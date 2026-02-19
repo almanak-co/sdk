@@ -73,6 +73,7 @@ class TimelineEventType(StrEnum):
     OPERATOR_ACTION_EXECUTED = "OPERATOR_ACTION_EXECUTED"
 
     # Error events
+    ERROR = "ERROR"
     ERROR_OCCURRED = "ERROR_OCCURRED"
 
     # Copy trading events
@@ -236,7 +237,6 @@ def _load_events_from_file() -> None:
                 event_type_str = event_data.get("event_type", "CUSTOM").upper()
                 # Map old format types to new enum values
                 type_mapping = {
-                    "ERROR": "ERROR_OCCURRED",
                     "TRADE": "TRANSACTION_CONFIRMED",
                     "DEPOSIT": "POSITION_MODIFIED",
                     "WITHDRAW": "POSITION_MODIFIED",
