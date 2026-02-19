@@ -88,6 +88,18 @@ async def test_execute_applies_prices_to_compiler():
     compiler.price_oracle = None
     compiler._using_placeholders = True
 
+    # Make update_prices/restore_prices functional on the mock
+    def _update_prices(prices):
+        compiler.price_oracle = prices
+        compiler._using_placeholders = False
+
+    def _restore_prices(oracle, placeholders):
+        compiler.price_oracle = oracle
+        compiler._using_placeholders = placeholders
+
+    compiler.update_prices = _update_prices
+    compiler.restore_prices = _restore_prices
+
     # Track prices during compile
     seen_prices = []
 

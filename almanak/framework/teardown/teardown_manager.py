@@ -600,22 +600,17 @@ class TeardownManager:
                                 intent_with_slippage = type(intent_to_exec).from_dict(intent_dict)
 
                     # Apply real prices to compiler if available
-                    has_price_attrs = hasattr(self.compiler, "price_oracle") and hasattr(
-                        self.compiler, "_using_placeholders"
-                    )
-                    original_price_oracle = getattr(self.compiler, "price_oracle", None)
-                    original_using_placeholders = getattr(self.compiler, "_using_placeholders", True)
-                    if price_oracle and has_price_attrs:
-                        self.compiler.price_oracle = price_oracle
-                        self.compiler._using_placeholders = False
+                    original_oracle = getattr(self.compiler, "price_oracle", None)
+                    original_placeholders = getattr(self.compiler, "_using_placeholders", True)
+                    if price_oracle and hasattr(self.compiler, "update_prices"):
+                        self.compiler.update_prices(price_oracle)
 
                     # Compile intent to ActionBundle
                     try:
                         compilation_result = self.compiler.compile(intent_with_slippage)
                     finally:
-                        if has_price_attrs:
-                            self.compiler.price_oracle = original_price_oracle
-                            self.compiler._using_placeholders = original_using_placeholders
+                        if hasattr(self.compiler, "restore_prices"):
+                            self.compiler.restore_prices(original_oracle, original_placeholders)
 
                     if compilation_result.status.value != "success":
                         logger.error(f"Intent compilation failed: {compilation_result.error}")

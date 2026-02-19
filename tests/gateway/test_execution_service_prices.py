@@ -56,6 +56,18 @@ async def test_compile_with_price_map_uses_real_prices():
     compiler._using_placeholders = True
     compiler.compile.return_value = _make_compilation_result()
 
+    # Make update_prices/restore_prices functional on the mock
+    def _update_prices(prices):
+        compiler.price_oracle = prices
+        compiler._using_placeholders = False
+
+    def _restore_prices(oracle, placeholders):
+        compiler.price_oracle = oracle
+        compiler._using_placeholders = placeholders
+
+    compiler.update_prices = _update_prices
+    compiler.restore_prices = _restore_prices
+
     # Track what prices were set during compile()
     seen_prices = {}
     seen_placeholders = {}
@@ -94,6 +106,18 @@ async def test_compile_without_price_map_uses_placeholders():
     compiler._using_placeholders = True
     compiler.compile.return_value = _make_compilation_result()
 
+    # Make update_prices/restore_prices functional on the mock
+    def _update_prices(prices):
+        compiler.price_oracle = prices
+        compiler._using_placeholders = False
+
+    def _restore_prices(oracle, placeholders):
+        compiler.price_oracle = oracle
+        compiler._using_placeholders = placeholders
+
+    compiler.update_prices = _update_prices
+    compiler.restore_prices = _restore_prices
+
     seen_placeholders = {}
 
     original_compile = compiler.compile
@@ -127,6 +151,18 @@ async def test_compile_restores_price_oracle_after_call():
     compiler.price_oracle = original_oracle
     compiler._using_placeholders = True
 
+    # Make update_prices/restore_prices functional on the mock
+    def _update_prices(prices):
+        compiler.price_oracle = prices
+        compiler._using_placeholders = False
+
+    def _restore_prices(oracle, placeholders):
+        compiler.price_oracle = oracle
+        compiler._using_placeholders = placeholders
+
+    compiler.update_prices = _update_prices
+    compiler.restore_prices = _restore_prices
+
     # Make compile raise to test finally block
     compiler.compile.side_effect = RuntimeError("compilation error")
     service._get_compiler = MagicMock(return_value=compiler)
@@ -154,6 +190,18 @@ async def test_compile_with_empty_price_map_uses_placeholders():
     compiler._using_placeholders = True
     compiler.compile.return_value = _make_compilation_result()
 
+    # Make update_prices/restore_prices functional on the mock
+    def _update_prices(prices):
+        compiler.price_oracle = prices
+        compiler._using_placeholders = False
+
+    def _restore_prices(oracle, placeholders):
+        compiler.price_oracle = oracle
+        compiler._using_placeholders = placeholders
+
+    compiler.update_prices = _update_prices
+    compiler.restore_prices = _restore_prices
+
     service._get_compiler = MagicMock(return_value=compiler)
     service._create_intent = MagicMock(return_value=MagicMock())
 
@@ -178,6 +226,18 @@ async def test_price_map_decimal_parsing():
     compiler.price_oracle = None
     compiler._using_placeholders = True
     compiler.compile.return_value = _make_compilation_result()
+
+    # Make update_prices/restore_prices functional on the mock
+    def _update_prices(prices):
+        compiler.price_oracle = prices
+        compiler._using_placeholders = False
+
+    def _restore_prices(oracle, placeholders):
+        compiler.price_oracle = oracle
+        compiler._using_placeholders = placeholders
+
+    compiler.update_prices = _update_prices
+    compiler.restore_prices = _restore_prices
 
     captured_oracle = {}
 

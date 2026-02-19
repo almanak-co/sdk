@@ -287,13 +287,11 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             from almanak.framework.intents.compiler import CompilationStatus
 
             async with compiler_lock:
-                has_price_attrs = hasattr(compiler, "price_oracle") and hasattr(compiler, "_using_placeholders")
-                original_price_oracle = getattr(compiler, "price_oracle", None)
-                original_using_placeholders = getattr(compiler, "_using_placeholders", True)
+                original_oracle = getattr(compiler, "price_oracle", None)
+                original_placeholders = getattr(compiler, "_using_placeholders", True)
 
-                if parsed_prices and has_price_attrs:
-                    compiler.price_oracle = parsed_prices
-                    compiler._using_placeholders = False
+                if parsed_prices and hasattr(compiler, "update_prices"):
+                    compiler.update_prices(parsed_prices)
                     logger.debug(
                         f"Applied {len(parsed_prices)} real prices for compilation: {list(parsed_prices.keys())}"
                     )
@@ -301,9 +299,8 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 try:
                     compilation_result = compiler.compile(intent=intent)
                 finally:
-                    if has_price_attrs:
-                        compiler.price_oracle = original_price_oracle
-                        compiler._using_placeholders = original_using_placeholders
+                    if hasattr(compiler, "restore_prices"):
+                        compiler.restore_prices(original_oracle, original_placeholders)
 
             # Check compilation status
             if compilation_result.status != CompilationStatus.SUCCESS:

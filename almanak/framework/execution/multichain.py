@@ -50,7 +50,7 @@ from almanak.framework.execution.interfaces import (
     TransactionType,
     UnsignedTransaction,
 )
-from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler
+from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.vocabulary import (
     AnyIntent,
     Intent,
@@ -482,6 +482,7 @@ class MultiChainOrchestrator:
                 wallet_address=self._config.execution_address,
                 default_protocol=default_protocol,
                 rpc_url=rpc_url,
+                config=IntentCompilerConfig(allow_placeholder_prices=True),
             )
             logger.debug(f"Created IntentCompiler for {chain_lower} (wallet={self._config.execution_address[:10]}...)")
 
@@ -580,22 +581,16 @@ class MultiChainOrchestrator:
         compiler_lock = self._compiler_locks.setdefault(chain, asyncio.Lock())
 
         async with compiler_lock:
-            applied_price_override = False
-            original_price_oracle = None
-            original_using_placeholders = True
+            original_oracle = compiler.price_oracle
+            original_placeholders = compiler._using_placeholders
             if price_oracle:
-                applied_price_override = True
-                original_price_oracle = compiler.price_oracle
-                original_using_placeholders = compiler._using_placeholders
-                compiler.price_oracle = price_oracle
-                compiler._using_placeholders = False
+                compiler.update_prices(price_oracle)
 
             try:
                 result = compiler.compile(intent)
             finally:
-                if applied_price_override:
-                    compiler.price_oracle = original_price_oracle
-                    compiler._using_placeholders = original_using_placeholders
+                if price_oracle:
+                    compiler.restore_prices(original_oracle, original_placeholders)
 
         if result.status != CompilationStatus.SUCCESS:
             raise ExecutionError(

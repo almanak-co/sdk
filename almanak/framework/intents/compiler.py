@@ -1925,12 +1925,13 @@ class IntentCompiler:
         # Price oracle - use provided or fall back to placeholders (only if allowed)
         self.price_oracle: dict[str, Decimal] | None
         if self._using_placeholders:
-            logger.warning(
-                "IntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT. This is only acceptable for unit tests."
+            logger.debug(
+                "IntentCompiler created without price oracle, will use placeholders if not updated before compilation"
             )
             self.price_oracle = self._get_placeholder_prices()
         else:
             self.price_oracle = price_oracle
+        self._placeholder_warning_logged = False
 
         # Allowance cache (token -> spender -> amount)
         self._allowance_cache: dict[str, dict[str, int]] = {}
@@ -1945,6 +1946,16 @@ class IntentCompiler:
         logger.info(
             f"IntentCompiler initialized for chain={chain}, wallet={wallet_address[:10]}..., protocol={default_protocol}, using_placeholders={self._using_placeholders}"
         )
+
+    def update_prices(self, prices: dict[str, Decimal]) -> None:
+        """Update the price oracle with real prices, clearing placeholder state."""
+        self.price_oracle = prices
+        self._using_placeholders = False
+
+    def restore_prices(self, original_oracle: dict[str, Decimal] | None, original_using_placeholders: bool) -> None:
+        """Restore prices to a previous state (used after temporary override)."""
+        self.price_oracle = original_oracle
+        self._using_placeholders = original_using_placeholders
 
     def _init_polymarket_adapter(self) -> None:
         """Initialize Polymarket adapter if on Polygon and config is available.
@@ -2090,6 +2101,13 @@ class IntentCompiler:
         Returns:
             CompilationResult with ActionBundle and metadata
         """
+        if self._using_placeholders and not self._placeholder_warning_logged:
+            logger.warning(
+                "IntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT. "
+                "This is only acceptable for unit tests."
+            )
+            self._placeholder_warning_logged = True
+
         try:
             intent_type = intent.intent_type
 
@@ -8451,7 +8469,7 @@ class IntentCompiler:
         Real prices as of 2026-01: ETH ~$3400, BTC ~$105,000
         These placeholders show ETH at $2000, BTC at $45,000 - 40-60% wrong!
         """
-        logger.warning(
+        logger.debug(
             "PLACEHOLDER PRICES being used - NOT SAFE FOR PRODUCTION. ETH=$2000 (real ~$3400), BTC=$45000 (real ~$105000)"
         )
         return {
