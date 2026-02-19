@@ -1279,6 +1279,20 @@ class MarketSnapshot:
         """
         self._prices[token] = price_value
 
+    def set_price_data(self, token: str, price_data: PriceData, quote: str = "USD") -> None:
+        """Pre-populate enriched price data for a token (useful for testing).
+
+        Unlike set_price() which only sets a scalar price, this sets the full
+        PriceData object including change_24h_pct, high_24h, low_24h, etc.
+
+        Args:
+            token: Token symbol
+            price_data: PriceData with price, change_24h_pct, etc.
+            quote: Quote currency (default "USD")
+        """
+        cache_key = f"{token}/{quote}"
+        self._price_cache[cache_key] = price_data
+
     def set_balance(self, token: str, balance_data: TokenBalance) -> None:
         """Pre-populate balance for a token.
 
@@ -2703,6 +2717,25 @@ class MultiChainMarketSnapshot:
         """
         chain_lower = self._validate_chain(chain)
         self._prices[chain_lower][token] = price_value
+
+    def set_price_data(self, token: str, chain: str, price_data: "PriceData", quote: str = "USD") -> None:
+        """Pre-populate enriched price data for a token on a specific chain.
+
+        Unlike set_price() which only sets a scalar price, this sets the full
+        PriceData object including change_24h_pct, high_24h, low_24h, etc.
+
+        Args:
+            token: Token symbol
+            chain: Chain name
+            price_data: PriceData with price, change_24h_pct, etc.
+            quote: Quote currency (default "USD")
+
+        Raises:
+            ChainNotConfiguredError: If chain is not configured
+        """
+        chain_lower = self._validate_chain(chain)
+        cache_key = f"{token}/{quote}"
+        self._price_cache[chain_lower][cache_key] = price_data
 
     def set_balance(self, token: str, chain: str, balance_data: TokenBalance) -> None:
         """Pre-populate balance for a token on a specific chain.

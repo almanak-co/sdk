@@ -546,8 +546,20 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
         self.persistent_state["config_version"] += 1
         version = self.persistent_state["config_version"]
 
+        # Handle plain dicts that don't have to_dict()
+        if hasattr(self.config, "to_dict"):
+            config_dict = self.config.to_dict()
+        elif isinstance(self.config, dict):
+            config_dict = dict(self.config)
+        else:
+            config_dict = {}
+            logger.warning(
+                f"Config type {type(self.config).__name__} has no to_dict() and is not a dict; "
+                f"snapshot will be empty for {self.strategy_id}"
+            )
+
         snapshot = ConfigSnapshot(
-            config_dict=self.config.to_dict(),
+            config_dict=config_dict,
             timestamp=datetime.now(UTC),
             version=version,
             updated_by=updated_by,
