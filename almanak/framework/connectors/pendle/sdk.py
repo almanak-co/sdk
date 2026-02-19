@@ -151,6 +151,14 @@ MARKET_BY_YT_TOKEN: dict[str, dict[str, str]] = {
         "YT-FUSDT0": "0x0cb289e9df2d0dcfe13732638c89655fb80c2be2",
         "YT-fUSDT0": "0x0cb289e9df2d0dcfe13732638c89655fb80c2be2",
     },
+    "ethereum": {
+        "YT-SUSDE-7MAY2026": "0x8dae8ece668cf80d348873f23d456448e8694883",
+        "YT-sUSDE-7MAY2026": "0x8dae8ece668cf80d348873f23d456448e8694883",
+        "YT-sUSDe-7MAY2026": "0x8dae8ece668cf80d348873f23d456448e8694883",
+        "YT-SUSDE-5FEB2026": "0xed81f8ba2941c3979de2265c295748a6b6956567",
+        "YT-sUSDE-5FEB2026": "0xed81f8ba2941c3979de2265c295748a6b6956567",
+        "YT-sUSDe-5FEB2026": "0xed81f8ba2941c3979de2265c295748a6b6956567",
+    },
 }
 
 MARKET_TOKEN_MINT_SY: dict[str, dict[str, str]] = {
