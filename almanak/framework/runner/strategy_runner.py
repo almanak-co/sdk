@@ -1766,6 +1766,8 @@ class StrategyRunner:
                     self._emit_execution_timeline_event(strategy, intent, success=False, result=last_execution_result)
 
                     # Notify strategy of failure due to slippage breach
+                    # Attach slippage error to result so strategy authors can access it
+                    last_execution_result.error = slippage_error
                     if hasattr(strategy, "on_intent_executed"):
                         try:
                             strategy.on_intent_executed(intent, success=False, result=last_execution_result)
@@ -1865,9 +1867,14 @@ class StrategyRunner:
                 await self._handle_execution_error(strategy, last_execution_result)
 
             # Notify strategy of failed execution
+            # Ensure the result always carries the error message so strategy authors
+            # can access it via result.error or str(result) instead of getting None.
+            callback_result = last_execution_result or SimpleNamespace(error=error_msg)
+            if last_execution_result and not last_execution_result.error:
+                last_execution_result.error = error_msg
             if hasattr(strategy, "on_intent_executed"):
                 try:
-                    strategy.on_intent_executed(intent, success=False, result=last_execution_result)
+                    strategy.on_intent_executed(intent, success=False, result=callback_result)
                 except Exception as e:
                     logger.warning(f"Error in on_intent_executed callback: {e}")
             self._invoke_optional_hook(
@@ -1875,7 +1882,7 @@ class StrategyRunner:
                 "on_copy_execution_result",
                 intent,
                 False,
-                last_execution_result,
+                callback_result,
             )
 
             # Save strategy state after failed execution (state may have changed)
