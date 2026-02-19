@@ -1,0 +1,128 @@
+{
+  "metadata": {
+    "fixture_type": "perp_trades",
+    "version": "1.0.0",
+    "created": "2026-01-31",
+    "description": "Golden test fixtures for perp backtesting accuracy validation",
+    "ground_truth_source": {
+      "funding_calculation": "FundingCalculator using GMX V2 hourly funding model",
+      "pnl_calculation": "Standard perp PnL formula: size * price_change_pct * direction",
+      "price_data": "December 2024 ETH/USD prices from GMX V2 historical data",
+      "protocol_reference": "GMX V2 ETH-USD market on Arbitrum"
+    },
+    "protocol_parameters": {
+      "funding_interval": "1 hour",
+      "max_funding_rate": "0.01%/hour",
+      "maintenance_margin": "1%",
+      "trading_fee_range": "0.05%-0.07%"
+    },
+    "tolerance_requirements": {
+      "funding": 0.10,
+      "pnl": 0.05
+    }
+  },
+  "fixtures": [
+    {
+      "id": "DEC_2024_PERP_001",
+      "description": "5x Long ETH during December rally (+11.8%)",
+      "scenario": "leveraged_long_bull_market",
+      "input": {
+        "entry_date": "2024-12-01T10:00:00Z",
+        "exit_date": "2024-12-08T10:00:00Z",
+        "duration_hours": 168,
+        "market": "ETH-USD",
+        "is_long": true,
+        "entry_price": "3400",
+        "exit_price": "3800",
+        "size_usd": "50000",
+        "leverage": "5",
+        "collateral_usd": "10000",
+        "avg_funding_rate": "0.0001"
+      },
+      "expected": {
+        "funding_paid": "840",
+        "price_pnl_usd": "5880",
+        "pnl_after_funding_usd": "5040",
+        "net_pnl_usd": "5005",
+        "trading_fees_usd": "35"
+      },
+      "ground_truth": {
+        "funding_source": "168 hours * 0.01%/hour * $50,000 = $840 (longs pay with positive rate)",
+        "pnl_source": "11.76% price increase * $50,000 position = $5,880 profit",
+        "fee_source": "Standard GMX V2 trading fee ~0.07% of notional"
+      },
+      "tolerances": {
+        "funding": 0.10,
+        "pnl": 0.05
+      }
+    },
+    {
+      "id": "DEC_2024_PERP_002",
+      "description": "3x Short ETH during mid-December pullback (-10%)",
+      "scenario": "leveraged_short_bear_market",
+      "input": {
+        "entry_date": "2024-12-10T14:00:00Z",
+        "exit_date": "2024-12-15T14:00:00Z",
+        "duration_hours": 120,
+        "market": "ETH-USD",
+        "is_long": false,
+        "entry_price": "4000",
+        "exit_price": "3600",
+        "size_usd": "30000",
+        "leverage": "3",
+        "collateral_usd": "10000",
+        "avg_funding_rate": "0.00008"
+      },
+      "expected": {
+        "funding_paid": "-288",
+        "price_pnl_usd": "3000",
+        "pnl_after_funding_usd": "3288",
+        "net_pnl_usd": "3267",
+        "trading_fees_usd": "21"
+      },
+      "ground_truth": {
+        "funding_source": "120 hours * 0.008%/hour * $30,000 = $288 received (shorts receive with positive rate)",
+        "pnl_source": "10% price decrease * $30,000 short position = $3,000 profit",
+        "fee_source": "Standard GMX V2 trading fee ~0.07% of notional"
+      },
+      "tolerances": {
+        "funding": 0.10,
+        "pnl": 0.05
+      }
+    },
+    {
+      "id": "DEC_2024_PERP_003",
+      "description": "10x Long ETH during volatile period (+5%, high funding)",
+      "scenario": "high_leverage_high_funding",
+      "input": {
+        "entry_date": "2024-12-16T08:00:00Z",
+        "exit_date": "2024-12-18T08:00:00Z",
+        "duration_hours": 48,
+        "market": "ETH-USD",
+        "is_long": true,
+        "entry_price": "3600",
+        "exit_price": "3780",
+        "size_usd": "100000",
+        "leverage": "10",
+        "collateral_usd": "10000",
+        "avg_funding_rate": "0.0003"
+      },
+      "expected": {
+        "funding_paid": "1440",
+        "price_pnl_usd": "5000",
+        "pnl_after_funding_usd": "3560",
+        "net_pnl_usd": "3490",
+        "trading_fees_usd": "70"
+      },
+      "ground_truth": {
+        "funding_source": "48 hours * 0.03%/hour * $100,000 = $1,440 (high funding due to market imbalance)",
+        "pnl_source": "5% price increase * $100,000 position = $5,000 profit",
+        "fee_source": "Standard GMX V2 trading fee ~0.07% of notional"
+      },
+      "tolerances": {
+        "funding": 0.10,
+        "pnl": 0.05
+      }
+    }
+  ]
+}

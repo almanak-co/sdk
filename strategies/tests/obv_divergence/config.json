@@ -1,0 +1,12 @@
+{
+    "strategy_id": "test_obv_divergence",
+    "strategy_name": "test_obv_divergence",
+    "description": "OBV divergence strategy for testing - trades on OBV signal crossovers",
+    "trade_size_usd": 5,
+    "obv_signal_period": 21,
+    "max_slippage_bps": 100,
+    "base_token": "WETH",
+    "quote_token": "USDC",
+    "chain": "arbitrum",
+    "protocol": "uniswap_v3"
+}

@@ -1,0 +1,14 @@
+{
+    "strategy_id": "test_cci_reversion",
+    "strategy_name": "test_cci_reversion",
+    "description": "CCI mean reversion strategy for testing - trades on overbought/oversold levels",
+    "trade_size_usd": 5,
+    "cci_period": 20,
+    "cci_upper_level": 100,
+    "cci_lower_level": -100,
+    "max_slippage_bps": 100,
+    "base_token": "ARB",
+    "quote_token": "USDC",
+    "chain": "arbitrum",
+    "protocol": "uniswap_v3"
+}

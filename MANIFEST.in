@@ -1,0 +1,7 @@
+include README.md
+include LICENSE
+recursive-exclude * __pycache__
+recursive-include dist/almanak/pyarmor_runtime_007224 *.so
+recursive-include * *.json
+recursive-include almanak *.pyi
+recursive-include almanak/bin *

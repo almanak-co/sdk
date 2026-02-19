@@ -1,0 +1,13 @@
+{
+    "strategy_id": "test_atr_volatility_gate",
+    "strategy_name": "test_atr_volatility_gate",
+    "description": "ATR-based volatility filter strategy for testing - trades only when volatility is below threshold",
+    "trade_size_usd": 5,
+    "atr_period": 14,
+    "max_volatility_threshold": 5,
+    "max_slippage_bps": 100,
+    "base_token": "WETH",
+    "quote_token": "USDC",
+    "chain": "arbitrum",
+    "protocol": "uniswap_v3"
+}

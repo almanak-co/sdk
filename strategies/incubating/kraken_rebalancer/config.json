@@ -1,0 +1,9 @@
+{
+    "chain": "arbitrum",
+    "swap_amount_usd": 10,
+    "from_token": "USDC",
+    "to_token": "ETH",
+    "skip_deposit": false,
+    "skip_withdraw": false,
+    "force_action": ""
+}

@@ -1,0 +1,12 @@
+{
+    "strategy_id": "test_aero_trend_follower",
+    "strategy_name": "test_aero_trend_follower",
+    "chain": "base",
+    "pool": "WETH/USDC",
+    "stable": false,
+    "amount0": "0.002",
+    "amount1": "3",
+    "force_action": "",
+    "forced_ema9": null,
+    "forced_ema21": null
+}

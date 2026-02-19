@@ -1,0 +1,23 @@
+/* Almanak brand colors */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #1F3033;
+  --md-primary-fg-color--light: #253438;
+  --md-primary-fg-color--dark: #192729;
+  --md-accent-fg-color: #d2f562;
+  --md-accent-fg-color--transparent: #d2f56233;
+  --md-typeset-a-color: #4bc951;
+}
+
+/* Header logo */
+.md-header__button.md-logo img {
+  height: 0.8rem;
+  width: auto;
+}
+
+/* Hero logo on home page */
+.md-typeset img.hero-logo {
+  display: block;
+  max-width: 300px;
+  width: 100%;
+  margin: 2rem auto 1.5rem;
+}

@@ -1,0 +1,12 @@
+{
+    "chain": "avalanche",
+    "wallet_address": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "pool": "WAVAX/USDC/20",
+    "amount_x": "0.5",
+    "amount_y": "15",
+    "range_width_pct": "0.06",
+    "num_bins": 7,
+    "interval_seconds": 60,
+    "max_tool_rounds": 10,
+    "strategy_id": "agent-lp-wavax-usdc"
+}

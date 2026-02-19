@@ -1,0 +1,210 @@
+[project]
+name = "almanak"
+version = "2.0.0"
+description = "A powerful Python SDK for developing and deploying autonomous DeFi agents. Features agent-based modeling, state machine architecture, and non-custodial execution through Safe smart accounts"
+authors = [
+    {name = "engineering@almanak.co"}
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+readme = "PYPI.md"
+requires-python = ">=3.12"
+dependencies = [
+    # SDK dependencies
+    "requests>=2.32.3,<3.0.0",
+    "click>=8.1.8,<9.0.0",
+    "httpx>=0.28.1,<0.29.0",
+    "pandas>=2.2.3,<4.0.0",
+    "aiohttp>=3.11.11,<4.0.0",
+    "python-dotenv>=1.0.1,<2.0.0",
+    "pydantic>=2.10.6,<3.0.0",
+    "retry>=0.9.2,<0.10.0",
+    "web3>=6.15.1,<8.0.0",
+    "streamlit>=1.44.1,<2.0.0",
+    # Framework dependencies
+    "pytz>=2023.4",
+    "PyYAML>=6.0.1",
+    "fastapi>=0.128.0",
+    # V2 Framework dependencies
+    "eth-account>=0.10.0",
+    "eth-abi>=5.0.0",
+    "structlog>=24.1.0",
+    "nest_asyncio>=1.6.0",
+    "matplotlib>=3.7.0",
+    "python-kraken-sdk>=3.2.7",
+    "asyncpg>=0.29.0", # PostgreSQL async driver for state management
+    # Gateway dependencies (gRPC)
+    "grpcio>=1.76.0",
+    "grpcio-tools>=1.76.0",
+    "grpcio-health-checking>=1.76.0",
+    "grpcio-reflection>=1.76.0",
+    "pydantic-settings>=2.0.0", # For gateway configuration
+    "prometheus-client>=0.20.0", # For gateway metrics
+    # Backtesting dependencies
+    "tqdm>=4.66.0", # Progress bar for backtest sweeps
+    "optuna>=3.5.0", # Bayesian optimization for parameter tuning
+    "plotly>=5.18.0", # Interactive charts for backtest visualization
+    # LSP / editor tooling (used by almanak-code)
+    "pyright>=1.1.390",
+]
+
+[project.optional-dependencies]
+dev = [
+    "setuptools>=61",
+    "wheel==0.46.3",
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.7.0",
+    "mkdocstrings[python]>=0.29.0",
+    "md-click-2 (>=0.0.1,<0.0.2)",
+    "twine (>=6.1.0,<7.0.0)",
+    "ruff (>=0.9.10,<0.15.0)",
+    "mypy>=1.19.1,<2.0.0",
+    "mypy-protobuf>=3.6.0",
+    "types-requests>=2.32.0",
+    "types-PyYAML>=6.0.0",
+    "types-pytz>=2024.1.0",
+    "types-retry>=0.9.0",
+    "types-protobuf>=5.0.0",
+    "pytest>=8.4.1",
+    "pytest-asyncio>=0.25.0",
+    "pytest-xdist>=3.5.0",
+    "pytest-cov>=6.0",
+]
+
+[tool.poetry]
+include = [
+    { path = "almanak/bin/*", format = ["sdist", "wheel"] },
+    { path = "almanak/llms/llms-full.txt", format = ["sdist", "wheel"] },
+]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[project.scripts]
+almanak = "almanak.cli:almanak"
+
+
+[tool.ruff]
+line-length = 120
+include = ["almanak/**/*.py"]
+exclude = [
+    ".claude/",  # Skills templates with placeholder syntax
+    "almanak/gateway/proto/",  # Auto-generated protobuf files
+]
+
+[dependency-groups]
+dev = [
+    "mkdocs-llmstxt>=0.5.0",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "pytest-xdist>=3.5.0",
+    "pytest-cov>=6.0",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings 
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+]
+ignore = [
+    "E501",  # line too long - formatter handles code; long strings are intentional (logs, errors)
+    "E402",  # module level import not at top of file - required for sys.path manipulation
+    "B008",  # function call in defaults - required for FastAPI Depends()
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # Re-exports are intentional in __init__.py
+
+[tool.ruff.lint.isort]
+known-first-party = ["almanak"]
+
+# --- pytest ---
+[tool.pytest.ini_options]
+addopts = "-n auto"
+
+# --- coverage ---
+[tool.coverage.run]
+source = ["almanak"]
+omit = [
+    "almanak/gateway/proto/*_pb2*.py",
+    "almanak/**/tests/*",
+    "almanak/**/test_*.py",
+]
+
+[tool.coverage.report]
+fail_under = 0
+show_missing = true
+skip_empty = true
+
+# --- mypy type checking ---
+[tool.mypy]
+python_version = "3.12"
+files = ["almanak"]
+exclude = [
+    "almanak/gateway/proto/",  # Auto-generated protobuf files
+]
+# Start strict-ish: catch real bugs without requiring full annotation coverage
+warn_return_any = false
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+strict_equality = true
+extra_checks = true
+# Do not require full annotations yet - enable incrementally
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+# Import handling
+ignore_missing_imports = false
+follow_imports = "normal"
+
+# Third-party libraries without stubs or inline types
+[[tool.mypy.overrides]]
+module = [
+    "web3.*",
+    "eth_account.*",
+    "eth_abi.*",
+    "eth_typing.*",
+    "eth_utils.*",
+    "grpc.*",
+    "grpc_tools.*",
+    "grpc_health.*",
+    "grpc_reflection.*",
+    "google.protobuf.*",
+    "google.cloud.*",
+    "streamlit.*",
+    "plotly.*",
+    "optuna.*",
+    "nest_asyncio",
+    "kraken.*",
+    "prometheus_client.*",
+    "enso_client.*",
+    "uvicorn.*",
+    "asyncpg.*",
+    "tqdm.*",
+    "pandas.*",
+    "matplotlib.*",
+    "structlog.*",
+]
+ignore_missing_imports = true
+
+# In-tree test files (intentionally pass wrong types for testing)
+[[tool.mypy.overrides]]
+module = [
+    "almanak.framework.*.tests.*",
+    "almanak.framework.*.*.tests.*",
+    "almanak.framework.*.*.*.tests.*",
+    "almanak.framework.execution.config_tests.*",
+    "almanak.framework.data.qa.*",
+]
+ignore_errors = true

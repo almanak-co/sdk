@@ -1,0 +1,10 @@
+{
+    "market": "ETH/USD",
+    "collateral_token": "WETH",
+    "collateral_amount": "0.0005",
+    "leverage": "2.0",
+    "is_long": true,
+    "hold_minutes": 5,
+    "max_slippage_pct": 2.0,
+    "chain": "arbitrum"
+}

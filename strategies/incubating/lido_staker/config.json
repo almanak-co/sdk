@@ -1,0 +1,6 @@
+{
+    "min_stake_amount": "0.002",
+    "gas_reserve": "0.001",
+    "force_action": "stake",
+    "chain": "ethereum"
+}

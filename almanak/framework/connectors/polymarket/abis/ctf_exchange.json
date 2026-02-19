@@ -1,0 +1,108 @@
+[
+  {
+    "constant": true,
+    "inputs": [{"name": "orderHash", "type": "bytes32"}],
+    "name": "getOrderStatus",
+    "outputs": [
+      {"name": "isFilledOrCancelled", "type": "bool"},
+      {"name": "remaining", "type": "uint256"}
+    ],
+    "type": "function"
+  },
+  {
+    "constant": true,
+    "inputs": [],
+    "name": "getCollateral",
+    "outputs": [{"name": "", "type": "address"}],
+    "type": "function"
+  },
+  {
+    "constant": true,
+    "inputs": [],
+    "name": "getCtf",
+    "outputs": [{"name": "", "type": "address"}],
+    "type": "function"
+  },
+  {
+    "constant": true,
+    "inputs": [{"name": "user", "type": "address"}],
+    "name": "nonces",
+    "outputs": [{"name": "", "type": "uint256"}],
+    "type": "function"
+  },
+  {
+    "constant": false,
+    "inputs": [
+      {
+        "name": "order",
+        "type": "tuple",
+        "components": [
+          {"name": "salt", "type": "uint256"},
+          {"name": "maker", "type": "address"},
+          {"name": "signer", "type": "address"},
+          {"name": "taker", "type": "address"},
+          {"name": "tokenId", "type": "uint256"},
+          {"name": "makerAmount", "type": "uint256"},
+          {"name": "takerAmount", "type": "uint256"},
+          {"name": "expiration", "type": "uint256"},
+          {"name": "nonce", "type": "uint256"},
+          {"name": "feeRateBps", "type": "uint256"},
+          {"name": "side", "type": "uint8"},
+          {"name": "signatureType", "type": "uint8"}
+        ]
+      }
+    ],
+    "name": "cancelOrder",
+    "outputs": [],
+    "type": "function"
+  },
+  {
+    "constant": false,
+    "inputs": [
+      {
+        "name": "orders",
+        "type": "tuple[]",
+        "components": [
+          {"name": "salt", "type": "uint256"},
+          {"name": "maker", "type": "address"},
+          {"name": "signer", "type": "address"},
+          {"name": "taker", "type": "address"},
+          {"name": "tokenId", "type": "uint256"},
+          {"name": "makerAmount", "type": "uint256"},
+          {"name": "takerAmount", "type": "uint256"},
+          {"name": "expiration", "type": "uint256"},
+          {"name": "nonce", "type": "uint256"},
+          {"name": "feeRateBps", "type": "uint256"},
+          {"name": "side", "type": "uint8"},
+          {"name": "signatureType", "type": "uint8"}
+        ]
+      }
+    ],
+    "name": "cancelOrders",
+    "outputs": [],
+    "type": "function"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {"indexed": true, "name": "orderHash", "type": "bytes32"},
+      {"indexed": true, "name": "maker", "type": "address"},
+      {"indexed": true, "name": "taker", "type": "address"},
+      {"indexed": false, "name": "makerAssetId", "type": "uint256"},
+      {"indexed": false, "name": "takerAssetId", "type": "uint256"},
+      {"indexed": false, "name": "makerAmountFilled", "type": "uint256"},
+      {"indexed": false, "name": "takerAmountFilled", "type": "uint256"},
+      {"indexed": false, "name": "fee", "type": "uint256"}
+    ],
+    "name": "OrderFilled",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {"indexed": true, "name": "orderHash", "type": "bytes32"}
+    ],
+    "name": "OrderCancelled",
+    "type": "event"
+  }
+]

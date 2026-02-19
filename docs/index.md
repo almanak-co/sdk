@@ -1,0 +1,84 @@
+![Almanak](assets/logo-dark.svg){ .hero-logo }
+
+The Almanak SDK provides a comprehensive framework for developing, testing, and deploying autonomous DeFi agents. Built on an intent-based architecture, strategies are expressed as high-level intents with minimal boilerplate.
+
+## Features
+
+- **Intent-Based Architecture** - Express trading logic as high-level intents (Swap, LP, Borrow, etc.). The framework handles compilation and execution.
+- **Three-Tier State Management** - Automatic persistence with HOT/WARM/COLD tiers for reliability.
+- **Comprehensive Backtesting** - PnL simulation, paper trading on Anvil forks, and parameter sweeps.
+- **Multi-Chain Support** - Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Plasma, Blast, Mantle, Berachain, and more.
+- **Protocol Integration** - Uniswap V3, Aave V3, Morpho Blue, GMX V2, Pendle, Polymarket, Kraken, and more.
+- **Non-Custodial Design** - Full control over your funds through Safe smart accounts.
+- **Production-Ready** - Built-in alerting, stuck detection, emergency management, and canary deployments.
+
+## Installation
+
+```bash
+pip install almanak
+```
+
+## Quick Start
+
+```bash
+# Create a new strategy from a template
+almanak strat new
+
+# Run it (auto-starts the gateway sidecar)
+cd my_strategy
+almanak strat run --once
+```
+
+## Writing a Strategy
+
+Strategies use an intent-based architecture. Implement the `decide()` method to return an intent based on market conditions:
+
+```python
+from almanak import IntentStrategy, SwapIntent, HoldIntent, MarketSnapshot
+
+class MyStrategy(IntentStrategy):
+    """A simple mean-reversion strategy."""
+
+    def decide(self, market: MarketSnapshot) -> Intent:
+        eth_price = market.prices.get("ETH")
+        usdc_balance = market.balances.get("USDC")
+
+        if eth_price < 2000 and usdc_balance > 1000:
+            return SwapIntent(
+                token_in="USDC",
+                token_out="ETH",
+                amount=1000,
+                slippage=0.005,
+            )
+
+        return HoldIntent(reason="Waiting for better conditions")
+```
+
+## Architecture
+
+```
+almanak/
+  framework/           # V2 Strategy Framework
+    strategies/        # IntentStrategy base class
+    intents/           # Intent vocabulary & compiler
+    state/             # Three-tier state management
+    execution/         # Transaction orchestration
+    backtesting/       # PnL, paper trading, sweeps
+    connectors/        # Protocol adapters
+    data/              # Price oracles, indicators
+    alerting/          # Slack/Telegram notifications
+    services/          # Stuck detection, emergency mgmt
+  gateway/             # gRPC gateway sidecar
+  transaction_builder/ # Low-level tx building
+  core/                # Enums, models, utilities
+  cli/                 # Command-line interface
+```
+
+All strategies run through a **gateway-only architecture** for security. The gateway sidecar holds all secrets and exposes a controlled gRPC API. Strategy containers have no secrets and no direct internet access.
+
+## Next Steps
+
+- [Getting Started](getting-started.md) - Installation and first strategy walkthrough
+- [CLI Reference](cli/almanak.md) - All CLI commands
+- [API Reference](api/index.md) - Full Python API documentation
+- [Gateway](gateway/api-reference.md) - Gateway gRPC API

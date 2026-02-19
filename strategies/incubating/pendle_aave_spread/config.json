@@ -1,0 +1,25 @@
+{
+    "strategy_id": "pendle_aave_spread",
+    "strategy_name": "pendle_aave_spread",
+    "description": "Cross-protocol yield spread trader: Pendle PT vs Aave V3 lending",
+    "chain": "arbitrum",
+    "base_token": "WSTETH",
+    "base_token_symbol": "WSTETH",
+    "pt_token": "PT-wstETH",
+    "pt_token_symbol": "PT-wstETH",
+    "market_address": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
+    "market_expiry": "2026-06-25",
+    "spread_entry_threshold_pct": 2.0,
+    "spread_exit_threshold_pct": 0.5,
+    "max_rotation_pct": 0.50,
+    "min_rotation_amount": 0.1,
+    "rebalance_cooldown_seconds": 300,
+    "min_days_to_maturity": 30,
+    "exit_days_before_maturity": 14,
+    "max_slippage_bps": 100,
+    "initial_allocation": "aave",
+    "anvil_funding": {
+        "ETH": 100,
+        "WSTETH": 5
+    }
+}

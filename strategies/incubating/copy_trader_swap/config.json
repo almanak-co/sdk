@@ -1,0 +1,37 @@
+{
+    "strategy_id": "copy_trader_swap_demo",
+    "strategy_name": "Copy Trader Swap Demo",
+    "description": "Monitors a leader wallet and copies swap trades on Arbitrum",
+    "chain": "arbitrum",
+    "copy_trading": {
+        "leaders": [
+            {
+                "address": "0x0000000000000000000000000000000000000001",
+                "label": "demo_leader"
+            }
+        ],
+        "monitoring": {
+            "confirmation_depth": 1,
+            "poll_interval_seconds": 12,
+            "lookback_blocks": 50,
+            "max_signal_age_seconds": 300
+        },
+        "filters": {
+            "action_types": ["SWAP"],
+            "protocols": ["uniswap_v3"],
+            "tokens": ["WETH", "USDC", "ARB", "WBTC"],
+            "min_usd_value": 100
+        },
+        "sizing": {
+            "mode": "fixed_usd",
+            "fixed_usd": 100,
+            "percentage_of_leader": 0.1
+        },
+        "risk": {
+            "max_trade_usd": 500,
+            "max_daily_notional_usd": 5000,
+            "max_open_positions": 5,
+            "max_slippage": 0.01
+        }
+    }
+}

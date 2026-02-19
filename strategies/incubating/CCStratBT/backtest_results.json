@@ -1,0 +1,179 @@
+{
+  "winner": "Aggressive",
+  "winner_params": {
+    "trade_size_usd": "500",
+    "rsi_period": 7,
+    "rsi_oversold": 40,
+    "rsi_overbought": 60,
+    "macd_fast": 6,
+    "macd_slow": 13,
+    "macd_signal": 4,
+    "bb_period": 10,
+    "bb_std_dev": 1.5,
+    "bb_buy_threshold": 0.25,
+    "bb_sell_threshold": 0.75,
+    "min_signals_to_trade": 2,
+    "cooldown_ticks": 2,
+    "max_slippage_pct": 1.0,
+    "base_token": "WETH",
+    "quote_token": "USDC",
+    "chain": "arbitrum"
+  },
+  "param_scores": {
+    "Conservative": -0.9467205863367265,
+    "Balanced": 1.3926378301429634,
+    "Aggressive": 1.9805885315038423
+  },
+  "runs": [
+    {
+      "param_set": "Conservative",
+      "period": "2024-Q1 (Jan-Mar)",
+      "sharpe": -1.9737197886272906,
+      "total_return_pct": 0.05583875692329127,
+      "max_drawdown_pct": 0.004083089231244954,
+      "total_trades": 2,
+      "win_rate": 0.0,
+      "net_pnl_usd": 558.3875692329127
+    },
+    {
+      "param_set": "Conservative",
+      "period": "2024-Q2 (Apr-Jun)",
+      "sharpe": -2.0074537699099344,
+      "total_return_pct": 0.04978395119585387,
+      "max_drawdown_pct": 0.00914221961532091,
+      "total_trades": 2,
+      "win_rate": 0.0,
+      "net_pnl_usd": 497.83951195853865
+    },
+    {
+      "param_set": "Conservative",
+      "period": "2024-Q3 (Jul-Sep)",
+      "sharpe": -0.4882025343151566,
+      "total_return_pct": 0.20053708818038876,
+      "max_drawdown_pct": 0.01245895425024163,
+      "total_trades": 8,
+      "win_rate": 0.0,
+      "net_pnl_usd": 2005.3708818038876
+    },
+    {
+      "param_set": "Conservative",
+      "period": "2024-Q4 (Oct-Dec)",
+      "sharpe": 0.07349176521442069,
+      "total_return_pct": 0.36815052920319696,
+      "max_drawdown_pct": 0.005618509720676414,
+      "total_trades": 13,
+      "win_rate": 0.0,
+      "net_pnl_usd": 3681.5052920319695
+    },
+    {
+      "param_set": "Conservative",
+      "period": "2025-Q1 (Jan-Feb)",
+      "sharpe": -0.33771860404567144,
+      "total_return_pct": 0.09549907330146096,
+      "max_drawdown_pct": 0.007596087812393358,
+      "total_trades": 3,
+      "win_rate": 0.0,
+      "net_pnl_usd": 954.9907330146096
+    },
+    {
+      "param_set": "Balanced",
+      "period": "2024-Q1 (Jan-Mar)",
+      "sharpe": 1.2965280789651517,
+      "total_return_pct": 1.2526224208178296,
+      "max_drawdown_pct": 0.0043228163979813885,
+      "total_trades": 50,
+      "win_rate": 0.0,
+      "net_pnl_usd": 12526.224208178295
+    },
+    {
+      "param_set": "Balanced",
+      "period": "2024-Q2 (Apr-Jun)",
+      "sharpe": 1.375073787540861,
+      "total_return_pct": 1.3482904680469405,
+      "max_drawdown_pct": 0.006483326467866343,
+      "total_trades": 53,
+      "win_rate": 0.0,
+      "net_pnl_usd": 13482.904680469406
+    },
+    {
+      "param_set": "Balanced",
+      "period": "2024-Q3 (Jul-Sep)",
+      "sharpe": 1.136972770623019,
+      "total_return_pct": 1.099657698489408,
+      "max_drawdown_pct": 0.009780139324426345,
+      "total_trades": 43,
+      "win_rate": 0.0,
+      "net_pnl_usd": 10996.57698489408
+    },
+    {
+      "param_set": "Balanced",
+      "period": "2024-Q4 (Oct-Dec)",
+      "sharpe": 1.3293952530134818,
+      "total_return_pct": 1.3071383064871376,
+      "max_drawdown_pct": 0.0038278871732412576,
+      "total_trades": 51,
+      "win_rate": 0.0,
+      "net_pnl_usd": 13071.383064871376
+    },
+    {
+      "param_set": "Balanced",
+      "period": "2025-Q1 (Jan-Feb)",
+      "sharpe": 1.8252192605723037,
+      "total_return_pct": 0.7477470663480424,
+      "max_drawdown_pct": 0.008456832995278277,
+      "total_trades": 29,
+      "win_rate": 0.0,
+      "net_pnl_usd": 7477.470663480424
+    },
+    {
+      "param_set": "Aggressive",
+      "period": "2024-Q1 (Jan-Mar)",
+      "sharpe": 2.256398632017538,
+      "total_return_pct": 2.791139493955927,
+      "max_drawdown_pct": 0.002665924180777141,
+      "total_trades": 112,
+      "win_rate": 0.0,
+      "net_pnl_usd": 27911.39493955927
+    },
+    {
+      "param_set": "Aggressive",
+      "period": "2024-Q2 (Apr-Jun)",
+      "sharpe": 2.2304220044915137,
+      "total_return_pct": 2.738712318030727,
+      "max_drawdown_pct": 0.003642867226469714,
+      "total_trades": 109,
+      "win_rate": 0.0,
+      "net_pnl_usd": 27387.12318030727
+    },
+    {
+      "param_set": "Aggressive",
+      "period": "2024-Q3 (Jul-Sep)",
+      "sharpe": 1.136972770623019,
+      "total_return_pct": 1.099657698489408,
+      "max_drawdown_pct": 0.009780139324426345,
+      "total_trades": 43,
+      "win_rate": 0.0,
+      "net_pnl_usd": 10996.57698489408
+    },
+    {
+      "param_set": "Aggressive",
+      "period": "2024-Q4 (Oct-Dec)",
+      "sharpe": 1.3293952530134818,
+      "total_return_pct": 1.3071383064871376,
+      "max_drawdown_pct": 0.0038278871732412576,
+      "total_trades": 51,
+      "win_rate": 0.0,
+      "net_pnl_usd": 13071.383064871376
+    },
+    {
+      "param_set": "Aggressive",
+      "period": "2025-Q1 (Jan-Feb)",
+      "sharpe": 2.94975399737366,
+      "total_return_pct": 1.596357354806221,
+      "max_drawdown_pct": 0.006342681049406144,
+      "total_trades": 63,
+      "win_rate": 0.0,
+      "net_pnl_usd": 15963.573548062212
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+    "strategy_id": "test_ichimoku_crossover",
+    "strategy_name": "test_ichimoku_crossover",
+    "description": "Ichimoku Cloud crossover strategy for testing - buys on Tenkan/Kijun bullish crossover",
+    "trade_size_usd": 5,
+    "tenkan_period": 9,
+    "kijun_period": 26,
+    "senkou_b_period": 52,
+    "max_slippage_bps": 100,
+    "base_token": "LINK",
+    "quote_token": "USDC",
+    "chain": "arbitrum",
+    "protocol": "uniswap_v3"
+}

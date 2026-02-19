@@ -1,0 +1,13 @@
+{
+    "strategy_id": "test_ma_crossover",
+    "strategy_name": "test_ma_crossover",
+    "description": "Moving Average crossover strategy for testing - buys on golden cross, sells on death cross",
+    "trade_size_usd": 5,
+    "sma_short": 9,
+    "sma_long": 21,
+    "max_slippage_bps": 100,
+    "base_token": "LINK",
+    "quote_token": "USDC",
+    "chain": "arbitrum",
+    "protocol": "uniswap_v3"
+}

@@ -1,0 +1,26 @@
+{
+    "strategy_id": "cc_triple_signal",
+    "strategy_name": "cc_triple_signal",
+    "description": "Triple Signal Momentum: RSI + MACD + Bollinger Bands consensus trading (Aggressive - backtested winner)",
+    "trade_size_usd": "500",
+    "max_slippage_pct": 1.0,
+    "base_token": "WETH",
+    "quote_token": "USDC",
+    "chain": "arbitrum",
+
+    "rsi_period": 7,
+    "rsi_oversold": 40,
+    "rsi_overbought": 60,
+
+    "macd_fast": 6,
+    "macd_slow": 13,
+    "macd_signal": 4,
+
+    "bb_period": 10,
+    "bb_std_dev": 1.5,
+    "bb_buy_threshold": 0.25,
+    "bb_sell_threshold": 0.75,
+
+    "min_signals_to_trade": 2,
+    "cooldown_ticks": 2
+}

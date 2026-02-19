@@ -1,0 +1,47 @@
+*__pycache__/
+.DS_Store
+/docs_output
+/almanak/sdk/dist/
+.env
+
+/marcia-test-folder/
+/almanak-test-folder/
+/example-results-data/
+example-data/
+.aider*
+build
+almanak.egg-info/
+dist/
+
+local_storage/
+# Local artifacts
+venv/
+almanak_state.db
+almanak_state.db-shm
+almanak_state.db-wal
+scripts/contracts.db
+almanak/.dashboard_events.json
+
+# Native binaries (downloaded at build time)
+almanak/bin/almanak-code-*
+
+# LLM docs (generated during CI build from mkdocs)
+almanak/llms/llms-full.txt
+
+# Build script temp dirs
+.bin_stash/
+.wheel_staging/
+
+# MkDocs build output
+/site/
+
+# Coverage reports
+coverage-html/
+coverage.xml
+.coverage
+
+# Automation scripts runtime artifacts
+scripts/yailoop/yailoop.log
+scripts/pr-manager/pr-manager.log
+scripts/pr-manager/state.json
+notes/.tmp/

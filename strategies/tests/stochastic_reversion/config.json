@@ -1,0 +1,16 @@
+{
+    "strategy_id": "test_stochastic_reversion",
+    "strategy_name": "test_stochastic_reversion",
+    "description": "Stochastic oscillator reversion strategy - buys in oversold, sells in overbought",
+    "trade_size_usd": 5,
+    "stoch_fast_k": 14,
+    "stoch_slow_k": 3,
+    "stoch_slow_d": 3,
+    "overbought": 80,
+    "oversold": 20,
+    "max_slippage_bps": 100,
+    "base_token": "ARB",
+    "quote_token": "USDC",
+    "chain": "arbitrum",
+    "protocol": "uniswap_v3"
+}

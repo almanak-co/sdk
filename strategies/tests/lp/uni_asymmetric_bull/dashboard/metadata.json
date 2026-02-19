@@ -1,0 +1,5 @@
+{
+    "display_name": "Uni Asymmetric Bull",
+    "description": "Uniswap V3 asymmetric bullish LP strategy dashboard showing range position, upside/downside room, rebalance history, and in-range time metrics",
+    "icon": "\ud83d\udc02"
+}

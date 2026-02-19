@@ -1,0 +1,131 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "contract IERC20",
+        "name": "tokenX",
+        "type": "address"
+      },
+      {
+        "internalType": "contract IERC20",
+        "name": "tokenY",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "binStep",
+        "type": "uint256"
+      }
+    ],
+    "name": "getLBPairInformation",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint16",
+            "name": "binStep",
+            "type": "uint16"
+          },
+          {
+            "internalType": "contract ILBPair",
+            "name": "LBPair",
+            "type": "address"
+          },
+          {
+            "internalType": "bool",
+            "name": "createdByOwner",
+            "type": "bool"
+          },
+          {
+            "internalType": "bool",
+            "name": "ignoredForRouting",
+            "type": "bool"
+          }
+        ],
+        "internalType": "struct ILBFactory.LBPairInformation",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "getNumberOfLBPairs",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      }
+    ],
+    "name": "getLBPairAtIndex",
+    "outputs": [
+      {
+        "internalType": "contract ILBPair",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "contract IERC20",
+        "name": "tokenX",
+        "type": "address"
+      },
+      {
+        "internalType": "contract IERC20",
+        "name": "tokenY",
+        "type": "address"
+      }
+    ],
+    "name": "getAllLBPairs",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint16",
+            "name": "binStep",
+            "type": "uint16"
+          },
+          {
+            "internalType": "contract ILBPair",
+            "name": "LBPair",
+            "type": "address"
+          },
+          {
+            "internalType": "bool",
+            "name": "createdByOwner",
+            "type": "bool"
+          },
+          {
+            "internalType": "bool",
+            "name": "ignoredForRouting",
+            "type": "bool"
+          }
+        ],
+        "internalType": "struct ILBFactory.LBPairInformation[]",
+        "name": "",
+        "type": "tuple[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]

@@ -1,0 +1,10 @@
+{
+  "strategy_id": "leverage_loop_cross_chain_e2e_test",
+  "chains": ["base", "arbitrum"],
+  "chain": "base",
+  "protocols": ["enso", "aave_v3", "gmx_v2"],
+  "min_usdc_to_start": "10",
+  "swap_amount_usd": "10",
+  "borrow_amount_usd": "5",
+  "perp_size_usd": "10"
+}

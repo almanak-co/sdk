@@ -1,0 +1,7 @@
+{
+    "chain": "base",
+    "pool": "USDC/USDbC",
+    "stable": true,
+    "amount0": "3",
+    "amount1": "3"
+}

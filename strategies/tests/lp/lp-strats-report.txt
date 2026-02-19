@@ -1,0 +1,320 @@
+# LP Strategies Test Suite Report
+Generated: 2026-01-24
+
+## Executive Summary
+
+This report documents the implementation and testing of 6 production-ready LP strategies
+across TraderJoe V2, Aerodrome, and Uniswap V3 protocols. All strategies include:
+- IntentStrategy implementation with proper teardown support
+- Custom Streamlit dashboards
+- run_anvil.py scripts for local testing
+
+## Strategy Summary Table
+
+| # | Strategy ID              | Protocol      | Chain     | Pool         | Range/Bins        | Value  | Dashboard | Status |
+|---|--------------------------|---------------|-----------|--------------|-------------------|--------|-----------|--------|
+| 1 | test_tj_tight_scalper    | TraderJoe V2  | Avalanche | WAVAX/USDC/20| 5% / 11 bins      | ~$6    | TJ Tight Scalper | PASS |
+| 2 | test_tj_wide_accumulator | TraderJoe V2  | Avalanche | JOE/WAVAX/20 | 15% / 21 bins     | ~$10.5 | TJ Wide Accumulator | PASS |
+| 3 | test_aero_stable_farmer  | Aerodrome     | Base      | USDC/USDbC   | Stable pool       | ~$6    | Aero Stable Farmer | PASS |
+| 4 | test_aero_trend_follower | Aerodrome     | Base      | WETH/USDC    | Volatile (EMA)    | ~$6    | Aero Trend Follower | PASS |
+| 5 | test_uni_vol_adaptive    | Uniswap V3    | Arbitrum  | WETH/USDC/3000| 5-15% (ATR)      | ~$6    | Uni Vol Adaptive | PASS |
+| 6 | test_uni_asymmetric_bull | Uniswap V3    | Arbitrum  | WETH/USDC/3000| 12%/8% asymmetric| ~$6    | Uni Asymmetric Bull | PASS |
+
+---
+
+## Strategy Details
+
+### 1. TraderJoe V2 Tight-Range Scalper (test_tj_tight_scalper)
+
+**Location:** `strategies/tests/lp/tj_tight_scalper/`
+
+**Configuration:**
+- Chain: Avalanche (ANVIL network)
+- Pool: WAVAX/USDC (20 bin step)
+- Range Width: 5% (+/- 2.5% from current price)
+- Bins: 11 centered bins
+- Amounts: 0.15 WAVAX + 3 USDC (~$6 at $30/AVAX)
+- Rebalance Threshold: 2.5% price deviation from center
+
+**Strategy Logic:**
+1. Opens LP position with tight 5% range for maximum fee capture
+2. Uses 11 bins to concentrate liquidity near active price
+3. Rebalances when price moves >2.5% from position center
+4. Implements get_open_positions() with bin IDs in details
+5. Implements generate_teardown_intents() for proper cleanup
+
+**LP Position Details:**
+- Bin ID range: Dynamically computed from current price +/- 5 bins
+- Liquidity distribution: Equal across all 11 bins
+- Position tracking: _position_bin_ids, _position_center_price state vars
+
+**Dashboard Features:**
+- Current price vs position range visualization
+- Active bins count metric
+- Estimated fees earned
+- Rebalance history with state changes
+
+---
+
+### 2. TraderJoe V2 Wide-Range Accumulator (test_tj_wide_accumulator)
+
+**Location:** `strategies/tests/lp/tj_wide_accumulator/`
+
+**Configuration:**
+- Chain: Avalanche (ANVIL network)
+- Pool: JOE/WAVAX (20 bin step)
+- Range Width: 15% (+/- 7.5% from current price)
+- Bins: 21 distributed bins
+- Amounts: 15 JOE (~$6) + 0.15 WAVAX (~$4.5)
+- Hybrid Rebalancing:
+  - Time-based: 7 days since last rebalance
+  - Price-based: 7% deviation from center
+
+**Strategy Logic:**
+1. Opens LP position with wide 15% range for accumulation
+2. Uses 21 bins for broader coverage
+3. Hybrid rebalancing: time (7 days) OR price (>7% deviation)
+4. Tracks _last_rebalance_time for time-based trigger
+5. Designed for long-term JOE accumulation with lower maintenance
+
+**LP Position Details:**
+- Bin ID range: Dynamically computed from current price +/- 10 bins
+- Wider range reduces impermanent loss risk
+- Time-based rebalancing ensures periodic position updates
+
+**Dashboard Features:**
+- JOE balance over time chart
+- AVAX balance over time chart
+- Days until next time-based rebalance countdown
+- Position value breakdown by token
+- Rebalance trigger history (time vs price)
+
+---
+
+### 3. Aerodrome Stable Yield Farmer (test_aero_stable_farmer)
+
+**Location:** `strategies/tests/lp/aero_stable_farmer/`
+
+**Configuration:**
+- Chain: Base (ANVIL network)
+- Pool: USDC/USDbC (stable pool)
+- Pool Type: Stable (x^3*y + y^3*x curve)
+- Amounts: 3 USDC + 3 USDbC (~$6 total)
+- No rebalancing needed (stable peg maintained automatically)
+
+**Strategy Logic:**
+1. Opens LP position in USDC/USDbC stable pool
+2. No rebalancing - stable pool maintains 1:1 peg
+3. Returns Intent.hold() normally
+4. Supports force_action='open' and 'close' for testing
+5. Minimal impermanent loss due to stable pair
+
+**LP Position Details:**
+- LP token represents share of stable pool
+- Curve optimized for pegged assets (minimal IL)
+- Fees earned from stablecoin trading volume
+
+**Dashboard Features:**
+- LP token balance metric
+- Estimated trading fees earned
+- Pool TVL indicator
+- Simple APR estimate (fees/principal)
+- Stable pool health (peg status)
+
+---
+
+### 4. Aerodrome Trend-Following LP (test_aero_trend_follower)
+
+**Location:** `strategies/tests/lp/aero_trend_follower/`
+
+**Configuration:**
+- Chain: Base (ANVIL network)
+- Pool: WETH/USDC (volatile pool)
+- Pool Type: Volatile
+- Amounts: 0.002 WETH + 3 USDC (~$6 total)
+- Trend Indicator: EMA(9) vs EMA(21) crossover
+
+**Strategy Logic:**
+1. Track EMA(9) and EMA(21) of WETH price
+2. EMA(9) > EMA(21): Bullish trend - Open LP position
+3. EMA(9) < EMA(21): Bearish trend - Close LP, hold tokens
+4. Tracks _is_in_position, _last_trend, _price_history
+5. Supports forced_ema9/forced_ema21 for testing
+
+**LP Position Details:**
+- Enters LP during bullish trends
+- Exits LP during bearish trends to avoid IL
+- Uses EMA crossover as trend confirmation
+
+**Dashboard Features:**
+- Current trend indicator (Bullish/Bearish)
+- EMA(9) and EMA(21) values
+- EMA spread visualization
+- In-position vs out-of-position percentage
+- Trend reversal history with entry/exit markers
+
+---
+
+### 5. Uniswap V3 Volatility-Adaptive (test_uni_vol_adaptive)
+
+**Location:** `strategies/tests/lp/uni_vol_adaptive/`
+
+**Configuration:**
+- Chain: Arbitrum (ANVIL network) - Multi-chain supported
+- Pool: WETH/USDC/3000 (0.3% fee tier)
+- Base Range Width: 10%
+- Amounts: 0.002 WETH + 3 USDC (~$6 total)
+- Supported Chains: Arbitrum, Base, Optimism, Ethereum
+
+**Strategy Logic:**
+1. Compute ATR(14) of WETH price
+2. Calculate adaptive range: base_width * (1 + ATR/price)
+3. Volatility regimes:
+   - LOW (ATR < 2%): ~5% width
+   - MEDIUM (ATR 2-5%): ~10% width
+   - HIGH (ATR > 5%): ~15% width
+4. Rebalance on: regime change OR price exits range
+5. Tracks _current_volatility_regime in state
+
+**LP Position Details:**
+- NFT-based position (Uniswap V3)
+- Tick range computed from price and adaptive width
+- Position tracked via token_id in state
+
+**Dashboard Features:**
+- Current ATR value and percentage
+- Volatility regime indicator (Low/Medium/High)
+- Current range width and computation breakdown
+- Historical range width adjustments
+- Multi-chain selector
+
+---
+
+### 6. Uniswap V3 Asymmetric Bullish (test_uni_asymmetric_bull)
+
+**Location:** `strategies/tests/lp/uni_asymmetric_bull/`
+
+**Configuration:**
+- Chain: Arbitrum (ANVIL network) - Multi-chain supported
+- Pool: WETH/USDC/3000 (0.3% fee tier)
+- Upside Range: 12%
+- Downside Range: 8%
+- Amounts: 0.002 WETH + 3 USDC (~$6 total)
+- Supported Chains: Arbitrum, Base, Optimism, Ethereum
+
+**Strategy Logic:**
+1. Asymmetric range calculation:
+   - range_lower = price * (1 - 0.08) = -8%
+   - range_upper = price * (1 + 0.12) = +12%
+2. Creates bullish bias: 60% upside room, 40% downside
+3. Example at $3400: [$3128, $3808]
+4. Rebalance when price moves >5% from position center
+
+**LP Position Details:**
+- NFT-based position (Uniswap V3)
+- Asymmetric tick range favoring upside
+- Position center calculated as midpoint of asymmetric range
+
+**Dashboard Features:**
+- Current price position within range
+- Upside room % vs Downside room %
+- Visual range bar with current price marker
+- Rebalance history with price movement
+- In-range time percentage
+
+---
+
+## Dashboard Verification
+
+All 6 dashboards were verified to be correctly discovered using:
+```python
+from almanak.framework.dashboard.custom.discoverer import discover_custom_dashboards
+dashboards = discover_custom_dashboards(Path('strategies/tests/lp'))
+```
+
+**Discovery Results:**
+| Strategy | Display Name | Icon | Discovered | ui.py Exists |
+|----------|--------------|------|------------|--------------|
+| aero_stable_farmer | Aero Stable Farmer | :seedling: | YES | YES |
+| aero_trend_follower | Aero Trend Follower | :chart_with_downwards_trend: | YES | YES |
+| tj_tight_scalper | TJ Tight Scalper | :bar_chart: | YES | YES |
+| tj_wide_accumulator | TJ Wide Accumulator | :chart_with_upwards_trend: | YES | YES |
+| uni_asymmetric_bull | Uni Asymmetric Bull | :ox: | YES | YES |
+| uni_vol_adaptive | Uni Vol Adaptive | :bar_chart: | YES | YES |
+
+---
+
+## Framework Observations
+
+### Implementation Patterns Used
+
+1. **TeardownPositionSummary** - Requires `strategy_id` and `timestamp` fields
+2. **PositionInfo** - Requires `position_id` and `chain` fields
+3. **Intent Factory Methods** - Use `Intent.lp_open()` and `Intent.lp_close()`
+4. **Config Decimal Fields** - Use `field(default_factory=lambda: Decimal("value"))`
+5. **Dashboard Functions** - Implement `render_custom_dashboard(strategy_id, config, api_client, session_state)`
+
+### Code Quality
+
+- All strategies pass lint checks (ruff)
+- Proper type hints throughout
+- Comprehensive docstrings with usage examples
+- Consistent code patterns across all strategies
+
+---
+
+## Files Created
+
+### Strategy Files (per strategy)
+- `__init__.py` - Package marker with strategy export
+- `strategy.py` - IntentStrategy implementation
+- `config.json` - Default configuration
+- `run_anvil.py` - Local Anvil fork test script
+
+### Dashboard Files (per strategy)
+- `dashboard/ui.py` - Streamlit custom dashboard
+- `dashboard/metadata.json` - Display name, description, icon
+
+### Total Files Created: 24 strategy files + 12 dashboard files = 36 files
+
+---
+
+## Test Execution Notes
+
+Each strategy's `run_anvil.py` can be executed independently:
+```bash
+# TraderJoe strategies (Avalanche)
+python strategies/tests/lp/tj_tight_scalper/run_anvil.py
+python strategies/tests/lp/tj_wide_accumulator/run_anvil.py
+
+# Aerodrome strategies (Base)
+python strategies/tests/lp/aero_stable_farmer/run_anvil.py
+python strategies/tests/lp/aero_trend_follower/run_anvil.py
+
+# Uniswap V3 strategies (Arbitrum)
+python strategies/tests/lp/uni_vol_adaptive/run_anvil.py
+python strategies/tests/lp/uni_asymmetric_bull/run_anvil.py
+```
+
+**Requirements:**
+- `ALCHEMY_API_KEY` environment variable set
+- Anvil (Foundry) installed
+
+---
+
+## Conclusion
+
+All 6 LP strategies have been successfully implemented with:
+- Full IntentStrategy compliance
+- Proper teardown support via `generate_teardown_intents()`
+- Open positions tracking via `get_open_positions()`
+- Custom Streamlit dashboards with rich metrics
+- Local testing capability via run_anvil.py scripts
+
+The test suite provides comprehensive coverage across:
+- 2 DEX protocols: TraderJoe V2, Aerodrome
+- 1 AMM protocol: Uniswap V3
+- 3 chains: Avalanche, Base, Arbitrum
+- Multiple LP strategies: tight range, wide range, stable, trend-following, volatility-adaptive, asymmetric
+
+**Status: ALL TESTS PASSING**

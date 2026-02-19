@@ -1,0 +1,38 @@
+{
+    "chain": "base",
+    "wallet_address": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "safe_address": "0x98aE9CE2606e2773eE948178C3a163fdB8194c04",
+    "pool": "ALMANAK/USDC/3000",
+    "pool_address": "0xbDbC38652D78AF0383322bBc823E06FA108d0874",
+    "almanak_token": "0xdefa1d21c5f1cbeac00eeb54b44c7d86467cc3a3",
+    "usdc_token": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "vault": {
+        "name": "Almanak DeFAI Vault",
+        "symbol": "aALM",
+        "underlying_token": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    },
+    "lp": {
+        "amount_almanak": "100",
+        "amount_usdc": "10",
+        "range_width_pct": "0.50"
+    },
+    "deposit": {
+        "amount_usdc_raw": "10000000",
+        "amount_usdc_human": "10",
+        "min_deploy_threshold_usdc_raw": "5000000"
+    },
+    "rebalance": {
+        "min_rebalance_interval_minutes": 30,
+        "range_edge_pct": 0.15,
+        "out_of_range_max_iterations": 2
+    },
+    "policy": {
+        "max_single_trade_usd": "10000",
+        "max_daily_spend_usd": "50000",
+        "cooldown_seconds": 30,
+        "max_trades_per_hour": 10
+    },
+    "strategy_id": "defai-vault-lp",
+    "max_tool_rounds": 15,
+    "interval_seconds": 120
+}

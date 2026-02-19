@@ -1,0 +1,11 @@
+{
+    "strategy_id": "test_uni_asymmetric_bull",
+    "strategy_name": "test_uni_asymmetric_bull",
+    "description": "Uniswap V3 LP strategy with asymmetric range favoring upside (bullish bias)",
+    "pool": "WETH/USDC/3000",
+    "upside_pct": "0.12",
+    "downside_pct": "0.08",
+    "amount0": "0.002",
+    "amount1": "3",
+    "chain": "arbitrum"
+}

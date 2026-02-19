@@ -1,0 +1,57 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.eggs
+dist
+build
+
+# Virtual environments
+.venv
+venv
+
+# IDE / Editor
+.vscode
+.idea
+*.swp
+*.swo
+
+# Environment and secrets
+.env
+.env.*
+*.db
+
+# CI/CD
+.github
+
+# Claude / AI
+.claude
+
+# Documentation site output
+site/
+
+# Test artifacts
+.pytest_cache
+.ruff_cache
+.mypy_cache
+htmlcov
+coverage.xml
+.coverage
+mypy-report.txt
+
+# Working documents at repo root
+exposed-secrets-audit.md
+gateway-framework-audit.md
+review-runtime-config.md
+trufflehog-results.json
+
+# Deploy (separate docker setup)
+deploy/
+
+# Keep PYPI.md (needed by uv sync)
+!PYPI.md

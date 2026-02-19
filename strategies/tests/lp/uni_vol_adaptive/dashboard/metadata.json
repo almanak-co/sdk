@@ -1,0 +1,5 @@
+{
+    "display_name": "Uni Vol Adaptive",
+    "description": "Uniswap V3 volatility-adaptive LP strategy dashboard showing ATR-based range width adjustments, volatility regimes, and multi-chain deployment status",
+    "icon": "\ud83d\udcca"
+}

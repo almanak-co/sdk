@@ -1,0 +1,152 @@
+site_name: Almanak SDK
+site_description: Python SDK for developing and deploying autonomous DeFi agents
+site_url: https://sdk.docs.almanak.co
+repo_url: https://github.com/almanak-co/almanak-sdk
+repo_name: almanak-co/almanak-sdk
+use_directory_urls: false
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  logo: assets/logo-icon.svg
+  palette:
+    scheme: slate
+    primary: custom
+    accent: custom
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - toc.follow
+  favicon: assets/favicon.ico
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+  - llmstxt:
+      full_output: llms-full.txt
+      sections:
+        Overview:
+          - index.md
+        Getting Started:
+          - getting-started.md
+        Environment Variables:
+          - environment-variables.md
+        CLI Reference:
+          - cli/*.md
+        Gateway:
+          - gateway/*.md
+        API Reference:
+          - api/*.md
+          - api/connectors/*.md
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_signature_annotations: true
+            separate_signature: true
+            merge_init_into_class: true
+            members_order: source
+            show_root_heading: true
+            show_source: false
+            heading_level: 2
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+
+extra:
+  generator: false
+
+extra_css:
+  - stylesheets/extra.css
+
+validation:
+  nav:
+    not_found: warn
+  links:
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn
+
+exclude_docs: |
+  internal/
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+  - attr_list
+  - def_list
+  - tables
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - getting-started.md
+  - Environment Variables:
+    - environment-variables.md
+  - CLI Reference:
+    - cli/almanak.md
+    - cli/almanak-strat.md
+    - cli/strat-run.md
+    - cli/strat-new.md
+    - cli/strat-example.md
+    - cli/almanak-gateway.md
+    - cli/almanak-dashboard.md
+    - cli/dashboard-test.md
+  - Gateway:
+    - gateway/api-reference.md
+    - gateway/troubleshooting.md
+  - API Reference:
+    - api/index.md
+    - api/enums.md
+    - api/strategies.md
+    - api/intents.md
+    - api/compiler.md
+    - api/state.md
+    - api/execution.md
+    - api/data.md
+    - api/tokens.md
+    - api/indicators.md
+    - Connectors:
+      - api/connectors/index.md
+      - api/connectors/uniswap_v3.md
+      - api/connectors/aave_v3.md
+      - api/connectors/morpho_blue.md
+      - api/connectors/gmx_v2.md
+      - api/connectors/aerodrome.md
+      - api/connectors/traderjoe_v2.md
+      - api/connectors/pancakeswap_v3.md
+      - api/connectors/sushiswap_v3.md
+      - api/connectors/curve.md
+      - api/connectors/balancer.md
+      - api/connectors/compound_v3.md
+      - api/connectors/enso.md
+      - api/connectors/polymarket.md
+      - api/connectors/hyperliquid.md
+      - api/connectors/lido.md
+      - api/connectors/ethena.md
+      - api/connectors/spark.md
+      - api/connectors/pendle.md
+      - api/connectors/kraken.md
+      - api/connectors/bridges.md
+      - api/connectors/flash_loan.md
+      - api/connectors/base.md
+    - api/services.md
+    - api/alerting.md
+    - api/backtesting.md
+    - api/deployment.md
+    - api/logging.md

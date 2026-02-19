@@ -1,0 +1,13 @@
+{
+    "strategy_id": "test_bollinger_reversion",
+    "strategy_name": "test_bollinger_reversion",
+    "description": "Bollinger Bands mean reversion strategy for testing - buys at lower band, sells at upper band",
+    "trade_size_usd": 5,
+    "bb_period": 20,
+    "bb_std_dev": 2.0,
+    "max_slippage_bps": 100,
+    "base_token": "WETH",
+    "quote_token": "USDC",
+    "chain": "arbitrum",
+    "protocol": "uniswap_v3"
+}

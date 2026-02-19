@@ -1,0 +1,5 @@
+{
+    "display_name": "Lido Staker",
+    "description": "Lido liquid staking dashboard showing stETH/wstETH balance, yield, withdrawal status, and peg health",
+    "icon": "\ud83c\udf0a"
+}

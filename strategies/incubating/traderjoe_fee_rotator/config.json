@@ -1,0 +1,33 @@
+{
+    "chain": "avalanche",
+    "pool_a": "WAVAX/USDC/20",
+    "pool_b": "WAVAX/WETH.e/15",
+    "pool_a_wavax": "1.0",
+    "pool_a_usdc": "30",
+    "pool_b_wavax": "1.0",
+    "pool_b_weth_e": "0.01",
+    "swap_rotation_usdc": "20",
+    "risk_on_alloc_a": "0.30",
+    "risk_off_alloc_a": "0.70",
+    "neutral_alloc_a": "0.50",
+    "rotation_threshold_pct": "0.20",
+    "min_rotation_interval_hours": 12,
+    "rsi_period": 14,
+    "rsi_risk_on_lower": "40",
+    "rsi_risk_on_upper": "70",
+    "bb_squeeze_threshold": "0.05",
+    "atr_period": 14,
+    "low_vol_range_pct": "0.05",
+    "med_vol_range_pct": "0.10",
+    "high_vol_range_pct": "0.20",
+    "atr_low_threshold": "0.02",
+    "atr_high_threshold": "0.05",
+    "drift_rebalance_pct": "0.60",
+    "min_rebalance_interval_hours": 4,
+    "anvil_funding": {
+        "AVAX": 100,
+        "WAVAX": 100,
+        "USDC": 10000,
+        "WETH.e": 1
+    }
+}

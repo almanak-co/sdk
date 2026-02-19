@@ -1,0 +1,50 @@
+# QA Data Framework Configuration
+# This file defines tokens and thresholds for validating data sources
+
+# Target blockchain network
+chain: arbitrum
+
+# Historical data settings
+historical_days: 30
+timeframe: "4h"
+
+# RSI indicator settings
+rsi_period: 14
+
+# Validation thresholds
+thresholds:
+  # Minimum confidence score for price data (0.0-1.0)
+  min_confidence: 0.8
+  # Maximum acceptable price impact in basis points (100 bps = 1%)
+  max_price_impact_bps: 100
+  # Maximum gap between OHLCV candles in hours
+  max_gap_hours: 8.0
+  # Maximum seconds before data is considered stale
+  max_stale_seconds: 120
+
+# Popular/high-liquidity tokens (5 tokens)
+# These are well-established tokens with reliable price feeds
+popular_tokens:
+  - ETH
+  - WBTC
+  - USDC
+  - LINK
+  - ARB
+
+# Additional tokens to test (5 tokens)
+# These are DeFi protocol tokens that may have lower liquidity
+additional_tokens:
+  - GMX
+  - PENDLE
+  - UNI
+  - DAI
+  - RDNT
+
+# Tokens to test with DEX price sources
+# These must have sufficient DEX liquidity for WETH-quoted prices
+dex_tokens:
+  - USDC
+  - LINK
+  - ARB
+  - GMX
+  - UNI

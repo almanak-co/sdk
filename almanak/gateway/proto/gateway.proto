@@ -1,0 +1,1450 @@
+syntax = "proto3";
+
+package almanak.gateway.proto;
+
+// =============================================================================
+// Health Service (standard gRPC health protocol)
+// =============================================================================
+
+// Health check service for gateway liveness/readiness probes.
+// Implements the standard gRPC health checking protocol.
+service Health {
+  // Check if the service is healthy.
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Watch for health status changes (streaming).
+  rpc Watch(HealthCheckRequest) returns (stream HealthCheckResponse);
+
+  // Pre-initialize execution orchestrators and compilers for specified chains.
+  rpc RegisterChains(RegisterChainsRequest) returns (RegisterChainsResponse);
+}
+
+message HealthCheckRequest {
+  // Service name to check. Empty string checks the overall server health.
+  string service = 1;
+}
+
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+    SERVICE_UNKNOWN = 3;  // Used for Watch when service is not found
+  }
+  ServingStatus status = 1;
+}
+
+message RegisterChainsRequest {
+  repeated string chains = 1;      // Chain names to pre-initialize (e.g., "arbitrum", "base")
+  string wallet_address = 2;       // Wallet address for orchestrator initialization
+}
+
+message RegisterChainsResponse {
+  bool success = 1;
+  repeated string initialized_chains = 2;  // Chains that were successfully initialized
+  string wallet_address = 3;               // Wallet address derived from gateway private key
+  string error = 4;
+}
+
+// =============================================================================
+// Common Messages
+// =============================================================================
+
+message Empty {}
+
+// =============================================================================
+// MarketService - provides access to market data
+// =============================================================================
+
+service MarketService {
+  // Get token price from aggregated sources.
+  rpc GetPrice(PriceRequest) returns (PriceResponse);
+
+  // Get token balance for strategy wallet.
+  rpc GetBalance(BalanceRequest) returns (BalanceResponse);
+
+  // Get token balances across multiple chains in a single call.
+  rpc BatchGetBalances(BatchBalanceRequest) returns (BatchBalanceResponse);
+
+  // Get technical indicator value.
+  rpc GetIndicator(IndicatorRequest) returns (IndicatorResponse);
+}
+
+message PriceRequest {
+  string token = 1;
+  string quote = 2;  // Default: USD
+}
+
+message PriceResponse {
+  string price = 1;  // Decimal as string
+  int64 timestamp = 2;
+  string source = 3;
+  double confidence = 4;  // 0.0-1.0
+  bool stale = 5;
+}
+
+message BalanceRequest {
+  string token = 1;
+  string chain = 2;
+  string wallet_address = 3;
+}
+
+message BalanceResponse {
+  string balance = 1;  // Decimal as string (human-readable units)
+  string balance_usd = 2;
+  string address = 3;
+  int32 decimals = 4;
+  string raw_balance = 5;  // Wei/raw units as string
+  int64 timestamp = 6;
+  bool stale = 7;
+  string error = 8;  // Per-response error for batch calls
+}
+
+message BatchBalanceRequest {
+  repeated BalanceRequest requests = 1;
+}
+
+message BatchBalanceResponse {
+  repeated BalanceResponse responses = 1;
+}
+
+message IndicatorRequest {
+  string indicator_type = 1;  // "RSI", "MACD", "SMA", etc.
+  string token = 2;
+  string quote = 3;
+  map<string, string> params = 4;  // e.g., {"period": "14", "timeframe": "1h"}
+}
+
+message IndicatorResponse {
+  string value = 1;  // Primary indicator value as string
+  map<string, string> metadata = 2;  // Additional data (e.g., signal line for MACD)
+  int64 timestamp = 3;
+}
+
+// =============================================================================
+// StateService - handles strategy state persistence
+// =============================================================================
+
+service StateService {
+  // Load strategy state from persistence.
+  rpc LoadState(LoadStateRequest) returns (StateData);
+
+  // Save strategy state with optimistic locking.
+  rpc SaveState(SaveStateRequest) returns (SaveStateResponse);
+
+  // Delete strategy state.
+  rpc DeleteState(DeleteStateRequest) returns (DeleteStateResponse);
+}
+
+message LoadStateRequest {
+  string strategy_id = 1;
+}
+
+message StateData {
+  string strategy_id = 1;
+  int64 version = 2;
+  bytes data = 3;  // JSON-serialized state
+  int32 schema_version = 4;
+  string checksum = 5;  // SHA-256 hex
+  int64 created_at = 6;
+  int64 updated_at = 7;
+  string loaded_from = 8;  // "hot", "warm"
+}
+
+message SaveStateRequest {
+  string strategy_id = 1;
+  int64 expected_version = 2;  // For optimistic locking (0 = new state)
+  bytes data = 3;  // JSON-serialized state
+  int32 schema_version = 4;
+}
+
+message SaveStateResponse {
+  bool success = 1;
+  int64 new_version = 2;
+  string error = 3;
+  string checksum = 4;
+}
+
+message DeleteStateRequest {
+  string strategy_id = 1;
+}
+
+message DeleteStateResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// =============================================================================
+// ExecutionService - handles intent compilation and transaction execution
+// =============================================================================
+
+service ExecutionService {
+  // Compile an intent into an action bundle.
+  rpc CompileIntent(CompileIntentRequest) returns (CompilationResult);
+
+  // Execute an action bundle (sign, submit, confirm).
+  rpc Execute(ExecuteRequest) returns (ExecutionResult);
+
+  // Get status of a submitted transaction.
+  rpc GetTransactionStatus(TxStatusRequest) returns (TxStatus);
+}
+
+message CompileIntentRequest {
+  string intent_type = 1;  // Case-insensitive with aliases: "swap"/"SWAP", "lp_open"/"lpopen", "lp_close"/"lpclose", "perp_open"/"perpopen", etc.
+  bytes intent_data = 2;  // JSON-serialized intent
+  string chain = 3;
+  string wallet_address = 4;
+  map<string, string> price_map = 5;  // Token symbol -> USD price string (preserves Decimal precision). Empty = use placeholder prices.
+}
+
+message CompilationResult {
+  bool success = 1;
+  bytes action_bundle = 2;  // JSON-serialized ActionBundle
+  string error = 3;
+  string error_code = 4;  // Structured error code
+}
+
+message ExecuteRequest {
+  bytes action_bundle = 1;  // JSON-serialized ActionBundle
+  bool dry_run = 2;  // Simulate only, don't submit
+  bool simulation_enabled = 3;  // Run simulation before execution
+  string strategy_id = 4;
+  string intent_id = 5;
+  string chain = 6;
+  string wallet_address = 7;
+  int32 max_gas_price_gwei = 8;  // Gas price cap in gwei (0 = use gateway default)
+}
+
+message ExecutionResult {
+  bool success = 1;
+  repeated string tx_hashes = 2;
+  int64 total_gas_used = 3;
+  bytes receipts = 4;  // JSON-serialized list of receipts
+  string error = 5;
+  string error_code = 6;
+  string execution_id = 7;
+}
+
+message TxStatusRequest {
+  string tx_hash = 1;
+  string chain = 2;
+}
+
+message TxStatus {
+  string status = 1;  // "pending", "confirmed", "failed", "reverted"
+  int64 confirmations = 2;
+  int64 block_number = 3;
+  int64 gas_used = 4;
+  string error = 5;
+}
+
+// =============================================================================
+// ObserveService - logging, alerting, and metrics
+// =============================================================================
+
+service ObserveService {
+  // Log a message from the strategy.
+  rpc Log(LogEntry) returns (Empty);
+
+  // Send an alert through configured channels.
+  rpc Alert(AlertRequest) returns (AlertResponse);
+
+  // Record a metric value.
+  rpc RecordMetric(MetricEntry) returns (Empty);
+
+  // Record a timeline event for a strategy.
+  rpc RecordTimelineEvent(RecordTimelineEventRequest) returns (RecordTimelineEventResponse);
+}
+
+message LogEntry {
+  string level = 1;  // "DEBUG", "INFO", "WARNING", "ERROR"
+  string message = 2;
+  string strategy_id = 3;
+  map<string, string> context = 4;
+  int64 timestamp = 5;
+  string logger_name = 6;
+}
+
+message AlertRequest {
+  string channel = 1;  // "slack", "telegram"
+  string message = 2;
+  string severity = 3;  // "info", "warning", "critical"
+  string strategy_id = 4;
+  map<string, string> metadata = 5;
+}
+
+message AlertResponse {
+  bool success = 1;
+  string error = 2;
+  string alert_id = 3;
+}
+
+message MetricEntry {
+  string name = 1;
+  double value = 2;
+  map<string, string> labels = 3;
+  int64 timestamp = 4;
+  string metric_type = 5;  // "gauge", "counter", "histogram"
+}
+
+message RecordTimelineEventRequest {
+  string strategy_id = 1;
+  string event_type = 2;       // "TRADE", "REBALANCE", "ERROR", "STATE_CHANGE", etc.
+  string description = 3;
+  string tx_hash = 4;          // Optional: transaction hash
+  string chain = 5;            // Optional: chain name
+  string details_json = 6;     // Optional: JSON-encoded details
+  int64 timestamp = 7;         // Optional: event timestamp (uses server time if 0)
+}
+
+message RecordTimelineEventResponse {
+  bool success = 1;
+  string event_id = 2;         // Assigned event ID
+  string error = 3;
+}
+
+// =============================================================================
+// RpcService - JSON-RPC proxy for blockchain access (Phase 3)
+// =============================================================================
+
+service RpcService {
+  // Make a single JSON-RPC call to a chain.
+  rpc Call(RpcRequest) returns (RpcResponse);
+
+  // Make a batch of JSON-RPC calls to a chain.
+  rpc BatchCall(RpcBatchRequest) returns (RpcBatchResponse);
+
+  // Query ERC-20 allowance for a token/owner/spender.
+  rpc QueryAllowance(AllowanceRequest) returns (AllowanceResponse);
+
+  // Query ERC-20 balance for a token/wallet.
+  rpc QueryBalance(BalanceQueryRequest) returns (BalanceQueryResponse);
+
+  // Query Uniswap V3 position liquidity.
+  rpc QueryPositionLiquidity(PositionLiquidityRequest) returns (PositionLiquidityResponse);
+
+  // Query Uniswap V3 position tokens owed (fees + withdrawn liquidity).
+  rpc QueryPositionTokensOwed(PositionTokensOwedRequest) returns (PositionTokensOwedResponse);
+}
+
+message RpcRequest {
+  string chain = 1;           // Chain identifier (e.g., "arbitrum", "base", "ethereum")
+  string method = 2;          // JSON-RPC method (e.g., "eth_call", "eth_getBalance")
+  string params = 3;          // JSON-encoded params array
+  string id = 4;              // Request ID for correlation
+}
+
+message RpcResponse {
+  string result = 1;          // JSON-encoded result
+  string error = 2;           // JSON-encoded error object if failed
+  string id = 3;              // Request ID for correlation
+  bool success = 4;
+}
+
+message RpcBatchRequest {
+  string chain = 1;
+  repeated RpcRequest requests = 2;
+}
+
+message RpcBatchResponse {
+  repeated RpcResponse responses = 1;
+}
+
+// Typed RPC query messages for common operations
+message AllowanceRequest {
+  string chain = 1;               // Chain identifier
+  string token_address = 2;       // ERC-20 token contract address
+  string owner_address = 3;       // Token owner address
+  string spender_address = 4;     // Spender address
+}
+
+message AllowanceResponse {
+  bool success = 1;
+  string allowance = 2;           // Allowance as decimal string (wei)
+  string error = 3;
+}
+
+message BalanceQueryRequest {
+  string chain = 1;               // Chain identifier
+  string token_address = 2;       // ERC-20 token contract address
+  string wallet_address = 3;      // Wallet to query balance for
+}
+
+message BalanceQueryResponse {
+  bool success = 1;
+  string balance = 2;             // Balance as decimal string (wei)
+  string error = 3;
+}
+
+message PositionLiquidityRequest {
+  string chain = 1;               // Chain identifier
+  string position_manager = 2;    // NFT Position Manager address
+  uint64 token_id = 3;            // Position NFT token ID
+}
+
+message PositionLiquidityResponse {
+  bool success = 1;
+  string liquidity = 2;           // Liquidity as decimal string
+  string error = 3;
+}
+
+message PositionTokensOwedRequest {
+  string chain = 1;               // Chain identifier
+  string position_manager = 2;    // NFT Position Manager address
+  uint64 token_id = 3;            // Position NFT token ID
+}
+
+message PositionTokensOwedResponse {
+  bool success = 1;
+  string tokens_owed0 = 2;        // tokensOwed0 as decimal string (wei)
+  string tokens_owed1 = 3;        // tokensOwed1 as decimal string (wei)
+  string error = 4;
+}
+
+// =============================================================================
+// IntegrationService - third-party data sources (Phase 3)
+// =============================================================================
+
+service IntegrationService {
+  // Binance market data endpoints
+  rpc BinanceGetTicker(BinanceTickerRequest) returns (BinanceTickerResponse);
+  rpc BinanceGetKlines(BinanceKlinesRequest) returns (BinanceKlinesResponse);
+  rpc BinanceGetOrderBook(BinanceOrderBookRequest) returns (BinanceOrderBookResponse);
+
+  // CoinGecko price and market data endpoints
+  rpc CoinGeckoGetPrice(CoinGeckoGetPriceRequest) returns (CoinGeckoGetPriceResponse);
+  rpc CoinGeckoGetPrices(CoinGeckoGetPricesRequest) returns (CoinGeckoGetPricesResponse);
+  rpc CoinGeckoGetMarkets(CoinGeckoGetMarketsRequest) returns (CoinGeckoGetMarketsResponse);
+  rpc CoinGeckoGetHistoricalPrice(CoinGeckoHistoricalPriceRequest) returns (CoinGeckoHistoricalPriceResponse);
+  rpc CoinGeckoGetMarketChartRange(CoinGeckoMarketChartRangeRequest) returns (CoinGeckoMarketChartRangeResponse);
+
+  // TheGraph subgraph query endpoint
+  rpc TheGraphQuery(TheGraphQueryRequest) returns (TheGraphQueryResponse);
+}
+
+// =============================================================================
+// Binance Integration Messages
+// =============================================================================
+
+message BinanceTickerRequest {
+  string symbol = 1;          // Trading pair (e.g., "BTCUSDT", "ETHUSDT")
+}
+
+message BinanceTickerResponse {
+  string symbol = 1;
+  string price = 2;           // Last price as string
+  string price_change = 3;    // 24h price change
+  string price_change_percent = 4;  // 24h price change percent
+  string high_24h = 5;
+  string low_24h = 6;
+  string volume_24h = 7;      // Base asset volume
+  string quote_volume_24h = 8; // Quote asset volume
+  int64 timestamp = 9;
+}
+
+message BinanceKlinesRequest {
+  string symbol = 1;          // Trading pair
+  string interval = 2;        // Kline interval (1m, 5m, 15m, 1h, 4h, 1d, etc.)
+  int32 limit = 3;            // Number of klines (max 1000)
+  int64 start_time = 4;       // Start timestamp in ms (optional)
+  int64 end_time = 5;         // End timestamp in ms (optional)
+}
+
+message BinanceKline {
+  int64 open_time = 1;
+  string open = 2;
+  string high = 3;
+  string low = 4;
+  string close = 5;
+  string volume = 6;
+  int64 close_time = 7;
+  string quote_volume = 8;
+  int32 trades = 9;
+}
+
+message BinanceKlinesResponse {
+  repeated BinanceKline klines = 1;
+}
+
+message BinanceOrderBookRequest {
+  string symbol = 1;
+  int32 limit = 2;            // Depth limit (5, 10, 20, 50, 100, 500, 1000)
+}
+
+message BinanceOrderBookEntry {
+  string price = 1;
+  string quantity = 2;
+}
+
+message BinanceOrderBookResponse {
+  int64 last_update_id = 1;
+  repeated BinanceOrderBookEntry bids = 2;
+  repeated BinanceOrderBookEntry asks = 3;
+}
+
+// =============================================================================
+// CoinGecko Integration Messages
+// =============================================================================
+
+message CoinGeckoGetPriceRequest {
+  string token_id = 1;        // CoinGecko token ID (e.g., "ethereum", "bitcoin")
+  repeated string vs_currencies = 2;  // Quote currencies (e.g., ["usd", "eur"])
+}
+
+message CoinGeckoGetPriceResponse {
+  map<string, string> prices = 1;  // currency -> price as string
+  int64 timestamp = 2;
+}
+
+message CoinGeckoGetPricesRequest {
+  repeated string token_ids = 1;
+  repeated string vs_currencies = 2;
+}
+
+message CoinGeckoTokenPrice {
+  string token_id = 1;
+  map<string, string> prices = 2;
+}
+
+message CoinGeckoGetPricesResponse {
+  repeated CoinGeckoTokenPrice tokens = 1;
+  int64 timestamp = 2;
+}
+
+message CoinGeckoGetMarketsRequest {
+  string vs_currency = 1;     // Quote currency (e.g., "usd")
+  repeated string ids = 2;    // Token IDs to filter (optional)
+  string order = 3;           // Sort order (market_cap_desc, volume_desc, etc.)
+  int32 per_page = 4;         // Results per page (max 250)
+  int32 page = 5;             // Page number
+}
+
+message CoinGeckoMarket {
+  string id = 1;
+  string symbol = 2;
+  string name = 3;
+  string current_price = 4;
+  string market_cap = 5;
+  int32 market_cap_rank = 6;
+  string total_volume = 7;
+  string high_24h = 8;
+  string low_24h = 9;
+  string price_change_24h = 10;
+  string price_change_percentage_24h = 11;
+  int64 last_updated = 12;
+}
+
+message CoinGeckoGetMarketsResponse {
+  repeated CoinGeckoMarket markets = 1;
+}
+
+message CoinGeckoHistoricalPriceRequest {
+  string token_id = 1;        // CoinGecko token ID (e.g., "ethereum", "bitcoin")
+  string date = 2;            // Date in dd-mm-yyyy format
+}
+
+message CoinGeckoHistoricalPriceResponse {
+  string price_usd = 1;       // Price in USD as string
+  string market_cap_usd = 2;  // Market cap in USD as string
+  string volume_usd = 3;      // 24h volume in USD as string
+  int64 timestamp = 4;
+  bool success = 5;
+  string error = 6;
+}
+
+message CoinGeckoMarketChartRangeRequest {
+  string token_id = 1;        // CoinGecko token ID
+  int64 from_timestamp = 2;   // Start timestamp in seconds
+  int64 to_timestamp = 3;     // End timestamp in seconds
+  string vs_currency = 4;     // Quote currency (default: "usd")
+}
+
+message CoinGeckoMarketChartDataPoint {
+  int64 timestamp = 1;        // Timestamp in milliseconds
+  string value = 2;           // Value as string (price, market cap, or volume)
+}
+
+message CoinGeckoMarketChartRangeResponse {
+  repeated CoinGeckoMarketChartDataPoint prices = 1;
+  repeated CoinGeckoMarketChartDataPoint market_caps = 2;
+  repeated CoinGeckoMarketChartDataPoint total_volumes = 3;
+  bool success = 4;
+  string error = 5;
+}
+
+// =============================================================================
+// TheGraph Integration Messages
+// =============================================================================
+
+message TheGraphQueryRequest {
+  string subgraph_id = 1;     // Subgraph deployment ID or name
+  string query = 2;           // GraphQL query string
+  string variables = 3;       // JSON-encoded variables (optional)
+}
+
+message TheGraphQueryResponse {
+  string data = 1;            // JSON-encoded query result
+  string errors = 2;          // JSON-encoded errors array if any
+  bool success = 3;
+}
+
+// =============================================================================
+// SimulationService - transaction simulation via Alchemy/Tenderly
+// =============================================================================
+
+service SimulationService {
+  // Simulate transactions via configured backend (Tenderly or Alchemy).
+  rpc SimulateBundle(SimulateBundleRequest) returns (SimulateBundleResponse);
+}
+
+message SimulateTransaction {
+  string from_address = 1;    // Sender address
+  string to_address = 2;      // Target contract address
+  string data = 3;            // Transaction calldata (hex)
+  string value = 4;           // ETH value in wei (hex or decimal string)
+  int64 gas_limit = 5;        // Optional gas limit
+}
+
+message SimulateStateOverride {
+  string address = 1;         // Address to override
+  string balance = 2;         // Balance override (hex wei)
+}
+
+message SimulateBundleRequest {
+  string chain = 1;                             // Chain name (e.g., "arbitrum")
+  repeated SimulateTransaction transactions = 2; // Transactions to simulate
+  repeated SimulateStateOverride state_overrides = 3; // Optional state overrides
+  string simulator = 4;                         // Optional: "tenderly", "alchemy", or empty for auto
+}
+
+message SimulateBundleResponse {
+  bool success = 1;                   // True if all transactions would succeed
+  bool simulated = 2;                 // True if simulation was actually run
+  repeated int64 gas_estimates = 3;   // Gas estimate per transaction
+  string revert_reason = 4;           // Revert reason if failed
+  repeated string warnings = 5;       // Simulation warnings
+  string simulation_url = 6;          // Tenderly dashboard URL (if available)
+  string simulator_used = 7;          // Which simulator was used
+  string error = 8;                   // Error message if simulation failed
+}
+
+// =============================================================================
+// FundingRateService - perpetual funding rate data
+// =============================================================================
+
+service FundingRateService {
+  // Get funding rate for a market on a specific venue.
+  rpc GetFundingRate(FundingRateRequest) returns (FundingRateResponse);
+
+  // Get funding rate spread between two venues.
+  rpc GetFundingRateSpread(FundingRateSpreadRequest) returns (FundingRateSpreadResponse);
+}
+
+message FundingRateRequest {
+  string venue = 1;           // Venue name: "gmx_v2", "hyperliquid"
+  string market = 2;          // Market symbol (e.g., "ETH-USD", "BTC-USD")
+  string chain = 3;           // Chain for on-chain venues (e.g., "arbitrum")
+}
+
+message FundingRateResponse {
+  string venue = 1;
+  string market = 2;
+  string rate_hourly = 3;           // Hourly rate as decimal string
+  string rate_8h = 4;               // 8-hour rate as decimal string
+  string rate_annualized = 5;       // Annualized rate as decimal string
+  int64 next_funding_time = 6;      // Next funding timestamp (unix seconds)
+  string open_interest_long = 7;    // Long OI in USD
+  string open_interest_short = 8;   // Short OI in USD
+  string mark_price = 9;            // Mark price
+  string index_price = 10;          // Index price
+  bool is_live_data = 11;           // True if data is from live source
+  bool success = 12;
+  string error = 13;
+}
+
+message FundingRateSpreadRequest {
+  string market = 1;          // Market symbol (e.g., "ETH-USD")
+  string venue_a = 2;         // First venue
+  string venue_b = 3;         // Second venue
+  string chain = 4;           // Chain for on-chain venues
+}
+
+message FundingRateSpreadResponse {
+  string spread_hourly = 1;         // Spread in hourly rate
+  string spread_annualized = 2;     // Spread annualized
+  FundingRateResponse venue_a_rate = 3;
+  FundingRateResponse venue_b_rate = 4;
+  bool success = 5;
+  string error = 6;
+}
+
+// =============================================================================
+// DashboardService - provides data for operator dashboards
+// =============================================================================
+
+service DashboardService {
+  // List all available strategies with summary info.
+  rpc ListStrategies(ListStrategiesRequest) returns (ListStrategiesResponse);
+
+  // Get detailed information about a specific strategy.
+  rpc GetStrategyDetails(GetStrategyDetailsRequest) returns (StrategyDetails);
+
+  // Get timeline events for a strategy.
+  rpc GetTimeline(GetTimelineRequest) returns (GetTimelineResponse);
+
+  // Get strategy configuration.
+  rpc GetStrategyConfig(GetStrategyConfigRequest) returns (StrategyConfigResponse);
+
+  // Get current strategy state (read-only, formatted for display).
+  rpc GetStrategyState(GetStrategyStateRequest) returns (StrategyStateResponse);
+
+  // Execute operator action (pause, resume, emergency).
+  rpc ExecuteAction(ExecuteActionRequest) returns (ExecuteActionResponse);
+
+  // Register a strategy instance in the persistent registry.
+  rpc RegisterStrategyInstance(RegisterInstanceRequest) returns (RegisterInstanceResponse);
+
+  // Update strategy instance status or send heartbeat.
+  rpc UpdateStrategyInstanceStatus(UpdateInstanceStatusRequest) returns (UpdateInstanceStatusResponse);
+
+  // Archive a strategy instance (hidden from dashboard, data retained).
+  rpc ArchiveStrategyInstance(ArchiveInstanceRequest) returns (ArchiveInstanceResponse);
+
+  // Purge a strategy instance and all its events (permanent delete).
+  rpc PurgeStrategyInstance(PurgeInstanceRequest) returns (PurgeInstanceResponse);
+}
+
+// =============================================================================
+// Dashboard Service Messages
+// =============================================================================
+
+message ListStrategiesRequest {
+  // Source modes: "REGISTRY" (default, instances only), "AVAILABLE" (templates only),
+  // "ALL" (combined). Status modes: "RUNNING", "PAUSED", "ERROR", "STUCK", "STALE",
+  // "INACTIVE", "ARCHIVED" (filter registry instances by status).
+  string status_filter = 1;
+  string chain_filter = 2;    // Filter by chain (optional)
+  bool include_position = 3;  // Include position summary (more expensive)
+}
+
+message ListStrategiesResponse {
+  repeated StrategySummary strategies = 1;
+  int32 total_count = 2;
+}
+
+message StrategySummary {
+  string strategy_id = 1;
+  string name = 2;
+  string status = 3;          // "RUNNING", "PAUSED", "ERROR", "STUCK"
+  string chain = 4;
+  string protocol = 5;
+  string total_value_usd = 6;
+  string pnl_24h_usd = 7;
+  int64 last_action_at = 8;
+  bool attention_required = 9;
+  string attention_reason = 10;
+  bool is_multi_chain = 11;
+  repeated string chains = 12;
+}
+
+message GetStrategyDetailsRequest {
+  string strategy_id = 1;
+  bool include_timeline = 2;      // Include recent timeline events
+  bool include_pnl_history = 3;   // Include PnL history for charts
+  int32 timeline_limit = 4;       // Max timeline events (default 20)
+}
+
+message StrategyDetails {
+  StrategySummary summary = 1;
+  PositionInfo position = 2;
+  repeated TimelineEventInfo timeline = 3;
+  repeated PnLDataPoint pnl_history = 4;
+  OperatorCardInfo operator_card = 5;
+  map<string, ChainHealthInfo> chain_health = 6;
+}
+
+message PositionInfo {
+  repeated TokenBalanceInfo token_balances = 1;
+  repeated LPPositionInfo lp_positions = 2;
+  string total_lp_value_usd = 3;
+  string health_factor = 4;
+  string leverage = 5;
+}
+
+message TokenBalanceInfo {
+  string symbol = 1;
+  string balance = 2;
+  string value_usd = 3;
+}
+
+message LPPositionInfo {
+  string pool = 1;
+  string token0 = 2;
+  string token1 = 3;
+  string liquidity_usd = 4;
+  string range_lower = 5;
+  string range_upper = 6;
+  string current_price = 7;
+  bool in_range = 8;
+}
+
+message TimelineEventInfo {
+  int64 timestamp = 1;
+  string event_type = 2;
+  string description = 3;
+  string tx_hash = 4;
+  string details_json = 5;    // JSON-encoded details
+  string chain = 6;
+}
+
+message PnLDataPoint {
+  int64 timestamp = 1;
+  string value_usd = 2;
+  string pnl_usd = 3;
+}
+
+message OperatorCardInfo {
+  string strategy_id = 1;
+  int64 timestamp = 2;
+  string reason = 3;          // StuckReason enum value
+  string severity = 4;        // "LOW", "MEDIUM", "HIGH", "CRITICAL"
+  string context_json = 5;
+  string position_at_risk_usd = 6;
+  string risk_description = 7;
+  repeated string suggested_actions = 8;
+  repeated string available_actions = 9;
+}
+
+message ChainHealthInfo {
+  string chain = 1;
+  string status = 2;          // "HEALTHY", "DEGRADED", "UNAVAILABLE"
+  int32 rpc_latency_ms = 3;
+  string gas_price_gwei = 4;
+  int64 block_number = 5;
+  int64 last_updated = 6;
+}
+
+message GetTimelineRequest {
+  string strategy_id = 1;
+  int32 limit = 2;            // Default 50
+  string event_type_filter = 3;   // Optional filter
+  int64 since_timestamp = 4;  // Optional: only events after this time
+}
+
+message GetTimelineResponse {
+  repeated TimelineEventInfo events = 1;
+  bool has_more = 2;
+}
+
+message GetStrategyConfigRequest {
+  string strategy_id = 1;
+}
+
+message StrategyConfigResponse {
+  string strategy_id = 1;
+  string strategy_name = 2;
+  string config_json = 3;     // Full config as JSON
+  int64 last_updated = 4;
+}
+
+message GetStrategyStateRequest {
+  string strategy_id = 1;
+  repeated string fields = 2; // Optional: specific fields to return
+}
+
+message StrategyStateResponse {
+  string strategy_id = 1;
+  string state_json = 2;      // State as JSON (filtered by fields if specified)
+  int64 version = 3;
+  int64 updated_at = 4;
+}
+
+message ExecuteActionRequest {
+  string strategy_id = 1;
+  string action = 2;          // "PAUSE", "RESUME", "BUMP_GAS", "CANCEL_TX", "EMERGENCY_UNWIND"
+  string reason = 3;          // Required for audit
+  map<string, string> params = 4;  // Action-specific parameters
+}
+
+message ExecuteActionResponse {
+  bool success = 1;
+  string error = 2;
+  string action_id = 3;       // For tracking
+}
+
+// Instance registry messages
+
+message RegisterInstanceRequest {
+  string strategy_id = 1;          // Unique instance ID (e.g. "uniswap_lp:a1b2c3d4e5f6")
+  string strategy_name = 2;        // Display name (from config's strategy_id or strategy_name)
+  string template_name = 3;        // Class name, e.g. "UniswapLPStrategy"
+  string chain = 4;
+  string protocol = 5;
+  string wallet_address = 6;
+  string config_json = 7;
+  string version = 8;
+}
+
+message RegisterInstanceResponse {
+  bool success = 1;
+  string error = 2;
+  bool already_existed = 3;        // True if re-registering on restart (same strategy_id)
+}
+
+message UpdateInstanceStatusRequest {
+  string strategy_id = 1;
+  string status = 2;               // RUNNING, INACTIVE, ERROR, PAUSED
+  string reason = 3;
+  bool heartbeat_only = 4;         // If true, only update last_heartbeat_at
+}
+
+message UpdateInstanceStatusResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message ArchiveInstanceRequest {
+  string strategy_id = 1;
+  string reason = 2;
+}
+
+message ArchiveInstanceResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message PurgeInstanceRequest {
+  string strategy_id = 1;
+  string reason = 2;               // Required for audit
+}
+
+message PurgeInstanceResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// =============================================================================
+// PolymarketService - Polymarket CLOB API proxy
+// =============================================================================
+
+service PolymarketService {
+  // Market data endpoints
+  rpc GetMarket(PolymarketGetMarketRequest) returns (PolymarketMarketResponse);
+  rpc GetMarkets(PolymarketGetMarketsRequest) returns (PolymarketMarketsResponse);
+  rpc GetSimplifiedMarkets(PolymarketGetSimplifiedMarketsRequest) returns (PolymarketSimplifiedMarketsResponse);
+
+  // Order book and pricing
+  rpc GetOrderBook(PolymarketOrderBookRequest) returns (PolymarketOrderBookResponse);
+  rpc GetMidpoint(PolymarketMidpointRequest) returns (PolymarketMidpointResponse);
+  rpc GetPrice(PolymarketPriceRequest) returns (PolymarketPriceResponse);
+  rpc GetSpread(PolymarketSpreadRequest) returns (PolymarketSpreadResponse);
+  rpc GetTickSize(PolymarketTickSizeRequest) returns (PolymarketTickSizeResponse);
+
+  // Order management (requires credentials - handled by gateway)
+  rpc CreateAndPostOrder(PolymarketCreateOrderRequest) returns (PolymarketOrderResponse);
+  rpc CreateAndPostMarketOrder(PolymarketMarketOrderRequest) returns (PolymarketOrderResponse);
+  rpc CancelOrder(PolymarketCancelOrderRequest) returns (PolymarketCancelResponse);
+  rpc CancelOrders(PolymarketCancelOrdersRequest) returns (PolymarketCancelResponse);
+  rpc CancelAll(PolymarketCancelAllRequest) returns (PolymarketCancelResponse);
+
+  // Position and trade queries
+  rpc GetPositions(PolymarketGetPositionsRequest) returns (PolymarketPositionsResponse);
+  rpc GetOpenOrders(PolymarketGetOpenOrdersRequest) returns (PolymarketOpenOrdersResponse);
+  rpc GetTradesHistory(PolymarketGetTradesRequest) returns (PolymarketTradesResponse);
+  rpc GetOrder(PolymarketGetOrderRequest) returns (PolymarketOrderInfoResponse);
+
+  // Balance queries
+  rpc GetBalanceAllowance(PolymarketBalanceAllowanceRequest) returns (PolymarketBalanceAllowanceResponse);
+}
+
+// =============================================================================
+// Polymarket Market Data Messages
+// =============================================================================
+
+message PolymarketGetMarketRequest {
+  string condition_id = 1;    // Market condition ID
+}
+
+message PolymarketMarketResponse {
+  string condition_id = 1;
+  string question_id = 2;
+  repeated string tokens = 3;           // Token IDs for outcomes
+  string rewards_daily_rate = 4;
+  string rewards_min_size = 5;
+  string rewards_max_spread = 6;
+  bool active = 7;
+  bool closed = 8;
+  bool accepting_orders = 9;
+  string accepting_order_timestamp = 10;
+  string minimum_order_size = 11;
+  string minimum_tick_size = 12;
+  bool success = 13;
+  string error = 14;
+}
+
+message PolymarketGetMarketsRequest {
+  string next_cursor = 1;     // Pagination cursor (optional)
+}
+
+message PolymarketMarketsResponse {
+  repeated PolymarketMarketResponse markets = 1;
+  string next_cursor = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+message PolymarketGetSimplifiedMarketsRequest {
+  string next_cursor = 1;     // Pagination cursor (optional)
+}
+
+message PolymarketSimplifiedMarket {
+  string condition_id = 1;
+  repeated string tokens = 2;
+  string min_incentive_size = 3;
+  string max_incentive_spread = 4;
+  bool active = 5;
+  bool closed = 6;
+}
+
+message PolymarketSimplifiedMarketsResponse {
+  repeated PolymarketSimplifiedMarket markets = 1;
+  string next_cursor = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+// =============================================================================
+// Polymarket Order Book Messages
+// =============================================================================
+
+message PolymarketOrderBookRequest {
+  string token_id = 1;        // Token ID for the outcome
+}
+
+message PolymarketOrderBookLevel {
+  string price = 1;           // Price level
+  string size = 2;            // Size at this level
+}
+
+message PolymarketOrderBookResponse {
+  string market = 1;          // Token ID
+  string asset_id = 2;
+  string hash = 3;
+  int64 timestamp = 4;
+  repeated PolymarketOrderBookLevel bids = 5;
+  repeated PolymarketOrderBookLevel asks = 6;
+  bool success = 7;
+  string error = 8;
+}
+
+message PolymarketMidpointRequest {
+  string token_id = 1;
+}
+
+message PolymarketMidpointResponse {
+  string midpoint = 1;        // Midpoint price as decimal string
+  bool success = 2;
+  string error = 3;
+}
+
+message PolymarketPriceRequest {
+  string token_id = 1;
+  string side = 2;            // "BUY" or "SELL"
+}
+
+message PolymarketPriceResponse {
+  string price = 1;           // Best price as decimal string
+  bool success = 2;
+  string error = 3;
+}
+
+message PolymarketSpreadRequest {
+  string token_id = 1;
+}
+
+message PolymarketSpreadResponse {
+  string spread = 1;          // Spread as decimal string
+  bool success = 2;
+  string error = 3;
+}
+
+message PolymarketTickSizeRequest {
+  string token_id = 1;
+}
+
+message PolymarketTickSizeResponse {
+  string tick_size = 1;       // Minimum tick size
+  bool success = 2;
+  string error = 3;
+}
+
+// =============================================================================
+// Polymarket Order Messages
+// =============================================================================
+
+message PolymarketCreateOrderRequest {
+  string token_id = 1;        // Token ID for the outcome
+  string price = 2;           // Limit price as decimal string
+  string size = 3;            // Order size as decimal string
+  string side = 4;            // "BUY" or "SELL"
+  string fee_rate_bps = 5;    // Fee rate in basis points (optional, default "0")
+  int64 expiration = 6;       // Order expiration timestamp (optional, 0 for no expiration)
+  string nonce = 7;           // Optional nonce (auto-generated if empty)
+  string time_in_force = 8;   // "GTC", "FOK", "GTD" (optional, default "GTC")
+}
+
+message PolymarketMarketOrderRequest {
+  string token_id = 1;
+  string amount = 2;          // USDC amount for buy, token amount for sell
+  string side = 3;            // "BUY" or "SELL"
+  string fee_rate_bps = 4;    // Fee rate in basis points (optional)
+  int64 expiration = 5;       // Order expiration timestamp (optional)
+  string nonce = 6;           // Optional nonce
+  string worst_price = 7;     // Optional worst acceptable price
+}
+
+message PolymarketOrderResponse {
+  string order_id = 1;
+  string status = 2;          // "LIVE", "MATCHED", "CANCELLED", etc.
+  string size_matched = 3;
+  string transact_time = 4;
+  bool success = 5;
+  string error = 6;
+  string error_code = 7;
+}
+
+message PolymarketCancelOrderRequest {
+  string order_id = 1;
+}
+
+message PolymarketCancelOrdersRequest {
+  repeated string order_ids = 1;
+}
+
+message PolymarketCancelAllRequest {
+  string market_id = 1;       // Optional: cancel only for specific market
+  string asset_id = 2;        // Optional: cancel only for specific asset
+}
+
+message PolymarketCancelResponse {
+  repeated string canceled = 1;
+  repeated string not_canceled = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+// =============================================================================
+// Polymarket Position and Trade Messages
+// =============================================================================
+
+message PolymarketGetPositionsRequest {
+  // Uses wallet address from gateway credentials
+}
+
+message PolymarketPosition {
+  string asset = 1;           // Token ID
+  string condition_id = 2;
+  string size = 3;
+  string avg_price = 4;
+  string realized_pnl = 5;
+  string cur_price = 6;
+}
+
+message PolymarketPositionsResponse {
+  repeated PolymarketPosition positions = 1;
+  bool success = 2;
+  string error = 3;
+}
+
+message PolymarketGetOpenOrdersRequest {
+  string market_id = 1;       // Optional: filter by market
+  string asset_id = 2;        // Optional: filter by asset
+}
+
+message PolymarketOpenOrder {
+  string order_id = 1;
+  string market = 2;
+  string asset_id = 3;
+  string side = 4;
+  string price = 5;
+  string original_size = 6;
+  string size_matched = 7;
+  string outcome = 8;
+  string status = 9;
+  string expiration = 10;
+  string created_at = 11;
+}
+
+message PolymarketOpenOrdersResponse {
+  repeated PolymarketOpenOrder orders = 1;
+  bool success = 2;
+  string error = 3;
+}
+
+message PolymarketGetTradesRequest {
+  string market_id = 1;       // Optional: filter by market
+  string asset_id = 2;        // Optional: filter by asset
+  int32 limit = 3;            // Optional: limit results
+  string before = 4;          // Optional: pagination cursor
+  string after = 5;           // Optional: pagination cursor
+}
+
+message PolymarketTrade {
+  string trade_id = 1;
+  string market = 2;
+  string asset_id = 3;
+  string side = 4;
+  string price = 5;
+  string size = 6;
+  string fee_rate_bps = 7;
+  string status = 8;
+  string match_time = 9;
+  string transaction_hash = 10;
+  string bucket_index = 11;
+}
+
+message PolymarketTradesResponse {
+  repeated PolymarketTrade trades = 1;
+  string next_cursor = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+message PolymarketGetOrderRequest {
+  string order_id = 1;
+}
+
+message PolymarketOrderInfoResponse {
+  string order_id = 1;
+  string market = 2;
+  string asset_id = 3;
+  string side = 4;
+  string price = 5;
+  string original_size = 6;
+  string size_matched = 7;
+  string status = 8;
+  string outcome = 9;
+  string owner = 10;
+  string expiration = 11;
+  string created_at = 12;
+  string associate_trades_json = 13;  // JSON array of associated trades
+  bool success = 14;
+  string error = 15;
+}
+
+// =============================================================================
+// Polymarket Balance Messages
+// =============================================================================
+
+message PolymarketBalanceAllowanceRequest {
+  string asset_type = 1;      // "COLLATERAL" or "CONDITIONAL"
+  string token_id = 2;        // Required for CONDITIONAL type
+}
+
+message PolymarketBalanceAllowanceResponse {
+  string balance = 1;
+  string allowance = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+// =============================================================================
+// EnsoService - Enso Finance routing API proxy
+// =============================================================================
+
+service EnsoService {
+  // Get swap route across multiple DEXs
+  rpc GetRoute(EnsoRouteRequest) returns (EnsoRouteResponse);
+
+  // Get quote without building transaction
+  rpc GetQuote(EnsoQuoteRequest) returns (EnsoQuoteResponse);
+
+  // Get approval transaction data
+  rpc GetApproval(EnsoApprovalRequest) returns (EnsoApprovalResponse);
+
+  // Get bundle transaction for multiple DeFi operations
+  rpc GetBundle(EnsoBundleRequest) returns (EnsoBundleResponse);
+}
+
+// =============================================================================
+// Enso Route Messages
+// =============================================================================
+
+message EnsoRouteRequest {
+  string chain = 1;                   // Chain name (e.g., "arbitrum", "base")
+  string token_in = 2;                // Input token address
+  string token_out = 3;               // Output token address
+  string amount_in = 4;               // Input amount in wei
+  string from_address = 5;            // Sender address
+  string receiver = 6;                // Receiver address (optional, defaults to from_address)
+  int32 slippage_bps = 7;             // Slippage in basis points (default 50)
+  string routing_strategy = 8;        // "router" or "delegate" (optional)
+  int32 max_price_impact_bps = 9;     // Max price impact threshold (optional)
+  int32 destination_chain_id = 10;    // Destination chain ID for cross-chain (optional)
+  string refund_receiver = 11;        // Refund receiver for cross-chain (optional)
+}
+
+message EnsoRouteResponse {
+  bool success = 1;
+  string error = 2;
+
+  // Transaction data
+  string to = 3;                      // Router contract address
+  string data = 4;                    // Transaction calldata
+  string value = 5;                   // ETH value (for native token swaps)
+  string gas = 6;                     // Estimated gas
+
+  // Route details
+  string amount_out = 7;              // Expected output amount in wei
+  int32 price_impact = 8;             // Price impact in basis points
+  string gas_estimate = 9;            // Gas estimate in wei
+
+  // Cross-chain fields
+  string bridge_fee = 10;             // Bridge fee (for cross-chain)
+  int32 estimated_time = 11;          // Estimated time in seconds (for cross-chain)
+  bool is_cross_chain = 12;           // Whether this is a cross-chain route
+
+  // Route path info (JSON encoded)
+  string route_json = 13;             // Full route details as JSON
+}
+
+// =============================================================================
+// Enso Quote Messages
+// =============================================================================
+
+message EnsoQuoteRequest {
+  string chain = 1;
+  string token_in = 2;
+  string token_out = 3;
+  string amount_in = 4;
+  string from_address = 5;
+  string routing_strategy = 6;
+  int32 destination_chain_id = 7;     // For cross-chain quotes
+}
+
+message EnsoQuoteResponse {
+  bool success = 1;
+  string error = 2;
+  string amount_out = 3;              // Expected output amount in wei
+  int32 price_impact = 4;             // Price impact in basis points
+  string gas_estimate = 5;            // Gas estimate
+}
+
+// =============================================================================
+// Enso Approval Messages
+// =============================================================================
+
+message EnsoApprovalRequest {
+  string chain = 1;
+  string token_address = 2;           // Token to approve
+  string amount = 3;                  // Amount to approve (empty for unlimited)
+  string from_address = 4;
+  string routing_strategy = 5;
+}
+
+message EnsoApprovalResponse {
+  bool success = 1;
+  string error = 2;
+  string to = 3;                      // Token contract address
+  string data = 4;                    // Approval calldata
+  string gas = 5;                     // Estimated gas
+}
+
+// =============================================================================
+// Enso Bundle Messages
+// =============================================================================
+
+message EnsoBundleAction {
+  string protocol = 1;                // Protocol name (e.g., "aave-v3", "uniswap-v3")
+  string action = 2;                  // Action type (e.g., "deposit", "borrow", "swap")
+  map<string, string> args = 3;       // Action arguments
+}
+
+message EnsoBundleRequest {
+  string chain = 1;
+  string from_address = 2;
+  repeated EnsoBundleAction actions = 3;
+  string routing_strategy = 4;
+  bool skip_quote = 5;
+}
+
+message EnsoBundleResponse {
+  bool success = 1;
+  string error = 2;
+  string to = 3;                      // Router contract address
+  string data = 4;                    // Bundle calldata
+  string value = 5;                   // ETH value
+  string gas = 6;                     // Estimated gas
+  string bundle_json = 7;             // Full bundle response as JSON
+}
+
+// =============================================================================
+// TokenService - unified token resolution and on-chain metadata discovery
+// =============================================================================
+
+service TokenService {
+  // Resolve a token by symbol or address, returning cached or static registry data.
+  // Checks: memory cache -> disk cache -> static registry -> on-chain (if address)
+  rpc ResolveToken(ResolveTokenRequest) returns (TokenMetadataResponse);
+
+  // Get on-chain ERC-20 metadata by querying the token contract directly.
+  // Use this for unknown tokens not in the static registry.
+  rpc GetTokenMetadata(GetTokenMetadataRequest) returns (TokenMetadataResponse);
+
+  // Get only the decimals for a token (lightweight endpoint).
+  // Useful when you only need decimals for amount calculations.
+  rpc GetTokenDecimals(GetTokenDecimalsRequest) returns (GetTokenDecimalsResponse);
+
+  // Resolve multiple tokens in a single call (batch operation).
+  // Returns metadata for each token, with errors for individual failures.
+  rpc BatchResolveTokens(BatchResolveTokensRequest) returns (BatchResolveTokensResponse);
+}
+
+// =============================================================================
+// TokenService Messages
+// =============================================================================
+
+message ResolveTokenRequest {
+  string token = 1;           // Token symbol (e.g., "USDC") or address (e.g., "0x...")
+  string chain = 2;           // Chain name (e.g., "arbitrum", "base", "ethereum")
+}
+
+message GetTokenMetadataRequest {
+  string address = 1;         // Token contract address (must be valid 0x address)
+  string chain = 2;           // Chain name
+}
+
+message GetTokenDecimalsRequest {
+  string token = 1;           // Token symbol or address
+  string chain = 2;           // Chain name
+}
+
+message GetTokenDecimalsResponse {
+  bool success = 1;
+  int32 decimals = 2;         // Token decimals (e.g., 6 for USDC, 18 for WETH)
+  string error = 3;           // Error message if resolution failed
+}
+
+message BatchResolveTokensRequest {
+  repeated string tokens = 1; // List of token symbols or addresses
+  string chain = 2;           // Chain name (all tokens must be on same chain)
+}
+
+message BatchResolveTokensResponse {
+  bool success = 1;           // True if all tokens resolved successfully
+  repeated TokenMetadataResponse tokens = 2;  // Metadata for each token (in order)
+  string error = 3;           // Overall error message if batch failed
+}
+
+message TokenMetadataResponse {
+  bool success = 1;
+  string error = 2;           // Error message if resolution failed
+
+  // Token metadata
+  string symbol = 3;          // Token symbol (e.g., "USDC", "WETH")
+  string address = 4;         // Token contract address (checksummed)
+  int32 decimals = 5;         // Token decimals
+  string name = 6;            // Token name (e.g., "USD Coin", "Wrapped Ether")
+  bool is_verified = 7;       // True if from static registry, false if on-chain lookup
+  string source = 8;          // Resolution source: "cache", "static", "on_chain"
+}

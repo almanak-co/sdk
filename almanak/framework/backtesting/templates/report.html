@@ -1,0 +1,1489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Backtest Report - {{ result.strategy_id }}</title>
+    <style>
+        /* CSS Variables for theming */
+        :root {
+            --bg-primary: #1a1a2e;
+            --bg-secondary: #16213e;
+            --bg-card: #0f3460;
+            --text-primary: #eaeaea;
+            --text-secondary: #a0a0a0;
+            --accent-green: #00d26a;
+            --accent-red: #ff4757;
+            --accent-blue: #3498db;
+            --accent-yellow: #f1c40f;
+            --border-color: #2a2a4a;
+            --shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        /* Reset and base styles */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            padding: 20px;
+        }
+
+        /* Container */
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        /* Header */
+        header {
+            text-align: center;
+            padding: 30px 0;
+            border-bottom: 2px solid var(--border-color);
+            margin-bottom: 30px;
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            color: var(--text-primary);
+        }
+
+        header .subtitle {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+        }
+
+        header .engine-badge {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: bold;
+            text-transform: uppercase;
+            margin-top: 10px;
+        }
+
+        header .engine-badge.pnl {
+            background-color: var(--accent-blue);
+            color: white;
+        }
+
+        header .engine-badge.paper {
+            background-color: var(--accent-yellow);
+            color: black;
+        }
+
+        /* Section styling */
+        section {
+            background-color: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 25px;
+            box-shadow: var(--shadow);
+        }
+
+        section h2 {
+            font-size: 1.5rem;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border-color);
+            color: var(--accent-blue);
+        }
+
+        /* Summary cards grid */
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+        }
+
+        .summary-card {
+            background-color: var(--bg-card);
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .summary-card .label {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        .summary-card .value {
+            font-size: 1.8rem;
+            font-weight: bold;
+        }
+
+        .summary-card .value.positive {
+            color: var(--accent-green);
+        }
+
+        .summary-card .value.negative {
+            color: var(--accent-red);
+        }
+
+        .summary-card .value.neutral {
+            color: var(--text-primary);
+        }
+
+        /* Metrics table */
+        .metrics-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .metrics-table th,
+        .metrics-table td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .metrics-table th {
+            background-color: var(--bg-card);
+            color: var(--accent-blue);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.85rem;
+        }
+
+        .metrics-table tr:hover {
+            background-color: rgba(52, 152, 219, 0.1);
+        }
+
+        .metrics-table .category-header {
+            background-color: var(--bg-primary);
+            font-weight: bold;
+            color: var(--accent-yellow);
+        }
+
+        /* Charts section */
+        .charts-container {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+        }
+
+        .chart-wrapper {
+            background-color: var(--bg-card);
+            border-radius: 10px;
+            padding: 15px;
+            min-height: 400px;
+        }
+
+        .chart-wrapper h3 {
+            margin-bottom: 15px;
+            color: var(--text-primary);
+        }
+
+        .chart-placeholder {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 350px;
+            background-color: var(--bg-primary);
+            border-radius: 8px;
+            color: var(--text-secondary);
+        }
+
+        /* Trades table */
+        .trades-wrapper {
+            overflow-x: auto;
+        }
+
+        .trades-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+
+        .trades-table th,
+        .trades-table td {
+            padding: 10px 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+            white-space: nowrap;
+        }
+
+        .trades-table th {
+            background-color: var(--bg-card);
+            color: var(--accent-blue);
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .trades-table th:hover {
+            background-color: rgba(52, 152, 219, 0.2);
+        }
+
+        .trades-table th .sort-indicator {
+            margin-left: 5px;
+            opacity: 0.5;
+        }
+
+        .trades-table th.sort-asc .sort-indicator::after {
+            content: ' ▲';
+            opacity: 1;
+        }
+
+        .trades-table th.sort-desc .sort-indicator::after {
+            content: ' ▼';
+            opacity: 1;
+        }
+
+        .trades-table tr:hover {
+            background-color: rgba(52, 152, 219, 0.1);
+        }
+
+        .trades-table .success {
+            color: var(--accent-green);
+        }
+
+        .trades-table .failed {
+            color: var(--accent-red);
+        }
+
+        .trades-table .pnl-positive {
+            color: var(--accent-green);
+        }
+
+        .trades-table .pnl-negative {
+            color: var(--accent-red);
+        }
+
+        /* Trade log controls */
+        .trades-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-bottom: 20px;
+            align-items: center;
+        }
+
+        .trades-controls .search-box {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        .trades-controls input[type="text"] {
+            width: 100%;
+            padding: 10px 15px;
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+        }
+
+        .trades-controls input[type="text"]::placeholder {
+            color: var(--text-secondary);
+        }
+
+        .trades-controls input[type="text"]:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+
+        .trades-controls select {
+            padding: 10px 15px;
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            cursor: pointer;
+        }
+
+        .trades-controls select:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+
+        .trades-controls .filter-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .trades-controls .filter-group label {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+
+        .trades-stats {
+            display: flex;
+            gap: 20px;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            margin-top: 10px;
+        }
+
+        .trades-stats .stat-item {
+            display: flex;
+            gap: 5px;
+        }
+
+        .trades-stats .stat-value {
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+
+        .no-results {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+
+        /* Attribution section */
+        .attribution-summary {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            margin-bottom: 20px;
+        }
+
+        .attribution-summary .positive {
+            color: var(--accent-green);
+            font-weight: bold;
+        }
+
+        .attribution-summary .negative {
+            color: var(--accent-red);
+            font-weight: bold;
+        }
+
+        .attribution-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .attribution-chart {
+            min-height: 350px;
+        }
+
+        .attribution-tables {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+        }
+
+        .attribution-table-wrapper {
+            background-color: var(--bg-card);
+            padding: 15px;
+            border-radius: 10px;
+        }
+
+        .attribution-table-wrapper h3 {
+            font-size: 1rem;
+            color: var(--accent-blue);
+            margin-bottom: 15px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .attribution-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+
+        .attribution-table th,
+        .attribution-table td {
+            padding: 8px 10px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .attribution-table th {
+            background-color: var(--bg-primary);
+            color: var(--accent-blue);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+        }
+
+        .attribution-table tr:hover {
+            background-color: rgba(52, 152, 219, 0.1);
+        }
+
+        .attribution-table .pnl-positive {
+            color: var(--accent-green);
+        }
+
+        .attribution-table .pnl-negative {
+            color: var(--accent-red);
+        }
+
+        /* Config section */
+        .config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .config-card {
+            background-color: var(--bg-card);
+            padding: 20px;
+            border-radius: 10px;
+        }
+
+        .config-card h3 {
+            font-size: 1rem;
+            color: var(--accent-blue);
+            margin-bottom: 15px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .config-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(42, 42, 74, 0.5);
+        }
+
+        .config-item:last-child {
+            border-bottom: none;
+        }
+
+        .config-item .key {
+            color: var(--text-secondary);
+        }
+
+        .config-item .value {
+            color: var(--text-primary);
+            font-family: 'Courier New', monospace;
+        }
+
+        /* Footer */
+        footer {
+            text-align: center;
+            padding: 20px;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            border-top: 1px solid var(--border-color);
+            margin-top: 30px;
+        }
+
+        footer a {
+            color: var(--accent-blue);
+            text-decoration: none;
+        }
+
+        footer a:hover {
+            text-decoration: underline;
+        }
+
+        /* Utility classes */
+        .text-center {
+            text-align: center;
+        }
+
+        .mb-10 {
+            margin-bottom: 10px;
+        }
+
+        .mb-20 {
+            margin-bottom: 20px;
+        }
+
+        /* Responsive adjustments */
+        @media (max-width: 768px) {
+            body {
+                padding: 10px;
+            }
+
+            header h1 {
+                font-size: 1.8rem;
+            }
+
+            .summary-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .summary-card .value {
+                font-size: 1.4rem;
+            }
+
+            .metrics-table th,
+            .metrics-table td {
+                padding: 8px 10px;
+                font-size: 0.9rem;
+            }
+
+            section {
+                padding: 15px;
+            }
+
+            /* Trade controls stack vertically on tablet */
+            .trades-controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .trades-controls .search-box {
+                min-width: auto;
+            }
+
+            .trades-controls .filter-group {
+                justify-content: space-between;
+            }
+
+            .trades-controls .filter-group label {
+                min-width: 60px;
+            }
+
+            .trades-controls select {
+                flex: 1;
+            }
+
+            /* Chart containers adapt */
+            .chart-wrapper {
+                min-height: 300px;
+            }
+
+            .chart-placeholder {
+                height: 250px;
+            }
+
+            /* Attribution tables on tablet */
+            .attribution-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .attribution-tables {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 480px) {
+            body {
+                padding: 8px;
+            }
+
+            header h1 {
+                font-size: 1.5rem;
+            }
+
+            header .subtitle {
+                font-size: 0.95rem;
+            }
+
+            header .engine-badge {
+                font-size: 0.8rem;
+                padding: 4px 10px;
+            }
+
+            .summary-grid {
+                grid-template-columns: 1fr;
+                gap: 12px;
+            }
+
+            .summary-card {
+                padding: 15px;
+            }
+
+            .summary-card .value {
+                font-size: 1.2rem;
+            }
+
+            .summary-card .label {
+                font-size: 0.75rem;
+            }
+
+            .config-grid {
+                grid-template-columns: 1fr;
+                gap: 12px;
+            }
+
+            .config-card {
+                padding: 15px;
+            }
+
+            section {
+                padding: 12px;
+                margin-bottom: 15px;
+            }
+
+            section h2 {
+                font-size: 1.2rem;
+                margin-bottom: 15px;
+            }
+
+            /* Trades table on mobile */
+            .trades-table {
+                font-size: 0.75rem;
+            }
+
+            .trades-table th,
+            .trades-table td {
+                padding: 6px 4px;
+            }
+
+            /* Trade stats wrap on mobile */
+            .trades-stats {
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+
+            /* Chart adjustments */
+            .chart-wrapper {
+                min-height: 250px;
+                padding: 10px;
+            }
+
+            .chart-placeholder {
+                height: 200px;
+            }
+
+            /* Footer */
+            footer {
+                padding: 15px;
+                font-size: 0.75rem;
+            }
+
+            /* Config items */
+            .config-item {
+                flex-direction: column;
+                gap: 4px;
+            }
+
+            .config-item .key {
+                font-size: 0.8rem;
+            }
+
+            .config-item .value {
+                font-size: 0.85rem;
+                word-break: break-all;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <h1>Backtest Report</h1>
+            <p class="subtitle">Strategy: <strong>{{ result.strategy_id }}</strong></p>
+            <span class="engine-badge {{ result.engine.value }}">{{ result.engine.value }} Engine</span>
+        </header>
+
+        <!-- Summary Section -->
+        <section id="summary">
+            <h2>Executive Summary</h2>
+            <div class="summary-grid">
+                <div class="summary-card">
+                    <div class="label">Total Return</div>
+                    <div class="value {% if metrics.total_return_pct|float >= 0 %}positive{% else %}negative{% endif %}">
+                        {{ "%.2f"|format((metrics.total_return_pct|float) * 100) }}%
+                    </div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Net PnL</div>
+                    <div class="value {% if metrics.net_pnl_usd|float >= 0 %}positive{% else %}negative{% endif %}">
+                        ${{ "{:,.2f}".format(metrics.net_pnl_usd|float) }}
+                    </div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Sharpe Ratio</div>
+                    <div class="value {% if metrics.sharpe_ratio|float >= 1 %}positive{% elif metrics.sharpe_ratio|float >= 0 %}neutral{% else %}negative{% endif %}">
+                        {{ "%.3f"|format(metrics.sharpe_ratio|float) }}
+                    </div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Max Drawdown</div>
+                    <div class="value negative">
+                        {{ "%.2f"|format((metrics.max_drawdown_pct|float) * 100) }}%
+                    </div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Win Rate</div>
+                    <div class="value {% if metrics.win_rate|float >= 0.5 %}positive{% else %}negative{% endif %}">
+                        {{ "%.1f"|format((metrics.win_rate|float) * 100) }}%
+                    </div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Total Trades</div>
+                    <div class="value neutral">
+                        {{ metrics.total_trades }}
+                    </div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Initial Capital</div>
+                    <div class="value neutral">
+                        ${{ "{:,.2f}".format(result.initial_capital_usd|float) }}
+                    </div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Final Capital</div>
+                    <div class="value {% if result.final_capital_usd|float >= result.initial_capital_usd|float %}positive{% else %}negative{% endif %}">
+                        ${{ "{:,.2f}".format(result.final_capital_usd|float) }}
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Metrics Section -->
+        <section id="metrics">
+            <h2>Detailed Metrics</h2>
+            <table class="metrics-table">
+                <thead>
+                    <tr>
+                        <th>Metric</th>
+                        <th>Value</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- Performance Metrics -->
+                    <tr class="category-header">
+                        <td colspan="2">Performance</td>
+                    </tr>
+                    <tr>
+                        <td>Total PnL (Gross)</td>
+                        <td>${{ "{:,.2f}".format(metrics.total_pnl_usd|float) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Net PnL (After Costs)</td>
+                        <td>${{ "{:,.2f}".format(metrics.net_pnl_usd|float) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Total Return</td>
+                        <td>{{ "%.2f"|format((metrics.total_return_pct|float) * 100) }}%</td>
+                    </tr>
+                    <tr>
+                        <td>Annualized Return</td>
+                        <td>{{ "%.2f"|format((metrics.annualized_return_pct|float) * 100) }}%</td>
+                    </tr>
+                    <tr>
+                        <td>Profit Factor</td>
+                        <td>{{ "%.2f"|format(metrics.profit_factor|float) }}</td>
+                    </tr>
+
+                    <!-- Risk Metrics -->
+                    <tr class="category-header">
+                        <td colspan="2">Risk</td>
+                    </tr>
+                    <tr>
+                        <td>Sharpe Ratio</td>
+                        <td>{{ "%.3f"|format(metrics.sharpe_ratio|float) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Sortino Ratio</td>
+                        <td>{{ "%.3f"|format(metrics.sortino_ratio|float) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Calmar Ratio</td>
+                        <td>{{ "%.3f"|format(metrics.calmar_ratio|float) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Max Drawdown</td>
+                        <td>{{ "%.2f"|format((metrics.max_drawdown_pct|float) * 100) }}%</td>
+                    </tr>
+                    <tr>
+                        <td>Volatility (Annualized)</td>
+                        <td>{{ "%.2f"|format((metrics.volatility|float) * 100) }}%</td>
+                    </tr>
+
+                    <!-- Trading Statistics -->
+                    <tr class="category-header">
+                        <td colspan="2">Trading Statistics</td>
+                    </tr>
+                    <tr>
+                        <td>Total Trades</td>
+                        <td>{{ metrics.total_trades }}</td>
+                    </tr>
+                    <tr>
+                        <td>Winning Trades</td>
+                        <td>{{ metrics.winning_trades }}</td>
+                    </tr>
+                    <tr>
+                        <td>Losing Trades</td>
+                        <td>{{ metrics.losing_trades }}</td>
+                    </tr>
+                    <tr>
+                        <td>Win Rate</td>
+                        <td>{{ "%.1f"|format((metrics.win_rate|float) * 100) }}%</td>
+                    </tr>
+                    <tr>
+                        <td>Avg Trade PnL</td>
+                        <td>${{ "{:,.2f}".format(metrics.avg_trade_pnl_usd|float) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Largest Win</td>
+                        <td>${{ "{:,.2f}".format(metrics.largest_win_usd|float) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Largest Loss</td>
+                        <td>${{ "{:,.2f}".format(metrics.largest_loss_usd|float) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Avg Win</td>
+                        <td>${{ "{:,.2f}".format(metrics.avg_win_usd|float) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Avg Loss</td>
+                        <td>${{ "{:,.2f}".format(metrics.avg_loss_usd|float) }}</td>
+                    </tr>
+
+                    <!-- Cost Analysis -->
+                    <tr class="category-header">
+                        <td colspan="2">Execution Costs</td>
+                    </tr>
+                    <tr>
+                        <td>Total Fees</td>
+                        <td>${{ "{:,.2f}".format(metrics.total_fees_usd|float) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Total Slippage</td>
+                        <td>${{ "{:,.2f}".format(metrics.total_slippage_usd|float) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Total Gas</td>
+                        <td>${{ "{:,.2f}".format(metrics.total_gas_usd|float) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Total Execution Cost</td>
+                        <td>${{ "{:,.2f}".format(metrics.total_execution_cost_usd|float) }}</td>
+                    </tr>
+                    {% if metrics.total_mev_cost_usd|float > 0 %}
+                    <tr>
+                        <td>Total MEV Cost</td>
+                        <td>${{ "{:,.2f}".format(metrics.total_mev_cost_usd|float) }}</td>
+                    </tr>
+                    {% endif %}
+                    {% if metrics.avg_gas_price_gwei|float > 0 %}
+                    <tr>
+                        <td>Avg Gas Price</td>
+                        <td>{{ "%.2f"|format(metrics.avg_gas_price_gwei|float) }} gwei</td>
+                    </tr>
+                    <tr>
+                        <td>Max Gas Price</td>
+                        <td>{{ "%.2f"|format(metrics.max_gas_price_gwei|float) }} gwei</td>
+                    </tr>
+                    {% endif %}
+
+                    <!-- LP Metrics (if applicable) -->
+                    {% if metrics.total_fees_earned_usd|float > 0 %}
+                    <tr class="category-header">
+                        <td colspan="2">LP Performance</td>
+                    </tr>
+                    <tr>
+                        <td>Total Fees Earned</td>
+                        <td>${{ "{:,.2f}".format(metrics.total_fees_earned_usd|float) }}</td>
+                    </tr>
+                    {% endif %}
+
+                    <!-- Perp Metrics (if applicable) -->
+                    {% if metrics.total_funding_paid|float > 0 or metrics.total_funding_received|float > 0 %}
+                    <tr class="category-header">
+                        <td colspan="2">Perp Performance</td>
+                    </tr>
+                    <tr>
+                        <td>Total Funding Paid</td>
+                        <td>${{ "{:,.2f}".format(metrics.total_funding_paid|float) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Total Funding Received</td>
+                        <td>${{ "{:,.2f}".format(metrics.total_funding_received|float) }}</td>
+                    </tr>
+                    {% if metrics.liquidations_count > 0 %}
+                    <tr>
+                        <td>Liquidations</td>
+                        <td>{{ metrics.liquidations_count }}</td>
+                    </tr>
+                    <tr>
+                        <td>Liquidation Losses</td>
+                        <td>${{ "{:,.2f}".format(metrics.liquidation_losses_usd|float) }}</td>
+                    </tr>
+                    {% endif %}
+                    {% if metrics.max_margin_utilization|float > 0 %}
+                    <tr>
+                        <td>Max Margin Utilization</td>
+                        <td>{{ "%.1f"|format((metrics.max_margin_utilization|float) * 100) }}%</td>
+                    </tr>
+                    {% endif %}
+                    {% endif %}
+
+                    <!-- Lending Metrics (if applicable) -->
+                    {% if metrics.total_interest_earned|float > 0 or metrics.total_interest_paid|float > 0 %}
+                    <tr class="category-header">
+                        <td colspan="2">Lending Performance</td>
+                    </tr>
+                    <tr>
+                        <td>Total Interest Earned</td>
+                        <td>${{ "{:,.2f}".format(metrics.total_interest_earned|float) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Total Interest Paid</td>
+                        <td>${{ "{:,.2f}".format(metrics.total_interest_paid|float) }}</td>
+                    </tr>
+                    {% if metrics.min_health_factor|float < 999 %}
+                    <tr>
+                        <td>Min Health Factor</td>
+                        <td>{{ "%.2f"|format(metrics.min_health_factor|float) }}</td>
+                    </tr>
+                    {% endif %}
+                    {% if metrics.health_factor_warnings > 0 %}
+                    <tr>
+                        <td>Health Factor Warnings</td>
+                        <td>{{ metrics.health_factor_warnings }}</td>
+                    </tr>
+                    {% endif %}
+                    {% endif %}
+
+                    <!-- Cross-Protocol Risk (if applicable) -->
+                    {% if metrics.total_leverage|float > 0 %}
+                    <tr class="category-header">
+                        <td colspan="2">Portfolio Risk</td>
+                    </tr>
+                    <tr>
+                        <td>Total Leverage</td>
+                        <td>{{ "%.2f"|format(metrics.total_leverage|float) }}x</td>
+                    </tr>
+                    {% if metrics.correlation_risk is not none %}
+                    <tr>
+                        <td>Correlation Risk</td>
+                        <td>{{ "%.2f"|format(metrics.correlation_risk|float) }}</td>
+                    </tr>
+                    {% endif %}
+                    {% if metrics.liquidation_cascade_risk|float > 0 %}
+                    <tr>
+                        <td>Liquidation Cascade Risk</td>
+                        <td>{{ "%.2f"|format(metrics.liquidation_cascade_risk|float) }}</td>
+                    </tr>
+                    {% endif %}
+                    {% endif %}
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Charts Section -->
+        <section id="charts">
+            <h2>Charts</h2>
+            <div class="charts-container">
+                {% if equity_chart_html %}
+                <div class="chart-wrapper">
+                    <h3>Equity Curve</h3>
+                    {{ equity_chart_html | safe }}
+                </div>
+                {% else %}
+                <div class="chart-wrapper">
+                    <h3>Equity Curve</h3>
+                    <div class="chart-placeholder">
+                        <p>Equity curve chart not available. Generate using plot_equity_curve_interactive().</p>
+                    </div>
+                </div>
+                {% endif %}
+
+                {% if pnl_histogram_html %}
+                <div class="chart-wrapper">
+                    <h3>PnL Distribution</h3>
+                    {{ pnl_histogram_html | safe }}
+                </div>
+                {% endif %}
+
+                {% if drawdown_chart_html %}
+                <div class="chart-wrapper">
+                    <h3>Drawdown</h3>
+                    {{ drawdown_chart_html | safe }}
+                </div>
+                {% endif %}
+            </div>
+        </section>
+
+        <!-- Attribution Section -->
+        {% if attribution_by_protocol or attribution_by_intent_type or attribution_by_asset %}
+        <section id="attribution">
+            <h2>PnL Attribution</h2>
+            <p class="attribution-summary">
+                Breakdown of PnL contribution by different categories. Green bars indicate profit, red bars indicate loss.
+                {% if metrics.realized_pnl and metrics.unrealized_pnl %}
+                <br>Realized PnL: <span class="{% if metrics.realized_pnl|float >= 0 %}positive{% else %}negative{% endif %}">${{ "{:,.2f}".format(metrics.realized_pnl|float) }}</span> |
+                Unrealized PnL: <span class="{% if metrics.unrealized_pnl|float >= 0 %}positive{% else %}negative{% endif %}">${{ "{:,.2f}".format(metrics.unrealized_pnl|float) }}</span>
+                {% endif %}
+            </p>
+            <div class="attribution-grid">
+                {% if attribution_by_protocol %}
+                <div class="chart-wrapper attribution-chart">
+                    {{ attribution_by_protocol | safe }}
+                </div>
+                {% endif %}
+
+                {% if attribution_by_intent_type %}
+                <div class="chart-wrapper attribution-chart">
+                    {{ attribution_by_intent_type | safe }}
+                </div>
+                {% endif %}
+
+                {% if attribution_by_asset %}
+                <div class="chart-wrapper attribution-chart">
+                    {{ attribution_by_asset | safe }}
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- Attribution Data Tables -->
+            {% if pnl_by_protocol or pnl_by_intent_type or pnl_by_asset %}
+            <div class="attribution-tables">
+                {% if pnl_by_protocol %}
+                <div class="attribution-table-wrapper">
+                    <h3>By Protocol</h3>
+                    <table class="attribution-table">
+                        <thead>
+                            <tr>
+                                <th>Protocol</th>
+                                <th>PnL (USD)</th>
+                                <th>% of Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for protocol, pnl in pnl_by_protocol.items() %}
+                            <tr>
+                                <td>{{ protocol }}</td>
+                                <td class="{% if pnl|float >= 0 %}pnl-positive{% else %}pnl-negative{% endif %}">
+                                    ${{ "{:,.2f}".format(pnl|float) }}
+                                </td>
+                                <td>
+                                    {% if metrics.total_pnl_usd|float != 0 %}
+                                    {{ "%.1f"|format((pnl|float / metrics.total_pnl_usd|float) * 100) }}%
+                                    {% else %}
+                                    -
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% endif %}
+
+                {% if pnl_by_intent_type %}
+                <div class="attribution-table-wrapper">
+                    <h3>By Intent Type</h3>
+                    <table class="attribution-table">
+                        <thead>
+                            <tr>
+                                <th>Intent Type</th>
+                                <th>PnL (USD)</th>
+                                <th>% of Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for intent_type, pnl in pnl_by_intent_type.items() %}
+                            <tr>
+                                <td>{{ intent_type }}</td>
+                                <td class="{% if pnl|float >= 0 %}pnl-positive{% else %}pnl-negative{% endif %}">
+                                    ${{ "{:,.2f}".format(pnl|float) }}
+                                </td>
+                                <td>
+                                    {% if metrics.total_pnl_usd|float != 0 %}
+                                    {{ "%.1f"|format((pnl|float / metrics.total_pnl_usd|float) * 100) }}%
+                                    {% else %}
+                                    -
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% endif %}
+
+                {% if pnl_by_asset %}
+                <div class="attribution-table-wrapper">
+                    <h3>By Asset</h3>
+                    <table class="attribution-table">
+                        <thead>
+                            <tr>
+                                <th>Asset</th>
+                                <th>PnL (USD)</th>
+                                <th>% of Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for asset, pnl in pnl_by_asset.items() %}
+                            <tr>
+                                <td>{{ asset }}</td>
+                                <td class="{% if pnl|float >= 0 %}pnl-positive{% else %}pnl-negative{% endif %}">
+                                    ${{ "{:,.2f}".format(pnl|float) }}
+                                </td>
+                                <td>
+                                    {% if metrics.total_pnl_usd|float != 0 %}
+                                    {{ "%.1f"|format((pnl|float / metrics.total_pnl_usd|float) * 100) }}%
+                                    {% else %}
+                                    -
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% endif %}
+            </div>
+            {% endif %}
+        </section>
+        {% endif %}
+
+        <!-- Trades Section -->
+        <section id="trades">
+            <h2>Trade Log</h2>
+            {% if trades %}
+            <div class="trades-controls">
+                <div class="search-box">
+                    <input type="text" id="trade-search" placeholder="Search trades (token, protocol, type...)">
+                </div>
+                <div class="filter-group">
+                    <label for="type-filter">Type:</label>
+                    <select id="type-filter">
+                        <option value="">All Types</option>
+                        {% set seen_types = [] %}
+                        {% for trade in trades %}
+                            {% if trade.intent_type.value not in seen_types %}
+                                {% if seen_types.append(trade.intent_type.value) %}{% endif %}
+                                <option value="{{ trade.intent_type.value }}">{{ trade.intent_type.value }}</option>
+                            {% endif %}
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="status-filter">Status:</label>
+                    <select id="status-filter">
+                        <option value="">All</option>
+                        <option value="success">Success</option>
+                        <option value="failed">Failed</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="pnl-filter">PnL:</label>
+                    <select id="pnl-filter">
+                        <option value="">All</option>
+                        <option value="positive">Profitable</option>
+                        <option value="negative">Losing</option>
+                    </select>
+                </div>
+            </div>
+            <div class="trades-stats">
+                <span class="stat-item">Showing: <span class="stat-value" id="visible-count">{{ trades|length }}</span></span>
+                <span class="stat-item">Total: <span class="stat-value">{{ trades|length }}</span></span>
+            </div>
+            {% endif %}
+            <div class="trades-wrapper">
+                <table class="trades-table" id="trades-table">
+                    <thead>
+                        <tr>
+                            <th data-sort="number">#<span class="sort-indicator"></span></th>
+                            <th data-sort="date">Timestamp<span class="sort-indicator"></span></th>
+                            <th data-sort="string">Type<span class="sort-indicator"></span></th>
+                            <th data-sort="string">Protocol<span class="sort-indicator"></span></th>
+                            <th data-sort="string">Tokens<span class="sort-indicator"></span></th>
+                            <th data-sort="number">Amount<span class="sort-indicator"></span></th>
+                            <th data-sort="number">Price<span class="sort-indicator"></span></th>
+                            <th data-sort="number">Fee<span class="sort-indicator"></span></th>
+                            <th data-sort="number">Slippage<span class="sort-indicator"></span></th>
+                            <th data-sort="number">Gas<span class="sort-indicator"></span></th>
+                            <th data-sort="number">PnL<span class="sort-indicator"></span></th>
+                            <th data-sort="string">Status<span class="sort-indicator"></span></th>
+                        </tr>
+                    </thead>
+                    <tbody id="trades-body">
+                        {% for trade in trades %}
+                        <tr data-type="{{ trade.intent_type.value }}" data-status="{{ 'success' if trade.success else 'failed' }}" data-pnl="{{ 'positive' if trade.pnl_usd|float >= 0 else 'negative' }}">
+                            <td>{{ loop.index }}</td>
+                            <td data-value="{{ trade.timestamp.timestamp() }}">{{ trade.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                            <td>{{ trade.intent_type.value }}</td>
+                            <td>{{ trade.protocol or '-' }}</td>
+                            <td>{{ trade.tokens | join(', ') if trade.tokens else '-' }}</td>
+                            <td data-value="{{ trade.amount_usd|float }}">${{ "{:,.2f}".format(trade.amount_usd|float) }}</td>
+                            <td data-value="{{ trade.executed_price|float }}">${{ "{:,.4f}".format(trade.executed_price|float) }}</td>
+                            <td data-value="{{ trade.fee_usd|float }}">${{ "{:,.2f}".format(trade.fee_usd|float) }}</td>
+                            <td data-value="{{ trade.slippage_usd|float }}">${{ "{:,.2f}".format(trade.slippage_usd|float) }}</td>
+                            <td data-value="{{ trade.gas_cost_usd|float }}">${{ "{:,.2f}".format(trade.gas_cost_usd|float) }}</td>
+                            <td class="{% if trade.pnl_usd|float >= 0 %}pnl-positive{% else %}pnl-negative{% endif %}" data-value="{{ trade.pnl_usd|float }}">
+                                ${{ "{:,.2f}".format(trade.pnl_usd|float) }}
+                            </td>
+                            <td class="{% if trade.success %}success{% else %}failed{% endif %}">
+                                {{ 'Success' if trade.success else 'Failed' }}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                        {% if not trades %}
+                        <tr class="no-data-row">
+                            <td colspan="12" class="text-center">No trades recorded</td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+            <div class="no-results" id="no-results" style="display: none;">
+                No trades match the current filters
+            </div>
+        </section>
+
+        <!-- Config Section -->
+        <section id="config">
+            <h2>Configuration</h2>
+            <div class="config-grid">
+                <div class="config-card">
+                    <h3>Backtest Settings</h3>
+                    <div class="config-item">
+                        <span class="key">Engine</span>
+                        <span class="value">{{ result.engine.value }}</span>
+                    </div>
+                    <div class="config-item">
+                        <span class="key">Chain</span>
+                        <span class="value">{{ result.chain }}</span>
+                    </div>
+                    <div class="config-item">
+                        <span class="key">Start Time</span>
+                        <span class="value">{{ result.start_time.strftime('%Y-%m-%d %H:%M') }}</span>
+                    </div>
+                    <div class="config-item">
+                        <span class="key">End Time</span>
+                        <span class="value">{{ result.end_time.strftime('%Y-%m-%d %H:%M') }}</span>
+                    </div>
+                    <div class="config-item">
+                        <span class="key">Duration</span>
+                        <span class="value">{{ "%.1f"|format(result.simulation_duration_days) }} days</span>
+                    </div>
+                    <div class="config-item">
+                        <span class="key">Initial Capital</span>
+                        <span class="value">${{ "{:,.2f}".format(result.initial_capital_usd|float) }}</span>
+                    </div>
+                </div>
+
+                {% if result.config %}
+                <div class="config-card">
+                    <h3>Strategy Config</h3>
+                    {% for key, value in result.config.items() %}
+                    <div class="config-item">
+                        <span class="key">{{ key }}</span>
+                        <span class="value">{{ value }}</span>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+
+                <div class="config-card">
+                    <h3>Run Info</h3>
+                    {% if result.run_started_at %}
+                    <div class="config-item">
+                        <span class="key">Run Started</span>
+                        <span class="value">{{ result.run_started_at.strftime('%Y-%m-%d %H:%M:%S') }}</span>
+                    </div>
+                    {% endif %}
+                    {% if result.run_ended_at %}
+                    <div class="config-item">
+                        <span class="key">Run Ended</span>
+                        <span class="value">{{ result.run_ended_at.strftime('%Y-%m-%d %H:%M:%S') }}</span>
+                    </div>
+                    {% endif %}
+                    {% if result.run_duration_seconds > 0 %}
+                    <div class="config-item">
+                        <span class="key">Run Duration</span>
+                        <span class="value">{{ "%.2f"|format(result.run_duration_seconds) }}s</span>
+                    </div>
+                    {% endif %}
+                    {% if result.error %}
+                    <div class="config-item">
+                        <span class="key">Error</span>
+                        <span class="value" style="color: var(--accent-red);">{{ result.error }}</span>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer>
+            <p>Generated by <a href="https://almanak.co" target="_blank">Almanak SDK</a> | Report created at {{ generated_at }}</p>
+        </footer>
+    </div>
+
+    <!-- JavaScript for table interactivity -->
+    <script>
+    (function() {
+        'use strict';
+
+        // Trade table sorting and filtering functionality
+        const tradesTable = document.getElementById('trades-table');
+        const tradesBody = document.getElementById('trades-body');
+        const searchInput = document.getElementById('trade-search');
+        const typeFilter = document.getElementById('type-filter');
+        const statusFilter = document.getElementById('status-filter');
+        const pnlFilter = document.getElementById('pnl-filter');
+        const visibleCount = document.getElementById('visible-count');
+        const noResults = document.getElementById('no-results');
+
+        if (!tradesTable || !tradesBody) return;
+
+        // Get all trade rows (excluding no-data row)
+        const getTradeRows = () => Array.from(tradesBody.querySelectorAll('tr:not(.no-data-row)'));
+
+        // Current sort state
+        let currentSortCol = null;
+        let currentSortDir = 'asc';
+
+        // Sorting functionality
+        function sortTable(columnIndex, sortType) {
+            const rows = getTradeRows();
+            if (rows.length === 0) return;
+
+            const th = tradesTable.querySelectorAll('th')[columnIndex];
+
+            // Toggle direction if same column
+            if (currentSortCol === columnIndex) {
+                currentSortDir = currentSortDir === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSortDir = 'asc';
+                // Remove sort class from previous column
+                if (currentSortCol !== null) {
+                    const prevTh = tradesTable.querySelectorAll('th')[currentSortCol];
+                    prevTh.classList.remove('sort-asc', 'sort-desc');
+                }
+            }
+            currentSortCol = columnIndex;
+
+            // Update sort indicator
+            th.classList.remove('sort-asc', 'sort-desc');
+            th.classList.add(currentSortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+
+            // Sort rows
+            rows.sort((a, b) => {
+                let aVal, bVal;
+                const aCell = a.cells[columnIndex];
+                const bCell = b.cells[columnIndex];
+
+                // Use data-value attribute if available (for numeric/date columns)
+                if (aCell.hasAttribute('data-value')) {
+                    aVal = parseFloat(aCell.getAttribute('data-value'));
+                    bVal = parseFloat(bCell.getAttribute('data-value'));
+                } else if (sortType === 'number') {
+                    // Parse dollar amounts
+                    aVal = parseFloat(aCell.textContent.replace(/[$,]/g, '')) || 0;
+                    bVal = parseFloat(bCell.textContent.replace(/[$,]/g, '')) || 0;
+                } else if (sortType === 'date') {
+                    aVal = new Date(aCell.textContent).getTime();
+                    bVal = new Date(bCell.textContent).getTime();
+                } else {
+                    aVal = aCell.textContent.toLowerCase();
+                    bVal = bCell.textContent.toLowerCase();
+                }
+
+                if (aVal < bVal) return currentSortDir === 'asc' ? -1 : 1;
+                if (aVal > bVal) return currentSortDir === 'asc' ? 1 : -1;
+                return 0;
+            });
+
+            // Re-append sorted rows
+            rows.forEach(row => tradesBody.appendChild(row));
+        }
+
+        // Add click handlers to sortable headers
+        tradesTable.querySelectorAll('th[data-sort]').forEach((th, index) => {
+            th.addEventListener('click', () => {
+                sortTable(index, th.getAttribute('data-sort'));
+            });
+        });
+
+        // Filtering functionality
+        function filterTable() {
+            const searchTerm = searchInput ? searchInput.value.toLowerCase() : '';
+            const typeValue = typeFilter ? typeFilter.value : '';
+            const statusValue = statusFilter ? statusFilter.value : '';
+            const pnlValue = pnlFilter ? pnlFilter.value : '';
+
+            const rows = getTradeRows();
+            let visibleRowCount = 0;
+
+            rows.forEach(row => {
+                let visible = true;
+
+                // Search filter (search across all text content)
+                if (searchTerm) {
+                    const rowText = row.textContent.toLowerCase();
+                    if (!rowText.includes(searchTerm)) {
+                        visible = false;
+                    }
+                }
+
+                // Type filter
+                if (visible && typeValue && row.getAttribute('data-type') !== typeValue) {
+                    visible = false;
+                }
+
+                // Status filter
+                if (visible && statusValue && row.getAttribute('data-status') !== statusValue) {
+                    visible = false;
+                }
+
+                // PnL filter
+                if (visible && pnlValue && row.getAttribute('data-pnl') !== pnlValue) {
+                    visible = false;
+                }
+
+                row.style.display = visible ? '' : 'none';
+                if (visible) visibleRowCount++;
+            });
+
+            // Update visible count
+            if (visibleCount) {
+                visibleCount.textContent = visibleRowCount;
+            }
+
+            // Show/hide no results message
+            if (noResults) {
+                noResults.style.display = visibleRowCount === 0 && rows.length > 0 ? 'block' : 'none';
+            }
+        }
+
+        // Add event listeners to filters
+        if (searchInput) {
+            searchInput.addEventListener('input', filterTable);
+        }
+        if (typeFilter) {
+            typeFilter.addEventListener('change', filterTable);
+        }
+        if (statusFilter) {
+            statusFilter.addEventListener('change', filterTable);
+        }
+        if (pnlFilter) {
+            pnlFilter.addEventListener('change', filterTable);
+        }
+
+        // Keyboard shortcut: Escape to clear search
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && searchInput) {
+                searchInput.value = '';
+                filterTable();
+            }
+        });
+
+        // Smooth scroll to sections when clicking navigation (if any)
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function(e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth' });
+                }
+            });
+        });
+    })();
+    </script>
+</body>
+</html>

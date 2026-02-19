@@ -1,0 +1,9 @@
+{
+    "chain": "avalanche",
+    "pool": "WAVAX/USDC/20",
+    "range_width_pct": "0.05",
+    "amount_x": "0.15",
+    "amount_y": "3",
+    "num_bins": 11,
+    "rebalance_threshold_pct": "0.025"
+}

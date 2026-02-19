@@ -1,0 +1,19 @@
+{
+    "strategy_id": "demo_polymarket_signal_trader",
+    "strategy_name": "demo_polymarket_signal_trader",
+    "description": "Tutorial signal-based strategy for Polymarket prediction markets",
+    "_comment_market_id": "Find market slugs at polymarket.com - URL path after /event/ (e.g., will-trump-win-2024)",
+    "market_id": "will-trump-win-the-2024-presidential-election",
+    "trade_size_usd": 10,
+    "min_confidence": 0.6,
+    "min_edge": 0.05,
+    "order_type": "market",
+    "time_in_force": "GTC",
+    "stop_loss_pct": 0.2,
+    "take_profit_pct": 0.3,
+    "exit_before_resolution_hours": 24,
+    "use_signals": [
+        "mock"
+    ],
+    "chain": "polygon"
+}

@@ -1,0 +1,10 @@
+{
+    "strategy_id": "test_uni_vol_adaptive",
+    "strategy_name": "test_uni_vol_adaptive",
+    "description": "Uniswap V3 LP strategy with ATR-based volatility-adaptive range width",
+    "pool": "WETH/USDC/3000",
+    "base_range_width_pct": 0.1,
+    "amount0": "0.002",
+    "amount1": "3",
+    "chain": "arbitrum"
+}

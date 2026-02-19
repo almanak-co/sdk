@@ -1,0 +1,305 @@
+# Almanak SDK
+
+[![PyPI version](https://badge.fury.io/py/almanak.svg)](https://badge.fury.io/py/almanak)
+
+The Almanak SDK is a powerful Python library for developing, testing, and deploying autonomous DeFi agents. Built on an intent-based architecture, it provides a comprehensive framework for creating sophisticated trading strategies with minimal boilerplate.
+
+## Features
+
+- **Intent-Based Architecture**: Express trading logic as high-level intents (Swap, LP, Borrow, etc.) - the framework handles compilation and execution
+- **Three-Tier State Management**: Automatic persistence with HOT/WARM/COLD tiers for reliability
+- **Comprehensive Backtesting**: PnL simulation, paper trading on Anvil forks, and parameter sweeps
+- **Multi-Chain Support**: Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Blast, Mantle, Berachain
+- **Protocol Integration**: Uniswap V3, Aave V3, Morpho Blue, GMX V2, Lido, Ethena, Polymarket, Kraken, and more
+- **Non-Custodial Design**: Full control over your funds through Safe smart accounts
+- **Production-Ready**: Built-in alerting, stuck detection, emergency management, and canary deployments
+
+## Installation
+
+```bash
+pip install almanak
+```
+
+## Quick Start
+
+1. **Create a New Strategy**
+   ```bash
+   almanak strat new
+   ```
+
+2. **Test Your Strategy**
+
+   A managed gateway is auto-started in the background when you run a strategy.
+   Use `--dashboard` to launch a live monitoring dashboard alongside execution:
+
+   ```bash
+   uv run almanak strat run -d strategies/demo/uniswap_lp --network anvil --dashboard --once
+   ```
+
+   This single command auto-starts Anvil + gateway, opens the dashboard in your browser, and runs one iteration of the strategy.
+
+## Writing a Strategy
+
+Strategies use an intent-based architecture. Implement the `decide()` method to return an intent based on market conditions:
+
+```python
+from almanak import IntentStrategy, SwapIntent, HoldIntent, MarketSnapshot
+
+class MyStrategy(IntentStrategy):
+    """A simple mean-reversion strategy."""
+
+    def decide(self, market: MarketSnapshot) -> Intent:
+        eth_price = market.prices.get("ETH")
+        usdc_balance = market.balances.get("USDC")
+
+        # Buy ETH when price is low
+        if eth_price < 2000 and usdc_balance > 1000:
+            return SwapIntent(
+                token_in="USDC",
+                token_out="ETH",
+                amount=1000,
+                slippage=0.005,
+            )
+
+        # Sell ETH when price is high
+        eth_balance = market.balances.get("ETH")
+        if eth_price > 2500 and eth_balance > 0.5:
+            return SwapIntent(
+                token_in="ETH",
+                token_out="USDC",
+                amount=0.5,
+                slippage=0.005,
+            )
+
+        return HoldIntent(reason="Waiting for better conditions")
+```
+
+### Swap Pool Selection
+
+For V3-style swaps, pool fee tiers are not assumed to be symmetric or equally liquid.
+
+- Default: `auto` pool selection (recommended)
+- Optional: `fixed` pool fee tier for deterministic execution
+
+```python
+from almanak.framework.intents.compiler import IntentCompilerConfig
+
+config = IntentCompilerConfig(
+    swap_pool_selection_mode="auto",  # Recommended
+)
+```
+
+## Available Intents
+
+| Intent | Description |
+|--------|-------------|
+| `SwapIntent` | Token swaps on DEXs |
+| `HoldIntent` | No action, wait for next cycle |
+| `LPOpenIntent` | Open liquidity position |
+| `LPCloseIntent` | Close liquidity position |
+| `BorrowIntent` | Borrow from lending protocols |
+| `RepayIntent` | Repay borrowed assets |
+
+## CLI Commands
+
+```bash
+# Gateway (auto-started by strat run, or start standalone)
+almanak gateway                # Start standalone gateway server
+almanak gateway --network anvil  # Start standalone for local Anvil testing
+
+# Strategy development
+almanak strat new              # Create new strategy from template
+almanak strat run --once       # Run single iteration (auto-starts gateway)
+almanak strat run --network anvil --once  # Run on local Anvil fork (auto-starts Anvil + gateway)
+almanak strat run --network anvil --dashboard  # Run with live dashboard
+
+# Backtesting
+almanak strat backtest pnl     # Historical price simulation
+almanak strat backtest sweep   # Parameter optimization
+almanak strat backtest paper   # Paper trading on Anvil
+
+# Advanced backtesting
+almanak strat backtest monte-carlo  # Statistical robustness analysis
+almanak strat backtest optimize     # Bayesian parameter optimization
+almanak strat backtest scenario     # Crisis scenario stress testing
+almanak strat backtest dashboard    # Interactive results dashboard
+
+```
+
+## Backtesting
+
+The SDK provides a dual-engine backtesting system for institutional-grade strategy validation:
+
+| Engine | Best For | Requirements |
+|--------|----------|--------------|
+| **PnL Backtester** | Historical analysis with price data | No Anvil required |
+| **Paper Trader** | Live-like simulation with real execution | Anvil fork |
+
+### Quick Example
+
+```python
+from almanak.framework.backtesting import PnLBacktester, PnLBacktestConfig
+from datetime import datetime, UTC
+from decimal import Decimal
+
+config = PnLBacktestConfig(
+    start_time=datetime(2024, 1, 1, tzinfo=UTC),
+    end_time=datetime(2024, 6, 1, tzinfo=UTC),
+    initial_capital_usd=Decimal("10000"),
+)
+
+backtester = PnLBacktester(data_provider, fee_models, slippage_models)
+result = await backtester.backtest(strategy, config)
+
+print(f"Total Return: {result.metrics.total_return_pct:.2f}%")
+print(f"Sharpe Ratio: {result.metrics.sharpe_ratio:.2f}")
+print(f"Max Drawdown: {result.metrics.max_drawdown_pct:.2f}%")
+```
+
+### CLI Usage
+
+```bash
+# Historical PnL backtest
+almanak strat backtest pnl -s my_strategy --start 2024-01-01 --end 2024-06-01
+
+# Parameter sweep optimization
+almanak strat backtest sweep -s my_strategy --param "window:10,20,30"
+
+# Paper trading on Anvil fork
+almanak strat backtest paper start -s my_strategy --chain arbitrum
+
+# Monte Carlo simulation (1000 price paths)
+almanak strat backtest monte-carlo -s my_strategy --n-paths 1000
+
+# Crisis scenario stress testing
+almanak strat backtest scenario -s my_strategy --scenario terra_collapse
+```
+
+### Working Examples
+
+Complete runnable examples are available in `examples/`:
+
+```bash
+python examples/backtest_ta_strategy.py      # RSI mean reversion
+python examples/backtest_lp_strategy.py      # Concentrated LP
+python examples/backtest_looping_strategy.py # Leveraged yield
+```
+
+For complete documentation, see [`almanak/framework/backtesting/README.md`](almanak/framework/backtesting/README.md).
+
+## Supported Networks
+
+- Ethereum
+- Arbitrum
+- Optimism
+- Base
+- Avalanche
+- Polygon
+- BSC
+- Sonic
+- Plasma
+- Blast
+- Mantle
+- Berachain
+
+## Supported Protocols
+
+- **DEXs**: Uniswap V3, SushiSwap V3, PancakeSwap V3, TraderJoe V2, Aerodrome, Curve, Balancer
+- **Lending**: Aave V3, Morpho Blue, Compound V3, Spark
+- **Liquid Staking**: Lido, Ethena
+- **Yield**: Pendle
+- **Perpetuals**: GMX V2, Hyperliquid
+- **Prediction Markets**: Polymarket
+- **CEX Integration**: Kraken
+- **Aggregators**: Enso, LiFi
+
+## Demo Strategies
+
+The SDK includes educational demo strategies to help you learn:
+
+| Strategy | Description | Chain | Protocol |
+|----------|-------------|-------|----------|
+| `uniswap_rsi` | RSI-based trading on Uniswap V3 | Ethereum | Uniswap V3 |
+| `uniswap_lp` | Dynamic LP position management | Ethereum | Uniswap V3 |
+| `aave_borrow` | Supply collateral and borrow | Ethereum | Aave V3 |
+| `gmx_perps` | Perpetuals trading | Arbitrum | GMX V2 |
+| `enso_rsi` | RSI trading via DEX aggregator | Ethereum | Enso |
+| `enso_uniswap_arbitrage` | Cross-protocol arbitrage | Ethereum | Enso, Uniswap |
+| `traderjoe_lp` | Liquidity Book position management | Avalanche | TraderJoe V2 |
+| `aerodrome_lp` | Solidly-based LP management | Base | Aerodrome |
+| `lido_staker` | Stake ETH for liquid staking yield | Ethereum | Lido |
+| `ethena_yield` | Stake USDe for yield-bearing sUSDe | Ethereum | Ethena |
+| `spark_lender` | Supply DAI for lending yield | Ethereum | Spark |
+| `morpho_looping` | Leveraged yield farming via recursive borrowing | Ethereum | Morpho Blue |
+| `kraken_rebalancer` | CEX deposit, swap, and withdraw | Arbitrum | Kraken |
+| `polymarket_signal_trader` | Signal-based prediction trading | Polygon | Polymarket |
+| `polymarket_arbitrage` | Cross-market arbitrage | Polygon | Polymarket |
+| `pancakeswap_simple` | Simple swap on PancakeSwap V3 | Arbitrum | PancakeSwap V3 |
+| `sushiswap_lp` | LP position management on SushiSwap | Arbitrum | SushiSwap V3 |
+| `pendle_basics` | Yield tokenization basics | Plasma | Pendle |
+| `almanak_rsi` | RSI trading variant | Base | Uniswap V3 |
+
+Run any demo with:
+```bash
+cd strategies/demo/<strategy_name>
+uv run almanak strat run --once --dry-run
+```
+
+## Architecture
+
+```
+almanak/
+  framework/           # V2 Strategy Framework
+    strategies/        # IntentStrategy base class
+    intents/           # Intent vocabulary & compiler
+    state/             # Three-tier state management
+    execution/         # Transaction orchestration
+    backtesting/       # PnL, paper trading, sweeps
+    connectors/        # Protocol adapters
+    data/              # Price oracles, indicators
+    alerting/          # Slack/Telegram notifications
+    services/          # Stuck detection, emergency mgmt
+  transaction_builder/ # Low-level tx building
+  core/                # Enums, models, utilities
+  cli/                 # Command-line interface
+```
+
+## Security
+
+- All strategy code is encrypted at rest and in transit
+- Agent EOA private keys are encrypted and never accessible to humans
+- Fine-grained permission controls through Zodiac Roles Modifier
+- Non-custodial design ensures users maintain full control of funds
+
+### Gateway Architecture
+
+All strategies run through a gateway-only architecture for security:
+
+- **Gateway Sidecar**: Holds all secrets (API keys, private keys), exposes controlled gRPC API
+- **Strategy Container**: Runs user code with no secrets and no internet access
+
+This ensures strategy code cannot access secrets directly - all external access is mediated through the gateway.
+
+```bash
+# Run your strategy (auto-starts gateway in background)
+cd my_strategy
+almanak strat run --once
+
+# Or run a standalone gateway for shared use
+almanak gateway
+
+# For full container isolation (production-like)
+docker-compose -f deploy/docker/docker-compose.yml up
+```
+
+For more details, visit [docs.almanak.co](https://docs.almanak.co/).
+
+## Documentation
+
+For detailed documentation, visit [docs.almanak.co](https://docs.almanak.co/)
+
+## Support
+
+- [Discord](https://discord.gg/c4jY28WrEB)
+- [Telegram](https://t.me/+G1O9NFuz-AAzYmQy)
+- [Twitter](https://x.com/Almanak__)
