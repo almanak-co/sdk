@@ -30,7 +30,8 @@ venv
 .github
 
 # Claude / AI
-.claude
+# .claude — included for nightly-test-builds (needs skills/commands)
+# .claude
 
 # Documentation site output
 site/
