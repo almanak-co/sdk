@@ -297,6 +297,7 @@ class ExecutionContext:
     simulation_enabled: bool = False
     intent_description: str = ""  # Human-readable description of the intent
     dry_run: bool = False
+    protocol: str | None = None  # Resolved protocol (for result enrichment)
 
     def __post_init__(self) -> None:
         """Generate correlation_id if not provided."""

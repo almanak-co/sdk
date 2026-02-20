@@ -168,10 +168,10 @@ class ResultEnricher:
         if not spec:
             return result  # No fields to extract (e.g., HOLD)
 
-        # Get protocol from intent
-        protocol = self._get_protocol(intent)
+        # Get protocol from intent, falling back to context (intent may be frozen with protocol=None)
+        protocol = self._get_protocol(intent) or getattr(context, "protocol", None)
         if not protocol:
-            logger.debug(f"No protocol specified on intent: {intent_type}")
+            logger.debug(f"No protocol specified on intent or context: {intent_type}")
             return result
 
         # Get parser for protocol

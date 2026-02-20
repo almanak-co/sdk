@@ -1561,11 +1561,14 @@ class StrategyRunner:
                     )
 
                 # Execute the action bundle through orchestrator
+                # Resolve protocol for result enrichment (intent is frozen, so we pass via context)
+                resolved_protocol = getattr(intent, "protocol", None) or compiler.default_protocol
                 execution_context = ExecutionContext(
                     strategy_id=strategy_id,
                     chain=strategy.chain,
                     wallet_address=strategy.wallet_address,
                     correlation_id=intent.intent_id,
+                    protocol=resolved_protocol,
                 )
                 last_execution_context = execution_context
 

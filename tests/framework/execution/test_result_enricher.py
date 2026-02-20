@@ -119,13 +119,14 @@ class TestResultEnricherBasics:
         assert enriched.position_id is None
         assert len(enriched.extraction_warnings) == 0
 
-    def test_does_not_enrich_without_protocol(self):
-        """Intents without protocol should be skipped gracefully."""
+    def test_does_not_enrich_without_protocol_anywhere(self):
+        """Intents without protocol on intent OR context should be skipped gracefully."""
         enricher = ResultEnricher()
         result = create_execution_result(success=True)
         intent = MockIntent()
         intent.protocol = None  # type: ignore
         context = create_context()
+        context.protocol = None  # No fallback either
 
         enriched = enricher.enrich(result, intent, context)
 
@@ -151,6 +152,91 @@ class TestResultEnricherBasics:
 
         assert "HOLD" in enricher.EXTRACTION_SPECS
         assert enricher.EXTRACTION_SPECS["HOLD"] == []
+
+
+class TestResultEnricherContextProtocolFallback:
+    """Test that enrichment falls back to context.protocol when intent.protocol is None."""
+
+    def test_swap_enrichment_uses_context_protocol_fallback(self):
+        """Swap enrichment should work via context.protocol when intent.protocol is None (VIB-135)."""
+        swap_amounts = SwapAmounts(
+            amount_in=1000000,
+            amount_out=500000,
+            amount_in_decimal=Decimal("1.0"),
+            amount_out_decimal=Decimal("0.5"),
+            effective_price=Decimal("0.5"),
+        )
+
+        mock_parser = Mock()
+        mock_parser.extract_swap_amounts.return_value = swap_amounts
+
+        mock_registry = Mock(spec=ReceiptParserRegistry)
+        mock_registry.get.return_value = mock_parser
+
+        enricher = ResultEnricher(parser_registry=mock_registry)
+        result = create_execution_result(success=True)
+
+        # Intent has protocol=None (common when strategy author doesn't specify)
+        intent = MockSwapIntent()
+        intent.protocol = None  # type: ignore
+
+        # Context carries the resolved protocol from the compiler
+        context = create_context()
+        context.protocol = "uniswap_v3"
+
+        enriched = enricher.enrich(result, intent, context)
+
+        # Should have used context.protocol as fallback
+        assert enriched.swap_amounts is swap_amounts
+        assert enriched.swap_amounts.amount_out_decimal == Decimal("0.5")
+        mock_registry.get.assert_called_once_with("uniswap_v3", chain="arbitrum")
+
+    def test_lp_enrichment_uses_context_protocol_fallback(self):
+        """LP enrichment should work via context.protocol when intent.protocol is None."""
+        mock_parser = Mock()
+        mock_parser.extract_position_id.return_value = 42
+
+        mock_registry = Mock(spec=ReceiptParserRegistry)
+        mock_registry.get.return_value = mock_parser
+
+        enricher = ResultEnricher(parser_registry=mock_registry)
+        result = create_execution_result(success=True)
+
+        intent = MockIntent()
+        intent.protocol = None  # type: ignore
+
+        context = create_context()
+        context.protocol = "aerodrome"
+
+        enriched = enricher.enrich(result, intent, context)
+
+        assert enriched.position_id == 42
+        mock_registry.get.assert_called_once_with("aerodrome", chain="arbitrum")
+
+    def test_intent_protocol_takes_precedence_over_context(self):
+        """When both intent.protocol and context.protocol are set, intent wins."""
+        mock_parser = Mock()
+        mock_parser.extract_swap_amounts.return_value = SwapAmounts(
+            amount_in=1, amount_out=1,
+            amount_in_decimal=Decimal("1"), amount_out_decimal=Decimal("1"),
+            effective_price=Decimal("1"),
+        )
+
+        mock_registry = Mock(spec=ReceiptParserRegistry)
+        mock_registry.get.return_value = mock_parser
+
+        enricher = ResultEnricher(parser_registry=mock_registry)
+        result = create_execution_result(success=True)
+        intent = MockSwapIntent()
+        intent.protocol = "aerodrome"
+
+        context = create_context()
+        context.protocol = "uniswap_v3"  # Should be ignored
+
+        enricher.enrich(result, intent, context)
+
+        # Intent protocol should take precedence
+        mock_registry.get.assert_called_once_with("aerodrome", chain="arbitrum")
 
 
 class TestResultEnricherPositionId:
