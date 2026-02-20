@@ -271,10 +271,12 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     },
     "bsc": {
         "uniswap_v3": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
+        "sushiswap_v3": "0xF70c086618dcf2b1A461311275e00D6B722ef914",
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
     },
     "bnb": {  # Alias for bsc
         "uniswap_v3": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
+        "sushiswap_v3": "0xF70c086618dcf2b1A461311275e00D6B722ef914",
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
     },
 }

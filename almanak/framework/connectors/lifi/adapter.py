@@ -293,8 +293,8 @@ class LiFiAdapter:
             # Build approval transaction if needed.
             # NOTE: The approval spender comes from the current quote. If the route
             # changes when get_fresh_transaction() re-quotes, a different spender may
-            # be returned. The execution layer should verify approval is sufficient
-            # before submitting the fresh transaction.
+            # be returned. The deferred refresh logic in deferred_refresh.py will
+            # update the approval tx spender to match the fresh quote.
             approval_address = quote.estimate.approval_address if quote.estimate else ""
             if approval_address and not self._is_native_token(token_in_address):
                 approve_tx = self._build_approve_transaction(
@@ -436,6 +436,7 @@ class LiFiAdapter:
                 f"{metadata.get('from_token', '?')} -> {metadata.get('to_token', '?')} via LiFi"
             ),
             "tx_type": "bridge" if metadata.get("is_cross_chain") else "swap",
+            "approval_address": quote.estimate.approval_address if quote.estimate else "",
         }
 
     def _resolve_amount(

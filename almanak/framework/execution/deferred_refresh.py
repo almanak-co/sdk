@@ -7,8 +7,8 @@ compile time and store route parameters in the ActionBundle metadata.
 This module provides a single function, ``refresh_deferred_bundle``, that the
 ExecutionOrchestrator calls immediately before building unsigned transactions.
 It re-fetches fresh calldata from the protocol API and patches the deferred
-transaction in the bundle, leaving all other transactions (e.g. approvals)
-untouched.
+transaction in the bundle. If the fresh quote routes through a different
+spender, the approval transaction is also updated to match.
 
 For bundles without ``metadata["deferred_swap"] == True`` the function is a
 no-op (zero overhead for all non-deferred protocols).
@@ -32,8 +32,8 @@ def refresh_deferred_bundle(
     If the bundle's metadata contains ``deferred_swap: True``, this function
     re-fetches fresh transaction data from the originating protocol (LiFi or
     Enso) and replaces the deferred transaction fields (to, value, data,
-    gas_estimate, tx_type).  All other transactions (e.g. approve) are left
-    unchanged.
+    gas_estimate, tx_type).  If the fresh quote returns a different approval
+    spender, the approval transaction is also updated to match.
 
     For non-deferred bundles the original bundle is returned immediately.
 
@@ -85,6 +85,26 @@ def refresh_deferred_bundle(
                 tx["description"] = fresh_tx["description"]
             replaced = True
             break
+
+    # Patch approval tx if the fresh quote uses a different spender
+    fresh_approval_address = fresh_tx.get("approval_address", "")
+    if fresh_approval_address and replaced:
+        for tx in new_bundle.transactions:
+            if tx.get("tx_type") == "approve":
+                # Extract current spender from calldata (bytes 4-36 after selector)
+                current_data = tx.get("data", "")
+                if current_data.startswith("0x095ea7b3"):
+                    current_spender = "0x" + current_data[10:74].lstrip("0")
+                    if current_spender.lower() != fresh_approval_address.lower():
+                        # Rebuild approval calldata with fresh spender
+                        new_calldata = (
+                            "0x095ea7b3"
+                            + fresh_approval_address.lower().replace("0x", "").zfill(64)
+                            + "f" * 64  # MAX_UINT256
+                        )
+                        tx["data"] = new_calldata
+                        logger.info(f"Updated approval spender: {current_spender} -> {fresh_approval_address}")
+                break
 
     if not replaced:
         logger.warning(

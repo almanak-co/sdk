@@ -142,8 +142,8 @@ CHAIN_CONFIGS = {
         },
         "balance_slots": {
             "USDC": 9,
-            "WETH": 3,
-            "USDT": 2,
+            "WETH": 0,  # UChildERC20Proxy (PoS bridge): _balances is slot 0 in ERC20 base
+            "USDT": 0,  # UChildERC20Proxy (PoS bridge): _balances is slot 0 in ERC20 base
         },
     },
     "bsc": {
