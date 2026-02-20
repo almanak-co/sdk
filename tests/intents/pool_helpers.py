@@ -18,6 +18,7 @@ from __future__ import annotations
 import pytest
 
 from almanak.framework.intents.pool_validation import (
+    validate_aerodrome_cl_pool,
     validate_aerodrome_pool,
     validate_traderjoe_pool,
     validate_v3_pool,
@@ -85,6 +86,31 @@ def fail_if_aerodrome_pool_missing(
         pytest.fail(f"Pool missing: {result.error}")
     if result.exists is None:
         pytest.fail(f"Could not validate pool existence: {result.warning}")
+
+
+def fail_if_aerodrome_cl_pool_missing(
+    web3,
+    chain: str,
+    token_a: str,
+    token_b: str,
+    tick_spacing: int,
+) -> None:
+    """Fail the test if an Aerodrome Slipstream CL pool doesn't exist.
+
+    Args:
+        web3: Web3 instance (used to extract RPC URL).
+        chain: Chain name (should be "base").
+        token_a: Token A address.
+        token_b: Token B address.
+        tick_spacing: CL pool tick spacing (e.g. 100).
+    """
+    rpc_url = _get_rpc_url_from_web3(web3)
+    result = validate_aerodrome_cl_pool(chain, token_a, token_b, tick_spacing, rpc_url)
+
+    if result.exists is False:
+        pytest.fail(f"CL pool missing: {result.error}")
+    if result.exists is None:
+        pytest.fail(f"Could not validate CL pool existence: {result.warning}")
 
 
 def fail_if_traderjoe_pool_missing(

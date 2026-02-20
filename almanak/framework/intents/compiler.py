@@ -4173,12 +4173,13 @@ class IntentCompiler:
     def _compile_swap_aerodrome(self, intent: SwapIntent) -> CompilationResult:
         """Compile SWAP intent for Aerodrome Finance (Solidly fork on Base).
 
-        Aerodrome uses swapExactTokensForTokens with routes specifying:
-        - from/to token addresses
-        - stable flag (True=stable pool, False=volatile pool)
-        - factory address
+        By default, routes through Slipstream CL (concentrated liquidity) pools.
+        Classic (v1) routing is available as opt-in via swap_params={"classic": True}.
 
-        Pool type can be specified in swap_params["stable"], otherwise defaults to volatile.
+        swap_params options:
+        - tick_spacing (int): CL pool tick spacing, default 100
+        - classic (bool): If True, use Classic volatile/stable routing
+        - stable (bool): Pool type for Classic routing (default False)
 
         Args:
             intent: SwapIntent with from_token, to_token, and amount
@@ -4233,10 +4234,11 @@ class IntentCompiler:
                     intent_id=intent.intent_id,
                 )
 
-            # Get stable flag from swap_params (default to volatile)
-            stable = False
-            if hasattr(intent, "swap_params") and intent.swap_params:
-                stable = intent.swap_params.get("stable", False)
+            # Extract routing params from swap_params
+            swap_params = intent.swap_params if hasattr(intent, "swap_params") and intent.swap_params else {}
+            use_classic = swap_params.get("classic", False)
+            tick_spacing = swap_params.get("tick_spacing", 100)
+            stable = swap_params.get("stable", False)
 
             # Check chain support
             if self.chain != "base":
@@ -4246,16 +4248,24 @@ class IntentCompiler:
                     intent_id=intent.intent_id,
                 )
 
+            routing = "classic" if use_classic else "cl"
             logger.info(
-                f"Compiling Aerodrome SWAP: {from_token.symbol} -> {to_token.symbol}, amount={amount_decimal}, stable={stable}"
+                f"Compiling Aerodrome SWAP ({routing}): {from_token.symbol} -> {to_token.symbol}, amount={amount_decimal}"
             )
 
             # Validate pool existence
-            from .pool_validation import validate_aerodrome_pool
+            if use_classic:
+                from .pool_validation import validate_aerodrome_pool
 
-            pool_check = validate_aerodrome_pool(
-                self.chain, from_token.address, to_token.address, stable, self._get_chain_rpc_url()
-            )
+                pool_check = validate_aerodrome_pool(
+                    self.chain, from_token.address, to_token.address, stable, self._get_chain_rpc_url()
+                )
+            else:
+                from .pool_validation import validate_aerodrome_cl_pool
+
+                pool_check = validate_aerodrome_cl_pool(
+                    self.chain, from_token.address, to_token.address, tick_spacing, self._get_chain_rpc_url()
+                )
             failed = self._validate_pool(pool_check, intent.intent_id)
             if failed is not None:
                 return failed
@@ -4276,6 +4286,8 @@ class IntentCompiler:
                 token_out=to_token.symbol,
                 amount_in=amount_decimal,
                 stable=stable,
+                tick_spacing=tick_spacing,
+                use_classic=use_classic,
             )
 
             if not swap_result.success:
@@ -4298,7 +4310,7 @@ class IntentCompiler:
                     "from_token": from_token.to_dict(),
                     "to_token": to_token.to_dict(),
                     "amount_in": str(amount_decimal),
-                    "stable": stable,
+                    "routing": routing,
                     "protocol": "aerodrome",
                 },
             )
@@ -4308,7 +4320,7 @@ class IntentCompiler:
             result.total_gas_estimate = total_gas
 
             logger.info(
-                f"Compiled Aerodrome SWAP intent: {from_token.symbol} -> {to_token.symbol}, stable={stable}, {len(transactions)} txs, {total_gas} gas"
+                f"Compiled Aerodrome SWAP intent ({routing}): {from_token.symbol} -> {to_token.symbol}, {len(transactions)} txs, {total_gas} gas"
             )
 
         except Exception as e:

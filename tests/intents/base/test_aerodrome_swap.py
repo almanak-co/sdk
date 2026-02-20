@@ -27,7 +27,7 @@ from tests.intents.conftest import (
     get_token_balance,
     get_token_decimals,
 )
-from tests.intents.pool_helpers import fail_if_aerodrome_pool_missing
+from tests.intents.pool_helpers import fail_if_aerodrome_cl_pool_missing
 
 # =============================================================================
 # Test Configuration
@@ -58,6 +58,7 @@ class TestAerodromeSwapIntent:
     async def test_swap_usdc_to_weth_using_intent(
         self,
         web3: Web3,
+        anvil_rpc_url: str,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
@@ -75,7 +76,7 @@ class TestAerodromeSwapIntent:
         token_out = tokens["WETH"]
 
         # Validate pool exists before running test
-        fail_if_aerodrome_pool_missing(web3, CHAIN_NAME, token_in, token_out, False)
+        fail_if_aerodrome_cl_pool_missing(web3, CHAIN_NAME, token_in, token_out, 100)
 
         # Get decimals
         in_decimals = get_token_decimals(web3, token_in)
@@ -113,6 +114,7 @@ class TestAerodromeSwapIntent:
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
         )
 
         print("Compiling intent to ActionBundle...")
@@ -177,6 +179,7 @@ class TestAerodromeSwapIntent:
     async def test_swap_weth_to_usdc_using_intent(
         self,
         web3: Web3,
+        anvil_rpc_url: str,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
@@ -187,7 +190,7 @@ class TestAerodromeSwapIntent:
         token_out = tokens["USDC"]
 
         # Validate pool exists before running test
-        fail_if_aerodrome_pool_missing(web3, CHAIN_NAME, token_in, token_out, False)
+        fail_if_aerodrome_cl_pool_missing(web3, CHAIN_NAME, token_in, token_out, 100)
 
         in_decimals = get_token_decimals(web3, token_in)
         out_decimals = get_token_decimals(web3, token_out)
@@ -216,6 +219,7 @@ class TestAerodromeSwapIntent:
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
         )
         compilation_result = compiler.compile(intent)
         assert compilation_result.status.value == "SUCCESS"
@@ -244,6 +248,7 @@ class TestAerodromeSwapIntent:
     async def test_swap_intent_with_insufficient_balance_fails(
         self,
         web3: Web3,
+        anvil_rpc_url: str,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
@@ -279,6 +284,7 @@ class TestAerodromeSwapIntent:
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
         )
         compilation_result = compiler.compile(intent)
         assert compilation_result.status.value == "SUCCESS"

@@ -66,6 +66,9 @@ REMOVE_LIQUIDITY_SELECTOR = "0x0dede6c4"
 # swapExactTokensForTokens(uint256,uint256,(address,address,bool,address)[],address,uint256)
 SWAP_EXACT_TOKENS_SELECTOR = "0xcac88ea9"
 
+# Slipstream CL SwapRouter: exactInputSingle((address,address,int24,address,uint256,uint256,uint256,uint160))
+CL_EXACT_INPUT_SINGLE_SELECTOR = "0xa026383e"
+
 # ERC20 approve selector
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"
 
@@ -354,6 +357,7 @@ class AerodromeAdapter:
 
         # Initialize SDK (includes optional RPC override for pool lookups/quotes)
         self.sdk = AerodromeSDK(chain=self.chain, rpc_url=config.rpc_url)
+        self._web3: Any = None
 
         # Load contract addresses
         self.addresses = AERODROME_ADDRESSES[self.chain]
@@ -399,16 +403,23 @@ class AerodromeAdapter:
         stable: bool = False,
         slippage_bps: int | None = None,
         recipient: str | None = None,
+        tick_spacing: int = 100,
+        use_classic: bool = False,
     ) -> SwapResult:
         """Build a swap transaction with exact input amount.
+
+        By default, routes through the Slipstream CL (concentrated liquidity) pool.
+        Use ``use_classic=True`` to opt into the Classic (v1) volatile/stable router.
 
         Args:
             token_in: Input token symbol or address
             token_out: Output token symbol or address
             amount_in: Amount of input token (in token units, not wei)
-            stable: Pool type (True=stable, False=volatile)
+            stable: Pool type for Classic routing (True=stable, False=volatile)
             slippage_bps: Slippage tolerance in basis points (default from config)
             recipient: Address to receive output tokens (default: wallet_address)
+            tick_spacing: Slipstream CL tick spacing (default 100)
+            use_classic: If True, route through Classic router instead of CL
 
         Returns:
             SwapResult with transaction data
@@ -439,14 +450,6 @@ class AerodromeAdapter:
             # Convert amount to wei
             amount_in_wei = int(amount_in * Decimal(10**token_in_decimals))
 
-            # Get quote (estimate output)
-            quote = self._get_quote_exact_input(token_in_address, token_out_address, amount_in_wei, stable)
-
-            amount_out_minimum = int(quote.amount_out * (10000 - slippage_bps) // 10000)
-
-            # Build transactions
-            transactions: list[TransactionData] = []
-
             # Check if we need native token handling
             is_native_input = self._is_native_token(token_in)
             actual_token_in = token_in_address
@@ -456,33 +459,64 @@ class AerodromeAdapter:
                 weth_address = self._resolve_token("WETH")
                 actual_token_in = weth_address if weth_address else token_in_address
 
+            # Determine routing: CL (default) vs Classic (opt-in)
+            routing = "classic" if use_classic else "cl"
+
+            # Get quote (estimate output)
+            # For CL, skip on-chain Classic router quoting; use oracle-based estimation
+            if routing == "cl":
+                quote = self._get_quote_exact_input(
+                    token_in_address, token_out_address, amount_in_wei, stable, skip_onchain=True
+                )
+            else:
+                quote = self._get_quote_exact_input(token_in_address, token_out_address, amount_in_wei, stable)
+
+            amount_out_minimum = int(quote.amount_out * (10000 - slippage_bps) // 10000)
+
+            # Build transactions
+            transactions: list[TransactionData] = []
+
+            # Determine spender (CL router vs Classic router)
+            spender = self.addresses["cl_router"] if routing == "cl" else self.addresses["router"]
+
             # Build approve transaction if needed (skip for native token)
             if not is_native_input:
                 approve_tx = self._build_approve_tx(
                     actual_token_in,
-                    self.addresses["router"],
+                    spender,
                     amount_in_wei,
                 )
                 if approve_tx is not None:
                     transactions.append(approve_tx)
 
             # Build swap transaction
-            swap_tx = self._build_swap_exact_input_tx(
-                token_in=actual_token_in,
-                token_out=token_out_address,
-                stable=stable,
-                recipient=recipient,
-                amount_in=amount_in_wei,
-                amount_out_minimum=amount_out_minimum,
-                value=amount_in_wei if is_native_input else 0,
-            )
+            if routing == "cl":
+                swap_tx = self._build_swap_exact_input_cl_tx(
+                    token_in=actual_token_in,
+                    token_out=token_out_address,
+                    tick_spacing=tick_spacing,
+                    recipient=recipient,
+                    amount_in=amount_in_wei,
+                    amount_out_minimum=amount_out_minimum,
+                    value=amount_in_wei if is_native_input else 0,
+                )
+            else:
+                swap_tx = self._build_swap_exact_input_tx(
+                    token_in=actual_token_in,
+                    token_out=token_out_address,
+                    stable=stable,
+                    recipient=recipient,
+                    amount_in=amount_in_wei,
+                    amount_out_minimum=amount_out_minimum,
+                    value=amount_in_wei if is_native_input else 0,
+                )
             transactions.append(swap_tx)
 
             total_gas = sum(tx.gas_estimate for tx in transactions)
 
             logger.info(
-                f"Built Aerodrome swap: {token_in} -> {token_out}, "
-                f"stable={stable}, amount_in={amount_in}, slippage={slippage_bps}bps, "
+                f"Built Aerodrome {routing} swap: {token_in} -> {token_out}, "
+                f"amount_in={amount_in}, slippage={slippage_bps}bps, "
                 f"transactions={len(transactions)}"
             )
 
@@ -854,6 +888,61 @@ class AerodromeAdapter:
             tx_type="swap",
         )
 
+    def _build_swap_exact_input_cl_tx(
+        self,
+        token_in: str,
+        token_out: str,
+        tick_spacing: int,
+        recipient: str,
+        amount_in: int,
+        amount_out_minimum: int,
+        value: int = 0,
+    ) -> TransactionData:
+        """Build Slipstream CL exactInputSingle swap transaction.
+
+        Aerodrome Slipstream exactInputSingle signature:
+        function exactInputSingle(ExactInputSingleParams calldata params)
+
+        ExactInputSingleParams struct:
+            address tokenIn, address tokenOut, int24 tickSpacing,
+            address recipient, uint256 deadline, uint256 amountIn,
+            uint256 amountOutMinimum, uint160 sqrtPriceLimitX96
+        """
+        deadline = int(datetime.now(UTC).timestamp()) + self.config.deadline_seconds
+
+        calldata = (
+            CL_EXACT_INPUT_SINGLE_SELECTOR
+            + self._pad_address(token_in)
+            + self._pad_address(token_out)
+            + self._pad_int24(tick_spacing)
+            + self._pad_address(recipient)
+            + self._pad_uint256(deadline)
+            + self._pad_uint256(amount_in)
+            + self._pad_uint256(amount_out_minimum)
+            + self._pad_uint256(0)  # sqrtPriceLimitX96 = 0 (no limit)
+        )
+
+        # Format amounts for description
+        token_in_symbol = self._get_token_symbol(token_in)
+        token_out_symbol = self._get_token_symbol(token_out)
+        token_in_decimals = self._get_token_decimals(token_in_symbol)
+        token_out_decimals = self._get_token_decimals(token_out_symbol)
+
+        amount_in_formatted = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
+        amount_out_formatted = Decimal(str(amount_out_minimum)) / Decimal(10**token_out_decimals)
+
+        return TransactionData(
+            to=self.addresses["cl_router"],
+            value=value,
+            data=calldata,
+            gas_estimate=AERODROME_GAS_ESTIMATES["swap"],
+            description=(
+                f"Aerodrome CL swap {amount_in_formatted:.6f} {token_in_symbol} -> "
+                f"{token_out_symbol} (min: {amount_out_formatted:.6f}, tickSpacing={tick_spacing})"
+            ),
+            tx_type="swap",
+        )
+
     def _build_add_liquidity_tx(
         self,
         token_a: str,
@@ -973,26 +1062,41 @@ class AerodromeAdapter:
         token_out: str,
         amount_in: int,
         stable: bool,
+        skip_onchain: bool = False,
     ) -> SwapQuote:
         """Get quote for exact input swap.
 
         In production, this would call the pool contract.
-        For now, returns an estimate based on price oracle.
+        Prefer on-chain quoting via router.getAmountsOut when rpc_url is available.
+        Falls back to a price-oracle estimate when on-chain quoting is unavailable.
         """
         token_in_symbol = self._get_token_symbol(token_in)
         token_out_symbol = self._get_token_symbol(token_out)
 
-        prices = self._get_default_price_oracle()
-        price_in = prices.get(token_in_symbol, Decimal("1"))
-        price_out = prices.get(token_out_symbol, Decimal("1"))
-
-        if price_out == 0:
-            price_out = Decimal("1")
-
-        # Calculate expected output
         token_in_decimals = self._get_token_decimals(token_in_symbol)
         token_out_decimals = self._get_token_decimals(token_out_symbol)
 
+        amount_out = None if skip_onchain else self._try_get_amount_out_onchain(token_in, token_out, amount_in, stable)
+        if amount_out is not None:
+            amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
+            amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
+            effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal("0")
+
+            return SwapQuote(
+                token_in=token_in,
+                token_out=token_out,
+                amount_in=amount_in,
+                amount_out=amount_out,
+                stable=stable,
+                effective_price=effective_price,
+                gas_estimate=AERODROME_GAS_ESTIMATES["swap"],
+            )
+
+        prices = self._get_default_price_oracle()
+        price_in = prices.get(token_in_symbol, Decimal("1"))
+        price_out = prices.get(token_out_symbol, Decimal("1")) or Decimal("1")
+
+        # Calculate expected output
         amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
         usd_value = amount_in_decimal * price_in
 
@@ -1014,6 +1118,38 @@ class AerodromeAdapter:
             effective_price=effective_price,
             gas_estimate=AERODROME_GAS_ESTIMATES["swap"],
         )
+
+    def _try_get_amount_out_onchain(
+        self,
+        token_in: str,
+        token_out: str,
+        amount_in: int,
+        stable: bool,
+    ) -> int | None:
+        """Best-effort on-chain quote for amount out via router.getAmountsOut().
+
+        Returns None when rpc_url is not configured or when the quote cannot be fetched.
+        """
+        if not self.config.rpc_url:
+            return None
+
+        try:
+            from web3 import Web3
+
+            if self._web3 is None:
+                self._web3 = Web3(Web3.HTTPProvider(self.config.rpc_url, request_kwargs={"timeout": 15}))
+
+            from .sdk import SwapRoute
+
+            routes = [SwapRoute(from_token=token_in, to_token=token_out, stable=stable)]
+            amounts = self.sdk.get_amounts_out(amount_in, routes, self._web3)
+            if not amounts:
+                return None
+
+            return int(amounts[-1])
+        except Exception as e:
+            logger.debug("Aerodrome on-chain quote failed; falling back to price oracle: %s", e)
+            return None
 
     # =========================================================================
     # Helper Methods
@@ -1119,6 +1255,13 @@ class AerodromeAdapter:
     @staticmethod
     def _pad_uint256(value: int) -> str:
         """Pad uint256 to 32 bytes."""
+        return hex(value)[2:].zfill(64)
+
+    @staticmethod
+    def _pad_int24(value: int) -> str:
+        """Pad int24 to 32 bytes (two's complement for negative values)."""
+        if value < 0:
+            value = (1 << 256) + value
         return hex(value)[2:].zfill(64)
 
     @staticmethod

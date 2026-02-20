@@ -231,6 +231,76 @@ def validate_aerodrome_pool(
     return PoolValidationResult(exists=True, pool_address=pool_address)
 
 
+# Aerodrome Slipstream CL getPool(address,address,int24) selector
+_AERODROME_CL_GET_POOL_SELECTOR = "0x28af8d0b"
+
+
+def _encode_get_pool_aerodrome_cl(token_a: str, token_b: str, tick_spacing: int) -> str:
+    """Encode getPool(address,address,int24) calldata for Aerodrome CL factory."""
+    a = token_a.lower().replace("0x", "").zfill(64)
+    b = token_b.lower().replace("0x", "").zfill(64)
+    # tick_spacing is always positive, safe to encode as uint
+    ts = hex(tick_spacing)[2:].zfill(64)
+    return _AERODROME_CL_GET_POOL_SELECTOR + a + b + ts
+
+
+def validate_aerodrome_cl_pool(
+    chain: str,
+    token_a: str,
+    token_b: str,
+    tick_spacing: int,
+    rpc_url: str | None,
+) -> PoolValidationResult:
+    """Validate that an Aerodrome Slipstream (CL) pool exists on-chain.
+
+    Args:
+        chain: Chain name (should be "base").
+        token_a: Token A address.
+        token_b: Token B address.
+        tick_spacing: CL pool tick spacing (e.g. 100).
+        rpc_url: RPC URL for on-chain query. If None, returns unknown.
+
+    Returns:
+        PoolValidationResult with exists=True/False/None.
+    """
+    if rpc_url is None:
+        return PoolValidationResult(
+            exists=None,
+            warning=f"No RPC URL available — cannot verify Aerodrome CL pool existence on {chain}",
+        )
+
+    chain_contracts = AERODROME.get(chain.lower())
+    if chain_contracts is None or "cl_factory" not in chain_contracts:
+        return PoolValidationResult(
+            exists=None,
+            warning=f"No Aerodrome CL factory address for chain '{chain}' — cannot verify pool existence",
+        )
+    cl_factory = chain_contracts["cl_factory"]
+
+    calldata = _encode_get_pool_aerodrome_cl(token_a, token_b, tick_spacing)
+    raw = _eth_call(rpc_url, cl_factory, calldata)
+
+    if raw is None:
+        return PoolValidationResult(
+            exists=None,
+            warning=f"RPC call to Aerodrome CL factory failed on {chain} — cannot verify pool existence",
+        )
+
+    pool_address = _decode_address(raw)
+
+    if pool_address == ZERO_ADDRESS:
+        return PoolValidationResult(
+            exists=False,
+            error=(
+                f"No Aerodrome CL pool found for "
+                f"{token_a[:10]}.../{token_b[:10]}... with tick spacing {tick_spacing} on {chain}. "
+                f"The pool may not exist or may use a different tick spacing."
+            ),
+        )
+
+    return PoolValidationResult(exists=True, pool_address=pool_address)
+
+
 def validate_traderjoe_pool(
     chain: str,
     token_x: str,
