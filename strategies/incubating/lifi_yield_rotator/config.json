@@ -1,0 +1,17 @@
+{
+    "supply_token": "USDC",
+    "supply_amount": "5",
+    "protocol": "aave_v3",
+    "rate_threshold_bps": 100,
+    "min_rotation_interval_hours": 24,
+    "chains": ["arbitrum", "base"],
+    "default_chain": "arbitrum",
+    "max_bridge_slippage_pct": 0.5,
+    "max_swap_slippage_pct": 1.0,
+    "force_action": "supply",
+    "chain": "arbitrum",
+    "anvil_funding": {
+        "ETH": 1,
+        "USDC": 1000
+    }
+}

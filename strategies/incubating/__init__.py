@@ -14,4 +14,6 @@ Available strategies:
 - lst_basis: LST basis trade
 - stablecoin_peg_arb: Stablecoin peg arbitrage
 - flash_triangular_arb: Flash loan triangular arbitrage
+- lifi_smart_dca: Smart DCA strategy using LiFi aggregator
+- lifi_yield_rotator: Cross-chain yield rotator using LiFi bridges and Aave V3
 """
