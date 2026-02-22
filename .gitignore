@@ -38,6 +38,7 @@ almanak/llms/llms-full.txt
 # Coverage reports
 coverage-html/
 coverage.xml
+test-results.xml
 .coverage
 
 # Automation scripts runtime artifacts
@@ -46,5 +47,8 @@ scripts/pr-manager/pr-manager.log
 scripts/pr-manager/state.json
 notes/.tmp/
 
+# Local Claude artifacts
+.claude/worktrees/
 # any files containing secrets
-secrets.yaml.env.nightly
+secrets.yaml
+.env.nightly
