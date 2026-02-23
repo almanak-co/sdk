@@ -7,6 +7,8 @@ Based on the proven GatewayServerThread pattern from tests/conftest_gateway.py.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
 import socket
@@ -78,6 +80,28 @@ def find_available_gateway_port(host: str, preferred_port: int, max_attempts: in
         if not is_port_in_use(host, candidate):
             return candidate
     raise GatewayPortUnavailableError(preferred_port, preferred_port + max_attempts - 1)
+
+
+def derive_isolated_wallet(master_private_key: str, strategy_name: str) -> tuple[str, str]:
+    """Derive a deterministic child private key from a master key and strategy name.
+
+    Uses HMAC-SHA256 to produce a unique 32-byte key per strategy, ensuring
+    wallet isolation when running multiple strategies on a shared Anvil fork.
+
+    Args:
+        master_private_key: Hex-encoded master private key (with or without 0x prefix)
+        strategy_name: Strategy identifier used as derivation salt
+
+    Returns:
+        Tuple of (derived_private_key_hex, derived_wallet_address)
+    """
+    from eth_account import Account
+
+    key_bytes = bytes.fromhex(master_private_key.removeprefix("0x"))
+    derived = hmac.new(key_bytes, strategy_name.encode(), hashlib.sha256).digest()
+    derived_key = "0x" + derived.hex()
+    account = Account.from_key(derived_key)
+    return derived_key, account.address
 
 
 class ManagedGateway:
@@ -383,6 +407,45 @@ class ManagedGateway:
         if self._thread is not None:
             self._thread.join(timeout=timeout)
         logger.info("Managed gateway stopped")
+
+    def reset_anvil_forks(self) -> bool:
+        """Reset all Anvil forks to the latest mainnet block and re-fund wallets.
+
+        Thread-safe: schedules async work on the gateway's event loop and blocks
+        until complete. Intended for use as a pre-iteration callback in the
+        strategy runner loop.
+
+        Returns:
+            True if all resets succeeded, False otherwise.
+        """
+        if not self._anvil_managers:
+            logger.warning("reset_anvil_forks called but no Anvil managers are running")
+            return False
+        if self._loop is None or self._loop.is_closed():
+            logger.error("reset_anvil_forks called but gateway event loop is not available")
+            return False
+
+        async def _reset_all() -> bool:
+            for chain, manager in self._anvil_managers.items():
+                ok = await manager.reset_to_latest()
+                if not ok:
+                    logger.error(f"Failed to reset Anvil fork for {chain}")
+                    return False
+                logger.info(f"Anvil fork reset for {chain} to latest block")
+            await self._fund_anvil_wallets()
+            return True
+
+        import concurrent.futures
+
+        future = asyncio.run_coroutine_threadsafe(_reset_all(), self._loop)
+        try:
+            return future.result(timeout=60.0)
+        except concurrent.futures.TimeoutError:
+            logger.error("reset_anvil_forks timed out after 60s")
+            return False
+        except Exception as e:
+            logger.exception(f"reset_anvil_forks failed: {e}")
+            return False
 
     def __enter__(self) -> ManagedGateway:
         self.start()

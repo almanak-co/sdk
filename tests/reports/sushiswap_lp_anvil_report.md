@@ -1,180 +1,87 @@
-# Anvil Test Report: sushiswap_lp
+# E2E Strategy Test Report: sushiswap_lp (Anvil)
 
-**Date:** 2026-02-08 15:45
+**Date:** 2026-02-23 04:12
 **Result:** PASS
-**Duration:** ~5 minutes
-
----
-
-## Summary
-
-The `sushiswap_lp` demo strategy successfully executed on a local Anvil fork of Arbitrum. The strategy opened a concentrated liquidity position on SushiSwap V3 using 0.01 WETH and 25 USDC with a 10% price range. Execution completed successfully with position ID 32514 minted.
-
----
+**Mode:** Anvil
+**Duration:** ~4 minutes
 
 ## Configuration
 
 | Field | Value |
 |-------|-------|
-| Strategy | sushiswap_lp |
-| Chain | Arbitrum |
+| Strategy | demo_sushiswap_lp |
+| Chain | arbitrum |
 | Network | Anvil fork |
-| Port | 8545 (Anvil), 50051 (Gateway) |
+| Anvil Port | 64404 (auto-assigned by managed gateway) |
 | Pool | WETH/USDC/3000 |
-| Range Width | 10% (±5% from current price) |
-| Token0 Amount | 0.01 WETH |
-| Token1 Amount | 25 USDC |
-| Force Action | open |
+| amount0 | 0.001 WETH |
+| amount1 | 3 USDC |
+| force_action | open |
 
----
+**Config changes:** None. Amounts (0.001 WETH ~$1.94, 3 USDC) are well under the $100 budget cap. `force_action` was already set to `"open"`.
 
-## Test Phases
+## Execution
 
-### Phase 1: Setup
-- [x] Anvil started on port 8545 (Arbitrum fork)
-- [x] Gateway started on port 50051
-- [x] Wallet funded with 100 ETH (gas)
-- [x] Wallet funded with 1 WETH (wrapped from ETH)
-- [x] Wallet funded with 10,000 USDC (storage slot method)
+### Setup
+- [x] Anvil fork started (managed by CLI auto-start on port 64404, chain ID 42161)
+- [x] Gateway started on port 50052 (managed mode)
+- [x] Wallet funded by managed gateway: 100 ETH, 1 WETH (slot 51), 10,000 USDC (slot 9)
 
-### Phase 2: Strategy Execution
-- [x] Strategy loaded: `SushiSwapLPStrategy`
-- [x] Config loaded from `config.json`
-- [x] Strategy initialized with pool WETH/USDC/3000
-- [x] Force action triggered: OPEN LP position
-- [x] Price range calculated: [2005.46 - 2216.56]
-- [x] Tick range calculated: [-200280 - -199260]
-- [x] Intent created: LP_OPEN with sushiswap_v3 protocol
-- [x] Intent compiled to 3 transactions (510,000 gas estimate)
-- [x] Execution completed successfully
+### Strategy Run
+- [x] Strategy executed with `--network anvil --once`
+- [x] Price fetched: WETH = $1,941.29, USDC = $0.9999
+- [x] Price range calculated: [1844.39 - 2038.54] USDC/WETH, ticks [-201120, -200100]
+- [x] LP_OPEN intent triggered by `force_action = open`
+- [x] Compiled: 3 transactions, estimated 660,000 gas
+- [x] All 3 transactions confirmed on-chain (Anvil fork)
+- [x] LP position opened: **position_id = 32979**, liquidity = 2,223,696,811,742
+- [x] Result enrichment: position_id, tick_lower, tick_upper, liquidity extracted from receipt
 
-### Phase 3: Verification
-- [x] Position ID extracted from receipt: 32514
-- [x] Token balances verified:
-  - WETH: 1.0 → 0.99 (0.01 used)
-  - USDC: 10,000 → 9,979 (21 used)
-  - ETH: ~99 (gas consumed)
-- [x] Execution status: SUCCESS
-- [x] Gas used: 620,404
+### Transaction Hashes (Anvil fork)
 
-### Phase 4: Cleanup
-- [x] Anvil process killed
-- [x] Gateway process killed
-- [x] Ports released (8545, 50051, 9090)
+| # | Purpose | TX Hash | Gas Used | Block |
+|---|---------|---------|----------|-------|
+| 1 | WETH approval (Permit2) | `3563bd4af6fbdd73e676208c51e9e59234da96088a75bab2eb1dba9d80e9b433` | 53,440 | 434905487 |
+| 2 | Permit2 internal approval | `b20c409b8decc6a2efab80bf21c8ec9fe5959a920de056fd814516a896b30217` | 55,437 | 434905488 |
+| 3 | SushiSwap V3 mint (LP_OPEN) | `623a78671a429ae5b87e9c2be15b443ab277b54322e95d3e4b03e77bf03428a3` | 430,239 | 434905489 |
 
----
+**Total gas used:** 539,116
 
-## Execution Log Highlights
+### Key Log Output
 
-### Strategy Initialization
-```
-SushiSwapLPStrategy initialized: pool=WETH/USDC/3000, range_width=10.00%, amounts=0.01 WETH + 25 USDC
-```
-
-### Intent Decision
-```
+```text
+Aggregated price for WETH/USD: 1941.29 (confidence: 1.00, sources: 1/1, outliers: 0)
+Aggregated price for USDC/USD: 0.999909 (confidence: 1.00, sources: 1/1, outliers: 0)
 Forced action: OPEN LP position
-LP_OPEN: 0.0100 WETH + 25.0000 USDC, price range [2005.4585 - 2216.5594], ticks [-200280 - -199260]
-SushiSwapLPStrategy:3e54f3102494 intent: LP_OPEN: WETH/USDC/3000 (0.01, 25) [2005 - 2217] via sushiswap_v3
+LP_OPEN: 0.0010 WETH + 3.0000 USDC, price range [1844.3933 - 2038.5400], ticks [-201120 - -200100]
+Compiled LP_OPEN intent: WETH/USDC, range [1844.39-2038.54], 3 txs, 660000 gas
+EXECUTED: LP_OPEN completed successfully
+   Txs: 3 (3563bd...b433, b20c40...0217, 623a78...28a3) | 539,116 gas
+Extracted LP position ID from receipt: 32979
+Enriched LP_OPEN result with: position_id, tick_lower, tick_upper, liquidity (protocol=sushiswap_v3, chain=arbitrum)
+SushiSwap V3 LP position opened: position_id=32979, liquidity=2223696811742
+Status: SUCCESS | Intent: LP_OPEN | Gas used: 539116 | Duration: 25017ms
 ```
 
-### Intent Compilation
-```
-Compiled LP_OPEN intent: WETH/USDC, range [2005.46-2216.56], 3 txs, 510000 gas
-```
+## Suspicious Behaviour
 
-### Execution Result
-```
-Execution successful for SushiSwapLPStrategy:3e54f3102494: gas_used=620404, tx_count=3
-Extracted LP position ID from receipt: 32514
-Status: SUCCESS | Intent: LP_OPEN | Gas used: 620404 | Duration: 5466ms
-```
+| # | Source | Severity | Pattern | Log Line |
+|---|--------|----------|---------|----------|
+| 1 | strategy | INFO | No CoinGecko API key | `COINGECKO_API_KEY not configured - CoinGecko will use free tier API (30 requests/minute limit)` |
+| 2 | strategy | WARNING | Gas estimate below compiler floor | `Gas estimate tx[0]: raw=53,788 buffered=80,682 (x1.5) < compiler=120,000, using compiler limit` |
+| 3 | strategy | WARNING | Gas estimate below compiler floor | `Gas estimate tx[1]: raw=55,819 buffered=83,728 (x1.5) < compiler=120,000, using compiler limit` |
+| 4 | strategy | WARNING | Amount chaining warning | `Amount chaining: no output amount extracted from step 1; subsequent amount='all' steps will fail` |
 
----
+**Analysis:**
+- **Finding 1 (INFO):** No CoinGecko API key is normal for local development. Prices were fetched successfully from the free tier. Not a real issue.
+- **Findings 2 & 3 (WARNING):** Gas simulator returned lower estimates than the compiler floor for the two approval transactions. The orchestrator correctly deferred to the compiler limit (120,000 gas each). Approvals actually used only 53,440 and 55,437 gas respectively, so the compiler limit was conservative but safe. Not blocking.
+- **Finding 4 (WARNING):** The `Amount chaining` warning fires because this LP_OPEN flow does not use an `amount='all'` chained step -- LP_OPEN compiles to discrete amounts (0.001 WETH + 3 USDC), not a chained output. The warning is spurious for LP_OPEN intents and does not affect correctness. Worth investigating whether the warning should be suppressed for non-swap flows.
 
-## Token Balance Changes
+No zero prices, no API fetch failures, no reverts, no token resolution errors, no timeouts.
 
-| Token | Initial | Final | Change | Expected |
-|-------|---------|-------|--------|----------|
-| ETH | 100.0 | ~99.0 | -1.0 (gas) | Gas only |
-| WETH | 1.0 | 0.99 | -0.01 | -0.01 |
-| USDC | 10,000 | 9,979 | -21 | -25 |
+## Result
 
-**Note:** USDC usage was 21 instead of 25, likely due to optimal liquidity provision within the calculated tick range. This is expected behavior for concentrated liquidity positions.
+**PASS** - SushiSwap V3 LP_OPEN executed successfully on Anvil (Arbitrum fork). Position #32979 opened with 0.001 WETH + 3 USDC across ticks [-201120, -200100], 3 transactions confirmed, 539,116 total gas used.
 
----
-
-## Transaction Breakdown
-
-| Phase | Action | Gas Estimate | Actual Gas | Status |
-|-------|--------|--------------|------------|--------|
-| 1 | APPROVE WETH | ~50,000 | Included | SUCCESS |
-| 2 | APPROVE USDC | ~50,000 | Included | SUCCESS |
-| 3 | LP_OPEN (mint position) | ~410,000 | 620,404 total | SUCCESS |
-| **Total** | | **510,000** | **620,404** | **SUCCESS** |
-
-**Gas Delta:** Actual gas was 21.6% higher than estimate (620,404 vs 510,000). This is within acceptable range for first-time approvals.
-
----
-
-## Position Details
-
-| Field | Value |
-|-------|-------|
-| Position ID | 32514 |
-| Protocol | SushiSwap V3 |
-| Pool | WETH/USDC/3000 |
-| Fee Tier | 0.3% (3000 basis points) |
-| Tick Lower | -200280 |
-| Tick Upper | -199260 |
-| Price Range | [2005.46 - 2216.56] USDC per WETH |
-| Token0 Deposited | 0.01 WETH |
-| Token1 Deposited | ~21 USDC |
-
----
-
-## Gateway Performance
-
-| Metric | Value |
-|--------|-------|
-| Connection Time | <1s |
-| State Load | 1.8ms |
-| Price Queries | 2 (449ms, 848ms) |
-| Allowance Queries | 2 (58ms, 57ms) |
-| Execution | 4,039ms |
-| Total Duration | ~5.5s |
-
----
-
-## Issues Encountered
-
-### Minor Warning
-```
-Warning: Error in on_intent_executed callback: 'GatewayExecutionResult' object has no attribute 'liquidity'
-```
-
-**Impact:** Cosmetic only. The strategy attempted to extract liquidity data from the result, but the field was not present. Position ID was successfully extracted.
-
-**Action Required:** None for this test. The position was created successfully.
-
----
-
-## Conclusion
-
-**PASS** - The `sushiswap_lp` strategy executed successfully on Anvil:
-
-1. All setup completed without errors
-2. Strategy loaded and initialized correctly
-3. LP_OPEN intent compiled to 3 transactions
-4. Execution succeeded with position ID 32514 minted
-5. Token balances reflect expected changes
-6. Gateway performed well with reasonable latencies
-7. Cleanup completed successfully
-
-The strategy demonstrates proper SushiSwap V3 integration with:
-- Correct tick math and price range calculations
-- Proper token approvals
-- Successful concentrated liquidity position creation
-- Result enrichment (position ID extraction)
-
-**Recommendation:** Strategy is ready for further testing with different configurations (different pools, fee tiers, range widths).
+SUSPICIOUS_BEHAVIOUR_COUNT: 4
+SUSPICIOUS_BEHAVIOUR_ERRORS: 0

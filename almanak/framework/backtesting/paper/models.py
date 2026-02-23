@@ -97,10 +97,12 @@ class PaperTrade:
 
     @property
     def net_token_flow_usd(self) -> Decimal:
-        """Get net token flow in USD (tokens_out_usd - tokens_in_usd).
+        """Get net token flow in USD (received - sent).
 
         Calculates the net value change from this trade using token prices
-        captured at execution time.
+        captured at execution time. Convention matches receipt_utils.py and
+        engine.py: tokens_in = received (transfers TO wallet),
+        tokens_out = sent (transfers FROM wallet).
 
         Returns:
             Positive value indicates profit (received more than sent),
@@ -110,20 +112,20 @@ class PaperTrade:
         if not self.token_prices_usd:
             return Decimal("0")
 
-        # Calculate USD value of tokens received
-        tokens_out_usd = Decimal("0")
-        for token, amount in self.tokens_out.items():
-            price = self.token_prices_usd.get(token.upper(), Decimal("0"))
-            tokens_out_usd += amount * price
-
-        # Calculate USD value of tokens sent
+        # Calculate USD value of tokens received (tokens_in = transfers TO wallet)
         tokens_in_usd = Decimal("0")
         for token, amount in self.tokens_in.items():
             price = self.token_prices_usd.get(token.upper(), Decimal("0"))
             tokens_in_usd += amount * price
 
+        # Calculate USD value of tokens sent (tokens_out = transfers FROM wallet)
+        tokens_out_usd = Decimal("0")
+        for token, amount in self.tokens_out.items():
+            price = self.token_prices_usd.get(token.upper(), Decimal("0"))
+            tokens_out_usd += amount * price
+
         # Net flow: what we received minus what we sent
-        return tokens_out_usd - tokens_in_usd
+        return tokens_in_usd - tokens_out_usd
 
     @property
     def net_pnl_usd(self) -> Decimal:

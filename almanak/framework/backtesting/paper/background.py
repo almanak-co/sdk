@@ -1125,8 +1125,8 @@ def _run_background_paper_trader(
             tick_count=0,
             trades=[],
             errors=[],
-            current_balances=dict(config.initial_tokens),
-            initial_balances=dict(config.initial_tokens),
+            current_balances=config.get_initial_balances(),
+            initial_balances=config.get_initial_balances(),
             equity_curve=[],
             config=config_dict,
             pid=os.getpid(),
@@ -1157,7 +1157,7 @@ def _run_background_paper_trader(
 
         portfolio_tracker = PaperPortfolioTracker(
             strategy_id=config.strategy_id,
-            initial_balances=config.initial_tokens,
+            initial_balances=config.get_initial_balances(),
         )
 
         # Create paper trader
@@ -1189,6 +1189,9 @@ def _run_background_paper_trader(
                     f"Restored state: tick_count={trader._tick_count}, "
                     f"trades={len(trader._trades)}, balances={len(state.current_balances)}"
                 )
+                # Re-sync on-chain wallet to match resumed tracker balances
+                # (_initialize_fork funded with initial config; now correct to actual)
+                await trader._sync_wallet_to_fork()
             else:
                 trader._tick_count = 0
                 trader._trades = []

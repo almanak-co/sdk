@@ -714,7 +714,8 @@ def format_iteration_result(result: IterationResult) -> str:
     "-n",
     type=click.Choice(["mainnet", "anvil"], case_sensitive=False),
     default=None,
-    help="Network environment: 'mainnet' for production RPC, 'anvil' for local fork (auto-starts Anvil on a free port). Overrides config.json 'network' field.",
+    help="Network environment: 'mainnet' for production RPC, 'anvil' for local fork testing (auto-starts Anvil on a free port). "
+    "For paper trading with PnL tracking, use 'almanak strat backtest paper'. Overrides config.json 'network' field.",
 )
 @click.option(
     "--gateway-host",
@@ -766,6 +767,26 @@ def format_iteration_result(result: IterationResult) -> str:
     default=False,
     help="Do not auto-start a gateway; connect to an existing one.",
 )
+@click.option(
+    "--wallet",
+    type=click.Choice(["default", "isolated"], case_sensitive=False),
+    default="default",
+    help="Wallet mode for Anvil: 'isolated' derives a unique wallet per strategy for balance isolation.",
+)
+@click.option(
+    "--log-file",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Write JSON logs to this file (in addition to console output). Useful for AI agent analysis.",
+)
+@click.option(
+    "--reset-fork",
+    "reset_fork",
+    is_flag=True,
+    default=False,
+    help="Reset Anvil fork to latest mainnet block before each iteration (requires --network anvil). "
+    "Gives live on-chain state for fork testing.",
+)
 def run(
     working_dir: str,
     config_file: str | None,
@@ -787,6 +808,9 @@ def run(
     copy_replay_file: str | None = None,
     copy_strict: bool = False,
     no_gateway: bool = False,
+    wallet: str = "default",
+    log_file: str | None = None,
+    reset_fork: bool = False,
     strategy_id_override: str | None = None,
 ) -> None:
     """
@@ -827,7 +851,7 @@ def run(
         almanak strat run --list
     """
     # Configure logging using structured logging
-    from ..utils.logging import LogFormat, LogLevel, configure_logging
+    from ..utils.logging import LogFormat, LogLevel, add_file_handler, configure_logging
 
     # Determine log level: debug > verbose > default (info)
     if debug:
@@ -839,6 +863,13 @@ def run(
 
     # Use console format for human-readable output
     configure_logging(level=log_level, format=LogFormat.CONSOLE)
+
+    # Add JSON file handler if --log-file is specified
+    if log_file:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        add_file_handler(str(log_path), level=LogLevel.DEBUG)
+        click.echo(f"Logging to file: {log_path} (JSON format)")
 
     # Control third-party logger verbosity based on --debug flag
     # By default, suppress Web3/HTTP noise unless --debug is specified
@@ -869,6 +900,13 @@ def run(
     managed_gateway: ManagedGateway | None = None
 
     if no_gateway:
+        # --wallet isolated requires the managed gateway (which auto-funds the derived wallet)
+        if wallet == "isolated":
+            raise click.ClickException(
+                "--wallet isolated requires a managed gateway (remove --no-gateway). "
+                "The managed gateway auto-funds the derived wallet on Anvil."
+            )
+
         # --no-gateway: connect to an existing gateway, fail if unavailable
         click.echo(f"Connecting to existing gateway at {effective_host}:{gateway_port}...")
         gateway_config = GatewayClientConfig(host=effective_host, port=gateway_port)
@@ -942,6 +980,37 @@ def run(
                     "Gateway will start without Anvil forks."
                 )
 
+        # Wallet isolation: derive a unique wallet per strategy on Anvil
+        isolated_wallet_address: str | None = None
+        if wallet == "isolated" and gateway_network == "anvil":
+            from almanak.gateway.managed import derive_isolated_wallet
+
+            master_key = os.environ.get("ALMANAK_PRIVATE_KEY", "")
+            if not master_key:
+                raise click.ClickException("--wallet isolated requires ALMANAK_PRIVATE_KEY to be set")
+            # Use the strategy directory name as the derivation seed
+            strategy_seed = Path(working_dir).resolve().name
+            derived_key, isolated_wallet_address = derive_isolated_wallet(master_key, strategy_seed)
+            # Override the env var so LocalRuntimeConfig.from_env() picks up the derived key
+            os.environ["ALMANAK_PRIVATE_KEY"] = derived_key
+            click.echo(
+                f"Wallet: isolated ({isolated_wallet_address[:10]}...{isolated_wallet_address[-4:]}) "
+                f"[derived from strategy '{strategy_seed}']"
+            )
+        elif wallet == "isolated" and gateway_network != "anvil":
+            raise click.ClickException("--wallet isolated is only supported with --network anvil")
+
+        # Validate --reset-fork requires --network anvil
+        if reset_fork and gateway_network != "anvil":
+            raise click.ClickException("--reset-fork is only supported with --network anvil")
+        if reset_fork and once:
+            click.echo("Note: --reset-fork has no effect with --once (fork is already fresh at startup)")
+
+        # When using isolated wallets, pass the derived key to the gateway so its
+        # signer matches the funded wallet. GatewaySettings reads ALMANAK_GATEWAY_PRIVATE_KEY
+        # (not ALMANAK_PRIVATE_KEY), so we must pass it explicitly.
+        gateway_private_key = os.environ.get("ALMANAK_PRIVATE_KEY") if isolated_wallet_address else None
+
         gateway_settings = GatewaySettings(
             grpc_host=effective_host,
             grpc_port=gateway_port,
@@ -950,6 +1019,7 @@ def run(
             metrics_enabled=False,
             audit_enabled=False,
             chains=anvil_chains,
+            private_key=gateway_private_key,
         )
 
         if anvil_chains:
@@ -959,7 +1029,12 @@ def run(
             )
         else:
             click.echo(f"Starting managed gateway on {effective_host}:{gateway_port} (network={gateway_network})...")
-        managed_gateway = ManagedGateway(gateway_settings, anvil_chains=anvil_chains, anvil_funding=anvil_funding)
+        managed_gateway = ManagedGateway(
+            gateway_settings,
+            anvil_chains=anvil_chains,
+            wallet_address=isolated_wallet_address,
+            anvil_funding=anvil_funding,
+        )
         # Anvil forks need extra startup time (forking from mainnet RPC)
         startup_timeout = 30.0 if anvil_chains else 10.0
         try:
@@ -1912,6 +1987,21 @@ def run(
             timestamp = result.timestamp.strftime("%Y-%m-%d %H:%M:%S")
             click.echo(f"[{timestamp}] {format_iteration_result(result)}")
 
+        # Build pre-iteration callback for --reset-fork
+        pre_iteration_cb: Callable[[], None] | None = None
+        if reset_fork and managed_gateway is not None:
+
+            def pre_iteration_cb() -> None:
+                click.echo("Resetting Anvil fork to latest block...")
+                ok = managed_gateway.reset_anvil_forks()
+                if ok:
+                    click.echo("Fork reset complete.")
+                else:
+                    raise RuntimeError(
+                        "Anvil fork reset failed. Cannot continue with stale fork state. "
+                        "Remove --reset-fork to run without fork resets."
+                    )
+
         async def run_loop_with_cleanup() -> None:
             """Run loop and cleanup resources."""
             try:
@@ -1919,6 +2009,7 @@ def run(
                     strategy=strategy_instance,
                     interval_seconds=interval,
                     iteration_callback=on_iteration,
+                    pre_iteration_callback=pre_iteration_cb,
                 )
             finally:
                 await cleanup_resources()

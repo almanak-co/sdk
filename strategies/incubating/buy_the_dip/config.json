@@ -13,5 +13,9 @@
     "cooldown_minutes": 60,
     "dust_threshold_usd": 0.50,
     "max_slippage_bps": 100,
-    "chain": "arbitrum"
+    "chain": "arbitrum",
+    "anvil_funding": {
+        "ETH": 1,
+        "USDC": 5000
+    }
 }

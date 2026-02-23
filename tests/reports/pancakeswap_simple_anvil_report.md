@@ -1,179 +1,90 @@
-# Anvil Test Report: pancakeswap_simple
+# E2E Strategy Test Report: pancakeswap_simple (Anvil)
 
-**Date:** 2026-02-08 15:27
+**Date:** 2026-02-23 03:58
 **Result:** PASS
-**Duration:** ~7 minutes
-
----
-
-## Summary
-
-Successfully tested the `pancakeswap_simple` strategy on Anvil fork of Arbitrum. The strategy executed a single WETH → USDC swap via PancakeSwap V3, demonstrating correct protocol integration, intent compilation, and transaction execution.
-
----
+**Mode:** Anvil
+**Duration:** ~3 minutes
 
 ## Configuration
 
 | Field | Value |
 |-------|-------|
 | Strategy | pancakeswap_simple |
-| Chain | Arbitrum (42161) |
+| Chain | arbitrum |
 | Network | Anvil fork |
-| Port | 8545 |
-| Swap Amount | $10 USD |
-| From Token | WETH |
-| To Token | USDC |
-| Protocol | PancakeSwap V3 |
-| Max Slippage | 1.00% |
+| Anvil Port | 8545 (manual pre-fund), 62149 (managed by runner) |
+| swap_amount_usd | $10 |
+| from_token | WETH |
+| to_token | USDC |
+| max_slippage | 1.00% |
 
----
+**Config changes made:** None. `swap_amount_usd` was already $10 (well within $100 cap).
 
-## Test Phases
+## Execution
 
-### Phase 1: Setup
-- [x] Anvil started on port 8545 (Arbitrum fork)
+### Setup
+- [x] Anvil started on port 8545 (Arbitrum fork, chain ID 42161)
 - [x] Gateway started on port 50051
-- [x] Wallet funded:
-  - 100 ETH (gas)
-  - 1 WETH (collateral for swap)
-  - 10,000 USDC (initial balance)
+- [x] Wallet pre-funded: 100 ETH, 10 WETH, 10,000 USDC (Anvil default wallet `0xf39Fd6e5...`)
+- [x] Runner also auto-managed its own Anvil fork (port 62149) + gateway (port 50052) with anvil_funding from config
 
-### Phase 2: Strategy Execution
-- [x] Strategy initialized successfully
-- [x] Market data fetched: WETH=$2111.19, USDC=$0.999916
-- [x] Balance check passed: 1 WETH ($2111.19)
-- [x] Swap intent compiled: 0.0047 WETH → 9.9708 USDC (min: 9.8711 USDC)
-- [x] Transaction executed successfully
-- [x] Receipt parsed: 1 swap detected
+### Strategy Run
+- [x] Strategy executed with `--network anvil --once`
+- [x] Prices fetched: WETH = $1,940.06, USDC = $0.999896
+- [x] Balance confirmed: 10 WETH ($19,400.60)
+- [x] Intent produced: SWAP $10 WETH -> USDC via pancakeswap_v3
+- [x] Intent compiled: 0.0052 WETH -> 9.9710 USDC (min: 9.8713 USDC)
+- [x] 2 transactions submitted and confirmed
 
-### Phase 3: Verification
-- [x] Final WETH balance: 0.995263 WETH (spent 0.004736 WETH)
-- [x] Final USDC balance: 10,009.967184 USDC (received 9.967184 USDC)
-- [x] Swap amount matches expected: ~$10 worth of WETH at market price
+### Transactions
 
----
+| # | TX Hash | Gas Used | Status |
+|---|---------|----------|--------|
+| 1 (approve) | `67cda978c109ed015eb8aa501d322887a4ac229a874591bd081059033803f448` | 53,452 | SUCCESS |
+| 2 (swap) | `817e8d011267f940e6edcaf59f67e80519e901b7f058c028552198652fbc4f13` | 173,292 | SUCCESS |
 
-## Execution Log Highlights
+**Total gas used:** 226,744
 
-### Strategy Initialization
-```
-Loaded strategy: PancakeSwapSimpleStrategy
-Network: ANVIL (local fork at http://127.0.0.1:8545)
-Strategy: PancakeSwapSimpleStrategy
-Instance ID: demo_pancakeswap_simple
-Chain: arbitrum
-Wallet: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
-```
+### Key Log Output
 
-### Market Data
-```
-Prices: WETH=$2111.19, USDC=$0.999916
-Balance: 1 WETH ($2111.19)
+```text
+Aggregated price for WETH/USD: 1940.06 (confidence: 1.00, sources: 1/1, outliers: 0)
+Aggregated price for USDC/USD: 0.999896 (confidence: 1.00, sources: 1/1, outliers: 0)
+Balance: 10 WETH ($19400.60)
 Swapping $10 WETH -> USDC via PancakeSwap V3
+Compiled SWAP: 0.0052 WETH -> 9.9710 USDC (min: 9.8713 USDC) | Slippage: 1.00% | Txs: 2 | Gas: 280,000
+Transaction confirmed: tx_hash=67cda978..., block=434902203, gas_used=53452
+Transaction confirmed: tx_hash=817e8d01..., block=434902204, gas_used=173292
+EXECUTED: SWAP completed successfully | Txs: 2 | 226,744 gas
+Status: SUCCESS | Intent: SWAP | Gas used: 226744 | Duration: 21816ms
 ```
 
-### Intent Compilation
-```
-📈 demo_pancakeswap_simple intent: 🔄 SWAP: $10.00 WETH → USDC (slippage: 1.00%) via pancakeswap_v3
-✅ Compiled SWAP: 0.0047 WETH → 9.9708 USDC (min: 9.8711 USDC)
-   Slippage: 1.00% | Txs: 2 | Gas: 280,000
-```
+## Suspicious Behaviour
 
-### Execution Result
-```
-Execution successful for demo_pancakeswap_simple: gas_used=275031, tx_count=2
-Parsed PancakeSwap V3 receipt: tx=..., swaps=1
-Status: SUCCESS | Intent: SWAP | Gas used: 275031 | Duration: 5875ms
-```
+| # | Source | Severity | Pattern | Log Line |
+|---|--------|----------|---------|----------|
+| 1 | strategy | INFO | Insecure mode (expected for Anvil) | `INSECURE MODE: Auth interceptor disabled - no auth_token configured. This is acceptable for local development on 'anvil'.` |
+| 2 | strategy | WARNING | CoinGecko free tier rate limit risk | `COINGECKO_API_KEY not configured - CoinGecko will use free tier API (30 requests/minute limit)` |
+| 3 | strategy | WARNING | Gas estimate below compiler limit | `Gas estimate tx[0]: raw=53,800 buffered=80,700 (x1.5) < compiler=120,000, using compiler limit` |
+| 4 | strategy | WARNING | PancakeSwapV3ReceiptParser missing swap_amounts | `Parser PancakeSwapV3ReceiptParser does not declare support for 'swap_amounts' (expected by SWAP)` |
+| 5 | strategy | WARNING | Amount chaining broken due to missing swap_amounts | `Amount chaining: no output amount extracted from step 1; subsequent amount='all' steps will fail` |
+| 6 | strategy | INFO | Anvil fork port not freed cleanly on shutdown | `Port 62149 not freed after 5.0s` |
 
----
+**Notes on findings:**
 
-## Transactions
+- Findings #1 and #2 are normal/expected for local Anvil testing with no production API keys. No functional impact on this run.
+- Finding #3 (gas estimate below compiler limit) is benign -- the compiler limit was used as the floor and both transactions confirmed successfully. Actual gas (53,452) was well within the limit.
+- **Findings #4 and #5 are a real bug:** `PancakeSwapV3ReceiptParser` does not implement the `extract_swap_amounts()` method required by the `ResultEnricher` framework contract. This means:
+  - The strategy cannot chain swap output amounts (e.g., `amount='all'` for a subsequent step would fail silently).
+  - Post-execution enrichment data (actual in/out amounts) is not surfaced to the strategy author's `on_intent_executed` callback.
+  - This is a gap compared to Uniswap V3 and Enso receipt parsers which both implement `extract_swap_amounts()`.
+- Finding #6 is a minor Anvil cleanup race condition on teardown; not functionally impactful.
 
-| Phase | Action | Gas Used | Status |
-|-------|--------|----------|--------|
-| Setup | Wrap 1 ETH to WETH | 57,975 | ✅ |
-| Execute | Approve WETH | ~50,000 | ✅ |
-| Execute | Swap WETH → USDC | ~225,031 | ✅ |
-| **Total** | | **275,031** | **✅** |
+## Result
 
----
-
-## Final Balances
-
-### Before Swap
-- WETH: 1.0 WETH
-- USDC: 10,000 USDC
-
-### After Swap
-- WETH: 0.995263 WETH
-- USDC: 10,009.967184 USDC
-
-### Changes
-- WETH spent: 0.004736 WETH (~$10.00 at market price)
-- USDC received: 9.967184 USDC
-- Effective rate: ~$0.999 per USDC (within 1% slippage tolerance)
+**PASS** - The pancakeswap_simple strategy executed a $10 WETH->USDC swap via PancakeSwap V3 on Arbitrum Anvil fork. 2 transactions confirmed (approve + swap), total 226,744 gas. One notable bug detected: `PancakeSwapV3ReceiptParser` does not implement `swap_amounts` extraction, breaking amount chaining for multi-step intents that depend on prior swap outputs.
 
 ---
 
-## Technical Details
-
-### Intent Compilation
-- Intent type: SWAP
-- Protocol: pancakeswap_v3
-- Compiler: IntentCompiler
-- Actions generated: 2 (APPROVE + SWAP)
-- Gas estimate: 280,000 (actual: 275,031)
-
-### PancakeSwap V3 Integration
-- Router used: PancakeSwap V3 SwapRouter
-- Receipt parser: pancakeswap_v3.ReceiptParser
-- Swap events detected: 1
-- No errors or warnings
-
-### Gateway Services
-- MarketService: Price data fetched successfully
-- StateService: Strategy state managed
-- ExecutionService: Transaction submitted and confirmed
-- TokenService: Token addresses resolved
-
----
-
-## Test Validation
-
-### Success Criteria
-- [x] Strategy loaded without errors
-- [x] Market data fetched successfully
-- [x] Intent compiled to valid transactions
-- [x] Transactions executed on Anvil
-- [x] Receipts parsed correctly
-- [x] Final balances reflect expected swap
-- [x] No errors or exceptions raised
-
-### Edge Cases Tested
-- [x] Balance check: Strategy correctly validates sufficient WETH balance
-- [x] Slippage protection: Min output calculated (9.8711 USDC for 1% slippage)
-- [x] Price oracle: Both WETH and USDC prices fetched and logged
-
----
-
-## Conclusion
-
-**PASS** - The `pancakeswap_simple` strategy executed successfully on Anvil fork of Arbitrum. The test demonstrates:
-
-1. Correct PancakeSwap V3 protocol integration
-2. Proper intent compilation (SWAP intent → 2 transactions)
-3. Successful transaction execution (gas_used: 275,031)
-4. Accurate receipt parsing (1 swap detected)
-5. Expected balance changes (0.0047 WETH → 9.97 USDC)
-
-The strategy is production-ready for PancakeSwap V3 swaps on Arbitrum mainnet.
-
----
-
-## Recommendations
-
-1. **Production Deployment**: Strategy is ready for mainnet deployment
-2. **Gas Optimization**: Actual gas usage (275K) aligned with estimate (280K)
-3. **Slippage Tuning**: 1% slippage is reasonable for small swaps; consider dynamic slippage for larger amounts
-4. **Multi-Swap Testing**: Consider testing with multiple consecutive swaps to verify state management
+SUSPICIOUS_BEHAVIOUR_COUNT: 6
+SUSPICIOUS_BEHAVIOUR_ERRORS: 0

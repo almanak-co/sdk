@@ -5,7 +5,7 @@
     "chain": "ethereum",
     "anvil_funding": {
         "ETH": 100,
-        "DAI": 10000,
+        "DAI": 10,
         "WETH": 1
     }
 }

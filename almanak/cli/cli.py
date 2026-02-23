@@ -732,7 +732,8 @@ def new(ctx, name, working_dir, template, chain):
     "-n",
     type=click.Choice(["mainnet", "anvil"], case_sensitive=False),
     default=None,
-    help="Network environment: 'mainnet' for production RPC, 'anvil' for local fork (default: anvil).",
+    help="Network environment: 'mainnet' for production RPC, 'anvil' for local fork testing. "
+    "For paper trading with PnL tracking, use 'almanak strat backtest paper'.",
 )
 @click.option(
     "--gateway-host",
@@ -790,6 +791,25 @@ def new(ctx, name, working_dir, template, chain):
     default=8501,
     help="Port to run the dashboard on (default: 8501).",
 )
+@click.option(
+    "--wallet",
+    type=click.Choice(["default", "isolated"], case_sensitive=False),
+    default="default",
+    help="Wallet mode for Anvil: 'isolated' derives a unique wallet per strategy for balance isolation.",
+)
+@click.option(
+    "--log-file",
+    type=click.Path(),
+    default=None,
+    help="Write JSON logs to this file (in addition to console output). Useful for AI agent analysis.",
+)
+@click.option(
+    "--reset-fork",
+    "reset_fork",
+    is_flag=True,
+    default=False,
+    help="Reset Anvil fork to latest mainnet block before each iteration (requires --network anvil).",
+)
 @click.pass_context
 def strategy_run(
     ctx,
@@ -811,6 +831,9 @@ def strategy_run(
     copy_strict,
     dashboard,
     dashboard_port,
+    wallet,
+    log_file,
+    reset_fork,
 ):
     """Run a strategy from its working directory.
 
@@ -890,6 +913,9 @@ def strategy_run(
             copy_shadow=copy_shadow,
             copy_replay_file=copy_replay_file,
             copy_strict=copy_strict,
+            wallet=wallet,
+            log_file=log_file,
+            reset_fork=reset_fork,
             working_dir=working_dir,
             strategy_id_override=id,
         )

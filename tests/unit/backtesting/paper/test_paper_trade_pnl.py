@@ -22,7 +22,7 @@ class TestNetTokenFlowUSD:
         """Test PnL calculation for a profitable swap.
 
         Scenario: Buy 1 ETH for 2000 USDC when ETH is worth 2500 USD
-        Expected: tokens_out (ETH) = $2500, tokens_in (USDC) = $2000
+        tokens_in (received) = 1 ETH ($2500), tokens_out (sent) = 2000 USDC ($2000)
         Net flow = $2500 - $2000 = $500 profit
         """
         trade = PaperTrade(
@@ -32,22 +32,22 @@ class TestNetTokenFlowUSD:
             tx_hash="0x123",
             gas_used=100000,
             gas_cost_usd=Decimal("5.00"),
-            tokens_in={"USDC": Decimal("2000")},  # Paid 2000 USDC
-            tokens_out={"ETH": Decimal("1")},  # Received 1 ETH
+            tokens_in={"ETH": Decimal("1")},  # Received 1 ETH
+            tokens_out={"USDC": Decimal("2000")},  # Sent 2000 USDC
             token_prices_usd={
                 "USDC": Decimal("1"),
                 "ETH": Decimal("2500"),
             },
         )
 
-        # Net token flow: received $2500 worth of ETH, paid $2000 USDC
+        # Net token flow: received $2500 worth of ETH, sent $2000 USDC
         assert trade.net_token_flow_usd == Decimal("500")
 
     def test_swap_loss_scenario(self):
         """Test PnL calculation for a losing swap.
 
         Scenario: Buy 1 ETH for 2000 USDC when ETH is worth 1800 USD
-        Expected: tokens_out (ETH) = $1800, tokens_in (USDC) = $2000
+        tokens_in (received) = 1 ETH ($1800), tokens_out (sent) = 2000 USDC ($2000)
         Net flow = $1800 - $2000 = -$200 loss
         """
         trade = PaperTrade(
@@ -57,8 +57,8 @@ class TestNetTokenFlowUSD:
             tx_hash="0x123",
             gas_used=100000,
             gas_cost_usd=Decimal("5.00"),
-            tokens_in={"USDC": Decimal("2000")},
-            tokens_out={"ETH": Decimal("1")},
+            tokens_in={"ETH": Decimal("1")},  # Received 1 ETH
+            tokens_out={"USDC": Decimal("2000")},  # Sent 2000 USDC
             token_prices_usd={
                 "USDC": Decimal("1"),
                 "ETH": Decimal("1800"),
@@ -71,7 +71,7 @@ class TestNetTokenFlowUSD:
         """Test PnL calculation when tokens have equal value.
 
         Scenario: Swap 2000 USDC for 1 ETH at exactly $2000 ETH price
-        Expected: Net flow = $2000 - $2000 = $0
+        Net flow = $2000 - $2000 = $0
         """
         trade = PaperTrade(
             timestamp=datetime.now(),
@@ -80,8 +80,8 @@ class TestNetTokenFlowUSD:
             tx_hash="0x123",
             gas_used=100000,
             gas_cost_usd=Decimal("5.00"),
-            tokens_in={"USDC": Decimal("2000")},
-            tokens_out={"ETH": Decimal("1")},
+            tokens_in={"ETH": Decimal("1")},  # Received 1 ETH
+            tokens_out={"USDC": Decimal("2000")},  # Sent 2000 USDC
             token_prices_usd={
                 "USDC": Decimal("1"),
                 "ETH": Decimal("2000"),
@@ -99,8 +99,8 @@ class TestNetTokenFlowUSD:
             tx_hash="0x123",
             gas_used=100000,
             gas_cost_usd=Decimal("5.00"),
-            tokens_in={"USDC": Decimal("2000")},
-            tokens_out={"ETH": Decimal("1")},
+            tokens_in={"ETH": Decimal("1")},  # Received
+            tokens_out={"USDC": Decimal("2000")},  # Sent
             token_prices_usd={},  # No prices
         )
 
@@ -115,16 +115,16 @@ class TestNetTokenFlowUSD:
             tx_hash="0x123",
             gas_used=100000,
             gas_cost_usd=Decimal("5.00"),
-            tokens_in={"USDC": Decimal("2000")},
-            tokens_out={"ETH": Decimal("1")},
+            tokens_in={"ETH": Decimal("1")},  # Received (price missing)
+            tokens_out={"USDC": Decimal("2000")},  # Sent
             token_prices_usd={
                 "USDC": Decimal("1"),
                 # ETH price missing
             },
         )
 
-        # tokens_out_usd = 1 * 0 = 0
-        # tokens_in_usd = 2000 * 1 = 2000
+        # tokens_in_usd (received) = 1 * 0 = 0
+        # tokens_out_usd (sent) = 2000 * 1 = 2000
         # Net = 0 - 2000 = -2000
         assert trade.net_token_flow_usd == Decimal("-2000")
 
@@ -132,8 +132,8 @@ class TestNetTokenFlowUSD:
         """Test PnL with multiple tokens on both sides.
 
         Scenario: Complex swap with multiple inputs and outputs
-        Input: 1000 USDC + 0.5 ETH (worth $1500 at $3000 ETH)
-        Output: 1 WBTC (worth $60000)
+        Sent: 1000 USDC + 0.5 ETH (worth $1500 at $3000 ETH)
+        Received: 1 WBTC (worth $60000)
         Net flow = $60000 - $1000 - $1500 = $57500
         """
         trade = PaperTrade(
@@ -143,11 +143,11 @@ class TestNetTokenFlowUSD:
             tx_hash="0x123",
             gas_used=200000,
             gas_cost_usd=Decimal("10.00"),
-            tokens_in={
-                "USDC": Decimal("1000"),
-                "ETH": Decimal("0.5"),
+            tokens_in={"WBTC": Decimal("1")},  # Received
+            tokens_out={
+                "USDC": Decimal("1000"),  # Sent
+                "ETH": Decimal("0.5"),  # Sent
             },
-            tokens_out={"WBTC": Decimal("1")},
             token_prices_usd={
                 "USDC": Decimal("1"),
                 "ETH": Decimal("3000"),
@@ -155,8 +155,8 @@ class TestNetTokenFlowUSD:
             },
         )
 
-        # tokens_out_usd = 60000
-        # tokens_in_usd = 1000 + 1500 = 2500
+        # tokens_in_usd (received) = 60000
+        # tokens_out_usd (sent) = 1000 + 1500 = 2500
         # Net = 60000 - 2500 = 57500
         assert trade.net_token_flow_usd == Decimal("57500")
 
@@ -169,8 +169,8 @@ class TestNetTokenFlowUSD:
             tx_hash="0x123",
             gas_used=100000,
             gas_cost_usd=Decimal("5.00"),
-            tokens_in={"usdc": Decimal("2000")},  # lowercase
-            tokens_out={"eth": Decimal("1")},  # lowercase
+            tokens_in={"eth": Decimal("1")},  # Received (lowercase)
+            tokens_out={"usdc": Decimal("2000")},  # Sent (lowercase)
             token_prices_usd={
                 "USDC": Decimal("1"),  # uppercase
                 "ETH": Decimal("2500"),  # uppercase
@@ -196,8 +196,8 @@ class TestNetPnlUSD:
             tx_hash="0x123",
             gas_used=100000,
             gas_cost_usd=Decimal("5.00"),
-            tokens_in={"USDC": Decimal("2000")},
-            tokens_out={"ETH": Decimal("1")},
+            tokens_in={"ETH": Decimal("1")},  # Received
+            tokens_out={"USDC": Decimal("2000")},  # Sent
             token_prices_usd={
                 "USDC": Decimal("1"),
                 "ETH": Decimal("2500"),
@@ -219,8 +219,8 @@ class TestNetPnlUSD:
             tx_hash="0x123",
             gas_used=100000,
             gas_cost_usd=Decimal("5.00"),
-            tokens_in={"USDC": Decimal("2000")},
-            tokens_out={"ETH": Decimal("1")},
+            tokens_in={"ETH": Decimal("1")},  # Received
+            tokens_out={"USDC": Decimal("2000")},  # Sent
             token_prices_usd={
                 "USDC": Decimal("1"),
                 "ETH": Decimal("1800"),
@@ -242,8 +242,8 @@ class TestNetPnlUSD:
             tx_hash="0x123",
             gas_used=100000,
             gas_cost_usd=Decimal("5.00"),
-            tokens_in={"USDC": Decimal("2000")},
-            tokens_out={"ETH": Decimal("1")},
+            tokens_in={"ETH": Decimal("1")},  # Received
+            tokens_out={"USDC": Decimal("2000")},  # Sent
             token_prices_usd={
                 "USDC": Decimal("1"),
                 "ETH": Decimal("2000"),
@@ -265,8 +265,8 @@ class TestNetPnlUSD:
             tx_hash="0x123",
             gas_used=500000,
             gas_cost_usd=Decimal("150.00"),  # High gas
-            tokens_in={"USDC": Decimal("1000")},
-            tokens_out={"ETH": Decimal("0.4")},  # Worth $1100 at $2750
+            tokens_in={"ETH": Decimal("0.4")},  # Received, worth $1100 at $2750
+            tokens_out={"USDC": Decimal("1000")},  # Sent
             token_prices_usd={
                 "USDC": Decimal("1"),
                 "ETH": Decimal("2750"),
@@ -285,8 +285,8 @@ class TestNetPnlUSD:
             tx_hash="0x123",
             gas_used=0,
             gas_cost_usd=Decimal("0"),
-            tokens_in={"USDC": Decimal("2000")},
-            tokens_out={"ETH": Decimal("1")},
+            tokens_in={"ETH": Decimal("1")},  # Received
+            tokens_out={"USDC": Decimal("2000")},  # Sent
             token_prices_usd={
                 "USDC": Decimal("1"),
                 "ETH": Decimal("2500"),
@@ -308,8 +308,8 @@ class TestPaperTradeSerialization:
             tx_hash="0x123",
             gas_used=100000,
             gas_cost_usd=Decimal("5.00"),
-            tokens_in={"USDC": Decimal("2000")},
-            tokens_out={"ETH": Decimal("1")},
+            tokens_in={"ETH": Decimal("1")},  # Received
+            tokens_out={"USDC": Decimal("2000")},  # Sent
             token_prices_usd={
                 "USDC": Decimal("1"),
                 "ETH": Decimal("2500"),
@@ -334,8 +334,8 @@ class TestPaperTradeSerialization:
             tx_hash="0x123",
             gas_used=100000,
             gas_cost_usd=Decimal("5.00"),
-            tokens_in={"USDC": Decimal("2000")},
-            tokens_out={"ETH": Decimal("1")},
+            tokens_in={"ETH": Decimal("1")},  # Received
+            tokens_out={"USDC": Decimal("2000")},  # Sent
             token_prices_usd={
                 "USDC": Decimal("1"),
                 "ETH": Decimal("2500"),
@@ -368,11 +368,11 @@ class TestWinRateProfitFactorScenarios:
             tx_hash="0x123",
             gas_used=100000,
             gas_cost_usd=Decimal("10.00"),
-            tokens_in={"USDC": Decimal("1000")},
-            tokens_out={"ETH": Decimal("1")},
+            tokens_in={"ETH": Decimal("1")},  # Received 1 ETH worth $2000
+            tokens_out={"USDC": Decimal("1000")},  # Sent 1000 USDC
             token_prices_usd={
                 "USDC": Decimal("1"),
-                "ETH": Decimal("2000"),  # Worth 2000, paid 1000
+                "ETH": Decimal("2000"),
             },
         )
 
@@ -387,11 +387,11 @@ class TestWinRateProfitFactorScenarios:
             tx_hash="0x123",
             gas_used=100000,
             gas_cost_usd=Decimal("10.00"),
-            tokens_in={"USDC": Decimal("1000")},
-            tokens_out={"ETH": Decimal("1")},
+            tokens_in={"ETH": Decimal("1")},  # Received 1 ETH worth $500
+            tokens_out={"USDC": Decimal("1000")},  # Sent 1000 USDC
             token_prices_usd={
                 "USDC": Decimal("1"),
-                "ETH": Decimal("500"),  # Worth 500, paid 1000
+                "ETH": Decimal("500"),
             },
         )
 
@@ -406,11 +406,11 @@ class TestWinRateProfitFactorScenarios:
             tx_hash="0x123",
             gas_used=100000,
             gas_cost_usd=Decimal("10.00"),
-            tokens_in={"USDC": Decimal("1000")},
-            tokens_out={"ETH": Decimal("1")},
+            tokens_in={"ETH": Decimal("1")},  # Received 1 ETH worth $1000
+            tokens_out={"USDC": Decimal("1000")},  # Sent 1000 USDC
             token_prices_usd={
                 "USDC": Decimal("1"),
-                "ETH": Decimal("1000"),  # Worth 1000, paid 1000
+                "ETH": Decimal("1000"),
             },
         )
 

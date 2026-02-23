@@ -7,5 +7,9 @@
     "base_token": "WETH",
     "quote_token": "USDC",
     "chain": "base",
-    "force_action": "buy"
+    "force_action": "buy",
+    "anvil_funding": {
+        "ETH": 1,
+        "USDC": 5000
+    }
 }

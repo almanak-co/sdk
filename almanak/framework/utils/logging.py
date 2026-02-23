@@ -39,6 +39,7 @@ import sys
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -262,6 +263,38 @@ def configure_logging(
     logging.getLogger("web3").setLevel(logging.WARNING)
 
     _logging_configured = True
+
+
+def add_file_handler(
+    log_file: str,
+    level: LogLevel = LogLevel.DEBUG,
+) -> None:
+    """Add a JSON file handler to the root logger.
+
+    Writes machine-readable JSON logs to the specified file, suitable for
+    post-hoc analysis by AI agents or log aggregation systems. This is
+    additive -- the existing console handler is preserved.
+
+    Args:
+        log_file: Path to the log file (created if it doesn't exist)
+        level: Minimum log level for the file handler (default: DEBUG)
+    """
+    shared_processors = _get_shared_processors()
+
+    json_formatter = structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=shared_processors,
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            structlog.processors.JSONRenderer(),
+        ],
+    )
+
+    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+    handler.setFormatter(json_formatter)
+    handler.setLevel(getattr(logging, level.value))
+
+    logging.getLogger().addHandler(handler)
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:

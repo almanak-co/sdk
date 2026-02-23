@@ -1129,6 +1129,7 @@ class StrategyRunner:
         strategy: StrategyProtocol,
         interval_seconds: int | None = None,
         iteration_callback: Callable[[IterationResult], None] | None = None,
+        pre_iteration_callback: Callable[[], None] | None = None,
     ) -> None:
         """Run the strategy in a continuous loop.
 
@@ -1139,6 +1140,9 @@ class StrategyRunner:
             strategy: The strategy to execute
             interval_seconds: Seconds between iterations (uses config default if None)
             iteration_callback: Optional callback called after each iteration
+            pre_iteration_callback: Optional callback called before each iteration
+                (e.g., to reset Anvil forks for live paper trading). Errors are
+                logged but do not stop the loop.
         """
         interval = interval_seconds or self.config.default_interval_seconds
         strategy_id = strategy.strategy_id
@@ -1204,6 +1208,13 @@ class StrategyRunner:
 
         while not self._shutdown_requested:
             try:
+                # Pre-iteration callback (e.g., reset Anvil forks)
+                if pre_iteration_callback:
+                    try:
+                        pre_iteration_callback()
+                    except Exception as e:
+                        logger.error(f"Pre-iteration callback error: {e}")
+
                 # Run iteration
                 result = await self.run_iteration(strategy)
 

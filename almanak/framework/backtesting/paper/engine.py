@@ -520,6 +520,7 @@ async def create_market_snapshot_from_fork(
     wallet_address: str,
     portfolio_tracker: PaperPortfolioTracker | None = None,
     token_prices: dict[str, Decimal] | None = None,
+    price_oracle: Any | None = None,
 ) -> MarketSnapshot:
     """Create a MarketSnapshot from the current fork state.
 
@@ -532,6 +533,7 @@ async def create_market_snapshot_from_fork(
         wallet_address: Wallet address for balance queries
         portfolio_tracker: Optional portfolio tracker for balance data
         token_prices: Optional dict of token symbol to USD price for valuation
+        price_oracle: Optional PriceOracle/PriceAggregator for market.price() calls
 
     Returns:
         MarketSnapshot populated with fork-based data
@@ -541,6 +543,7 @@ async def create_market_snapshot_from_fork(
         chain=chain,
         wallet_address=wallet_address,
         timestamp=datetime.now(UTC),
+        price_oracle=price_oracle,
     )
 
     # Add metadata about fork state
@@ -823,7 +826,7 @@ class PaperTrader:
                 fee_usd=Decimal("0"),  # Fees embedded in execution
                 slippage_usd=Decimal("0"),
                 gas_cost_usd=trade.gas_cost_usd,
-                pnl_usd=trade.net_pnl_usd,  # Net PnL: token flows minus gas costs
+                pnl_usd=trade.net_token_flow_usd,  # Pre-gas PnL: TradeRecord.net_pnl_usd subtracts gas itself
                 success=True,  # All trades in _trades are successful
                 amount_usd=Decimal(trade.metadata.get("amount_usd", "0")),
                 protocol=trade.protocol,
@@ -1194,17 +1197,55 @@ class PaperTrader:
                 chain=self.config.chain,
             )
 
+            # Fund the on-chain wallet with initial balances (first startup)
+            await self._sync_wallet_to_fork(use_initial=True)
+
+    async def _sync_wallet_to_fork(self, *, use_initial: bool = False) -> None:
+        """Fund the on-chain wallet to match tracked portfolio balances.
+
+        Uses the portfolio tracker's current balances so that after a fork
+        reset the on-chain wallet matches the strategy's actual position.
+        Falls back to config initial balances on first init (before the
+        tracker has been started) or when use_initial=True.
+
+        Args:
+            use_initial: Force using config initial balances (for first startup).
+        """
+        # Use the hardcoded Anvil account #0 address
+        # TODO: Support custom private key via PaperTraderConfig
+        wallet_address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+
+        # Use tracker's current balances if available, otherwise config initial
+        if not use_initial and self.portfolio_tracker.current_balances:
+            balances = dict(self.portfolio_tracker.current_balances)
+        else:
+            balances = self.config.get_initial_balances()
+
+        # Fund ETH
+        eth_amount = balances.pop("ETH", None)
+        if eth_amount and eth_amount > 0:
+            success = await self.fork_manager.fund_wallet(wallet_address, eth_amount)
+            if not success:
+                logger.warning(f"[{self._backtest_id}] Failed to fund wallet with {eth_amount} ETH")
+
+        # Fund ERC-20 tokens
+        if balances:
+            success = await self.fork_manager.fund_tokens(wallet_address, balances)
+            if not success:
+                logger.warning(f"[{self._backtest_id}] Failed to fund some ERC-20 tokens")
+
     async def _initialize_orchestrator(self) -> None:
         """Initialize the execution orchestrator with fork connection."""
         from almanak.framework.execution.signer.local import LocalKeySigner
         from almanak.framework.execution.simulator.direct import DirectSimulator
-        from almanak.framework.execution.submitter.mempool import PublicMempoolSubmitter  # type: ignore[import-untyped]
+        from almanak.framework.execution.submitter.public import PublicMempoolSubmitter
 
         # Get fork RPC URL
         fork_rpc = self.fork_manager.get_rpc_url()
 
         # Create signer with test private key (for fork only)
         # Note: This uses a deterministic test key for Anvil (first default Anvil account)
+        # TODO: Support custom private key via PaperTraderConfig for non-default Anvil wallets
         test_private_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
         signer = LocalKeySigner(private_key=test_private_key)
 
@@ -1265,10 +1306,11 @@ class PaperTrader:
                 logger.warning(f"[{self._backtest_id}] Fork not running, skipping tick")
                 return None
 
-            # Fetch prices for portfolio tokens
+            # Fetch prices for portfolio tokens (cached for IntentCompiler use)
             token_prices = await self._get_portfolio_prices()
+            self._cached_prices = token_prices
 
-            # Create market snapshot from fork
+            # Create market snapshot from fork (with price oracle so strategies can call market.price())
             wallet_address = self._orchestrator.signer.address if self._orchestrator else ""
             snapshot = await create_market_snapshot_from_fork(
                 fork_manager=self.fork_manager,
@@ -1276,6 +1318,7 @@ class PaperTrader:
                 wallet_address=wallet_address,
                 portfolio_tracker=self.portfolio_tracker,
                 token_prices=token_prices,
+                price_oracle=self._price_aggregator,
             )
 
             # Call strategy decide
@@ -1635,6 +1678,9 @@ class PaperTrader:
         # Reinitialize orchestrator with refreshed fork
         await self._initialize_orchestrator()
 
+        # Re-fund wallet after fork reset (balances are wiped on reset)
+        await self._sync_wallet_to_fork()
+
         if self.fork_manager.is_running:
             logger.info(f"[{self._backtest_id}] Fork refreshed to block {self.fork_manager.current_block}")
 
@@ -1752,11 +1798,20 @@ class PaperTrader:
             except Exception as e:
                 logger.warning(f"[{self._backtest_id}] Intent compile() failed: {e}")
 
-        # Try using IntentCompiler
+        # Try using IntentCompiler with current prices
         try:
             from almanak.framework.intents import IntentCompiler
 
-            compiler = IntentCompiler(chain=self.config.chain)
+            # Build price oracle dict from cached portfolio prices
+            price_dict = getattr(self, "_cached_prices", None)
+
+            wallet_address = self._orchestrator.signer.address if self._orchestrator else ""
+            compiler = IntentCompiler(
+                chain=self.config.chain,
+                wallet_address=wallet_address,
+                price_oracle=price_dict,
+                rpc_url=self.fork_manager.get_rpc_url() if self.fork_manager.is_running else None,
+            )
             result = compiler.compile(intent)
             if result.status.value == "SUCCESS":
                 return result.action_bundle

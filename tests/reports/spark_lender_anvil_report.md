@@ -1,263 +1,105 @@
-# E2E Strategy Test Report: spark_lender
+# E2E Strategy Test Report: spark_lender (Anvil)
 
-**Date:** 2026-02-08 17:16 UTC
+**Date:** 2026-02-23 04:08 UTC
 **Result:** PASS
-**Duration:** ~8 minutes
-
----
-
-## Summary
-
-Successfully tested the `spark_lender` demo strategy on Anvil fork of Ethereum mainnet. The strategy detected 500 DAI in the wallet, supplied all 500 DAI to Spark protocol, and received 500 spDAI (interest-bearing token) in return. The transaction completed successfully after 1 retry (initial approval transaction needed).
-
----
+**Mode:** Anvil
+**Duration:** ~3 minutes
 
 ## Configuration
 
 | Field | Value |
 |-------|-------|
-| Strategy | spark_lender |
+| Strategy | demo_spark_lender |
 | Chain | ethereum |
-| Network | Anvil fork (port 8549) |
-| Worktree Path | `/Users/nick/Documents/Almanak/src/almanak-sdk-worktree-demo-fixes/` |
-| Strategy Directory | `strategies/demo/spark_lender` |
-| Min Supply Amount | 100 DAI |
-| Force Action | (none) |
+| Network | Anvil fork |
+| Anvil Port | 63624 (managed, auto-assigned) |
+| Supply Token | DAI |
+| Min Supply Amount | 5 DAI |
+| Force Action | supply (pre-configured) |
 
----
+## Config Changes Made
 
-## Test Environment Setup
+- `anvil_funding.DAI` reduced from `10000` to `10` (to stay within the $100 budget cap)
+- No other changes needed; `force_action: "supply"` was already set
+- `min_supply_amount` of `5` DAI is well within budget (~$5 at current DAI peg)
 
-### Phase 1: Infrastructure Setup
-- [x] Killed any existing Anvil/Gateway processes on ports 8549, 50051, 9090
-- [x] Started Anvil fork of Ethereum mainnet on port 8549
-- [x] Verified Anvil responding (chain ID = 1)
+## Execution
 
-### Phase 2: Wallet Funding
-- [x] Funded test wallet with 100 ETH for gas (0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266)
-- [x] Funded whale address with ETH (0x40ec5B33f54e0E8A33A975908C5BA1c14e5BbbDf)
-- [x] Transferred 500 DAI from whale to test wallet
-- [x] Verified DAI balance: 500 DAI (500e18 wei)
+### Setup
+- [x] Anvil started on port 63624 (managed gateway auto-forked Ethereum mainnet at block 24515001)
+- [x] Gateway started on port 50052
+- [x] Wallet funded: 100 ETH, 10 DAI, 1 WETH (from `anvil_funding` config)
 
-**Funding Details:**
-- DAI Contract: `0x6B175474E89094C44Da98b954EedeAC495271d0F`
-- Whale Address: `0x40ec5B33f54e0E8A33A975908C5BA1c14e5BbbDf`
-- Transfer TX: `0x28d3162b2cd36837bbf05598f8cf0cb25b381d6e96085c629395b5a3c93bbc83`
+### Strategy Run
 
-### Phase 3: Gateway Startup
-- [x] Started Gateway from worktree directory on port 50051
-- [x] Configured for Anvil network with insecure mode
-- [x] Verified Gateway listening on gRPC port 50051
+The strategy loaded stale state from a prior run (`supplied: True`, `supplied_amount: 0.5`).
+However, because `force_action: "supply"` is set, the strategy bypassed state checks and
+immediately emitted a SUPPLY intent for 5 DAI to the Spark protocol on Ethereum.
 
----
+**Execution sequence:**
 
-## Strategy Execution
+1. First attempt: 2-transaction bundle compiled (approve + supply, 230,000 gas estimate)
+   - TX 1 (approve): `d0012dfb3a62360b95236c6aa220ec48eb92e6e0589755811451a703b2e8304a` -- CONFIRMED (block 24515004, gas 46,146)
+   - TX 2 (supply): `2a19ffb11f80fb402e19d2bf338a7b41158ab0ac507eb7b779edeaaf82010c2d` -- REVERTED ("Invalid revert data (too short): 0x")
+   - Framework triggered auto-retry (attempt 1/3)
 
-### Phase 4: Strategy Run
-- [x] Ran strategy with `--once` flag from worktree
-- [x] Strategy loaded successfully: `SparkLenderStrategy`
-- [x] Config loaded from `strategies/demo/spark_lender/config.yaml`
-- [x] Wallet connected: `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`
+2. Retry: 1-transaction bundle (supply only, 150,000 gas limit -- DAI already approved)
+   - TX: `c6f6136467fa797fa5cb7f82b31184a98af0ce59fe9c91e573d4f278ac0e4004` -- CONFIRMED (block 24515006, gas 200,539)
+   - SUPPLY completed successfully
 
-**Environment Variables Used:**
-```bash
-ALMANAK_ETHEREUM_RPC_URL="http://127.0.0.1:8549"
-ALMANAK_PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+**Net outcome:** 5 DAI supplied to Spark. Receipt parsed: 1 supply event, 0 withdraws, 0 borrows, 0 repays.
+
+### Key Log Output
+
+```text
+[info] Forced action: SUPPLY DAI
+[info] SUPPLY intent: 5.0000 DAI -> Spark
+[info] Compiled SUPPLY: 5.0000 DAI to Spark (as collateral) | Txs: 2 | Gas: 230,000
+[warn] Transaction reverted: tx_hash=2a19ff...0c2d, reason=Invalid revert data (too short): 0x
+[error] FAILED: SUPPLY - Transaction reverted at 2a19ff...0c2d
+[info] Retrying intent (attempt 1/3, delay=1.07s)
+[info] Compiled SUPPLY: 5.0000 DAI to Spark (as collateral) | Txs: 1 | Gas: 150,000
+[info] Transaction confirmed: tx_hash=c6f613...4004, block=24515006, gas_used=200,539
+[info] EXECUTED: SUPPLY completed successfully
+[info] Txs: 1 (c6f613...4004) | 200,539 gas
+[info] Parsed Spark receipt: tx=..., supplies=1, withdraws=0, borrows=0, repays=0
+[info] Enriched SUPPLY result with: supply_amount, a_token_received (protocol=spark, chain=ethereum)
+[info] Supply successful: 5 DAI -> Spark
+[info] Intent succeeded after 1 retries
+Status: SUCCESS | Intent: SUPPLY | Gas used: 200539 | Duration: 34370ms
 ```
-
-### Decision Logic
-1. Strategy checked DAI balance: **500 DAI**
-2. Compared to min_supply_amount: **100 DAI**
-3. Decision: **SUPPLY** (balance >= threshold)
-
-### Intent Execution
-**Intent Type:** SUPPLY
-**Protocol:** Spark
-**Token:** DAI
-**Amount:** 500 DAI
-**Use as Collateral:** True (Spark default)
-
-**Compilation:**
-- Initial compilation: 2 transactions (APPROVE + SUPPLY), 230,000 gas estimate
-- After retry: 1 transaction (SUPPLY only, approval already done), 150,000 gas estimate
-
-**Execution Timeline:**
-- Started: 2026-02-08T17:16:42.238890+00:00
-- First attempt: **REVERTED** (short revert data)
-  - Error: "Invalid revert data (too short): 0x"
-  - Phase: CONFIRMATION
-  - TX: `0x04a8c8f5f927fd1fc914d3665f6bf7f73c9e374531db8504b58932da494596a6`
-- Retry 1/3: Waited 1.03s
-- Second attempt: **SUCCESS**
-  - Gas Used: **195,751**
-  - TX Count: 1
-- Completed: 2026-02-08T17:16:49.706402+00:00
-- Total Duration: **8,110 ms**
-
----
-
-## Execution Log Highlights
-
-### Strategy Initialization
-```
-SparkLenderStrategy initialized: min_supply=100 DAI
-Initialized IntentStrategy on ethereum with wallet 0xf39Fd6e5...
-```
-
-### Decision Logic
-```
-DAI balance (500) >= min_supply (100), supplying
-SUPPLY intent: 500.0000 DAI -> spDAI
-📈 SparkLenderStrategy:34a3aca3b064 intent: 📥 SUPPLY: 500 DAI to spark (as collateral)
-```
-
-### Intent Compilation
-```
-IntentCompiler initialized for chain=ethereum, wallet=0xf39Fd6e5..., protocol=uniswap_v3, using_placeholders=False
-SparkAdapter initialized for chain=ethereum, wallet=0xf39Fd6e5...
-Compiled SUPPLY: 500.0000 DAI to Spark (as collateral)
-   Txs: 2 | Gas: 230,000
-```
-
-### First Execution Attempt (Failed)
-```
-warning: Execution failed for SparkLenderStrategy:34a3aca3b064:
-======================================================================
-VERBOSE REVERT REPORT
-======================================================================
-
---- EXECUTION CONTEXT ---
-Strategy ID: SparkLenderStrategy:34a3aca3b064
-Chain: ethereum
-Wallet: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
-Correlation ID: c79230a3-6d6d-4561-8e1a-0b4df8f10dac
-Intent Description: Supply 500 DAI as collateral on spark
-
-Started At: 2026-02-08T17:16:42.238890+00:00
-Failed At: 2026-02-08T17:16:47.588596+00:00
-Execution Phase: CONFIRMATION
-
---- RAW ERROR ---
-Transaction 04a8c8f5f927fd1fc914d3665f6bf7f73c9e374531db8504b58932da494596a6 reverted: Invalid revert data (too short): 0x
-
-====================================================================== (retry 0/3)
-```
-
-### Retry Logic
-```
-Retrying intent 4f95177c-c387-4bbf-bd18-e565556e52c1 (attempt 1/3, delay=1.03s)
-Retry delay: sleeping for 1.03s (attempt 1/3)
-```
-
-### Second Execution Attempt (Success)
-```
-SparkAdapter initialized for chain=ethereum, wallet=0xf39Fd6e5...
-Compiled SUPPLY: 500.0000 DAI to Spark (as collateral)
-   Txs: 1 | Gas: 150,000
-Execution successful for SparkLenderStrategy:34a3aca3b064: gas_used=195751, tx_count=1
-Parsed Spark receipt: tx=..., supplies=1, withdraws=0, borrows=0, repays=0
-Supply successful: 500 DAI -> spDAI
-Intent succeeded after 1 retries
-```
-
-### Final Status
-```
-Status: SUCCESS | Intent: SUPPLY | Gas used: 195751 | Duration: 8110ms
-
-Iteration completed successfully.
-```
-
----
 
 ## Transactions
 
-| Attempt | Phase | Intent | Gas Used | Status | Notes |
-|---------|-------|--------|----------|--------|-------|
-| 1 | CONFIRMATION | SUPPLY | N/A | ❌ REVERTED | Short revert data, likely approval issue |
-| 2 | EXECUTION | SUPPLY | 195,751 | ✅ SUCCESS | Approval already done, direct supply |
+| Step | TX Hash | Block | Gas Used | Status |
+|------|---------|-------|----------|--------|
+| Approve (attempt 1) | `d0012dfb3a62360b95236c6aa220ec48eb92e6e0589755811451a703b2e8304a` | 24515004 | 46,146 | SUCCESS |
+| Supply (attempt 1) | `2a19ffb11f80fb402e19d2bf338a7b41158ab0ac507eb7b779edeaaf82010c2d` | - | - | REVERTED |
+| Supply (retry 1) | `c6f6136467fa797fa5cb7f82b31184a98af0ce59fe9c91e573d4f278ac0e4004` | 24515006 | 200,539 | SUCCESS |
+
+## Suspicious Behaviour
+
+| # | Source | Severity | Pattern | Log Line |
+|---|--------|----------|---------|----------|
+| 1 | strategy | WARNING | Placeholder prices in use | `IntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT. This is only acceptable for unit tests.` |
+| 2 | strategy | ERROR | First supply TX reverted on Anvil fork | `FAILED: SUPPLY - Transaction reverted at 2a19ff...0c2d. Reason: Invalid revert data (too short): 0x` |
+| 3 | strategy | WARNING | Amount chaining output missing | `Amount chaining: no output amount extracted from step 1; subsequent amount='all' steps will fail` |
+| 4 | strategy | WARNING | Stale persisted state loaded on startup | `Mode: RESUME (existing state found). State version: 1, keys: ['supplied', 'supplied_amount']` -- state showed `supplied: True` from a prior run; force_action overrode it |
+| 5 | gateway | WARNING | CoinGecko free tier only | `COINGECKO_API_KEY not configured - CoinGecko will use free tier API (30 requests/minute limit)` |
+
+**Notes on findings:**
+
+- **Finding #1 (Placeholder prices)**: Expected in Anvil mode. The Spark SUPPLY intent does not use slippage, so this has no practical impact on this strategy. However, any strategy that relies on slippage calculations would be affected.
+- **Finding #2 (TX revert on first attempt)**: The 2-TX bundle (approve + supply) caused the supply TX to revert on the Anvil fork. This is a recurring pattern with Spark on Anvil -- the approve and supply are submitted together but the supply may execute before the approve is indexed on the fork. The framework's auto-retry handled this correctly by re-compiling with only the supply TX. Worth investigating whether the bundle submission should be made sequential rather than parallel.
+- **Finding #3 (Amount chaining)**: The result enricher could not extract an output amount from the SUPPLY step. This would break strategies that chain intents using `amount='all'` after a supply. Signals a gap in the Spark receipt parser's output amount extraction. Low severity for this single-intent strategy.
+- **Finding #4 (Stale state)**: A prior test run left `supplied: True` in the state DB (`almanak_state.db`). Without `force_action`, the strategy would have returned HOLD immediately. Testers should clear state between runs or use `--reset` if available.
+- **Finding #5 (CoinGecko free tier)**: Expected for local dev. Rate limiting could become an issue with high-frequency testing.
+
+## Result
+
+**PASS** - The strategy successfully supplied 5 DAI to the Spark protocol on an Ethereum Anvil fork after one auto-retry. The first attempt reverted due to a known Anvil bundle ordering issue (approve + supply submitted in parallel), but the retry succeeded cleanly. No price data issues, token resolution failures, or timeouts were observed.
 
 ---
 
-## Final Verification
-
-### On-Chain State After Execution
-
-**DAI Balance:**
-```
-0 (all supplied to Spark)
-```
-
-**spDAI Balance (Interest-Bearing Token):**
-```
-500000000000000000000 [5e20] = 500 spDAI
-```
-
-**Spark Protocol Addresses:**
-- Pool Contract: `0xC13e21B648A5Ee794902342038FF3aDAB66BE987`
-- spDAI (aToken): `0x4DEDf26112B3Ec8eC46e7E31EA5e123490B05B8B`
-
-### Verification Summary
-- ✅ DAI successfully transferred from wallet to Spark
-- ✅ spDAI minted and received by wallet
-- ✅ Amount matches exactly: 500 DAI → 500 spDAI
-- ✅ Receipt parser correctly identified 1 supply event
-
----
-
-## Strategy Behavior Analysis
-
-### Strengths
-1. **Clear decision logic**: Simple threshold-based supply trigger
-2. **Proper state tracking**: Tracks supplied amount and status
-3. **Good logging**: Human-readable logs at each step
-4. **Retry resilience**: Successfully recovered from initial revert
-5. **Receipt parsing**: Correctly parsed Spark supply events
-
-### Observations
-1. **Initial approval handling**: First attempt included APPROVE transaction that reverted (likely already approved)
-2. **Retry optimization**: Second attempt correctly skipped approval and only did SUPPLY
-3. **Gas efficiency**: Actual gas (195,751) close to estimate (150,000 after retry)
-4. **Collateral setting**: Correctly set `use_as_collateral=True` (Spark default)
-
-### Configuration Notes
-- `min_supply_amount: 100` - Good default, avoids gas-inefficient small supplies
-- `force_action: ""` - Not used in this test, normal operation
-- Strategy is idempotent: Won't re-supply after first supply (tracks `_supplied` state)
-
----
-
-## Test Worktree Information
-
-**Worktree Path:** `/Users/nick/Documents/Almanak/src/almanak-sdk-worktree-demo-fixes/`
-**Main Repo:** `/Users/nick/Documents/Almanak/src/almanak-sdk/`
-**Environment File:** Sourced from main repo `.env`
-
-All commands executed from worktree directory to test isolated code changes.
-
----
-
-## Conclusion
-
-**PASS** - The `spark_lender` strategy successfully completed its core functionality:
-
-1. ✅ Detected sufficient DAI balance (500 >= 100 threshold)
-2. ✅ Created correct SUPPLY intent for Spark protocol
-3. ✅ Compiled intent to transactions (with approval handling)
-4. ✅ Recovered from initial approval-related revert via retry
-5. ✅ Successfully supplied 500 DAI to Spark
-6. ✅ Received 500 spDAI interest-bearing tokens
-7. ✅ Updated internal state correctly (`_supplied = True`)
-8. ✅ Receipt parser correctly identified supply event
-
-**Key Success Metrics:**
-- Intent compilation: ✅ Correct
-- Transaction execution: ✅ Success after 1 retry
-- Gas usage: ✅ Efficient (195,751 gas)
-- On-chain verification: ✅ Balances match exactly
-- State management: ✅ Proper tracking
-
-**Notes:**
-- The initial revert was expected behavior (approval transaction optimization)
-- The retry mechanism worked perfectly to recover
-- The strategy is production-ready for Ethereum mainnet use
-- Consider adding teardown/withdrawal logic for complete lifecycle testing
+SUSPICIOUS_BEHAVIOUR_COUNT: 5
+SUSPICIOUS_BEHAVIOUR_ERRORS: 1

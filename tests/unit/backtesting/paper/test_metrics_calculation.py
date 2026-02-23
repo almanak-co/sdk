@@ -34,16 +34,16 @@ def create_trade(
         timestamp = datetime.now()
 
     # Calculate token amounts to achieve desired net_flow_usd
-    # Using USDC = $1 as base, we can set tokens_in and tokens_out
-    # to achieve any net_flow_usd value
+    # Using USDC = $1 as base, we can set tokens_in (received) and tokens_out (sent)
+    # to achieve any net_flow_usd value. Convention: tokens_in = received, tokens_out = sent.
     if net_flow_usd >= Decimal("0"):
-        # Profit: received more than paid
-        tokens_in = {"USDC": Decimal("1000")}
-        tokens_out = {"USDC": Decimal("1000") + net_flow_usd}
-    else:
-        # Loss: paid more than received
-        tokens_in = {"USDC": Decimal("1000") + abs(net_flow_usd)}
+        # Profit: received more than sent
+        tokens_in = {"USDC": Decimal("1000") + net_flow_usd}
         tokens_out = {"USDC": Decimal("1000")}
+    else:
+        # Loss: sent more than received
+        tokens_in = {"USDC": Decimal("1000")}
+        tokens_out = {"USDC": Decimal("1000") + abs(net_flow_usd)}
 
     return PaperTrade(
         timestamp=timestamp,

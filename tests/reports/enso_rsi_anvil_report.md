@@ -1,196 +1,98 @@
-# Anvil Test Report: enso_rsi
+# E2E Strategy Test Report: enso_rsi (Anvil)
 
-**Date:** 2026-02-08 14:55 UTC
+**Date:** 2026-02-23 03:46 UTC
 **Result:** PASS
-**Duration:** ~90 seconds
-
----
-
-## Summary
-
-The `enso_rsi` demo strategy was successfully tested on an Anvil fork of Base chain. The strategy correctly:
-1. Connected to the Gateway with Enso service enabled
-2. Evaluated market conditions and returned HOLD when RSI was in neutral zone (51.21)
-3. Successfully executed a forced BUY swap using Enso aggregator
-4. Compiled the swap intent into transactions (APPROVE + SWAP)
-5. Executed both transactions successfully on Anvil
-6. Verified correct token balance changes
-
----
+**Mode:** Anvil
+**Duration:** ~3 minutes
 
 ## Configuration
 
 | Field | Value |
 |-------|-------|
-| Strategy | enso_rsi |
-| Chain | Base (8453) |
-| Network | Anvil fork |
-| Port | 8548 |
-| Protocol | Enso (DEX aggregator) |
-| Wallet | 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 |
+| Strategy | enso_rsi (demo_enso_rsi) |
+| Chain | base (Chain ID: 8453) |
+| Network | Anvil fork (Base mainnet) |
+| Anvil Port | 59596 (managed gateway auto-fork) |
+| trade_size_usd | $3.00 (under $100 budget cap -- no change needed) |
+| base_token | WETH |
+| quote_token | USDC |
 
----
+## Config Changes Made
 
-## Test Phases
+- Added `"force_action": "buy"` to trigger an immediate trade (trade size already $3, well under $100 cap).
+- Removed `force_action` from `strategies/demo/enso_rsi/config.json` after test to restore original state.
+- No amount changes were needed (config was already within the $100 budget cap).
 
-### Phase 1: Setup
-- [x] Anvil started on port 8548 (Base fork)
-- [x] Gateway started on port 50051 with Enso service
-- [x] Wallet funded: 100 ETH, 10,000 USDC, 1 WETH
+## Execution
 
-### Phase 2: Initial Strategy Run (HOLD Test)
-- [x] Strategy loaded successfully
-- [x] RSI calculated: 51.21 (neutral zone)
-- [x] Strategy returned HOLD intent
-- [x] Duration: 475ms
+### Setup
+- Pre-started Anvil fork of Base mainnet on port 8547 (chain ID 8453 verified)
+- Gateway started on port 50051 (insecure mode, Anvil network)
+- Wallet `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` pre-funded:
+  - 100 ETH (native, via `anvil_setBalance`)
+  - 1 WETH (`0x4200000000000000000000000000000000000006`, via `deposit()`)
+  - 10,000 USDC (`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, via storage slot 9)
+- Managed gateway auto-started a second Anvil fork on port 59596 and re-funded from `anvil_funding` config
 
-### Phase 3: Forced Buy Test (Swap Execution)
-- [x] Config modified with `force_action: "buy"`
-- [x] Strategy created BUY intent
-- [x] Intent compiled successfully (APPROVE + SWAP via Enso)
-- [x] Enso route found: USDC -> WETH
-- [x] Both transactions executed successfully
-- [x] Gas used: 760,771
-- [x] Duration: 13,489ms
+### Strategy Run
+- Strategy executed with `--network anvil --once`
+- Force action `"buy"` triggered immediately: $3.00 USDC -> WETH via Enso aggregator
+- Enso route resolved successfully: USDC -> WETH, amountOut=1,543,480,380,153,723 (~0.0015 WETH), priceImpact=3bp
 
-### Phase 4: Verification
-- [x] USDC balance: 9,999,960,000 (10,000 - 0.04 = 9,999.96 USDC) ✅
-- [x] WETH balance: 1,000,019,435,665,352,447 (~1.0000194 WETH) ✅
-- [x] Original config restored
+### Intents Executed
 
----
+| Intent | Status | Details |
+|--------|--------|---------|
+| SWAP (Enso) | SUCCESS | 3.0000 USDC -> ~0.0015 WETH, slippage 1.00%, 2 transactions |
 
-## Execution Log Highlights
+### Transactions
 
-### Initial Run (HOLD)
+| Tx # | TX Hash | Block | Gas Used | Status |
+|------|---------|-------|----------|--------|
+| 1 (approve) | `ac6187a177f4dcee8ae37aa35b87d5379a51821506381d7fda6c98fa070988c2` | 42501895 | 55,437 | Confirmed |
+| 2 (swap) | `5f95622571aeb86569dc99875752e17c5728e6dc522a2cb783462764fc9f3b74` | 42501896 | 349,011 | Confirmed |
+
+**Total gas used:** 404,448
+
+### Key Log Output
+
+```text
+Force action requested: buy
+BUY via Enso: $3.00 USDC -> WETH, slippage=1.0%
+Getting Enso route: USDC -> WETH, amount=3000000
+Route found: 0x833589fC... -> 0x42000000..., amount_out=1543480380153723, price_impact=3bp
+Compiled SWAP (Enso): 3.0000 USDC -> 0.0015 WETH (min: 0.0015 WETH)
+  Slippage: 1.00% | Impact: 3bp (0.03%) | Txs: 2 | Gas: 503,322
+Transaction confirmed: tx_hash=ac6187a1..., block=42501895, gas_used=55437
+Transaction confirmed: tx_hash=5f956225..., block=42501896, gas_used=349011
+EXECUTED: SWAP completed successfully
+  Txs: 2 (ac6187...88c2, 5f9562...3b74) | 404,448 gas
+Status: SUCCESS | Intent: SWAP | Gas used: 404448 | Duration: 20508ms
 ```
-[2026-02-08T14:54:59.637377Z] [info] Starting iteration for strategy: EnsoRSIStrategy:2455127c8193
-[2026-02-08T14:55:00.111968Z] [info] ⏸️ EnsoRSIStrategy:2455127c8193 HOLD: RSI 51.21 in neutral zone
-Status: HOLD | Intent: HOLD | Duration: 475ms
-```
 
-### Forced Buy Run (SWAP)
-```
-[2026-02-08T14:55:24.317118Z] [info] Force action requested: buy
-[2026-02-08T14:55:24.317158Z] [info] 🔄 BUY via Enso: $0.04 USDC → WETH, slippage=1.0%
-[2026-02-08T14:55:24.317255Z] [info] 📈 EnsoRSIStrategy:20b5ef4dfb23 intent: 🔄 SWAP: $0.04 USDC → WETH (slippage: 1.00%) via enso
-[2026-02-08T14:55:24.326411Z] [info] Getting Enso route: USDC -> WETH, amount=40000
-[2026-02-08T14:55:27.217912Z] [info] Route found: 0x833589fC... -> 0x42000000..., amount_out=19435665352447, price_impact=0bp
-[2026-02-08T14:55:27.277727Z] [info] ✅ Compiled SWAP (Enso): 0.0400 USDC → 0.00001944 WETH (min: 0.00001924 WETH)
-[2026-02-08T14:55:27.277858Z] [info]    Slippage: 1.00% | Impact: N/A | Txs: 2 | Gas: 957,871
-[2026-02-08T14:55:37.805528Z] [info] Execution successful for EnsoRSIStrategy:20b5ef4dfb23: gas_used=760771, tx_count=2
-Status: SUCCESS | Intent: SWAP | Gas used: 760771 | Duration: 13489ms
-```
+## Suspicious Behaviour
 
----
+| # | Source | Severity | Pattern | Log Line |
+|---|--------|----------|---------|----------|
+| 1 | strategy | WARNING | Placeholder prices - slippage protection unreliable | `IntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT. This is only acceptable for unit tests.` |
+| 2 | strategy | WARNING | Amount chaining broken - teardown `amount="all"` will fail | `Amount chaining: no output amount extracted from step 1; subsequent amount='all' steps will fail` |
+| 3 | gateway | WARNING | CoinGecko on free tier (rate-limit risk in production) | `COINGECKO_API_KEY not configured - CoinGecko will use free tier API (30 requests/minute limit)` |
+| 4 | strategy | INFO | Gas estimate below compiler minimum, using compiler limit | `Gas estimate tx[0]: raw=55,819 buffered=83,728 (x1.5) < compiler=120,000, using compiler limit` |
+| 5 | strategy | INFO | Port not freed after Anvil fork stop | `Port 59596 not freed after 5.0s` (cosmetic cleanup delay, no impact on result) |
 
-## Transactions
+**Analysis of findings:**
 
-| Phase | Intent | Gas Used | Status |
-|-------|--------|----------|--------|
-| HOLD Test | HOLD | 0 | ✅ |
-| Swap Test | APPROVE | ~196,900 | ✅ |
-| Swap Test | SWAP (Enso) | ~563,871 | ✅ |
-| **Total** | - | **760,771** | ✅ |
+- **Finding #1 (Placeholder prices):** The IntentCompiler initializes with `using_placeholders=True` because no live price feed is wired up during Anvil tests. The Enso route itself queries live prices from the Enso API, so actual swap amounts were correct. However, slippage bounds are computed against placeholder prices rather than real market prices. This is expected and acceptable for Anvil test runs. In production (mainnet mode with a price provider configured), the compiler would use `using_placeholders=False`.
+- **Finding #2 (Amount chaining):** After a successful 2-step bundle (approve + swap), the runner cannot extract the output amount from step 1 (approval tx) to chain into a subsequent `amount='all'` step. This warning fires every time a multi-step bundle executes. It would only be a real problem if the strategy chained a follow-on `amount='all'` intent -- which `enso_rsi` does NOT do in its normal `decide()` path (only in `generate_teardown_intents()`). This is a latent teardown bug, not a runtime failure.
+- **Finding #3 (CoinGecko free tier):** Expected for development environments without a CoinGecko Pro API key. Acceptable for a single-run test; would need a paid key for high-frequency production use.
+- **Finding #4 (Gas limit floor):** The buffered gas estimate (83,728) was below the compiler's minimum floor (120,000), so the compiler limit was used. This is conservative and safe -- no risk of out-of-gas.
+- **Finding #5 (Port cleanup delay):** Cosmetic - the fork cleanup logged a 5-second delay before the port was freed. No impact on test validity.
+
+## Result
+
+**PASS** - The `enso_rsi` strategy on Base chain successfully executed a forced BUY swap of $3.00 USDC to WETH via the Enso DEX aggregator. Two on-chain transactions (approve + swap) were confirmed on the Anvil fork. Total gas: 404,448. Duration: ~20 seconds for execution.
 
 ---
 
-## Enso Integration Details
-
-### Route Details
-- **From token:** USDC (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913)
-- **To token:** WETH (0x4200000000000000000000000000000000000006)
-- **Amount in:** 40,000 (0.04 USDC with 6 decimals)
-- **Amount out:** 19,435,665,352,447 (~0.00001944 WETH)
-- **Minimum out:** 19,244,308,698,923 (~0.00001924 WETH)
-- **Slippage:** 1.00%
-- **Price impact:** 0 basis points
-- **Route compilation time:** 2.89 seconds
-
-### Enso Service Status
-- Enso API key configured: ✅
-- Enso service available in Gateway: ✅
-- Route finding successful: ✅
-- Transaction calldata generated: ✅
-
----
-
-## Final Verification
-
-### Token Balances
-
-**Before:**
-- ETH: 100 ETH (gas)
-- USDC: 10,000.00 USDC
-- WETH: 1.00000000 WETH
-
-**After:**
-- USDC: 9,999.96 USDC (spent 0.04 USDC)
-- WETH: 1.00001944 WETH (gained ~0.00001944 WETH)
-
-**Delta:**
-- USDC: -0.04 USDC ✅ (exactly as configured in trade_size_usd)
-- WETH: +0.00001944 WETH ✅ (received from Enso swap)
-
----
-
-## Conclusion
-
-**PASS** - The `enso_rsi` strategy successfully completed all test phases:
-
-1. ✅ Strategy initialization with correct configuration
-2. ✅ Gateway connection with Enso service enabled
-3. ✅ RSI calculation and HOLD logic working correctly
-4. ✅ Forced buy action triggering swap intent
-5. ✅ Enso route compilation and transaction generation
-6. ✅ Successful on-chain execution (APPROVE + SWAP)
-7. ✅ Correct token balance changes verified
-8. ✅ Original configuration restored
-
-**Key Features Verified:**
-- Enso DEX aggregator integration working correctly
-- Intent-based architecture (SwapIntent -> ActionBundle -> Transactions)
-- Gateway-backed execution pipeline
-- RSI indicator calculation via gateway
-- Token resolution for Base chain (WETH, USDC)
-- Slippage protection and minimum output calculation
-- Multi-transaction compilation (approve + swap)
-
-**No Issues Detected.**
-
----
-
-## Recommendations
-
-1. Consider increasing `trade_size_usd` for production (current: $0.04 is very small)
-2. The strategy correctly handles neutral RSI zones with HOLD logic
-3. Enso aggregator is working as expected with proper route finding
-4. Gas usage is reasonable for a simple swap (760,771 gas total)
-
----
-
-## Appendix: Commands Used
-
-```bash
-# Start Anvil (Base fork)
-anvil -f https://base-mainnet.g.alchemy.com/v2/$ALCHEMY_API_KEY --port 8548
-
-# Fund wallet
-cast rpc anvil_setBalance $WALLET 0x56BC75E2D63100000 --rpc-url http://127.0.0.1:8548
-cast send $WETH --value 1000000000000000000 --from $WALLET --private-key $PRIVKEY --rpc-url http://127.0.0.1:8548
-
-# Start Gateway
-ALMANAK_GATEWAY_NETWORK=anvil \
-ALMANAK_GATEWAY_ALLOW_INSECURE=true \
-ALMANAK_GATEWAY_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
-ALMANAK_BASE_RPC_URL=http://127.0.0.1:8548 \
-ENSO_API_KEY=$ENSO_API_KEY \
-uv run almanak gateway
-
-# Run strategy
-uv run almanak strat run -d strategies/demo/enso_rsi --once
-
-# Verify balances
-cast call $USDC "balanceOf(address)(uint256)" $WALLET --rpc-url http://127.0.0.1:8548
-cast call $WETH "balanceOf(address)(uint256)" $WALLET --rpc-url http://127.0.0.1:8548
-```
+SUSPICIOUS_BEHAVIOUR_COUNT: 5
+SUSPICIOUS_BEHAVIOUR_ERRORS: 0

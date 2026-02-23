@@ -328,11 +328,15 @@ class TestPaperTraderSetup:
     ) -> None:
         """Test that RollingForkManager can connect to existing Anvil."""
         # Create fork manager that connects to existing Anvil
-        fork_manager = RollingForkManager(config=fork_manager_config)
+        fork_manager = RollingForkManager(
+            rpc_url=fork_manager_config.rpc_url,
+            chain=fork_manager_config.chain,
+            anvil_port=fork_manager_config.anvil_port,
+        )
 
         # The fork manager should detect the existing Anvil instance
-        assert fork_manager.config.chain == "arbitrum"
-        assert fork_manager.config.anvil_port == 8546
+        assert fork_manager.chain == "arbitrum"
+        assert fork_manager.anvil_port == 8546
 
     @pytest.mark.asyncio
     @pytest.mark.anvil
@@ -349,7 +353,11 @@ class TestPaperTraderSetup:
             chain="arbitrum",
             anvil_port=8546,
         )
-        fork_manager = RollingForkManager(config=fork_manager_config)
+        fork_manager = RollingForkManager(
+            rpc_url=fork_manager_config.rpc_url,
+            chain=fork_manager_config.chain,
+            anvil_port=fork_manager_config.anvil_port,
+        )
 
         # Create portfolio tracker
         portfolio_tracker = PaperPortfolioTracker(
@@ -518,7 +526,11 @@ class TestHoldStrategy:
             chain="arbitrum",
             anvil_port=8546,
         )
-        fork_manager = RollingForkManager(config=fork_manager_config)
+        fork_manager = RollingForkManager(
+            rpc_url=fork_manager_config.rpc_url,
+            chain=fork_manager_config.chain,
+            anvil_port=fork_manager_config.anvil_port,
+        )
 
         # Create portfolio tracker
         portfolio_tracker = PaperPortfolioTracker(
@@ -717,9 +729,9 @@ class TestMetricsCalculation:
         )
         tracker.record_trade(trade)
 
-        # Get summary
+        # Get summary with PnL
         current_prices = {"USDC": Decimal("1"), "WETH": Decimal("2000")}
-        summary = tracker.get_summary(current_prices)
+        summary = tracker.get_summary_with_pnl(current_prices)
 
         # Verify summary fields
         assert summary.strategy_id == "summary_test"

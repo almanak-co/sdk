@@ -1,10 +1,10 @@
-# Aerodrome LP Strategy - Anvil Test Report
+# E2E Strategy Test Report: aerodrome_lp (Anvil)
 
-**Test Date:** 2026-02-08 21:50:44 UTC
+**Test Date:** 2026-02-20 19:58 UTC
 **Strategy:** aerodrome_lp
 **Chain:** Base (chain_id: 8453)
 **Network:** Anvil (local fork)
-**Result:** ✅ PASS
+**Result:** PASS
 
 ---
 
@@ -405,3 +405,162 @@ The test demonstrates that:
 
 **Test conducted by:** Claude Code Strategy Tester Agent
 **Report generated:** 2026-02-08 21:55 UTC
+
+---
+
+# Run #2 — 2026-02-20
+
+## Config Changes Made (Run #2)
+
+- Added `"force_action": "open"` to trigger an immediate LP_OPEN. Restored to original after the test.
+- Trade sizes (0.001 WETH + 0.04 USDC ~= $2) were within the $50 budget cap — no amount changes needed.
+
+## Execution (Run #2)
+
+The CLI auto-started a managed gateway (port 50052) and an Anvil Base fork (port 61563, block 42414055).
+Wallet was auto-funded via `anvil_funding` config: 100 ETH, 1 WETH, 10,000 USDC.
+Prices fetched: WETH=$1963.25, USDC=$0.999888.
+LP_OPEN compiled to 3 transactions (approve WETH, approve USDC, addLiquidity).
+
+### Transactions Confirmed
+
+| # | Role | TX Hash | Block | Gas Used |
+|---|------|---------|-------|----------|
+| 1 | Approve WETH | `ce3f63b698418c13c37ffa3c24a3a77db6e9fd08c902b96ae2606ca6ba0a9931` | 42414058 | 46,343 |
+| 2 | Approve USDC | `038f26ed842d530ff3d48a2d704598df36285334d198891661db62a3c1a54321` | 42414059 | 55,785 |
+| 3 | addLiquidity | `6ba0cded156965fb2a20eda836814a42fa38226830c1c96e5534fd6463e7f4fc` | 42414060 | 240,012 |
+
+**Total gas used:** 342,140 | **Duration:** 25,171ms
+
+### Result
+
+```
+Status: SUCCESS | Intent: LP_OPEN | Gas used: 342140 | Duration: 25171ms
+Iteration completed successfully.
+```
+
+## Suspicious Behaviour (Run #2)
+
+| # | Source | Severity | Pattern | Log Line |
+|---|--------|----------|---------|----------|
+| 1 | strategy | WARNING | Gas estimation revert on addLiquidity | `Gas estimation failed for tx 3/3: ('execution reverted', '0x'). Using compiler-provided gas limit.` |
+| 2 | strategy | WARNING | Amount chaining — no output amount from step 1 | `Amount chaining: no output amount extracted from step 1; subsequent amount='all' steps will fail` |
+| 3 | gateway | WARNING | CoinGecko free tier in use | `COINGECKO_API_KEY not configured - CoinGecko will use free tier API (30 requests/minute limit)` |
+| 4 | gateway | INFO | INSECURE MODE (expected for Anvil) | `Auth interceptor disabled - no auth_token configured. Acceptable for local dev on 'anvil'.` |
+| 5 | strategy | INFO | Anvil port not freed after 5s | `Port 61563 not freed after 5.0s` |
+
+**Notes:**
+- Finding #1: Gas estimation for the addLiquidity tx reverts during estimation but succeeds at execution (240,012 gas). This is a known issue where the gas estimator runs without full Aerodrome state context. The fallback to compiler gas works correctly. Non-blocking.
+- Finding #2: The Aerodrome receipt parser does not populate the `extracted_amount` field used by the amount chaining system. Strategies using `amount='all'` in a chain following an LP_OPEN would fail silently. Not relevant to this strategy.
+- Finding #3: No rate limit was hit during this run. Informational.
+- Finding #4: Expected and correct for local Anvil testing.
+- Finding #5: Cosmetic cleanup timing issue. No functional impact.
+
+**Overall result: PASS** — aerodrome_lp opened a WETH/USDC volatile LP position on Aerodrome (Base) via 3 confirmed Anvil transactions.
+
+SUSPICIOUS_BEHAVIOUR_COUNT: 5
+SUSPICIOUS_BEHAVIOUR_ERRORS: 0
+
+---
+
+# Run #3 — 2026-02-21
+
+## Config Changes Made (Run #3)
+
+- Added `"force_action": "open"` to trigger an immediate LP_OPEN. Restored to original after the test.
+- Trade sizes (0.001 WETH + 0.04 USDC, total ~$2) were within the $500 budget cap — no amount changes needed.
+
+## Execution (Run #3)
+
+The CLI auto-started a managed gateway (port 50052) and an Anvil Base fork (port 60638, block 42448519, chain ID 8453).
+Wallet was auto-funded via `anvil_funding` config: 100 ETH, 1 WETH (slot 3), 10,000 USDC (slot 9).
+Prices fetched from CoinGecko: WETH=$1,986.97, USDC=$0.999902.
+LP_OPEN compiled to 3 transactions (approve WETH, approve USDC, addLiquidity).
+
+### Transactions Confirmed
+
+| # | Role | TX Hash | Block | Gas Used |
+|---|------|---------|-------|----------|
+| 1 | Approve WETH | `058cb50f6d155f6aadc3e516b8ef9153c0b8bbc69b478eb5310883afebbb396d` | 42448522 | 46,343 |
+| 2 | Approve USDC | `55815c28e58d14346ca9fed2a22020aa93d3fdc7166dfccfe71eb804ac131f1c` | 42448523 | 55,785 |
+| 3 | addLiquidity  | `70db3ac4f081747b07744bf5e261030a368de105d8bbe1989530d76c56e34dc3` | 42448524 | 240,012 |
+
+**Total gas used:** 342,140 | **Duration:** 26,456ms
+
+### Result
+
+```
+Status: SUCCESS | Intent: LP_OPEN | Gas used: 342140 | Duration: 26456ms
+Iteration completed successfully.
+```
+
+## Suspicious Behaviour (Run #3)
+
+| # | Source | Severity | Pattern | Log Line |
+|---|--------|----------|---------|----------|
+| 1 | strategy | WARNING | Gas estimation revert on addLiquidity | `Gas estimation failed for tx 3/3: ('execution reverted', '0x'). Using compiler-provided gas limit.` |
+| 2 | strategy | WARNING | Amount chaining — no output amount from step 1 | `Amount chaining: no output amount extracted from step 1; subsequent amount='all' steps will fail` |
+| 3 | gateway | WARNING | CoinGecko free tier in use | `COINGECKO_API_KEY not configured - CoinGecko will use free tier API (30 requests/minute limit)` |
+
+**Notes:**
+- Finding #1: Gas estimation for the addLiquidity tx reverts during simulation but succeeds at execution (240,012 gas). Compiler-provided fallback gas limit works correctly. Non-blocking, consistent with prior runs.
+- Finding #2: The Aerodrome receipt parser does not populate the `extracted_amount` field used by the amount chaining system. Strategies chaining a subsequent `amount='all'` intent after LP_OPEN would fail silently. Not relevant to this single-intent strategy.
+- Finding #3: Free-tier CoinGecko was used. No rate limit hit during this run. Informational.
+
+**Overall result: PASS** — aerodrome_lp opened a WETH/USDC volatile LP position on Aerodrome (Base) via 3 confirmed Anvil transactions (342,140 total gas). Consistent behaviour across all three test runs.
+
+SUSPICIOUS_BEHAVIOUR_COUNT: 3
+SUSPICIOUS_BEHAVIOUR_ERRORS: 0
+
+---
+
+# Run #4 — 2026-02-23
+
+## Config Changes Made (Run #4)
+
+- Added `"force_action": "open"` to trigger an immediate LP_OPEN. Restored to original after the test.
+- Trade sizes (0.001 WETH + 0.04 USDC, total ~$1.98 at $1,943 ETH) were within the $100 budget cap — no amount changes needed.
+
+## Execution (Run #4)
+
+The CLI auto-started a managed gateway (port 50052) and an Anvil Base fork (port 58261, block 42501654, chain ID 8453).
+Wallet was auto-funded via `anvil_funding` config: 100 ETH, 1 WETH (slot 3), 10,000 USDC (slot 9).
+Prices fetched from CoinGecko: WETH=$1,943.28, USDC=$0.999835.
+LP_OPEN compiled to 3 transactions (approve WETH, approve USDC, addLiquidity).
+
+### Transactions Confirmed
+
+| # | Role | TX Hash | Block | Gas Used |
+|---|------|---------|-------|----------|
+| 1 | Approve WETH | `99cce75bc886421464a7cb3cc0201806ac8d6463161dc3ae854c1778b98b8964` | 42501657 | 46,343 |
+| 2 | Approve USDC | `ee5e756f02eaa0bb777ab65a4b39581c351e572df1b544d5a693972aca383840` | 42501658 | 55,785 |
+| 3 | addLiquidity  | `8d27fb10502ba44c54d1d8f051a4bba42aac0967689761836ff9661d3379b361` | 42501659 | 240,012 |
+
+**Total gas used:** 342,140 | **Duration:** 24,706ms
+
+### Result
+
+```
+Status: SUCCESS | Intent: LP_OPEN | Gas used: 342140 | Duration: 24706ms
+Iteration completed successfully.
+```
+
+## Suspicious Behaviour (Run #4)
+
+| # | Source | Severity | Pattern | Log Line |
+|---|--------|----------|---------|----------|
+| 1 | strategy | WARNING | Gas estimation revert on addLiquidity | `Gas estimation failed for tx 3/3: ('execution reverted', '0x'). Using compiler-provided gas limit.` |
+| 2 | strategy | WARNING | Amount chaining — no output amount from step 1 | `Amount chaining: no output amount extracted from step 1; subsequent amount='all' steps will fail` |
+| 3 | gateway | WARNING | CoinGecko free tier in use | `COINGECKO_API_KEY not configured - CoinGecko will use free tier API (30 requests/minute limit)` |
+| 4 | strategy | WARNING | Insecure mode (expected for Anvil) | `INSECURE MODE: Auth interceptor disabled - no auth_token configured. Acceptable for local dev on 'anvil'.` |
+
+**Notes:**
+- Finding #1: Gas estimation for the addLiquidity tx reverts during simulation but succeeds at execution (240,012 gas). Compiler-provided fallback gas limit works correctly. Non-blocking, consistent with all prior runs.
+- Finding #2: The Aerodrome receipt parser does not populate the `extracted_amount` field used by the amount chaining system. Strategies chaining a subsequent `amount='all'` intent after LP_OPEN would fail silently. Not relevant to this single-intent strategy.
+- Finding #3: Free-tier CoinGecko was used. No rate limit hit during this run. Informational.
+- Finding #4: Expected and correct for local Anvil testing.
+
+**Overall result: PASS** — aerodrome_lp opened a WETH/USDC volatile LP position on Aerodrome (Base) via 3 confirmed Anvil transactions (342,140 total gas). Consistent behaviour across all four test runs.
+
+SUSPICIOUS_BEHAVIOUR_COUNT: 4
+SUSPICIOUS_BEHAVIOUR_ERRORS: 0

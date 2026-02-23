@@ -3,39 +3,39 @@
 This module provides CLI commands for all backtesting engines:
 
 1. **PnL Backtest** (new): Historical simulation using price data
-   Usage: almanak backtest pnl --strategy <name> --start <date> --end <date>
+   Usage: almanak strat backtest pnl --strategy <name> --start <date> --end <date>
 
 2. **Parameter Sweep** (new): Multi-parameter optimization in parallel
-   Usage: almanak backtest sweep --strategy <name> --start <date> --end <date> \
+   Usage: almanak strat backtest sweep --strategy <name> --start <date> --end <date> \
           --param "name:val1,val2,val3" [--parallel N]
 
-3. **Paper Trading** (new): Real-time simulation on Anvil forks
-   Usage: almanak backtest paper start --strategy <name> --chain <chain>
-          almanak backtest paper stop --strategy <name>
-          almanak backtest paper status --strategy <name>
+3. **Paper Trading** (new): Real-time simulation on Anvil forks with PnL tracking
+   Usage: almanak strat backtest paper start --strategy <name> --chain <chain>
+          almanak strat backtest paper stop --strategy <name>
+          almanak strat backtest paper status --strategy <name>
 
 4. **Block Backtest** (legacy): Block-based simulation using Anvil forks
-   Usage: almanak backtest block --strategy <name> --days <n> --chain <chain>
+   Usage: almanak strat backtest block --strategy <name> --days <n> --chain <chain>
 
 Examples:
     # PnL backtest with date range
-    almanak backtest pnl -s dynamic_lp --start 2024-01-01 --end 2024-06-01
+    almanak strat backtest pnl -s dynamic_lp --start 2024-01-01 --end 2024-06-01
 
     # PnL backtest with custom settings
-    almanak backtest pnl -s mean_reversion --start 2024-01-01 --end 2024-03-01 \
+    almanak strat backtest pnl -s mean_reversion --start 2024-01-01 --end 2024-03-01 \
         --interval 3600 --initial-capital 50000 --output results.json
 
     # Parameter sweep
-    almanak backtest sweep -s momentum --start 2024-01-01 --end 2024-06-01 \
+    almanak strat backtest sweep -s momentum --start 2024-01-01 --end 2024-06-01 \
         --param "window:10,20,30" --param "threshold:0.5,1.0" --parallel 8
 
     # Paper trading - start, check, stop
-    almanak backtest paper start -s momentum_v1 --chain arbitrum --initial-eth 10
-    almanak backtest paper status -s momentum_v1
-    almanak backtest paper stop -s momentum_v1
+    almanak strat backtest paper start -s momentum_v1 --chain arbitrum --initial-eth 10
+    almanak strat backtest paper status -s momentum_v1
+    almanak strat backtest paper stop -s momentum_v1
 
     # Legacy block-based backtest
-    almanak backtest block -s dynamic_lp --days 7 --chain arbitrum
+    almanak strat backtest block -s dynamic_lp --days 7 --chain arbitrum
 """
 
 import asyncio
@@ -64,6 +64,7 @@ from ..backtesting import (
     PnLBacktester,
     RollingForkManager,
 )
+from ..backtesting.paper.background import BackgroundPaperTrader
 from ..backtesting.paper.fork_manager import CHAIN_IDS
 from ..backtesting.pnl.config_loader import ConfigLoadError, load_config_from_result
 from ..backtesting.pnl.logging_utils import configure_backtest_logging
@@ -4384,15 +4385,15 @@ def list_paper_sessions() -> list[dict[str, Any]]:
 @backtest.group("paper")
 def paper() -> None:
     """
-    Paper trading - real-time simulation on Anvil forks.
+    Paper trading - real-time simulation on Anvil forks with PnL tracking.
 
     Paper trading executes real transactions on a local Anvil fork,
     providing accurate simulation of DeFi interactions without risking
-    real capital.
+    real capital. Includes PnL tracking, equity curves, and trade journals.
 
     Subcommands:
 
-        start  - Start a paper trading session in the background
+        start  - Start a paper trading session (foreground or background)
 
         stop   - Stop a running paper trading session
 
@@ -4403,22 +4404,22 @@ def paper() -> None:
     Examples:
 
         # Start paper trading
-        almanak backtest paper start -s momentum_v1 --chain arbitrum
+        almanak strat backtest paper start -s momentum_v1 --chain arbitrum
 
         # Check status
-        almanak backtest paper status -s momentum_v1
+        almanak strat backtest paper status -s momentum_v1
 
         # View logs
-        almanak backtest paper logs -s momentum_v1
+        almanak strat backtest paper logs -s momentum_v1
 
         # Follow logs in real-time
-        almanak backtest paper logs -s momentum_v1 --follow
+        almanak strat backtest paper logs -s momentum_v1 --follow
 
         # Stop paper trading
-        almanak backtest paper stop -s momentum_v1
+        almanak strat backtest paper stop -s momentum_v1
 
         # List all sessions
-        almanak backtest paper status --all
+        almanak strat backtest paper status --all
     """
     pass
 
@@ -4517,7 +4518,8 @@ def paper_start(
     Start a paper trading session.
 
     Paper trading executes strategy decisions on a local Anvil fork,
-    providing accurate simulation with real DeFi protocol interactions.
+    providing accurate simulation with real DeFi protocol interactions
+    and full PnL tracking.
 
     The session runs in the background by default. Use --foreground to
     run interactively, or use 'paper status' to check progress.
@@ -4529,19 +4531,19 @@ def paper_start(
     Examples:
 
         # Basic paper trading on Arbitrum
-        almanak backtest paper start -s momentum_v1 --chain arbitrum
+        almanak strat backtest paper start -s momentum_v1 --chain arbitrum
 
         # With custom initial balances
-        almanak backtest paper start -s lending_loop \\
+        almanak strat backtest paper start -s lending_loop \\
             --chain arbitrum \\
             --initial-eth 20 \\
             --initial-tokens "USDC:50000,WETH:10"
 
         # Run for limited ticks
-        almanak backtest paper start -s test_strategy --max-ticks 100
+        almanak strat backtest paper start -s test_strategy --max-ticks 100
 
         # Run in foreground (blocks terminal)
-        almanak backtest paper start -s test_strategy --foreground
+        almanak strat backtest paper start -s test_strategy --foreground
     """
     # Validate strategy exists
     available_strategies = list_strategies_fn()
@@ -4550,13 +4552,13 @@ def paper_start(
         click.echo(f"Available strategies: {', '.join(sorted(available_strategies))}", err=True)
         raise click.Abort()
 
-    # Check if session already running
+    # Check if session already running (via BackgroundPaperTrader)
     existing_state = load_paper_session_state(strategy)
     if existing_state and existing_state.get("status") == "running":
         pid = existing_state.get("pid")
         if pid and is_process_running(pid):
             click.echo(f"Error: Paper trading session for '{strategy}' is already running (PID: {pid})", err=True)
-            click.echo(f"Use 'almanak backtest paper stop -s {strategy}' to stop it first.", err=True)
+            click.echo(f"Use 'almanak strat backtest paper stop -s {strategy}' to stop it first.", err=True)
             raise click.Abort()
 
     # Determine RPC URL
@@ -4711,7 +4713,7 @@ def paper_start(
                 output_data = summary.to_dict()
                 output_data["_meta"] = {
                     "generated_at": datetime.now(UTC).isoformat(),
-                    "generator": "almanak backtest paper",
+                    "generator": "almanak strat backtest paper",
                     "engine": "paper",
                 }
                 with open(output_path, "w") as f:
@@ -4724,37 +4726,48 @@ def paper_start(
             click.echo("Paper trading interrupted by user.")
 
     else:
-        # Run in background
+        # Run in background using BackgroundPaperTrader
         click.echo()
         click.echo("Starting paper trading in background...")
 
-        # For background mode, we'll save state and spawn a subprocess
-        # that runs the paper trader. This is a simplified approach;
-        # a production system would use proper process management.
-        start_time = datetime.now(UTC)
+        bg_trader = BackgroundPaperTrader(
+            config=paper_config,
+        )
 
-        # In this simplified implementation, we'll just save the config
-        # and show how to run it. A full implementation would spawn
-        # a proper background process.
+        # Resolve strategy module/class via registry for correct paths
+        strategy_cls = get_strategy(strategy)
+
+        try:
+            pid = bg_trader.start(
+                strategy_module=strategy_cls.__module__,
+                strategy_class=strategy_cls.__name__,
+            )
+        except RuntimeError as e:
+            click.echo(f"Error: {e}", err=True)
+            raise click.Abort() from e
+
+        # Also save to the CLI session state for backwards compatibility
+        start_time = datetime.now(UTC)
         save_paper_session_state(
             strategy_id=strategy,
-            pid=os.getpid(),  # Placeholder - would be subprocess PID
+            pid=pid,
             config=paper_config,
             start_time=start_time,
         )
 
         click.echo()
-        click.echo(f"Paper trading session started for '{strategy}'")
-        click.echo(f"Session state saved to: {get_paper_state_file(strategy)}")
-        click.echo()
-        click.echo("Note: Background paper trading requires running in a separate process.")
-        click.echo("For immediate execution, use --foreground flag.")
+        click.echo(f"Paper trading session started for '{strategy}' (PID: {pid})")
+        click.echo(f"State directory: {bg_trader.state_dir}")
+        click.echo(f"Log file: {bg_trader.log_file}")
         click.echo()
         click.echo("To check status:")
-        click.echo(f"  almanak backtest paper status -s {strategy}")
+        click.echo(f"  almanak strat backtest paper status -s {strategy}")
+        click.echo()
+        click.echo("To view logs:")
+        click.echo(f"  almanak strat backtest paper logs -s {strategy}")
         click.echo()
         click.echo("To stop:")
-        click.echo(f"  almanak backtest paper stop -s {strategy}")
+        click.echo(f"  almanak strat backtest paper stop -s {strategy}")
 
 
 async def _run_paper_trading_foreground(
@@ -4829,12 +4842,47 @@ def paper_stop(strategy: str, force: bool) -> None:
     Examples:
 
         # Graceful stop
-        almanak backtest paper stop -s momentum_v1
+        almanak strat backtest paper stop -s momentum_v1
 
         # Force stop
-        almanak backtest paper stop -s momentum_v1 --force
+        almanak strat backtest paper stop -s momentum_v1 --force
     """
-    # Load session state
+    # Try BackgroundPaperTrader first (engine state dir)
+    # We need a minimal config just to locate the state files
+    bg_trader = BackgroundPaperTrader(
+        config=PaperTraderConfig(
+            chain="arbitrum",  # Doesn't matter for stop, just need strategy_id
+            rpc_url="http://localhost:8545",
+            strategy_id=strategy,
+        ),
+    )
+
+    bg_status = bg_trader.get_status()
+
+    if bg_status.is_running:
+        click.echo(f"Session: {strategy}")
+        click.echo(f"Status: running (PID: {bg_status.pid})")
+
+        if force:
+            # Force kill
+            if bg_status.pid:
+                try:
+                    os.kill(bg_status.pid, signal.SIGKILL)
+                    click.echo(f"Process {bg_status.pid} killed forcefully.")
+                except (ProcessLookupError, PermissionError) as e:
+                    click.echo(f"Error: {e}", err=True)
+        else:
+            stopped = bg_trader.stop()
+            if stopped:
+                click.echo("Session stopped gracefully.")
+            else:
+                click.echo("Failed to stop session. Try --force.", err=True)
+
+        # Also clean up CLI session state
+        update_paper_session_status(strategy, "stopped")
+        return
+
+    # Fallback: check CLI session state
     state = load_paper_session_state(strategy)
     if not state:
         click.echo(f"No paper trading session found for '{strategy}'", err=True)
@@ -4921,17 +4969,19 @@ def paper_status(strategy: str | None, show_all: bool, verbose: bool) -> None:
     Check the status of paper trading sessions.
 
     Shows information about running and completed paper trading sessions.
+    Reads from both the engine state directory (~/.almanak/paper/) and
+    the CLI session directory for comprehensive status.
 
     Examples:
 
         # Check specific strategy
-        almanak backtest paper status -s momentum_v1
+        almanak strat backtest paper status -s momentum_v1
 
         # List all sessions
-        almanak backtest paper status --all
+        almanak strat backtest paper status --all
 
         # Detailed view
-        almanak backtest paper status -s momentum_v1 --verbose
+        almanak strat backtest paper status -s momentum_v1 --verbose
     """
     if show_all:
         # Show all sessions
@@ -4981,13 +5031,39 @@ def paper_status(strategy: str | None, show_all: bool, verbose: bool) -> None:
         click.echo("Error: Please specify --strategy or use --all to list all sessions", err=True)
         raise click.Abort()
 
-    # Check specific strategy
+    # Check specific strategy -- try BackgroundPaperTrader engine state first
+    bg_trader = BackgroundPaperTrader(
+        config=PaperTraderConfig(
+            chain="arbitrum",
+            rpc_url="http://localhost:8545",
+            strategy_id=strategy,
+        ),
+    )
+    bg_status = bg_trader.get_status()
+
+    if bg_status.is_running or bg_status.tick_count > 0:
+        click.echo("=" * 60)
+        click.echo(f"PAPER TRADING STATUS: {strategy}")
+        click.echo("=" * 60)
+        click.echo(f"Status: {'running' if bg_status.is_running else bg_status.status} (PID: {bg_status.pid or 'N/A'})")
+        if bg_status.session_start:
+            click.echo(f"Started: {bg_status.session_start.strftime('%Y-%m-%d %H:%M:%S')}")
+        click.echo(f"Ticks: {bg_status.tick_count}")
+        click.echo(f"Trades: {bg_status.trade_count}")
+        click.echo(f"Errors: {bg_status.error_count}")
+        if bg_status.last_save:
+            click.echo(f"Last Save: {bg_status.last_save.strftime('%Y-%m-%d %H:%M:%S')}")
+        if bg_status.can_resume:
+            click.echo(f"Can Resume: yes (resume_count: {bg_status.resume_count})")
+        return
+
+    # Fallback: check CLI session state
     state = load_paper_session_state(strategy)
     if not state:
         click.echo(f"No paper trading session found for '{strategy}'")
         click.echo()
         click.echo("To start a session:")
-        click.echo(f"  almanak backtest paper start -s {strategy}")
+        click.echo(f"  almanak strat backtest paper start -s {strategy}")
         return
 
     click.echo("=" * 60)
@@ -5100,16 +5176,16 @@ def paper_logs(strategy: str, lines: int, follow: bool, show_all: bool) -> None:
     Examples:
 
         # View last 100 lines
-        almanak backtest paper logs -s momentum_v1
+        almanak strat backtest paper logs -s momentum_v1
 
         # View last 500 lines
-        almanak backtest paper logs -s momentum_v1 -n 500
+        almanak strat backtest paper logs -s momentum_v1 -n 500
 
         # View all logs
-        almanak backtest paper logs -s momentum_v1 --all
+        almanak strat backtest paper logs -s momentum_v1 --all
 
         # Follow logs in real-time
-        almanak backtest paper logs -s momentum_v1 --follow
+        almanak strat backtest paper logs -s momentum_v1 --follow
     """
     log_file = get_paper_log_file(strategy)
 

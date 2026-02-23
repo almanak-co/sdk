@@ -61,23 +61,22 @@ class PancakeSwapSimpleStrategy(IntentStrategy):
             to_price = market.price(self.to_token)
             logger.info(f"Prices: {self.from_token}=${from_price:.2f}, {self.to_token}=${to_price:.6f}")
 
-            # DEBUG: Print price oracle dict contents
-            price_oracle = market.get_price_oracle_dict()
-            logger.info(f"DEBUG: Price oracle dict: {price_oracle}")
-
-            # Get balances to verify we have funds
-            from_balance = market.balance(self.from_token)
-            logger.info(
-                f"Balance: {from_balance.balance} {self.from_token} "
-                f"(${from_balance.balance_usd:.2f})"
-            )
-
-            # Check sufficient balance
-            if from_balance.balance_usd < self.swap_amount_usd:
-                return Intent.hold(
-                    reason=f"Insufficient {self.from_token}: "
-                    f"${from_balance.balance_usd:.2f} < ${self.swap_amount_usd}"
+            # Get balances to verify we have funds (skip if no balance provider)
+            try:
+                from_balance = market.balance(self.from_token)
+                logger.info(
+                    f"Balance: {from_balance.balance} {self.from_token} "
+                    f"(${from_balance.balance_usd:.2f})"
                 )
+
+                # Check sufficient balance
+                if from_balance.balance_usd < self.swap_amount_usd:
+                    return Intent.hold(
+                        reason=f"Insufficient {self.from_token}: "
+                        f"${from_balance.balance_usd:.2f} < ${self.swap_amount_usd}"
+                    )
+            except ValueError:
+                logger.warning("Balance check unavailable, proceeding with swap")
 
             # Execute swap
             logger.info(

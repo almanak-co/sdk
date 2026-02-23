@@ -241,11 +241,11 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
 
         # Range width as percentage
         # 0.20 = 20% total width = ±10% from current price
-        self.range_width_pct = self.config.range_width_pct
+        self.range_width_pct = Decimal(str(self.config.range_width_pct))
 
-        # Token amounts to provide
-        self.amount0 = self.config.amount0  # Token0 (e.g., WETH)
-        self.amount1 = self.config.amount1  # Token1 (e.g., USDC)
+        # Token amounts to provide (ensure Decimal for arithmetic)
+        self.amount0 = Decimal(str(self.config.amount0))  # Token0 (e.g., WETH)
+        self.amount1 = Decimal(str(self.config.amount1))  # Token1 (e.g., USDC)
 
         # Force action for testing ("open" or "close")
         self.force_action = str(self.config.force_action).lower()
