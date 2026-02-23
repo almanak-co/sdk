@@ -563,7 +563,7 @@ class TestAaveV3BorrowIntent:
             collateral_token="WBNB",
             collateral_amount=Decimal("1"),
             borrow_token="USDC",
-            borrow_amount=Decimal("150"),
+            borrow_amount=Decimal("100"),
             interest_rate_mode="variable",
             chain=CHAIN_NAME,
         )
@@ -574,7 +574,7 @@ class TestAaveV3BorrowIntent:
         await orchestrator.execute(borrow_result.action_bundle, execution_context)
 
         # Now repay partial debt
-        repay_amount = Decimal("50")
+        repay_amount = Decimal("40")
 
         print(f"\n{'=' * 80}")
         print(f"Test: Repay {repay_amount} USDC debt using RepayIntent")

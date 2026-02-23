@@ -377,9 +377,9 @@ class TestAaveV3BorrowIntent:
         weth_decimals = get_token_decimals(web3, weth)
         usdc_decimals = get_token_decimals(web3, usdc)
 
-        # Supply 1 WETH as collateral, borrow 1000 USDC (conservative LTV ~50%)
+        # Supply 1 WETH as collateral, borrow 500 USDC (~30% LTV)
         collateral_amount = Decimal("1")
-        borrow_amount = Decimal("1000")
+        borrow_amount = Decimal("500")
 
         print(f"\n{'='*80}")
         print(f"Test: Borrow {borrow_amount} USDC with {collateral_amount} WETH collateral using BorrowIntent")
@@ -519,7 +519,7 @@ class TestAaveV3BorrowIntent:
             collateral_token="WETH",
             collateral_amount=Decimal("1"),
             borrow_token="USDC",
-            borrow_amount=Decimal("1500"),
+            borrow_amount=Decimal("500"),
             interest_rate_mode="variable",
             chain=CHAIN_NAME,
         )
@@ -531,7 +531,7 @@ class TestAaveV3BorrowIntent:
         assert borrow_exec_result.success, f"Setup borrow failed: {borrow_exec_result.error}"
 
         # Now repay partial debt
-        repay_amount = Decimal("500")
+        repay_amount = Decimal("200")
 
         print(f"\n{'='*80}")
         print(f"Test: Repay {repay_amount} USDC debt using RepayIntent")

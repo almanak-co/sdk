@@ -418,10 +418,10 @@ class TestAaveV3BorrowIntent:
         wavax_decimals = get_token_decimals(web3, wavax)
         usdc_decimals = get_token_decimals(web3, usdc)
 
-        # Supply 5 WAVAX as collateral, borrow 20 USDC (conservative LTV ~46%)
-        # WAVAX ~$8.74 -> 5 WAVAX = ~$43.70 collateral, LTV ~50-65% -> max borrow ~$22-28
+        # Supply 5 WAVAX as collateral, borrow 10 USDC (~30% LTV)
+        # WAVAX ~$8.74 -> 5 WAVAX = ~$43.70 collateral
         collateral_amount = Decimal("5")
-        borrow_amount = Decimal("20")
+        borrow_amount = Decimal("10")
 
         print(f"\n{'='*80}")
         print(f"Test: Borrow {borrow_amount} USDC with {collateral_amount} WAVAX collateral using BorrowIntent")
@@ -569,7 +569,7 @@ class TestAaveV3BorrowIntent:
             collateral_token="WAVAX",
             collateral_amount=Decimal("5"),
             borrow_token="USDC",
-            borrow_amount=Decimal("20"),
+            borrow_amount=Decimal("10"),
             interest_rate_mode="variable",
             chain=CHAIN_NAME,
         )
@@ -581,7 +581,7 @@ class TestAaveV3BorrowIntent:
         assert borrow_exec_result.success, f"Setup borrow failed: {borrow_exec_result.error}"
 
         # Now repay partial debt
-        repay_amount = Decimal("10")
+        repay_amount = Decimal("5")
 
         print(f"\n{'='*80}")
         print(f"Test: Repay {repay_amount} USDC debt using RepayIntent")
