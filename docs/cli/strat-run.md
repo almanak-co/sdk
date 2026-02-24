@@ -14,7 +14,7 @@ Usage: almanak strat run [OPTIONS]
 
 ## Prerequisites
 
-- Environment variables: `ALMANAK_PRIVATE_KEY`, `ALCHEMY_API_KEY`
+- Environment variables: `ALMANAK_PRIVATE_KEY` (RPC_URL recommended; free public RPCs used if nothing is set)
 - For anvil mode: Anvil is auto-started by the managed gateway (requires Foundry installed)
 
 ## Options
@@ -106,7 +106,7 @@ Usage: almanak strat run [OPTIONS]
   Use --no-gateway to connect to an existing gateway instead.
 
   Prerequisites:
-      - Environment variables: ALMANAK_PRIVATE_KEY, ALCHEMY_API_KEY
+      - Environment variables: ALMANAK_PRIVATE_KEY (RPC_URL recommended; public RPCs used if unset)
       - For anvil mode: Foundry installed (Anvil is auto-started)
 
   Examples:

@@ -723,11 +723,14 @@ __all__ = [
 def generate_env_file() -> str:
     """Generate the .env file with required environment variables."""
     return """# Required
-ALCHEMY_API_KEY=
 ALMANAK_PRIVATE_KEY=
-ALMANAK_GATEWAY_PRIVATE_KEY=
+
+# RPC access (set one of these, or leave empty for free public RPCs)
+# RPC_URL=https://your-rpc-provider.com/v1/your-key
+# ALCHEMY_API_KEY=
 
 # Optional
+# ALMANAK_GATEWAY_PRIVATE_KEY=  # falls back to ALMANAK_PRIVATE_KEY if unset
 # ENSO_API_KEY=
 # COINGECKO_API_KEY=
 # ALMANAK_API_KEY=

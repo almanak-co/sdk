@@ -642,12 +642,12 @@ class LocalRuntimeConfig:
                     except ValueError as e:
                         raise ConfigurationError(
                             field="rpc_url",
-                            reason=f"Could not build RPC URL: {e}. Set ALMANAK_{resolved_chain.upper()}_RPC_URL, ALMANAK_RPC_URL, or ALCHEMY_API_KEY.",
+                            reason=f"Could not build RPC URL: {e}. Set RPC_URL, {resolved_chain.upper()}_RPC_URL, ALMANAK_RPC_URL, or ALCHEMY_API_KEY.",
                         ) from None
                 else:
                     raise ConfigurationError(
                         field="rpc_url",
-                        reason=f"RPC URL required. Set ALMANAK_{resolved_chain.upper()}_RPC_URL, ALMANAK_RPC_URL, or ALCHEMY_API_KEY environment variable.",
+                        reason=f"RPC URL required. Set RPC_URL, {resolved_chain.upper()}_RPC_URL, ALMANAK_RPC_URL, or ALCHEMY_API_KEY environment variable.",
                     )
 
         return cls(
@@ -1095,13 +1095,13 @@ class MultiChainRuntimeConfig:
                     except ValueError as e:
                         raise ConfigurationError(
                             field=env_var,
-                            reason=f"Could not build RPC URL for {chain}: {e}. Set {env_var} or ALCHEMY_API_KEY.",
+                            reason=f"Could not build RPC URL for {chain}: {e}. Set RPC_URL, {chain.upper()}_RPC_URL, ALMANAK_RPC_URL, or ALCHEMY_API_KEY.",
                         ) from None
                 else:
                     # No URL available
                     raise ConfigurationError(
                         field=env_var,
-                        reason=f"RPC URL required for {chain}. Set {env_var} or ALCHEMY_API_KEY environment variable.",
+                        reason=f"RPC URL required for {chain}. Set RPC_URL, {chain.upper()}_RPC_URL, ALMANAK_RPC_URL, or ALCHEMY_API_KEY environment variable.",
                     )
 
     def _validate_optional_fields(self) -> None:

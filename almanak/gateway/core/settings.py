@@ -1,8 +1,10 @@
 """Gateway configuration using Pydantic Settings."""
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 # Default persistent DB path for gateway data (timeline events, instance registry)
@@ -92,6 +94,19 @@ class GatewaySettings(BaseSettings):
         "env_file": ".env",
         "extra": "ignore",
     }
+
+    @model_validator(mode="after")
+    def _fallback_private_key(self) -> "GatewaySettings":
+        """Fall back to ALMANAK_PRIVATE_KEY if ALMANAK_GATEWAY_PRIVATE_KEY is not set."""
+        if not self.private_key:
+            # Ensure .env values are loaded into os.environ (idempotent)
+            from dotenv import load_dotenv
+
+            load_dotenv()
+            fallback = os.environ.get("ALMANAK_PRIVATE_KEY")
+            if fallback:
+                self.private_key = fallback
+        return self
 
 
 @lru_cache

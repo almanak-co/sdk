@@ -12,14 +12,25 @@ These must be set before running any strategy.
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `ALCHEMY_API_KEY` | RPC access to blockchain networks and Anvil fork testing. Get a key at [alchemy.com](https://www.alchemy.com/) | `abc123def456` |
-| `ALMANAK_GATEWAY_PRIVATE_KEY` | Wallet private key used by the gateway to sign and submit transactions on-chain | `0x4c0883a6...` |
-| `ALMANAK_PRIVATE_KEY` | Same private key, used by the framework to derive your wallet address | `0x4c0883a6...` |
+| `ALMANAK_PRIVATE_KEY` | Wallet private key for signing transactions and deriving your wallet address | `0x4c0883a6...` |
+
+### RPC Access (recommended; free public RPCs used if unset)
+
+| Variable | Priority | Description | Example |
+|----------|----------|-------------|---------|
+| `ALMANAK_{CHAIN}_RPC_URL` | 1 (highest) | Per-chain RPC URL with ALMANAK prefix | `https://arb-mainnet.infura.io/v3/KEY` |
+| `{CHAIN}_RPC_URL` | 2 | Per-chain RPC URL (e.g. `ARBITRUM_RPC_URL`) | `https://arb-mainnet.infura.io/v3/KEY` |
+| `ALMANAK_RPC_URL` | 3 | Generic RPC URL for all chains | `https://your-rpc.com/v1/KEY` |
+| `RPC_URL` | 4 | Bare generic RPC URL | `https://your-rpc.com/v1/KEY` |
+| `ALCHEMY_API_KEY` | 5 (fallback) | Alchemy API key -- URLs built automatically per chain | `abc123def456` |
+| `TENDERLY_API_KEY_{CHAIN}` | 6 (fallback) | Tenderly API key for chain-specific RPC (e.g. `TENDERLY_API_KEY_ARBITRUM`) | `abc123...` |
+
+Any provider works: Infura, QuickNode, self-hosted, Alchemy, etc. `ALCHEMY_API_KEY` is an optional fallback that auto-constructs URLs for all supported chains. If none are set, the gateway falls back to free public RPCs (rate-limited, best-effort).
 
 !!! warning
     Never commit private keys. Use a dedicated testing wallet for development.
 
-**Why two private key variables?** The gateway signs all transactions using `ALMANAK_GATEWAY_PRIVATE_KEY`. The framework never signs anything itself -- it only reads `ALMANAK_PRIVATE_KEY` to derive your wallet address, which it passes to the gateway. Both variables must be set to the **same key**. They exist separately because the gateway and framework use different env var prefixes (`ALMANAK_GATEWAY_` vs `ALMANAK_`).
+**Note:** The gateway also accepts `ALMANAK_GATEWAY_PRIVATE_KEY` (with its own prefix). If set, it takes precedence. Otherwise, the gateway falls back to `ALMANAK_PRIVATE_KEY` -- so you only need one variable.
 
 ---
 
@@ -107,9 +118,11 @@ Optional, for historical gas price data. Pattern: `{EXPLORER}_API_KEY`
 
 ```bash
 # Required
-ALCHEMY_API_KEY=your_alchemy_key
 ALMANAK_PRIVATE_KEY=0xYOUR_PRIVATE_KEY
-ALMANAK_GATEWAY_PRIVATE_KEY=0xYOUR_PRIVATE_KEY
+
+# RPC access (pick one)
+RPC_URL=https://your-rpc-provider.com/v1/your-key
+# ALCHEMY_API_KEY=your_alchemy_key  # alternative: auto-builds URLs per chain
 
 # Recommended
 ENSO_API_KEY=your_enso_key

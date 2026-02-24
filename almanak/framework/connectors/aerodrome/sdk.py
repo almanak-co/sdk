@@ -303,14 +303,17 @@ class AerodromeSDK:
         Returns:
             Pool address if exists, None otherwise
         """
-        import os
-
         from web3 import Web3
 
-        # Get RPC URL from instance or environment
+        # Get RPC URL from instance or centralized resolver
         rpc_url = self.rpc_url
         if not rpc_url:
-            rpc_url = os.environ.get("ALMANAK_BASE_RPC_URL") or os.environ.get("ALMANAK_RPC_URL")
+            try:
+                from almanak.gateway.utils.rpc_provider import get_rpc_url
+
+                rpc_url = get_rpc_url("base")
+            except (ImportError, ValueError):
+                pass
 
         if not rpc_url:
             logger.warning("No RPC URL available - cannot query pool address from factory")

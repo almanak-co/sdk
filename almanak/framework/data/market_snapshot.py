@@ -3866,22 +3866,10 @@ class MarketSnapshot:
             raise HealthUnavailableError(f"PT position health unavailable: {e}") from e
 
     def _get_rpc_url(self) -> str:
-        """Get RPC URL from chain configuration."""
-        # Fall back to Alchemy-based RPC URL construction
-        import os
+        """Get RPC URL from chain configuration via centralized resolver."""
+        from almanak.gateway.utils.rpc_provider import get_rpc_url
 
-        chain_rpc_map = {
-            "ethereum": "https://eth-mainnet.g.alchemy.com/v2/",
-            "arbitrum": "https://arb-mainnet.g.alchemy.com/v2/",
-            "optimism": "https://opt-mainnet.g.alchemy.com/v2/",
-            "base": "https://base-mainnet.g.alchemy.com/v2/",
-        }
-        api_key = os.environ.get("ALCHEMY_API_KEY", "")
-        chain_key = self._chain.lower()
-        base_url = chain_rpc_map.get(chain_key, "")
-        if base_url and api_key:
-            return f"{base_url}{api_key}"
-        raise ValueError(f"No RPC URL available for chain: {self._chain}")
+        return get_rpc_url(self._chain)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert snapshot state to dictionary for serialization.

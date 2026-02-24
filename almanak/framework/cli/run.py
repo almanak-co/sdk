@@ -820,7 +820,7 @@ def run(
     Use --no-gateway to connect to an existing gateway instead.
 
     Prerequisites:
-        - Environment variables: ALMANAK_PRIVATE_KEY, ALCHEMY_API_KEY
+        - Environment variables: ALMANAK_PRIVATE_KEY (RPC_URL optional; public RPCs used if unset)
         - For anvil mode: Foundry installed (Anvil is auto-started)
 
     Examples:
@@ -1330,16 +1330,13 @@ def run(
             click.echo(f"Error loading multi-chain configuration: {e}", err=True)
             click.echo()
             click.echo("Required environment variables for multi-chain:")
-            click.echo("  ALMANAK_PRIVATE_KEY - Wallet private key")
-            click.echo("  ALCHEMY_API_KEY     - Alchemy API key (for dynamic RPC URLs)")
+            click.echo("  ALMANAK_PRIVATE_KEY          - Wallet private key")
             click.echo()
-            click.echo("Alternative (explicit URLs):")
+            click.echo("RPC access (one of these, or leave empty for free public RPCs):")
             for chain in strategy_chains:
-                click.echo(f"  ALMANAK_{chain.upper()}_RPC_URL - RPC for {chain}")
-            click.echo()
-            click.echo("Example (recommended):")
-            click.echo("  export ALMANAK_PRIVATE_KEY=0x...")
-            click.echo("  export ALCHEMY_API_KEY=your_api_key")
+                click.echo(f"  ALMANAK_{chain.upper()}_RPC_URL  - Per-chain RPC URL")
+            click.echo("  RPC_URL                      - Generic RPC endpoint URL")
+            click.echo("  ALCHEMY_API_KEY              - Alchemy API key (fallback)")
             sys.exit(1)
     else:
         try:
@@ -1349,12 +1346,13 @@ def run(
             click.echo(f"Error loading configuration: {e}", err=True)
             click.echo()
             click.echo("Required environment variables:")
-            click.echo("  ALMANAK_PRIVATE_KEY - Wallet private key")
-            click.echo("  ALCHEMY_API_KEY     - Alchemy API key (for dynamic RPC URLs)")
+            click.echo("  ALMANAK_PRIVATE_KEY          - Wallet private key")
             click.echo()
-            click.echo("Alternative (legacy mode):")
-            click.echo("  ALMANAK_CHAIN       - Chain name (e.g., arbitrum)")
-            click.echo("  ALMANAK_RPC_URL     - RPC endpoint URL")
+            click.echo("RPC access (one of these, or leave empty for free public RPCs):")
+            click.echo("  ALMANAK_ARBITRUM_RPC_URL     - Per-chain RPC URL (highest priority)")
+            click.echo("  ALMANAK_RPC_URL              - Generic RPC endpoint URL")
+            click.echo("  RPC_URL                      - Generic RPC endpoint URL")
+            click.echo("  ALCHEMY_API_KEY              - Alchemy API key (fallback)")
             click.echo()
             click.echo("Optional environment variables:")
             click.echo("  ALMANAK_MAX_GAS_PRICE_GWEI - Max gas price (default: 100)")

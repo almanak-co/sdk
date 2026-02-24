@@ -2017,8 +2017,9 @@ class IntentCompiler:
         """Get RPC URL for the current chain.
 
         If rpc_url is set on the compiler, use it. Otherwise, try to fetch from
-        the gateway's RPC provider using ALCHEMY_API_KEY. Falls back to Anvil
-        (localhost) if mainnet resolution fails, to support local fork testing.
+        the gateway's RPC provider using custom RPC URL env vars or ALCHEMY_API_KEY.
+        Falls back to Anvil (localhost) if mainnet resolution fails, to support
+        local fork testing.
 
         This is needed for protocol adapters (like Aerodrome, TraderJoe, Pendle)
         that need to make direct RPC calls for pool queries when the compiler is
@@ -2040,14 +2041,14 @@ class IntentCompiler:
             logger.debug(f"Fetched RPC URL for {self.chain} from gateway utils")
             return rpc_url
 
-        # Fallback: try Anvil ONLY if no API key is configured.
-        # If ALCHEMY_API_KEY is set but resolution failed (bad key, unsupported chain),
+        # Fallback: try Anvil ONLY if no RPC source is configured.
+        # If an RPC source is set but resolution failed (bad key, unsupported chain),
         # we should fail fast - not silently switch to localhost.
-        import os
+        from almanak.gateway.utils.rpc_provider import has_api_key_configured
 
-        if os.environ.get("ALCHEMY_API_KEY"):
+        if has_api_key_configured():
             logger.warning(
-                f"ALCHEMY_API_KEY is set but RPC resolution failed for {self.chain}. Not falling back to Anvil."
+                f"RPC source is configured but resolution failed for {self.chain}. Not falling back to Anvil."
             )
             return None
 
@@ -6730,16 +6731,14 @@ class IntentCompiler:
 
             # Step 5: Create transaction data using GMX V2 SDK
             # Use the real SDK to build calldata with proper ABI encoding
-            import os
-
             from ..connectors.gmx_v2 import GMX_V2_MARKETS, GMX_V2_TOKENS, GMXV2SDK, GMXV2OrderParams
 
-            # Get RPC URL for Arbitrum
-            rpc_url = os.environ.get("ALMANAK_ARBITRUM_RPC_URL") or os.environ.get("ALMANAK_RPC_URL")
+            # Get RPC URL via centralized resolver
+            rpc_url = self._get_chain_rpc_url()
             if not rpc_url:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error="ALMANAK_ARBITRUM_RPC_URL or ALMANAK_RPC_URL required for GMX V2 compilation",
+                    error=f"No RPC URL available for GMX V2. Set ALMANAK_{self.chain.upper()}_RPC_URL, RPC_URL, or ALCHEMY_API_KEY.",
                     intent_id=intent.intent_id,
                 )
 
@@ -6912,16 +6911,14 @@ class IntentCompiler:
                 )
 
             # Step 5: Create transaction data using GMX V2 SDK
-            import os
-
             from ..connectors.gmx_v2 import GMX_V2_MARKETS, GMX_V2_TOKENS, GMXV2SDK, GMXV2OrderParams
 
-            # Get RPC URL for Arbitrum
-            rpc_url = os.environ.get("ALMANAK_ARBITRUM_RPC_URL") or os.environ.get("ALMANAK_RPC_URL")
+            # Get RPC URL via centralized resolver
+            rpc_url = self._get_chain_rpc_url()
             if not rpc_url:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error="ALMANAK_ARBITRUM_RPC_URL or ALMANAK_RPC_URL required for GMX V2 compilation",
+                    error=f"No RPC URL available for GMX V2. Set ALMANAK_{self.chain.upper()}_RPC_URL, RPC_URL, or ALCHEMY_API_KEY.",
                     intent_id=intent.intent_id,
                 )
 

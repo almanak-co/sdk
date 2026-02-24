@@ -110,8 +110,8 @@ If you need a blocked method, contact support to discuss alternatives.
 Allowed chains: `ethereum`, `arbitrum`, `base`, `optimism`, `polygon`, `avalanche`, `bsc`, `sonic`, `plasma`
 
 ```bash
-# Verify ALCHEMY_API_KEY is set in gateway
-docker-compose exec gateway env | grep ALCHEMY
+# Verify RPC source is configured in gateway
+docker-compose exec gateway env | grep -E 'RPC_URL|ALCHEMY'
 ```
 
 ### Issue: Rate Limiting

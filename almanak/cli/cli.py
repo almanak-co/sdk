@@ -841,7 +841,7 @@ def strategy_run(
     Use --no-gateway to connect to an existing gateway instead.
 
     Prerequisites:
-        - Environment variables: ALMANAK_PRIVATE_KEY, ALCHEMY_API_KEY
+        - Environment variables: ALMANAK_PRIVATE_KEY, RPC_URL (or ALCHEMY_API_KEY)
         - For anvil mode: Foundry installed (Anvil is auto-started by managed gateway)
 
     Examples:

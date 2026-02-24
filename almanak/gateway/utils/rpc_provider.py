@@ -1,17 +1,29 @@
 """Dynamic RPC URL Provider for EVM Chains.
 
-This module provides dynamic RPC URL construction from API keys, eliminating the need
-to specify full RPC URLs per chain in environment variables.
+This module provides flexible RPC URL resolution with env-var-driven precedence,
+supporting custom RPC URLs with Alchemy/Tenderly as optional fallbacks.
 
 Key Features:
-    - Single ALCHEMY_API_KEY env var works for all chains
-    - Automatic URL construction based on chain name
+    - Bring-your-own RPC URL via env vars (any provider: Infura, QuickNode, self-hosted, etc.)
+    - Alchemy API key as optional fallback (works for all chains)
     - Support for multiple node providers (Alchemy, Tenderly)
+    - Free public RPC fallback (no config needed -- works out of the box)
     - Anvil detection for local development
     - Caching of Web3 clients
 
+Env Var Precedence (mainnet/sepolia):
+    1. ALMANAK_{CHAIN}_RPC_URL   (e.g. ALMANAK_ARBITRUM_RPC_URL)
+    2. {CHAIN}_RPC_URL           (e.g. ARBITRUM_RPC_URL)
+    3. ALMANAK_RPC_URL           (generic, all chains)
+    4. RPC_URL                   (bare generic)
+    5. ALCHEMY_API_KEY           (dynamic URL construction)
+    6. TENDERLY_API_KEY_{CHAIN}  (per-chain Tenderly keys)
+    7. Free public RPCs          (PublicNode, last resort)
+
+    For bsc/bnb: both variants are checked (e.g. BSC_RPC_URL and BNB_RPC_URL).
+
 Usage:
-    # Get RPC URL for a chain (uses ALCHEMY_API_KEY from env)
+    # Get RPC URL for a chain (checks custom env vars, then ALCHEMY_API_KEY)
     url = get_rpc_url("arbitrum")
     url = get_rpc_url("base", network="mainnet")
 
@@ -22,7 +34,11 @@ Usage:
     url = get_rpc_url("arbitrum", network="anvil")  # Returns http://127.0.0.1:8545
 
 Environment Variables:
-    ALCHEMY_API_KEY: Alchemy API key (works for all chains)
+    ALMANAK_{CHAIN}_RPC_URL: Per-chain custom RPC URL (highest priority)
+    {CHAIN}_RPC_URL: Per-chain bare custom RPC URL
+    ALMANAK_RPC_URL: Generic custom RPC URL for all chains
+    RPC_URL: Bare generic custom RPC URL
+    ALCHEMY_API_KEY: Alchemy API key fallback (works for all chains)
     ANVIL_PORT: Optional custom Anvil port (default: 8545)
     TENDERLY_API_KEY_{CHAIN}: Per-chain Tenderly keys (e.g., TENDERLY_API_KEY_ARBITRUM)
 """
@@ -52,6 +68,7 @@ class NodeProvider(StrEnum):
     TENDERLY = "tenderly"
     ANVIL = "anvil"
     CUSTOM = "custom"  # For explicitly provided URLs
+    PUBLIC = "public"  # Free public RPCs (no API key, last resort)
 
 
 class Network(StrEnum):
@@ -94,6 +111,23 @@ TENDERLY_SUBDOMAINS: dict[str, str] = {
     # Note: Optimism, Polygon, BSC, Sonic not supported by Tenderly RPC
 }
 
+# Free public RPC endpoints (no API key required).
+# Used as last-resort fallback when no custom URL or API key is configured.
+# Source: PublicNode (publicnode.com) + official chain RPCs.
+PUBLIC_RPC_URLS: dict[str, str] = {
+    "ethereum": "https://ethereum-rpc.publicnode.com",
+    "arbitrum": "https://arbitrum-one-rpc.publicnode.com",
+    "optimism": "https://optimism-rpc.publicnode.com",
+    "base": "https://base-rpc.publicnode.com",
+    "avalanche": "https://avalanche-c-chain-rpc.publicnode.com",
+    "polygon": "https://polygon-bor-rpc.publicnode.com",
+    "bnb": "https://bsc-rpc.publicnode.com",
+    "bsc": "https://bsc-rpc.publicnode.com",
+    "sonic": "https://sonic-rpc.publicnode.com",
+    "linea": "https://linea-rpc.publicnode.com",
+    "plasma": "https://rpc.plasma.to",
+}
+
 # Chains that require POA middleware (geth_poa_middleware)
 POA_CHAINS: set[str] = {"avalanche", "bnb", "polygon"}
 
@@ -120,42 +154,132 @@ ANVIL_CHAIN_PORTS: dict[str, int] = {
 # =============================================================================
 
 
+def _get_custom_url(chain: str) -> str:
+    """Check env vars for a custom RPC URL in precedence order.
+
+    Precedence:
+        1. ALMANAK_{CHAIN}_RPC_URL
+        2. {CHAIN}_RPC_URL
+        3. ALMANAK_RPC_URL
+        4. RPC_URL
+
+    For bsc/bnb chains, both variants are checked at each level.
+
+    Args:
+        chain: Normalized chain name (lowercase)
+
+    Returns:
+        Custom RPC URL from environment
+
+    Raises:
+        ValueError: If no custom URL env var is set
+    """
+    chain_upper = chain.upper()
+
+    # Determine alias variants for bsc/bnb (requested chain checked first)
+    variants = [chain_upper]
+    if chain_upper == "BSC":
+        variants = ["BSC", "BNB"]
+    elif chain_upper == "BNB":
+        variants = ["BNB", "BSC"]
+
+    # 1. ALMANAK_{CHAIN}_RPC_URL
+    for variant in variants:
+        env_var = f"ALMANAK_{variant}_RPC_URL"
+        url = os.environ.get(env_var)
+        if url:
+            logger.debug(f"Using custom RPC URL from {env_var}")
+            return url
+
+    # 2. {CHAIN}_RPC_URL
+    for variant in variants:
+        env_var = f"{variant}_RPC_URL"
+        url = os.environ.get(env_var)
+        if url:
+            logger.debug(f"Using custom RPC URL from {env_var}")
+            return url
+
+    # 3. ALMANAK_RPC_URL
+    url = os.environ.get("ALMANAK_RPC_URL")
+    if url:
+        logger.debug("Using custom RPC URL from ALMANAK_RPC_URL")
+        return url
+
+    # 4. RPC_URL
+    url = os.environ.get("RPC_URL")
+    if url:
+        logger.debug("Using custom RPC URL from RPC_URL")
+        return url
+
+    raise ValueError(
+        f"No custom RPC URL found for chain '{chain}'. "
+        f"Set ALMANAK_{chain_upper}_RPC_URL, {chain_upper}_RPC_URL, ALMANAK_RPC_URL, or RPC_URL."
+    )
+
+
+def _has_custom_url(chain: str) -> bool:
+    """Check if a custom RPC URL env var is set for this chain.
+
+    Same precedence as _get_custom_url but returns bool without logging/error.
+    """
+    chain_upper = chain.upper()
+    variants = [chain_upper]
+    if chain_upper == "BSC":
+        variants = ["BSC", "BNB"]
+    elif chain_upper == "BNB":
+        variants = ["BNB", "BSC"]
+
+    for variant in variants:
+        if os.environ.get(f"ALMANAK_{variant}_RPC_URL"):
+            return True
+        if os.environ.get(f"{variant}_RPC_URL"):
+            return True
+
+    if os.environ.get("ALMANAK_RPC_URL"):
+        return True
+    if os.environ.get("RPC_URL"):
+        return True
+
+    return False
+
+
 def get_rpc_url(
     chain: str,
     network: str = "mainnet",
     provider: NodeProvider | None = None,
     custom_url: str | None = None,
 ) -> str:
-    """Get RPC URL for a chain, constructing dynamically from API key if needed.
+    """Get RPC URL for a chain, using custom env vars or API key fallback.
 
-    This function provides the same UX as v0: just set ALCHEMY_API_KEY and the
-    chain is determined from strategy config. URLs are built automatically.
+    Checks custom RPC URL env vars first, then falls back to Alchemy/Tenderly
+    API keys for dynamic URL construction.
 
     Args:
         chain: Chain name (e.g., "arbitrum", "base", "ethereum")
         network: Network environment - "mainnet", "sepolia", "testnet", or "anvil"
         provider: Optional node provider override. If None, auto-selects based on
-                  available API keys (prefers Alchemy). Use NodeProvider.CUSTOM
+                  available env vars and API keys. Use NodeProvider.CUSTOM
                   with custom_url parameter for explicit URLs.
-        custom_url: Custom RPC URL when provider=NodeProvider.CUSTOM. Required
-                    when using CUSTOM provider.
+        custom_url: Custom RPC URL when provider=NodeProvider.CUSTOM. If not
+                    provided with CUSTOM provider, falls back to env var lookup.
 
     Returns:
         RPC URL for the chain
 
     Raises:
-        ValueError: If chain is unsupported, no API key is available, or
-                    custom_url is missing when using CUSTOM provider.
+        ValueError: If chain is unsupported and no RPC source is available.
 
     Example:
-        # These all work with just ALCHEMY_API_KEY set:
-        url = get_rpc_url("arbitrum")  # https://arb-mainnet.g.alchemy.com/v2/xxx
-        url = get_rpc_url("base")      # https://base-mainnet.g.alchemy.com/v2/xxx
+        # Custom RPC URL from env (RPC_URL, ARBITRUM_RPC_URL, etc.):
+        url = get_rpc_url("arbitrum")
+
+        # Alchemy fallback (ALCHEMY_API_KEY):
+        url = get_rpc_url("base")  # https://base-mainnet.g.alchemy.com/v2/xxx
 
         # Local development
         url = get_rpc_url("arbitrum", network="anvil")  # http://127.0.0.1:8545
 
-        # Custom RPC endpoint
+        # Explicit custom URL (parameter takes precedence)
         url = get_rpc_url("arbitrum", provider=NodeProvider.CUSTOM,
                           custom_url="https://my-rpc.example.com")
     """
@@ -172,9 +296,10 @@ def get_rpc_url(
 
     # Handle custom provider
     if provider == NodeProvider.CUSTOM:
-        if not custom_url:
-            raise ValueError("custom_url parameter is required when using NodeProvider.CUSTOM")
-        return custom_url
+        if custom_url:
+            return custom_url
+        # Fall back to env var lookup when no explicit URL provided
+        return _get_custom_url(chain_lower)
 
     # Auto-select provider if not specified
     if provider is None:
@@ -185,6 +310,10 @@ def get_rpc_url(
         return _get_alchemy_url(chain_lower, network_lower)
     elif provider == NodeProvider.TENDERLY:
         return _get_tenderly_url(chain_lower)
+    elif provider == NodeProvider.CUSTOM:
+        return _get_custom_url(chain_lower)
+    elif provider == NodeProvider.PUBLIC:
+        return _get_public_url(chain_lower)
     elif provider == NodeProvider.ANVIL:
         return _get_anvil_url(chain_lower)
     else:
@@ -195,11 +324,17 @@ def _auto_select_provider(chain: str) -> NodeProvider:
     """Auto-select the best available provider for a chain.
 
     Priority:
-    1. Alchemy (if ALCHEMY_API_KEY is set)
-    2. Tenderly (if chain-specific key is set)
-    3. Raise error
+    1. Custom URL (if any custom RPC URL env var is set)
+    2. Alchemy (if ALCHEMY_API_KEY is set)
+    3. Tenderly (if chain-specific key is set)
+    4. Public RPC (free, no API key -- last resort)
+    5. Raise error
     """
-    # Check Alchemy first (preferred)
+    # Check custom URL env vars first
+    if _has_custom_url(chain):
+        return NodeProvider.CUSTOM
+
+    # Check Alchemy
     if os.environ.get("ALCHEMY_API_KEY"):
         if chain in ALCHEMY_CHAIN_KEYS:
             return NodeProvider.ALCHEMY
@@ -210,10 +345,16 @@ def _auto_select_provider(chain: str) -> NodeProvider:
         if chain in TENDERLY_SUBDOMAINS:
             return NodeProvider.TENDERLY
 
+    # Fall back to free public RPC
+    if chain in PUBLIC_RPC_URLS:
+        logger.info(f"No API key configured -- using free public RPC for {chain} (rate limits may apply)")
+        return NodeProvider.PUBLIC
+
     # No provider available
+    chain_upper = chain.upper()
     raise ValueError(
         f"No RPC provider available for chain '{chain}'. "
-        f"Set ALCHEMY_API_KEY or {tenderly_key_var} environment variable."
+        f"Set RPC_URL, {chain_upper}_RPC_URL, ALMANAK_RPC_URL, or ALCHEMY_API_KEY environment variable."
     )
 
 
@@ -311,6 +452,28 @@ def _get_tenderly_url(chain: str) -> str:
     return f"https://{subdomain}.gateway.tenderly.co/{api_key}"
 
 
+def _get_public_url(chain: str) -> str:
+    """Get free public RPC URL for the specified chain.
+
+    These are rate-limited community endpoints that require no API key.
+    Used as a last-resort fallback when no custom URL or API key is configured.
+
+    Args:
+        chain: Normalized chain name (lowercase)
+
+    Returns:
+        Public RPC URL
+
+    Raises:
+        ValueError: If no public RPC is available for the chain
+    """
+    url = PUBLIC_RPC_URLS.get(chain)
+    if not url:
+        supported = ", ".join(sorted(PUBLIC_RPC_URLS.keys()))
+        raise ValueError(f"No free public RPC available for chain '{chain}'. Supported: {supported}")
+    return url
+
+
 # =============================================================================
 # Helper Functions
 # =============================================================================
@@ -353,11 +516,29 @@ def get_supported_chains() -> list[str]:
 
 
 def has_api_key_configured() -> bool:
-    """Check if at least one RPC provider API key is configured.
+    """Check if at least one RPC source is configured (custom URL or API key).
 
     Returns:
-        True if ALCHEMY_API_KEY or any TENDERLY_API_KEY_* is set
+        True if any custom RPC URL env var, ALCHEMY_API_KEY, or any TENDERLY_API_KEY_* is set
     """
+    # Check generic custom URL env vars
+    if os.environ.get("RPC_URL"):
+        return True
+    if os.environ.get("ALMANAK_RPC_URL"):
+        return True
+
+    # Check per-chain custom URL env vars (check all known chains)
+    for chain in ALCHEMY_CHAIN_KEYS:
+        chain_upper = chain.upper()
+        variants = [chain_upper]
+        if chain_upper == "BNB":
+            variants.append("BSC")
+        for variant in variants:
+            if os.environ.get(f"ALMANAK_{variant}_RPC_URL"):
+                return True
+            if os.environ.get(f"{variant}_RPC_URL"):
+                return True
+
     if os.environ.get("ALCHEMY_API_KEY"):
         return True
 
@@ -412,4 +593,6 @@ __all__ = [
     "has_api_key_configured",
     "is_local_rpc",
     "is_poa_chain",
+    "_get_custom_url",
+    "_has_custom_url",
 ]
