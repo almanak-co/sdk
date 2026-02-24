@@ -1011,16 +1011,18 @@ def run(
         # (not ALMANAK_PRIVATE_KEY), so we must pass it explicitly.
         gateway_private_key = os.environ.get("ALMANAK_PRIVATE_KEY") if isolated_wallet_address else None
 
-        gateway_settings = GatewaySettings(
-            grpc_host=effective_host,
-            grpc_port=gateway_port,
-            network=gateway_network,
-            allow_insecure=True,
-            metrics_enabled=False,
-            audit_enabled=False,
-            chains=anvil_chains,
-            private_key=gateway_private_key,
-        )
+        gateway_kwargs: dict[str, Any] = {
+            "grpc_host": effective_host,
+            "grpc_port": gateway_port,
+            "network": gateway_network,
+            "allow_insecure": True,
+            "metrics_enabled": False,
+            "audit_enabled": False,
+            "chains": anvil_chains,
+        }
+        if gateway_private_key:
+            gateway_kwargs["private_key"] = gateway_private_key
+        gateway_settings = GatewaySettings(**gateway_kwargs)
 
         if anvil_chains:
             click.echo(
