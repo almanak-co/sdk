@@ -548,7 +548,7 @@ class LocalRuntimeConfig:
             # Local development with Anvil
             config = LocalRuntimeConfig.from_env(chain="arbitrum", network="anvil")
         """
-        from almanak.framework.utils.rpc_provider import get_rpc_url, has_api_key_configured
+        from almanak.gateway.utils.rpc_provider import get_rpc_url
 
         # Load .env file if specified or found in default locations
         if dotenv_path:
@@ -634,21 +634,15 @@ class LocalRuntimeConfig:
                 rpc_url = get_optional("RPC_URL")
 
             if not rpc_url:
-                # Try to build dynamically from ALCHEMY_API_KEY
-                if has_api_key_configured():
-                    try:
-                        rpc_url = get_rpc_url(resolved_chain, network=network)
-                        logger.debug(f"Built RPC URL dynamically for {resolved_chain}")
-                    except ValueError as e:
-                        raise ConfigurationError(
-                            field="rpc_url",
-                            reason=f"Could not build RPC URL: {e}. Set RPC_URL, {resolved_chain.upper()}_RPC_URL, ALMANAK_RPC_URL, or ALCHEMY_API_KEY.",
-                        ) from None
-                else:
+                # Build dynamically via get_rpc_url (handles API keys, Tenderly, and free public RPCs)
+                try:
+                    rpc_url = get_rpc_url(resolved_chain, network=network)
+                    logger.debug(f"Built RPC URL dynamically for {resolved_chain}")
+                except ValueError as e:
                     raise ConfigurationError(
                         field="rpc_url",
-                        reason=f"RPC URL required. Set RPC_URL, {resolved_chain.upper()}_RPC_URL, ALMANAK_RPC_URL, or ALCHEMY_API_KEY environment variable.",
-                    )
+                        reason=f"Could not build RPC URL: {e}. Set {prefix}RPC_URL, {prefix}{resolved_chain.upper()}_RPC_URL, ALCHEMY_API_KEY, or TENDERLY_API_KEY_{resolved_chain.upper()}.",
+                    ) from None
 
         return cls(
             chain=resolved_chain,
@@ -1049,12 +1043,10 @@ class MultiChainRuntimeConfig:
         Args:
             network: Network environment ("mainnet", "sepolia", "anvil"). Default: "mainnet"
         """
-        from almanak.framework.utils.rpc_provider import get_rpc_url, has_api_key_configured
+        from almanak.gateway.utils.rpc_provider import get_rpc_url
 
         load_dotenv()
 
-        # Check if we have API key for dynamic URL building
-        can_build_dynamically = has_api_key_configured()
         is_anvil = network.lower() == "anvil"
 
         for chain in self.chains:
@@ -1086,8 +1078,8 @@ class MultiChainRuntimeConfig:
                     self.rpc_urls[chain] = rpc_url_env
                     logger.debug(f"Using explicit RPC URL for {chain}")
 
-                elif can_build_dynamically:
-                    # Build URL dynamically from ALCHEMY_API_KEY
+                else:
+                    # Build dynamically via get_rpc_url (handles API keys, Tenderly, and free public RPCs)
                     try:
                         rpc_url = get_rpc_url(chain, network=network)
                         self.rpc_urls[chain] = rpc_url
@@ -1095,14 +1087,8 @@ class MultiChainRuntimeConfig:
                     except ValueError as e:
                         raise ConfigurationError(
                             field=env_var,
-                            reason=f"Could not build RPC URL for {chain}: {e}. Set RPC_URL, {chain.upper()}_RPC_URL, ALMANAK_RPC_URL, or ALCHEMY_API_KEY.",
+                            reason=f"Could not build RPC URL for {chain}: {e}. Set {env_var}, RPC_URL, ALCHEMY_API_KEY, or TENDERLY_API_KEY_{chain.upper()}.",
                         ) from None
-                else:
-                    # No URL available
-                    raise ConfigurationError(
-                        field=env_var,
-                        reason=f"RPC URL required for {chain}. Set RPC_URL, {chain.upper()}_RPC_URL, ALMANAK_RPC_URL, or ALCHEMY_API_KEY environment variable.",
-                    )
 
     def _validate_optional_fields(self) -> None:
         """Validate optional fields with defaults."""
