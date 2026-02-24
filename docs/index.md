@@ -76,6 +76,10 @@ almanak/
 
 All strategies run through a **gateway-only architecture** for security. The gateway sidecar holds all secrets and exposes a controlled gRPC API. Strategy containers have no secrets and no direct internet access.
 
+## Feedback & Feature Requests
+
+Have an idea, found a bug, or want to request a feature? Head over to our [Discord](https://discord.gg/Almanak) and post in the appropriate channel. We actively monitor feedback there and use it to shape the SDK roadmap.
+
 ## Next Steps
 
 - [Getting Started](getting-started.md) - Installation and first strategy walkthrough
