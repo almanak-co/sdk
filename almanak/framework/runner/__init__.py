@@ -38,6 +38,7 @@ Example:
 """
 
 from almanak.framework.runner.strategy_runner import (
+    CriticalCallbackError,
     IterationResult,
     IterationStatus,
     RunnerConfig,
@@ -46,6 +47,7 @@ from almanak.framework.runner.strategy_runner import (
 )
 
 __all__ = [
+    "CriticalCallbackError",
     "StrategyRunner",
     "RunnerConfig",
     "IterationResult",

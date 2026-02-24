@@ -51,7 +51,7 @@ class CopyTraderSwapStrategy(IntentStrategy):
         super().__init__(*args, **kwargs)
 
         ct_config = _get_config(self.config, "copy_trading", {})
-        self._filters = ct_config.get("filters", {})
+        self._filters = ct_config.get("global_policy", ct_config.get("filters", {}))
 
         sizing_dict = ct_config.get("sizing", {})
         risk_dict = ct_config.get("risk", {})

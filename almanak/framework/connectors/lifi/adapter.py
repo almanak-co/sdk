@@ -460,9 +460,14 @@ class LiFiAdapter:
             decimals = self.get_token_decimals(intent.from_token)
             return int(amount_decimal * Decimal(10**decimals))
         elif intent.amount_usd is not None:
-            from_price = price_oracle.get(intent.from_token.upper(), Decimal("1"))
-            if from_price == 0:
-                from_price = Decimal("1")
+            from_price = price_oracle.get(intent.from_token.upper())
+            if not from_price:
+                logger.error(
+                    "Price unavailable for '%s' -- cannot convert amount_usd to token amount. "
+                    "Ensure the price oracle includes this token.",
+                    intent.from_token,
+                )
+                return None
             token_amount = intent.amount_usd / from_price
             decimals = self.get_token_decimals(intent.from_token)
             return int(token_amount * Decimal(10**decimals))

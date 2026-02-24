@@ -292,9 +292,13 @@ class EnsoAdapter:
                 amount_in_wei = int(amount_decimal * Decimal(10**decimals))
             elif intent.amount_usd is not None:
                 # Convert USD to token amount
-                from_price = price_oracle.get(intent.from_token.upper(), Decimal("1"))
-                if from_price == 0:
-                    from_price = Decimal("1")
+                from_price = price_oracle.get(intent.from_token.upper())
+                if not from_price:
+                    return self._error_bundle(
+                        intent,
+                        f"Price unavailable for '{intent.from_token}' -- cannot convert amount_usd "
+                        "to token amount. Ensure the price oracle includes this token.",
+                    )
                 token_amount = intent.amount_usd / from_price
                 decimals = self.get_token_decimals(intent.from_token)
                 amount_in_wei = int(token_amount * Decimal(10**decimals))

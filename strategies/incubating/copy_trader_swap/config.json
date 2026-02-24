@@ -16,7 +16,7 @@
             "lookback_blocks": 50,
             "max_signal_age_seconds": 300
         },
-        "filters": {
+        "global_policy": {
             "action_types": ["SWAP"],
             "protocols": ["uniswap_v3"],
             "tokens": ["WETH", "USDC", "ARB", "WBTC"],
@@ -24,14 +24,19 @@
         },
         "sizing": {
             "mode": "fixed_usd",
-            "fixed_usd": 100,
-            "percentage_of_leader": 0.1
+            "fixed_usd": "100",
+            "percentage_of_leader": "0.1"
         },
         "risk": {
-            "max_trade_usd": 500,
-            "max_daily_notional_usd": 5000,
+            "max_trade_usd": "500",
+            "max_daily_notional_usd": "5000",
             "max_open_positions": 5,
-            "max_slippage": 0.01
+            "max_slippage": "0.01"
         }
+    },
+    "anvil_funding": {
+        "ETH": 1,
+        "WETH": 1,
+        "USDC": 5000
     }
 }

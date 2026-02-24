@@ -21,6 +21,7 @@ class StrategyTemplate(StrEnum):
 
     DYNAMIC_LP = "dynamic_lp"
     MEAN_REVERSION = "mean_reversion"
+    BOLLINGER = "bollinger"
     BASIS_TRADE = "basis_trade"
     LENDING_LOOP = "lending_loop"
     COPY_TRADER = "copy_trader"
@@ -69,6 +70,20 @@ TEMPLATE_CONFIGS: dict[StrategyTemplate, TemplateConfig] = {
             "rsi_period": "14",
             "rsi_oversold": "30",
             "rsi_overbought": "70",
+            "trade_size_usd": "1000",
+        },
+    ),
+    StrategyTemplate.BOLLINGER: TemplateConfig(
+        name="Bollinger Bands",
+        description="Volatility-aware mean reversion strategy using Bollinger Bands bandwidth and %B",
+        default_protocol="uniswap_v3",
+        config_params={
+            "bb_period": "20",
+            "bb_std_dev": "2.0",
+            "bb_timeframe": "1h",
+            "squeeze_threshold": "0.02",
+            "buy_percent_b": "0.0",
+            "sell_percent_b": "1.0",
             "trade_size_usd": "1000",
         },
     ),
@@ -183,6 +198,75 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 return Intent.hold(
                     reason=f"RSI={rsi.value:.2f} in neutral zone [{self.rsi_oversold}-{self.rsi_overbought}]"
                 )"""
+
+    elif template == StrategyTemplate.BOLLINGER:
+        return """
+            # Get Bollinger Bands indicator
+            try:
+                bb = market.bollinger_bands(
+                    self.base_token,
+                    period=self.bb_period,
+                    std_dev=self.bb_std_dev,
+                    timeframe=self.bb_timeframe,
+                )
+            except ValueError as e:
+                logger.warning(f"Could not get Bollinger Bands: {e}")
+                return Intent.hold(reason="BB data unavailable")
+
+            # Get balances
+            try:
+                quote_balance = market.balance(self.quote_token)
+                base_balance = market.balance(self.base_token)
+            except ValueError as e:
+                logger.warning(f"Could not get balances: {e}")
+                return Intent.hold(reason="Balance data unavailable")
+
+            # Log current BB state
+            logger.info(
+                f"BB: bandwidth={bb.bandwidth:.4f}, %B={bb.percent_b:.4f}, "
+                f"upper={bb.upper_band:.2f}, mid={bb.middle_band:.2f}, lower={bb.lower_band:.2f}"
+            )
+
+            # Squeeze detection: low bandwidth means consolidation, skip trading
+            if bb.bandwidth < self.squeeze_threshold:
+                return Intent.hold(
+                    reason=f"Squeeze detected (bandwidth={bb.bandwidth:.4f} < {self.squeeze_threshold})"
+                )
+
+            # Mean reversion: buy when price is at or below lower band
+            if bb.percent_b <= self.buy_percent_b:
+                if quote_balance.balance_usd < self.trade_size_usd:
+                    return Intent.hold(
+                        reason=f"Buy signal (%B={bb.percent_b:.2f}) but insufficient {self.quote_token}"
+                    )
+                logger.info(f"BUY SIGNAL: %B={bb.percent_b:.4f} <= {self.buy_percent_b}")
+                return Intent.swap(
+                    from_token=self.quote_token,
+                    to_token=self.base_token,
+                    amount_usd=self.trade_size_usd,
+                    max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),
+                )
+
+            # Mean reversion: sell when price is at or above upper band
+            if bb.percent_b >= self.sell_percent_b:
+                base_price = market.price(self.base_token)
+                min_base_to_sell = self.trade_size_usd / base_price
+                if base_balance.balance < min_base_to_sell:
+                    return Intent.hold(
+                        reason=f"Sell signal (%B={bb.percent_b:.2f}) but insufficient {self.base_token}"
+                    )
+                logger.info(f"SELL SIGNAL: %B={bb.percent_b:.4f} >= {self.sell_percent_b}")
+                return Intent.swap(
+                    from_token=self.base_token,
+                    to_token=self.quote_token,
+                    amount_usd=self.trade_size_usd,
+                    max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),
+                )
+
+            # Neutral zone
+            return Intent.hold(
+                reason=f"%B={bb.percent_b:.4f} in neutral zone [{self.buy_percent_b}-{self.sell_percent_b}]"
+            )"""
 
     elif template == StrategyTemplate.DYNAMIC_LP:
         return """
@@ -300,6 +384,26 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self.base_token = get_config("base_token", "WETH")
         self.quote_token = get_config("quote_token", "USDC")"""
 
+    elif template == StrategyTemplate.BOLLINGER:
+        return """
+        # Bollinger Bands parameters
+        self.bb_period = int(get_config("bb_period", 20))
+        self.bb_std_dev = float(get_config("bb_std_dev", 2.0))
+        self.bb_timeframe = get_config("bb_timeframe", "1h")
+
+        # Trading thresholds
+        self.squeeze_threshold = float(get_config("squeeze_threshold", 0.02))
+        self.buy_percent_b = float(get_config("buy_percent_b", 0.0))
+        self.sell_percent_b = float(get_config("sell_percent_b", 1.0))
+
+        # Trading parameters
+        self.trade_size_usd = Decimal(str(get_config("trade_size_usd", "1000")))
+        self.max_slippage_bps = int(get_config("max_slippage_bps", 50))
+
+        # Token configuration
+        self.base_token = get_config("base_token", "WETH")
+        self.quote_token = get_config("quote_token", "USDC")"""
+
     elif template == StrategyTemplate.DYNAMIC_LP:
         return """
         # LP parameters
@@ -377,6 +481,7 @@ def generate_strategy_file(
     # Determine intent types based on template
     intent_types = {
         StrategyTemplate.MEAN_REVERSION: '["SWAP", "HOLD"]',
+        StrategyTemplate.BOLLINGER: '["SWAP", "HOLD"]',
         StrategyTemplate.DYNAMIC_LP: '["LP_OPEN", "LP_CLOSE", "LP_REBALANCE", "HOLD"]',
         StrategyTemplate.BASIS_TRADE: '["SWAP", "PERP_OPEN", "PERP_CLOSE", "HOLD"]',
         StrategyTemplate.LENDING_LOOP: '["SUPPLY", "BORROW", "REPAY", "WITHDRAW", "HOLD"]',
@@ -543,6 +648,21 @@ def generate_config_json(
                 "rsi_period": 14,
                 "rsi_oversold": 30,
                 "rsi_overbought": 70,
+                "trade_size_usd": 1000,
+                "max_slippage_bps": 50,
+            }
+        )
+    elif template == StrategyTemplate.BOLLINGER:
+        data.update(
+            {
+                "base_token": "WETH",
+                "quote_token": "USDC",
+                "bb_period": 20,
+                "bb_std_dev": 2.0,
+                "bb_timeframe": "1h",
+                "squeeze_threshold": 0.02,
+                "buy_percent_b": 0.0,
+                "sell_percent_b": 1.0,
                 "trade_size_usd": 1000,
                 "max_slippage_bps": 50,
             }
@@ -728,6 +848,10 @@ ALMANAK_PRIVATE_KEY=
 # RPC access (set one of these, or leave empty for free public RPCs)
 # RPC_URL=https://your-rpc-provider.com/v1/your-key
 # ALCHEMY_API_KEY=
+
+# RPC access (set one of these)
+# RPC_URL=https://your-rpc-provider.com/v1/your-key
+ALCHEMY_API_KEY=
 
 # Optional
 # ALMANAK_GATEWAY_PRIVATE_KEY=  # falls back to ALMANAK_PRIVATE_KEY if unset

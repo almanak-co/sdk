@@ -49,6 +49,14 @@ def _mock_rpc_call(success=True, result="0x0"):
     return resp
 
 
+def _roles_storage_rpc(valuator: str, safe: str):
+    """Build a getRolesStorage RPC response encoding the given valuator and safe addresses."""
+    v = valuator.lower().removeprefix("0x").zfill(64)
+    s = safe.lower().removeprefix("0x").zfill(64)
+    data = "0x" + "0" * 64 + "0" * 64 + s + "0" * 64 + v
+    return _mock_rpc_call(result=data)
+
+
 def _mock_exec_response(success=True, tx_hashes=None, error=""):
     """Create a mock execution response."""
     resp = MagicMock()
@@ -119,9 +127,14 @@ class TestComputeVaultNav:
         """When new_total_assets is omitted, settle_vault uses computed NAV."""
         usdc_address = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
         asset_result = "0x" + "0" * 24 + usdc_address[2:]
+        safe = "0x" + "b" * 40
+        valuator = "0x1234567890abcdef1234567890abcdef12345678"
 
         # Set up RPC responses for NAV computation + settlement + liquidity check
         rpc_responses = [
+            # Preflight: getRolesStorage (valuation manager + curator)
+            _roles_storage_rpc(valuator, safe),
+            _roles_storage_rpc(valuator, safe),
             # NAV computation
             _mock_rpc_call(result=asset_result),  # asset()
             _mock_rpc_call(result=hex(10_000_000)),  # balanceOf(safe)
@@ -155,8 +168,13 @@ class TestComputeVaultNav:
         """When LLM-provided NAV deviates too far from computed, reject."""
         usdc_address = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
         asset_result = "0x" + "0" * 24 + usdc_address[2:]
+        safe = "0x" + "b" * 40
+        valuator = "0x1234567890abcdef1234567890abcdef12345678"
 
         rpc_responses = [
+            # Preflight: getRolesStorage (valuation manager + curator)
+            _roles_storage_rpc(valuator, safe),
+            _roles_storage_rpc(valuator, safe),
             _mock_rpc_call(result=asset_result),  # asset()
             _mock_rpc_call(result=hex(10_000_000)),  # balanceOf(safe) = 10 USDC
             _mock_rpc_call(result="0x" + "0" * 64),  # silo (zero addr)

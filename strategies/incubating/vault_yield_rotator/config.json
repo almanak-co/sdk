@@ -19,5 +19,10 @@
         "min_valuation_change_down_bps": 500,
         "max_valuation_change_up_bps": 1000,
         "auto_settle_redeems": true
+    },
+    "anvil_funding": {
+        "ETH": 1,
+        "WETH": 1,
+        "USDC": 5000
     }
 }

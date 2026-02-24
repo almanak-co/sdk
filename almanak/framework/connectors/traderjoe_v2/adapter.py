@@ -60,6 +60,17 @@ from .sdk import (
     TraderJoeV2SDKError,
 )
 
+# Re-export for external use
+__all__ = [
+    "TraderJoeV2Adapter",
+    "TraderJoeV2Config",
+    "SwapQuote",
+    "SwapResult",
+    "LiquidityPosition",
+    "TransactionData",
+    "CollectFeesResult",
+]
+
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
 
@@ -185,6 +196,25 @@ class LiquidityPosition:
     amount_x: int
     amount_y: int
     active_bin: int
+
+
+@dataclass
+class CollectFeesResult:
+    """Result of a fee collection query.
+
+    Attributes:
+        pool_address: Address of the LBPair pool
+        bin_ids: List of bin IDs with fees
+        pending_fees_x: Estimated pending fees for token X (in wei)
+        pending_fees_y: Estimated pending fees for token Y (in wei)
+        has_fees: Whether there are any pending fees to collect
+    """
+
+    pool_address: str
+    bin_ids: list[int]
+    pending_fees_x: int = 0
+    pending_fees_y: int = 0
+    has_fees: bool = False
 
 
 @dataclass
@@ -749,6 +779,83 @@ class TraderJoeV2Adapter:
             ids=position.bin_ids,
             amounts=list(position.balances.values()),
             to=self.config.wallet_address,
+        )
+
+        return TransactionData(
+            to=tx["to"],
+            data=tx["data"].hex() if isinstance(tx["data"], bytes) else tx["data"],
+            value=tx.get("value", 0),
+            gas=gas,
+            chain_id=43114,
+        )
+
+    # =========================================================================
+    # Fee Collection Operations
+    # =========================================================================
+
+    def get_pending_fees(
+        self,
+        token_x: str,
+        token_y: str,
+        bin_step: int = 20,
+        wallet: str | None = None,
+    ) -> CollectFeesResult | None:
+        """Query pending fees for an LP position.
+
+        Args:
+            token_x: Token X symbol or address
+            token_y: Token Y symbol or address
+            bin_step: Bin step of the pool
+            wallet: Wallet address (default: configured wallet)
+
+        Returns:
+            CollectFeesResult with pending fee info, or None if no position
+        """
+        position = self.get_position(token_x, token_y, bin_step, wallet)
+        if not position or not position.bin_ids:
+            return None
+
+        fees_x, fees_y = self.sdk.get_pending_fees(
+            pool_address=position.pool_address,
+            account=wallet or self.config.wallet_address,
+            ids=position.bin_ids,
+        )
+
+        return CollectFeesResult(
+            pool_address=position.pool_address,
+            bin_ids=position.bin_ids,
+            pending_fees_x=fees_x,
+            pending_fees_y=fees_y,
+            has_fees=(fees_x > 0 or fees_y > 0),
+        )
+
+    def build_collect_fees_transaction(
+        self,
+        token_x: str,
+        token_y: str,
+        bin_step: int = 20,
+    ) -> TransactionData | None:
+        """Build a transaction to collect fees from an LP position without closing it.
+
+        Calls LBPair.collectFees(account, binIds) which harvests accumulated
+        fees while keeping the liquidity position intact.
+
+        Args:
+            token_x: Token X symbol or address
+            token_y: Token Y symbol or address
+            bin_step: Bin step of the pool
+
+        Returns:
+            TransactionData if position exists, None otherwise
+        """
+        position = self.get_position(token_x, token_y, bin_step)
+        if not position or not position.bin_ids:
+            return None
+
+        tx, gas = self.sdk.build_collect_fees(
+            pool_address=position.pool_address,
+            account=self.config.wallet_address,
+            ids=position.bin_ids,
         )
 
         return TransactionData(

@@ -9,6 +9,7 @@ from almanak.framework.services.copy_trading_models import (
     CopyExecutionRecord,
     CopySignal,
     CopyTradingConfig,
+    CopyTradingConfigV2,
     LeaderEvent,
     SizingMode,
 )
@@ -189,3 +190,86 @@ class TestCopyTradingConfig:
         # Other monitoring defaults still present
         assert ct.monitoring["poll_interval_seconds"] == 12
         assert ct.monitoring["lookback_blocks"] == 50
+
+
+class TestCopyTradingConfigV2Normalization:
+    """Tests for VIB-130: V2 config normalization fixes."""
+
+    def test_v2_parses_with_string_decimals_and_global_policy(self):
+        """V2 config with string Decimals and global_policy parses correctly."""
+        config = {
+            "leaders": [{"address": "0x" + "ab" * 20, "label": "whale"}],
+            "global_policy": {"action_types": ["SWAP"], "protocols": ["uniswap_v3"]},
+            "sizing": {"mode": "fixed_usd", "fixed_usd": "200", "percentage_of_leader": "0.2"},
+            "risk": {"max_trade_usd": "500", "max_daily_notional_usd": "5000", "max_slippage": "0.005"},
+        }
+        v2 = CopyTradingConfigV2.from_config(config)
+        assert v2.sizing.fixed_usd == Decimal("200")
+        assert v2.sizing.percentage_of_leader == Decimal("0.2")
+        assert v2.risk.max_trade_usd == Decimal("500")
+        assert v2.risk.max_slippage == Decimal("0.005")
+
+    def test_filters_key_aliased_to_global_policy(self):
+        """Legacy 'filters' key is aliased to 'global_policy' and removed."""
+        config = {
+            "leaders": [{"address": "0x" + "ab" * 20}],
+            "filters": {"action_types": ["SWAP"], "protocols": ["uniswap_v3"]},
+            "sizing": {"mode": "fixed_usd", "fixed_usd": "100"},
+            "risk": {"max_trade_usd": "500"},
+        }
+        v2 = CopyTradingConfigV2.from_config(config)
+        assert v2.global_policy.action_types == ["SWAP"]
+        assert v2.global_policy.protocols == ["uniswap_v3"]
+
+    def test_filters_removed_when_global_policy_present(self):
+        """When both 'filters' and 'global_policy' exist, filters is dropped."""
+        config = {
+            "leaders": [{"address": "0x" + "ab" * 20}],
+            "global_policy": {"action_types": ["SWAP"]},
+            "filters": {"action_types": ["LP_OPEN"]},  # stale, should be ignored
+            "sizing": {"mode": "fixed_usd", "fixed_usd": "100"},
+            "risk": {"max_trade_usd": "500"},
+        }
+        v2 = CopyTradingConfigV2.from_config(config)
+        assert v2.global_policy.action_types == ["SWAP"]  # from global_policy, not filters
+
+    def test_leader_weight_as_string_decimal(self):
+        """Leader weight as string decimal parses correctly in V2."""
+        config = {
+            "leaders": [{"address": "0x" + "ab" * 20, "label": "whale", "weight": "0.7"}],
+        }
+        v2 = CopyTradingConfigV2.from_config(config)
+        assert v2.leaders[0].weight == Decimal("0.7")
+
+    def test_legacy_fallback_logs_warning(self, caplog):
+        """When V2 parse fails on floats, fallback logs a warning."""
+        import logging
+
+        config = {
+            "leaders": [{"address": "0xleader"}],
+            "filters": {"action_types": ["SWAP"]},
+            "sizing": {"mode": "fixed_usd", "fixed_usd": 200, "percentage_of_leader": 0.2},  # floats
+            "risk": {"max_trade_usd": 500, "max_slippage": 0.005},  # floats
+        }
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.services.copy_trading_models"):
+            ct = CopyTradingConfig.from_config(config)
+
+        assert "V2 copy trading config validation failed" in caplog.text
+        assert "falling back to legacy mode" in caplog.text
+        # Legacy fallback still works
+        assert ct.sizing["fixed_usd"] == 200
+
+    def test_v2_parse_succeeds_no_warning(self, caplog):
+        """V2 with correct string decimals doesn't log a warning."""
+        import logging
+
+        config = {
+            "leaders": [{"address": "0x" + "ab" * 20}],
+            "global_policy": {"action_types": ["SWAP"]},
+            "sizing": {"mode": "fixed_usd", "fixed_usd": "200"},
+            "risk": {"max_trade_usd": "500"},
+        }
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.services.copy_trading_models"):
+            CopyTradingConfig.from_config(config)
+
+        assert "V2 copy trading config validation failed" not in caplog.text

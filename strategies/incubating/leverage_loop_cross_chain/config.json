@@ -6,5 +6,9 @@
   "min_usdc_to_start": "10",
   "swap_amount_usd": "10",
   "borrow_amount_usd": "5",
-  "perp_size_usd": "10"
+  "perp_size_usd": "10",
+  "anvil_funding": {
+      "ETH": 1,
+      "USDC": 5000
+  }
 }

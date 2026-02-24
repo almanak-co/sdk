@@ -91,6 +91,12 @@ GAS_ERROR_PATTERNS = [
     r"gas limit too low",
 ]
 
+# RPC in-flight transaction limit patterns (Alchemy delegated accounts)
+INFLIGHT_LIMIT_PATTERNS = [
+    r"in-flight transaction limit",
+    r"gapped-nonce tx from delegated",
+]
+
 # Connection/transient error patterns (should retry)
 CONNECTION_ERROR_PATTERNS = [
     r"connection refused",
@@ -334,7 +340,8 @@ class PublicMempoolSubmitter(Submitter):
             error_message: Error message from RPC response
 
         Returns:
-            Error category: "nonce", "insufficient_funds", "gas", "connection", or "unknown"
+            Error category: "nonce", "insufficient_funds", "gas",
+            "inflight_limit", "connection", or "unknown"
         """
         error_lower = error_message.lower()
 
@@ -349,6 +356,10 @@ class PublicMempoolSubmitter(Submitter):
         for pattern in GAS_ERROR_PATTERNS:
             if re.search(pattern, error_lower):
                 return "gas"
+
+        for pattern in INFLIGHT_LIMIT_PATTERNS:
+            if re.search(pattern, error_lower):
+                return "inflight_limit"
 
         for pattern in CONNECTION_ERROR_PATTERNS:
             if re.search(pattern, error_lower):
@@ -506,6 +517,28 @@ class PublicMempoolSubmitter(Submitter):
                     # Gas errors are typically not retryable
                     raise GasEstimationError(reason=error_message) from None
 
+                elif error_category == "inflight_limit":
+                    # RPC in-flight limit (e.g. Alchemy delegated accounts).
+                    # Retryable -- the prior TX may confirm and free a slot.
+                    self._metrics.connection_errors += 1
+                    if attempt < self._max_retries:
+                        delay = self._calculate_backoff_delay(attempt)
+                        logger.warning(
+                            f"In-flight TX limit hit (attempt {attempt + 1}/{self._max_retries + 1}): "
+                            f"{error_message}, retrying in {delay:.1f}s"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        logger.error(f"In-flight TX limit after {self._max_retries + 1} attempts: {error_message}")
+                        self._metrics.total_submissions += 1
+                        self._metrics.failed_submissions += 1
+                        raise SubmissionError(
+                            reason=f"RPC in-flight transaction limit: {error_message}",
+                            tx_hash=signed_tx.tx_hash,
+                            recoverable=True,
+                        ) from None
+
                 elif error_category == "connection":
                     self._metrics.connection_errors += 1
                     if attempt < self._max_retries:
@@ -603,6 +636,87 @@ class PublicMempoolSubmitter(Submitter):
                 logger.warning(f"Transaction {tx.tx_hash} failed to submit: {result.error}")
 
         return results
+
+    async def submit_sequential(
+        self,
+        txs: list[SignedTransaction],
+        receipt_timeout: float = 120.0,
+    ) -> tuple[list[SubmissionResult], list[TransactionReceipt]]:
+        """Submit transactions sequentially, confirming each before sending the next.
+
+        This avoids hitting RPC in-flight transaction limits (e.g. Alchemy's
+        2-TX limit for delegated accounts on Base) by ensuring only one
+        transaction is in-flight at any time.
+
+        The flow for each TX is: submit -> wait for receipt -> submit next.
+
+        On failure, partial results (already-confirmed TXs) are attached to
+        the raised exception as ``partial_results`` and ``partial_receipts``
+        attributes so the caller can record them for retry safety.
+
+        Args:
+            txs: List of signed transactions to submit (order preserved).
+            receipt_timeout: Seconds to wait for each receipt.
+
+        Returns:
+            Tuple of (submission_results, receipts) in the same order as input.
+
+        Raises:
+            NonceError: If a nonce error occurs.
+            InsufficientFundsError: If wallet lacks funds.
+            GasEstimationError: If gas-related error occurs.
+            TransactionRevertedError: If a transaction reverts on-chain.
+            SubmissionError: If receipt cannot be retrieved.
+        """
+        if not txs:
+            return [], []
+
+        submission_results: list[SubmissionResult] = []
+        receipts: list[TransactionReceipt] = []
+
+        def _attach_partial(exc: Exception) -> None:
+            """Attach partial results to an exception for upstream recovery."""
+            exc.partial_results = submission_results  # type: ignore[attr-defined]
+            exc.partial_receipts = receipts  # type: ignore[attr-defined]
+
+        try:
+            for i, tx in enumerate(txs):
+                logger.info(f"Sequential submit: TX {i + 1}/{len(txs)}")
+
+                # Submit this TX
+                result = await self._submit_single(tx)
+                submission_results.append(result)
+
+                if not result.submitted:
+                    # Determine recoverability from the error message.
+                    # Connection and in-flight limit errors are transient.
+                    recoverable = bool(
+                        result.error
+                        and any(
+                            indicator in result.error.lower()
+                            for indicator in ("connection", "in-flight", "inflight", "timeout")
+                        )
+                    )
+                    raise SubmissionError(
+                        reason=f"Sequential TX {i + 1}/{len(txs)} failed to submit: {result.error}",
+                        tx_hash=tx.tx_hash,
+                        recoverable=recoverable,
+                    )
+
+                # Wait for receipt before submitting next TX
+                receipt = await self.get_receipt(result.tx_hash, timeout=receipt_timeout)
+                receipts.append(receipt)
+
+                logger.info(
+                    f"Sequential submit: TX {i + 1}/{len(txs)} confirmed "
+                    f"(block={receipt.block_number}, gas={receipt.gas_used})"
+                )
+
+        except Exception as exc:
+            _attach_partial(exc)
+            raise
+
+        return submission_results, receipts
 
     def _decode_revert_data(self, revert_data: str | bytes) -> str:
         """Decode revert data into a human-readable message.

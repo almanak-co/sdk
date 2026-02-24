@@ -773,9 +773,12 @@ class AerodromeAdapter:
             amount_in: Decimal = intent.amount  # type: ignore[assignment]
         elif intent.amount_usd is not None:
             # Convert USD to token amount
-            from_price = price_oracle.get(intent.from_token.upper(), Decimal("1"))
-            if from_price == 0:
-                from_price = Decimal("1")
+            from_price = price_oracle.get(intent.from_token.upper())
+            if not from_price:
+                raise ValueError(
+                    f"Price unavailable for '{intent.from_token}' -- cannot convert amount_usd "
+                    "to token amount. Ensure the price oracle includes this token."
+                )
             amount_in = intent.amount_usd / from_price
         else:
             raise ValueError("Either amount or amount_usd must be specified")

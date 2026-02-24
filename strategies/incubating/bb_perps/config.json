@@ -8,5 +8,9 @@
     "max_slippage_pct": 2.0,
     "hold_minutes": 5,
     "chain": "arbitrum",
-    "force_action": "long"
+    "force_action": "long",
+    "anvil_funding": {
+        "ETH": 1,
+        "WETH": 1
+    }
 }

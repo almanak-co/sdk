@@ -918,7 +918,7 @@ class WalkForwardResult:
 
 
 async def run_walk_forward_optimization(
-    strategy_factory: Callable[[], Any],
+    strategy_factory: Callable[..., Any],
     data_provider_factory: Callable[[], Any],
     backtester_factory: Callable[[Any, dict[str, Any], dict[str, Any]], Any],
     base_config: PnLBacktestConfig,
@@ -930,6 +930,7 @@ async def run_walk_forward_optimization(
     fee_models: dict[str, Any] | None = None,
     slippage_models: dict[str, Any] | None = None,
     show_progress: bool = True,
+    strategy_config: dict[str, Any] | None = None,
 ) -> WalkForwardResult:
     """Run walk-forward optimization across multiple train/test windows.
 
@@ -1054,6 +1055,7 @@ async def run_walk_forward_optimization(
             slippage_models=slippage_models,
             show_progress=show_progress,
             patience=patience,
+            strategy_config=strategy_config,
         )
 
         train_objective_value = optimization_result.best_value
@@ -1074,14 +1076,26 @@ async def run_walk_forward_optimization(
         test_config_dict["start_time"] = window.test_start.isoformat()
         test_config_dict["end_time"] = window.test_end.isoformat()
 
-        # Apply optimal parameters from training
+        # Separate best_params into config params and strategy params
+        valid_config_fields = {f for f in vars(base_config) if not f.startswith("_")}
+        strategy_overrides: dict[str, Any] = {}
         for param_name, param_value in optimization_result.best_params.items():
-            test_config_dict[param_name] = param_value
+            if param_name in valid_config_fields:
+                test_config_dict[param_name] = param_value
+            else:
+                strategy_overrides[param_name] = param_value
 
         test_config = PnLBacktestConfig.from_dict(test_config_dict)
 
         # Run backtest on test window with optimal parameters
-        strategy = strategy_factory()
+        # Pass strategy overrides if the factory supports them
+        if strategy_config is not None:
+            merged_strat_config = {**strategy_config, **strategy_overrides}
+            strategy = strategy_factory(merged_strat_config)
+        elif strategy_overrides:
+            strategy = strategy_factory(strategy_overrides)
+        else:
+            strategy = strategy_factory()
         data_provider = data_provider_factory()
         backtester = backtester_factory(data_provider, fee_models, slippage_models)
 

@@ -41,6 +41,7 @@ from ..utils.log_formatters import (
 from .vocabulary import (
     AnyIntent,
     BorrowIntent,
+    CollectFeesIntent,
     FlashLoanIntent,
     HoldIntent,
     IntentType,
@@ -2120,6 +2121,8 @@ class IntentCompiler:
                 return self._compile_lp_open(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.LP_CLOSE:
                 return self._compile_lp_close(intent)  # type: ignore[arg-type]
+            elif intent_type == IntentType.LP_COLLECT_FEES:
+                return self._compile_collect_fees(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.BORROW:
                 return self._compile_borrow(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.REPAY:
@@ -3145,7 +3148,29 @@ class IntentCompiler:
                     intent_id=intent.intent_id,
                 )
 
-            token0_info, token1_info, fee_tier = pool_info
+            token0_info, token1_info, fee_tier, tokens_swapped = pool_info
+
+            # When tokens were reordered to match on-chain convention (token0 addr < token1 addr),
+            # we must invert the price range and swap the amounts to stay consistent.
+            # The user specified prices as "token1-per-token0" in their original ordering.
+            # After swapping, that relationship is inverted: new price = 1 / old price.
+            range_lower = intent.range_lower
+            range_upper = intent.range_upper
+            amount0 = intent.amount0
+            amount1 = intent.amount1
+
+            if tokens_swapped:
+                # Invert price range: if user said 550-670 (WBNB in USDT), after swap
+                # token0=USDT, token1=WBNB, so price is now WBNB-per-USDT = 1/550 to 1/670.
+                # new_lower = 1/old_upper, new_upper = 1/old_lower (preserves lower < upper).
+                range_lower = Decimal(1) / intent.range_upper
+                range_upper = Decimal(1) / intent.range_lower
+                # Swap amounts to match new token order
+                amount0, amount1 = amount1, amount0
+                logger.debug(
+                    f"Tokens swapped: inverted price range [{intent.range_lower}, {intent.range_upper}] "
+                    f"-> [{range_lower:.10f}, {range_upper:.10f}], swapped amounts"
+                )
 
             # Validate pool existence (best-effort)
             from .pool_validation import validate_v3_pool
@@ -3163,19 +3188,19 @@ class IntentCompiler:
                 return failed
 
             # Step 3: Convert amounts to wei
-            amount0_desired = int(intent.amount0 * Decimal(10**token0_info.decimals))
-            amount1_desired = int(intent.amount1 * Decimal(10**token1_info.decimals))
+            amount0_desired = int(amount0 * Decimal(10**token0_info.decimals))
+            amount1_desired = int(amount1 * Decimal(10**token1_info.decimals))
 
             # Step 4: Convert price range to ticks
             # Uniswap V3 uses tick-based ranges: price = 1.0001^tick
             # Price must be adjusted for token decimals difference
             tick_lower = self._price_to_tick(
-                intent.range_lower,
+                range_lower,
                 token0_decimals=token0_info.decimals,
                 token1_decimals=token1_info.decimals,
             )
             tick_upper = self._price_to_tick(
-                intent.range_upper,
+                range_upper,
                 token0_decimals=token0_info.decimals,
                 token1_decimals=token1_info.decimals,
             )
@@ -3186,7 +3211,10 @@ class IntentCompiler:
             tick_upper = (tick_upper // tick_spacing) * tick_spacing
 
             logger.debug(
-                f"LP tick calculation: price_range=[{intent.range_lower:.2f}, {intent.range_upper:.2f}], decimals=({token0_info.decimals}, {token1_info.decimals}), ticks=[{tick_lower}, {tick_upper}], spacing={tick_spacing}"
+                f"LP tick calculation: price_range=[{range_lower:.8f}, {range_upper:.8f}]"
+                f"{' (inverted)' if tokens_swapped else ''}, "
+                f"decimals=({token0_info.decimals}, {token1_info.decimals}), "
+                f"ticks=[{tick_lower}, {tick_upper}], spacing={tick_spacing}"
             )
 
             # Step 5: Calculate minimum amounts using LP slippage
@@ -3849,6 +3877,182 @@ class IntentCompiler:
 
         except Exception as e:
             logger.exception(f"Failed to compile TraderJoe V2 LP_CLOSE intent: {e}")
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+
+        return result
+
+    def _compile_collect_fees(self, intent: "CollectFeesIntent") -> CompilationResult:
+        """Compile an LP_COLLECT_FEES intent into an ActionBundle.
+
+        Routes to protocol-specific handlers for fee collection.
+
+        Args:
+            intent: CollectFeesIntent to compile
+
+        Returns:
+            CompilationResult with fee collection ActionBundle
+        """
+        from .vocabulary import CollectFeesIntent
+
+        if not isinstance(intent, CollectFeesIntent):
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="Expected CollectFeesIntent",
+                intent_id=intent.intent_id,
+            )
+
+        protocol = intent.protocol.lower()
+        if protocol == "traderjoe_v2":
+            return self._compile_collect_fees_traderjoe_v2(intent)
+
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Protocol '{intent.protocol}' does not support LP_COLLECT_FEES. Supported: traderjoe_v2",
+            intent_id=intent.intent_id,
+        )
+
+    def _compile_collect_fees_traderjoe_v2(self, intent: "CollectFeesIntent") -> CompilationResult:
+        """Compile LP_COLLECT_FEES intent for TraderJoe V2 Liquidity Book.
+
+        Calls LBPair.collectFees(account, binIds) to harvest accumulated fees
+        without removing any liquidity from the position.
+
+        Args:
+            intent: CollectFeesIntent to compile
+
+        Returns:
+            CompilationResult with TraderJoe V2 fee collection ActionBundle
+        """
+        result = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=intent.intent_id,
+        )
+        transactions: list[TransactionData] = []
+        warnings: list[str] = []
+
+        try:
+            from almanak.framework.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
+
+            # Parse pool info (format: TOKEN_X/TOKEN_Y/BIN_STEP)
+            pool_parts = intent.pool.split("/")
+            if len(pool_parts) < 2:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Invalid pool format for TraderJoe V2: {intent.pool}. Expected: TOKEN_X/TOKEN_Y/BIN_STEP",
+                    intent_id=intent.intent_id,
+                )
+
+            token_x_symbol = pool_parts[0]
+            token_y_symbol = pool_parts[1]
+            bin_step = int(pool_parts[2]) if len(pool_parts) > 2 else 20
+
+            # Resolve token addresses via TokenResolver
+            token_x_info = self._resolve_token(token_x_symbol)
+            token_y_info = self._resolve_token(token_y_symbol)
+
+            if not token_x_info or not token_y_info:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Unknown tokens for pool {intent.pool} on {self.chain}",
+                    intent_id=intent.intent_id,
+                )
+
+            token_x_addr = token_x_info.address
+            token_y_addr = token_y_info.address
+
+            # Get RPC URL
+            rpc_url = self._get_chain_rpc_url()
+            if not rpc_url:
+                raise ValueError(
+                    "RPC URL required for TraderJoe V2 adapter. "
+                    "Either provide rpc_url to IntentCompiler or use GatewayExecutionOrchestrator."
+                )
+
+            # Create TraderJoe V2 adapter
+            config = TraderJoeV2Config(
+                chain=self.chain,
+                wallet_address=self.wallet_address,
+                rpc_url=rpc_url,
+            )
+            tj_adapter = TraderJoeV2Adapter(config)
+
+            # Get position to check if we have liquidity
+            position = tj_adapter.get_position(token_x_addr, token_y_addr, bin_step)
+            if not position or not position.bin_ids:
+                warnings.append("No LP position found for fee collection")
+                action_bundle = ActionBundle(
+                    intent_type=IntentType.LP_COLLECT_FEES.value,
+                    transactions=[],
+                    metadata={
+                        "pool": intent.pool,
+                        "protocol": "traderjoe_v2",
+                        "warning": "No position found",
+                    },
+                )
+                result.action_bundle = action_bundle
+                result.warnings = warnings
+                return result
+
+            # Build collect fees transaction (no approval needed - calling LBPair directly)
+            fee_tx = tj_adapter.build_collect_fees_transaction(
+                token_x=token_x_addr,
+                token_y=token_y_addr,
+                bin_step=bin_step,
+            )
+
+            if fee_tx is None:
+                warnings.append("No LP position found for fee collection")
+                action_bundle = ActionBundle(
+                    intent_type=IntentType.LP_COLLECT_FEES.value,
+                    transactions=[],
+                    metadata={
+                        "pool": intent.pool,
+                        "protocol": "traderjoe_v2",
+                        "warning": "No position found",
+                    },
+                )
+                result.action_bundle = action_bundle
+                result.warnings = warnings
+                return result
+
+            # Convert to TransactionData format
+            fee_tx_data = TransactionData(
+                to=fee_tx.to,
+                value=fee_tx.value,
+                data=fee_tx.data if isinstance(fee_tx.data, str) else fee_tx.data,
+                gas_estimate=fee_tx.gas or 200000,
+                description=f"Collect fees from TraderJoe V2: {token_x_symbol}/{token_y_symbol}",
+                tx_type="traderjoe_v2_collect_fees",
+            )
+            transactions.append(fee_tx_data)
+
+            # Build ActionBundle
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+
+            action_bundle = ActionBundle(
+                intent_type=IntentType.LP_COLLECT_FEES.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "pool": intent.pool,
+                    "protocol": "traderjoe_v2",
+                    "chain": self.chain,
+                    "bin_ids": position.bin_ids,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+            result.warnings = warnings
+
+            logger.info(
+                f"Compiled TraderJoe V2 LP_COLLECT_FEES intent: {token_x_symbol}/{token_y_symbol}, "
+                f"{len(position.bin_ids)} bins, {total_gas} gas"
+            )
+
+        except Exception as e:
+            logger.exception(f"Failed to compile TraderJoe V2 LP_COLLECT_FEES intent: {e}")
             result.status = CompilationStatus.FAILED
             result.error = str(e)
 
@@ -8503,7 +8707,7 @@ class IntentCompiler:
         decimal_amount = Decimal(str(amount)) / Decimal(10**decimals)
         return f"{decimal_amount:,.4f}"
 
-    def _parse_pool_info(self, pool: str) -> tuple[TokenInfo, TokenInfo, int] | None:
+    def _parse_pool_info(self, pool: str) -> tuple[TokenInfo, TokenInfo, int, bool] | None:
         """Parse pool identifier to extract token addresses and fee tier.
 
         Supports formats:
@@ -8515,7 +8719,10 @@ class IntentCompiler:
             pool: Pool identifier string
 
         Returns:
-            Tuple of (token0_info, token1_info, fee_tier) or None if parsing fails
+            Tuple of (token0_info, token1_info, fee_tier, tokens_swapped) or None if parsing fails.
+            tokens_swapped is True when the user-specified token order was reversed to match
+            the on-chain convention (token0 address < token1 address). Callers must invert
+            price ranges and swap amounts when this flag is True.
         """
         # Default fee tier (0.3%)
         default_fee = 3000
@@ -8532,7 +8739,7 @@ class IntentCompiler:
             token1 = self._resolve_token("USDC")
             if token0 is None or token1 is None:
                 return None
-            return (token0, token1, default_fee)
+            return (token0, token1, default_fee, False)
 
         # Handle TOKEN0/TOKEN1/FEE or TOKEN0/TOKEN1 format
         parts = pool.split("/")
@@ -8562,11 +8769,13 @@ class IntentCompiler:
             return None
 
         # Ensure tokens are sorted (token0 < token1 by address)
+        tokens_swapped = False
         if token0.address.lower() > token1.address.lower():
             token0, token1 = token1, token0
+            tokens_swapped = True
             logger.debug(f"Swapped tokens to maintain sorting: {token0.symbol}/{token1.symbol}")
 
-        return (token0, token1, fee_tier)
+        return (token0, token1, fee_tier, tokens_swapped)
 
     # Uniswap V3 tick bounds
     UNISWAP_MIN_TICK = -887272
@@ -8634,9 +8843,10 @@ class IntentCompiler:
     def _get_tick_spacing(fee_tier: int) -> int:
         """Get the tick spacing for a given fee tier.
 
-        Uniswap V3 tick spacing by fee tier:
+        Standard tick spacings by fee tier:
         - 100 (0.01%): tick spacing 1
         - 500 (0.05%): tick spacing 10
+        - 2500 (0.25%): tick spacing 50  (PancakeSwap V3)
         - 3000 (0.30%): tick spacing 60
         - 10000 (1.00%): tick spacing 200
 
@@ -8649,10 +8859,19 @@ class IntentCompiler:
         tick_spacings = {
             100: 1,
             500: 10,
+            2500: 50,
             3000: 60,
             10000: 200,
         }
-        return tick_spacings.get(fee_tier, 60)  # Default to 60 (0.3% tier)
+        if fee_tier not in tick_spacings:
+            logger.warning(
+                "Unknown fee tier %d -- defaulting to tick_spacing=60. "
+                "Known fee tiers: %s. "
+                "If this is a protocol-specific fee tier, add it to _get_tick_spacing().",
+                fee_tier,
+                list(tick_spacings.keys()),
+            )
+        return tick_spacings.get(fee_tier, 60)
 
     def set_allowance(self, token_address: str, spender: str, amount: int) -> None:
         """Set cached allowance (for testing or after on-chain approval).

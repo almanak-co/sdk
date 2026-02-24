@@ -14,9 +14,12 @@ Key Classes:
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
 
 
 # =============================================================================
@@ -169,13 +172,15 @@ class PositionHealthProvider:
 
     def __init__(
         self,
-        rpc_url: str,
+        rpc_url: str = "",
         chain: str = "ethereum",
         price_oracle: Any = None,
+        gateway_client: "GatewayClient | None" = None,
     ):
         self._rpc_url = rpc_url
         self._chain = chain
         self._price_oracle = price_oracle
+        self._gateway_client = gateway_client
         self._cache: dict[str, _CachedHealth] = {}
 
     def get_health(
@@ -243,7 +248,10 @@ class PositionHealthProvider:
         try:
             from almanak.framework.data.pendle.on_chain_reader import PendleOnChainReader
 
-            reader = PendleOnChainReader(rpc_url=self._rpc_url, chain=self._chain)
+            if self._gateway_client is not None:
+                reader = PendleOnChainReader(gateway_client=self._gateway_client, chain=self._chain)
+            else:
+                reader = PendleOnChainReader(rpc_url=self._rpc_url, chain=self._chain)
             implied_apy = reader.get_implied_apy(pendle_market_address)
 
             # Check if market is expired

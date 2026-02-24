@@ -9,9 +9,11 @@ backward compatibility with the original API.
 
 import logging
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from almanak.framework.connectors.base.hex_utils import HexDecoder
+from almanak.framework.execution.extracted_data import SwapAmounts
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash
 
 logger = logging.getLogger(__name__)
@@ -82,12 +84,16 @@ class EnsoReceiptParser:
         print(f"Received: {result.amount_out}")
     """
 
+    SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset({"swap_amounts"})
+
     def __init__(self, **kwargs: Any) -> None:
         """Initialize EnsoReceiptParser.
 
-        Accepts and ignores keyword arguments (e.g. chain=) passed by
-        the receipt_registry when instantiating parsers dynamically.
+        Args:
+            **kwargs: Keyword arguments passed by the receipt_registry.
+                chain: Chain name for token decimal resolution.
         """
+        self._chain: str | None = kwargs.get("chain")
 
     def parse_swap_receipt(
         self,
@@ -232,6 +238,132 @@ class EnsoReceiptParser:
                     continue
 
         return 0
+
+    def extract_swap_amounts(self, receipt: dict[str, Any]) -> SwapAmounts | None:
+        """Extract swap amounts from an Enso swap receipt.
+
+        Called by ResultEnricher for SWAP intents. Parses ERC-20 Transfer
+        events to determine the input and output token amounts.
+
+        The heuristic:
+        - amount_in: first Transfer FROM the wallet (tx sender)
+        - amount_out: last Transfer TO the wallet (final output after routing)
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' and 'from' fields
+
+        Returns:
+            SwapAmounts if swap transfers found, None otherwise
+        """
+        wallet = self._normalize_address(receipt.get("from", ""))
+        if not wallet:
+            return None
+
+        status = receipt.get("status", 0)
+        if status != 1:
+            return None
+
+        logs = receipt.get("logs", [])
+        transfers_from_wallet: list[tuple[str, int]] = []
+        transfers_to_wallet: list[tuple[str, int]] = []
+
+        for log in logs:
+            topics = log.get("topics", [])
+            if not topics or len(topics) < 3:
+                continue
+
+            topic0 = topics[0]
+            if isinstance(topic0, bytes):
+                topic0 = "0x" + topic0.hex()
+            if topic0.lower() != TRANSFER_EVENT_SIGNATURE.lower():
+                continue
+
+            log_from = HexDecoder.topic_to_address(topics[1])
+            log_to = HexDecoder.topic_to_address(topics[2])
+            data = HexDecoder.normalize_hex(log.get("data", ""))
+            if not data:
+                continue
+            try:
+                amount = HexDecoder.decode_uint256(data, 0)
+            except (ValueError, IndexError):
+                continue
+
+            token_address = self._normalize_address(log.get("address", ""))
+
+            if log_from == wallet:
+                transfers_from_wallet.append((token_address, amount))
+            if log_to == wallet:
+                transfers_to_wallet.append((token_address, amount))
+
+        if not transfers_to_wallet:
+            return None
+
+        # Input: first transfer from wallet; Output: last transfer to wallet
+        token_in_addr, amount_in_raw = transfers_from_wallet[0] if transfers_from_wallet else ("", 0)
+        token_out_addr, amount_out_raw = transfers_to_wallet[-1]
+
+        if amount_out_raw == 0:
+            return None
+
+        decimals_in = self._resolve_decimals(token_in_addr)
+        decimals_out = self._resolve_decimals(token_out_addr)
+
+        # If we can't resolve decimals for the output token, bail out rather than
+        # returning wildly wrong amounts (e.g., 10^12x off for 6-decimal tokens).
+        if decimals_out is None:
+            logger.warning("Cannot compute swap amounts: output token decimals unknown")
+            return None
+
+        amount_in_decimal = (
+            Decimal(amount_in_raw) / Decimal(10**decimals_in)
+            if (amount_in_raw and decimals_in is not None)
+            else Decimal(0)
+        )
+        amount_out_decimal = Decimal(amount_out_raw) / Decimal(10**decimals_out)
+
+        effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal else Decimal(0)
+
+        return SwapAmounts(
+            amount_in=amount_in_raw,
+            amount_out=amount_out_raw,
+            amount_in_decimal=amount_in_decimal,
+            amount_out_decimal=amount_out_decimal,
+            effective_price=effective_price,
+            token_in=token_in_addr or None,
+            token_out=token_out_addr or None,
+        )
+
+    def _resolve_decimals(self, token_address: str) -> int | None:
+        """Resolve token decimals via the token resolver.
+
+        Returns None if the resolver is unavailable or the token is unknown,
+        so callers can decide how to handle missing decimals rather than
+        silently using a wrong default.
+
+        Args:
+            token_address: Checksummed or lowercase token address
+
+        Returns:
+            Token decimals (e.g. 6 for USDC, 18 for WETH), or None if unknown.
+        """
+        if not token_address:
+            return None
+        try:
+            from almanak.framework.data.tokens import get_token_resolver
+
+            resolver = get_token_resolver()
+            token = resolver.resolve(token_address, self._chain or "ethereum")
+            return token.decimals
+        except Exception:
+            logger.warning(f"Could not resolve decimals for {token_address}, swap amounts will be unavailable")
+            return None
+
+    @staticmethod
+    def _normalize_address(address: Any) -> str:
+        """Normalize an address to lowercase hex string."""
+        if isinstance(address, bytes):
+            address = "0x" + address.hex()
+        return str(address).lower() if address else ""
 
     def parse_approval_receipt(
         self,

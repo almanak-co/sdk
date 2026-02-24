@@ -113,6 +113,45 @@ DEFAULT_END_BLOCKS: dict[str, int] = {
 # Helper Functions
 # =============================================================================
 
+# Placeholder wallet address for backtest strategy instantiation.
+# Backtests don't execute real transactions so the address is irrelevant.
+_BACKTEST_WALLET = "0x" + "0" * 40
+
+
+def _create_backtest_strategy(
+    strategy_class: Any,
+    config: dict[str, Any],
+    chain: str,
+) -> Any:
+    """Instantiate a strategy for backtesting.
+
+    IntentStrategy subclasses require (config, chain, wallet_address).
+    Simpler classes may accept only (config,) or no arguments.
+    This helper tries each signature in order.
+
+    Args:
+        strategy_class: The strategy class to instantiate.
+        config: Strategy configuration dict.
+        chain: Target chain (e.g. "arbitrum").
+
+    Returns:
+        An instantiated strategy object.
+    """
+    # 1. Try IntentStrategy signature: (config, chain, wallet_address)
+    try:
+        return strategy_class(config, chain, _BACKTEST_WALLET)
+    except TypeError:
+        pass
+
+    # 2. Try simple signature: (config,)
+    try:
+        return strategy_class(config)
+    except TypeError:
+        pass
+
+    # 3. Fall back to no-arg constructor (mock strategies)
+    return strategy_class()
+
 
 def days_to_blocks(days: int, chain: str) -> int:
     """Convert days to approximate block count for a chain.
@@ -748,11 +787,7 @@ def pnl_backtest(
         strategy_class = MockPnLStrategy
 
     # Create strategy instance
-    try:
-        strategy_instance = strategy_class(strategy_config)
-    except TypeError:
-        # If strategy doesn't accept config dict, try without
-        strategy_instance = strategy_class()
+    strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, chain)
 
     # Ensure strategy has strategy_id attribute
     if not hasattr(strategy_instance, "strategy_id"):
@@ -1160,11 +1195,9 @@ async def run_sweep_backtest(
             strategy_config[name] = value
 
     # Create strategy instance
-    try:
-        strategy_instance = strategy_class(strategy_config)
-    except TypeError:
-        strategy_instance = strategy_class()
-        # Set params as attributes
+    strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, pnl_config.chain)
+    # Set params as attributes for strategies that don't read config dict
+    if not hasattr(strategy_instance, "config") or not isinstance(getattr(strategy_instance, "config", None), dict):
         for name, value in params.items():
             try:
                 setattr(strategy_instance, name, float(value))
@@ -1572,10 +1605,10 @@ def _run_sweep_task_worker(task: _SweepTask) -> SweepResult:
             strategy_config[name] = value
 
     # Create strategy instance
-    try:
-        strategy_instance = strategy_class(strategy_config)
-    except TypeError:
-        strategy_instance = strategy_class()
+    worker_chain = task.base_config.get("chain", "arbitrum")
+    strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, worker_chain)
+    # Set params as attributes for strategies that don't read config dict
+    if not hasattr(strategy_instance, "config") or not isinstance(getattr(strategy_instance, "config", None), dict):
         for name, value in task.params.items():
             try:
                 setattr(strategy_instance, name, float(value))
@@ -2602,12 +2635,10 @@ def optimize_backtest(
     def create_data_provider() -> CoinGeckoDataProvider:
         return CoinGeckoDataProvider()
 
-    # Create strategy factory
-    def create_strategy() -> Any:
-        try:
-            return strategy_class(base_config)
-        except TypeError:
-            return strategy_class()
+    # Create strategy factory that accepts optional config overrides
+    def create_strategy(config_overrides: dict[str, Any] | None = None) -> Any:
+        effective_config = {**base_config, **(config_overrides or {})}
+        return _create_backtest_strategy(strategy_class, effective_config, chain)
 
     # Create backtester factory
     def create_backtester(
@@ -2655,6 +2686,7 @@ def optimize_backtest(
                 patience=effective_patience,
                 min_delta=min_delta,
                 extra_configs=pnl_configs[1:] if multi_period else None,
+                strategy_config=base_config,
             )
         )
     except Exception as e:
@@ -3139,12 +3171,10 @@ def walk_forward_backtest(
     def create_data_provider() -> CoinGeckoDataProvider:
         return CoinGeckoDataProvider()
 
-    # Create strategy factory
-    def create_strategy() -> Any:
-        try:
-            return strategy_class(base_config)
-        except TypeError:
-            return strategy_class()
+    # Create strategy factory that accepts optional config overrides
+    def create_strategy(config_overrides: dict[str, Any] | None = None) -> Any:
+        effective_config = {**base_config, **(config_overrides or {})}
+        return _create_backtest_strategy(strategy_class, effective_config, chain)
 
     # Create backtester factory
     def create_backtester(
@@ -3178,6 +3208,7 @@ def walk_forward_backtest(
                 n_trials_per_window=effective_n_trials,
                 patience=effective_patience,
                 show_progress=verbose,
+                strategy_config=base_config,
             )
         )
     except ValueError as e:
@@ -3529,10 +3560,7 @@ def monte_carlo_backtest(
     base_config = load_strategy_config(strategy, chain)
 
     # Create strategy instance
-    try:
-        strategy_instance = strategy_class(base_config)
-    except TypeError:
-        strategy_instance = strategy_class()
+    strategy_instance = _create_backtest_strategy(strategy_class, base_config, chain)
 
     # Create PnL backtest config
     pnl_config = PnLBacktestConfig(
@@ -4090,10 +4118,7 @@ def scenario_backtest(
     base_config = load_strategy_config(strategy, chain)
 
     # Create strategy instance
-    try:
-        strategy_instance = strategy_class(base_config)
-    except TypeError:
-        strategy_instance = strategy_class()
+    strategy_instance = _create_backtest_strategy(strategy_class, base_config, chain)
 
     # Create PnL backtester
     data_provider = CoinGeckoDataProvider()
@@ -4677,10 +4702,7 @@ def paper_start(
 
     # Create strategy instance
     strategy_config = load_strategy_config(strategy, chain)
-    try:
-        strategy_instance = strategy_class(strategy_config)
-    except TypeError:
-        strategy_instance = strategy_class()
+    strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, chain)
 
     # Ensure strategy has strategy_id
     if not hasattr(strategy_instance, "strategy_id"):

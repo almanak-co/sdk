@@ -15,5 +15,10 @@
     "dip_buy_percent": 25,
     "cooldown_minutes": 60,
     "dust_threshold_usd": 5,
-    "max_slippage_bps": 100
+    "max_slippage_bps": 100,
+    "anvil_funding": {
+        "ETH": 1,
+        "WETH": 1,
+        "USDC": 5000
+    }
 }

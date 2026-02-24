@@ -13,7 +13,7 @@ Examples:
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -100,8 +100,8 @@ class CrisisScenario:
 
 BLACK_THURSDAY = CrisisScenario(
     name="black_thursday",
-    start_date=datetime(2020, 3, 12),
-    end_date=datetime(2020, 3, 19),
+    start_date=datetime(2020, 3, 12, tzinfo=UTC),
+    end_date=datetime(2020, 3, 19, tzinfo=UTC),
     description=(
         "COVID-19 market crash ('Black Thursday'). On March 12, 2020, crypto markets "
         "experienced their largest single-day drop, with Bitcoin falling over 40% and "
@@ -122,8 +122,8 @@ Key characteristics:
 
 TERRA_COLLAPSE = CrisisScenario(
     name="terra_collapse",
-    start_date=datetime(2022, 5, 7),
-    end_date=datetime(2022, 5, 14),
+    start_date=datetime(2022, 5, 7, tzinfo=UTC),
+    end_date=datetime(2022, 5, 14, tzinfo=UTC),
     description=(
         "Terra/Luna collapse. The UST algorithmic stablecoin lost its dollar peg, "
         "triggering a death spiral that wiped out ~$60B in market value. LUNA "
@@ -144,8 +144,8 @@ Key characteristics:
 
 FTX_COLLAPSE = CrisisScenario(
     name="ftx_collapse",
-    start_date=datetime(2022, 11, 6),
-    end_date=datetime(2022, 11, 14),
+    start_date=datetime(2022, 11, 6, tzinfo=UTC),
+    end_date=datetime(2022, 11, 14, tzinfo=UTC),
     description=(
         "FTX exchange collapse. Following revelations about Alameda Research's "
         "balance sheet and a failed Binance acquisition, FTX halted withdrawals "

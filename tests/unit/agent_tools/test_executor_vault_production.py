@@ -330,7 +330,7 @@ class TestLiquidityCheckFailsClosed:
         with patch('almanak.framework.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
             sdk = MockSDK.return_value
             sdk.get_pending_redemptions.return_value = 1_000_000_000_000_000_000  # 1 share
-            sdk.get_share_price.return_value = Decimal("0.000000000001")  # 1 USDC per share
+            sdk.convert_to_assets.return_value = 1_000_000  # 1 USDC in raw units
 
             # Balance read fails
             mock_gateway.rpc.Call.side_effect = Exception("RPC timeout")

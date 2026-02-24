@@ -42,6 +42,7 @@ test-results.xml
 .coverage
 
 # Automation scripts runtime artifacts
+logs/
 scripts/yailoop/yailoop.log
 scripts/pr-manager/pr-manager.log
 scripts/pr-manager/state.json

@@ -273,6 +273,8 @@ class FreshnessConfig:
 
 
 if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
+
     from .defi.gas import GasOracle, GasPrice
     from .defi.pools import PoolReserves, UniswapV3PoolReader
     from .funding import FundingRate, FundingRateProvider, FundingRateSpread
@@ -652,6 +654,7 @@ class MarketSnapshot:
         pool_analytics_reader: Optional["PoolAnalyticsReader"] = None,
         yield_aggregator: Optional["YieldAggregator"] = None,
         wallet_activity_provider: Optional["WalletActivityProvider"] = None,
+        gateway_client: Optional["GatewayClient"] = None,
     ) -> None:
         """Initialize the MarketSnapshot.
 
@@ -716,6 +719,7 @@ class MarketSnapshot:
         self._pool_analytics_reader = pool_analytics_reader
         self._yield_aggregator = yield_aggregator
         self._wallet_activity_provider = wallet_activity_provider
+        self._gateway_client = gateway_client
 
         # Internal caches to avoid redundant async calls within same snapshot
         self._price_cache: dict[str, Decimal] = {}
@@ -3813,7 +3817,12 @@ class MarketSnapshot:
 
         try:
             url = rpc_url or self._get_rpc_url()
-            provider = PositionHealthProvider(rpc_url=url, chain=self._chain, price_oracle=self._price_oracle)
+            provider = PositionHealthProvider(
+                rpc_url=url,
+                chain=self._chain,
+                price_oracle=self._price_oracle,
+                gateway_client=self._gateway_client,
+            )
             return provider.get_health(
                 protocol=protocol,
                 market_id=market_id,
@@ -3854,7 +3863,12 @@ class MarketSnapshot:
 
         try:
             url = rpc_url or self._get_rpc_url()
-            provider = PositionHealthProvider(rpc_url=url, chain=self._chain, price_oracle=self._price_oracle)
+            provider = PositionHealthProvider(
+                rpc_url=url,
+                chain=self._chain,
+                price_oracle=self._price_oracle,
+                gateway_client=self._gateway_client,
+            )
             return provider.get_pt_position_health(
                 morpho_market_id=morpho_market_id,
                 pendle_market_address=pendle_market_address,

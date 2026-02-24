@@ -22,5 +22,10 @@
     "bb_sell_threshold": 0.75,
 
     "min_signals_to_trade": 2,
-    "cooldown_ticks": 2
+    "cooldown_ticks": 2,
+    "anvil_funding": {
+        "ETH": 1,
+        "WETH": 1,
+        "USDC": 5000
+    }
 }

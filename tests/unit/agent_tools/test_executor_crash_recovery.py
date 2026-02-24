@@ -81,6 +81,9 @@ def _mock_lagoon_sdk(get_total_assets=10_000_000, get_proposed_total_assets=0, g
     sdk.get_pending_redemptions.return_value = get_pending_redemptions
     sdk.get_underlying_token_address.return_value = "0xUSDC"
     sdk.get_silo_address.return_value = "0x" + "0" * 40
+    # Preflight check mocks -- must match SETTLE_ARGS addresses
+    sdk.get_valuation_manager.return_value = "0x1111111111111111111111111111111111111111"
+    sdk.get_curator.return_value = "0x3333333333333333333333333333333333333333"
     return sdk
 
 

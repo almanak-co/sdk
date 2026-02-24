@@ -95,6 +95,7 @@ ALCHEMY_CHAIN_KEYS: dict[str, str] = {
     "avalanche": "avax",
     "polygon": "polygon",
     "bnb": "bnb",
+    "bsc": "bnb",  # Alias: BSC is the common name for BNB Smart Chain
     "sonic": "sonic",
     "plasma": "plasma",
     "linea": "linea",
@@ -129,7 +130,7 @@ PUBLIC_RPC_URLS: dict[str, str] = {
 }
 
 # Chains that require POA middleware (geth_poa_middleware)
-POA_CHAINS: set[str] = {"avalanche", "bnb", "polygon"}
+POA_CHAINS: set[str] = {"avalanche", "bnb", "bsc", "polygon"}
 
 # Default Anvil port mapping for multi-chain local development
 # When running multiple Anvil instances, use ANVIL_{CHAIN}_PORT env vars

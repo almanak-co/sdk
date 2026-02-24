@@ -787,6 +787,13 @@ def format_iteration_result(result: IterationResult) -> str:
     help="Reset Anvil fork to latest mainnet block before each iteration (requires --network anvil). "
     "Gives live on-chain state for fork testing.",
 )
+@click.option(
+    "--max-iterations",
+    type=int,
+    default=None,
+    help="Maximum number of iterations to run before exiting cleanly. "
+    "Without this flag, continuous mode runs indefinitely.",
+)
 def run(
     working_dir: str,
     config_file: str | None,
@@ -811,6 +818,7 @@ def run(
     wallet: str = "default",
     log_file: str | None = None,
     reset_fork: bool = False,
+    max_iterations: int | None = None,
     strategy_id_override: str | None = None,
 ) -> None:
     """
@@ -898,6 +906,13 @@ def run(
     effective_host = "127.0.0.1" if gateway_host == "localhost" else gateway_host
 
     managed_gateway: ManagedGateway | None = None
+
+    # --wallet isolated requires a managed gateway (derives wallet + funds Anvil fork)
+    if wallet == "isolated" and no_gateway:
+        raise click.ClickException(
+            "--wallet isolated requires a managed gateway (incompatible with --no-gateway). "
+            "Remove --no-gateway to let the CLI start its own gateway + Anvil fork."
+        )
 
     if no_gateway:
         # --wallet isolated requires the managed gateway (which auto-funds the derived wallet)
@@ -1458,7 +1473,10 @@ def run(
     else:
         click.echo(f"Chain: {runtime_config.chain}")  # type: ignore[union-attr]
     click.echo(f"Wallet: {runtime_config.wallet_address}")
-    click.echo(f"Execution: {'Single run' if once else f'Continuous (every {interval}s)'}")
+    exec_desc = "Single run" if once else f"Continuous (every {interval}s)"
+    if max_iterations and not once:
+        exec_desc += f", max {max_iterations} iterations"
+    click.echo(f"Execution: {exec_desc}")
     click.echo(f"Dry run: {effective_dry_run}")
     if isinstance(strategy_config.get("copy_trading"), dict):
         copy_execution_policy = strategy_config["copy_trading"].get("execution_policy", {})
@@ -1990,6 +2008,7 @@ def run(
         # Build pre-iteration callback for --reset-fork
         pre_iteration_cb: Callable[[], None] | None = None
         if reset_fork and managed_gateway is not None:
+            from ..runner.strategy_runner import CriticalCallbackError
 
             def pre_iteration_cb() -> None:
                 click.echo("Resetting Anvil fork to latest block...")
@@ -1997,7 +2016,7 @@ def run(
                 if ok:
                     click.echo("Fork reset complete.")
                 else:
-                    raise RuntimeError(
+                    raise CriticalCallbackError(
                         "Anvil fork reset failed. Cannot continue with stale fork state. "
                         "Remove --reset-fork to run without fork resets."
                     )
@@ -2010,6 +2029,7 @@ def run(
                     interval_seconds=interval,
                     iteration_callback=on_iteration,
                     pre_iteration_callback=pre_iteration_cb,
+                    max_iterations=max_iterations,
                 )
             finally:
                 await cleanup_resources()

@@ -191,6 +191,27 @@ class LagoonVaultSDK:
         assets_per_share = _decode_uint256(result)
         return Decimal(assets_per_share) / Decimal(one_share)
 
+    def convert_to_assets(self, vault_address: str, shares: int) -> int:
+        """Convert a share amount to underlying asset units via on-chain call.
+
+        Uses the ERC-4626 convertToAssets(uint256) function directly with the
+        given share amount, avoiding precision loss from intermediate division.
+
+        Args:
+            vault_address: Vault contract address.
+            shares: Share amount in raw units (18 decimals).
+
+        Returns:
+            Equivalent underlying asset amount in raw units (underlying decimals).
+        """
+        calldata = CONVERT_TO_ASSETS_SELECTOR + _encode_uint256(shares)
+        result = self._eth_call(
+            to=vault_address,
+            data=calldata,
+            request_id="lagoon_convert_to_assets",
+        )
+        return _decode_uint256(result)
+
     def get_underlying_balance(self, vault_address: str, wallet_address: str) -> int:
         """Read the underlying token balance of a wallet in the vault context.
 

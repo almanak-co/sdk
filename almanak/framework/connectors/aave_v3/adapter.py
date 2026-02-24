@@ -1648,7 +1648,12 @@ class AaveV3Adapter:
             "sAVAX": Decimal("40"),  # OUTDATED
         }
 
-        price = default_prices.get(asset, default_prices.get(asset.upper(), Decimal("1")))
+        price = default_prices.get(asset) or default_prices.get(asset.upper())
+        if price is None:
+            raise ValueError(
+                f"No placeholder price available for '{asset}'. "
+                "Pass a real price_oracle to the adapter for production use."
+            )
 
         # Log every time a placeholder price is used
         logger.warning(

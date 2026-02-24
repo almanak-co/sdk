@@ -35,6 +35,9 @@ EVENT_TOPICS: dict[str, str] = {
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
     # Approval(address,address,uint256) - ERC20
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
+    # ClaimedFees(address indexed sender, address indexed to, uint256[] ids, bytes32[] amounts)
+    # This event is emitted by LBPair.collectFees()
+    "ClaimedFees": "0xdf71cf7e8bfaf5953702c2be6d726b8f61d37bf9d90fda35b7bbb3981264e24d",
     # Deposit(address,uint256) - WAVAX wrap
     "Deposit": "0xe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109c",
     # Withdrawal(address,uint256) - WAVAX unwrap
@@ -61,6 +64,7 @@ class TraderJoeV2EventType(Enum):
     TRANSFER_BATCH = "TRANSFER_BATCH"
     TRANSFER = "TRANSFER"
     APPROVAL = "APPROVAL"
+    CLAIMED_FEES = "CLAIMED_FEES"
     DEPOSIT = "DEPOSIT"
     WITHDRAWAL = "WITHDRAWAL"
     UNKNOWN = "UNKNOWN"
@@ -72,6 +76,7 @@ EVENT_NAME_TO_TYPE: dict[str, TraderJoeV2EventType] = {
     "TransferBatch": TraderJoeV2EventType.TRANSFER_BATCH,
     "Transfer": TraderJoeV2EventType.TRANSFER,
     "Approval": TraderJoeV2EventType.APPROVAL,
+    "ClaimedFees": TraderJoeV2EventType.CLAIMED_FEES,
     "Deposit": TraderJoeV2EventType.DEPOSIT,
     "Withdrawal": TraderJoeV2EventType.WITHDRAWAL,
 }
@@ -159,6 +164,19 @@ class ParsedLiquidityResult:
     bin_ids: list[int] = field(default_factory=list)
     amount_x: int = 0
     amount_y: int = 0
+    gas_used: int | None = None
+    block_number: int | None = None
+
+
+@dataclass
+class ParsedFeeCollectionResult:
+    """Result of parsing a fee collection transaction."""
+
+    success: bool
+    pool_address: str | None = None
+    bin_ids: list[int] = field(default_factory=list)
+    fees_x: int = 0
+    fees_y: int = 0
     gas_used: int | None = None
     block_number: int | None = None
 
@@ -390,6 +408,13 @@ class TraderJoeV2ReceiptParser:
                     result["to"] = HexDecoder.topic_to_address(topics[2])
                 # ids and amounts are dynamic arrays (complex to parse)
                 # Store raw_data for now, matching original behavior
+                result["raw_data"] = data_hex
+
+            elif event_type == TraderJoeV2EventType.CLAIMED_FEES:
+                # ClaimedFees(address indexed sender, address indexed to, uint256[] ids, bytes32[] amounts)
+                if len(topics) >= 3:
+                    result["sender"] = HexDecoder.topic_to_address(topics[1])
+                    result["to"] = HexDecoder.topic_to_address(topics[2])
                 result["raw_data"] = data_hex
 
             elif event_type == TraderJoeV2EventType.DEPOSIT:
@@ -667,6 +692,86 @@ class TraderJoeV2ReceiptParser:
             logger.warning(f"Failed to extract liquidity: {e}")
             return None
 
+    def extract_collected_fees(self, receipt: dict[str, Any]) -> ParsedFeeCollectionResult | None:
+        """Extract collected fees data from a fee collection transaction receipt.
+
+        Looks for ClaimedFees events and Transfer events to determine fee amounts.
+        Returns None if ClaimedFees is not found (older LBPair versions without this event).
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            ParsedFeeCollectionResult if fee collection found, None otherwise
+        """
+        try:
+            result = self.parse_receipt(receipt)
+            gas_used = receipt.get("gasUsed", 0)
+            block_number = receipt.get("blockNumber", 0)
+
+            # Look for ClaimedFees events first (V2.1)
+            claimed_events = [e for e in result.events if e.event_type == TraderJoeV2EventType.CLAIMED_FEES]
+            if claimed_events:
+                event = claimed_events[0]
+                bin_ids = []
+                raw_data = event.data.get("raw_data", "")
+                if raw_data:
+                    bin_ids = self._parse_bin_ids_from_data(raw_data) or []
+
+                # Get fee amounts from Transfer events
+                fees_x = 0
+                fees_y = 0
+                transfers = [e for e in result.events if e.event_type == TraderJoeV2EventType.TRANSFER]
+                if len(transfers) >= 2:
+                    fees_x = transfers[0].data.get("value", 0)
+                    fees_y = transfers[1].data.get("value", 0)
+                elif len(transfers) == 1:
+                    fees_x = transfers[0].data.get("value", 0)
+
+                return ParsedFeeCollectionResult(
+                    success=True,
+                    pool_address=event.contract_address,
+                    bin_ids=bin_ids,
+                    fees_x=fees_x,
+                    fees_y=fees_y,
+                    gas_used=gas_used,
+                    block_number=block_number,
+                )
+
+            return None
+
+        except Exception as e:  # noqa: BLE001  # Defensive: graceful degradation for extraction
+            logger.warning(f"Failed to extract collected fees: {e}")
+            return None
+
+    def extract_fees0(self, receipt: dict[str, Any]) -> int | None:
+        """Extract fee amount for token X from fee collection receipt.
+
+        Args:
+            receipt: Transaction receipt dict
+
+        Returns:
+            Fee amount in wei for token X, or None
+        """
+        result = self.extract_collected_fees(receipt)
+        if result and result.success:
+            return result.fees_x
+        return None
+
+    def extract_fees1(self, receipt: dict[str, Any]) -> int | None:
+        """Extract fee amount for token Y from fee collection receipt.
+
+        Args:
+            receipt: Transaction receipt dict
+
+        Returns:
+            Fee amount in wei for token Y, or None
+        """
+        result = self.extract_collected_fees(receipt)
+        if result and result.success:
+            return result.fees_y
+        return None
+
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> "LPCloseData | None":
         """Extract LP close data from transaction receipt.
 
@@ -721,6 +826,7 @@ __all__ = [
     "TransferEventData",
     "ParsedSwapResult",
     "ParsedLiquidityResult",
+    "ParsedFeeCollectionResult",
     "ParseResult",
     "EVENT_TOPICS",
     "TOPIC_TO_EVENT",

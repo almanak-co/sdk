@@ -57,6 +57,18 @@ def _mock_rpc_call(success=True, result="0x0"):
     return resp
 
 
+def _roles_storage_rpc(valuator: str, safe: str):
+    """Build a getRolesStorage RPC response encoding the given valuator and safe addresses.
+
+    Returns a mock RPC response with 5 ABI-encoded addresses:
+    [whitelistManager, feeReceiver, safe, feeRegistry, valuationManager].
+    """
+    v = valuator.lower().removeprefix("0x").zfill(64)
+    s = safe.lower().removeprefix("0x").zfill(64)
+    data = "0x" + "0" * 64 + "0" * 64 + s + "0" * 64 + v
+    return _mock_rpc_call(result=data)
+
+
 def _mock_exec_response(success=True, tx_hashes=None, error=""):
     """Create a mock execution response."""
     resp = MagicMock()
@@ -79,8 +91,13 @@ class TestSettleWithPendingDeposits:
         asset_result = "0x" + "0" * 24 + usdc_address[2:]
         vault = "0x" + "a" * 40
         safe = "0x" + "b" * 40
+        valuator = "0x1234567890abcdef1234567890abcdef12345678"
 
         rpc_responses = [
+            # Preflight: getRolesStorage (valuation manager check)
+            _roles_storage_rpc(valuator, safe),
+            # Preflight: getRolesStorage (curator check)
+            _roles_storage_rpc(valuator, safe),
             # NAV computation: asset(), balanceOf(safe), silo
             _mock_rpc_call(result=asset_result),
             _mock_rpc_call(result=hex(20_000_000)),  # 20 USDC in Safe
@@ -117,7 +134,7 @@ class TestSettleWithPendingDeposits:
             sdk = MockSDK.return_value
             sdk.get_underlying_token_address.return_value = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
             sdk.get_pending_redemptions.return_value = 50_000_000_000_000_000_000  # 50 shares
-            sdk.get_share_price.return_value = Decimal("0.000000000001")  # 1 USDC per share
+            sdk.convert_to_assets.return_value = 50_000_000  # 50 USDC in raw units
 
             # Safe only has 10 USDC but needs 50
             mock_gateway.rpc.Call.return_value = _mock_rpc_call(result=hex(10_000_000))
@@ -477,8 +494,13 @@ class TestAlertingOnFailures:
         """Propose NAV failure triggers critical alert."""
         usdc_address = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
         asset_result = "0x" + "0" * 24 + usdc_address[2:]
+        safe = "0x" + "b" * 40
+        valuator = "0x1234567890abcdef1234567890abcdef12345678"
 
         rpc_responses = [
+            # Preflight: getRolesStorage (valuation manager + curator)
+            _roles_storage_rpc(valuator, safe),
+            _roles_storage_rpc(valuator, safe),
             # NAV computation
             _mock_rpc_call(result=asset_result),
             _mock_rpc_call(result=hex(10_000_000)),

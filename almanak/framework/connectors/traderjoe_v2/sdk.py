@@ -68,6 +68,7 @@ DEFAULT_GAS_ESTIMATES: dict[str, int] = {
     "swap": 200_000,
     "add_liquidity": 700_000,
     "remove_liquidity": 400_000,
+    "collect_fees": 200_000,
 }
 
 # TraderJoe V2 constants
@@ -662,6 +663,83 @@ class TraderJoeV2SDK:
         )
 
         return dict(tx), tx["gas"]
+
+    def build_collect_fees(
+        self,
+        pool_address: str,
+        account: str,
+        ids: list[int],
+    ) -> tuple[dict[str, Any], int]:
+        """Build transaction for collecting accumulated fees from an LP position.
+
+        Calls LBPair.collectFees(account, ids) which collects fees without
+        removing any liquidity. This is a V2.1 feature of TraderJoe's Liquidity Book.
+
+        The returned bytes32[] encodes fee amounts where each bytes32 has
+        amountX in the upper 128 bits and amountY in the lower 128 bits.
+
+        Args:
+            pool_address: Address of the LBPair contract
+            account: Address of the account to collect fees for
+            ids: Array of bin IDs to collect fees from
+
+        Returns:
+            Tuple of (transaction dict, estimated gas)
+
+        Raises:
+            TraderJoeV2SDKError: If no bin IDs provided
+        """
+        if not ids:
+            raise TraderJoeV2SDKError("No bin IDs provided for fee collection")
+
+        pair = self.get_pair_contract(pool_address)
+        account_addr = Web3.to_checksum_address(account)
+
+        tx = pair.functions.collectFees(
+            account_addr,
+            ids,
+        ).build_transaction(
+            {
+                "from": account_addr,
+                "gas": DEFAULT_GAS_ESTIMATES["collect_fees"],
+                "nonce": self.web3.eth.get_transaction_count(account_addr),
+            }
+        )
+
+        return dict(tx), tx["gas"]
+
+    def get_pending_fees(
+        self,
+        pool_address: str,
+        account: str,
+        ids: list[int],
+    ) -> tuple[int, int]:
+        """Query pending (uncollected) fees for a position.
+
+        Args:
+            pool_address: Address of the LBPair contract
+            account: Address of the account to query
+            ids: Array of bin IDs to query fees for
+
+        Returns:
+            Tuple of (total_fees_x, total_fees_y) in wei
+        """
+        pair = self.get_pair_contract(pool_address)
+        account_addr = Web3.to_checksum_address(account)
+
+        total_fees_x = 0
+        total_fees_y = 0
+
+        for bin_id in ids:
+            try:
+                fees = pair.functions.pendingFees(account_addr, bin_id).call()
+                total_fees_x += fees[0]
+                total_fees_y += fees[1]
+            except Exception:
+                # pendingFees may not be available on all versions
+                continue
+
+        return total_fees_x, total_fees_y
 
     # =========================================================================
     # Position Queries

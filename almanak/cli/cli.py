@@ -621,7 +621,9 @@ def dashboard(port, gateway_host, gateway_port, no_browser):
 @click.option(
     "--template",
     "-t",
-    type=click.Choice(["blank", "dynamic_lp", "mean_reversion", "basis_trade", "lending_loop", "copy_trader"]),
+    type=click.Choice(
+        ["blank", "dynamic_lp", "mean_reversion", "bollinger", "basis_trade", "lending_loop", "copy_trader"]
+    ),
     default="blank",
     help="Strategy template to use (default: blank)",
 )
@@ -810,6 +812,13 @@ def new(ctx, name, working_dir, template, chain):
     default=False,
     help="Reset Anvil fork to latest mainnet block before each iteration (requires --network anvil).",
 )
+@click.option(
+    "--max-iterations",
+    type=int,
+    default=None,
+    help="Maximum number of iterations to run before exiting cleanly. "
+    "Without this flag, continuous mode runs indefinitely.",
+)
 @click.pass_context
 def strategy_run(
     ctx,
@@ -834,6 +843,7 @@ def strategy_run(
     wallet,
     log_file,
     reset_fork,
+    max_iterations,
 ):
     """Run a strategy from its working directory.
 
@@ -916,6 +926,7 @@ def strategy_run(
             wallet=wallet,
             log_file=log_file,
             reset_fork=reset_fork,
+            max_iterations=max_iterations,
             working_dir=working_dir,
             strategy_id_override=id,
         )

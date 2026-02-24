@@ -47,17 +47,17 @@ POSITION_MANAGER = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88"
 MAX_UINT128 = 2**128 - 1
 
 # Pool: WETH/USDC 0.3% fee tier
-# After sorting by address: token0=USDC, token1=WETH
-# So amount0=USDC, amount1=WETH, range is in WETH-per-USDC terms
+# Specify amounts and range in user's pool ordering (WETH/USDC).
+# The compiler auto-sorts tokens and inverts the range when needed.
 POOL = "WETH/USDC/3000"
-LP_AMOUNT_USDC = Decimal("500")  # amount0 (USDC after sorting)
-LP_AMOUNT_WETH = Decimal("0.2")  # amount1 (WETH after sorting)
+LP_AMOUNT_WETH = Decimal("0.2")   # amount0 (first token in user's pool ordering)
+LP_AMOUNT_USDC = Decimal("500")   # amount1 (second token in user's pool ordering)
 
-# Wide price range in WETH-per-USDC terms to ensure both tokens are deposited
-# range_lower=0.00005 → ETH at ~$20,000
-# range_upper=0.005   → ETH at ~$200
-RANGE_LOWER = Decimal("0.00005")
-RANGE_UPPER = Decimal("0.005")
+# Wide price range in USDC-per-WETH terms to ensure both tokens are deposited
+# range_lower=200   -> ETH at $200
+# range_upper=20000 -> ETH at $20,000
+RANGE_LOWER = Decimal("200")
+RANGE_UPPER = Decimal("20000")
 
 
 # =============================================================================
@@ -138,8 +138,8 @@ async def _open_position_via_intent(
     """Open an LP position via LPOpenIntent and return the position token ID."""
     intent = LPOpenIntent(
         pool=POOL,
-        amount0=LP_AMOUNT_USDC,
-        amount1=LP_AMOUNT_WETH,
+        amount0=LP_AMOUNT_WETH,
+        amount1=LP_AMOUNT_USDC,
         range_lower=RANGE_LOWER,
         range_upper=RANGE_UPPER,
         protocol="uniswap_v3",
@@ -224,9 +224,9 @@ class TestUniswapV3LPOpenIntent:
         print("Test: LP Open WETH/USDC via LPOpenIntent")
         print(f"{'=' * 80}")
         print(f"Pool: {POOL}")
-        print(f"Amount USDC (token0): {LP_AMOUNT_USDC}")
-        print(f"Amount WETH (token1): {LP_AMOUNT_WETH}")
-        print(f"Range: [{RANGE_LOWER} - {RANGE_UPPER}] WETH per USDC")
+        print(f"Amount WETH (user token0): {LP_AMOUNT_WETH}")
+        print(f"Amount USDC (user token1): {LP_AMOUNT_USDC}")
+        print(f"Range: [{RANGE_LOWER} - {RANGE_UPPER}] USDC per WETH")
 
         # 1. Record balances BEFORE
         usdc_before = get_token_balance(web3, usdc_addr, funded_wallet)
@@ -238,8 +238,8 @@ class TestUniswapV3LPOpenIntent:
         # 2. Create LPOpenIntent
         intent = LPOpenIntent(
             pool=POOL,
-            amount0=LP_AMOUNT_USDC,
-            amount1=LP_AMOUNT_WETH,
+            amount0=LP_AMOUNT_WETH,
+            amount1=LP_AMOUNT_USDC,
             range_lower=RANGE_LOWER,
             range_upper=RANGE_UPPER,
             protocol="uniswap_v3",

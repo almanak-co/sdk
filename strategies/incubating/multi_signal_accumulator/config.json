@@ -9,5 +9,10 @@
     "quote_token": "USDC",
     "max_accumulated_usd": 50,
     "chain": "arbitrum",
-    "force_action": "buy"
+    "force_action": "buy",
+    "anvil_funding": {
+        "ETH": 1,
+        "WETH": 1,
+        "USDC": 5000
+    }
 }

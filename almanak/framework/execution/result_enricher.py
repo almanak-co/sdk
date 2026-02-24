@@ -74,6 +74,8 @@ class ResultEnricher:
             "fees0",
             "fees1",
         ],
+        # === LP Fee Collection ===
+        "LP_COLLECT_FEES": ["fees0", "fees1", "bin_ids"],
         # === Lending ===
         "BORROW": ["borrow_amount", "borrow_rate", "debt_token"],
         "REPAY": ["repay_amount", "remaining_debt"],

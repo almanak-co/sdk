@@ -94,10 +94,22 @@ def derive_isolated_wallet(master_private_key: str, strategy_name: str) -> tuple
 
     Returns:
         Tuple of (derived_private_key_hex, derived_wallet_address)
+
+    Raises:
+        ValueError: If master_private_key is not a valid 32-byte hex-encoded private key
     """
     from eth_account import Account
 
-    key_bytes = bytes.fromhex(master_private_key.removeprefix("0x"))
+    key_hex = master_private_key.removeprefix("0x")
+    try:
+        key_bytes = bytes.fromhex(key_hex)
+    except ValueError as e:
+        raise ValueError(f"ALMANAK_PRIVATE_KEY is not valid hex: {e}") from e
+    if len(key_bytes) != 32:
+        raise ValueError(
+            f"ALMANAK_PRIVATE_KEY must be 32 bytes (64 hex chars), got {len(key_bytes)} bytes. "
+            "Check that the key is a valid EVM private key."
+        )
     derived = hmac.new(key_bytes, strategy_name.encode(), hashlib.sha256).digest()
     derived_key = "0x" + derived.hex()
     account = Account.from_key(derived_key)
@@ -187,7 +199,18 @@ class ManagedGateway:
                 env_var = f"ANVIL_{chain.upper()}_PORT"
                 self._original_env[env_var] = os.environ.get(env_var)
                 os.environ[env_var] = str(port)
-                logger.info("Anvil fork started for %s on port %d (fork: %s)", chain, port, fork_url)
+                # Redact API key from fork URL to avoid leaking secrets in logs
+                # Handles Alchemy (/v2/KEY), Tenderly (/KEY), and other providers
+                from urllib.parse import urlparse
+
+                parsed = urlparse(fork_url)
+                path = parsed.path.rstrip("/")
+                path_parts = path.rsplit("/", 1)
+                redacted_path = f"{path_parts[0]}/***" if len(path_parts) > 1 else path
+                # Strip userinfo (user:pass@) from netloc to avoid leaking credentials
+                host = parsed.netloc.split("@")[-1]
+                redacted_url = f"{parsed.scheme}://{host}{redacted_path}"
+                logger.info("Anvil fork started for %s on port %d (fork: %s)", chain, port, redacted_url)
         except Exception:
             # Clean up any forks that were already started before re-raising
             await self._stop_anvil_forks()

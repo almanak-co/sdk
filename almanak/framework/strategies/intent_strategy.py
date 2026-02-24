@@ -86,6 +86,12 @@ logger = logging.getLogger(__name__)
 class TokenBalance:
     """Balance information for a single token.
 
+    Supports numeric comparisons so strategy authors can write:
+        if market.balance("ETH") > Decimal("1.0"): ...
+        amount = min(trade_size, market.balance("USDC"))
+
+    Comparisons delegate to the ``balance`` field (native units).
+
     Attributes:
         symbol: Token symbol (e.g., "ETH", "USDC")
         balance: Token balance in native units
@@ -97,6 +103,70 @@ class TokenBalance:
     balance: Decimal
     balance_usd: Decimal
     address: str = ""
+
+    # -- numeric protocol --------------------------------------------------
+
+    def _to_decimal(self, other: object) -> Decimal | None:
+        """Coerce other to Decimal for comparison, or return None."""
+        if isinstance(other, TokenBalance):
+            return other.balance
+        if isinstance(other, Decimal):
+            return other
+        if isinstance(other, int | float):
+            return Decimal(str(other))
+        return None
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, TokenBalance):
+            return self.symbol == other.symbol and self.balance == other.balance and self.address == other.address
+        val = self._to_decimal(other)
+        if val is None:
+            return NotImplemented
+        return self.balance == val
+
+    def __lt__(self, other: object) -> bool:
+        val = self._to_decimal(other)
+        if val is None:
+            return NotImplemented
+        return self.balance < val
+
+    def __le__(self, other: object) -> bool:
+        val = self._to_decimal(other)
+        if val is None:
+            return NotImplemented
+        return self.balance <= val
+
+    def __gt__(self, other: object) -> bool:
+        val = self._to_decimal(other)
+        if val is None:
+            return NotImplemented
+        return self.balance > val
+
+    def __ge__(self, other: object) -> bool:
+        val = self._to_decimal(other)
+        if val is None:
+            return NotImplemented
+        return self.balance >= val
+
+    def __hash__(self) -> int:
+        # Hash only on balance to satisfy the Python invariant: a == b => hash(a) == hash(b).
+        # Since __eq__ returns True for `tb == Decimal(100)`, hash must match hash(Decimal(100)).
+        # Different tokens with the same balance will hash-collide but __eq__ distinguishes them.
+        return hash(self.balance)
+
+    def __float__(self) -> float:
+        return float(self.balance)
+
+    def __int__(self) -> int:
+        return int(self.balance)
+
+    def __format__(self, format_spec: str) -> str:
+        if format_spec:
+            return format(self.balance, format_spec)
+        return str(self.balance)
+
+    def __repr__(self) -> str:
+        return f"TokenBalance(symbol={self.symbol!r}, balance={self.balance}, balance_usd={self.balance_usd})"
 
 
 @dataclass
@@ -124,6 +194,12 @@ class PriceData:
 class RSIData:
     """RSI (Relative Strength Index) data for a token.
 
+    Supports numeric operations so strategy authors can write:
+        rsi = market.rsi("ETH")
+        if rsi > 70: ...          # comparison against int/float
+        f"{rsi:.2f}"              # f-string formatting
+        float(rsi)                # explicit float conversion
+
     Attributes:
         value: Current RSI value (0-100)
         period: RSI period used (e.g., 14)
@@ -136,6 +212,42 @@ class RSIData:
     period: int = 14
     overbought: Decimal = Decimal("70")
     oversold: Decimal = Decimal("30")
+
+    def __float__(self) -> float:
+        return float(self.value)
+
+    def __format__(self, format_spec: str) -> str:
+        return format(float(self.value), format_spec) if format_spec else str(self.value)
+
+    def __gt__(self, other: object) -> bool:
+        if isinstance(other, int | float | Decimal):
+            return self.value > Decimal(str(other))
+        return NotImplemented
+
+    def __lt__(self, other: object) -> bool:
+        if isinstance(other, int | float | Decimal):
+            return self.value < Decimal(str(other))
+        return NotImplemented
+
+    def __ge__(self, other: object) -> bool:
+        if isinstance(other, int | float | Decimal):
+            return self.value >= Decimal(str(other))
+        return NotImplemented
+
+    def __le__(self, other: object) -> bool:
+        if isinstance(other, int | float | Decimal):
+            return self.value <= Decimal(str(other))
+        return NotImplemented
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, RSIData):
+            return self.value == other.value
+        if isinstance(other, int | float | Decimal):
+            return self.value == Decimal(str(other))
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self.value)
 
     @property
     def signal(self) -> str:
@@ -201,6 +313,11 @@ class MACDData:
 class BollingerBandsData:
     """Bollinger Bands data for a token.
 
+    Numeric operations use percent_b (price position within bands, 0-1):
+        bb = market.bollinger_bands("ETH")
+        f"{bb:.2f}"               # formats percent_b
+        float(bb)                 # returns percent_b as float
+
     Attributes:
         upper_band: Upper band value (middle + std_dev * multiplier)
         middle_band: Middle band value (SMA)
@@ -218,6 +335,12 @@ class BollingerBandsData:
     percent_b: Decimal = Decimal("0.5")
     period: int = 20
     std_dev: float = 2.0
+
+    def __float__(self) -> float:
+        return float(self.percent_b)
+
+    def __format__(self, format_spec: str) -> str:
+        return format(float(self.percent_b), format_spec) if format_spec else str(self.percent_b)
 
     @property
     def is_oversold(self) -> bool:
@@ -298,6 +421,11 @@ class StochasticData:
 class ATRData:
     """ATR (Average True Range) data for a token.
 
+    Numeric operations use value (ATR in price units):
+        atr = market.atr("ETH")
+        f"{atr:.2f}"              # formats ATR value
+        float(atr)                # returns ATR value as float
+
     Attributes:
         value: ATR value in price units
         value_percent: ATR as percentage of current price
@@ -309,6 +437,12 @@ class ATRData:
     value_percent: Decimal = Decimal("0")
     period: int = 14
     volatility_threshold: Decimal = Decimal("5.0")
+
+    def __float__(self) -> float:
+        return float(self.value)
+
+    def __format__(self, format_spec: str) -> str:
+        return format(float(self.value), format_spec) if format_spec else str(self.value)
 
     @property
     def is_high_volatility(self) -> bool:

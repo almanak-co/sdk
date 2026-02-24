@@ -6,5 +6,9 @@
     "is_long": true,
     "hold_minutes": 5,
     "max_slippage_pct": 2.0,
-    "chain": "arbitrum"
+    "chain": "arbitrum",
+    "anvil_funding": {
+        "ETH": 1,
+        "WETH": 1
+    }
 }

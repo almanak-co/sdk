@@ -134,6 +134,11 @@ class IntentState(Enum):
     VALIDATING_UNSTAKE = auto()
     SADFLOW_UNSTAKE = auto()
 
+    # LP_COLLECT_FEES intent states
+    PREPARING_LP_COLLECT_FEES = auto()
+    VALIDATING_LP_COLLECT_FEES = auto()
+    SADFLOW_LP_COLLECT_FEES = auto()
+
 
 def get_preparing_state(intent_type: IntentType) -> IntentState:
     """Get the PREPARING state for an intent type.
@@ -157,6 +162,7 @@ def get_preparing_state(intent_type: IntentType) -> IntentState:
         IntentType.HOLD: IntentState.PREPARING_HOLD,
         IntentType.STAKE: IntentState.PREPARING_STAKE,
         IntentType.UNSTAKE: IntentState.PREPARING_UNSTAKE,
+        IntentType.LP_COLLECT_FEES: IntentState.PREPARING_LP_COLLECT_FEES,
     }
     return state_map.get(intent_type, IntentState.IDLE)
 
@@ -183,6 +189,7 @@ def get_validating_state(intent_type: IntentType) -> IntentState:
         IntentType.HOLD: IntentState.VALIDATING_HOLD,
         IntentType.STAKE: IntentState.VALIDATING_STAKE,
         IntentType.UNSTAKE: IntentState.VALIDATING_UNSTAKE,
+        IntentType.LP_COLLECT_FEES: IntentState.VALIDATING_LP_COLLECT_FEES,
     }
     return state_map.get(intent_type, IntentState.IDLE)
 
@@ -209,6 +216,7 @@ def get_sadflow_state(intent_type: IntentType) -> IntentState:
         IntentType.HOLD: IntentState.SADFLOW_HOLD,
         IntentType.STAKE: IntentState.SADFLOW_STAKE,
         IntentType.UNSTAKE: IntentState.SADFLOW_UNSTAKE,
+        IntentType.LP_COLLECT_FEES: IntentState.SADFLOW_LP_COLLECT_FEES,
     }
     return state_map.get(intent_type, IntentState.IDLE)
 
@@ -228,6 +236,7 @@ def is_preparing_state(state: IntentState) -> bool:
         IntentState.PREPARING_HOLD,
         IntentState.PREPARING_STAKE,
         IntentState.PREPARING_UNSTAKE,
+        IntentState.PREPARING_LP_COLLECT_FEES,
     }
 
 
@@ -246,6 +255,7 @@ def is_validating_state(state: IntentState) -> bool:
         IntentState.VALIDATING_HOLD,
         IntentState.VALIDATING_STAKE,
         IntentState.VALIDATING_UNSTAKE,
+        IntentState.VALIDATING_LP_COLLECT_FEES,
     }
 
 
@@ -264,6 +274,7 @@ def is_sadflow_state(state: IntentState) -> bool:
         IntentState.SADFLOW_HOLD,
         IntentState.SADFLOW_STAKE,
         IntentState.SADFLOW_UNSTAKE,
+        IntentState.SADFLOW_LP_COLLECT_FEES,
     }
 
 

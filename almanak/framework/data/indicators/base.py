@@ -118,8 +118,16 @@ class BollingerBandsResult:
         upper_band: Upper band (SMA + std_dev * multiplier)
         middle_band: Middle band (Simple Moving Average)
         lower_band: Lower band (SMA - std_dev * multiplier)
-        bandwidth: Band width as percentage ((upper - lower) / middle)
-        percent_b: Price position relative to bands (0 = lower, 1 = upper)
+        bandwidth: Band width as ratio ((upper - lower) / middle).
+            Typical ranges for crypto assets (1h candles, 20-period, 2 std dev):
+                - Squeeze: < 0.02 (low volatility, breakout likely)
+                - Normal:  0.02 - 0.06 (typical trading range)
+                - Expansion: > 0.06 (high volatility, trend in progress)
+            These are starting guidelines; actual thresholds vary by asset and
+            timeframe. Shorter timeframes and lower-cap assets trend higher.
+        percent_b: Price position relative to bands (0 = lower, 1 = upper).
+            Values above 1.0 indicate price above the upper band; values below
+            0.0 indicate price below the lower band.
     """
 
     upper_band: float

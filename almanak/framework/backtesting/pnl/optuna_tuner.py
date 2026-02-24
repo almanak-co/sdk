@@ -993,14 +993,15 @@ class OptunaTuner:
         param = _convert_legacy_param(name, values)
         return self._suggest_from_param_range(trial, name, param)
 
-    def _create_config_from_trial(self, trial: Trial) -> PnLBacktestConfig:
-        """Create a PnLBacktestConfig from trial suggestions.
+    def _create_config_from_trial(self, trial: Trial) -> tuple[PnLBacktestConfig, dict[str, Any]]:
+        """Create a PnLBacktestConfig and strategy param overrides from trial.
 
         Args:
             trial: Optuna trial object
 
         Returns:
-            PnLBacktestConfig with suggested parameters
+            Tuple of (PnLBacktestConfig with suggested config params,
+                      dict of suggested strategy param overrides)
         """
         if self._base_config is None:
             raise RuntimeError("Base config not set. Call optimize() first.")
@@ -1012,16 +1013,22 @@ class OptunaTuner:
         for key in ["duration_seconds", "duration_days", "estimated_ticks"]:
             config_dict.pop(key, None)
 
-        # Suggest and update each parameter
-        for name, values in self._param_ranges.items():
+        # Suggest and update config params (PnLBacktestConfig fields only)
+        for name, values in self._config_param_ranges.items():
             suggested = self._suggest_param(trial, name, values)
             config_dict[name] = suggested
 
-        return PnLBacktestConfig.from_dict(config_dict)
+        # Suggest strategy params (passed to strategy factory, not PnLBacktestConfig)
+        strategy_overrides: dict[str, Any] = {}
+        for name, values in self._strategy_param_ranges.items():
+            suggested = self._suggest_param(trial, name, values)
+            strategy_overrides[name] = suggested
+
+        return PnLBacktestConfig.from_dict(config_dict), strategy_overrides
 
     def _create_objective(
         self,
-        strategy_factory: Callable[[], Any],
+        strategy_factory: Callable[..., Any],
         data_provider_factory: Callable[[], Any],
         backtester_factory: Callable[[Any, dict[str, Any], dict[str, Any]], Any],
         fee_models: dict[str, Any],
@@ -1031,7 +1038,8 @@ class OptunaTuner:
         """Create the objective function for Optuna.
 
         Args:
-            strategy_factory: Factory function for strategy
+            strategy_factory: Factory function for strategy.
+                Called with no args or a config dict depending on param ranges.
             data_provider_factory: Factory function for data provider
             backtester_factory: Factory function for backtester
             fee_models: Fee models dict
@@ -1044,10 +1052,21 @@ class OptunaTuner:
             Objective function that takes a Trial and returns float
         """
 
+        def _create_strategy_with_overrides(overrides: dict[str, Any]) -> Any:
+            """Create a strategy, merging overrides into strategy config."""
+            if overrides and self._strategy_config is not None:
+                merged_config = {**self._strategy_config, **overrides}
+                return strategy_factory(merged_config)
+            elif overrides:
+                # No base strategy config -- pass overrides directly
+                return strategy_factory(overrides)
+            else:
+                return strategy_factory()
+
         def objective(trial: Trial) -> float:
             """Objective function for Optuna optimization."""
             # Create config from trial suggestions (uses base_config as template)
-            config = self._create_config_from_trial(trial)
+            config, strategy_overrides = self._create_config_from_trial(trial)
 
             if extra_configs:
                 # Multi-period: run backtest for each period, average the metric
@@ -1073,7 +1092,7 @@ class OptunaTuner:
                 metric_values = []
                 for period_config in all_configs:
                     try:
-                        strategy = strategy_factory()
+                        strategy = _create_strategy_with_overrides(strategy_overrides)
                         data_provider = data_provider_factory()
                         backtester = backtester_factory(data_provider, fee_models, slippage_models)
                         result: BacktestResult = asyncio.run(backtester.backtest(strategy, period_config))
@@ -1096,7 +1115,7 @@ class OptunaTuner:
                 return avg_metric
             else:
                 # Single-period: original behavior
-                strategy = strategy_factory()
+                strategy = _create_strategy_with_overrides(strategy_overrides)
                 data_provider = data_provider_factory()
                 backtester = backtester_factory(data_provider, fee_models, slippage_models)
 
@@ -1119,7 +1138,7 @@ class OptunaTuner:
 
     async def optimize(
         self,
-        strategy_factory: Callable[[], Any],
+        strategy_factory: Callable[..., Any],
         data_provider_factory: Callable[[], Any],
         backtester_factory: Callable[[Any, dict[str, Any], dict[str, Any]], Any],
         base_config: PnLBacktestConfig,
@@ -1132,6 +1151,7 @@ class OptunaTuner:
         patience: int | None = None,
         min_delta: float | None = None,
         extra_configs: list[PnLBacktestConfig] | None = None,
+        strategy_config: dict[str, Any] | None = None,
     ) -> OptimizationResult:
         """Run Bayesian optimization to find best parameters.
 
@@ -1141,6 +1161,9 @@ class OptunaTuner:
         Args:
             strategy_factory: Factory function that returns a new strategy instance.
                 Must be picklable (module-level function).
+                Called as ``strategy_factory()`` when no strategy param ranges are defined.
+                Called as ``strategy_factory(config_dict)`` with a merged dict when
+                strategy param ranges are present (optionally merged with ``strategy_config``).
             data_provider_factory: Factory function that returns a new data provider.
                 Must be picklable (module-level function).
             backtester_factory: Factory function that returns a new PnLBacktester.
@@ -1185,19 +1208,45 @@ class OptunaTuner:
         if not param_ranges:
             raise ValueError("param_ranges cannot be empty")
 
-        valid_fields = {f for f in vars(base_config) if not f.startswith("_")}
-        for field_name in param_ranges:
-            if field_name not in valid_fields:
-                raise ValueError(f"Invalid field name '{field_name}'. Valid fields: {sorted(valid_fields)}")
+        # Partition param_ranges into config params (PnLBacktestConfig fields)
+        # and strategy params (everything else, passed to strategy factory)
+        valid_config_fields = {f for f in vars(base_config) if not f.startswith("_")}
+        config_param_ranges: OptunaParamRanges = {}
+        strategy_param_ranges: OptunaParamRanges = {}
+
+        for field_name, field_range in param_ranges.items():
+            if field_name in valid_config_fields:
+                config_param_ranges[field_name] = field_range
+            else:
+                strategy_param_ranges[field_name] = field_range
+
+        if strategy_param_ranges:
+            logger.info(
+                f"Strategy params to optimize: {sorted(strategy_param_ranges.keys())} "
+                f"(will be passed to strategy factory)"
+            )
+        if config_param_ranges:
+            logger.info(f"Backtest config params to optimize: {sorted(config_param_ranges.keys())}")
 
         # Convert all param_ranges to TypedParamRanges (ParamRange objects)
         typed_ranges: TypedParamRanges = {}
         for name, value in param_ranges.items():
             typed_ranges[name] = _convert_legacy_param(name, value)
 
+        typed_config_ranges: TypedParamRanges = {}
+        for name, value in config_param_ranges.items():
+            typed_config_ranges[name] = _convert_legacy_param(name, value)
+
+        typed_strategy_ranges: TypedParamRanges = {}
+        for name, value in strategy_param_ranges.items():
+            typed_strategy_ranges[name] = _convert_legacy_param(name, value)
+
         # Store for use in objective
         self._param_ranges = typed_ranges
+        self._config_param_ranges = typed_config_ranges
+        self._strategy_param_ranges = typed_strategy_ranges
         self._base_config = base_config
+        self._strategy_config = strategy_config
 
         # Create objective function
         objective = self._create_objective(

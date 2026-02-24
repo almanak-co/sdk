@@ -76,9 +76,17 @@ GMX_V2_SDK_ADDRESSES = {
 # Note: 0.001 ETH is sufficient for testing; increase to 0.005 ETH for production
 MIN_EXECUTION_FEE_FALLBACK = 1_000_000_000_000_000  # 0.001 ETH (testing)
 
-# Gas limits for different order types
+# Gas limits for different order types (raw callbackGasLimit = 0 for our orders)
 INCREASE_ORDER_GAS_LIMIT = 3_000_000  # ~3M gas for increase orders
 DECREASE_ORDER_GAS_LIMIT = 3_000_000  # ~3M gas for decrease orders
+
+# GMX V2 adjustedGasLimit formula parameters (from GasUtils.sol):
+#   adjustedGasLimit = baseGasLimit + callbackGasLimit + order_gas_limit * multiplierFactor
+# Our orders have callbackGasLimit = 0, so:
+#   adjustedGasLimit = baseGasLimit + order_gas_limit * multiplierFactor
+# See: https://github.com/gmx-io/gmx-synthetics/blob/main/contracts/gas/GasUtils.sol
+GMX_GAS_BASE_AMOUNT = 2_890_000  # ESTIMATED_GAS_FEE_BASE_AMOUNT_V2_1
+GMX_GAS_MULTIPLIER = 1.56  # ESTIMATED_GAS_FEE_MULTIPLIER_FACTOR (shifted by 1e30 on-chain)
 
 
 @dataclass
@@ -190,19 +198,24 @@ class GMXV2SDK:
         Calculate execution fee for GMX order dynamically.
 
         GMX V2 validates: executionFee >= adjustedGasLimit * tx.gasprice
+        where adjustedGasLimit = baseGasLimit + orderGasLimit * multiplierFactor
+        (callbackGasLimit = 0 for our orders).
 
         Args:
             order_type: "increase" or "decrease" to select appropriate gas limit
-            multiplier: Safety multiplier (default 1.5x for testing, use 2.0x for production)
+            multiplier: Safety multiplier on top of the adjusted gas limit
+                (default 1.5x for testing, use 2.0x for production)
 
         Returns:
             Execution fee in wei
         """
-        gas_limit = DECREASE_ORDER_GAS_LIMIT if order_type == "decrease" else INCREASE_ORDER_GAS_LIMIT
+        order_gas_limit = DECREASE_ORDER_GAS_LIMIT if order_type == "decrease" else INCREASE_ORDER_GAS_LIMIT
+        # Apply GMX's adjusted gas limit formula (GasUtils.sol)
+        adjusted_gas_limit = int(GMX_GAS_BASE_AMOUNT + order_gas_limit * GMX_GAS_MULTIPLIER)
 
         try:
             gas_price = self.web3.eth.gas_price
-            execution_fee = int(gas_limit * gas_price * multiplier)
+            execution_fee = int(adjusted_gas_limit * gas_price * multiplier)
             return max(execution_fee, MIN_EXECUTION_FEE_FALLBACK)
         except Exception:
             return MIN_EXECUTION_FEE_FALLBACK * 2

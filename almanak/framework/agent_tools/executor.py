@@ -931,13 +931,19 @@ class ToolExecutor:
         return total
 
     async def _fetch_portfolio_value(self) -> Decimal:
-        """Best-effort portfolio value for stop-loss tracking."""
+        """Best-effort portfolio value for stop-loss tracking.
+
+        Queries balances across all chains in the agent policy's allowed_chains
+        (not just the default chain) so that multi-chain portfolios are tracked.
+        """
         try:
             from almanak.gateway.proto import gateway_pb2
 
             tokens = list(self._policy_engine.policy.allowed_tokens or self._RISK_METRIC_TOKENS)
+            chains = list(self._policy_engine.policy.allowed_chains or {self._default_chain})
             requests = [
-                gateway_pb2.BalanceRequest(token=t, chain=self._default_chain, wallet_address=self._wallet_address)
+                gateway_pb2.BalanceRequest(token=t, chain=c, wallet_address=self._wallet_address)
+                for c in chains
                 for t in tokens
             ]
             resp = self._client.market.BatchGetBalances(gateway_pb2.BatchBalanceRequest(requests=requests))
@@ -1747,12 +1753,15 @@ class ToolExecutor:
         if pending_redeems == 0:
             return True, 0, 0
 
-        # Get share price to convert redeem shares to underlying
+        # Convert redeem shares to underlying via on-chain convertToAssets.
+        # Uses the ERC-4626 function directly to avoid precision loss from
+        # intermediate share_price division (shares are 18 decimals but
+        # underlying may be 6, e.g. USDC).
         try:
-            share_price = sdk.get_share_price(vault_address)
-            needed = int(pending_redeems * share_price)
-        except Exception:
-            needed = pending_redeems  # Fallback: assume 1:1
+            needed = sdk.convert_to_assets(vault_address, pending_redeems)
+        except (RuntimeError, ValueError, TypeError) as exc:
+            logger.warning("Cannot convert pending redemptions to assets; failing closed: %s", exc)
+            return False, 0, 0
 
         # Read Safe's underlying balance
         try:
@@ -1838,6 +1847,37 @@ class ToolExecutor:
                 raise
             logger.warning("Failed to persist settlement state (phase=%s, non-fatal)", phase)
 
+    def _vault_preflight_checks(
+        self, sdk: Any, vault_address: str, safe_address: str, valuator_address: str
+    ) -> str | None:
+        """Run on-chain preflight checks before settlement.
+
+        Verifies that the on-chain valuation manager and curator match the
+        provided addresses. This mirrors the lifecycle manager's preflight
+        checks to prevent settlement with misconfigured vault parameters.
+
+        Returns:
+            None if all checks pass, or an error message string.
+        """
+        try:
+            on_chain_valuator = sdk.get_valuation_manager(vault_address)
+            if on_chain_valuator.lower() != valuator_address.lower():
+                return (
+                    f"Preflight failed: on-chain valuation manager {on_chain_valuator} "
+                    f"!= provided valuator {valuator_address}"
+                )
+        except Exception as e:
+            return f"Preflight failed: could not verify valuation manager: {e}"
+
+        try:
+            on_chain_curator = sdk.get_curator(vault_address)
+            if on_chain_curator.lower() != safe_address.lower():
+                return f"Preflight failed: on-chain curator {on_chain_curator} != provided safe {safe_address}"
+        except Exception as e:
+            return f"Preflight failed: could not verify curator: {e}"
+
+        return None
+
     async def _execute_settle_vault(self, args: dict) -> ToolResponse:
         """Run a vault settlement cycle with crash-recovery state machine.
 
@@ -1860,6 +1900,19 @@ class ToolExecutor:
 
         sdk = LagoonVaultSDK(self._client, chain=chain)
         adapter = LagoonVaultAdapter(sdk)
+
+        # Preflight: verify on-chain vault config matches provided args
+        preflight_error = self._vault_preflight_checks(sdk, vault_address, safe_address, valuator_address)
+        if preflight_error:
+            logger.error("settle_vault preflight failed: %s", preflight_error)
+            return ToolResponse(
+                status="error",
+                error={
+                    "error_code": "preflight_failed",
+                    "message": preflight_error,
+                    "recoverable": False,
+                },
+            )
 
         # Load crash-recovery state
         self._load_settlement_state()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 import uuid
@@ -9,6 +10,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from pydantic import Field, ValidationError, field_validator, model_validator
 
@@ -227,9 +230,12 @@ class CopyTradingConfigV2(AlmanakImmutableModel):
 
         data = dict(raw)
 
-        # Legacy alias: filters -> global_policy
+        # Legacy alias: filters -> global_policy (remove filters to avoid extra="forbid" rejection)
         if "global_policy" not in data and "filters" in data:
-            data["global_policy"] = data.get("filters", {})
+            data["global_policy"] = data.pop("filters")
+        elif "filters" in data:
+            # global_policy already present; drop stale filters key
+            data.pop("filters")
 
         # Legacy leader shape: ["0x..."] -> [{"address": "0x..."}]
         leaders = data.get("leaders")
@@ -242,7 +248,9 @@ class CopyTradingConfigV2(AlmanakImmutableModel):
                     normalized_leaders.append(dict(leader))
             data["leaders"] = normalized_leaders
 
-        # Legacy scalar controls on top-level
+        # Legacy scalar controls on top-level -> move into execution_policy, then remove
+        # to avoid extra="forbid" rejection on the top-level model.
+        _LEGACY_EP_KEYS = ("submission_mode", "copy_mode", "strict", "shadow", "replay_file")
         if "execution_policy" not in data:
             data["execution_policy"] = {}
         if isinstance(data["execution_policy"], dict):
@@ -258,6 +266,10 @@ class CopyTradingConfigV2(AlmanakImmutableModel):
             if "replay_file" in data and "replay_file" not in ep:
                 ep["replay_file"] = data["replay_file"]
             data["execution_policy"] = ep
+        for key in _LEGACY_EP_KEYS:
+            data.pop(key, None)
+        # Also remove other known non-schema keys that configs may carry
+        data.pop("copy_strict", None)
 
         # Ensure at least SWAP policy is derivable from global policy
         if "action_policies" not in data or not data["action_policies"]:
@@ -477,10 +489,16 @@ class CopyTradingConfig:
 
         try:
             v2 = CopyTradingConfigV2.from_config(config)
-        except CopyTradingConfigError:
+        except CopyTradingConfigError as exc:
             if strict_requested:
                 raise
             # Lenient fallback (legacy behavior)
+            logger.warning(
+                "V2 copy trading config validation failed, falling back to legacy mode. "
+                'Common causes: float values in Decimal fields (use strings like "0.1" instead of 0.1), '
+                "or unknown keys. Error: %s",
+                exc,
+            )
             leaders = config.get("leaders", [])
             monitoring = {
                 "confirmation_depth": 1,

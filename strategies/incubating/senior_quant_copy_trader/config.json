@@ -10,13 +10,13 @@
                 "address": "0x489ee077994B6658eFaCA1507F1FBB620B9308aa",
                 "label": "wintermute",
                 "chain": "arbitrum",
-                "weight": 1.0
+                "weight": "1.0"
             },
             {
                 "address": "0xe8c19DB00287e3536075114B2576c70773E039BD",
                 "label": "jump_trading",
                 "chain": "arbitrum",
-                "weight": 0.7
+                "weight": "0.7"
             }
         ],
         "monitoring": {
@@ -25,7 +25,7 @@
             "lookback_blocks": 120,
             "max_signal_age_seconds": 180
         },
-        "filters": {
+        "global_policy": {
             "action_types": ["SWAP"],
             "protocols": ["uniswap_v3", "sushiswap_v3", "pancakeswap_v3"],
             "tokens": ["WETH", "USDC", "USDT", "WBTC", "ARB", "GMX"],
@@ -33,16 +33,21 @@
         },
         "sizing": {
             "mode": "proportion_of_leader",
-            "fixed_usd": 25,
-            "percentage_of_leader": 0.0015,
-            "percentage_of_equity": 0.015
+            "fixed_usd": "25",
+            "percentage_of_leader": "0.0015",
+            "percentage_of_equity": "0.015"
         },
         "risk": {
-            "max_trade_usd": 120,
-            "min_trade_usd": 5,
-            "max_daily_notional_usd": 600,
+            "max_trade_usd": "120",
+            "min_trade_usd": "5",
+            "max_daily_notional_usd": "600",
             "max_open_positions": 10,
-            "max_slippage": 0.004
+            "max_slippage": "0.004"
         }
+    },
+    "anvil_funding": {
+        "ETH": 1,
+        "WETH": 1,
+        "USDC": 5000
     }
 }

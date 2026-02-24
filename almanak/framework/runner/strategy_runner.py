@@ -98,6 +98,24 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# Exceptions
+# =============================================================================
+
+
+class CriticalCallbackError(Exception):
+    """Raised by pre/post-iteration callbacks to signal a fail-closed condition.
+
+    When a pre_iteration_callback raises this exception, the strategy runner
+    will stop the loop instead of logging and continuing. This is used by
+    safety-critical callbacks like --reset-fork where continuing on failure
+    would run the strategy on stale fork state.
+
+    Regular Exception subclasses raised by callbacks are caught and logged
+    without stopping the loop (backward compatible behavior).
+    """
+
+
+# =============================================================================
 # Intent Formatting for Logs
 # =============================================================================
 
@@ -1130,6 +1148,7 @@ class StrategyRunner:
         interval_seconds: int | None = None,
         iteration_callback: Callable[[IterationResult], None] | None = None,
         pre_iteration_callback: Callable[[], None] | None = None,
+        max_iterations: int | None = None,
     ) -> None:
         """Run the strategy in a continuous loop.
 
@@ -1141,13 +1160,16 @@ class StrategyRunner:
             interval_seconds: Seconds between iterations (uses config default if None)
             iteration_callback: Optional callback called after each iteration
             pre_iteration_callback: Optional callback called before each iteration
-                (e.g., to reset Anvil forks for live paper trading). Errors are
-                logged but do not stop the loop.
+                (e.g., to reset Anvil forks for live paper trading). Regular errors
+                are logged but do not stop the loop. To signal a fail-closed
+                condition, raise CriticalCallbackError instead.
+            max_iterations: Maximum number of iterations to run. None means run indefinitely.
         """
         interval = interval_seconds or self.config.default_interval_seconds
         strategy_id = strategy.strategy_id
 
-        logger.info(f"Starting run loop for strategy {strategy_id} with interval={interval}s")
+        max_iter_msg = f", max_iterations={max_iterations}" if max_iterations else ""
+        logger.info(f"Starting run loop for strategy {strategy_id} with interval={interval}s{max_iter_msg}")
 
         # Initialize state if enabled
         if self.config.enable_state_persistence:
@@ -1206,12 +1228,16 @@ class StrategyRunner:
         add_event(start_event)
         logger.debug(f"Emitted STRATEGY_STARTED event for {strategy_id}")
 
+        loop_iteration_count = 0
         while not self._shutdown_requested:
             try:
                 # Pre-iteration callback (e.g., reset Anvil forks)
                 if pre_iteration_callback:
                     try:
                         pre_iteration_callback()
+                    except CriticalCallbackError:
+                        # Fail-closed: safety-critical callbacks stop the loop
+                        raise
                     except Exception as e:
                         logger.error(f"Pre-iteration callback error: {e}")
 
@@ -1254,6 +1280,12 @@ class StrategyRunner:
                 # Send heartbeat to gateway after each iteration
                 self._gateway_heartbeat(strategy_id)
 
+                # Check max iterations limit
+                loop_iteration_count += 1
+                if max_iterations is not None and loop_iteration_count >= max_iterations:
+                    logger.info(f"Reached max iterations ({max_iterations}) for {strategy_id}. Stopping.")
+                    break
+
                 # Sleep until next iteration (unless shutdown requested)
                 if not self._shutdown_requested:
                     logger.debug(f"Sleeping for {interval}s before next iteration")
@@ -1261,6 +1293,9 @@ class StrategyRunner:
 
             except asyncio.CancelledError:
                 logger.info(f"Run loop cancelled for {strategy_id}")
+                break
+            except CriticalCallbackError:
+                logger.error("Critical callback error — stopping strategy loop")
                 break
             except Exception as e:
                 logger.exception(f"Unexpected error in run loop: {e}")
@@ -1501,7 +1536,17 @@ class StrategyRunner:
                 )
 
         # Build compiler config
-        # Allow placeholder prices if no real price oracle is available
+        # Allow placeholder prices when no real prices are available (empty oracle).
+        # This happens legitimately when the strategy uses indicators (RSI, BB)
+        # instead of calling market.price() directly.  Placeholder prices are only
+        # used as fallback for tokens not in the oracle dict, so an empty oracle
+        # with placeholders enabled is safe -- the compiler will use conservative
+        # hardcoded estimates for slippage calculations.
+        if price_oracle is None:
+            logger.debug(
+                "No prices in market snapshot -- compiler will use placeholder prices. "
+                "This is normal for strategies that use indicators instead of market.price()."
+            )
         compiler_config = IntentCompilerConfig(
             allow_placeholder_prices=price_oracle is None,
             polymarket_config=polymarket_config,

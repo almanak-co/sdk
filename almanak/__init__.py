@@ -52,6 +52,7 @@ from .framework import (
     CanaryState,
     CanaryStatus,
     CircuitBreaker,
+    CollectFeesIntent,
     CompilationResult,
     CompilationStatus,
     # Config
@@ -231,6 +232,7 @@ __all__ = [
     "SwapIntent",
     "LPOpenIntent",
     "LPCloseIntent",
+    "CollectFeesIntent",
     "BorrowIntent",
     "RepayIntent",
     "HoldIntent",

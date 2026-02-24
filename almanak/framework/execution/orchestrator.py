@@ -1175,28 +1175,69 @@ class ExecutionOrchestrator:
                 )
                 return result
 
-            # Step 7: Submit transactions
+            # Step 7+8: Submit transactions and collect receipts.
+            #
+            # Use sequential submit-and-confirm for multi-TX bundles with EOA
+            # signers to avoid hitting RPC in-flight TX limits (e.g. Alchemy's
+            # 2-TX limit for delegated accounts on Base).  Safe signers bundle
+            # atomically via MultiSend into a single on-chain TX, so they are
+            # exempt and use the faster parallel path.
             self._emit_event(
                 ExecutionEventType.SUBMITTING,
                 context,
                 {"tx_count": len(signed_txs)},
             )
 
-            submission_results = await self.submitter.submit(signed_txs)
+            use_sequential = len(signed_txs) >= 2 and not isinstance(self.signer, SafeSigner)
 
-            # Check for submission failures
-            failed_submissions = [r for r in submission_results if not r.submitted]
-            if failed_submissions:
-                first_error = failed_submissions[0].error or "Unknown submission error"
-                result.error = f"Submission failed: {first_error}"
-                result.error_phase = ExecutionPhase.SUBMISSION
-                self._complete_session(session, success=False, error=result.error)
-                self._emit_event(
-                    ExecutionEventType.EXECUTION_FAILED,
-                    context,
-                    {"error": first_error, "failed_count": len(failed_submissions)},
-                )
-                return result
+            if use_sequential:
+                # --- Sequential path: submit TX -> confirm -> submit next ---
+                from .submitter.public import PublicMempoolSubmitter
+
+                if isinstance(self.submitter, PublicMempoolSubmitter):
+                    logger.info(f"Using sequential submit for {len(signed_txs)} TXs (avoids RPC in-flight limits)")
+                    try:
+                        submission_results, receipts = await self.submitter.submit_sequential(
+                            signed_txs, receipt_timeout=self.tx_timeout_seconds
+                        )
+                    except Exception as exc:
+                        # Record partial tx_hashes from already-confirmed TXs
+                        # so retry logic can detect them and avoid duplicate swaps.
+                        partial = getattr(exc, "partial_results", [])
+                        for i, sub in enumerate(partial):
+                            if sub.submitted and session and i < len(session.transactions):
+                                session.transactions[i].tx_hash = sub.tx_hash
+                                session.transactions[i].status = TransactionStatus.SUBMITTED
+                                session.transactions[i].submitted_at = datetime.now(UTC)
+                        if partial:
+                            self._checkpoint_session(
+                                session,
+                                SessionPhase.SUBMITTED,
+                                transactions=session.transactions if session else None,
+                            )
+                        raise
+                else:
+                    # Non-public submitter fallback: submit all, then confirm
+                    submission_results = await self.submitter.submit(signed_txs)
+                    use_sequential = False  # fall through to parallel receipt path
+            else:
+                submission_results = await self.submitter.submit(signed_txs)
+
+            if not use_sequential:
+                # --- Parallel path (single TX, Safe signer, or fallback) ---
+                # Check for submission failures
+                failed_submissions = [r for r in submission_results if not r.submitted]
+                if failed_submissions:
+                    first_error = failed_submissions[0].error or "Unknown submission error"
+                    result.error = f"Submission failed: {first_error}"
+                    result.error_phase = ExecutionPhase.SUBMISSION
+                    self._complete_session(session, success=False, error=result.error)
+                    self._emit_event(
+                        ExecutionEventType.EXECUTION_FAILED,
+                        context,
+                        {"error": first_error, "failed_count": len(failed_submissions)},
+                    )
+                    return result
 
             # Emit TX_SENT events and update transaction states
             for i, submission in enumerate(submission_results):
@@ -1223,15 +1264,15 @@ class ExecutionOrchestrator:
             # Checkpoint CONFIRMING phase
             self._checkpoint_session(session, SessionPhase.CONFIRMING)
 
-            # Step 8: Wait for receipts
-            self._emit_event(
-                ExecutionEventType.WAITING,
-                context,
-                {"tx_count": len(submission_results)},
-            )
-
-            tx_hashes = [r.tx_hash for r in submission_results]
-            receipts = await self.submitter.get_receipts(tx_hashes, timeout=self.tx_timeout_seconds)
+            if not use_sequential:
+                # Parallel receipt polling (single TX or Safe bundles)
+                self._emit_event(
+                    ExecutionEventType.WAITING,
+                    context,
+                    {"tx_count": len(submission_results)},
+                )
+                tx_hashes = [r.tx_hash for r in submission_results]
+                receipts = await self.submitter.get_receipts(tx_hashes, timeout=self.tx_timeout_seconds)
 
             # Step 9: Process receipts
             for _i, receipt in enumerate(receipts):

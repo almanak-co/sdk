@@ -236,6 +236,7 @@ class TestHasApiKeyConfigured:
         with patch.dict(os.environ, {"ALMANAK_BSC_RPC_URL": "https://bsc"}):
             assert has_api_key_configured() is True
 
+
     def test_with_nothing(self):
         """Returns False when nothing is configured."""
         assert has_api_key_configured() is False

@@ -101,5 +101,51 @@
     "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
     "stateMutability": "view",
     "type": "function"
+  },
+  {
+    "inputs": [
+      {"internalType": "address", "name": "account", "type": "address"},
+      {"internalType": "uint256[]", "name": "ids", "type": "uint256[]"}
+    ],
+    "name": "collectFees",
+    "outputs": [
+      {"internalType": "bytes32[]", "name": "amounts", "type": "bytes32[]"}
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {"internalType": "address", "name": "account", "type": "address"},
+      {"internalType": "uint256", "name": "id", "type": "uint256"}
+    ],
+    "name": "pendingFees",
+    "outputs": [
+      {"internalType": "uint256", "name": "amountX", "type": "uint256"},
+      {"internalType": "uint256", "name": "amountY", "type": "uint256"}
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {"internalType": "uint256", "name": "id", "type": "uint256"}
+    ],
+    "name": "totalSupply",
+    "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {"internalType": "uint256", "name": "id", "type": "uint256"}
+    ],
+    "name": "getBin",
+    "outputs": [
+      {"internalType": "uint128", "name": "binReserveX", "type": "uint128"},
+      {"internalType": "uint128", "name": "binReserveY", "type": "uint128"}
+    ],
+    "stateMutability": "view",
+    "type": "function"
   }
 ]

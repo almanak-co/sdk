@@ -61,6 +61,7 @@ from .intents import (
     DEFAULT_GAS_ESTIMATES,
     PROTOCOL_ROUTERS,
     BorrowIntent,
+    CollectFeesIntent,
     CompilationResult,
     CompilationStatus,
     DefaultSwapAdapter,

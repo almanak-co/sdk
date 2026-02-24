@@ -44,5 +44,10 @@
             "max_open_positions": 10,
             "max_slippage": 0.005
         }
+    },
+    "anvil_funding": {
+        "ETH": 1,
+        "WETH": 1,
+        "USDC": 5000
     }
 }

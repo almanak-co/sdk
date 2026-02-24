@@ -40,7 +40,7 @@ class SeniorQuantCopyTraderStrategy(IntentStrategy):
 
         ct_raw = _cfg(self.config, "copy_trading", {})
         self._ct_config = CopyTradingConfig.from_config(ct_raw)
-        self._filters = ct_raw.get("filters", {})
+        self._filters = ct_raw.get("global_policy", ct_raw.get("filters", {}))
         self._allowlisted_tokens = {t.upper() for t in self._filters.get("tokens", [])}
 
         sizing_dict = ct_raw.get("sizing", {})

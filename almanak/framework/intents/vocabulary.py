@@ -253,6 +253,8 @@ class IntentType(Enum):
     VAULT_REDEEM = "VAULT_REDEEM"
     VAULT_REALLOCATE = "VAULT_REALLOCATE"  # Phase 2
     VAULT_MANAGE = "VAULT_MANAGE"  # Phase 4
+    # LP fee collection (without removing liquidity)
+    LP_COLLECT_FEES = "LP_COLLECT_FEES"
 
 
 # =============================================================================
@@ -463,6 +465,60 @@ class LPCloseIntent(AlmanakImmutableModel):
     @classmethod
     def deserialize(cls, data: dict[str, Any]) -> "LPCloseIntent":
         """Deserialize a dictionary to an LPCloseIntent."""
+        clean_data = {k: v for k, v in data.items() if k != "type"}
+        if "created_at" in clean_data and isinstance(clean_data["created_at"], str):
+            clean_data["created_at"] = datetime.fromisoformat(clean_data["created_at"])
+        return cls.model_validate(clean_data)
+
+
+class CollectFeesIntent(AlmanakImmutableModel):
+    """Intent to collect accumulated fees from an LP position without closing it.
+
+    This is useful for fee harvesting and auto-compounding strategies that want
+    to claim earned fees while keeping their liquidity position open.
+
+    Attributes:
+        pool: Pool identifier (format: TOKEN_X/TOKEN_Y/BIN_STEP for TraderJoe V2)
+        protocol: LP protocol (e.g., "traderjoe_v2")
+        chain: Optional target chain for execution (defaults to strategy's primary chain)
+        intent_id: Unique identifier for this intent
+        created_at: Timestamp when the intent was created
+
+    Example:
+        # Collect fees from a TraderJoe V2 LP position
+        intent = Intent.collect_fees(
+            pool="WAVAX/USDC/20",
+            protocol="traderjoe_v2",
+        )
+    """
+
+    pool: str
+    protocol: str = "traderjoe_v2"
+    chain: str | None = None
+    intent_id: str = Field(default_factory=default_intent_id)
+    created_at: datetime = Field(default_factory=default_timestamp)
+
+    @model_validator(mode="after")
+    def validate_collect_fees_intent(self) -> "CollectFeesIntent":
+        """Validate the collect fees intent."""
+        if not self.pool:
+            raise ValueError("pool is required for collect fees intent")
+        return self
+
+    @property
+    def intent_type(self) -> IntentType:
+        """Return the type of this intent."""
+        return IntentType.LP_COLLECT_FEES
+
+    def serialize(self) -> dict[str, Any]:
+        """Serialize the intent to a dictionary."""
+        data = self.model_dump(mode="json")
+        data["type"] = self.intent_type.value
+        return data
+
+    @classmethod
+    def deserialize(cls, data: dict[str, Any]) -> "CollectFeesIntent":
+        """Deserialize a dictionary to a CollectFeesIntent."""
         clean_data = {k: v for k, v in data.items() if k != "type"}
         if "created_at" in clean_data and isinstance(clean_data["created_at"], str):
             clean_data["created_at"] = datetime.fromisoformat(clean_data["created_at"])
@@ -1060,6 +1116,7 @@ class HoldIntent(AlmanakImmutableModel):
 
 # Forward declaration for FlashLoanIntent callback_intents type
 FlashLoanCallbackIntent = Union[
+    "CollectFeesIntent",
     "SwapIntent",
     "LPOpenIntent",
     "LPCloseIntent",
@@ -1179,6 +1236,7 @@ class FlashLoanIntent(AlmanakImmutableModel):
             IntentType.SWAP.value: SwapIntent,
             IntentType.LP_OPEN.value: LPOpenIntent,
             IntentType.LP_CLOSE.value: LPCloseIntent,
+            IntentType.LP_COLLECT_FEES.value: CollectFeesIntent,
             IntentType.BORROW.value: BorrowIntent,
             IntentType.REPAY.value: RepayIntent,
             IntentType.SUPPLY.value: SupplyIntent,
@@ -1858,6 +1916,7 @@ AnyIntent = (
     SwapIntent
     | LPOpenIntent
     | LPCloseIntent
+    | CollectFeesIntent
     | BorrowIntent
     | RepayIntent
     | SupplyIntent
@@ -2122,6 +2181,32 @@ class Intent:
             position_id=position_id,
             pool=pool,
             collect_fees=collect_fees,
+            protocol=protocol,
+            chain=chain,
+        )
+
+    @staticmethod
+    def collect_fees(
+        pool: str,
+        protocol: str = "traderjoe_v2",
+        chain: str | None = None,
+    ) -> CollectFeesIntent:
+        """Create a collect fees intent to harvest LP fees without closing the position.
+
+        Args:
+            pool: Pool identifier (e.g., "WAVAX/USDC/20" for TraderJoe V2)
+            protocol: LP protocol (default "traderjoe_v2")
+            chain: Target chain for execution (defaults to strategy's primary chain)
+
+        Returns:
+            CollectFeesIntent: The created collect fees intent
+
+        Example:
+            # Collect fees from a TraderJoe V2 WAVAX/USDC LP position
+            intent = Intent.collect_fees(pool="WAVAX/USDC/20", protocol="traderjoe_v2")
+        """
+        return CollectFeesIntent(
+            pool=pool,
             protocol=protocol,
             chain=chain,
         )
@@ -3123,6 +3208,7 @@ class Intent:
             IntentType.SWAP.value: SwapIntent,
             IntentType.LP_OPEN.value: LPOpenIntent,
             IntentType.LP_CLOSE.value: LPCloseIntent,
+            IntentType.LP_COLLECT_FEES.value: CollectFeesIntent,
             IntentType.BORROW.value: BorrowIntent,
             IntentType.REPAY.value: RepayIntent,
             IntentType.SUPPLY.value: SupplyIntent,
