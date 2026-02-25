@@ -1,6 +1,16 @@
 # Getting Started
 
-This guide walks you through installing the Almanak SDK, configuring your environment, and running your first strategy.
+This guide walks you through installing the Almanak SDK, scaffolding your first strategy, and running it locally on an Anvil fork -- no wallet or API keys required.
+
+## Prerequisites
+
+- **Python 3.11+**
+- **Foundry** (provides Anvil for local fork testing):
+
+```bash
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
+```
 
 ## Installation
 
@@ -14,46 +24,95 @@ Or with [uv](https://docs.astral.sh/uv/):
 uv pip install almanak
 ```
 
-Use the CLI to scaffold a new strategy:
+## 1. Scaffold a Strategy
 
 ```bash
 almanak strat new
 ```
 
-This creates a strategy directory with:
+Follow the interactive prompts to pick a template, chain, and name. This creates a strategy directory with:
 
 - `strategy.py` - Your strategy implementation with `decide()` method
 - `config.json` - Chain, protocol, and parameter configuration
-- `.env` - Environment variables (fill in your keys)
+- `.env` - Environment variables (fill in your keys later)
 - `__init__.py` - Package exports
 - `tests/` - Test scaffolding
 
-## Run Your Strategy
+## 2. Run on a Local Anvil Fork
 
-A managed gateway is auto-started in the background:
+The fastest way to test your strategy -- no wallet keys, no real funds, no risk:
 
 ```bash
 cd my_strategy
-almanak strat run --once
-```
-
-### Run on a Local Anvil Fork
-
-For testing without real transactions:
-
-```bash
 almanak strat run --network anvil --once
 ```
 
-This auto-starts both Anvil (forking mainnet via your Alchemy key) and the gateway.
+This command automatically:
 
-### Dry Run
+1. **Starts an Anvil fork** of the chain specified in your `config.json` (free public RPCs are used by default)
+2. **Uses a default Anvil wallet** -- no `ALMANAK_PRIVATE_KEY` needed
+3. **Starts the gateway** sidecar in the background
+4. **Funds your wallet** with tokens listed in `anvil_funding` (see below)
+5. **Runs one iteration** of your strategy's `decide()` method
 
-To simulate without submitting transactions:
+### Wallet Funding on Anvil
+
+Add an `anvil_funding` block to your `config.json` to automatically fund your wallet when the fork starts:
+
+```json
+{
+    "strategy_id": "my_strategy",
+    "chain": "arbitrum",
+    "anvil_funding": {
+        "ETH": 10,
+        "USDC": 10000,
+        "WETH": 5
+    }
+}
+```
+
+Native tokens (ETH, AVAX, etc.) are funded via `anvil_setBalance`. ERC-20 tokens are funded via storage slot manipulation. This happens automatically each time the fork starts.
+
+### Better RPC Performance (Optional)
+
+Free public RPCs work but are rate-limited. For faster forking, set an Alchemy key in your `.env`:
 
 ```bash
-almanak strat run --dry-run --once
+ALCHEMY_API_KEY=your_alchemy_key
 ```
+
+This auto-constructs RPC URLs for all supported chains. Any provider works -- see [Environment Variables](environment-variables.md) for the full priority order.
+
+## 3. Run on Mainnet
+
+!!! warning
+    Mainnet execution uses **real funds**. Start with small amounts and use a dedicated wallet.
+
+To run against live chains, you need a wallet private key in your `.env`:
+
+```bash
+# .env
+ALMANAK_PRIVATE_KEY=0xYOUR_PRIVATE_KEY
+
+# RPC access (pick one)
+ALCHEMY_API_KEY=your_alchemy_key
+# or: RPC_URL=https://your-rpc-provider.com/v1/your-key
+```
+
+Then run without the `--network anvil` flag:
+
+```bash
+almanak strat run --once
+```
+
+!!! tip
+    Test with `--dry-run` first to simulate without submitting transactions:
+
+    ```bash
+    almanak strat run --dry-run --once
+    ```
+
+See [Environment Variables](environment-variables.md) for the full list of configuration options including protocol-specific API keys.
 
 ## Strategy Structure
 
@@ -100,6 +159,7 @@ class MyStrategy(IntentStrategy):
 
 ## Next Steps
 
+- [Environment Variables](environment-variables.md) - All configuration options
 - [API Reference](api/index.md) - Full Python API documentation
 - [CLI Reference](cli/almanak.md) - All CLI commands
 - [Gateway API](gateway/api-reference.md) - Gateway gRPC services
