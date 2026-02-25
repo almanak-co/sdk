@@ -21,13 +21,15 @@ pip install almanak
 ## Quick Start
 
 ```bash
-# Create a new strategy from a template
+# Scaffold a new strategy from a template
 almanak strat new
 
-# Run it (auto-starts the gateway sidecar)
+# Run it on a local Anvil fork -- no wallet or API keys required
 cd my_strategy
-almanak strat run --once
+almanak strat run --network anvil --once
 ```
+
+Anvil fork testing is the recommended starting point. The SDK auto-starts a local fork, uses a default funded wallet, and runs your strategy with zero configuration. See [Getting Started](getting-started.md) for the full walkthrough.
 
 ## Writing a Strategy
 
