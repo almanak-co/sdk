@@ -1,4 +1,5 @@
 {
+    "description": "Tutorial SushiSwap V3 LP strategy - concentrated liquidity on Arbitrum",
     "chain": "arbitrum",
     "pool": "WETH/USDC/3000",
     "range_width_pct": "0.10",

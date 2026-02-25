@@ -1,4 +1,5 @@
 {
+    "description": "Tutorial Aerodrome LP strategy - Solidly-based AMM liquidity on Base",
     "pool": "WETH/USDC",
     "stable": false,
     "amount0": "0.001",

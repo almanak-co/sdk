@@ -1,4 +1,5 @@
 {
+    "description": "Tutorial TraderJoe V2 LP strategy - Liquidity Book positions on Avalanche",
     "chain": "avalanche",
     "pool": "WAVAX/USDC/20",
     "range_width_pct": "0.10",

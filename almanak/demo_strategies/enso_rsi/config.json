@@ -1,4 +1,5 @@
 {
+    "description": "RSI mean reversion strategy using Enso DEX aggregator on Base",
     "trade_size_usd": "3",
     "rsi_oversold": 30,
     "rsi_overbought": 70,
