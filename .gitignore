@@ -21,6 +21,7 @@ almanak_state.db-shm
 almanak_state.db-wal
 scripts/contracts.db
 almanak/.dashboard_events.json
+probe/
 
 # Native binaries (downloaded at build time)
 almanak/bin/almanak-code-*

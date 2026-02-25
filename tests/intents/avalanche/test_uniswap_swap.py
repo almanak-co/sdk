@@ -236,7 +236,7 @@ class TestUniswapV3SwapIntent:
         print(f"USDC received: {format_token_amount(usdc_received, out_decimals)}")
         print("\nALL CHECKS PASSED")
 
-    @pytest.mark.xfail(reason="flaky: Currently fails due to insufficient balance error during execution. Needs better error handling in ExecutionOrchestrator.", strict=False)
+    @pytest.mark.xfail(reason="flaky: needs more investigation", strict=False)
     @pytest.mark.asyncio
     async def test_swap_intent_with_insufficient_balance_fails(
         self,
