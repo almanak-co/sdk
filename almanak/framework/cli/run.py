@@ -61,7 +61,7 @@ from ..data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
 from ..data.ohlcv.ohlcv_router import OHLCVRouter
 from ..data.ohlcv.routing_provider import RoutingOHLCVProvider
 from ..data.price.gateway_oracle import GatewayPriceOracle
-from ..execution.config import LocalRuntimeConfig, MultiChainRuntimeConfig
+from ..execution.config import LocalRuntimeConfig, MissingEnvironmentVariableError, MultiChainRuntimeConfig
 from ..execution.multichain import MultiChainOrchestrator
 from ..execution.orchestrator import ExecutionOrchestrator
 from ..execution.signer.local import LocalKeySigner
@@ -73,6 +73,10 @@ from ..strategies.intent_strategy import IndicatorProvider
 from .intent_debug import load_strategy_from_file
 
 logger = logging.getLogger(__name__)
+
+# Well-known Anvil default account #0 (used when no private key is configured)
+ANVIL_DEFAULT_ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+ANVIL_DEFAULT_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"  # gitleaks:allow
 
 
 # =============================================================================
@@ -1341,6 +1345,41 @@ def run(
                 network=resolved_network,
             )
             click.echo(f"Multi-chain config loaded for: {', '.join(strategy_chains)}")
+        except MissingEnvironmentVariableError as e:
+            if resolved_network == "anvil" and e.var_name.endswith("PRIVATE_KEY"):
+                click.echo(f"No ALMANAK_PRIVATE_KEY set. Using default Anvil wallet: {ANVIL_DEFAULT_ADDRESS}")
+                if sys.stdin.isatty():
+                    if not click.confirm("Continue with this wallet?", default=True):
+                        sys.exit(0)
+                else:
+                    click.echo("(non-interactive, accepting default Anvil wallet)")
+                os.environ["ALMANAK_PRIVATE_KEY"] = ANVIL_DEFAULT_PRIVATE_KEY
+                try:
+                    runtime_config = MultiChainRuntimeConfig.from_env(
+                        chains=strategy_chains,
+                        protocols=strategy_protocols,
+                        network=resolved_network,
+                    )
+                except Exception as retry_err:
+                    click.echo(f"Error loading configuration after setting default key: {retry_err}", err=True)
+                    sys.exit(1)
+                click.echo(f"Multi-chain config loaded for: {', '.join(strategy_chains)}")
+            else:
+                if e.var_name.endswith("PRIVATE_KEY"):
+                    click.echo("Error: ALMANAK_PRIVATE_KEY is required for mainnet execution.", err=True)
+                    click.echo("Set it in your .env file or environment.", err=True)
+                else:
+                    click.echo(f"Error loading multi-chain configuration: {e}", err=True)
+                    click.echo()
+                    click.echo("Required environment variables for multi-chain:")
+                    click.echo("  ALMANAK_PRIVATE_KEY          - Wallet private key")
+                    click.echo()
+                    click.echo("RPC access (one of these, or leave empty for free public RPCs):")
+                    for chain in strategy_chains:
+                        click.echo(f"  ALMANAK_{chain.upper()}_RPC_URL  - Per-chain RPC URL")
+                    click.echo("  RPC_URL                      - Generic RPC endpoint URL")
+                    click.echo("  ALCHEMY_API_KEY              - Alchemy API key (fallback)")
+                sys.exit(1)
         except Exception as e:
             click.echo(f"Error loading multi-chain configuration: {e}", err=True)
             click.echo()
@@ -1357,6 +1396,41 @@ def run(
         try:
             # Pass chain and network from strategy config for dynamic RPC URL building
             runtime_config = LocalRuntimeConfig.from_env(chain=config_chain, network=resolved_network)
+        except MissingEnvironmentVariableError as e:
+            if resolved_network == "anvil" and e.var_name.endswith("PRIVATE_KEY"):
+                click.echo(f"No ALMANAK_PRIVATE_KEY set. Using default Anvil wallet: {ANVIL_DEFAULT_ADDRESS}")
+                if sys.stdin.isatty():
+                    if not click.confirm("Continue with this wallet?", default=True):
+                        sys.exit(0)
+                else:
+                    click.echo("(non-interactive, accepting default Anvil wallet)")
+                os.environ["ALMANAK_PRIVATE_KEY"] = ANVIL_DEFAULT_PRIVATE_KEY
+                try:
+                    runtime_config = LocalRuntimeConfig.from_env(chain=config_chain, network=resolved_network)
+                except Exception as retry_err:
+                    click.echo(f"Error loading configuration after setting default key: {retry_err}", err=True)
+                    sys.exit(1)
+            else:
+                if e.var_name.endswith("PRIVATE_KEY"):
+                    click.echo("Error: ALMANAK_PRIVATE_KEY is required for mainnet execution.", err=True)
+                    click.echo("Set it in your .env file or environment.", err=True)
+                else:
+                    click.echo(f"Error loading configuration: {e}", err=True)
+                    click.echo()
+                    click.echo("Required environment variables:")
+                    click.echo("  ALMANAK_PRIVATE_KEY          - Wallet private key")
+                    click.echo()
+                    click.echo("RPC access (one of these, or leave empty for free public RPCs):")
+                    click.echo("  ALMANAK_ARBITRUM_RPC_URL     - Per-chain RPC URL (highest priority)")
+                    click.echo("  ALMANAK_RPC_URL              - Generic RPC endpoint URL")
+                    click.echo("  RPC_URL                      - Generic RPC endpoint URL")
+                    click.echo("  ALCHEMY_API_KEY              - Alchemy API key (fallback)")
+                    click.echo()
+                    click.echo("Optional environment variables:")
+                    click.echo("  ALMANAK_MAX_GAS_PRICE_GWEI - Max gas price (default: 100)")
+                    click.echo("  ALMANAK_TX_TIMEOUT_SECONDS - Tx timeout (default: 120)")
+                    click.echo("  ALMANAK_SIMULATION_ENABLED - Enable simulation (default: false)")
+                sys.exit(1)
         except Exception as e:
             click.echo(f"Error loading configuration: {e}", err=True)
             click.echo()
