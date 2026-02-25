@@ -23,6 +23,7 @@ from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    SWAP_MAX_SLIPPAGE,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -99,7 +100,7 @@ class TestUniswapV3SwapIntent:
             from_token="USDC",
             to_token="WETH",
             amount=swap_amount,
-            max_slippage=Decimal("0.05"),  # 5% slippage to tolerate oracle price drift
+            max_slippage=SWAP_MAX_SLIPPAGE,
             protocol="uniswap_v3",
             chain=CHAIN_NAME,
         )
@@ -202,7 +203,7 @@ class TestUniswapV3SwapIntent:
             from_token="WETH",
             to_token="USDC",
             amount=swap_amount,
-            max_slippage=Decimal("0.01"),
+            max_slippage=SWAP_MAX_SLIPPAGE,
             protocol="uniswap_v3",
             chain=CHAIN_NAME,
         )
@@ -266,7 +267,7 @@ class TestUniswapV3SwapIntent:
             from_token="USDC",
             to_token="WETH",
             amount=excessive_amount,
-            max_slippage=Decimal("0.01"),
+            max_slippage=SWAP_MAX_SLIPPAGE,
             protocol="uniswap_v3",
             chain=CHAIN_NAME,
         )

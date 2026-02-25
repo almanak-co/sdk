@@ -46,6 +46,10 @@ TEST_WEB3_REQUEST_TIMEOUT = (TEST_RPC_CONNECT_TIMEOUT_SECONDS, TEST_RPC_READ_TIM
 # Constants
 # =============================================================================
 
+# Default max slippage for swap intent tests (20%).
+# High tolerance because CoinGecko oracle prices can diverge from on-chain pool prices.
+SWAP_MAX_SLIPPAGE = Decimal("0.20")
+
 # Default Anvil port
 ANVIL_PORT = 8545
 ANVIL_URL = f"http://localhost:{ANVIL_PORT}"
@@ -271,6 +275,7 @@ __all__ = [
     "TEST_CAST_TIMEOUT_SECONDS",
     "TEST_TX_TIMEOUT_SECONDS",
     "TEST_SUBMITTER_MAX_RETRIES",
+    "SWAP_MAX_SLIPPAGE",
     "CHAIN_CONFIGS",
     "CHAIN_ANVIL_PORTS",
     # Helper functions

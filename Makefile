@@ -271,7 +271,7 @@ test-demo-quick:
 		echo "Error: ALCHEMY_API_KEY environment variable is not set"; \
 		exit 1; \
 	fi
-	uv run --env-file .env python scripts/test_demo_strategies_gateway.py --quick
+	uv run --env-file .env python scripts/test_demo_strategies_gateway.py
 
 # Test a single strategy through gateway
 # Usage: make test-demo-single STRATEGY=uniswap_rsi CHAIN=arbitrum

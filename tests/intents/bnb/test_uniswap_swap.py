@@ -28,6 +28,7 @@ from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    SWAP_MAX_SLIPPAGE,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -95,7 +96,7 @@ class TestUniswapV3SwapIntent:
             from_token="USDT",
             to_token="WBNB",
             amount=swap_amount,
-            max_slippage=Decimal("0.20"),  # 20% slippage for testing
+            max_slippage=SWAP_MAX_SLIPPAGE,
             protocol="uniswap_v3",
             chain=CHAIN_NAME,
         )
@@ -172,12 +173,11 @@ class TestUniswapV3SwapIntent:
         usdt_before = get_token_balance(web3, token_out, funded_wallet)
 
         # Create intent
-        # Note: Higher slippage needed because CoinGecko prices may differ from on-chain pool prices
         intent = SwapIntent(
             from_token="WBNB",
             to_token="USDT",
             amount=swap_amount,
-            max_slippage=Decimal("0.20"),  # 20% slippage for testing
+            max_slippage=SWAP_MAX_SLIPPAGE,
             protocol="uniswap_v3",
             chain=CHAIN_NAME,
         )
@@ -256,7 +256,7 @@ class TestUniswapV3SwapIntent:
             from_token="USDT",
             to_token="WBNB",
             amount=excessive_amount,
-            max_slippage=Decimal("0.01"),
+            max_slippage=SWAP_MAX_SLIPPAGE,
             protocol="uniswap_v3",
             chain=CHAIN_NAME,
         )
