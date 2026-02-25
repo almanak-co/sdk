@@ -24,7 +24,21 @@ Or with [uv](https://docs.astral.sh/uv/):
 uv pip install almanak
 ```
 
-## 1. Scaffold a Strategy
+## 1. Get a Strategy
+
+### Option A: Copy a working demo (recommended for beginners)
+
+```bash
+almanak strat demo
+```
+
+This shows an interactive menu of 13 working demo strategies. Pick one and it gets copied into your current directory, ready to run. You can also skip the menu:
+
+```bash
+almanak strat demo --name uniswap_rsi
+```
+
+### Option B: Scaffold from a template
 
 ```bash
 almanak strat new

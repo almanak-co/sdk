@@ -1,0 +1,26 @@
+{
+    "strategy_id": "almanak_rsi",
+    "strategy_name": "almanak_rsi",
+    "description": "RSI Mean Reversion Strategy for ALMANAK/USDC on Base (Uniswap V3)",
+    "chain": "base",
+    "protocol": "uniswap_v3",
+    "base_token": "ALMANAK",
+    "base_token_address": "0xdefa1d21c5f1cbeac00eeb54b44c7d86467cc3a3",
+    "quote_token": "USDC",
+    "quote_token_address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "pool_address": "0xbDbC38652D78AF0383322bBc823E06FA108d0874",
+    "fee_tier": 3000,
+    "rsi_period": 14,
+    "rsi_overbought": 70,
+    "rsi_oversold": 30,
+    "data_granularity": "15m",
+    "initial_capital_usdc": 20,
+    "position_size_pct": 100,
+    "cooldown_hours": 1,
+    "max_slippage_pct": 1.0,
+    "anvil_funding": {
+        "ETH": 100,
+        "USDC": 10000,
+        "WETH": 1
+    }
+}

@@ -47,6 +47,8 @@ dependencies = [
     "tqdm>=4.66.0", # Progress bar for backtest sweeps
     "optuna>=3.5.0", # Bayesian optimization for parameter tuning
     "plotly>=5.18.0", # Interactive charts for backtest visualization
+    # Interactive terminal menus (used by almanak strat demo)
+    "simple-term-menu>=1.6.4,<2.0.0",
     # LSP / editor tooling (used by almanak-code)
     "pyright>=1.1.390",
 ]
@@ -94,6 +96,7 @@ include = ["almanak/**/*.py"]
 exclude = [
     ".claude/",  # Skills templates with placeholder syntax
     "almanak/gateway/proto/",  # Auto-generated protobuf files
+    "almanak/demo_strategies/",  # Packaged demo strategies (user-facing, copied as-is)
 ]
 
 [dependency-groups]
@@ -151,6 +154,7 @@ python_version = "3.12"
 files = ["almanak"]
 exclude = [
     "almanak/gateway/proto/",  # Auto-generated protobuf files
+    "almanak/demo_strategies/",  # Packaged demo strategies (user-facing, copied as-is)
 ]
 # Start strict-ish: catch real bugs without requiring full annotation coverage
 warn_return_any = false
@@ -195,6 +199,7 @@ module = [
     "pandas.*",
     "matplotlib.*",
     "structlog.*",
+    "simple_term_menu.*",
 ]
 ignore_missing_imports = true
 

@@ -1,0 +1,20 @@
+# Spark Lender Strategy Configuration
+# ====================================
+#
+# This configuration defines the parameters for the Spark lending strategy.
+#
+# Configuration Options:
+# ----------------------
+# min_supply_amount: Minimum DAI balance to trigger supply (default: 100 DAI)
+# force_action: Force a specific action for testing ("supply" or "")
+#
+# Note: Spark automatically uses all supplied assets as collateral.
+# Unlike Aave V3, this cannot be disabled per-asset.
+
+# Minimum DAI balance required to trigger supply
+# Set this based on gas costs - supplying ~100 DAI is usually worth the gas
+min_supply_amount: "100"
+
+# Force action for testing (leave empty for normal operation)
+# Options: "supply", ""
+force_action: ""

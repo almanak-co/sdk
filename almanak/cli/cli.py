@@ -15,6 +15,7 @@ from almanak import __version__
 # V2 Framework CLI commands
 from almanak.framework.cli import backtest as framework_backtest_group
 from almanak.framework.cli import new_strategy as framework_new_strategy_cmd
+from almanak.framework.cli.demo import demo as framework_demo_cmd
 from almanak.framework.cli.run import run as framework_run_cmd
 from almanak.framework.cli.teardown import teardown as framework_teardown_group
 
@@ -102,6 +103,9 @@ strat.add_command(framework_backtest_group, name="backtest")
 
 # Add teardown command group to strat
 strat.add_command(framework_teardown_group, name="teardown")
+
+# Add demo command to strat
+strat.add_command(framework_demo_cmd, name="demo")
 
 
 def _load_cli_config(path: str) -> dict:
