@@ -209,11 +209,12 @@ class GatewayServer:
         get_instance_registry(db_path=self.settings.gateway_db_path)
         logger.info(f"InstanceRegistry initialized with persistent storage: {self.settings.gateway_db_path}")
 
-        # Warn about optional services without API keys
+        # Log pricing source configuration
         if not self.settings.coingecko_api_key:
-            logger.warning(
-                "COINGECKO_API_KEY not configured - CoinGecko will use free tier API "
-                "(30 requests/minute limit). Set ALMANAK_GATEWAY_COINGECKO_API_KEY for higher rate limits."
+            logger.info(
+                "No CoinGecko API key -- using on-chain pricing (Chainlink oracles) "
+                "with free CoinGecko as fallback. Set ALMANAK_GATEWAY_COINGECKO_API_KEY "
+                "for CoinGecko as primary source."
             )
 
         # Add health service (standard gRPC health protocol)

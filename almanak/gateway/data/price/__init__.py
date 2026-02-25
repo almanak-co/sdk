@@ -24,9 +24,11 @@ from .multi_dex import (
 from .multi_dex import (
     TokenNotSupportedError as DexTokenNotSupportedError,
 )
+from .onchain import OnChainPriceSource
 
 __all__ = [
     "CoinGeckoPriceSource",
+    "OnChainPriceSource",
     "PriceAggregator",
     # Multi-DEX exports
     "MultiDexPriceService",

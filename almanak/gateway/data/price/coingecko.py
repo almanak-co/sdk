@@ -259,7 +259,7 @@ class CoinGeckoPriceSource(BasePriceSource):
 
     def __init__(
         self,
-        api_key: str = "",
+        api_key: str | None = None,
         cache_ttl: int = 30,
         request_timeout: float = 10.0,
         stale_confidence_multiplier: float = 0.7,
@@ -273,7 +273,7 @@ class CoinGeckoPriceSource(BasePriceSource):
             stale_confidence_multiplier: Confidence multiplier for stale data (0-1).
                 Default 0.7 means stale data has 70% of original confidence.
         """
-        self._api_key = api_key or os.environ.get("COINGECKO_API_KEY", "")
+        self._api_key = os.environ.get("COINGECKO_API_KEY", "") if api_key is None else api_key
         self._cache_ttl = cache_ttl
         self._request_timeout = request_timeout
         self._stale_confidence_multiplier = stale_confidence_multiplier
@@ -296,7 +296,7 @@ class CoinGeckoPriceSource(BasePriceSource):
         logger.info(
             "Initialized CoinGeckoPriceSource",
             extra={
-                "api_type": "pro" if api_key else "free",
+                "api_type": "pro" if self._api_key else "free",
                 "cache_ttl": cache_ttl,
                 "request_timeout": request_timeout,
             },

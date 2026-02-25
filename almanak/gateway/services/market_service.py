@@ -57,16 +57,33 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         if self._initialized:
             return
 
-        # Import from gateway's local price providers
         from almanak.gateway.data.price.aggregator import PriceAggregator
         from almanak.gateway.data.price.coingecko import CoinGeckoPriceSource
+        from almanak.gateway.data.price.onchain import OnChainPriceSource
 
-        # Initialize price aggregator with CoinGecko source
-        cg_source = CoinGeckoPriceSource(cache_ttl=30)
-        self._price_aggregator = PriceAggregator(sources=[cg_source])
+        # Determine primary chain for on-chain pricing
+        chain = self.settings.chains[0] if self.settings.chains else "arbitrum"
+
+        # Create price sources
+        cg_source = CoinGeckoPriceSource(
+            api_key=self.settings.coingecko_api_key if self.settings.coingecko_api_key is not None else "",
+            cache_ttl=30,
+        )
+        onchain_source = OnChainPriceSource(chain=chain, network=self.settings.network)
+
+        # Order sources by CoinGecko API key availability (settings is the single source of truth)
+        has_cg_key = bool(self.settings.coingecko_api_key)
+
+        if has_cg_key:
+            sources = [cg_source, onchain_source]
+            logger.info("MarketService: CoinGecko (primary) + on-chain (fallback), chain=%s", chain)
+        else:
+            sources = [onchain_source, cg_source]
+            logger.info("MarketService: on-chain (primary) + CoinGecko free tier (fallback), chain=%s", chain)
+
+        self._price_aggregator = PriceAggregator(sources=sources)
 
         self._initialized = True
-        logger.info("MarketService initialized with price aggregator")
 
     async def _get_balance_provider(self, chain: str, wallet_address: str):
         """Get or create balance provider for a chain.
