@@ -140,6 +140,18 @@ almanak agent install -p amazonq
 
 ---
 
+### OpenClaw
+
+OpenClaw discovers skills from `.openclaw/skills/` subdirectories. Also available via the ClawHub marketplace: `clawhub install almanak-strategy-builder`.
+
+```bash
+almanak agent install -p openclaw
+```
+
+**Result:** `.openclaw/skills/almanak-strategy-builder/SKILL.md`
+
+---
+
 ## Install All Platforms
 
 To install for every supported platform at once:

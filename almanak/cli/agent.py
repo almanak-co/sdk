@@ -33,6 +33,7 @@ _DETECTION_MAP: list[tuple[str, Platform]] = [
     (".roo", Platform.ROO),
     (".aider", Platform.AIDER),
     (".amazonq", Platform.AMAZONQ),
+    (".openclaw", Platform.OPENCLAW),
 ]
 
 
@@ -170,7 +171,7 @@ def install(platforms: tuple[str, ...], directory: str, global_install: bool, dr
     \b
         almanak agent install                    # auto-detect
         almanak agent install -p claude -p cursor # specific platforms
-        almanak agent install -p all             # all 9 platforms
+        almanak agent install -p all             # all platforms
         almanak agent install -g                 # global install (~/)
         almanak agent install --dry-run          # preview only
     """

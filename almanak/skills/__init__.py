@@ -2,8 +2,8 @@
 
 The strategy-builder skill ships with `pip install almanak` and can be installed
 into user projects via `almanak agent install`, producing platform-specific files
-for 9 agent platforms (Claude Code, Codex, Cursor, Copilot, Windsurf, Cline,
-Roo Code, Aider, Amazon Q).
+for 10 agent platforms (Claude Code, Codex, Cursor, Copilot, Windsurf, Cline,
+Roo Code, Aider, Amazon Q, OpenClaw).
 
 Usage:
     from almanak.skills import get_skill_path, get_skill_content, Platform

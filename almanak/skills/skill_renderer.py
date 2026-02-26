@@ -1,6 +1,6 @@
 """Skill renderer that transforms canonical SKILL.md into platform-specific files.
 
-Supports 9 agent platforms. Each platform gets a standalone file written to its
+Supports 10 agent platforms. Each platform gets a standalone file written to its
 native skills/rules directory - never appended to user-authored root files.
 """
 
@@ -27,6 +27,7 @@ class Platform(StrEnum):
     ROO = "roo"
     AIDER = "aider"
     AMAZONQ = "amazonq"
+    OPENCLAW = "openclaw"
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,11 @@ PLATFORM_CONFIGS: dict[Platform, PlatformConfig] = {
     Platform.AMAZONQ: PlatformConfig(
         directory=".amazonq/rules",
         filename="almanak-strategy-builder.md",
+    ),
+    Platform.OPENCLAW: PlatformConfig(
+        directory=".openclaw/skills/almanak-strategy-builder",
+        filename="SKILL.md",
+        global_directory=".openclaw/skills/almanak-strategy-builder",
     ),
 }
 
