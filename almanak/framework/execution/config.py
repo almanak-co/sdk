@@ -557,10 +557,10 @@ class LocalRuntimeConfig:
             load_dotenv()
 
         def get_required(name: str) -> str:
-            """Get required environment variable."""
+            """Get required environment variable (empty string treated as missing)."""
             full_name = f"{prefix}{name}"
             value = os.environ.get(full_name)
-            if value is None:
+            if not value:
                 raise MissingEnvironmentVariableError(full_name)
             return value
 
@@ -1444,10 +1444,10 @@ class MultiChainRuntimeConfig:
             load_dotenv()
 
         def get_required(name: str) -> str:
-            """Get required environment variable."""
+            """Get required environment variable (empty string treated as missing)."""
             full_name = f"{prefix}{name}"
             value = os.environ.get(full_name)
-            if value is None:
+            if not value:
                 raise MissingEnvironmentVariableError(full_name)
             return value
 
@@ -1805,10 +1805,10 @@ def _create_safe_signer_from_env(
     )
 
     def get_required(name: str) -> str:
-        """Get required environment variable."""
+        """Get required environment variable (empty string treated as missing)."""
         full_name = f"{prefix}{name}"
         value = os.environ.get(full_name)
-        if value is None:
+        if not value:
             raise MissingEnvironmentVariableError(full_name)
         return value
 
