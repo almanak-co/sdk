@@ -80,7 +80,7 @@ All strategies run through a **gateway-only architecture** for security. The gat
 
 ## Feedback & Feature Requests
 
-Have an idea, found a bug, or want to request a feature? Head over to our [Discord](https://discord.gg/Almanak) and post in the appropriate channel. We actively monitor feedback there and use it to shape the SDK roadmap.
+Have an idea, found a bug, or want to request a feature? Head over to our [Discord](https://discord.gg/yuCMvQv3rN) and post in the appropriate channel. We actively monitor feedback there and use it to shape the SDK roadmap.
 
 ## Next Steps
 
