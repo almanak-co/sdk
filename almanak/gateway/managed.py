@@ -141,11 +141,15 @@ class ManagedGateway:
         anvil_chains: list[str] | None = None,
         wallet_address: str | None = None,
         anvil_funding: dict[str, float | int | str] | None = None,
+        external_anvil_ports: dict[str, int] | None = None,
+        keep_anvil: bool = False,
     ):
         self.settings = settings
         self._anvil_chains = anvil_chains or []
         self._wallet_address = wallet_address
         self._anvil_funding = anvil_funding or {}
+        self._external_anvil_ports = external_anvil_ports or {}
+        self._keep_anvil = keep_anvil
         self._anvil_managers: dict[str, RollingForkManager] = {}
         self._original_env: dict[str, str | None] = {}
         self._server: GatewayServer | None = None
@@ -184,6 +188,23 @@ class ManagedGateway:
 
         try:
             for chain in self._anvil_chains:
+                env_var = f"ANVIL_{chain.upper()}_PORT"
+
+                if chain in self._external_anvil_ports:
+                    # External Anvil: set env var, don't start a process
+                    port = self._external_anvil_ports[chain]
+                    self._original_env[env_var] = os.environ.get(env_var)
+                    os.environ[env_var] = str(port)
+
+                    if not is_port_in_use("127.0.0.1", port):
+                        raise RuntimeError(
+                            f"External Anvil for {chain} not reachable on port {port}. "
+                            f"Start it first or remove --anvil-port {chain}={port}"
+                        )
+                    logger.info("Using external Anvil for %s on port %d", chain, port)
+                    continue
+
+                # Managed Anvil: start a new fork
                 port = find_free_port()
                 fork_url = get_rpc_url(chain, network="mainnet")
                 manager = RollingForkManager(
@@ -196,7 +217,6 @@ class ManagedGateway:
                     raise RuntimeError(f"Failed to start Anvil fork for {chain} on port {port}")
                 self._anvil_managers[chain] = manager
                 # Set env var so gateway RPC provider routes to this Anvil
-                env_var = f"ANVIL_{chain.upper()}_PORT"
                 self._original_env[env_var] = os.environ.get(env_var)
                 os.environ[env_var] = str(port)
                 # Redact API key from fork URL to avoid leaking secrets in logs
@@ -213,7 +233,7 @@ class ManagedGateway:
                 logger.info("Anvil fork started for %s on port %d (fork: %s)", chain, port, redacted_url)
         except Exception:
             # Clean up any forks that were already started before re-raising
-            await self._stop_anvil_forks()
+            await self._stop_anvil_forks(force=True)
             raise
 
     # Native gas tokens that are funded via anvil_setBalance (not ERC-20 transfer)
@@ -291,12 +311,40 @@ class ManagedGateway:
             except Exception as e:
                 logger.warning(f"Anvil funding failed for {chain}: {e}")
 
-    async def _stop_anvil_forks(self) -> None:
-        """Stop all managed Anvil fork instances and restore env vars."""
+    async def _stop_anvil_forks(self, *, force: bool = False) -> None:
+        """Stop all managed Anvil fork instances and restore env vars.
+
+        When keep_anvil is True (and force is False), managed Anvil processes
+        are left running and their env vars are preserved. External Anvil env
+        vars are always restored since the user manages those processes.
+
+        Args:
+            force: If True, always stop managed forks regardless of keep_anvil.
+                   Used during error cleanup to avoid orphaned processes.
+        """
+        if not force and self._keep_anvil and self._anvil_managers:
+            for chain, manager in self._anvil_managers.items():
+                logger.info(
+                    "Keeping Anvil alive for %s on port %d (PID %s)",
+                    chain,
+                    manager.anvil_port,
+                    manager._process.pid if manager._process else "unknown",
+                )
+            # Restore env vars only for external forks (user manages those)
+            for env_var, original in self._original_env.items():
+                chain_from_var = env_var.replace("ANVIL_", "").replace("_PORT", "").lower()
+                if chain_from_var in self._external_anvil_ports:
+                    if original is None:
+                        os.environ.pop(env_var, None)
+                    else:
+                        os.environ[env_var] = original
+            return
+
+        # Normal shutdown: stop all managed forks
         for chain, manager in self._anvil_managers.items():
             await manager.stop()
             logger.info("Anvil fork stopped for %s", chain)
-        # Restore env vars
+        # Restore all env vars
         for env_var, original in self._original_env.items():
             if original is None:
                 os.environ.pop(env_var, None)
@@ -332,7 +380,7 @@ class ManagedGateway:
             logger.exception("Managed gateway failed to start")
             if self._anvil_managers and self._loop is not None and not self._loop.is_closed():
                 try:
-                    self._loop.run_until_complete(self._stop_anvil_forks())
+                    self._loop.run_until_complete(self._stop_anvil_forks(force=True))
                 except Exception:
                     logger.debug("Suppressed error stopping Anvil forks during cleanup", exc_info=True)
             if self._loop is not None and not self._loop.is_closed():

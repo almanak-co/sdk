@@ -772,6 +772,18 @@ def format_iteration_result(result: IterationResult) -> str:
     help="Do not auto-start a gateway; connect to an existing one.",
 )
 @click.option(
+    "--anvil-port",
+    "anvil_ports",
+    multiple=True,
+    help="Use existing Anvil instance: CHAIN=PORT (e.g., --anvil-port arbitrum=8545). Repeatable.",
+)
+@click.option(
+    "--keep-anvil",
+    is_flag=True,
+    default=False,
+    help="Keep Anvil instances running after gateway shutdown.",
+)
+@click.option(
     "--wallet",
     type=click.Choice(["default", "isolated"], case_sensitive=False),
     default="default",
@@ -819,6 +831,8 @@ def run(
     copy_replay_file: str | None = None,
     copy_strict: bool = False,
     no_gateway: bool = False,
+    anvil_ports: tuple[str, ...] = (),
+    keep_anvil: bool = False,
     wallet: str = "default",
     log_file: str | None = None,
     reset_fork: bool = False,
@@ -919,6 +933,10 @@ def run(
         )
 
     if no_gateway:
+        if anvil_ports:
+            raise click.ClickException("--anvil-port requires a managed gateway (remove --no-gateway).")
+        if keep_anvil:
+            raise click.ClickException("--keep-anvil requires a managed gateway (remove --no-gateway).")
         # --wallet isolated requires the managed gateway (which auto-funds the derived wallet)
         if wallet == "isolated":
             raise click.ClickException(
@@ -963,8 +981,35 @@ def run(
             click.echo()
             raise click.ClickException(str(e)) from None
 
+        # Parse --anvil-port values into dict
+        external_anvil_ports: dict[str, int] = {}
+        for entry in anvil_ports:
+            if "=" not in entry:
+                raise click.ClickException(
+                    f"Invalid --anvil-port format: '{entry}'. Expected CHAIN=PORT (e.g., arbitrum=8545)"
+                )
+            chain_name, port_str = entry.split("=", 1)
+            chain_name = chain_name.strip().lower()
+            if not chain_name:
+                raise click.ClickException(f"Invalid --anvil-port format: '{entry}'. Chain name cannot be empty.")
+            try:
+                port = int(port_str)
+            except ValueError:
+                raise click.ClickException(f"Invalid port in --anvil-port: '{port_str}'") from None
+            if not (1 <= port <= 65535):
+                raise click.ClickException(f"Invalid port in --anvil-port: '{port_str}'. Expected 1-65535.")
+            if chain_name in external_anvil_ports:
+                raise click.ClickException(f"Duplicate --anvil-port for chain '{chain_name}'.")
+            external_anvil_ports[chain_name] = port
+
         # Resolve network for the managed gateway (CLI flag only, default mainnet)
+        # Auto-infer anvil network when --anvil-port is provided
+        if external_anvil_ports and not network:
+            network = "anvil"
         gateway_network = network or "mainnet"
+
+        if keep_anvil and gateway_network != "anvil":
+            click.echo("Warning: --keep-anvil has no effect without --network anvil or --anvil-port.")
 
         # Determine which chains need Anvil forks
         anvil_chains: list[str] = []
@@ -993,6 +1038,11 @@ def run(
                 elif chain_val:
                     anvil_chains = [chain_val]
                 anvil_funding = quick_config.get("anvil_funding", {})
+            # Add externally-specified chains to anvil_chains if not already present
+            for ext_chain in external_anvil_ports:
+                if ext_chain not in anvil_chains:
+                    anvil_chains.append(ext_chain)
+
             if not anvil_chains:
                 click.echo(
                     "Warning: --network anvil specified but no chain found in config. "
@@ -1055,6 +1105,8 @@ def run(
             anvil_chains=anvil_chains,
             wallet_address=isolated_wallet_address,
             anvil_funding=anvil_funding,
+            external_anvil_ports=external_anvil_ports,
+            keep_anvil=keep_anvil,
         )
         # Anvil forks need extra startup time (forking from mainnet RPC)
         startup_timeout = 30.0 if anvil_chains else 10.0
@@ -1662,6 +1714,11 @@ def run(
         if gateway_client is not None:
             gateway_client.disconnect()
         if managed_gateway is not None:
+            if keep_anvil and managed_gateway._anvil_managers:
+                for chain, mgr in managed_gateway._anvil_managers.items():
+                    port = mgr.anvil_port
+                    pid = mgr._process.pid if mgr._process else "unknown"
+                    click.echo(f"Anvil for {chain} still running on port {port} (PID {pid})")
             managed_gateway.stop()
 
     # Create components
