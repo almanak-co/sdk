@@ -20,6 +20,14 @@ The Almanak SDK is a powerful Python library for developing, testing, and deploy
 pip install almanak
 ```
 
+**Using an AI coding agent?** Teach it the SDK in one command:
+
+```bash
+almanak agent install
+```
+
+Auto-detects your platform (Claude Code, Codex, Cursor, Copilot, and 6 more) and installs the strategy builder skill.
+
 ## Quick Start
 
 1. **Create a New Strategy**
