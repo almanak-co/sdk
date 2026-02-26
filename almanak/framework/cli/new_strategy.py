@@ -1114,6 +1114,9 @@ def new_strategy(
         click.echo("  almanak backtest pnl -s <name> --start 2024-01-01 --end 2024-06-01")
         click.echo("  almanak backtest sweep -s <name> --start ... --end ... --param 'key:v1,v2,v3'")
         click.echo("  almanak backtest optimize -s <name> --start ... --end ... --config-file cfg.json")
+        click.echo()
+        click.echo("AI agent support:")
+        click.echo("  almanak agent install    # Teach your AI agent this SDK")
 
     except Exception as e:
         click.echo(f"Error creating strategy: {e}", err=True)

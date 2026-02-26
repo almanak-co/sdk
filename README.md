@@ -294,6 +294,25 @@ docker-compose -f deploy/docker/docker-compose.yml up
 
 For more details, visit [docs.almanak.co](https://docs.almanak.co/).
 
+## AI Agent Skills
+
+Supercharge your strategy development with AI agent support. The Almanak strategy builder skill teaches AI coding agents (Claude Code, Codex, Cursor, Copilot, and others) how to write strategies using the SDK.
+
+### Install for Your Agent
+
+```bash
+# Claude Code / Codex / any skills.sh-compatible agent
+npx skills add almanak-co/almanak-sdk
+
+# Or via the Almanak CLI (auto-detects your agent platform)
+almanak agent install
+
+# OpenClaw
+clawhub install almanak-strategy-builder
+```
+
+Once installed, your agent understands the full intent vocabulary, market data API, backtesting tools, and CLI commands. Just describe what you want to build.
+
 ## Documentation
 
 For detailed documentation, visit [docs.almanak.co](https://docs.almanak.co/)

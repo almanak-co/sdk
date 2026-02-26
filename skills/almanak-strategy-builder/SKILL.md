@@ -1,6 +1,16 @@
 ---
 name: almanak-strategy-builder
-description: Build, test, and deploy DeFi strategies using the Almanak SDK. Use when writing IntentStrategy classes, composing Intent objects (Swap, LP, Borrow, Supply, Perp, Bridge, Stake, Vault, Prediction), backtesting with PnL or paper trading, or running strategies via the almanak CLI.
+description: >-
+  Build, test, and deploy DeFi trading strategies using the Almanak SDK.
+  ALWAYS use this skill when the user mentions almanak, DeFi strategy,
+  trading strategy, yield farming, liquidity provision, token swap,
+  borrowing, lending, perpetuals, staking, vault deposit, bridging tokens,
+  backtesting, paper trading, or on-chain execution. Use for writing
+  strategy.py files, composing intents (Swap, LP, Borrow, Supply, Perp,
+  Bridge, Stake, Vault, Prediction), working with config.json strategy
+  parameters, running almanak strat or almanak gateway CLI commands, or
+  debugging strategy execution on Anvil forks. Do NOT use for general
+  smart contract development, Solidity code, or non-strategy SDK internals.
 metadata:
   version: "2.0.0"
   author: Almanak
