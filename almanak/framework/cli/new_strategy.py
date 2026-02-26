@@ -1079,6 +1079,24 @@ def new_strategy(
             fh.write(env_content)
         files_created.append(".env")
 
+        # AGENTS.md (per-strategy agent guide)
+        from almanak.framework.cli.strategy_agent_guide import (
+            StrategyGuideConfig,
+            generate_strategy_agents_md,
+        )
+
+        guide_config = StrategyGuideConfig(
+            strategy_name=snake_name,
+            template_name=template_enum.value,
+            chain=chain_enum.value,
+            class_name=to_pascal_case(name) + "Strategy",
+        )
+        agents_md_file = strategy_dir / "AGENTS.md"
+        agents_md_content = generate_strategy_agents_md(guide_config)
+        with open(agents_md_file, "w") as fh:
+            fh.write(agents_md_content)
+        files_created.append("AGENTS.md")
+
         # Print success message
         click.echo("Files created:")
         for file_path in files_created:

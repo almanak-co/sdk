@@ -11,6 +11,7 @@ import requests
 from dotenv import load_dotenv
 
 from almanak import __version__
+from almanak.cli.agent import agent as agent_group
 
 # V2 Framework CLI commands
 from almanak.framework.cli import backtest as framework_backtest_group
@@ -262,6 +263,9 @@ def copy_report(ledger_db: str, since_hours: int | None, json_output: bool) -> N
     )
 
 
+almanak.add_command(agent_group, name="agent")
+
+
 @almanak.group()
 def docs():
     """Access bundled SDK documentation for LLM agents."""
@@ -321,6 +325,34 @@ def docs_dump(output):
         click.echo(f"Written to {output}", err=True)
     else:
         click.echo(text)
+
+
+@docs.command("agent-skill")
+@click.option(
+    "--dump",
+    is_flag=True,
+    default=False,
+    help="Dump the full SKILL.md content to stdout.",
+)
+def docs_agent_skill(dump):
+    """Show path to bundled agent skill, or dump content.
+
+    Examples:
+
+    \b
+        almanak docs agent-skill          # Print path
+        almanak docs agent-skill --dump   # Print content
+    """
+    from almanak.skills import get_skill_content, get_skill_path
+
+    try:
+        if dump:
+            click.echo(get_skill_content())
+        else:
+            click.echo(get_skill_path())
+    except FileNotFoundError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
 
 
 @almanak.command()

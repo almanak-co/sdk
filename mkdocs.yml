@@ -37,6 +37,8 @@ plugins:
           - getting-started.md
         Environment Variables:
           - environment-variables.md
+        Agent Skills:
+          - agent-skills.md
         CLI Reference:
           - cli/*.md
         Gateway:
@@ -98,6 +100,8 @@ nav:
     - getting-started.md
   - Environment Variables:
     - environment-variables.md
+  - Agent Skills:
+    - agent-skills.md
   - CLI Reference:
     - cli/almanak.md
     - cli/almanak-strat.md

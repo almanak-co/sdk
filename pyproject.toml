@@ -80,6 +80,7 @@ dev = [
 include = [
     { path = "almanak/bin/*", format = ["sdist", "wheel"] },
     { path = "almanak/llms/llms-full.txt", format = ["sdist", "wheel"] },
+    { path = "almanak/skills/**/*.md", format = ["sdist", "wheel"] },
 ]
 
 [build-system]
