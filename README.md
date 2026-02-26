@@ -48,53 +48,27 @@ This auto-detects your platform (Claude Code, Codex, Cursor, Copilot, and [6 mor
 
 ## Writing a Strategy
 
-Strategies use an intent-based architecture. Implement the `decide()` method to return an intent based on market conditions:
+Strategies implement the `decide()` method, which receives a `MarketSnapshot` and returns an `Intent` (or `None` to skip the cycle):
 
 ```python
-from almanak import IntentStrategy, SwapIntent, HoldIntent, MarketSnapshot
+from decimal import Decimal
+from almanak.framework.intents import Intent
+from almanak.framework.strategies import IntentStrategy, MarketSnapshot
 
 class MyStrategy(IntentStrategy):
     """A simple mean-reversion strategy."""
 
-    def decide(self, market: MarketSnapshot) -> Intent:
-        eth_price = market.prices.get("ETH")
-        usdc_balance = market.balances.get("USDC")
+    def decide(self, market: MarketSnapshot) -> Intent | None:
+        eth_price = market.price("ETH")
+        usdc = market.balance("USDC")
 
-        # Buy ETH when price is low
-        if eth_price < 2000 and usdc_balance > 1000:
-            return SwapIntent(
-                token_in="USDC",
-                token_out="ETH",
-                amount=1000,
-                slippage=0.005,
+        if eth_price < Decimal("2000") and usdc.balance_usd > Decimal("500"):
+            return Intent.swap(
+                from_token="USDC",
+                to_token="ETH",
+                amount_usd=Decimal("500"),
             )
-
-        # Sell ETH when price is high
-        eth_balance = market.balances.get("ETH")
-        if eth_price > 2500 and eth_balance > 0.5:
-            return SwapIntent(
-                token_in="ETH",
-                token_out="USDC",
-                amount=0.5,
-                slippage=0.005,
-            )
-
-        return HoldIntent(reason="Waiting for better conditions")
-```
-
-### Swap Pool Selection
-
-For V3-style swaps, pool fee tiers are not assumed to be symmetric or equally liquid.
-
-- Default: `auto` pool selection (recommended)
-- Optional: `fixed` pool fee tier for deterministic execution
-
-```python
-from almanak.framework.intents.compiler import IntentCompilerConfig
-
-config = IntentCompilerConfig(
-    swap_pool_selection_mode="auto",  # Recommended
-)
+        return Intent.hold(reason="Waiting for better conditions")
 ```
 
 ## Available Intents
@@ -103,10 +77,13 @@ config = IntentCompilerConfig(
 |--------|-------------|
 | `SwapIntent` | Token swaps on DEXs |
 | `HoldIntent` | No action, wait for next cycle |
-| `LPOpenIntent` | Open liquidity position |
-| `LPCloseIntent` | Close liquidity position |
-| `BorrowIntent` | Borrow from lending protocols |
-| `RepayIntent` | Repay borrowed assets |
+| `LPOpenIntent` / `LPCloseIntent` | Open/close liquidity positions |
+| `BorrowIntent` / `RepayIntent` | Borrow/repay on lending protocols |
+| `SupplyIntent` / `WithdrawIntent` | Supply/withdraw from lending protocols |
+| `StakeIntent` / `UnstakeIntent` | Stake/unstake tokens |
+| `PerpOpenIntent` / `PerpCloseIntent` | Open/close perpetuals positions |
+| `FlashLoanIntent` | Flash loan operations |
+| `PredictionBuyIntent` / `PredictionSellIntent` / `PredictionRedeemIntent` | Prediction market trading |
 
 ## CLI Commands
 
