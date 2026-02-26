@@ -82,9 +82,9 @@ class TestStructuredLogging:
         assert log.resolved_via == "static"
 
     def test_error_emits_warning_log(self, caplog):
-        """Resolution error emits 'token_resolution_error' warning."""
+        """Resolution error emits 'token_resolution_error' debug log."""
         resolver = self._resolver()
-        with caplog.at_level(logging.WARNING, logger="almanak.framework.data.tokens.resolver"):
+        with caplog.at_level(logging.DEBUG, logger="almanak.framework.data.tokens.resolver"):
             with pytest.raises(Exception):
                 resolver.resolve("NONEXISTENT_TOKEN_XYZ", "arbitrum")
 

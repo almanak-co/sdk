@@ -405,7 +405,7 @@ class TokenResolver:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             error_type = type(e).__name__
             latency_ms = round(elapsed_ms, 3)
-            logger.warning(
+            logger.debug(
                 "token_resolution_error token=%s chain=%s error_type=%s detail=%s latency_ms=%.3f",
                 token,
                 chain_lower,

@@ -16,6 +16,7 @@ Example:
     await source.close()
 """
 
+import asyncio
 import logging
 import time
 from datetime import UTC, datetime
@@ -23,7 +24,8 @@ from decimal import Decimal
 
 import aiohttp
 
-from almanak.framework.backtesting.pnl.providers.chainlink import (
+from almanak.core.chainlink import (
+    CHAINLINK_CHAIN_IDS,
     CHAINLINK_PRICE_FEEDS,
     LATEST_ROUND_DATA_SELECTOR,
     TOKEN_TO_PAIR,
@@ -100,6 +102,10 @@ class OnChainPriceSource(BasePriceSource):
         # Lazy-initialized aiohttp session
         self._session: aiohttp.ClientSession | None = None
 
+        # chainId validation deferred to first get_price() call (async)
+        self._chain_id_validated = False
+        self._chain_id_lock = asyncio.Lock()
+
         # Resolve RPC URL once
         self._rpc_url: str | None = None
         try:
@@ -134,6 +140,58 @@ class OnChainPriceSource(BasePriceSource):
     @property
     def cache_ttl_seconds(self) -> int:
         return int(self._cache_ttl)
+
+    async def _validate_chain_id(self) -> None:
+        """Validate that the RPC endpoint serves the expected chain.
+
+        Makes a single eth_chainId call on first use. If the chain ID doesn't
+        match expectations, disables on-chain pricing (sets _rpc_url = None)
+        rather than crashing the gateway.
+
+        Uses a lock to prevent concurrent get_price() calls from bypassing
+        in-flight validation.
+        """
+        async with self._chain_id_lock:
+            if self._chain_id_validated or not self._rpc_url:
+                return
+
+            self._chain_id_validated = True
+            expected_chain_id = CHAINLINK_CHAIN_IDS.get(self._chain)
+            if expected_chain_id is None:
+                return  # Unknown chain, skip validation
+
+            try:
+                session = await self._get_session()
+                self._rpc_request_id += 1
+                payload = {
+                    "jsonrpc": "2.0",
+                    "method": "eth_chainId",
+                    "params": [],
+                    "id": self._rpc_request_id,
+                }
+                timeout = aiohttp.ClientTimeout(total=self._request_timeout)
+                async with session.post(self._rpc_url, json=payload, timeout=timeout) as resp:
+                    if resp.status != 200:
+                        logger.warning(
+                            "OnChainPriceSource: chainId check failed (HTTP %d), skipping validation", resp.status
+                        )
+                        return
+                    body = await resp.json()
+
+                actual_chain_id = int(body.get("result") or "0x0", 16)
+                if actual_chain_id != expected_chain_id:
+                    logger.warning(
+                        "OnChainPriceSource: chainId mismatch! expected=%d (%s) got=%d -- disabling on-chain pricing",
+                        expected_chain_id,
+                        self._chain,
+                        actual_chain_id,
+                    )
+                    self._rpc_url = None
+                else:
+                    logger.debug("OnChainPriceSource: chainId validated: %d (%s)", actual_chain_id, self._chain)
+            except Exception as e:
+                # Broad catch intentional: chainId validation is best-effort and must never crash the gateway
+                logger.warning("OnChainPriceSource: chainId validation failed: %s -- skipping", e)
 
     async def get_price(self, token: str, quote: str = "USD") -> PriceResult:
         """Get price for a token via on-chain sources.
@@ -180,6 +238,10 @@ class OnChainPriceSource(BasePriceSource):
             )
             self._cache[cache_key] = (result, time.time())
             return result
+
+        # Validate chainId on first RPC-dependent call (after cache/stablecoin fast-paths)
+        if not self._chain_id_validated and self._rpc_url:
+            await self._validate_chain_id()
 
         if not self._rpc_url:
             raise DataSourceUnavailable(

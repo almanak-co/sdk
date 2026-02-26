@@ -355,6 +355,79 @@ class TestSessionCleanup:
         await source.close()  # Should not raise
 
 
+class _MockChainIdResponse:
+    """Async context manager that mimics aiohttp response for chainId calls."""
+
+    def __init__(self, chain_id: int):
+        self.status = 200
+        self._body = {"result": hex(chain_id)}
+
+    async def json(self):
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+
+class TestChainIdValidation:
+    """chainId validation on first use."""
+
+    @pytest.mark.asyncio
+    async def test_matching_chain_id_keeps_rpc(self):
+        """Correct chainId allows on-chain pricing to proceed."""
+        source = OnChainPriceSource(chain="arbitrum")
+
+        mock_session = AsyncMock()
+        mock_session.post = lambda *a, **kw: _MockChainIdResponse(42161)
+
+        with patch.object(source, "_get_session", new_callable=AsyncMock, return_value=mock_session):
+            await source._validate_chain_id()
+
+        assert source._rpc_url is not None
+        assert source._chain_id_validated is True
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_mismatched_chain_id_disables_rpc(self):
+        """Wrong chainId disables on-chain pricing."""
+        source = OnChainPriceSource(chain="arbitrum")
+
+        mock_session = AsyncMock()
+        mock_session.post = lambda *a, **kw: _MockChainIdResponse(1)  # Ethereum, not Arbitrum
+
+        with patch.object(source, "_get_session", new_callable=AsyncMock, return_value=mock_session):
+            await source._validate_chain_id()
+
+        assert source._rpc_url is None
+        assert source._chain_id_validated is True
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_chain_id_validation_failure_skips(self):
+        """Network error during chainId check is non-fatal."""
+        source = OnChainPriceSource(chain="arbitrum")
+        original_rpc = source._rpc_url
+
+        with patch.object(source, "_get_session", new_callable=AsyncMock, side_effect=Exception("connection refused")):
+            await source._validate_chain_id()
+
+        assert source._rpc_url == original_rpc
+        assert source._chain_id_validated is True
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_chain_id_validation_runs_once(self):
+        """chainId validation only runs on first call."""
+        source = OnChainPriceSource(chain="arbitrum")
+        source._chain_id_validated = True
+
+        await source._validate_chain_id()
+        await source.close()
+
+
 class TestSourceProperties:
     """Source metadata properties."""
 
