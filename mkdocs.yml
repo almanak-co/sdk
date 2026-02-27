@@ -73,24 +73,8 @@ plugins:
             Gateway: Pasarela
             API Reference: Referencia API
             Connectors: Conectores
-  - llmstxt:
-      full_output: llms-full.txt
-      sections:
-        Overview:
-          - index.md
-        Getting Started:
-          - getting-started.md
-        Environment Variables:
-          - environment-variables.md
-        Agent Skills:
-          - agent-skills.md
-        CLI Reference:
-          - cli/*.md
-        Gateway:
-          - gateway/*.md
-        API Reference:
-          - api/*.md
-          - api/connectors/*.md
+  # NOTE: llmstxt plugin moved to mkdocs-llms.yml (incompatible with i18n).
+  # Run `make docs-llms` to generate llms.txt separately.
   - mkdocstrings:
       default_handler: python
       handlers:

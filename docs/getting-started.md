@@ -175,9 +175,12 @@ class MyStrategy(IntentStrategy):
 | `PerpOpenIntent` | Open perpetuals position |
 | `PerpCloseIntent` | Close perpetuals position |
 | `FlashLoanIntent` | Flash loan operations |
+| `CollectFeesIntent` | Collect LP fees |
 | `PredictionBuyIntent` | Buy prediction market shares |
 | `PredictionSellIntent` | Sell prediction market shares |
 | `PredictionRedeemIntent` | Redeem prediction market winnings |
+| `VaultDepositIntent` | Deposit into a vault |
+| `VaultRedeemIntent` | Redeem from a vault |
 
 ## Next Steps
 

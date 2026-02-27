@@ -6,8 +6,8 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 
 | Service | Methods | Description |
 |---------|---------|-------------|
-| Health | 2 | Standard gRPC health checks (liveness/readiness probes) |
-| MarketService | 3 | Price data, balances, and technical indicators |
+| Health | 3 | Health checks (liveness/readiness probes) and chain registration |
+| MarketService | 4 | Price data, balances, batch balances, and technical indicators |
 | StateService | 3 | Strategy state persistence with optimistic locking |
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
@@ -19,6 +19,32 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | PolymarketService | 18 | Polymarket CLOB API proxy (market data, orders, positions) |
 | EnsoService | 4 | Enso Finance routing and bundling |
 | TokenService | 4 | Token resolution and on-chain metadata |
+
+## Health
+
+### Check
+
+Standard health check for liveness probes.
+
+```protobuf
+rpc Check(HealthCheckRequest) returns (HealthCheckResponse)
+```
+
+### Watch
+
+Streaming health check for readiness monitoring.
+
+```protobuf
+rpc Watch(HealthCheckRequest) returns (stream HealthCheckResponse)
+```
+
+### RegisterChains
+
+Register chains with the gateway after startup.
+
+```protobuf
+rpc RegisterChains(RegisterChainsRequest) returns (RegisterChainsResponse)
+```
 
 ## MarketService
 
@@ -82,6 +108,14 @@ message BalanceResponse {
   int32 decimals = 2;
   string symbol = 3;
 }
+```
+
+### BatchGetBalances
+
+Get token balances for multiple tokens in a single call.
+
+```protobuf
+rpc BatchGetBalances(BatchBalanceRequest) returns (BatchBalanceResponse)
 ```
 
 ### GetIndicator
@@ -245,6 +279,14 @@ Record a custom metric.
 rpc RecordMetric(MetricRequest) returns (MetricResponse)
 ```
 
+### RecordTimelineEvent
+
+Record a timeline event for strategy execution history.
+
+```protobuf
+rpc RecordTimelineEvent(RecordTimelineEventRequest) returns (RecordTimelineEventResponse)
+```
+
 ## RpcService
 
 ### Call
@@ -285,6 +327,10 @@ message RpcResponse {
 - bsc
 - sonic
 - plasma
+- linea
+- blast
+- mantle
+- berachain
 
 **Allowed Methods:**
 - `eth_call`

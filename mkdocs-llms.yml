@@ -1,0 +1,46 @@
+# Separate config for llms.txt generation (no i18n).
+#
+# The mkdocs-llmstxt plugin is incompatible with mkdocs-static-i18n because
+# the i18n plugin rebuilds the site for each locale, resetting the llmstxt
+# plugin state each time. Only the last locale's pages survive into the final
+# llms.txt, leaving translated pages empty.
+#
+# Usage: uv run mkdocs build -f mkdocs-llms.yml
+INHERIT: mkdocs.yml
+
+plugins:
+  - search
+  - llmstxt:
+      full_output: llms-full.txt
+      sections:
+        Overview:
+          - index.md
+        Getting Started:
+          - getting-started.md
+        Environment Variables:
+          - environment-variables.md
+        Agent Skills:
+          - agent-skills.md
+        CLI Reference:
+          - cli/*.md
+        Gateway:
+          - gateway/api-reference.md
+          - gateway/troubleshooting.md
+        API Reference:
+          - api/*.md
+          - api/connectors/*.md
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_signature_annotations: true
+            separate_signature: true
+            merge_init_into_class: true
+            members_order: source
+            show_root_heading: true
+            show_source: false
+            heading_level: 2
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true

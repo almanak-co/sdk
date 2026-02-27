@@ -175,9 +175,12 @@ class MyStrategy(IntentStrategy):
 | `PerpOpenIntent` | 开设永续合约头寸 |
 | `PerpCloseIntent` | 关闭永续合约头寸 |
 | `FlashLoanIntent` | 闪电贷操作 |
+| `CollectFeesIntent` | 收取 LP 费用 |
 | `PredictionBuyIntent` | 购买预测市场份额 |
 | `PredictionSellIntent` | 出售预测市场份额 |
 | `PredictionRedeemIntent` | 赎回预测市场收益 |
+| `VaultDepositIntent` | 存入金库 |
+| `VaultRedeemIntent` | 从金库赎回 |
 
 ## 下一步
 

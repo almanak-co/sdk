@@ -175,9 +175,12 @@ class MyStrategy(IntentStrategy):
 | `PerpOpenIntent` | Abrir posición de perpetuos |
 | `PerpCloseIntent` | Cerrar posición de perpetuos |
 | `FlashLoanIntent` | Operaciones de préstamo flash |
+| `CollectFeesIntent` | Recolectar comisiones de LP |
 | `PredictionBuyIntent` | Comprar acciones de mercado de predicción |
 | `PredictionSellIntent` | Vender acciones de mercado de predicción |
 | `PredictionRedeemIntent` | Canjear ganancias de mercado de predicción |
+| `VaultDepositIntent` | Depositar en una bóveda |
+| `VaultRedeemIntent` | Canjear desde una bóveda |
 
 ## Próximos pasos
 

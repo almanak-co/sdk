@@ -35,6 +35,7 @@ almanak/llms/llms-full.txt
 
 # MkDocs build output
 /site/
+/site-llms/
 
 # Coverage reports
 coverage-html/

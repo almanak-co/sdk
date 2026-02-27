@@ -35,7 +35,6 @@ from almanak.framework.utils.logging import configure_logging, get_logger
 
 | Module | Description |
 |--------|-------------|
-| [Client](client.md) | `Almanak` SDK client for platform API access |
 | [Enums](enums.md) | `Chain`, `Network`, `Protocol`, `ActionType`, and more |
 | [Strategies](strategies.md) | `IntentStrategy`, `StrategyBase`, `MarketSnapshot` |
 | [Intents](intents.md) | `SwapIntent`, `LPOpenIntent`, `HoldIntent`, and all intent types |

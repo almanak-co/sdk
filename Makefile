@@ -84,9 +84,19 @@ docs-cli:
 	sed -i.bak 's/\* Type: <click\.types\.Path.*>/* Type: `Path`/g' docs/cli/*.md
 	rm -f docs/cli/*.md.bak
 
-# Build documentation site
+# Build documentation site (includes llms.txt generation)
 docs:
 	uv run mkdocs build
+	@$(MAKE) docs-llms
+
+# Generate llms.txt (separate config, no i18n - see mkdocs-llms.yml)
+docs-llms:
+	uv run mkdocs build -f mkdocs-llms.yml -d site-llms
+	mkdir -p site
+	test -f site-llms/llms.txt
+	test -f site-llms/llms-full.txt
+	cp site-llms/llms.txt site-llms/llms-full.txt site/
+	rm -rf site-llms
 
 # Serve documentation locally for development
 docs-serve:
@@ -94,7 +104,7 @@ docs-serve:
 
 # Clean documentation build output
 docs-clean:
-	rm -rf site/
+	rm -rf site/ site-llms/
 
 # Install production dependencies
 install:
