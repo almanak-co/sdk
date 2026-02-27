@@ -67,7 +67,7 @@ from ..execution.orchestrator import ExecutionOrchestrator
 from ..execution.signer.local import LocalKeySigner
 from ..execution.simulator import create_simulator
 from ..execution.submitter.public import PublicMempoolSubmitter
-from ..runner import IterationResult, RunnerConfig, StrategyRunner
+from ..runner import IterationResult, IterationStatus, RunnerConfig, StrategyRunner
 from ..strategies import IntentStrategy, get_strategy, list_strategies
 from ..strategies.intent_strategy import IndicatorProvider
 from .intent_debug import load_strategy_from_file
@@ -810,6 +810,13 @@ def format_iteration_result(result: IterationResult) -> str:
     help="Maximum number of iterations to run before exiting cleanly. "
     "Without this flag, continuous mode runs indefinitely.",
 )
+@click.option(
+    "--teardown-after",
+    is_flag=True,
+    default=False,
+    help="After --once iteration, automatically teardown (close all positions). "
+    "Useful for CI/testing to avoid accumulating stale positions on-chain.",
+)
 def run(
     working_dir: str,
     config_file: str | None,
@@ -837,6 +844,7 @@ def run(
     log_file: str | None = None,
     reset_fork: bool = False,
     max_iterations: int | None = None,
+    teardown_after: bool = False,
     strategy_id_override: str | None = None,
 ) -> None:
     """
@@ -911,6 +919,11 @@ def run(
         # --debug flag: allow all debug logs including third-party
         logging.getLogger("web3").setLevel(logging.DEBUG)
         logging.getLogger("urllib3").setLevel(logging.DEBUG)
+
+    # Validate --teardown-after requires --once
+    if teardown_after and not once:
+        click.echo("Error: --teardown-after requires --once.", err=True)
+        sys.exit(1)
 
     # Gateway setup: auto-start a managed gateway or connect to an existing one
     import atexit
@@ -2056,8 +2069,8 @@ def run(
         click.echo("Running single iteration...")
         click.echo()
 
-        async def run_once_with_cleanup() -> IterationResult:
-            """Run single iteration and cleanup resources."""
+        async def run_once_with_cleanup() -> tuple[IterationResult, IterationResult | None]:
+            """Run single iteration, optional teardown, and cleanup resources."""
             runner.setup_gateway_integration(strategy_instance)
             try:
                 # Restore copy trading cursor state (mirrors run_loop pattern)
@@ -2071,6 +2084,39 @@ def run(
                         logger.warning(f"Failed to restore copy trading state: {e}")
 
                 result = await runner.run_iteration(strategy_instance)
+
+                # --- teardown-after: signal + second iteration ---
+                teardown_result = None
+                if (
+                    teardown_after
+                    and hasattr(strategy_instance, "supports_teardown")
+                    and strategy_instance.supports_teardown()
+                ):
+                    click.echo()
+                    click.echo("Teardown requested -- closing positions...")
+
+                    from almanak.framework.teardown import get_teardown_state_manager
+                    from almanak.framework.teardown.models import TeardownMode, TeardownRequest
+
+                    strategy_id = strategy_instance.strategy_id or strategy_instance.STRATEGY_NAME
+                    manager = get_teardown_state_manager()
+                    manager.create_request(
+                        TeardownRequest(
+                            strategy_id=strategy_id,
+                            mode=TeardownMode.SOFT,
+                            reason="--teardown-after flag (CI cleanup)",
+                            requested_by="cli",
+                        )
+                    )
+
+                    teardown_result = await runner.run_iteration(strategy_instance)
+                    click.echo(format_iteration_result(teardown_result))
+                elif teardown_after:
+                    teardown_result = IterationResult(
+                        status=IterationStatus.EXECUTION_FAILED,
+                        error="--teardown-after requested but strategy does not support teardown",
+                    )
+                    click.echo(teardown_result.error, err=True)
 
                 # Persist copy trading cursor state
                 if activity_provider is not None:
@@ -2096,16 +2142,33 @@ def run(
                         await strategy_instance.flush_pending_saves()
                     except Exception as e:
                         logger.warning(f"Error flushing pending saves: {e}")
-                return result
+                return result, teardown_result
             finally:
                 runner.teardown_gateway_integration(strategy_instance.strategy_id)
                 await cleanup_resources()
 
         try:
-            result = asyncio.run(run_once_with_cleanup())
+            result, teardown_result = asyncio.run(run_once_with_cleanup())
             click.echo(format_iteration_result(result))
 
-            if result.success:
+            # Determine exit code: main iteration + optional teardown
+            if teardown_result is not None:
+                # With --teardown-after: both iteration and teardown must succeed
+                teardown_ok = teardown_result.status == IterationStatus.TEARDOWN
+                if result.success and teardown_ok:
+                    click.echo()
+                    click.echo("Iteration and teardown completed successfully.")
+                    stop_dashboard(dashboard_process)
+                    sys.exit(0)
+                else:
+                    click.echo()
+                    if not result.success:
+                        click.echo(f"Iteration failed: {result.error}")
+                    if not teardown_ok:
+                        click.echo(f"Teardown failed: {teardown_result.error or teardown_result.status.value}")
+                    stop_dashboard(dashboard_process)
+                    sys.exit(1)
+            elif result.success:
                 click.echo()
                 click.echo("Iteration completed successfully.")
                 stop_dashboard(dashboard_process)

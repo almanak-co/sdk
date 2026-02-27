@@ -173,6 +173,73 @@ class DictConfigWrapper:
         return self._data.get(key, default)
 
 
+def _build_strategy_id_candidates(strategy: Any, strategy_class: type, config_dict: dict[str, Any]) -> list[str]:
+    """Build strategy_id candidates for state restore."""
+    candidates: list[str] = []
+
+    def _add_candidate(value: Any) -> None:
+        if not isinstance(value, str) or not value.strip():
+            return
+        clean_value = value.strip()
+        candidates.append(clean_value)
+        if ":" in clean_value:
+            prefix = clean_value.split(":", maxsplit=1)[0].strip()
+            if prefix:
+                candidates.append(prefix)
+
+    _add_candidate(config_dict.get("strategy_id"))
+    _add_candidate(getattr(strategy, "strategy_id", ""))
+    _add_candidate(getattr(strategy, "name", ""))
+    _add_candidate(getattr(strategy, "STRATEGY_NAME", ""))
+    _add_candidate(strategy_class.__name__)
+
+    seen: set[str] = set()
+    unique_candidates: list[str] = []
+    for candidate in candidates:
+        if candidate not in seen:
+            unique_candidates.append(candidate)
+            seen.add(candidate)
+    return unique_candidates
+
+
+def _restore_strategy_state_for_teardown(
+    strategy: Any,
+    strategy_class: type,
+    config_dict: dict[str, Any],
+    gateway_client: Any,
+) -> None:
+    """Restore strategy state before computing teardown positions."""
+    if not hasattr(strategy, "set_state_manager") or not hasattr(strategy, "load_state"):
+        logger.debug("Strategy %s does not expose state persistence hooks", strategy_class.__name__)
+        return
+
+    from ..state.gateway_state_manager import GatewayStateManager
+
+    candidates = _build_strategy_id_candidates(strategy, strategy_class, config_dict)
+    if not candidates:
+        logger.info("No strategy_id candidates available for teardown state restore")
+        return
+
+    state_manager = GatewayStateManager(gateway_client)
+    for strategy_id in candidates:
+        logger.info("Attempting teardown state restore for strategy_id=%s", strategy_id)
+        try:
+            strategy.set_state_manager(state_manager, strategy_id)
+        except Exception as e:
+            logger.warning("Failed to inject state manager for strategy_id=%s: %s", strategy_id, e)
+            continue
+
+        try:
+            if strategy.load_state():
+                logger.info("Restored strategy state for teardown (strategy_id=%s)", strategy_id)
+                return
+            logger.info("No persisted strategy state for strategy_id=%s", strategy_id)
+        except Exception as e:
+            logger.warning("State restore failed for strategy_id=%s: %s", strategy_id, e)
+
+    logger.info("No persisted strategy state restored for teardown (candidates=%s)", candidates)
+
+
 # =============================================================================
 # CLI Commands
 # =============================================================================
@@ -352,6 +419,13 @@ def execute_teardown(
                 f"Strategy {strategy_class.__name__} does not support teardown. "
                 "Implement supports_teardown() and generate_teardown_intents() methods."
             )
+
+        _restore_strategy_state_for_teardown(
+            strategy=strategy,
+            strategy_class=strategy_class,
+            config_dict=config_dict,
+            gateway_client=gateway_client,
+        )
 
         click.echo(f"Strategy: {strategy_class.__name__}")
         click.echo(f"Chain: {chain}")

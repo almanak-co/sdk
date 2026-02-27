@@ -696,6 +696,7 @@ class AerodromeAdapter:
                     token_address=pool_address,
                     spender=self.addresses["router"],
                     amount=liquidity_wei,
+                    token_label=f"LP({token_a}/{token_b})",
                 )
                 if approve_tx:
                     transactions.append(approve_tx)
@@ -1029,6 +1030,7 @@ class AerodromeAdapter:
         token_address: str,
         spender: str,
         amount: int,
+        token_label: str | None = None,
     ) -> TransactionData | None:
         """Build an ERC-20 approve transaction if needed."""
         # Check cache for existing allowance
@@ -1044,7 +1046,7 @@ class AerodromeAdapter:
         # Update cache
         self._allowance_cache[cache_key] = MAX_UINT256
 
-        token_symbol = self._get_token_symbol(token_address)
+        token_symbol = token_label or self._get_token_symbol(token_address)
 
         return TransactionData(
             to=token_address,

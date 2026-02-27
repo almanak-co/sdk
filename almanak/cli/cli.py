@@ -855,6 +855,13 @@ def new(ctx, name, working_dir, template, chain):
     help="Maximum number of iterations to run before exiting cleanly. "
     "Without this flag, continuous mode runs indefinitely.",
 )
+@click.option(
+    "--teardown-after",
+    is_flag=True,
+    default=False,
+    help="After --once iteration, automatically teardown (close all positions). "
+    "Useful for CI/testing to avoid accumulating stale positions on-chain.",
+)
 @click.pass_context
 def strategy_run(
     ctx,
@@ -880,6 +887,7 @@ def strategy_run(
     log_file,
     reset_fork,
     max_iterations,
+    teardown_after,
 ):
     """Run a strategy from its working directory.
 
@@ -963,6 +971,7 @@ def strategy_run(
             log_file=log_file,
             reset_fork=reset_fork,
             max_iterations=max_iterations,
+            teardown_after=teardown_after,
             working_dir=working_dir,
             strategy_id_override=id,
         )

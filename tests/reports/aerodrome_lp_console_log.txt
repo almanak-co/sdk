@@ -1,0 +1,610 @@
+Logging to file: /Users/gabrielphang/Documents/Almanak/almanak-sdk-2/tests/reports/aerodrome_lp_debug_log.json (JSON format)
+Starting managed gateway on 127.0.0.1:50051 (network=mainnet)...
+[2m2026-02-26T13:07:07.210312Z[0m [[33m[1mwarning  [0m] [1mINSECURE MODE on network 'mainnet': Auth interceptor disabled - no auth_token configured. Gateway authentication is DISABLED on a production network. Set ALMANAK_GATEWAY_AUTH_TOKEN or remove ALMANAK_GATEWAY_ALLOW_INSECURE.[0m [[0m[1m[34malmanak.gateway.server[0m][0m
+[2m2026-02-26T13:07:07.210758Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:07.211098Z[0m [[32m[1mdebug    [0m] [1mUsing AsyncIOEngine.POLLER as I/O engine[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:07.212833Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:07.218330Z[0m [[32m[1minfo     [0m] [1mLoaded 12 timeline events from database[0m [[0m[1m[34malmanak.gateway.timeline.store[0m][0m
+[2m2026-02-26T13:07:07.218391Z[0m [[32m[1minfo     [0m] [1mTimelineStore initialized (db_path=/Users/gabrielphang/.config/almanak/gateway.db)[0m [[0m[1m[34malmanak.gateway.timeline.store[0m][0m
+[2m2026-02-26T13:07:07.218432Z[0m [[32m[1minfo     [0m] [1mTimelineStore initialized with persistent storage: /Users/gabrielphang/.config/almanak/gateway.db[0m [[0m[1m[34malmanak.gateway.server[0m][0m
+[2m2026-02-26T13:07:07.218728Z[0m [[32m[1minfo     [0m] [1mLoaded 9 strategy instances from database[0m [[0m[1m[34malmanak.gateway.registry.store[0m][0m
+[2m2026-02-26T13:07:07.218761Z[0m [[32m[1minfo     [0m] [1mInstanceRegistry initialized (db_path=/Users/gabrielphang/.config/almanak/gateway.db)[0m [[0m[1m[34malmanak.gateway.registry.store[0m][0m
+[2m2026-02-26T13:07:07.218793Z[0m [[32m[1minfo     [0m] [1mInstanceRegistry initialized with persistent storage: /Users/gabrielphang/.config/almanak/gateway.db[0m [[0m[1m[34malmanak.gateway.server[0m][0m
+[2m2026-02-26T13:07:07.218878Z[0m [[32m[1minfo     [0m] [1mObserveService initialized: slack=False, telegram=False[0m [[0m[1m[34malmanak.gateway.services.observe_service[0m][0m
+[2m2026-02-26T13:07:07.218975Z[0m [[32m[1minfo     [0m] [1mInitialized RpcService with allowed chains: frozenset({'avalanche', 'blast', 'bnb', 'linea', 'plasma', 'base', 'arbitrum', 'ethereum', 'optimism', 'mantle', 'polygon', 'bsc', 'berachain', 'sonic'})[0m [[0m[1m[34malmanak.gateway.services.rpc_service[0m][0m
+[2m2026-02-26T13:07:07.219050Z[0m [[32m[1minfo     [0m] [1mInitialized FundingRateService[0m [[0m[1m[34malmanak.gateway.services.funding_rate_service[0m][0m
+[2m2026-02-26T13:07:07.219101Z[0m [[32m[1minfo     [0m] [1mSimulationService initialized: tenderly=False, alchemy=True[0m [[0m[1m[34malmanak.gateway.services.simulation_service[0m][0m
+[2m2026-02-26T13:07:07.219145Z[0m [[32m[1minfo     [0m] [1mPolymarketService initialized: available=False, credentials=False[0m [[0m[1m[34malmanak.gateway.services.polymarket_service[0m][0m
+[2m2026-02-26T13:07:07.219200Z[0m [[32m[1minfo     [0m] [1mEnsoService initialized: available=False[0m [[0m[1m[34malmanak.gateway.services.enso_service[0m][0m
+[2m2026-02-26T13:07:07.219320Z[0m [[32m[1minfo     [0m] [1mTokenService initialized      [0m [[0m[1m[34malmanak.gateway.services.token_service[0m][0m
+[2m2026-02-26T13:07:07.219365Z[0m [[32m[1minfo     [0m] [1mRegistered Phase 2 services: Market, State, Execution, Observe[0m [[0m[1m[34malmanak.gateway.server[0m][0m
+[2m2026-02-26T13:07:07.219395Z[0m [[32m[1minfo     [0m] [1mRegistered Phase 3 services: Rpc, Integration, FundingRate, Simulation, Polymarket, Enso[0m [[0m[1m[34malmanak.gateway.server[0m][0m
+[2m2026-02-26T13:07:07.219427Z[0m [[32m[1minfo     [0m] [1mRegistered Dashboard and Token services[0m [[0m[1m[34malmanak.gateway.server[0m][0m
+[2m2026-02-26T13:07:07.220446Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:07.220513Z[0m [[32m[1minfo     [0m] [1mGateway gRPC server started on 127.0.0.1:50051[0m [[0m[1m[34malmanak.gateway.server[0m][0m
+[2m2026-02-26T13:07:07.226400Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:07.228171Z[0m [[32m[1minfo     [0m] [1mManaged gateway started on 127.0.0.1:50051[0m [[0m[1m[34malmanak.gateway.managed[0m][0m
+Managed gateway started on 127.0.0.1:50051
+[2m2026-02-26T13:07:07.228685Z[0m [[32m[1minfo     [0m] [1mConnected to gateway at 127.0.0.1:50051[0m [[0m[1m[34malmanak.framework.gateway_client[0m][0m
+[2m2026-02-26T13:07:07.229597Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:07.229856Z[0m [[32m[1mdebug    [0m] [1mGateway health check passed (service=overall)[0m [[0m[1m[34malmanak.framework.gateway_client[0m][0m
+[2m2026-02-26T13:07:07.229927Z[0m [[32m[1minfo     [0m] [1mGateway channel configured for on-chain token discovery[0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+
+[2m2026-02-26T13:07:07.230731Z[0m [[32m[1minfo     [0m] [1mRegistered strategy: demo_aerodrome_lp v1.0.0[0m [[0m[1m[34malmanak.framework.strategies.intent_strategy[0m][0m
+Loaded strategy: AerodromeLPStrategy
+Loaded config from: /Users/gabrielphang/Documents/Almanak/almanak-sdk-2/strategies/demo/aerodrome_lp/config.json
+[2m2026-02-26T13:07:07.231251Z[0m [[32m[1mdebug    [0m] [1mBuilt RPC URL dynamically for base[0m [[0m[1m[34malmanak.framework.execution.config[0m][0m
+[2m2026-02-26T13:07:07.277393Z[0m [[32m[1mdebug    [0m] [1mLocalRuntimeConfig initialized: chain=base, wallet=0x0738Ea642faA28fFc588717625e45F3078fDBAC9[0m [[0m[1m[34malmanak.framework.execution.config[0m][0m
+============================================================
+ALMANAK STRATEGY RUNNER
+============================================================
+Strategy: AerodromeLPStrategy
+Instance ID: AerodromeLPStrategy
+Mode: FRESH START (no existing state)
+Chain: base
+Wallet: 0x0738Ea642faA28fFc588717625e45F3078fDBAC9
+Execution: Single run
+Dry run: False
+Gateway: localhost:50051
+============================================================
+Strategy class loaded: AerodromeLPStrategy
+[2m2026-02-26T13:07:07.277590Z[0m [[32m[1mdebug    [0m] [1mConfig class AerodromeLPConfig ignoring unknown fields: ['network', 'anvil_funding', 'strategy_display_name'][0m [[0m[1m[34malmanak.framework.cli.run[0m][0m
+  Config class: AerodromeLPConfig (ignored: ['network', 'anvil_funding', 'strategy_display_name'])
+[2m2026-02-26T13:07:07.277665Z[0m [[32m[1mdebug    [0m] [1mConfig snapshot saved for unknown: version=1[0m [[0m[1m[34malmanak.framework.strategies.base[0m][0m
+[2m2026-02-26T13:07:07.277704Z[0m [[32m[1minfo     [0m] [1mInitialized IntentStrategy on base with wallet 0x0738Ea64...[0m [[0m[1m[34malmanak.framework.strategies.intent_strategy[0m][0m
+[2m2026-02-26T13:07:07.277747Z[0m [[32m[1minfo     [0m] [1mAerodromeLPStrategy initialized: pool=WETH/USDC, type=volatile, amounts=0.001 WETH + 0.04 USDC[0m [[0m[1m[34mstrategy_module[0m][0m
+Strategy instance created successfully
+Initializing components...
+  Using gateway-backed providers...
+  Gateway-backed providers created
+[2m2026-02-26T13:07:07.277824Z[0m [[32m[1minfo     [0m] [1mInitialized GatewayOHLCVProvider with cache TTLs: live=10.0s, historical=60.0s[0m [[0m[1m[34malmanak.framework.data.ohlcv.gateway_provider[0m][0m
+[2m2026-02-26T13:07:07.277872Z[0m [[32m[1minfo     [0m] [1mInitialized GeckoTerminalOHLCVProvider (rate_limit=30/min)[0m [[0m[1m[34malmanak.framework.data.ohlcv.geckoterminal_provider[0m][0m
+[2m2026-02-26T13:07:07.277914Z[0m [[32m[1mdebug    [0m] [1mohlcv_router_registered provider=binance[0m [[0m[1m[34malmanak.framework.data.ohlcv.ohlcv_router[0m][0m
+[2m2026-02-26T13:07:07.277942Z[0m [[32m[1mdebug    [0m] [1mohlcv_router_registered provider=geckoterminal[0m [[0m[1m[34malmanak.framework.data.ohlcv.ohlcv_router[0m][0m
+[2m2026-02-26T13:07:07.277973Z[0m [[32m[1minfo     [0m] [1mRoutingOHLCVProvider initialised chain=base pool_address=(auto)[0m [[0m[1m[34malmanak.framework.data.ohlcv.routing_provider[0m][0m
+[2m2026-02-26T13:07:07.278004Z[0m [[32m[1minfo     [0m] [1mInitialized RSICalculator with default_period=14[0m [[0m[1m[34malmanak.framework.data.indicators.rsi[0m][0m
+[2m2026-02-26T13:07:07.278033Z[0m [[32m[1minfo     [0m] [1mInitialized MACDCalculator    [0m [[0m[1m[34malmanak.framework.data.indicators.macd[0m][0m
+[2m2026-02-26T13:07:07.278060Z[0m [[32m[1minfo     [0m] [1mInitialized BollingerBandsCalculator[0m [[0m[1m[34malmanak.framework.data.indicators.bollinger_bands[0m][0m
+[2m2026-02-26T13:07:07.278085Z[0m [[32m[1minfo     [0m] [1mInitialized StochasticCalculator[0m [[0m[1m[34malmanak.framework.data.indicators.stochastic[0m][0m
+[2m2026-02-26T13:07:07.278111Z[0m [[32m[1minfo     [0m] [1mInitialized ATRCalculator     [0m [[0m[1m[34malmanak.framework.data.indicators.atr[0m][0m
+[2m2026-02-26T13:07:07.278146Z[0m [[32m[1minfo     [0m] [1mInitialized MovingAverageCalculator[0m [[0m[1m[34malmanak.framework.data.indicators.moving_averages[0m][0m
+  Providers injected into strategy (RSI + MACD/Bollinger/Stochastic/ATR/SMA/EMA)
+  Using gateway-backed state manager
+[2m2026-02-26T13:07:07.279055Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:07.279258Z[0m [[32m[1minfo     [0m] [1mHOT tier (in-memory cache) initialized[0m [[0m[1m[34malmanak.framework.state.state_manager[0m][0m
+[2m2026-02-26T13:07:07.281052Z[0m [[32m[1minfo     [0m] [1mSQLite store initialized: ./almanak_state.db (WAL: True)[0m [[0m[1m[34malmanak.framework.state.backends.sqlite[0m][0m
+[2m2026-02-26T13:07:07.281118Z[0m [[32m[1minfo     [0m] [1mWARM tier (SQLite) initialized: ./almanak_state.db[0m [[0m[1m[34malmanak.framework.state.state_manager[0m][0m
+[2m2026-02-26T13:07:07.281247Z[0m [[32m[1minfo     [0m] [1mStateService initialized with 2 backend[0m [[0m[1m[34malmanak.gateway.services.state_service[0m][0m
+  No previous state found (fresh start)
+[2m2026-02-26T13:07:07.281935Z[0m [[32m[1minfo     [0m] [1mStrategyRunner initialized (single-chain mode) with config: interval=60s, dry_run=False, session_store=disabled[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+Components initialized successfully
+
+Running single iteration...
+
+[2m2026-02-26T13:07:07.282052Z[0m [[32m[1mdebug    [0m] [1mEnabled gateway dual-write for timeline events[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:07.282245Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:07.282808Z[0m [[32m[1minfo     [0m] [1mRe-registered strategy instance: AerodromeLPStrategy (AerodromeLPStrategy)[0m [[0m[1m[34malmanak.gateway.registry.store[0m][0m
+[2m2026-02-26T13:07:07.282945Z[0m [[32m[1minfo     [0m] [1mRe-registered strategy instance with gateway: AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:07.282986Z[0m [[32m[1minfo     [0m] [1mStarting iteration for strategy: AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:07.283117Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:07.283770Z[0m [[32m[1mdebug    [0m] [1mInitialized teardown state database at almanak_state.db[0m [[0m[1m[34malmanak.framework.teardown.state_manager[0m][0m
+[2m2026-02-26T13:07:07.284012Z[0m [[32m[1mdebug    [0m] [1mCreated market snapshot for AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:07.285075Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:07.285249Z[0m [[32m[1minfo     [0m] [1mInitialized CoinGeckoPriceSource[0m [[0m[1m[34malmanak.gateway.data.price.coingecko[0m][0m
+[2m2026-02-26T13:07:07.285886Z[0m [[32m[1mdebug    [0m] [1mLoaded 82 tokens from disk cache[0m [[0m[1m[34malmanak.framework.data.tokens.cache[0m][0m
+[2m2026-02-26T13:07:07.285950Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.286011Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.286088Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.286128Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321053Z[0m [[33m[1mwarning  [0m] [1mtoken_resolution_error token=BTC chain=arbitrum error_type=TokenNotFoundError detail=Cannot resolve token 'BTC' on arbitrum: Symbol 'BTC' not found in registry for arbitrum. Suggestions: Did you mean 'WBTC'?; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain latency_ms=0.022[0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321206Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321248Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321291Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321322Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321357Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321383Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321416Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321443Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321477Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321504Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321534Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321561Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321591Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321618Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321649Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321675Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321708Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321735Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321792Z[0m [[33m[1mwarning  [0m] [1mtoken_resolution_error token=STETH chain=arbitrum error_type=TokenNotFoundError detail=Cannot resolve token 'STETH' on arbitrum: Symbol 'STETH' not found in registry for arbitrum. Suggestions: Did you mean 'WSTETH'?; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain latency_ms=0.022[0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321835Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321862Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321892Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321918Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321954Z[0m [[33m[1mwarning  [0m] [1mtoken_resolution_error token=RDNT chain=arbitrum error_type=TokenNotFoundError detail=Cannot resolve token 'RDNT' on arbitrum: Symbol 'RDNT' not found in registry for arbitrum. Suggestions: Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain latency_ms=0.009[0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.321997Z[0m [[33m[1mwarning  [0m] [1mtoken_resolution_error token=MAGIC chain=arbitrum error_type=TokenNotFoundError detail=Cannot resolve token 'MAGIC' on arbitrum: Symbol 'MAGIC' not found in registry for arbitrum. Suggestions: Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain latency_ms=0.008[0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.322032Z[0m [[33m[1mwarning  [0m] [1mtoken_resolution_error token=WOO chain=arbitrum error_type=TokenNotFoundError detail=Cannot resolve token 'WOO' on arbitrum: Symbol 'WOO' not found in registry for arbitrum. Suggestions: Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain latency_ms=0.008[0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:07.322072Z[0m [[32m[1minfo     [0m] [1mMarketService: CoinGecko (primary) + on-chain (fallback), chain=arbitrum[0m [[0m[1m[34malmanak.gateway.services.market_service[0m][0m
+[2m2026-02-26T13:07:07.322109Z[0m [[32m[1minfo     [0m] [1mInitialized PriceAggregator   [0m [[0m[1m[34malmanak.gateway.data.price.aggregator[0m][0m
+[2m2026-02-26T13:07:07.322138Z[0m [[32m[1mdebug    [0m] [1mGetting aggregated price for WETH/USD from 2 sources[0m [[0m[1m[34malmanak.gateway.data.price.aggregator[0m][0m
+[2m2026-02-26T13:07:07.385991Z[0m [[32m[1mdebug    [0m] [1mChainlink ETH/USD: price=2069.13676351, confidence=0.95, age=75s[0m [[0m[1m[34malmanak.gateway.data.price.onchain[0m][0m
+[2m2026-02-26T13:07:07.701195Z[0m [[32m[1mdebug    [0m] [1mFetched price for WETH/USD: 2067.43 (latency: 378.84ms)[0m [[0m[1m[34malmanak.gateway.data.price.coingecko[0m][0m
+[2m2026-02-26T13:07:07.701425Z[0m [[32m[1minfo     [0m] [1mAggregated price for WETH/USD: 2068.283381755 (confidence: 1.00, sources: 2/2, outliers: 0)[0m [[0m[1m[34malmanak.gateway.data.price.aggregator[0m][0m
+[2m2026-02-26T13:07:07.702121Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:07.702315Z[0m [[32m[1mdebug    [0m] [1mGetting aggregated price for USDC/USD from 2 sources[0m [[0m[1m[34malmanak.gateway.data.price.aggregator[0m][0m
+[2m2026-02-26T13:07:08.042510Z[0m [[32m[1mdebug    [0m] [1mFetched price for USDC/USD: 0.999907 (latency: 339.76ms)[0m [[0m[1m[34malmanak.gateway.data.price.coingecko[0m][0m
+[2m2026-02-26T13:07:08.043114Z[0m [[32m[1minfo     [0m] [1mAggregated price for USDC/USD: 0.9999534999999999 (confidence: 1.00, sources: 2/2, outliers: 0)[0m [[0m[1m[34malmanak.gateway.data.price.aggregator[0m][0m
+[2m2026-02-26T13:07:08.044008Z[0m [[32m[1mdebug    [0m] [1mCurrent price: 2068.3796 USDC/WETH[0m [[0m[1m[34mstrategy_module[0m][0m
+[2m2026-02-26T13:07:08.044172Z[0m [[32m[1minfo     [0m] [1mForced action: OPEN LP position[0m [[0m[1m[34mstrategy_module[0m][0m
+[2m2026-02-26T13:07:08.044404Z[0m [[32m[1minfo     [0m] [1m💧 LP_OPEN: 0.0010 WETH + 0.0400 USDC, pool_type=volatile[0m [[0m[1m[34mstrategy_module[0m][0m
+[2m2026-02-26T13:07:08.044807Z[0m [[32m[1minfo     [0m] [1m📈 AerodromeLPStrategy intent: 🏊 LP_OPEN: WETH/USDC/volatile (0.001, 0.04) [1 - 1000000] via aerodrome[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:08.044929Z[0m [[32m[1mdebug    [0m] [1mUsing GatewayExecutionOrchestrator - RPC queries go through gateway[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:08.045011Z[0m [[32m[1mdebug    [0m] [1mUsing real prices from market snapshot: ['WETH', 'USDC'][0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:08.045180Z[0m [[32m[1minfo     [0m] [1mIntentCompiler initialized for chain=base, wallet=0x0738Ea64..., protocol=uniswap_v3, using_placeholders=False[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:07:08.045498Z[0m [[32m[1mdebug    [0m] [1mState transition: IDLE -> PREPARING_LP_OPEN (intent=40affdda-8cb0-4e4d-beb9-37a9d0fc39c0, duration=0.00ms)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:07:08.045656Z[0m [[32m[1mdebug    [0m] [1mState transition: IDLE -> PREPARING_LP_OPEN (intent=40affdda-8cb0-4e4d-beb9-37a9d0fc39c0)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:07:08.045806Z[0m [[32m[1minfo     [0m] [1mCreated IntentStateMachine for AerodromeLPStrategy (intent=40affdda-8cb0-4e4d-beb9-37a9d0fc39c0, max_retries=3)[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:08.046051Z[0m [[32m[1minfo     [0m] [1mCompiling Aerodrome LP_OPEN: WETH/USDC, stable=False, amounts=0.001/0.04[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:07:08.046298Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.046516Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.046769Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.046893Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.050190Z[0m [[32m[1mdebug    [0m] [1mFetched RPC URL for base from gateway utils[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:07:08.110261Z[0m [[32m[1mdebug    [0m] [1mFetched RPC URL for base from gateway utils[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:07:08.114009Z[0m [[32m[1minfo     [0m] [1mAerodromeSDK initialized for chain=base[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.sdk[0m][0m
+[2m2026-02-26T13:07:08.114361Z[0m [[32m[1minfo     [0m] [1mAerodromeAdapter initialized for chain=base, wallet=0x0738Ea64..., using_placeholders=False[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.adapter[0m][0m
+[2m2026-02-26T13:07:08.114602Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.114854Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.115163Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.115331Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.115478Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.115602Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.115736Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.115854Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.116000Z[0m [[32m[1mdebug    [0m] [1mAerodrome add liquidity: amount_a_min=0, amount_b_min=0 (set to 0 for LP operations)[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.adapter[0m][0m
+[2m2026-02-26T13:07:08.116211Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.116332Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.116505Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.116621Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.116813Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.116928Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.117051Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.117165Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:08.117293Z[0m [[32m[1minfo     [0m] [1mBuilt add liquidity: WETH/USDC stable=False, transactions=3[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.adapter[0m][0m
+[2m2026-02-26T13:07:08.117497Z[0m [[32m[1minfo     [0m] [1mCompiled Aerodrome LP_OPEN intent: WETH/USDC, stable=False, 3 txs, 312000 gas[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:07:08.117929Z[0m [[32m[1mdebug    [0m] [1mState transition: PREPARING_LP_OPEN -> VALIDATING_LP_OPEN (intent=40affdda-8cb0-4e4d-beb9-37a9d0fc39c0, duration=71.87ms)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:07:08.118335Z[0m [[32m[1mdebug    [0m] [1mState transition: PREPARING_LP_OPEN -> VALIDATING_LP_OPEN (intent=40affdda-8cb0-4e4d-beb9-37a9d0fc39c0)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:07:08.119939Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:08.120527Z[0m [[32m[1minfo     [0m] [1mExecutionService initialized  [0m [[0m[1m[34malmanak.gateway.services.execution_service[0m][0m
+[2m2026-02-26T13:07:08.125902Z[0m [[32m[1mdebug    [0m] [1mLocalKeySigner initialized for address 0x0738Ea642faA28fFc588717625e45F3078fDBAC9[0m [[0m[1m[34malmanak.framework.execution.signer.local[0m][0m
+[2m2026-02-26T13:07:08.126247Z[0m [[32m[1minfo     [0m] [1mPublicMempoolSubmitter initialized: rpc=https://base-mainnet.g.alchemy.com/v2/***, max_retries=3, timeout=120.0s[0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:08.127936Z[0m [[32m[1minfo     [0m] [1mAlchemySimulator initialized: timeout=10.0s, supported_chains=['arbitrum', 'base', 'ethereum', 'optimism'][0m [[0m[1m[34malmanak.framework.execution.simulator.alchemy[0m][0m
+[2m2026-02-26T13:07:08.128081Z[0m [[32m[1minfo     [0m] [1mCreated AlchemySimulator as primary (no Tenderly)[0m [[0m[1m[34malmanak.framework.execution.simulator[0m][0m
+[2m2026-02-26T13:07:08.128181Z[0m [[32m[1minfo     [0m] [1mLocalSimulator initialized    [0m [[0m[1m[34malmanak.framework.execution.simulator.local[0m][0m
+[2m2026-02-26T13:07:08.128258Z[0m [[32m[1minfo     [0m] [1mCreated LocalSimulator as fallback (eth_estimateGas)[0m [[0m[1m[34malmanak.framework.execution.simulator[0m][0m
+[2m2026-02-26T13:07:08.128335Z[0m [[32m[1minfo     [0m] [1mUsing FallbackSimulator: primary=alchemy, fallbacks=['local_fallback'][0m [[0m[1m[34malmanak.framework.execution.simulator[0m][0m
+[2m2026-02-26T13:07:08.128412Z[0m [[32m[1minfo     [0m] [1mFallbackSimulator initialized: primary=alchemy, fallbacks=['local_fallback'][0m [[0m[1m[34malmanak.framework.execution.simulator.fallback[0m][0m
+[2m2026-02-26T13:07:08.128562Z[0m [[32m[1minfo     [0m] [1mExecutionOrchestrator initialized: chain=base, wallet=0x0738Ea64..., gas_buffer=1.5x, session_store=disabled[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:08.131056Z[0m [[32m[1mdebug    [0m] [1mBuilding 3 unsigned transactions for chain base[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:08.252274Z[0m [[33m[1mwarning  [0m] [1mGas estimate tx[0]: raw=26,786 buffered=40,179 (x1.5) < compiler=69,000, using compiler limit[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:08.367125Z[0m [[33m[1mwarning  [0m] [1mGas estimate tx[1]: raw=39,052 buffered=58,578 (x1.5) < compiler=69,000, using compiler limit[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:08.481356Z[0m [[33m[1mwarning  [0m] [1mGas estimate tx[2]: raw=194,618 buffered=291,927 (x1.5) < compiler=330,000, using compiler limit[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:08.482981Z[0m [[32m[1mdebug    [0m] [1mPersisted 80 events to /Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/.dashboard_events.json[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:10.490009Z[0m [[32m[1mdebug    [0m] [1mFailed to send event to gateway (non-fatal): <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.DEADLINE_EXCEEDED
+	details = "Deadline Exceeded"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_message:"Deadline Exceeded", grpc_status:4}"
+>[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:10.490585Z[0m [[32m[1mdebug    [0m] [1mEvent emitted: VALIDATING for AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:10.490920Z[0m [[32m[1mdebug    [0m] [1mRisk guard passed: 3 txs, value=0.0000 ETH, daily_total=0.0000 ETH[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:10.492381Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:10.493858Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.ObserveService/RecordTimelineEvent][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:10.573094Z[0m [[32m[1mdebug    [0m] [1mUpdating gas prices: max_fee=0.0167 gwei, priority_fee=0.0010 gwei[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:10.753361Z[0m [[32m[1mdebug    [0m] [1mAssigned nonces 110 to 112 (chain=110, local=0)[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:10.754697Z[0m [[32m[1mdebug    [0m] [1mPersisted 81 events to /Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/.dashboard_events.json[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:12.759141Z[0m [[32m[1mdebug    [0m] [1mFailed to send event to gateway (non-fatal): <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.DEADLINE_EXCEEDED
+	details = "Deadline Exceeded"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_status:4, grpc_message:"Deadline Exceeded"}"
+>[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:12.759531Z[0m [[32m[1mdebug    [0m] [1mEvent emitted: SIGNING for AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:12.768019Z[0m [[32m[1mdebug    [0m] [1mTransaction signed: hash=0xe7aa58008b592a..., chain=base, to=0x42000000000000...[0m [[0m[1m[34malmanak.framework.execution.signer.local[0m][0m
+[2m2026-02-26T13:07:12.774932Z[0m [[32m[1mdebug    [0m] [1mTransaction signed: hash=0x690d5dfe27e6ee..., chain=base, to=0x833589fCD6eDb6...[0m [[0m[1m[34malmanak.framework.execution.signer.local[0m][0m
+[2m2026-02-26T13:07:12.781157Z[0m [[32m[1mdebug    [0m] [1mTransaction signed: hash=0x69dfce9b868c42..., chain=base, to=0xcF77a3Ba9A5CA3...[0m [[0m[1m[34malmanak.framework.execution.signer.local[0m][0m
+[2m2026-02-26T13:07:12.783468Z[0m [[32m[1mdebug    [0m] [1mPersisted 82 events to /Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/.dashboard_events.json[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:14.791501Z[0m [[32m[1mdebug    [0m] [1mFailed to send event to gateway (non-fatal): <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.DEADLINE_EXCEEDED
+	details = "Deadline Exceeded"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_status:4, grpc_message:"Deadline Exceeded"}"
+>[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:14.791946Z[0m [[32m[1mdebug    [0m] [1mEvent emitted: SUBMITTING for AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:14.792154Z[0m [[32m[1minfo     [0m] [1mUsing sequential submit for 3 TXs (avoids RPC in-flight limits)[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:14.792457Z[0m [[32m[1minfo     [0m] [1mSequential submit: TX 1/3     [0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:14.796076Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:14.796613Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:14.796876Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.ObserveService/RecordTimelineEvent][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:14.797066Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.ObserveService/RecordTimelineEvent][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:15.492231Z[0m [[32m[1minfo     [0m] [1mTransaction submitted: tx_hash=e7aa58008b592acaa7922c60dd90f551efcf33d0f3d3de30d5eee6659201c7f1, latency=698.4ms[0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:15.492522Z[0m [[32m[1minfo     [0m] [1mWaiting for receipt: tx_hash=e7aa58008b592acaa7922c60dd90f551efcf33d0f3d3de30d5eee6659201c7f1, timeout=120.0s[0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:17.642441Z[0m [[32m[1minfo     [0m] [1mTransaction confirmed: tx_hash=e7aa58008b592acaa7922c60dd90f551efcf33d0f3d3de30d5eee6659201c7f1, block=42660945, gas_used=26443[0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:17.642652Z[0m [[32m[1minfo     [0m] [1mSequential submit: TX 1/3 confirmed (block=42660945, gas=26443)[0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:17.642742Z[0m [[32m[1minfo     [0m] [1mSequential submit: TX 2/3     [0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:18.293707Z[0m [[32m[1minfo     [0m] [1mTransaction submitted: tx_hash=690d5dfe27e6ee79da6bb877a9a111d5bbeb4e3337d2b5c0d652ce12ee0793ba, latency=650.6ms[0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:18.294318Z[0m [[32m[1minfo     [0m] [1mWaiting for receipt: tx_hash=690d5dfe27e6ee79da6bb877a9a111d5bbeb4e3337d2b5c0d652ce12ee0793ba, timeout=120.0s[0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:19.639158Z[0m [[32m[1minfo     [0m] [1mTransaction confirmed: tx_hash=690d5dfe27e6ee79da6bb877a9a111d5bbeb4e3337d2b5c0d652ce12ee0793ba, block=42660946, gas_used=38685[0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:19.639342Z[0m [[32m[1minfo     [0m] [1mSequential submit: TX 2/3 confirmed (block=42660946, gas=38685)[0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:19.639417Z[0m [[32m[1minfo     [0m] [1mSequential submit: TX 3/3     [0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:20.563929Z[0m [[32m[1minfo     [0m] [1mTransaction submitted: tx_hash=69dfce9b868c4209f01d83d7b24f329e4dc2ace46e1447ef8fda0121747a5e41, latency=924.3ms[0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:20.564421Z[0m [[32m[1minfo     [0m] [1mWaiting for receipt: tx_hash=69dfce9b868c4209f01d83d7b24f329e4dc2ace46e1447ef8fda0121747a5e41, timeout=120.0s[0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:21.701821Z[0m [[32m[1minfo     [0m] [1mTransaction confirmed: tx_hash=69dfce9b868c4209f01d83d7b24f329e4dc2ace46e1447ef8fda0121747a5e41, block=42660947, gas_used=199679[0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:21.701927Z[0m [[32m[1minfo     [0m] [1mSequential submit: TX 3/3 confirmed (block=42660947, gas=199679)[0m [[0m[1m[34malmanak.framework.execution.submitter.public[0m][0m
+[2m2026-02-26T13:07:21.703466Z[0m [[32m[1mdebug    [0m] [1mPersisted 83 events to /Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/.dashboard_events.json[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:23.706782Z[0m [[32m[1mdebug    [0m] [1mFailed to send event to gateway (non-fatal): <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.DEADLINE_EXCEEDED
+	details = "Deadline Exceeded"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_message:"Deadline Exceeded", grpc_status:4}"
+>[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:23.706912Z[0m [[32m[1mdebug    [0m] [1mEvent emitted: TX_SENT for AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:23.708242Z[0m [[32m[1mdebug    [0m] [1mPersisted 84 events to /Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/.dashboard_events.json[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:25.713131Z[0m [[32m[1mdebug    [0m] [1mFailed to send event to gateway (non-fatal): <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.DEADLINE_EXCEEDED
+	details = "Deadline Exceeded"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_message:"Deadline Exceeded", grpc_status:4}"
+>[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:25.713343Z[0m [[32m[1mdebug    [0m] [1mEvent emitted: TX_SENT for AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:25.716069Z[0m [[32m[1mdebug    [0m] [1mPersisted 85 events to /Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/.dashboard_events.json[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:27.720935Z[0m [[32m[1mdebug    [0m] [1mFailed to send event to gateway (non-fatal): <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.DEADLINE_EXCEEDED
+	details = "Deadline Exceeded"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_status:4, grpc_message:"Deadline Exceeded"}"
+>[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:27.721432Z[0m [[32m[1mdebug    [0m] [1mEvent emitted: TX_SENT for AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:27.722780Z[0m [[32m[1mdebug    [0m] [1mPersisted 86 events to /Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/.dashboard_events.json[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:29.725390Z[0m [[32m[1mdebug    [0m] [1mFailed to send event to gateway (non-fatal): <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.DEADLINE_EXCEEDED
+	details = "Deadline Exceeded"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_status:4, grpc_message:"Deadline Exceeded"}"
+>[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:29.725603Z[0m [[32m[1mdebug    [0m] [1mEvent emitted: TX_CONFIRMED for AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:29.728021Z[0m [[32m[1mdebug    [0m] [1mPersisted 87 events to /Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/.dashboard_events.json[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:31.732832Z[0m [[32m[1mdebug    [0m] [1mFailed to send event to gateway (non-fatal): <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.DEADLINE_EXCEEDED
+	details = "Deadline Exceeded"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_message:"Deadline Exceeded", grpc_status:4}"
+>[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:31.732968Z[0m [[32m[1mdebug    [0m] [1mEvent emitted: TX_CONFIRMED for AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:31.734384Z[0m [[32m[1mdebug    [0m] [1mPersisted 88 events to /Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/.dashboard_events.json[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:33.740116Z[0m [[32m[1mdebug    [0m] [1mFailed to send event to gateway (non-fatal): <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.DEADLINE_EXCEEDED
+	details = "Deadline Exceeded"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_status:4, grpc_message:"Deadline Exceeded"}"
+>[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:33.740236Z[0m [[32m[1mdebug    [0m] [1mEvent emitted: TX_CONFIRMED for AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:33.742983Z[0m [[32m[1mdebug    [0m] [1mPersisted 89 events to /Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/.dashboard_events.json[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:35.750826Z[0m [[32m[1mdebug    [0m] [1mFailed to send event to gateway (non-fatal): <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.DEADLINE_EXCEEDED
+	details = "Deadline Exceeded"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_status:4, grpc_message:"Deadline Exceeded"}"
+>[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:35.751401Z[0m [[32m[1mdebug    [0m] [1mEvent emitted: EXECUTION_SUCCESS for AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:35.751532Z[0m [[32m[1minfo     [0m] [1m✅ EXECUTED: LP_OPEN completed successfully[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:35.751596Z[0m [[32m[1minfo     [0m] [1m   Txs: 3 (e7aa58...c7f1, 690d5d...93ba, 69dfce...5e41) | 264,807 gas[0m [[0m[1m[34malmanak.framework.execution.orchestrator[0m][0m
+[2m2026-02-26T13:07:35.752524Z[0m [[32m[1minfo     [0m] [1mExecution successful for AerodromeLPStrategy: gas_used=264807, tx_count=3[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:35.752666Z[0m [[32m[1mdebug    [0m] [1mState transition: VALIDATING_LP_OPEN -> COMPLETED (intent=40affdda-8cb0-4e4d-beb9-37a9d0fc39c0, duration=0.02ms)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:07:35.752717Z[0m [[32m[1mdebug    [0m] [1mState transition: VALIDATING_LP_OPEN -> COMPLETED (intent=40affdda-8cb0-4e4d-beb9-37a9d0fc39c0)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:07:35.752802Z[0m [[32m[1mdebug    [0m] [1mInvalidated all cached balances[0m [[0m[1m[34malmanak.framework.data.balance.gateway_provider[0m][0m
+[2m2026-02-26T13:07:35.752901Z[0m [[32m[1mdebug    [0m] [1mInitialized EventRegistry with 6 event types[0m [[0m[1m[34malmanak.framework.connectors.base.registry[0m][0m
+[2m2026-02-26T13:07:35.753025Z[0m [[32m[1minfo     [0m] [1m🔍 Parsed Aerodrome receipt: tx=N/A, events=1, 0 gas[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.receipt_parser[0m][0m
+[2m2026-02-26T13:07:35.753096Z[0m [[32m[1minfo     [0m] [1m🔍 Parsed Aerodrome receipt: tx=N/A, events=1, 0 gas[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.receipt_parser[0m][0m
+[2m2026-02-26T13:07:35.753206Z[0m [[32m[1minfo     [0m] [1m🔍 Parsed Aerodrome add liquidity: token0/token1, tx=N/A, 0 gas[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.receipt_parser[0m][0m
+[2m2026-02-26T13:07:35.753257Z[0m [[32m[1minfo     [0m] [1mEnriched LP_OPEN result with: liquidity (protocol=aerodrome, chain=base)[0m [[0m[1m[34malmanak.framework.execution.result_enricher[0m][0m
+[2m2026-02-26T13:07:35.753805Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.754124Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.754228Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.754560Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.ObserveService/RecordTimelineEvent][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.754743Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.754923Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.ObserveService/RecordTimelineEvent][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.755129Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.755201Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.ObserveService/RecordTimelineEvent][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.755339Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.ObserveService/RecordTimelineEvent][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.755382Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.755441Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.ObserveService/RecordTimelineEvent][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.755478Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.755552Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.ObserveService/RecordTimelineEvent][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.755605Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.ObserveService/RecordTimelineEvent][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.755754Z[0m [[32m[1mdebug    [0m] [1mPersisted 90 events to /Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/.dashboard_events.json[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:35.756119Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.758325Z[0m [[32m[1mdebug    [0m] [1mAdded timeline event: LP_OPEN for AerodromeLPStrategy[0m [[0m[1m[34malmanak.gateway.timeline.store[0m][0m
+[2m2026-02-26T13:07:35.758393Z[0m [[32m[1minfo     [0m] [1mRecorded timeline event: LP_OPEN for AerodromeLPStrategy[0m [[0m[1m[34malmanak.gateway.services.observe_service[0m][0m
+[2m2026-02-26T13:07:35.758645Z[0m [[32m[1minfo     [0m] [1mAerodrome LP position opened successfully[0m [[0m[1m[34mstrategy_module[0m][0m
+[2m2026-02-26T13:07:35.760245Z[0m [[32m[1mdebug    [0m] [1mPersisted 91 events to /Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/.dashboard_events.json[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:07:35.760604Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.761350Z[0m [[32m[1mdebug    [0m] [1mAdded timeline event: POSITION_OPENED for AerodromeLPStrategy[0m [[0m[1m[34malmanak.gateway.timeline.store[0m][0m
+[2m2026-02-26T13:07:35.761401Z[0m [[32m[1minfo     [0m] [1mRecorded timeline event: POSITION_OPENED for AerodromeLPStrategy[0m [[0m[1m[34malmanak.gateway.services.observe_service[0m][0m
+[2m2026-02-26T13:07:35.761677Z[0m [[32m[1mdebug    [0m] [1mSaved state for AerodromeLPStrategy: ['has_position', 'lp_token_balance'][0m [[0m[1m[34malmanak.framework.strategies.intent_strategy[0m][0m
+[2m2026-02-26T13:07:35.761797Z[0m [[33m[1mwarning  [0m] [1mAmount chaining: no output amount extracted from step 1; subsequent amount='all' steps will fail[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+
+Teardown requested -- closing positions...
+[2m2026-02-26T13:07:35.762852Z[0m [[32m[1minfo     [0m] [1mCreated teardown request for AerodromeLPStrategy: mode=SOFT, by=cli[0m [[0m[1m[34malmanak.framework.teardown.state_manager[0m][0m
+[2m2026-02-26T13:07:35.762906Z[0m [[32m[1minfo     [0m] [1mStarting iteration for strategy: AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:35.763101Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.764251Z[0m [[32m[1minfo     [0m] [1mFound active teardown request for AerodromeLPStrategy: mode=SOFT, status=pending[0m [[0m[1m[34malmanak.framework.strategies.intent_strategy[0m][0m
+[2m2026-02-26T13:07:35.765001Z[0m [[32m[1mdebug    [0m] [1mUpdated teardown request for AerodromeLPStrategy: status=cancel_window[0m [[0m[1m[34malmanak.framework.teardown.state_manager[0m][0m
+[2m2026-02-26T13:07:35.765049Z[0m [[32m[1minfo     [0m] [1mAcknowledged teardown request for AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.teardown.state_manager[0m][0m
+[2m2026-02-26T13:07:35.765078Z[0m [[32m[1minfo     [0m] [1mAcknowledged teardown request for AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:35.765418Z[0m [[32m[1minfo     [0m] [1mTeardown requested for AerodromeLPStrategy (mode=SOFT)[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:35.765679Z[0m [[32m[1mdebug    [0m] [1mCreated market snapshot for teardown with prices: [][0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:35.765717Z[0m [[32m[1minfo     [0m] [1mGenerating teardown intent for Aerodrome LP position (mode=SOFT)[0m [[0m[1m[34mstrategy_module[0m][0m
+[2m2026-02-26T13:07:35.765832Z[0m [[32m[1minfo     [0m] [1m🛑 AerodromeLPStrategy entering TEARDOWN mode (1 intents to execute)[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:35.766609Z[0m [[32m[1mdebug    [0m] [1mUpdated teardown request for AerodromeLPStrategy: status=executing[0m [[0m[1m[34malmanak.framework.teardown.state_manager[0m][0m
+[2m2026-02-26T13:07:35.766672Z[0m [[32m[1minfo     [0m] [1mStarted teardown for AerodromeLPStrategy: 1 positions[0m [[0m[1m[34malmanak.framework.teardown.state_manager[0m][0m
+[2m2026-02-26T13:07:35.766761Z[0m [[32m[1minfo     [0m] [1m🛑 Executing teardown intent 1/1: LP_CLOSE[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:35.766814Z[0m [[32m[1mdebug    [0m] [1mUsing GatewayExecutionOrchestrator - RPC queries go through gateway[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:35.766850Z[0m [[32m[1mdebug    [0m] [1mNo prices in market snapshot -- compiler will use placeholder prices. This is normal for strategies that use indicators instead of market.price().[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:35.766946Z[0m [[32m[1mdebug    [0m] [1mIntentCompiler created without price oracle, will use placeholders if not updated before compilation[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:07:35.766982Z[0m [[32m[1mdebug    [0m] [1mPLACEHOLDER PRICES being used - NOT SAFE FOR PRODUCTION. ETH=$2000 (real ~$3400), BTC=$45000 (real ~$105000)[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:07:35.767027Z[0m [[32m[1minfo     [0m] [1mIntentCompiler initialized for chain=base, wallet=0x0738Ea64..., protocol=uniswap_v3, using_placeholders=True[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:07:35.767094Z[0m [[32m[1mdebug    [0m] [1mState transition: IDLE -> PREPARING_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a, duration=0.00ms)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:07:35.767124Z[0m [[32m[1mdebug    [0m] [1mState transition: IDLE -> PREPARING_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:07:35.767153Z[0m [[32m[1minfo     [0m] [1mCreated IntentStateMachine for AerodromeLPStrategy (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a, max_retries=3)[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:07:35.767195Z[0m [[33m[1mwarning  [0m] [1mIntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT. This is only acceptable for unit tests.[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:07:35.767241Z[0m [[32m[1minfo     [0m] [1mCompiling Aerodrome LP_CLOSE: WETH/USDC, stable=False[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:07:35.767329Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:35.767393Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:35.767439Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:35.767475Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:35.767745Z[0m [[32m[1mdebug    [0m] [1mFetched RPC URL for base from gateway utils[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:07:35.770291Z[0m [[32m[1minfo     [0m] [1mAerodromeSDK initialized for chain=base[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.sdk[0m][0m
+[2m2026-02-26T13:07:35.770374Z[0m [[32m[1minfo     [0m] [1mAerodromeAdapter initialized for chain=base, wallet=0x0738Ea64..., using_placeholders=False[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.adapter[0m][0m
+[2m2026-02-26T13:07:35.852496Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:07:35.892868Z[0m [[32m[1minfo     [0m] [1mFound 3.450589263E-9 LP tokens (3450589263 wei) for Aerodrome pool[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:07:35.893102Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:35.893211Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:35.893314Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:35.893387Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:07:35.962482Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:08:05.968540Z[0m [[33m[1mwarning  [0m] [1mtoken_gateway_timeout         [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:05.969150Z[0m [[33m[1mwarning  [0m] [1mtoken_gateway_timeout         [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:05.969987Z[0m [[33m[1mwarning  [0m] [1mtoken_resolution_error token=0xcDAC0d6c6C59727a65F871236188350531885C43 chain=base error_type=TokenNotFoundError detail=Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain latency_ms=30006.727[0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:05.970387Z[0m [[33m[1mwarning  [0m] [1mtoken_resolution_error token=0xcDAC0d6c6C59727a65F871236188350531885C43 chain=base error_type=TokenNotFoundError detail=Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain latency_ms=30008.714[0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:05.971634Z[0m [[32m[1minfo     [0m] [1mInitialized OnChainLookup     [0m [[0m[1m[34malmanak.gateway.services.onchain_lookup[0m][0m
+[2m2026-02-26T13:08:05.972094Z[0m [[31m[1merror    [0m] [1mFailed to build remove liquidity: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.adapter[0m][0m
+Traceback (most recent call last):
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 1181, in _get_token_symbol
+    resolved = self._token_resolver.resolve(address, self.chain)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/data/tokens/resolver.py", line 395, in resolve
+    raise TokenNotFoundError(
+almanak.framework.data.tokens.exceptions.TokenNotFoundError: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 695, in remove_liquidity
+    approve_tx = self._build_approve_tx(
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 1047, in _build_approve_tx
+    token_symbol = self._get_token_symbol(token_address)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 1184, in _get_token_symbol
+    raise TokenResolutionError(
+almanak.framework.data.tokens.exceptions.TokenResolutionError: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain
+[2m2026-02-26T13:08:05.976990Z[0m [[32m[1mdebug    [0m] [1mCreated OnChainLookup for base (network=mainnet)[0m [[0m[1m[34malmanak.gateway.services.token_service[0m][0m
+[2m2026-02-26T13:08:05.978667Z[0m [[32m[1mdebug    [0m] [1mState transition: PREPARING_LP_CLOSE -> SADFLOW_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a, duration=30211.31ms)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:08:05.979319Z[0m [[32m[1mdebug    [0m] [1mState transition: PREPARING_LP_CLOSE -> SADFLOW_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:08:05.981898Z[0m [[33m[1mwarning  [0m] [1mStep error: Failed to build removeLiquidity TX: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain (retry 0/3)[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:08:05.983125Z[0m [[32m[1mdebug    [0m] [1mState transition: SADFLOW_LP_CLOSE -> PREPARING_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a, duration=0.22ms)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:08:05.983392Z[0m [[32m[1mdebug    [0m] [1mState transition: SADFLOW_LP_CLOSE -> PREPARING_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:08:05.983562Z[0m [[32m[1minfo     [0m] [1mRetrying intent 132271fb-e6c5-42d2-a8a9-007e4a81156a (attempt 1/3, delay=1.06s)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:08:05.983724Z[0m [[32m[1mdebug    [0m] [1mRetry delay: sleeping for 1.06s (attempt 1/3)[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:08:05.986056Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:08:05.987385Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.TokenService/GetTokenMetadata][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:08:05.987845Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:08:05.988099Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.TokenService/GetTokenMetadata][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:08:07.043598Z[0m [[32m[1minfo     [0m] [1mCompiling Aerodrome LP_CLOSE: WETH/USDC, stable=False[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:08:07.043981Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:07.044248Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:07.044492Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:07.044681Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:07.044917Z[0m [[32m[1mdebug    [0m] [1mFetched RPC URL for base from gateway utils[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:08:07.049484Z[0m [[32m[1minfo     [0m] [1mAerodromeSDK initialized for chain=base[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.sdk[0m][0m
+[2m2026-02-26T13:08:07.049673Z[0m [[32m[1minfo     [0m] [1mAerodromeAdapter initialized for chain=base, wallet=0x0738Ea64..., using_placeholders=False[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.adapter[0m][0m
+[2m2026-02-26T13:08:07.133820Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:08:07.174014Z[0m [[32m[1minfo     [0m] [1mFound 3.450589263E-9 LP tokens (3450589263 wei) for Aerodrome pool[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:08:07.174327Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:07.174633Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:07.174918Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:07.175011Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:07.252556Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:08:37.263087Z[0m [[33m[1mwarning  [0m] [1mtoken_gateway_timeout         [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:37.264305Z[0m [[33m[1mwarning  [0m] [1mtoken_gateway_timeout         [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:37.265155Z[0m [[33m[1mwarning  [0m] [1mtoken_resolution_error token=0xcDAC0d6c6C59727a65F871236188350531885C43 chain=base error_type=TokenNotFoundError detail=Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain latency_ms=30011.760[0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:37.265464Z[0m [[33m[1mwarning  [0m] [1mtoken_resolution_error token=0xcDAC0d6c6C59727a65F871236188350531885C43 chain=base error_type=TokenNotFoundError detail=Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain latency_ms=30013.379[0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:37.276627Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:08:37.277079Z[0m [[31m[1merror    [0m] [1mFailed to build remove liquidity: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.adapter[0m][0m
+Traceback (most recent call last):
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 1181, in _get_token_symbol
+    resolved = self._token_resolver.resolve(address, self.chain)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/data/tokens/resolver.py", line 395, in resolve
+    raise TokenNotFoundError(
+almanak.framework.data.tokens.exceptions.TokenNotFoundError: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 695, in remove_liquidity
+    approve_tx = self._build_approve_tx(
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 1047, in _build_approve_tx
+    token_symbol = self._get_token_symbol(token_address)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 1184, in _get_token_symbol
+    raise TokenResolutionError(
+almanak.framework.data.tokens.exceptions.TokenResolutionError: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain
+[2m2026-02-26T13:08:37.278532Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.TokenService/GetTokenMetadata][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:08:37.279220Z[0m [[32m[1mdebug    [0m] [1mState transition: PREPARING_LP_CLOSE -> SADFLOW_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a, duration=30235.89ms)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:08:37.279631Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.TokenService/GetTokenMetadata][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:08:37.279771Z[0m [[32m[1mdebug    [0m] [1mState transition: PREPARING_LP_CLOSE -> SADFLOW_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:08:37.280789Z[0m [[33m[1mwarning  [0m] [1mStep error: Failed to build removeLiquidity TX: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain (retry 1/3)[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:08:37.281138Z[0m [[32m[1mdebug    [0m] [1mState transition: SADFLOW_LP_CLOSE -> PREPARING_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a, duration=0.17ms)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:08:37.281231Z[0m [[32m[1mdebug    [0m] [1mState transition: SADFLOW_LP_CLOSE -> PREPARING_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:08:37.281298Z[0m [[32m[1minfo     [0m] [1mRetrying intent 132271fb-e6c5-42d2-a8a9-007e4a81156a (attempt 2/3, delay=2.20s)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:08:37.281375Z[0m [[32m[1mdebug    [0m] [1mRetry delay: sleeping for 2.20s (attempt 2/3)[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:08:39.481253Z[0m [[32m[1minfo     [0m] [1mCompiling Aerodrome LP_CLOSE: WETH/USDC, stable=False[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:08:39.481697Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:39.481904Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:39.482144Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:39.482288Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:39.482603Z[0m [[32m[1mdebug    [0m] [1mFetched RPC URL for base from gateway utils[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:08:39.486844Z[0m [[32m[1minfo     [0m] [1mAerodromeSDK initialized for chain=base[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.sdk[0m][0m
+[2m2026-02-26T13:08:39.487158Z[0m [[32m[1minfo     [0m] [1mAerodromeAdapter initialized for chain=base, wallet=0x0738Ea64..., using_placeholders=False[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.adapter[0m][0m
+[2m2026-02-26T13:08:39.602798Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:08:39.636521Z[0m [[32m[1minfo     [0m] [1mFound 3.450589263E-9 LP tokens (3450589263 wei) for Aerodrome pool[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:08:39.636793Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:39.636926Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:39.637033Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:39.637120Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:08:39.719327Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:09:09.726409Z[0m [[33m[1mwarning  [0m] [1mtoken_gateway_timeout         [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:09.727274Z[0m [[33m[1mwarning  [0m] [1mtoken_gateway_timeout         [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:09.727604Z[0m [[33m[1mwarning  [0m] [1mtoken_resolution_error token=0xcDAC0d6c6C59727a65F871236188350531885C43 chain=base error_type=TokenNotFoundError detail=Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain latency_ms=30009.288[0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:09.727757Z[0m [[33m[1mwarning  [0m] [1mtoken_resolution_error token=0xcDAC0d6c6C59727a65F871236188350531885C43 chain=base error_type=TokenNotFoundError detail=Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain latency_ms=30007.938[0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:09.727935Z[0m [[31m[1merror    [0m] [1mFailed to build remove liquidity: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.adapter[0m][0m
+Traceback (most recent call last):
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 1181, in _get_token_symbol
+    resolved = self._token_resolver.resolve(address, self.chain)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/data/tokens/resolver.py", line 395, in resolve
+    raise TokenNotFoundError(
+almanak.framework.data.tokens.exceptions.TokenNotFoundError: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 695, in remove_liquidity
+    approve_tx = self._build_approve_tx(
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 1047, in _build_approve_tx
+    token_symbol = self._get_token_symbol(token_address)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 1184, in _get_token_symbol
+    raise TokenResolutionError(
+almanak.framework.data.tokens.exceptions.TokenResolutionError: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain
+[2m2026-02-26T13:09:09.734647Z[0m [[32m[1mdebug    [0m] [1mState transition: PREPARING_LP_CLOSE -> SADFLOW_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a, duration=30253.56ms)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:09:09.734877Z[0m [[32m[1mdebug    [0m] [1mState transition: PREPARING_LP_CLOSE -> SADFLOW_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:09:09.735084Z[0m [[33m[1mwarning  [0m] [1mStep error: Failed to build removeLiquidity TX: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain (retry 2/3)[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:09:09.735334Z[0m [[32m[1mdebug    [0m] [1mState transition: SADFLOW_LP_CLOSE -> PREPARING_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a, duration=0.11ms)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:09:09.736200Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:09:09.736301Z[0m [[32m[1mdebug    [0m] [1mState transition: SADFLOW_LP_CLOSE -> PREPARING_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:09:09.736695Z[0m [[32m[1minfo     [0m] [1mRetrying intent 132271fb-e6c5-42d2-a8a9-007e4a81156a (attempt 3/3, delay=4.08s)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:09:09.737036Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.TokenService/GetTokenMetadata][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:09:09.737143Z[0m [[32m[1mdebug    [0m] [1mRetry delay: sleeping for 4.08s (attempt 3/3)[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:09:09.737420Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.TokenService/GetTokenMetadata][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:09:13.819591Z[0m [[32m[1minfo     [0m] [1mCompiling Aerodrome LP_CLOSE: WETH/USDC, stable=False[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:09:13.820074Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:13.820333Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:13.820604Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:13.820783Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:13.821126Z[0m [[32m[1mdebug    [0m] [1mFetched RPC URL for base from gateway utils[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:09:13.826967Z[0m [[32m[1minfo     [0m] [1mAerodromeSDK initialized for chain=base[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.sdk[0m][0m
+[2m2026-02-26T13:09:13.827417Z[0m [[32m[1minfo     [0m] [1mAerodromeAdapter initialized for chain=base, wallet=0x0738Ea64..., using_placeholders=False[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.adapter[0m][0m
+[2m2026-02-26T13:09:13.911859Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:09:13.947493Z[0m [[32m[1minfo     [0m] [1mFound 3.450589263E-9 LP tokens (3450589263 wei) for Aerodrome pool[0m [[0m[1m[34malmanak.framework.intents.compiler[0m][0m
+[2m2026-02-26T13:09:13.947635Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:13.947703Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:13.947752Z[0m [[32m[1mdebug    [0m] [1mtoken_cache_hit               [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:13.947788Z[0m [[32m[1mdebug    [0m] [1mtoken_resolved                [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:14.011513Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:09:44.020945Z[0m [[33m[1mwarning  [0m] [1mtoken_gateway_timeout         [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:44.021975Z[0m [[33m[1mwarning  [0m] [1mtoken_gateway_timeout         [0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:44.022896Z[0m [[33m[1mwarning  [0m] [1mtoken_resolution_error token=0xcDAC0d6c6C59727a65F871236188350531885C43 chain=base error_type=TokenNotFoundError detail=Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain latency_ms=30010.766[0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:44.023296Z[0m [[33m[1mwarning  [0m] [1mtoken_resolution_error token=0xcDAC0d6c6C59727a65F871236188350531885C43 chain=base error_type=TokenNotFoundError detail=Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain latency_ms=30011.970[0m [[0m[1m[34malmanak.framework.data.tokens.resolver[0m][0m
+[2m2026-02-26T13:09:44.024968Z[0m [[31m[1merror    [0m] [1mFailed to build remove liquidity: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain[0m [[0m[1m[34malmanak.framework.connectors.aerodrome.adapter[0m][0m
+Traceback (most recent call last):
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 1181, in _get_token_symbol
+    resolved = self._token_resolver.resolve(address, self.chain)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/data/tokens/resolver.py", line 395, in resolve
+    raise TokenNotFoundError(
+almanak.framework.data.tokens.exceptions.TokenNotFoundError: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 695, in remove_liquidity
+    approve_tx = self._build_approve_tx(
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 1047, in _build_approve_tx
+    token_symbol = self._get_token_symbol(token_address)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/connectors/aerodrome/adapter.py", line 1184, in _get_token_symbol
+    raise TokenResolutionError(
+almanak.framework.data.tokens.exceptions.TokenResolutionError: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain
+[2m2026-02-26T13:09:44.029042Z[0m [[32m[1mdebug    [0m] [1mState transition: PREPARING_LP_CLOSE -> SADFLOW_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a, duration=30209.69ms)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:09:44.030784Z[0m [[32m[1mdebug    [0m] [1mState transition: PREPARING_LP_CLOSE -> SADFLOW_LP_CLOSE (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:09:44.031257Z[0m [[33m[1mwarning  [0m] [1mStep error: Failed to build removeLiquidity TX: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain (retry 3/3)[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:09:44.031432Z[0m [[32m[1mdebug    [0m] [1mState transition: SADFLOW_LP_CLOSE -> FAILED (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a, duration=0.05ms)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:09:44.031586Z[0m [[32m[1mdebug    [0m] [1mState transition: SADFLOW_LP_CLOSE -> FAILED (intent=132271fb-e6c5-42d2-a8a9-007e4a81156a)[0m [[0m[1m[34malmanak.framework.intents.state_machine[0m][0m
+[2m2026-02-26T13:09:44.031679Z[0m [[31m[1merror    [0m] [1mIntent failed after 3 retries: Failed to build removeLiquidity TX: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:09:44.032351Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:09:44.032895Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.TokenService/GetTokenMetadata][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:09:44.033563Z[0m [[32m[1mdebug    [0m] [1mRPC cancelled for servicer method [/almanak.gateway.proto.TokenService/GetTokenMetadata][0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:09:44.035544Z[0m [[32m[1mdebug    [0m] [1mPersisted 92 events to /Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/.dashboard_events.json[0m [[0m[1m[34malmanak.framework.api.timeline[0m][0m
+[2m2026-02-26T13:09:44.036145Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:09:44.038931Z[0m [[32m[1mdebug    [0m] [1mAdded timeline event: TRANSACTION_FAILED for AerodromeLPStrategy[0m [[0m[1m[34malmanak.gateway.timeline.store[0m][0m
+[2m2026-02-26T13:09:44.038992Z[0m [[32m[1minfo     [0m] [1mRecorded timeline event: TRANSACTION_FAILED for AerodromeLPStrategy[0m [[0m[1m[34malmanak.gateway.services.observe_service[0m][0m
+[2m2026-02-26T13:09:44.039457Z[0m [[31m[1merror    [0m] [1m
+============================================================
+REVERT DIAGNOSTIC
+============================================================
+Intent: LP_CLOSE
+Chain: base
+Wallet: 0x0738Ea642faA28fFc588717625e45F3078fDBAC9
+
+Token Balances vs Requirements:
+
+Likely Cause: Insufficient liquidity in pool
+
+Suggestions:
+  1. Try smaller amount
+  2. Use a different pool/route
+
+Raw Error: Failed to build removeLiquidity TX: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain
+============================================================[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:09:44.039731Z[0m [[32m[1mdebug    [0m] [1mSaved state for AerodromeLPStrategy: ['has_position', 'lp_token_balance'][0m [[0m[1m[34malmanak.framework.strategies.intent_strategy[0m][0m
+[2m2026-02-26T13:09:44.039901Z[0m [[31m[1merror    [0m] [1m🛑 Teardown intent 1 failed: Failed to build removeLiquidity TX: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:09:44.040193Z[0m [[33m[1mwarning  [0m] [1m🛑 AerodromeLPStrategy teardown incomplete - manual intervention may be required[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:09:44.041911Z[0m [[32m[1mdebug    [0m] [1mUpdated teardown request for AerodromeLPStrategy: status=failed[0m [[0m[1m[34malmanak.framework.teardown.state_manager[0m][0m
+[2m2026-02-26T13:09:44.041981Z[0m [[31m[1merror    [0m] [1mFailed teardown for AerodromeLPStrategy: Failed to build removeLiquidity TX: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain[0m [[0m[1m[34malmanak.framework.teardown.state_manager[0m][0m
+Status: EXECUTION_FAILED | Intent: LP_CLOSE | Error: Failed to build removeLiquidity TX: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain | Duration: 128277ms
+[2m2026-02-26T13:09:44.042629Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:09:44.043863Z[0m [[32m[1mdebug    [0m] [1m[_cygrpc] Loaded running loop: id(loop)=4894878864[0m [[0m[1m[34mgrpc._cython.cygrpc[0m][0m
+[2m2026-02-26T13:09:44.044858Z[0m [[32m[1minfo     [0m] [1mUpdated status for AerodromeLPStrategy: INACTIVE (Strategy runner stopped)[0m [[0m[1m[34malmanak.gateway.registry.store[0m][0m
+[2m2026-02-26T13:09:44.045055Z[0m [[32m[1mdebug    [0m] [1mDeregistered strategy instance from gateway: AerodromeLPStrategy[0m [[0m[1m[34malmanak.framework.runner.strategy_runner[0m][0m
+[2m2026-02-26T13:09:44.045401Z[0m [[32m[1minfo     [0m] [1mDisconnected from gateway     [0m [[0m[1m[34malmanak.framework.gateway_client[0m][0m
+[2m2026-02-26T13:09:44.133891Z[0m [[32m[1minfo     [0m] [1mGateway gRPC server stopped   [0m [[0m[1m[34malmanak.gateway.server[0m][0m
+[2m2026-02-26T13:09:44.134298Z[0m [[32m[1minfo     [0m] [1mRpcService HTTP session closed[0m [[0m[1m[34malmanak.gateway.services.rpc_service[0m][0m
+[2m2026-02-26T13:09:44.134365Z[0m [[32m[1minfo     [0m] [1mFundingRateService closed     [0m [[0m[1m[34malmanak.gateway.services.funding_rate_service[0m][0m
+[2m2026-02-26T13:09:44.134416Z[0m [[32m[1minfo     [0m] [1mClosed OnChainLookup          [0m [[0m[1m[34malmanak.gateway.services.onchain_lookup[0m][0m
+[2m2026-02-26T13:09:44.134451Z[0m [[32m[1minfo     [0m] [1mTokenService closed           [0m [[0m[1m[34malmanak.gateway.services.token_service[0m][0m
+[2m2026-02-26T13:09:44.134770Z[0m [[32m[1minfo     [0m] [1mManaged gateway stopped       [0m [[0m[1m[34malmanak.gateway.managed[0m][0m
+Status: SUCCESS | Intent: LP_OPEN | Gas used: 264807 | Duration: 28479ms
+
+Teardown failed: Failed to build removeLiquidity TX: Cannot resolve token '0xcDAC0d6c6C59727a65F871236188350531885C43' on base: [AerodromeAdapter] Cannot resolve symbol: Address not found in registry for base. Suggestions: Verify the contract address is correct; Check if the address is deployed on this chain; Use register() to add custom tokens; Check the token symbol spelling; Use the full contract address if available; Verify the token exists on this chain
+Traceback (most recent call last):
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/.venv/lib/python3.12/site-packages/click/testing.py", line 412, in invoke
+    return_value = cli.main(args=args or (), prog_name=prog_name, **extra)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/.venv/lib/python3.12/site-packages/click/core.py", line 1082, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/.venv/lib/python3.12/site-packages/click/core.py", line 1443, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/.venv/lib/python3.12/site-packages/click/core.py", line 788, in invoke
+    return __callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/gabrielphang/Documents/Almanak/almanak-sdk-2/almanak/framework/cli/run.py", line 2109, in run
+    sys.exit(1)
+SystemExit: 1
+

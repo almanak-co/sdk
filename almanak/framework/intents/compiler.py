@@ -4315,11 +4315,31 @@ class IntentCompiler:
                 )
 
             if lp_balance_wei == 0:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"No LP tokens found in wallet for {token0_symbol}/{token1_symbol} pool. Pool address: {pool_address}",
-                    intent_id=intent.intent_id,
+                warning = (
+                    f"No LP tokens found in wallet for {token0_symbol}/{token1_symbol} pool "
+                    f"(pool={pool_address}) - treating LP_CLOSE as no-op"
                 )
+                warnings.append(warning)
+                logger.info(warning)
+
+                result.action_bundle = ActionBundle(
+                    intent_type=IntentType.LP_CLOSE.value,
+                    transactions=[],
+                    metadata={
+                        "pool": intent.position_id,
+                        "pool_address": pool_address,
+                        "token0_symbol": token0_symbol,
+                        "token1_symbol": token1_symbol,
+                        "stable": stable,
+                        "protocol": "aerodrome",
+                        "collect_fees": intent.collect_fees,
+                        "warning": "No LP tokens found; LP_CLOSE no-op",
+                    },
+                )
+                result.transactions = []
+                result.total_gas_estimate = 0
+                result.warnings = warnings
+                return result
 
             # Convert wei to decimal (LP tokens have 18 decimals)
             lp_balance = Decimal(lp_balance_wei) / Decimal(10**18)

@@ -4,6 +4,7 @@ These tests verify that both the adapter and SDK correctly use the TokenResolver
 for token resolution.
 """
 
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -189,3 +190,58 @@ class TestDeprecatedDictsRemoved:
 
         assert not hasattr(sdk_module, "AERODROME_TOKENS")
         assert not hasattr(sdk_module, "TOKEN_DECIMALS")
+
+
+class TestAerodromeRemoveLiquidityLPApproval:
+    """Regression tests for remove_liquidity LP approval behavior."""
+
+    def test_remove_liquidity_skips_lp_symbol_resolution_when_label_provided(self, adapter, mock_resolver):
+        """Unknown LP pool token should not block remove_liquidity build."""
+        weth_addr = "0x4200000000000000000000000000000000000006"
+        usdc_addr = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        pool_lp_addr = "0x" + "cd" * 20
+
+        def resolve_side_effect(token, chain):
+            if chain != "base":
+                raise AssertionError(f"Unexpected chain: {chain}")
+            token_map = {
+                "WETH": ResolvedToken("WETH", weth_addr, 18, "base", 8453),
+                weth_addr: ResolvedToken("WETH", weth_addr, 18, "base", 8453),
+                "USDC": ResolvedToken("USDC", usdc_addr, 6, "base", 8453),
+                usdc_addr: ResolvedToken("USDC", usdc_addr, 6, "base", 8453),
+            }
+            if token in token_map:
+                return token_map[token]
+            raise TokenResolutionError(token=token, chain="base", reason="Not found")
+
+        mock_resolver.resolve.side_effect = resolve_side_effect
+        adapter.sdk.get_pool_address = MagicMock(return_value=pool_lp_addr)
+
+        result = adapter.remove_liquidity(
+            token_a="WETH",
+            token_b="USDC",
+            liquidity=Decimal("1"),
+            stable=False,
+        )
+
+        assert result.success is True
+        assert len(result.transactions) == 2
+        assert result.transactions[0].tx_type == "approve"
+        assert "LP(WETH/USDC)" in result.transactions[0].description
+        resolved_tokens = [call.args[0] for call in mock_resolver.resolve.call_args_list]
+        assert pool_lp_addr not in resolved_tokens
+
+    def test_build_approve_tx_uses_explicit_label_without_resolution(self, adapter, mock_resolver):
+        """Explicit token labels should bypass resolver symbol lookup."""
+        mock_resolver.resolve.side_effect = TokenResolutionError(token="x", chain="base", reason="Not found")
+
+        tx = adapter._build_approve_tx(
+            token_address="0x" + "ab" * 20,
+            spender="0x" + "cd" * 20,
+            amount=1,
+            token_label="LP(TEST)",
+        )
+
+        assert tx is not None
+        assert "LP(TEST)" in tx.description
+        mock_resolver.resolve.assert_not_called()
