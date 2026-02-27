@@ -2,18 +2,18 @@
     "strategy_id": "demo_pendle_basics",
     "strategy_name": "demo_pendle_basics",
     "description": "Demo strategy for Pendle Protocol - yield tokenization and PT trading",
-    "market": "0x0cb289e9df2d0dcfe13732638c89655fb80c2be2",
-    "market_name": "PT-fUSDT0-26FEB2026",
-    "trade_size_token": 1,
+    "market": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
+    "market_name": "PT-wstETH-25JUN2026",
+    "trade_size_token": 0.01,
     "max_slippage_bps": 100,
-    "base_token": "FUSDT0",
-    "base_token_symbol": "FUSDT0",
-    "base_token_decimals": 6,
-    "pt_token": "PT-fUSDT0",
-    "pt_token_symbol": "PT-fUSDT0",
-    "chain": "plasma",
+    "base_token": "WSTETH",
+    "base_token_symbol": "WSTETH",
+    "base_token_decimals": 18,
+    "pt_token": "PT-wstETH",
+    "pt_token_symbol": "PT-wstETH",
+    "chain": "arbitrum",
     "anvil_funding": {
-        "ETH": 100,
-        "FUSDT0": 10000
+        "ETH": 10,
+        "WSTETH": 1
     }
 }

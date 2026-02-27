@@ -1,0 +1,37 @@
+[
+  {
+    "event_id": "arbitrum:0xdeadbeef00000000000000000000000000000000000000000000000000000001:0",
+    "signal_id": "test-signal-001",
+    "action_type": "SWAP",
+    "protocol": "uniswap_v3",
+    "chain": "arbitrum",
+    "tokens": ["USDC", "WETH"],
+    "amounts": {
+      "USDC": "25.00",
+      "WETH": "0.01"
+    },
+    "amounts_usd": {
+      "USDC": "25.00",
+      "WETH": "25.00"
+    },
+    "metadata": {
+      "notional_usd": "25.00"
+    },
+    "leader_address": "0x0000000000000000000000000000000000000001",
+    "block_number": 1000000,
+    "timestamp": 1700000000,
+    "leader_tx_hash": "0xdeadbeef00000000000000000000000000000000000000000000000000000001",
+    "leader_block": 1000000,
+    "detected_at": 1700000001,
+    "age_seconds": 1,
+    "action_payload": {
+      "token_in": "USDC",
+      "token_out": "WETH",
+      "amount_in": "25.00",
+      "amount_out": "0.01",
+      "effective_price": "2500.00",
+      "slippage_bps": 50
+    },
+    "capability_flags": {}
+  }
+]

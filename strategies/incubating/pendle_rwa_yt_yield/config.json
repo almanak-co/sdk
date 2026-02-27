@@ -1,0 +1,21 @@
+{
+    "strategy_id": "pendle_rwa_yt_yield",
+    "strategy_name": "pendle_rwa_yt_yield",
+    "description": "RWA yield exposure via Pendle YT-sUSDe (convex yield bet) with PT fallback",
+    "yt_token": "YT-sUSDe-7MAY2026",
+    "pt_token": "PT-sUSDe-7MAY2026",
+    "pt_token_address": "0x3de0ff76e8b528c092d47b9dac775931cef80f49",
+    "yt_token_address": "0x30775b422b9c7415349855346352faa61fd97e41",
+    "pendle_market": "0x8dae8ece668cf80d348873f23d456448e8694883",
+    "base_token": "sUSDe",
+    "base_token_address": "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497",
+    "maturity_date": "2026-05-07",
+    "max_slippage": "0.01",
+    "trade_size_pct": "0.005",
+    "exit_days_before_maturity": 7,
+    "chain": "ethereum",
+    "anvil_funding": {
+        "ETH": 100,
+        "sUSDe": 10000
+    }
+}

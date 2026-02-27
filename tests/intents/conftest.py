@@ -10,6 +10,7 @@ This module provides common infrastructure for all per-chain Intent tests:
 """
 
 import os
+import subprocess
 import time
 import weakref
 from decimal import Decimal
@@ -369,12 +370,15 @@ def configure_web3_default_http_timeout():
 
 
 def get_latest_block(rpc_url: str) -> int:
-    """Get the latest block number from an RPC endpoint.
-
-    Uses in-process Web3 provider instead of subprocess (cast).
-    """
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": TEST_WEB3_REQUEST_TIMEOUT}))
-    return w3.eth.block_number
+    """Get the latest block number from an RPC endpoint."""
+    result = subprocess.run(
+        ["cast", "block-number", "--rpc-url", rpc_url],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=TEST_CAST_TIMEOUT_SECONDS,
+    )
+    return int(result.stdout.strip())
 
 
 def is_anvil_running(rpc_url: str = ANVIL_URL) -> bool:
@@ -387,31 +391,14 @@ def is_anvil_running(rpc_url: str = ANVIL_URL) -> bool:
 
 
 def fund_native_token(wallet: str, amount_wei: int, rpc_url: str) -> None:
-    """Fund a wallet with native token (ETH/AVAX/etc).
-
-    Uses in-process Web3 provider RPC instead of subprocess (cast).
-    """
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": TEST_WEB3_REQUEST_TIMEOUT}))
+    """Fund a wallet with native token (ETH/AVAX/etc)."""
     amount_hex = hex(amount_wei)
-    w3.provider.make_request("anvil_setBalance", [wallet, amount_hex])
-
-
-def _calculate_mapping_slot(wallet: str, balance_slot: int) -> str:
-    """Calculate the storage slot for a mapping entry (balanceOf).
-
-    Equivalent to `cast index address <wallet> <slot>` but in-process.
-
-    Uses keccak256(abi.encode(key, slot)) per Solidity storage layout.
-    """
-    from eth_hash.auto import keccak as keccak256
-
-    # Pad wallet address to 32 bytes
-    key_padded = wallet.lower().replace("0x", "").zfill(64)
-    # Pad slot number to 32 bytes
-    slot_padded = hex(balance_slot)[2:].zfill(64)
-    # Concatenate and hash
-    concat = bytes.fromhex(key_padded + slot_padded)
-    return "0x" + keccak256(concat).hex()
+    subprocess.run(
+        ["cast", "rpc", "anvil_setBalance", wallet, amount_hex, "--rpc-url", rpc_url],
+        capture_output=True,
+        check=True,
+        timeout=TEST_CAST_TIMEOUT_SECONDS,
+    )
 
 
 def fund_erc20_token(
@@ -421,23 +408,39 @@ def fund_erc20_token(
     balance_slot: int,
     rpc_url: str,
 ) -> None:
-    """Fund a wallet with ERC20 tokens using storage manipulation.
-
-    Uses in-process Web3 provider and keccak256 instead of subprocess (cast).
-    """
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": TEST_WEB3_REQUEST_TIMEOUT}))
-
-    # Calculate storage slot in-process (replaces `cast index`)
-    storage_slot = _calculate_mapping_slot(wallet, balance_slot)
+    """Fund a wallet with ERC20 tokens using storage manipulation."""
+    # Calculate storage slot using cast index
+    result = subprocess.run(
+        ["cast", "index", "address", wallet, str(balance_slot)],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=TEST_CAST_TIMEOUT_SECONDS,
+    )
+    storage_slot = result.stdout.strip()
 
     # Format amount as 32-byte hex
     amount_hex = f"0x{amount:064x}"
 
-    # Set storage via Anvil RPC
-    w3.provider.make_request("anvil_setStorageAt", [token_address, storage_slot, amount_hex])
+    # Set storage
+    subprocess.run(
+        [
+            "cast", "rpc", "anvil_setStorageAt",
+            token_address, storage_slot, amount_hex,
+            "--rpc-url", rpc_url,
+        ],
+        capture_output=True,
+        check=True,
+        timeout=TEST_CAST_TIMEOUT_SECONDS,
+    )
 
     # Mine a block to apply changes
-    w3.provider.make_request("evm_mine", [])
+    subprocess.run(
+        ["cast", "rpc", "evm_mine", "--rpc-url", rpc_url],
+        capture_output=True,
+        check=True,
+        timeout=TEST_CAST_TIMEOUT_SECONDS,
+    )
 
 
 def get_token_balance(web3: Web3, token_address: str, wallet: str) -> int:
@@ -491,23 +494,27 @@ def test_wallet() -> str:
 def _wrap_native_token(wallet: str, weth_address: str, amount: int, rpc_url: str) -> None:
     """Wrap native tokens to get WETH/WAVAX/etc.
 
-    Uses in-process Web3 transaction from an unlocked (auto-impersonate) wallet
-    instead of subprocess (cast send).
-
     This is more reliable than storage slot manipulation because WETH
     storage layouts can vary across chains and implementations.
     """
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": TEST_WEB3_REQUEST_TIMEOUT}))
-    checksum_wallet = Web3.to_checksum_address(wallet)
-    checksum_weth = Web3.to_checksum_address(weth_address)
-
-    # Send ETH to WETH contract (calls deposit() via fallback)
-    tx_hash = w3.eth.send_transaction({
-        "from": checksum_wallet,
-        "to": checksum_weth,
-        "value": amount,
-    })
-    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=TEST_RPC_READ_TIMEOUT_SECONDS)
+    # Use cast to send ETH to WETH contract (calls deposit())
+    subprocess.run(
+        [
+            "cast",
+            "send",
+            weth_address,
+            "--value",
+            str(amount),
+            "--from",
+            wallet,
+            "--unlocked",
+            "--rpc-url",
+            rpc_url,
+        ],
+        capture_output=True,
+        check=True,
+        timeout=TEST_CAST_TIMEOUT_SECONDS,
+    )
 
 
 # =============================================================================
@@ -536,189 +543,49 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 # =============================================================================
-# Module-Scoped Baseline Snapshot / Revert for Test Isolation
+# Snapshot / Revert for Test Isolation
 # =============================================================================
-
-# Baseline map: (chain_id, module_path) -> baseline_snapshot_id
-# Captured once per module after funding is complete, re-armed after each revert.
-_module_baselines: dict[tuple[int, str], str] = {}
-
-
-def _get_baseline_key(request: pytest.FixtureRequest) -> tuple[int, str]:
-    """Build a baseline map key from the current test request.
-
-    Returns:
-        Tuple of (chain_id_or_-1, module_path)
-    """
-    chain_id = -1
-    try:
-        chain_id = int(request.getfixturevalue("chain_id"))
-    except Exception:
-        try:
-            web3 = request.getfixturevalue("web3")
-            if web3 is not None:
-                chain_id = int(web3.eth.chain_id)
-        except Exception:
-            pass
-    module_path = request.fspath.strpath if hasattr(request, "fspath") else str(request.node.module)
-    return (chain_id, module_path)
-
-
-def _capture_baseline(web3_instance: Any) -> str | None:
-    """Capture a baseline snapshot on the Anvil fork.
-
-    Returns:
-        Snapshot ID or None on failure
-    """
-    try:
-        resp = web3_instance.provider.make_request("evm_snapshot", [])
-        snapshot_id = resp.get("result")
-        if snapshot_id is None:
-            print(f"WARNING: evm_snapshot returned no result: {resp}")
-        return snapshot_id
-    except Exception as e:
-        print(f"WARNING: baseline capture failed ({type(e).__name__}: {e})")
-        return None
-
-
-def _revert_to_baseline(web3_instance: Any, snapshot_id: str) -> bool:
-    """Revert to a baseline snapshot.
-
-    Returns:
-        True if revert succeeded
-    """
-    try:
-        resp = web3_instance.provider.make_request("evm_revert", [snapshot_id])
-        return bool(resp.get("result"))
-    except Exception as e:
-        print(f"WARNING: baseline revert failed ({type(e).__name__}: {e})")
-        return False
 
 
 @pytest.fixture(autouse=True)
 def anvil_snapshot(request):
-    """Snapshot/revert Anvil state around each test using module baselines.
+    """Snapshot Anvil state before each test and revert after.
 
-    On first test in a module: captures baseline after funding is complete
-    (late-binding web3 and funded_wallet fixtures).
+    This ensures complete test isolation -- no on-chain state (balances,
+    approvals, positions, debt) leaks between tests.
 
-    On each test: reverts to baseline, then re-arms a new snapshot.
-
-    On revert failure: attempts fork restart -> reseed -> new baseline.
-
-    Requires ``web3`` fixture to be available in the test's scope.
+    Requires a ``web3`` fixture to be available in the test's scope.
     Tests without a ``web3`` fixture run without snapshot isolation.
     """
-    # Skip if no web3 fixture available
-    if "web3" not in request.fixturenames:
-        yield
-        return
-
-    try:
-        web3 = request.getfixturevalue("web3")
-    except Exception:
-        yield
-        return
-
+    web3 = request.getfixturevalue("web3") if "web3" in request.fixturenames else None
     if web3 is None:
         yield
         return
 
-    key = _get_baseline_key(request)
-
-    # Ensure baseline exists for this module (late-bind funded_wallet)
-    if key not in _module_baselines:
-        # Trigger funded_wallet if available (ensures funding is done before baseline)
-        if "funded_wallet" in request.fixturenames:
-            try:
-                request.getfixturevalue("funded_wallet")
-            except Exception:
-                pass
-
-        baseline_id = _capture_baseline(web3)
-        if baseline_id is None:
-            print("WARNING: Could not capture module baseline; running without isolation")
-            yield
-            return
-        _module_baselines[key] = baseline_id
-        print(f"  [baseline] Captured module baseline {baseline_id} for {key[1]}")
-
-    # Revert to baseline before this test
-    baseline_id = _module_baselines[key]
-    reverted = _revert_to_baseline(web3, baseline_id)
-
-    if not reverted:
-        # Attempt recovery: restart fork, reseed, rebuild baseline
-        print(f"WARNING: Baseline revert failed for {key[1]}, attempting recovery...")
-        recovered = _attempt_recovery(request, web3, key)
-        if not recovered:
-            pytest.fail(
-                f"Anvil recovery failed for module {key[1]} (chain_id={key[0]}). "
-                "Fork is unhealthy and state isolation cannot be guaranteed."
-            )
-
-    # Re-arm: capture new snapshot for next test's revert
-    new_baseline = _capture_baseline(web3)
-    if new_baseline is not None:
-        _module_baselines[key] = new_baseline
-    else:
-        print(f"WARNING: Failed to re-arm baseline for {key[1]}; next test may trigger recovery")
+    try:
+        snapshot_resp = web3.provider.make_request("evm_snapshot", [])
+        snapshot_id = snapshot_resp.get("result")
+        if snapshot_id is None:
+            raise RuntimeError(f"evm_snapshot failed: {snapshot_resp}")
+    except Exception as e:
+        print(f"WARNING: evm_snapshot failed ({type(e).__name__}: {e}); running without snapshot isolation")
+        yield
+        return
 
     yield
-
-    # No teardown revert needed; the NEXT test's setup reverts to baseline
-
-
-def _attempt_recovery(request: pytest.FixtureRequest, web3_instance: Any, key: tuple[int, str]) -> bool:
-    """Attempt to recover from a failed baseline revert.
-
-    Tries to restart the Anvil fork via the anvil_instance fixture,
-    reseed the wallet, and capture a new baseline.
-
-    Returns:
-        True if recovery succeeded
-    """
     try:
-        anvil = request.getfixturevalue("anvil_instance")
+        revert_resp = web3.provider.make_request("evm_revert", [snapshot_id])
+        reverted = revert_resp.get("result")
+        if not reverted:
+            raise RuntimeError(f"evm_revert failed: {revert_resp}")
     except Exception as e:
-        print(f"WARNING: Recovery unavailable (anvil_instance fixture not found): {e}")
-        return False
+        print(f"WARNING: evm_revert failed ({type(e).__name__}: {e})")
 
-    try:
-        if not hasattr(anvil, "ensure_healthy"):
-            print("WARNING: Recovery unavailable (anvil_instance has no ensure_healthy)")
-            return False
 
-        if not anvil.ensure_healthy():
-            print("WARNING: Fork restart failed during recovery")
-            return False
-
-        try:
-            reseed_wallet_state = request.getfixturevalue("reseed_wallet_state")
-        except Exception as e:
-            print(f"WARNING: Recovery unavailable (reseed_wallet_state fixture not found): {e}")
-            return False
-
-        if not callable(reseed_wallet_state):
-            print("WARNING: Recovery unavailable (reseed_wallet_state is not callable)")
-            return False
-
-        try:
-            reseed_wallet_state()
-        except Exception as e:
-            print(f"WARNING: Re-funding failed during recovery: {e}")
-            return False
-
-        # Capture new baseline after restart + reseed
-        new_baseline = _capture_baseline(web3_instance)
-        if new_baseline is not None:
-            _module_baselines[key] = new_baseline
-            print(f"  [baseline] Recovery successful, new baseline {new_baseline}")
-            return True
-        return False
-    except Exception as e:
-        print(f"WARNING: Recovery attempt failed: {e}")
-        return False
+@pytest.fixture(autouse=True)
+def restart_anvil_on_rpc_timeouts():
+    """No-op placeholder kept for backward compatibility with test collection."""
+    yield
 
 
 @pytest_asyncio.fixture(autouse=True)

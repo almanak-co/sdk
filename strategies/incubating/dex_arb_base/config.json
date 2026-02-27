@@ -1,0 +1,16 @@
+{
+    "strategy_id": "dex_arb_base",
+    "strategy_name": "dex_arb_base",
+    "description": "DEX arbitrage monitor on Base -- routes swaps to Uniswap V3 or Aerodrome",
+    "swap_amount_usdc": 100,
+    "max_slippage": 0.01,
+    "force_protocol": "uniswap_v3",
+    "direction": "buy_weth",
+    "spread_threshold_bps": 0,
+    "chain": "base",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

@@ -50,12 +50,39 @@ DataFreshnessPolicy = Literal["fail_closed", "fail_open"]
 # Import Safe signer types for type hints (avoid circular imports)
 from typing import TYPE_CHECKING
 
+from almanak.framework.execution.gas.constants import (
+    ANVIL_GAS_PRICE_CAP_GWEI,
+    CHAIN_GAS_PRICE_CAPS_GWEI,
+    DEFAULT_GAS_PRICE_CAP_GWEI,
+)
 from almanak.framework.execution.interfaces import Chain
 
 if TYPE_CHECKING:
     from almanak.framework.execution.signer.safe import SafeSigner
 
 logger = logging.getLogger(__name__)
+
+# VIB-308: Env vars that are silently ignored when set without the ALMANAK_ prefix.
+_UNPREFIXED_WARN_VARS: list[str] = [
+    "MAX_GAS_PRICE_GWEI",
+    "TX_TIMEOUT_SECONDS",
+    "SIMULATION_ENABLED",
+    "MAX_SLIPPAGE_BPS",
+]
+
+
+def _warn_unprefixed_env_vars(prefix: str) -> None:
+    """Warn when env vars are set without the required prefix.
+
+    Silently-ignored env vars are dangerous when real money is at stake.
+    This helper emits a warning so operators notice the misconfiguration.
+    """
+    for var in _UNPREFIXED_WARN_VARS:
+        if os.environ.get(var) and not os.environ.get(f"{prefix}{var}"):
+            logger.warning(
+                f"Environment variable '{var}' is set but will be ignored -- "
+                f"use '{prefix}{var}' instead (the {prefix} prefix is required)"
+            )
 
 
 # =============================================================================
@@ -605,8 +632,11 @@ class LocalRuntimeConfig:
                 return default
             return value.lower() in ("true", "1", "yes", "y")
 
-        # Determine chain: parameter > env var
-        resolved_chain = chain or get_optional("CHAIN")
+        # VIB-308: Warn when unprefixed env vars are set -- silently ignored without prefix.
+        _warn_unprefixed_env_vars(prefix)
+
+        # Determine chain: parameter > env var (normalize to lowercase for lookups)
+        resolved_chain = (chain or get_optional("CHAIN") or "").lower() or None
         if not resolved_chain:
             raise ConfigurationError(
                 field="chain",
@@ -644,11 +674,19 @@ class LocalRuntimeConfig:
                         reason=f"Could not build RPC URL: {e}. Set {prefix}RPC_URL, {prefix}{resolved_chain.upper()}_RPC_URL, ALCHEMY_API_KEY, or TENDERLY_API_KEY_{resolved_chain.upper()}.",
                     ) from None
 
+        # VIB-303 + VIB-304: Use chain-specific gas price cap as default (not 100 gwei hardcoded).
+        # In Anvil mode, gas costs no real money -- use ANVIL_GAS_PRICE_CAP_GWEI to prevent cap errors during dev.
+        # On mainnet, use the chain-specific cap (Polygon=500, Ethereum=300, Arbitrum=10, etc.).
+        if network.lower() == "anvil":
+            default_gas_cap = ANVIL_GAS_PRICE_CAP_GWEI
+        else:
+            default_gas_cap = CHAIN_GAS_PRICE_CAPS_GWEI.get(resolved_chain, DEFAULT_GAS_PRICE_CAP_GWEI)
+
         return cls(
             chain=resolved_chain,
             rpc_url=rpc_url,
             private_key=get_required("PRIVATE_KEY"),
-            max_gas_price_gwei=get_optional_int("MAX_GAS_PRICE_GWEI", 100),
+            max_gas_price_gwei=get_optional_int("MAX_GAS_PRICE_GWEI", default_gas_cap),
             max_gas_cost_native=get_optional_float("MAX_GAS_COST_NATIVE", 0.0),
             max_gas_cost_usd=get_optional_float("MAX_GAS_COST_USD", 0.0),
             max_slippage_bps=get_optional_int("MAX_SLIPPAGE_BPS", 0),
@@ -1492,6 +1530,9 @@ class MultiChainRuntimeConfig:
                 return default
             return value.lower() in ("true", "1", "yes", "y")
 
+        # VIB-308: Warn when unprefixed env vars are set -- silently ignored without prefix.
+        _warn_unprefixed_env_vars(prefix)
+
         # Get private key (always required)
         private_key = get_required("PRIVATE_KEY")
 
@@ -1508,13 +1549,21 @@ class MultiChainRuntimeConfig:
                 prefix=prefix,
             )
 
+        # VIB-303 + VIB-304: Use chain-aware gas price cap as default.
+        # In Anvil mode, gas costs no real money -- use ANVIL_GAS_PRICE_CAP_GWEI to prevent cap errors during dev.
+        # For multi-chain mainnet, use DEFAULT_GAS_PRICE_CAP_GWEI (conservative but correct for all chains).
+        if network.lower() == "anvil":
+            multi_default_gas_cap = ANVIL_GAS_PRICE_CAP_GWEI
+        else:
+            multi_default_gas_cap = DEFAULT_GAS_PRICE_CAP_GWEI
+
         return cls(
             chains=chains,
             protocols=protocols,
             private_key=private_key,
             safe_signer=safe_signer,
             network=network,
-            max_gas_price_gwei=get_optional_int("MAX_GAS_PRICE_GWEI", 100),
+            max_gas_price_gwei=get_optional_int("MAX_GAS_PRICE_GWEI", multi_default_gas_cap),
             max_gas_cost_native=get_optional_float("MAX_GAS_COST_NATIVE", 0.0),
             max_gas_cost_usd=get_optional_float("MAX_GAS_COST_USD", 0.0),
             max_slippage_bps=get_optional_int("MAX_SLIPPAGE_BPS", 0),

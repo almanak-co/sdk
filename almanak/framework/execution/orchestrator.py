@@ -1017,15 +1017,39 @@ class ExecutionOrchestrator:
             unsigned_txs = await self._build_unsigned_transactions(action_bundle, context)
 
             if not unsigned_txs:
-                # No transactions to execute (e.g., HOLD intent)
-                result.success = True
+                intent_type = (action_bundle.intent_type or "").upper()
+                # HOLD intents legitimately produce 0 transactions
+                if intent_type == "HOLD":
+                    result.success = True
+                    result.phase = ExecutionPhase.COMPLETE
+                    result.completed_at = datetime.now(UTC)
+                    self._complete_session(session, success=True)
+                    self._emit_event(
+                        ExecutionEventType.EXECUTION_SUCCESS,
+                        context,
+                        {"message": "No transactions to execute (HOLD intent)", "intent_type": intent_type},
+                    )
+                    return result
+
+                # For all other intent types (LP_CLOSE, SWAP, etc.), 0 transactions
+                # means nothing happened -- this is a false positive if reported as
+                # SUCCESS. Mark as failed so the strategy knows the action didn't execute.
+                error_msg = (
+                    f"Empty ActionBundle: {intent_type} compiled to 0 transactions. "
+                    f"Nothing was executed. This usually means no position was found to close "
+                    f"or the compiler could not build the required transactions."
+                )
+                logger.warning(error_msg)
+                result.success = False
+                result.error = error_msg
+                result.error_phase = ExecutionPhase.COMPLETE
                 result.phase = ExecutionPhase.COMPLETE
                 result.completed_at = datetime.now(UTC)
-                self._complete_session(session, success=True)
+                self._complete_session(session, success=False, error=error_msg)
                 self._emit_event(
-                    ExecutionEventType.EXECUTION_SUCCESS,
+                    ExecutionEventType.EXECUTION_FAILED,
                     context,
-                    {"message": "No transactions to execute", "intent_type": action_bundle.intent_type},
+                    {"error": error_msg, "message": error_msg, "intent_type": intent_type},
                 )
                 return result
 
@@ -1881,9 +1905,21 @@ class ExecutionOrchestrator:
         except ExecutionError:
             return unsigned_txs, gas_warnings
 
+        is_multi_tx_bundle = len(unsigned_txs) > 1
+
         updated: list[UnsignedTransaction] = []
         for idx, tx in enumerate(unsigned_txs):
             if not tx.to:
+                updated.append(tx)
+                continue
+
+            # For multi-TX bundles, only estimate gas for the first transaction.
+            # Subsequent TXs depend on state changes from prior TXs (e.g., approve must
+            # execute before addLiquidity), so eth_estimateGas against the current
+            # chain state will always revert. The compiler-provided gas limit is the
+            # correct estimate for dependent transactions (approve ~65k, action uses
+            # connector defaults). Attempting estimation wastes an RPC round-trip.
+            if is_multi_tx_bundle and idx > 0:
                 updated.append(tx)
                 continue
 
@@ -1933,12 +1969,15 @@ class ExecutionOrchestrator:
                     updated.append(self._update_gas_estimate(tx, gas_estimate))
             except Exception as e:
                 error_str = str(e)
-                # Common simulation reverts (STF = "Swap Too Few", ERC20 allowance, etc.)
-                # are expected when estimating multi-step bundles before prior txs execute.
-                # The compiler-provided gas limit is used as fallback - this is normal.
-                is_expected = any(
+                # Gas estimation for non-first TXs in multi-step bundles (approve+supply,
+                # decrease+collect+burn, etc.) will often fail because they depend on state
+                # changes from prior TXs that haven't been executed yet. This is expected
+                # and the compiler-provided gas limit is always used as fallback.
+                is_multi_tx_dependent = idx > 0
+                is_known_pattern = any(
                     code in error_str for code in ("STF", "allowance", "TRANSFER_FROM_FAILED", "ds-math-sub")
                 )
+                is_expected = is_multi_tx_dependent or is_known_pattern
                 warning_msg = f"tx {idx + 1}/{len(unsigned_txs)}: {e}"
                 gas_warnings.append(warning_msg)
                 if is_expected:

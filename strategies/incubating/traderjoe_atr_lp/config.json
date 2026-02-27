@@ -1,0 +1,18 @@
+{
+    "chain": "avalanche",
+    "pool": "WAVAX/USDC/20",
+    "amount_x": "0.1",
+    "amount_y": "2",
+    "atr_period": 14,
+    "atr_timeframe": "1h",
+    "atr_low_pct": "1.5",
+    "atr_high_pct": "3.0",
+    "range_tight_pct": "0.04",
+    "range_normal_pct": "0.08",
+    "force_action": "",
+    "anvil_funding": {
+        "AVAX": 100,
+        "WAVAX": 100,
+        "USDC": 10000
+    }
+}

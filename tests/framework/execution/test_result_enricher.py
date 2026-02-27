@@ -524,6 +524,129 @@ class TestResultEnricherExtractionSpecs:
 # =============================================================================
 
 
+class TestCollectReceiptsCamelCaseAliases:
+    """Test that _collect_receipts adds camelCase aliases for receipt parsers (VIB-301)."""
+
+    @dataclass
+    class SnakeCaseReceipt:
+        """Mimics TransactionReceipt.to_dict() output with snake_case keys."""
+
+        tx_hash: str = "0xabc123"
+        gas_used: int = 178803
+        block_number: int = 12345678
+        block_hash: str = "0xdef456"
+        logs: list = field(default_factory=list)
+
+        def to_dict(self) -> dict[str, Any]:
+            return {
+                "tx_hash": self.tx_hash,
+                "block_number": self.block_number,
+                "block_hash": self.block_hash,
+                "gas_used": self.gas_used,
+                "effective_gas_price": "50000000000",
+                "status": 1,
+                "logs": self.logs,
+                "contract_address": None,
+                "from_address": "0xsender",
+                "to_address": "0xrecipient",
+            }
+
+    def _make_result_with_snake_receipt(self, logs=None):
+        receipt = self.SnakeCaseReceipt(logs=logs or [])
+        tx_result = TransactionResult(
+            tx_hash="0xabc123",
+            success=True,
+            receipt=receipt,
+            gas_used=178803,
+        )
+        return ExecutionResult(
+            success=True,
+            phase=ExecutionPhase.COMPLETE,
+            transaction_results=[tx_result],
+            total_gas_used=178803,
+        )
+
+    def test_camel_case_aliases_added(self):
+        """Receipt dict should have camelCase aliases after _collect_receipts."""
+        enricher = ResultEnricher()
+        result = self._make_result_with_snake_receipt()
+
+        receipts = enricher._collect_receipts(result)
+        assert len(receipts) == 1
+
+        r = receipts[0]
+        # camelCase aliases should be present
+        assert r["transactionHash"] == "0xabc123"
+        assert r["gasUsed"] == 178803
+        assert r["blockNumber"] == 12345678
+        assert r["blockHash"] == "0xdef456"
+        assert r["effectiveGasPrice"] == "50000000000"
+        assert r["from"] == "0xsender"
+        assert r["to"] == "0xrecipient"
+
+    def test_snake_case_keys_preserved(self):
+        """Original snake_case keys should still be present."""
+        enricher = ResultEnricher()
+        result = self._make_result_with_snake_receipt()
+
+        receipts = enricher._collect_receipts(result)
+        r = receipts[0]
+        assert r["tx_hash"] == "0xabc123"
+        assert r["gas_used"] == 178803
+        assert r["block_number"] == 12345678
+
+    def test_no_overwrite_when_camel_already_present(self):
+        """If receipt already has camelCase keys, they should not be overwritten."""
+        enricher = ResultEnricher()
+        result = self._make_result_with_snake_receipt()
+
+        # Manually add a camelCase key to the receipt dict
+        tx_result = result.transaction_results[0]
+        original_to_dict = tx_result.receipt.to_dict
+
+        def patched_to_dict():
+            d = original_to_dict()
+            d["transactionHash"] = "0xoriginal_camel"
+            return d
+
+        tx_result.receipt.to_dict = patched_to_dict
+
+        receipts = enricher._collect_receipts(result)
+        r = receipts[0]
+        # Should keep the existing camelCase value, not overwrite
+        assert r["transactionHash"] == "0xoriginal_camel"
+
+    def test_raw_dict_receipts_not_affected(self):
+        """Raw dict receipts (already camelCase) should pass through unchanged."""
+        enricher = ResultEnricher()
+
+        raw_receipt = {
+            "transactionHash": "0xfrom_web3",
+            "gasUsed": 21000,
+            "blockNumber": 999,
+            "logs": [],
+        }
+        tx_result = TransactionResult(
+            tx_hash="0xfrom_web3",
+            success=True,
+            receipt=raw_receipt,
+            gas_used=21000,
+        )
+        result = ExecutionResult(
+            success=True,
+            phase=ExecutionPhase.COMPLETE,
+            transaction_results=[tx_result],
+            total_gas_used=21000,
+        )
+
+        receipts = enricher._collect_receipts(result)
+        r = receipts[0]
+        assert r["transactionHash"] == "0xfrom_web3"
+        assert r["gasUsed"] == 21000
+        # No snake_case keys should be added to a raw dict
+        assert "tx_hash" not in r
+
+
 class TestResultEnricherWithUniswapV3:
     """Integration tests with real UniswapV3ReceiptParser."""
 

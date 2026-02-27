@@ -6,6 +6,7 @@ Tests cover:
 - RSI population on MarketSnapshot
 - MACD population on MarketSnapshot
 - Bollinger Bands population on MarketSnapshot
+- ATR population on MarketSnapshot
 - Handling of insufficient data (graceful skip)
 - Config-driven indicator parameters
 - Unknown indicator warnings
@@ -25,6 +26,7 @@ from almanak.framework.backtesting.pnl.indicator_engine import (
     BacktestIndicatorEngine,
 )
 from almanak.framework.strategies.intent_strategy import (
+    ATRData,
     BollingerBandsData,
     MACDData,
     MarketSnapshot,
@@ -70,12 +72,13 @@ class TestBacktestIndicatorEngineInit:
     """Tests for initialization and configuration."""
 
     def test_default_indicators(self) -> None:
-        """Default should include rsi, macd, bollinger_bands."""
+        """Default should include rsi, macd, bollinger_bands, atr."""
         engine = BacktestIndicatorEngine()
         assert engine._required == DEFAULT_INDICATORS
         assert "rsi" in engine._required
         assert "macd" in engine._required
         assert "bollinger_bands" in engine._required
+        assert "atr" in engine._required
 
     def test_custom_indicators(self) -> None:
         """Accept custom indicator set."""
@@ -302,6 +305,74 @@ class TestBollingerBandsPopulation:
         assert bb_data.std_dev == 1.5
 
 
+class TestATRPopulation:
+    """Tests for ATR indicator population."""
+
+    def test_atr_populated_with_sufficient_data(self) -> None:
+        """ATR should be set on snapshot when enough data is available."""
+        prices = _generate_prices(3500.0, 30)
+        engine = _create_engine_with_prices("WETH", prices, {"atr"})
+
+        snapshot = _make_snapshot()
+        engine.populate_snapshot(snapshot)
+
+        atr_data = snapshot.atr("WETH")
+        assert isinstance(atr_data, ATRData)
+        assert atr_data.value > Decimal("0")
+        assert atr_data.value_percent > Decimal("0")
+        assert atr_data.period == 14  # default period
+
+    def test_atr_skipped_with_insufficient_data(self) -> None:
+        """ATR should not be set when not enough data is available."""
+        prices = _generate_prices(3500.0, 5)  # Only 5 prices, need 14+1
+        engine = _create_engine_with_prices("WETH", prices, {"atr"})
+
+        snapshot = _make_snapshot()
+        engine.populate_snapshot(snapshot)
+
+        with pytest.raises(ValueError):
+            snapshot.atr("WETH")
+
+    def test_atr_custom_period(self) -> None:
+        """ATR should respect custom period from config."""
+        prices = _generate_prices(3500.0, 30)
+        engine = _create_engine_with_prices("WETH", prices, {"atr"})
+
+        snapshot = _make_snapshot()
+        engine.populate_snapshot(snapshot, config={"atr_period": 7})
+
+        atr_data = snapshot.atr("WETH", period=7)
+        assert atr_data.period == 7
+
+    def test_atr_not_computed_when_not_required(self) -> None:
+        """ATR should not be computed if not in required indicators."""
+        prices = _generate_prices(3500.0, 30)
+        engine = _create_engine_with_prices("WETH", prices, {"rsi"})
+
+        snapshot = _make_snapshot()
+        engine.populate_snapshot(snapshot)
+
+        with pytest.raises(ValueError):
+            snapshot.atr("WETH")
+
+    def test_atr_value_percent_calculation(self) -> None:
+        """ATR value_percent should be ATR/price * 100."""
+        # Use constant-ish prices with known volatility
+        prices = [Decimal("100"), Decimal("110"), Decimal("100"), Decimal("110")]
+        # Add more prices to reach the 15 required (period 14 + 1)
+        for i in range(20):
+            prices.append(Decimal("100") if i % 2 == 0 else Decimal("110"))
+
+        engine = _create_engine_with_prices("TEST", prices, {"atr"})
+        snapshot = _make_snapshot()
+        engine.populate_snapshot(snapshot)
+
+        atr_data = snapshot.atr("TEST")
+        # ATR value_percent should be approximately ATR/current_price * 100
+        expected_pct = float(atr_data.value) / float(prices[-1]) * 100
+        assert float(atr_data.value_percent) == pytest.approx(expected_pct, rel=0.01)
+
+
 class TestAllIndicators:
     """Tests for computing all indicators together."""
 
@@ -317,6 +388,7 @@ class TestAllIndicators:
         assert isinstance(snapshot.rsi("WETH"), RSIData)
         assert isinstance(snapshot.macd("WETH"), MACDData)
         assert isinstance(snapshot.bollinger_bands("WETH"), BollingerBandsData)
+        assert isinstance(snapshot.atr("WETH"), ATRData)
 
     def test_multiple_tokens(self) -> None:
         """Indicators should be computed independently for each token."""
@@ -346,3 +418,79 @@ class TestAllIndicators:
 
         rsi_data = snapshot.rsi("WETH")
         assert rsi_data.period == 14  # default RSI period
+
+    def test_active_tokens_filter(self) -> None:
+        """Only tokens in active_tokens should get indicators populated."""
+        engine = BacktestIndicatorEngine(required_indicators={"rsi", "atr"})
+
+        for price in _generate_prices(3500.0, 30):
+            engine.append_price("WETH", price)
+        for price in _generate_prices(1.0, 30, volatility=0.01):
+            engine.append_price("USDC", price)
+
+        snapshot = _make_snapshot()
+        # Only populate WETH indicators
+        engine.populate_snapshot(snapshot, active_tokens={"WETH"})
+
+        # WETH should have indicators
+        assert isinstance(snapshot.rsi("WETH"), RSIData)
+        assert isinstance(snapshot.atr("WETH"), ATRData)
+
+        # USDC should NOT have indicators (not in active_tokens)
+        with pytest.raises(ValueError):
+            snapshot.rsi("USDC")
+
+
+# =============================================================================
+# ATR Calculator from_prices Tests
+# =============================================================================
+
+
+class TestATRCalculatorFromPrices:
+    """Tests for ATRCalculator.calculate_atr_from_prices static method."""
+
+    def test_basic_calculation(self) -> None:
+        """ATR from prices should return a positive value."""
+        from almanak.framework.data.indicators.atr import ATRCalculator
+
+        prices = _generate_prices(3500.0, 30)
+        atr = ATRCalculator.calculate_atr_from_prices(prices, period=14)
+        assert atr > 0
+
+    def test_insufficient_data_raises(self) -> None:
+        """Should raise InsufficientDataError with too few prices."""
+        from almanak.framework.data.indicators.atr import ATRCalculator
+        from almanak.framework.data.interfaces import InsufficientDataError
+
+        prices = _generate_prices(3500.0, 5)
+        with pytest.raises(InsufficientDataError):
+            ATRCalculator.calculate_atr_from_prices(prices, period=14)
+
+    def test_constant_prices_zero_atr(self) -> None:
+        """Constant prices should produce zero ATR."""
+        from almanak.framework.data.indicators.atr import ATRCalculator
+
+        prices = [Decimal("100")] * 20
+        atr = ATRCalculator.calculate_atr_from_prices(prices, period=14)
+        assert atr == pytest.approx(0.0, abs=1e-10)
+
+    def test_known_volatility(self) -> None:
+        """Alternating prices should produce predictable ATR."""
+        from almanak.framework.data.indicators.atr import ATRCalculator
+
+        # Alternating between 100 and 110: TR = 10 every step
+        prices = [Decimal("100") if i % 2 == 0 else Decimal("110") for i in range(20)]
+        atr = ATRCalculator.calculate_atr_from_prices(prices, period=5)
+        # All TRs are 10, so ATR should be approximately 10
+        assert atr == pytest.approx(10.0, rel=0.01)
+
+    def test_custom_period(self) -> None:
+        """Different periods should produce different ATR values."""
+        from almanak.framework.data.indicators.atr import ATRCalculator
+
+        prices = _generate_prices(3500.0, 50)
+        atr_7 = ATRCalculator.calculate_atr_from_prices(prices, period=7)
+        atr_14 = ATRCalculator.calculate_atr_from_prices(prices, period=14)
+        # Both should be positive but different
+        assert atr_7 > 0
+        assert atr_14 > 0

@@ -1,0 +1,19 @@
+{
+    "chain": "arbitrum",
+    "pool": "WETH/USDC/3000",
+    "range_width_pct": "0.10",
+    "amount0": "0.001",
+    "amount1": "3",
+    "fee_tier": 3000,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    "macd_timeframe": "1h",
+    "force_action": "open",
+    "position_id": null,
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

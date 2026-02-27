@@ -349,6 +349,29 @@ def create_market_snapshot_from_state(
         )
         snapshot.set_balance("USD", cash_balance)
 
+        # Expose cash under stablecoin symbols so strategies calling
+        # market.balance("USDC") get the cash balance instead of ValueError
+        stablecoin_aliases = frozenset(["USDC", "USDT", "DAI"])
+        for stable in stablecoin_aliases:
+            if stable not in portfolio.tokens:
+                stable_balance = TokenBalance(
+                    symbol=stable,
+                    balance=portfolio.cash_usd,
+                    balance_usd=portfolio.cash_usd,
+                )
+                snapshot.set_balance(stable, stable_balance)
+
+        # Expose zero balances for tracked tokens not in the portfolio
+        # so strategies calling market.balance("WETH") get zero instead of ValueError
+        for token in market_state.available_tokens:
+            if token not in portfolio.tokens and token not in stablecoin_aliases and token != "USD":
+                zero_balance = TokenBalance(
+                    symbol=token,
+                    balance=Decimal("0"),
+                    balance_usd=Decimal("0"),
+                )
+                snapshot.set_balance(token, zero_balance)
+
     return snapshot
 
 

@@ -1,40 +1,8 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-light.svg">
-    <img alt="Almanak" src="docs/assets/logo-light.svg" width="300">
-  </picture>
-</p>
+# Almanak SDK
 
-<h3 align="center">Production DeFi strategy framework for quants</h3>
+[![PyPI version](https://badge.fury.io/py/almanak.svg)](https://badge.fury.io/py/almanak)
 
-<p align="center">
-  <a href="https://pypi.org/project/almanak/"><img src="https://img.shields.io/pypi/v/almanak?style=flat-square&color=blue" alt="PyPI version"></a>
-  <a href="https://pypi.org/project/almanak/"><img src="https://img.shields.io/pypi/pyversions/almanak?style=flat-square" alt="Python 3.12+"></a>
-  <a href="https://github.com/almanak-co/almanak-sdk/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License: Apache-2.0"></a>
-  <a href="https://docs.almanak.co/"><img src="https://img.shields.io/badge/docs-almanak.co-purple?style=flat-square" alt="Docs"></a>
-  <a href="https://discord.gg/c4jY28WrEB"><img src="https://img.shields.io/badge/Discord-join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
-  <a href="https://x.com/Almanak__"><img src="https://img.shields.io/badge/Twitter-follow-1DA1F2?style=flat-square&logo=x&logoColor=white" alt="Twitter"></a>
-</p>
-
-<p align="center">
-  <a href="#installation">Installation</a> |
-  <a href="#quick-start">Quick Start</a> |
-  <a href="#writing-a-strategy">Strategies</a> |
-  <a href="#backtesting">Backtesting</a> |
-  <a href="https://docs.almanak.co/">Docs</a>
-</p>
-
-<p align="center">
-  <a href="https://sdk.docs.almanak.co/">English</a> |
-  <a href="https://sdk.docs.almanak.co/zh/">中文</a> |
-  <a href="https://sdk.docs.almanak.co/fr/">Français</a> |
-  <a href="https://sdk.docs.almanak.co/es/">Español</a>
-</p>
-
----
-
-Almanak is an intent-based Python framework for developing, testing, and deploying autonomous DeFi strategies. Express trading logic as high-level intents - the framework handles compilation, execution, and state management across 12 chains and 20+ protocols.
+The Almanak SDK is a powerful Python library for developing, testing, and deploying autonomous DeFi agents. Built on an intent-based architecture, it provides a comprehensive framework for creating sophisticated trading strategies with minimal boilerplate.
 
 ## Features
 
@@ -51,14 +19,6 @@ Almanak is an intent-based Python framework for developing, testing, and deployi
 ```bash
 pip install almanak
 ```
-
-**Using an AI coding agent?** Teach it the SDK in one command:
-
-```bash
-almanak agent install
-```
-
-This auto-detects your platform (Claude Code, Codex, Cursor, Copilot, and [6 more](https://docs.almanak.co/agent-skills/)) and installs the strategy builder skill.
 
 ## Quick Start
 
@@ -80,27 +40,53 @@ This auto-detects your platform (Claude Code, Codex, Cursor, Copilot, and [6 mor
 
 ## Writing a Strategy
 
-Strategies implement the `decide()` method, which receives a `MarketSnapshot` and returns an `Intent` (or `None` to skip the cycle):
+Strategies use an intent-based architecture. Implement the `decide()` method to return an intent based on market conditions:
 
 ```python
-from decimal import Decimal
-from almanak.framework.intents import Intent
-from almanak.framework.strategies import IntentStrategy, MarketSnapshot
+from almanak import IntentStrategy, SwapIntent, HoldIntent, MarketSnapshot
 
 class MyStrategy(IntentStrategy):
     """A simple mean-reversion strategy."""
 
-    def decide(self, market: MarketSnapshot) -> Intent | None:
-        eth_price = market.price("ETH")
-        usdc = market.balance("USDC")
+    def decide(self, market: MarketSnapshot) -> Intent:
+        eth_price = market.prices.get("ETH")
+        usdc_balance = market.balances.get("USDC")
 
-        if eth_price < Decimal("2000") and usdc.balance_usd > Decimal("500"):
-            return Intent.swap(
-                from_token="USDC",
-                to_token="ETH",
-                amount_usd=Decimal("500"),
+        # Buy ETH when price is low
+        if eth_price < 2000 and usdc_balance > 1000:
+            return SwapIntent(
+                token_in="USDC",
+                token_out="ETH",
+                amount=1000,
+                slippage=0.005,
             )
-        return Intent.hold(reason="Waiting for better conditions")
+
+        # Sell ETH when price is high
+        eth_balance = market.balances.get("ETH")
+        if eth_price > 2500 and eth_balance > 0.5:
+            return SwapIntent(
+                token_in="ETH",
+                token_out="USDC",
+                amount=0.5,
+                slippage=0.005,
+            )
+
+        return HoldIntent(reason="Waiting for better conditions")
+```
+
+### Swap Pool Selection
+
+For V3-style swaps, pool fee tiers are not assumed to be symmetric or equally liquid.
+
+- Default: `auto` pool selection (recommended)
+- Optional: `fixed` pool fee tier for deterministic execution
+
+```python
+from almanak.framework.intents.compiler import IntentCompilerConfig
+
+config = IntentCompilerConfig(
+    swap_pool_selection_mode="auto",  # Recommended
+)
 ```
 
 ## Available Intents
@@ -109,13 +95,10 @@ class MyStrategy(IntentStrategy):
 |--------|-------------|
 | `SwapIntent` | Token swaps on DEXs |
 | `HoldIntent` | No action, wait for next cycle |
-| `LPOpenIntent` / `LPCloseIntent` | Open/close liquidity positions |
-| `BorrowIntent` / `RepayIntent` | Borrow/repay on lending protocols |
-| `SupplyIntent` / `WithdrawIntent` | Supply/withdraw from lending protocols |
-| `StakeIntent` / `UnstakeIntent` | Stake/unstake tokens |
-| `PerpOpenIntent` / `PerpCloseIntent` | Open/close perpetuals positions |
-| `FlashLoanIntent` | Flash loan operations |
-| `PredictionBuyIntent` / `PredictionSellIntent` / `PredictionRedeemIntent` | Prediction market trading |
+| `LPOpenIntent` | Open liquidity position |
+| `LPCloseIntent` | Close liquidity position |
+| `BorrowIntent` | Borrow from lending protocols |
+| `RepayIntent` | Repay borrowed assets |
 
 ## CLI Commands
 
@@ -310,25 +293,6 @@ docker-compose -f deploy/docker/docker-compose.yml up
 ```
 
 For more details, visit [docs.almanak.co](https://docs.almanak.co/).
-
-## AI Agent Skills
-
-Supercharge your strategy development with AI agent support. The Almanak strategy builder skill teaches AI coding agents (Claude Code, Codex, Cursor, Copilot, and others) how to write strategies using the SDK.
-
-### Install for Your Agent
-
-```bash
-# Claude Code / Codex / any skills.sh-compatible agent
-npx skills add almanak-co/almanak-sdk
-
-# Or via the Almanak CLI (auto-detects your agent platform)
-almanak agent install
-
-# OpenClaw
-clawhub install almanak-strategy-builder
-```
-
-Once installed, your agent understands the full intent vocabulary, market data API, backtesting tools, and CLI commands. Just describe what you want to build.
 
 ## Documentation
 

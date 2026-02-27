@@ -1,0 +1,15 @@
+{
+    "strategy_id": "aave_supply_base",
+    "strategy_name": "aave_supply_base",
+    "description": "Supply USDC to Aave V3 on Base - chain portability validation",
+    "supply_token": "USDC",
+    "supply_amount": "100",
+    "min_apy_pct": 1.0,
+    "re_entry_apy_pct": 3.0,
+    "force_action": "supply",
+    "chain": "base",
+    "anvil_funding": {
+        "ETH": 100,
+        "USDC": 10000
+    }
+}

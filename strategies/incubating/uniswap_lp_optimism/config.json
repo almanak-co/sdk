@@ -1,0 +1,16 @@
+{
+    "strategy_id": "uniswap_lp_optimism",
+    "strategy_name": "uniswap_lp_optimism",
+    "description": "Uniswap V3 LP on Optimism - first kitchenloop test on OP chain",
+    "pool": "WETH/USDC/500",
+    "range_width_pct": 0.20,
+    "amount0": "0.001",
+    "amount1": "3",
+    "force_action": "open",
+    "chain": "optimism",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

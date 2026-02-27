@@ -124,6 +124,10 @@ ALMANAK_PRIVATE_KEY=0xYOUR_PRIVATE_KEY
 RPC_URL=https://your-rpc-provider.com/v1/your-key
 # ALCHEMY_API_KEY=your_alchemy_key  # alternative: auto-builds URLs per chain
 
+# RPC access (pick one)
+RPC_URL=https://your-rpc-provider.com/v1/your-key
+# ALCHEMY_API_KEY=your_alchemy_key  # alternative: auto-builds URLs per chain
+
 # Recommended
 ENSO_API_KEY=your_enso_key
 COINGECKO_API_KEY=your_coingecko_key

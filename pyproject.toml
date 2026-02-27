@@ -59,7 +59,6 @@ dev = [
     "wheel==0.46.3",
     "mkdocs>=1.6.1",
     "mkdocs-material>=9.7.0",
-    "mkdocs-static-i18n>=1.2.0",
     "mkdocs-llmstxt>=0.5.0",
     "mkdocstrings[python]>=0.29.0",
     "md-click-2 (>=0.0.1,<0.0.2)",
@@ -76,14 +75,12 @@ dev = [
     "pytest-asyncio>=0.25.0",
     "pytest-xdist>=3.5.0",
     "pytest-cov>=6.0",
-    "pytest-timeout>=2.3.1",
 ]
 
 [tool.poetry]
 include = [
     { path = "almanak/bin/*", format = ["sdist", "wheel"] },
     { path = "almanak/llms/llms-full.txt", format = ["sdist", "wheel"] },
-    { path = "almanak/skills/**/*.md", format = ["sdist", "wheel"] },
 ]
 
 [build-system]
@@ -110,7 +107,6 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "pytest-xdist>=3.5.0",
     "pytest-cov>=6.0",
-    "pytest-timeout>=2.3.1",
 ]
 
 [tool.ruff.lint]
@@ -205,8 +201,22 @@ module = [
     "matplotlib.*",
     "structlog.*",
     "simple_term_menu.*",
+    "yaml",
+    "yaml.*",
+    "langchain_core.*",
+    "pytz",
+    "pytz.*",
 ]
 ignore_missing_imports = true
+
+# Internal modules that may or may not be present depending on the environment
+[[tool.mypy.overrides]]
+module = [
+    "almanak.framework.data.price.multi_dex",
+    "almanak.framework.state.portfolio",
+]
+ignore_missing_imports = true
+follow_imports = "skip"
 
 # In-tree test files (intentionally pass wrong types for testing)
 [[tool.mypy.overrides]]

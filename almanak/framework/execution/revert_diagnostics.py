@@ -589,6 +589,18 @@ def determine_likely_cause(
                 ["Check token balance", "Check token approval for the contract"],
             )
 
+        # VIB-305: Check gas price cap errors BEFORE generic "price" check.
+        # "Gas price cap exceeded" contains "price", so the generic check fires incorrectly.
+        if "gas price cap" in error_lower:
+            return (
+                "Gas price cap exceeded",
+                [
+                    "Set ALMANAK_MAX_GAS_PRICE_GWEI to a higher value (e.g., ALMANAK_MAX_GAS_PRICE_GWEI=1000)",
+                    "Current chain gas price is higher than the configured cap",
+                    "In Anvil mode, the cap is disabled by default (9999 gwei) -- check your .env overrides",
+                ],
+            )
+
         if "slippage" in error_lower or "price" in error_lower:
             return (
                 "Slippage or price check failed",

@@ -1,0 +1,18 @@
+{
+    "market": "ETH/USD",
+    "collateral_token": "USDC",
+    "risk_budget_usd": "100",
+    "leverage": "2.0",
+    "rsi_threshold": 75,
+    "rsi_period": 14,
+    "rally_threshold_24h_pct": 5,
+    "max_doublings": 5,
+    "doubling_trigger_pct": 10,
+    "retracement_target_pct": 30,
+    "hard_stop_above_last_entry_pct": 15,
+    "time_stop_hours": 168,
+    "max_slippage_pct": 1.0,
+    "cooldown_minutes": 60,
+    "chain": "arbitrum",
+    "force_action": null
+}

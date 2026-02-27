@@ -28,50 +28,6 @@ CHAIN_NAME = "ethereum"
 REQUIRED_CHAIN_ID = 1
 
 
-def _seed_wallet_state(web3: Web3, rpc_url: str) -> str:
-    """Seed test wallet balances for Ethereum on the current fork instance."""
-    config = CHAIN_CONFIGS[CHAIN_NAME]
-    # Required tokens for Ethereum intent tests - fixture must fail if these can't be funded
-    required_tokens = {"USDC", "WETH"}
-    failed_tokens: list[str] = []
-
-    # Fund with 100 native tokens
-    fund_native_token(TEST_WALLET, 100 * 10**18, rpc_url)
-
-    # Fund with common tokens
-    for token_symbol, token_address in config.get("tokens", {}).items():
-        balance_slot = config.get("balance_slots", {}).get(token_symbol)
-        if balance_slot is not None:
-            try:
-                decimals = get_token_decimals(web3, token_address)
-                # Use wrapping for wrapped native tokens (more reliable than storage slot manipulation)
-                if token_symbol in ("WETH", "WAVAX", "WMATIC", "WBNB"):
-                    wrap_amount = 10 * (10**decimals)
-                    _wrap_native_token(TEST_WALLET, token_address, wrap_amount, rpc_url)
-                else:
-                    amount = 100_000 * (10**decimals)
-                    fund_erc20_token(TEST_WALLET, token_address, amount, balance_slot, rpc_url)
-            except Exception as e:
-                print(f"Warning: Could not fund {token_symbol}: {e}")
-                failed_tokens.append(token_symbol)
-
-    # Fail fast if required tokens couldn't be funded
-    missing_required = set(failed_tokens) & required_tokens
-    if missing_required:
-        raise AssertionError(
-            f"Failed to fund required tokens: {missing_required}. "
-            f"All failed tokens: {failed_tokens}"
-        )
-
-    return TEST_WALLET
-
-
-@pytest.fixture(scope="module")
-def anvil_instance(anvil_ethereum: AnvilFixture) -> AnvilFixture:
-    """Expose the chain-specific AnvilFixture for shared recovery logic."""
-    return anvil_ethereum
-
-
 @pytest.fixture(scope="module")
 def anvil_rpc_url(anvil_ethereum: AnvilFixture) -> str:
     """Get the Anvil RPC URL for Ethereum chain."""
@@ -97,17 +53,40 @@ def test_private_key() -> str:
 @pytest.fixture(scope="module")
 def funded_wallet(web3: Web3, anvil_rpc_url: str) -> str:
     """Fund the test wallet with native token and common ERC20s."""
-    return _seed_wallet_state(web3, anvil_rpc_url)
+    config = CHAIN_CONFIGS[CHAIN_NAME]
+    # Required tokens for Ethereum intent tests - fixture must fail if these can't be funded
+    required_tokens = {"USDC", "WETH"}
+    failed_tokens: list[str] = []
 
+    # Fund with 100 native tokens
+    fund_native_token(TEST_WALLET, 100 * 10**18, anvil_rpc_url)
 
-@pytest.fixture(scope="module")
-def reseed_wallet_state(web3: Web3, anvil_instance: AnvilFixture):
-    """Return a callable that re-seeds balances on demand (for fork recovery)."""
+    # Fund with common tokens
+    for token_symbol, token_address in config.get("tokens", {}).items():
+        balance_slot = config.get("balance_slots", {}).get(token_symbol)
+        if balance_slot is not None:
+            try:
+                decimals = get_token_decimals(web3, token_address)
+                # Use wrapping for wrapped native tokens (more reliable than storage slot manipulation)
+                if token_symbol in ("WETH", "WAVAX", "WMATIC", "WBNB"):
+                    wrap_amount = 10 * (10**decimals)
+                    _wrap_native_token(TEST_WALLET, token_address, wrap_amount, anvil_rpc_url)
+                else:
+                    amount = 100_000 * (10**decimals)
+                    fund_erc20_token(TEST_WALLET, token_address, amount, balance_slot, anvil_rpc_url)
+            except Exception as e:
+                print(f"Warning: Could not fund {token_symbol}: {e}")
+                failed_tokens.append(token_symbol)
 
-    def _reseed() -> str:
-        return _seed_wallet_state(web3, anvil_instance.get_rpc_url())
+    # Fail fast if required tokens couldn't be funded
+    missing_required = set(failed_tokens) & required_tokens
+    if missing_required:
+        raise AssertionError(
+            f"Failed to fund required tokens: {missing_required}. "
+            f"All failed tokens: {failed_tokens}"
+        )
 
-    return _reseed
+    return TEST_WALLET
 
 
 @pytest.fixture

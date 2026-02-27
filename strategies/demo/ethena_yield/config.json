@@ -7,6 +7,7 @@
     "anvil_funding": {
         "ETH": 100,
         "USDC": 10000,
-        "WETH": 1
+        "WETH": 1,
+        "USDe": 1000
     }
 }

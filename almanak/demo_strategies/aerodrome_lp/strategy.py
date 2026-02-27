@@ -215,10 +215,6 @@ class AerodromeLPStrategy(IntentStrategy[AerodromeLPConfig]):
             f"amounts={self.amount0} {self.token0_symbol} + {self.amount1} {self.token1_symbol}"
         )
 
-    def _has_tracked_position(self) -> bool:
-        """State-first position marker used for teardown gating."""
-        return self._has_position or self._lp_token_balance > 0
-
     # =========================================================================
     # MAIN DECISION LOGIC
     # =========================================================================
@@ -275,7 +271,7 @@ class AerodromeLPStrategy(IntentStrategy[AerodromeLPConfig]):
             # STEP 3: Check current position status
             # =================================================================
 
-            if self._has_tracked_position():
+            if self._has_position:
                 # We have a position - monitor it
                 return Intent.hold(reason=f"Position exists in {self.pool} pool - monitoring")
 
@@ -390,8 +386,6 @@ class AerodromeLPStrategy(IntentStrategy[AerodromeLPConfig]):
         if success and intent.intent_type.value == "LP_OPEN":
             logger.info("Aerodrome LP position opened successfully")
             self._has_position = True
-            if self._lp_token_balance <= 0:
-                self._lp_token_balance = Decimal("1")
             add_event(
                 TimelineEvent(
                     timestamp=datetime.now(UTC),
@@ -406,40 +400,6 @@ class AerodromeLPStrategy(IntentStrategy[AerodromeLPConfig]):
             logger.info("Aerodrome LP position closed successfully")
             self._has_position = False
             self._lp_token_balance = Decimal("0")
-
-    # =========================================================================
-    # STATE PERSISTENCE
-    # =========================================================================
-
-    def get_persistent_state(self) -> dict[str, Any]:
-        """Persist minimal LP state so teardown can recover after process restart."""
-        parent_get_state = getattr(super(), "get_persistent_state", None)
-        state = parent_get_state() if callable(parent_get_state) else {}
-        state["has_position"] = self._has_tracked_position()
-        state["lp_token_balance"] = str(self._lp_token_balance)
-        return state
-
-    def load_persistent_state(self, state: dict[str, Any]) -> None:
-        """Restore persisted LP state."""
-        parent_load_state = getattr(super(), "load_persistent_state", None)
-        if callable(parent_load_state):
-            parent_load_state(state)
-
-        raw_has_position = state.get("has_position", False)
-        if isinstance(raw_has_position, str):
-            self._has_position = raw_has_position.strip().lower() in {"1", "true", "yes", "on"}
-        else:
-            self._has_position = bool(raw_has_position)
-
-        raw_lp_balance = state.get("lp_token_balance", "0")
-        try:
-            self._lp_token_balance = Decimal(str(raw_lp_balance))
-        except Exception:
-            logger.warning("Invalid persisted lp_token_balance=%r; defaulting to 0", raw_lp_balance)
-            self._lp_token_balance = Decimal("0")
-
-        if self._lp_token_balance > 0:
-            self._has_position = True
 
     # =========================================================================
     # STATUS REPORTING
@@ -486,7 +446,7 @@ class AerodromeLPStrategy(IntentStrategy[AerodromeLPConfig]):
 
         positions: list[PositionInfo] = []
 
-        if self._has_tracked_position():
+        if self._has_position:
             # Calculate estimated value
             token0_price_usd = Decimal("3000")  # Default ETH price
             token1_price_usd = Decimal("1")  # Default USDC price
@@ -525,7 +485,7 @@ class AerodromeLPStrategy(IntentStrategy[AerodromeLPConfig]):
 
         intents: list[Intent] = []
 
-        if self._has_tracked_position():
+        if self._has_position:
             pool_type = "stable" if self.stable else "volatile"
             pool_with_type = f"{self.pool}/{pool_type}"
 

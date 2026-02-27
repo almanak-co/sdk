@@ -190,46 +190,40 @@ class MorphoLoopingStrategy(IntentStrategy):
         # Extract configuration
         # =====================================================================
 
-        def get_config(key: str, default: Any) -> Any:
-            if isinstance(self.config, dict):
-                return self.config.get(key, default)
-            if hasattr(self.config, "get"):
-                return self.config.get(key, default)
-            return getattr(self.config, key, default)
-
         # Market configuration (required)
         # Default: wstETH/USDC market on Ethereum (86% LLTV)
-        self.market_id = get_config(
+        self.market_id = self.get_config(
             "market_id",
             "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
         )
 
         # Token configuration
-        self.collateral_token = get_config("collateral_token", "wstETH")
-        self.borrow_token = get_config("borrow_token", "USDC")
+        self.collateral_token = self.get_config("collateral_token", "wstETH")
+        self.borrow_token = self.get_config("borrow_token", "USDC")
 
         # Collateral amount
-        self.initial_collateral = Decimal(str(get_config("initial_collateral", "1.0")))
+        self.initial_collateral = Decimal(str(self.get_config("initial_collateral", "1.0")))
 
         # Looping parameters
-        self.target_loops = int(get_config("target_loops", 3))
-        self.target_ltv = Decimal(str(get_config("target_ltv", "0.75")))  # 75% LTV per loop
+        self.target_loops = int(self.get_config("target_loops", 3))
+        self.target_ltv = Decimal(str(self.get_config("target_ltv", "0.75")))  # 75% LTV per loop
 
         # Risk parameters
-        self.min_health_factor = Decimal(str(get_config("min_health_factor", "1.5")))
+        self.min_health_factor = Decimal(str(self.get_config("min_health_factor", "1.5")))
 
         # Swap parameters
-        self.swap_slippage = Decimal(str(get_config("swap_slippage", "0.005")))  # 0.5%
+        self.swap_slippage = Decimal(str(self.get_config("swap_slippage", "0.005")))  # 0.5%
 
         # Force action for testing
-        self.force_action = str(get_config("force_action", "")).lower()
+        self.force_action = str(self.get_config("force_action", "")).lower()
 
         # =====================================================================
         # Internal state tracking
         # =====================================================================
 
-        # Loop state machine: idle -> supplying -> borrowing -> swapping -> (repeat) -> complete
+        # Loop state machine: idle -> supplying -> supplied -> borrowing -> borrowed -> swapping -> swapped -> (repeat) -> complete
         self._loop_state = "idle"
+        self._previous_stable_state = "idle"  # Revert target on intent failure
         self._current_loop = 0
         self._loops_completed = 0
 
@@ -337,8 +331,16 @@ class MorphoLoopingStrategy(IntentStrategy):
             elif self._loop_state == "complete":
                 return self._handle_complete_state(collateral_price, borrow_price)
 
-            # Default: Hold during transitions
+            # Safety net: if we're in a transitional state (supplying, borrowing, swapping)
+            # it means the previous intent failed and on_intent_executed didn't fire.
+            # Revert to the last known stable state.
             else:
+                if self._loop_state in ("supplying", "borrowing", "swapping"):
+                    revert_to = self._previous_stable_state
+                    logger.warning(
+                        f"Stuck in transitional state '{self._loop_state}' — reverting to '{revert_to}'"
+                    )
+                    self._loop_state = revert_to
                 return Intent.hold(reason=f"Waiting for state transition (current: {self._loop_state})")
 
         except Exception as e:
@@ -364,6 +366,7 @@ class MorphoLoopingStrategy(IntentStrategy):
 
         logger.info(f"State: IDLE -> SUPPLYING (loop {self._current_loop + 1}/{self.target_loops})")
         self._emit_state_change("idle", "supplying")
+        self._previous_stable_state = self._loop_state
         self._loop_state = "supplying"
         return self._create_supply_intent(self.initial_collateral)
 
@@ -371,6 +374,7 @@ class MorphoLoopingStrategy(IntentStrategy):
         """Handle SUPPLIED state - borrow against collateral."""
         logger.info(f"State: SUPPLIED -> BORROWING (loop {self._current_loop + 1}/{self.target_loops})")
         self._emit_state_change("supplied", "borrowing")
+        self._previous_stable_state = self._loop_state
         self._loop_state = "borrowing"
         return self._create_borrow_intent(collateral_price, borrow_price)
 
@@ -383,19 +387,23 @@ class MorphoLoopingStrategy(IntentStrategy):
 
         logger.info(f"State: BORROWED -> SWAPPING (loop {self._current_loop + 1}/{self.target_loops})")
         self._emit_state_change("borrowed", "swapping")
+        self._previous_stable_state = self._loop_state
         self._loop_state = "swapping"
         return self._create_swap_intent(self._pending_swap_amount, borrow_price)
 
     def _handle_swapped_state(self, market: MarketSnapshot) -> Intent:
-        """Handle SWAPPED state - check if more loops needed."""
-        self._loops_completed += 1
-        self._current_loop += 1
+        """Handle SWAPPED state - check if more loops needed.
 
+        Note: Loop counters (_loops_completed, _current_loop) are incremented
+        in on_intent_executed(success=True) for SWAP, not here. This prevents
+        double-counting if a subsequent supply fails and we revert to this state.
+        """
         if self._current_loop < self.target_loops:
             # More loops needed - supply the swapped collateral
             logger.info(
                 f"Loop {self._loops_completed} complete. Starting loop {self._current_loop + 1}/{self.target_loops}"
             )
+            self._previous_stable_state = self._loop_state
             self._loop_state = "supplying"
 
             # The collateral to supply is what we got from the swap
@@ -644,9 +652,13 @@ class MorphoLoopingStrategy(IntentStrategy):
 
             elif intent_type == "SWAP":
                 self._loop_state = "swapped"
+                # Increment loop counters here (not in _handle_swapped_state) to prevent
+                # double-counting if a subsequent supply fails and reverts to "swapped"
+                self._loops_completed += 1
+                self._current_loop += 1
                 # The swap result should contain the output amount
                 # For now, estimate based on prices
-                logger.info(f"Swap successful - Loop {self._current_loop + 1} swap complete")
+                logger.info(f"Swap successful - Loop {self._current_loop} swap complete")
                 add_event(
                     TimelineEvent(
                         timestamp=datetime.now(UTC),
@@ -663,8 +675,13 @@ class MorphoLoopingStrategy(IntentStrategy):
                 )
 
         else:
-            # On failure, stay in current state for retry
-            logger.warning(f"{intent_type} failed - will retry")
+            # On failure, revert to previous stable state so decide() can retry
+            # (staying in the transitional state would permanently stuck the strategy)
+            revert_to = self._previous_stable_state
+            logger.warning(
+                f"{intent_type} failed in state '{self._loop_state}' — reverting to '{revert_to}'"
+            )
+            self._loop_state = revert_to
 
     def _emit_state_change(self, old_state: str, new_state: str) -> None:
         """Emit a state change event to the timeline."""
@@ -720,6 +737,7 @@ class MorphoLoopingStrategy(IntentStrategy):
         """Get state to persist for crash recovery."""
         return {
             "loop_state": self._loop_state,
+            "previous_stable_state": self._previous_stable_state,
             "current_loop": self._current_loop,
             "loops_completed": self._loops_completed,
             "total_collateral": str(self._total_collateral),
@@ -732,6 +750,8 @@ class MorphoLoopingStrategy(IntentStrategy):
         """Load persisted state on startup."""
         if "loop_state" in state:
             self._loop_state = state["loop_state"]
+        if "previous_stable_state" in state:
+            self._previous_stable_state = state["previous_stable_state"]
         if "current_loop" in state:
             self._current_loop = int(state["current_loop"])
         if "loops_completed" in state:

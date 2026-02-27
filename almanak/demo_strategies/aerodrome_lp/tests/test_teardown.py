@@ -1,10 +1,9 @@
 """Teardown tests for Aerodrome LP demo strategy."""
 
 from decimal import Decimal
-from types import SimpleNamespace
 from unittest.mock import patch
 
-from almanak.demo_strategies.aerodrome_lp import AerodromeLPStrategy
+from strategies.demo.aerodrome_lp import AerodromeLPStrategy
 
 
 def create_strategy() -> AerodromeLPStrategy:
@@ -49,47 +48,3 @@ def test_get_open_positions_returns_valid_summary_with_position() -> None:
     assert len(summary.positions) == 1
     assert summary.positions[0].protocol == "aerodrome"
     assert summary.total_value_usd > Decimal("0")
-
-
-def test_get_open_positions_uses_positive_balance_marker() -> None:
-    """Positive LP balance marker should count as an open position."""
-    strategy = create_strategy()
-    strategy._has_position = False
-    strategy._lp_token_balance = Decimal("0.75")
-
-    summary = strategy.get_open_positions()
-
-    assert len(summary.positions) == 1
-    assert summary.positions[0].protocol == "aerodrome"
-
-
-def test_get_persistent_state_marks_position_open_for_positive_balance() -> None:
-    """Persisted has_position should follow tracked balance marker."""
-    strategy = create_strategy()
-    strategy._has_position = False
-    strategy._lp_token_balance = Decimal("0.75")
-
-    state = strategy.get_persistent_state()
-
-    assert state["has_position"] is True
-
-
-def test_load_persistent_state_positive_balance_sets_has_position() -> None:
-    """Positive persisted LP balance should normalize to has_position=True."""
-    strategy = create_strategy()
-    strategy.load_persistent_state({"has_position": False, "lp_token_balance": "0.2"})
-
-    assert strategy._has_position is True
-    assert strategy._lp_token_balance == Decimal("0.2")
-
-
-def test_generate_teardown_intents_uses_positive_balance_marker() -> None:
-    """Teardown intents should be generated when tracked marker indicates open position."""
-    strategy = create_strategy()
-    strategy._has_position = False
-    strategy._lp_token_balance = Decimal("0.3")
-
-    intents = strategy.generate_teardown_intents(SimpleNamespace(value="graceful"))
-
-    assert len(intents) == 1
-    assert intents[0].intent_type.value == "LP_CLOSE"

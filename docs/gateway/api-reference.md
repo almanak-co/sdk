@@ -6,7 +6,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 
 | Service | Methods | Description |
 |---------|---------|-------------|
-| Health | 3 | Health checks (liveness/readiness probes) and chain registration |
+| Health | 3 | Standard gRPC health checks and chain registration |
 | MarketService | 4 | Price data, balances, batch balances, and technical indicators |
 | StateService | 3 | Strategy state persistence with optimistic locking |
 | ExecutionService | 3 | Intent compilation and transaction execution |
@@ -24,26 +24,44 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 
 ### Check
 
-Standard health check for liveness probes.
+Check if the service is healthy (liveness probe).
 
 ```protobuf
-rpc Check(HealthCheckRequest) returns (HealthCheckResponse)
+rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
 ```
 
 ### Watch
 
-Streaming health check for readiness monitoring.
+Watch for health status changes (streaming readiness probe).
 
 ```protobuf
-rpc Watch(HealthCheckRequest) returns (stream HealthCheckResponse)
+rpc Watch(HealthCheckRequest) returns (stream HealthCheckResponse);
 ```
 
 ### RegisterChains
 
-Register chains with the gateway after startup.
+Pre-initialize execution orchestrators and compilers for specified chains. Call this at startup to warm up chain-specific resources.
 
 ```protobuf
-rpc RegisterChains(RegisterChainsRequest) returns (RegisterChainsResponse)
+rpc RegisterChains(RegisterChainsRequest) returns (RegisterChainsResponse);
+```
+
+**Request:**
+```protobuf
+message RegisterChainsRequest {
+  repeated string chains = 1;      // Chain names to pre-initialize (e.g., "arbitrum", "base")
+  string wallet_address = 2;       // Wallet address for orchestrator initialization
+}
+```
+
+**Response:**
+```protobuf
+message RegisterChainsResponse {
+  bool success = 1;
+  repeated string initialized_chains = 2;  // Chains successfully initialized
+  string wallet_address = 3;               // Wallet address derived from gateway private key
+  string error = 4;
+}
 ```
 
 ## MarketService
@@ -112,11 +130,26 @@ message BalanceResponse {
 
 ### BatchGetBalances
 
-Get token balances for multiple tokens in a single call.
+Get token balances across multiple chains in a single call.
 
 ```protobuf
 rpc BatchGetBalances(BatchBalanceRequest) returns (BatchBalanceResponse)
 ```
+
+**Request:**
+```protobuf
+message BatchBalanceRequest {
+  repeated BalanceRequest requests = 1;
+}
+```
+
+**Response:**
+```protobuf
+message BatchBalanceResponse {
+  repeated BalanceResponse responses = 1;
+}
+```
+
 
 ### GetIndicator
 
@@ -276,7 +309,37 @@ message AlertRequest {
 Record a custom metric.
 
 ```protobuf
-rpc RecordMetric(MetricRequest) returns (MetricResponse)
+rpc RecordMetric(MetricEntry) returns (Empty)
+```
+
+### RecordTimelineEvent
+
+Record a timeline event for a strategy (trades, rebalances, errors, state changes).
+
+```protobuf
+rpc RecordTimelineEvent(RecordTimelineEventRequest) returns (RecordTimelineEventResponse)
+```
+
+**Request:**
+```protobuf
+message RecordTimelineEventRequest {
+  string strategy_id = 1;
+  string event_type = 2;       // "TRADE", "REBALANCE", "ERROR", "STATE_CHANGE", etc.
+  string description = 3;
+  string tx_hash = 4;          // Optional: transaction hash
+  string chain = 5;            // Optional: chain name
+  string details_json = 6;     // Optional: JSON-encoded details
+  int64 timestamp = 7;         // Optional: uses server time if 0
+}
+```
+
+**Response:**
+```protobuf
+message RecordTimelineEventResponse {
+  bool success = 1;
+  string event_id = 2;
+  string error = 3;
+}
 ```
 
 ### RecordTimelineEvent
@@ -325,6 +388,7 @@ message RpcResponse {
 - polygon
 - avalanche
 - bsc
+- bnb
 - sonic
 - plasma
 - linea

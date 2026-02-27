@@ -1,11 +1,9 @@
 # E2E Strategy Test Report: aave_borrow (Anvil)
 
-**Date:** 2026-02-23 03:33
+**Date:** 2026-02-27 08:39-08:40 UTC
 **Result:** PASS
 **Mode:** Anvil
-**Duration:** ~4 minutes
-
----
+**Duration:** ~2 minutes
 
 ## Configuration
 
@@ -13,95 +11,81 @@
 |-------|-------|
 | Strategy | demo_aave_borrow |
 | Chain | arbitrum |
-| Network | Anvil fork (Arbitrum mainnet) |
-| Anvil Port | 57609 (managed gateway auto-fork) |
-| Collateral Token | WETH |
-| Collateral Amount | 0.002 WETH (~$3.89 at $1,942 ETH) |
+| Network | Anvil fork |
+| Anvil Port | 58618 (managed, auto-started by CLI) |
+| Collateral | 0.002 WETH (~$4.06 at $2031 ETH) |
 | Borrow Token | USDC |
 | LTV Target | 50% |
 | Min Health Factor | 2.0 |
 
-**Budget check:** 0.002 WETH at ~$1,942/ETH = ~$3.89. Well within the $100 cap. No config amount changes needed.
+## Config Changes Made
 
-**Config changes made:**
-- Added `"force_action": "supply"` to trigger an immediate SUPPLY intent (restored after test)
+- Added `"force_action": "supply"` to trigger immediate SUPPLY intent (restored after test).
 
----
+Trade size: 0.002 WETH * $2,031.60 = ~$4.06 USD. Well within the $500 budget cap.
 
 ## Execution
 
 ### Setup
-- [x] Anvil fork started (managed gateway auto-starts its own fork on port 57609)
-- [x] Gateway started on port 50052 (managed gateway, auto-started by `almanak strat run`)
-- [x] Wallet auto-funded by managed gateway: 100 ETH, 1 WETH, 10,000 USDC
+- [x] Anvil fork auto-started by CLI on port 58618 (Arbitrum mainnet fork at block 436456995)
+- [x] Managed gateway auto-started on port 50052 (insecure mode for Anvil)
+- [x] Wallet (0xf39Fd6e5...) funded: 100 ETH, 1 WETH, 10,000 USDC (via config `anvil_funding`)
 
 ### Strategy Run
-
-The strategy loaded persisted state from a previous run (`loop_state: supplied`, `supplied_amount: 0.002`). Because `force_action: "supply"` was set, it bypassed the state machine and immediately issued a SUPPLY intent.
-
 - [x] Strategy executed with `--network anvil --once`
-- [x] Intent executed: **SUPPLY 0.002 WETH to Aave V3**
-- [x] 3 transactions submitted and confirmed on Anvil fork:
+- [x] `force_action: supply` triggered immediate SUPPLY intent
+- [x] SUPPLY intent compiled to 3 transactions (approve + supply + setUserUseReserveAsCollateral)
+- [x] All 3 transactions confirmed successfully on Anvil
+- [x] Receipt parser enriched result with `supply_amount`, `a_token_received`, `supply_rate`
+- [x] Strategy state transitioned: `idle -> supplied`
 
-| Tx | Hash | Gas Used | Status |
-|----|------|----------|--------|
-| 1 (approve/setup) | `44a0857c9d083954fb562a6190630efef35f02e2b418565c2c9c4fe217591d9b` | 53,440 | SUCCESS |
-| 2 (supply to Aave) | `2cf8a4fb0144310f6774d44ea35e97dc1139a397de333badf070d8b2b8743cdb` | 205,598 | SUCCESS |
-| 3 (collateral flag) | `eb5dbfde421b7d160ee83c4f6d8e121924b9372180b02b9f745dd15d48b72e90` | 45,572 | SUCCESS |
+### Transactions
 
-**Total gas used:** 304,610
+| # | Description | TX Hash | Block | Gas Used | Status |
+|---|-------------|---------|-------|----------|--------|
+| 1 | approve WETH | `0x5573f9ca...3452` | 436456998 | 53,440 | SUCCESS |
+| 2 | supply WETH to Aave V3 | `0xff3dc8aa...6d3a` | 436456999 | 205,598 | SUCCESS |
+| 3 | setUserUseReserveAsCollateral | `0x31b5be48...7cc7` | 436457000 | 45,572 | SUCCESS |
 
-**Final status line:**
-```text
-Status: SUCCESS | Intent: SUPPLY | Gas used: 304610 | Duration: 27681ms
-Iteration completed successfully.
-```
+Total gas: 304,610
 
 ### Key Log Output
-
 ```text
-[info] Aggregated price for WETH/USD: 1942.62 (confidence: 1.00, sources: 1/1, outliers: 0)
-[info] Aggregated price for USDC/USD: 0.999897 (confidence: 1.00, sources: 1/1, outliers: 0)
 [info] Forced action: SUPPLY collateral
 [info] SUPPLY intent: 0.0020 WETH to Aave V3
 [info] Compiled SUPPLY: 0.0020 WETH to aave_v3 (as collateral) | Txs: 3 | Gas: 530,000
-[info] Transaction confirmed: tx_hash=44a085..., block=434896070, gas_used=53440
-[info] Transaction confirmed: tx_hash=2cf8a4..., block=434896071, gas_used=205598
-[info] Transaction confirmed: tx_hash=eb5dbf..., block=434896072, gas_used=45572
+[info] Simulation successful: 3 transaction(s), total gas: 310817
 [info] EXECUTED: SUPPLY completed successfully | Txs: 3 | 304,610 gas
-[info] Parsed Aave V3: SUPPLY 2,000,000,000,000,000 to 0x82af...bab1
-[info] Enriched SUPPLY result with: supply_amount, a_token_received (protocol=aave_v3, chain=arbitrum)
+[info] Parsed Aave V3: SUPPLY 2,000,000,000,000,000 to 0x82af...bab1, tx=0xff3d...6d3a, 205,598 gas
+[info] Enriched SUPPLY result with: supply_amount, a_token_received, supply_rate
 [info] Supply successful - state: supplied
+Status: SUCCESS | Intent: SUPPLY | Gas used: 304610 | Duration: 42187ms
 ```
-
----
 
 ## Suspicious Behaviour
 
 | # | Source | Severity | Pattern | Log Line |
 |---|--------|----------|---------|----------|
-| 1 | gateway | WARNING | No CoinGecko API key | `COINGECKO_API_KEY not configured - CoinGecko will use free tier API (30 req/min limit)` |
-| 2 | strategy | WARNING | Gas estimate below compiler limit | `Gas estimate tx[0]: raw=53,788 buffered=80,682 (x1.5) < compiler=120,000, using compiler limit` |
-| 3 | strategy | WARNING | Gas estimation failed for tx 3 | `Gas estimation failed for tx 3/3: ('0x5fe10377', '0x5fe10377'). Using compiler-provided gas limit.` |
-| 4 | strategy | WARNING | Amount chaining extraction gap | `Amount chaining: no output amount extracted from step 1; subsequent amount='all' steps will fail` |
-| 5 | strategy | WARNING | Port not freed immediately | `Port 57609 not freed after 5.0s` (cosmetic, fork stopped successfully) |
+| 1 | gateway | WARNING | Token resolution: `BTC` not in arbitrum registry | `token_resolution_error token=BTC chain=arbitrum error_type=TokenNotFoundError ... Did you mean 'WBTC'?` |
+| 2 | gateway | WARNING | Token resolution: `STETH` not in arbitrum registry | `token_resolution_error token=STETH chain=arbitrum error_type=TokenNotFoundError ... Did you mean 'WSTETH'?` |
+| 3 | gateway | WARNING | Token resolution: `RDNT` not in arbitrum registry | `token_resolution_error token=RDNT chain=arbitrum error_type=TokenNotFoundError` |
+| 4 | gateway | WARNING | Token resolution: `MAGIC` not in arbitrum registry | `token_resolution_error token=MAGIC chain=arbitrum error_type=TokenNotFoundError` |
+| 5 | gateway | WARNING | Token resolution: `WOO` not in arbitrum registry | `token_resolution_error token=WOO chain=arbitrum error_type=TokenNotFoundError` |
+| 6 | gateway | INFO | No CoinGecko API key; using on-chain Chainlink pricing as primary | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback` |
+| 7 | gateway | INFO | Port not freed within 5s after managed Anvil stop | `Port 58618 not freed after 5.0s` |
 
 **Analysis:**
-- Finding 1 (CoinGecko free tier): Operational note. Prices were fetched successfully (WETH=$1,942.62, USDC=$0.9999). Not a problem for this run.
-- Finding 2 (Gas estimate below compiler limit): The actual gas used (53,440) was lower than the buffered estimate (80,682) and the compiler limit (120,000). The compiler limit was used as a safety margin. Transaction confirmed. No functional impact.
-- Finding 3 (Gas estimation failed for tx 3): The `setUserUseReserveAsCollateral` call (0x5fe10377) did not simulate cleanly, so the compiler-provided limit was used. The tx confirmed with 45,572 gas. Low risk -- fallback worked correctly.
-- Finding 4 (Amount chaining): The SUPPLY receipt parser does not expose an output amount compatible with `amount='all'` chaining in multi-step IntentSequences. Not relevant for this single-intent run but worth tracking as a potential issue for composed workflows.
-- Finding 5 (Port not freed): Cosmetic timing warning on Anvil shutdown. Fork was stopped successfully.
+- Findings 1-5 (token resolution warnings): Fire during `MarketService` initialisation for tokens absent from the arbitrum registry or using non-canonical aliases (`BTC` vs `WBTC`, `STETH` vs `WSTETH`). The tokens `RDNT`, `MAGIC`, `WOO` are legitimate Arbitrum tokens that should be added to the static registry. This is a data-layer gap, not a strategy bug. The `BTC`/`STETH` aliases should be added as symbol mappings to `WBTC`/`WSTETH`.
+- Finding 6 (no CoinGecko key): Expected for Anvil testing; on-chain Chainlink pricing worked correctly (WETH=$2,031.60, USDC=$0.9999). No zero-price issue.
+- Finding 7 (port cleanup): Minor timing issue in the Anvil fork manager cleanup; does not affect correctness.
 
-**No zero prices, no token resolution failures, no on-chain reverts, no API fetch failures.**
-
----
+No zero prices, no reverts, no actual API fetch failures, no timeouts triggered.
 
 ## Result
 
-**PASS** - The aave_borrow strategy executed a SUPPLY intent successfully on an Arbitrum Anvil fork. Three transactions were confirmed on-chain with 304,610 total gas used. Prices were fetched live from CoinGecko (WETH=$1,942.62, USDC=$0.9999). Five warnings were detected; none indicate functional failures. The gas estimation fallback for tx 3 and the amount chaining gap (finding 4) are the most notable items to track.
+**PASS** - The aave_borrow strategy successfully compiled and executed a SUPPLY intent on Arbitrum (Anvil fork): 0.002 WETH supplied to Aave V3 via 3 on-chain transactions totalling 304,610 gas. The strategy's state machine correctly transitioned from `idle` to `supplied` after successful execution.
 
 ---
 
-SUSPICIOUS_BEHAVIOUR_COUNT: 5
+SUSPICIOUS_BEHAVIOUR_COUNT: 7
 SUSPICIOUS_BEHAVIOUR_ERRORS: 0

@@ -1,0 +1,19 @@
+{
+    "strategy_id": "aave_leverage_loop",
+    "strategy_name": "aave_leverage_loop",
+    "description": "Aave V3 leveraged yield loop: supply wstETH, borrow WETH, swap to wstETH, re-supply. Amplifies yield spread via recursive borrowing.",
+    "collateral_token": "wstETH",
+    "borrow_token": "WETH",
+    "initial_collateral": "0.1",
+    "target_loops": 3,
+    "target_ltv": "0.70",
+    "min_health_factor": "1.5",
+    "swap_slippage": "0.01",
+    "chain": "arbitrum",
+    "anvil_funding": {
+        "ETH": 100,
+        "wstETH": 1,
+        "WETH": 10,
+        "USDC": 10000
+    }
+}

@@ -2,7 +2,8 @@
 
 Computes technical indicators from rolling price history and populates
 them on MarketSnapshot so that strategies using market.rsi(), market.macd(),
-and market.bollinger_bands() work identically in live and backtest modes.
+market.bollinger_bands(), and market.atr() work identically in live and
+backtest modes.
 
 The engine uses existing static calculator methods from the indicator modules,
 avoiding any code duplication. It maintains a rolling price buffer per token
@@ -11,7 +12,7 @@ and computes only the indicators declared by the strategy (or defaults).
 Usage:
     from almanak.framework.backtesting.pnl.indicator_engine import BacktestIndicatorEngine
 
-    engine = BacktestIndicatorEngine(required_indicators=["rsi", "macd", "bollinger_bands"])
+    engine = BacktestIndicatorEngine(required_indicators=["rsi", "macd", "bollinger_bands", "atr"])
 
     # Each tick: append price, then populate snapshot
     engine.append_price("WETH", Decimal("3500.00"))
@@ -22,11 +23,13 @@ import logging
 from collections import deque
 from decimal import Decimal
 
+from almanak.framework.data.indicators.atr import ATRCalculator
 from almanak.framework.data.indicators.bollinger_bands import BollingerBandsCalculator
 from almanak.framework.data.indicators.macd import MACDCalculator
 from almanak.framework.data.indicators.rsi import RSICalculator
 from almanak.framework.data.interfaces import InsufficientDataError
 from almanak.framework.strategies.intent_strategy import (
+    ATRData,
     BollingerBandsData,
     MACDData,
     MarketSnapshot,
@@ -36,7 +39,10 @@ from almanak.framework.strategies.intent_strategy import (
 logger = logging.getLogger(__name__)
 
 # Default indicators to compute when strategy doesn't declare required_indicators
-DEFAULT_INDICATORS = frozenset({"rsi", "macd", "bollinger_bands"})
+DEFAULT_INDICATORS = frozenset({"rsi", "macd", "bollinger_bands", "atr"})
+
+# Supported indicator names for validation
+SUPPORTED_INDICATORS = frozenset({"rsi", "macd", "bollinger_bands", "atr"})
 
 # Maximum price history to keep per token (covers all standard indicator periods)
 DEFAULT_MAX_HISTORY = 200
@@ -47,6 +53,8 @@ class BacktestIndicatorEngine:
 
     This engine bridges the gap between the backtester (which only has close prices)
     and MarketSnapshot's indicator methods (which expect pre-populated data).
+
+    Supports: RSI, MACD, Bollinger Bands, ATR (close-only approximation).
 
     Attributes:
         required_indicators: Set of indicator names to compute each tick.
@@ -68,12 +76,12 @@ class BacktestIndicatorEngine:
         # token -> rolling deque of close prices (oldest first)
         self._price_buffers: dict[str, deque[Decimal]] = {}
 
-        unknown = self._required - {"rsi", "macd", "bollinger_bands"}
+        unknown = self._required - SUPPORTED_INDICATORS
         if unknown:
             logger.warning(
-                "BacktestIndicatorEngine: unknown indicators requested (will be skipped): %s. "
-                "Supported: rsi, macd, bollinger_bands",
+                "BacktestIndicatorEngine: unknown indicators requested (will be skipped): %s. Supported: %s",
                 ", ".join(sorted(unknown)),
+                ", ".join(sorted(SUPPORTED_INDICATORS)),
             )
 
     def append_price(self, token: str, price: Decimal) -> None:
@@ -97,7 +105,8 @@ class BacktestIndicatorEngine:
         Args:
             snapshot: The MarketSnapshot to populate with indicator data.
             config: Optional strategy config dict used to read indicator parameters
-                    (e.g., rsi_period, macd_fast, bb_period). Falls back to standard defaults.
+                    (e.g., rsi_period, macd_fast, bb_period, atr_period).
+                    Falls back to standard defaults.
             active_tokens: If provided, only compute indicators for these tokens.
                     Prevents stale indicators from being set for tokens missing from
                     the current tick's market data.
@@ -119,6 +128,9 @@ class BacktestIndicatorEngine:
 
             if "bollinger_bands" in self._required:
                 self._populate_bollinger(snapshot, token, price_list, config)
+
+            if "atr" in self._required:
+                self._populate_atr(snapshot, token, price_list, config)
 
     def _populate_rsi(
         self,
@@ -190,6 +202,41 @@ class BacktestIndicatorEngine:
                     percent_b=Decimal(str(round(result.percent_b, 6))),
                     period=period,
                     std_dev=std_dev,
+                ),
+            )
+        except InsufficientDataError:
+            pass
+
+    def _populate_atr(
+        self,
+        snapshot: MarketSnapshot,
+        token: str,
+        prices: list[Decimal],
+        config: dict,
+    ) -> None:
+        """Compute ATR from close prices and set on snapshot.
+
+        Uses close-only ATR approximation (TR ≈ |close[i] - close[i-1]|) since
+        the backtester only has close prices. This is appropriate for backtesting
+        and Monte Carlo simulation where OHLCV data is unavailable.
+
+        Silently skips if insufficient data.
+        """
+        period = int(config.get("atr_period", 14))
+        if period < 1:
+            logger.warning("BacktestIndicatorEngine: atr_period must be >= 1, skipping ATR population")
+            return
+        try:
+            atr_value = ATRCalculator.calculate_atr_from_prices(prices, period)
+            # Compute ATR as percentage of current price for value_percent
+            current_price = float(prices[-1])
+            atr_pct = (atr_value / current_price * 100) if current_price > 0 else 0.0
+            snapshot.set_atr(
+                token,
+                ATRData(
+                    value=Decimal(str(round(atr_value, 6))),
+                    value_percent=Decimal(str(round(atr_pct, 4))),
+                    period=period,
                 ),
             )
         except InsufficientDataError:

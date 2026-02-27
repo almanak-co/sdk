@@ -814,6 +814,8 @@ almanak docs agent-skill --dump       # Print agent skill content
 | TraderJoe V2 | `TRADERJOE_V2` | DEX / LP | `traderjoe_v2` |
 | Aerodrome | `AERODROME` | DEX / LP | `aerodrome` |
 | Enso | `ENSO` | Aggregator | `enso` |
+| Curve | `CURVE` | DEX / LP | `curve` |
+| Balancer | `BALANCER` | DEX / LP | `balancer` |
 | Pendle | `PENDLE` | Yield | `pendle` |
 | MetaMorpho | `METAMORPHO` | Lending | `metamorpho` |
 | LiFi | `LIFI` | Bridge | `lifi` |
