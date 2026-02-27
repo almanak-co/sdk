@@ -26,8 +26,10 @@ Usage:
 
 import asyncio
 import logging
+import os
 import socket
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -290,11 +292,19 @@ class RollingForkManager:
     block_time: int | None = None
     fork_block_number: int | None = None
 
+    # Timeout defaults (env-overridable)
+    rpc_timeout_seconds: float = field(default_factory=lambda: float(os.environ.get("ALMANAK_FORK_RPC_TIMEOUT", "8.0")))
+    health_timeout_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("ALMANAK_FORK_HEALTH_TIMEOUT", "2.0"))
+    )
+
     # Internal state (not initialized in __init__)
     _process: subprocess.Popen[bytes] | None = field(default=None, repr=False, init=False)
     _is_running: bool = field(default=False, repr=False, init=False)
     _current_block: int | None = field(default=None, repr=False, init=False)
     _start_time: float | None = field(default=None, repr=False, init=False)
+    _anvil_log_path: str | None = field(default=None, repr=False, init=False)
+    _anvil_log_file: Any = field(default=None, repr=False, init=False)
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -351,11 +361,16 @@ class RollingForkManager:
             )
             logger.debug(f"Anvil command: {' '.join(cmd)}")
 
-            # Start Anvil process
+            # Start Anvil process with file-backed logging (avoids pipe deadlock)
+            log_dir = tempfile.gettempdir()
+            self._anvil_log_path = os.path.join(log_dir, f"almanak-anvil-{self.chain}-{self.anvil_port}.log")
+            self._anvil_log_file = open(self._anvil_log_path, "w")  # noqa: SIM115
+            logger.debug(f"Anvil log file: {self._anvil_log_path}")
+
             self._process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=self._anvil_log_file,
+                stderr=self._anvil_log_file,
             )
 
             # Wait for Anvil to be ready
@@ -410,6 +425,14 @@ class RollingForkManager:
         self._is_running = False
         self._current_block = None
         self._start_time = None
+
+        # Close log file handle
+        if self._anvil_log_file is not None:
+            try:
+                self._anvil_log_file.close()
+            except Exception:
+                pass
+            self._anvil_log_file = None
 
         # Wait for port to be freed
         await self._wait_for_port_free(timeout=5.0)
@@ -701,6 +724,88 @@ class RollingForkManager:
         )
         return False
 
+    def _tail_anvil_log(self, num_lines: int = 120) -> str:
+        """Read the last N lines from the Anvil log file.
+
+        Args:
+            num_lines: Number of lines to read from the end
+
+        Returns:
+            Last N lines of the log file, or error message if unavailable
+        """
+        if not self._anvil_log_path:
+            return "<no log file>"
+        try:
+            # Flush the log file to ensure all output is written
+            if self._anvil_log_file is not None:
+                try:
+                    self._anvil_log_file.flush()
+                except Exception:
+                    pass
+            with open(self._anvil_log_path) as f:
+                lines = f.readlines()
+                tail = lines[-num_lines:] if len(lines) > num_lines else lines
+                return "".join(tail).rstrip()
+        except Exception as e:
+            return f"<could not read log: {e}>"
+
+    async def health_check(self, timeout_seconds: float | None = None) -> bool:
+        """Check if the Anvil fork is healthy and responding.
+
+        Probes eth_chainId and eth_blockNumber to verify the fork is alive.
+
+        Args:
+            timeout_seconds: Override default health_timeout_seconds
+
+        Returns:
+            True if fork is healthy, False otherwise
+        """
+        if not self.is_running:
+            return False
+
+        timeout = timeout_seconds or self.health_timeout_seconds
+        try:
+            success, chain_id_hex = await self._rpc_call_raw("eth_chainId", [], timeout_seconds=timeout)
+            if not success or chain_id_hex is None:
+                return False
+
+            success, block_hex = await self._rpc_call_raw("eth_blockNumber", [], timeout_seconds=timeout)
+            if not success or block_hex is None:
+                return False
+
+            return True
+        except Exception:
+            return False
+
+    async def restart(self) -> bool:
+        """Restart the Anvil fork.
+
+        Stops the current fork and starts a new one with the same configuration.
+
+        Returns:
+            True if restart successful, False otherwise
+        """
+        logger.info(f"Restarting Anvil fork for {self.chain}...")
+        try:
+            await self.stop()
+            success = await self.start()
+            if success:
+                # Validate health after restart
+                healthy = await self.health_check()
+                if not healthy:
+                    logger.error("Anvil fork restarted but health check failed")
+                    return False
+                logger.info(f"Anvil fork restarted successfully: block={self._current_block}")
+            return success
+        except Exception as e:
+            logger.exception(f"Failed to restart Anvil fork: {e}")
+            return False
+
+    @property
+    def anvil_log_path(self) -> str | None:
+        """Path to the Anvil process log file, if started."""
+        return self._anvil_log_path
+
     def get_rpc_url(self) -> str:
         """Get the local RPC URL for the fork.
 
@@ -759,8 +864,10 @@ class RollingForkManager:
 
             # Check if process died
             if self._process is not None and self._process.poll() is not None:
-                stdout, stderr = self._process.communicate()
-                logger.error(f"Anvil process exited unexpectedly. stdout: {stdout.decode()}, stderr: {stderr.decode()}")
+                log_tail = self._tail_anvil_log(120)
+                logger.error(
+                    f"Anvil process exited unexpectedly (code={self._process.returncode}). Last log lines:\n{log_tail}"
+                )
                 return False
 
             await asyncio.sleep(0.5)
@@ -804,6 +911,7 @@ class RollingForkManager:
         self,
         method: str,
         params: list[Any],
+        timeout_seconds: float | None = None,
     ) -> tuple[bool, Any]:
         """Make a JSON-RPC call and return success status separately from result.
 
@@ -814,6 +922,7 @@ class RollingForkManager:
         Args:
             method: RPC method name
             params: Method parameters
+            timeout_seconds: Override default rpc_timeout_seconds for this call
 
         Returns:
             Tuple of (success, result). success is True when the JSON-RPC response
@@ -829,14 +938,24 @@ class RollingForkManager:
             "id": 1,
         }
 
+        timeout = timeout_seconds if timeout_seconds is not None else self.rpc_timeout_seconds
+        client_timeout = aiohttp.ClientTimeout(
+            total=timeout,
+            connect=min(2.0, timeout),
+            sock_read=timeout,
+        )
+
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=client_timeout) as session:
                 async with session.post(url, json=payload) as response:
                     result_data: dict[str, Any] = await response.json()
                     if "error" in result_data:
                         logger.debug(f"RPC error for {method}: {result_data['error']}")
                         return (False, None)
                     return (True, result_data.get("result"))
+        except TimeoutError:
+            logger.debug(f"RPC call timed out for {method} after {timeout}s")
+            return (False, None)
         except Exception as e:
             logger.debug(f"RPC call failed for {method}: {e}")
             return (False, None)
