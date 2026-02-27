@@ -28,6 +28,51 @@ theme:
 
 plugins:
   - search
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      reconfigure_material: true
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: zh
+          name: 中文
+          build: true
+          nav_translations:
+            Home: 首页
+            Getting Started: 快速入门
+            Environment Variables: 环境变量
+            Agent Skills: AI 代理技能
+            CLI Reference: CLI 参考
+            Gateway: 网关
+            API Reference: API 参考
+            Connectors: 连接器
+        - locale: fr
+          name: Français
+          build: true
+          nav_translations:
+            Home: Accueil
+            Getting Started: Premiers pas
+            Environment Variables: Variables d'environnement
+            Agent Skills: Compétences d'agent
+            CLI Reference: Référence CLI
+            Gateway: Passerelle
+            API Reference: Référence API
+            Connectors: Connecteurs
+        - locale: es
+          name: Español
+          build: true
+          nav_translations:
+            Home: Inicio
+            Getting Started: Primeros pasos
+            Environment Variables: Variables de entorno
+            Agent Skills: Habilidades de agente
+            CLI Reference: Referencia CLI
+            Gateway: Pasarela
+            API Reference: Referencia API
+            Connectors: Conectores
   - llmstxt:
       full_output: llms-full.txt
       sections:
@@ -64,6 +109,19 @@ plugins:
 
 extra:
   generator: false
+  alternate:
+    - name: English
+      link: /
+      lang: en
+    - name: 中文
+      link: /zh/
+      lang: zh
+    - name: Français
+      link: /fr/
+      lang: fr
+    - name: Español
+      link: /es/
+      lang: es
 
 extra_css:
   - stylesheets/extra.css

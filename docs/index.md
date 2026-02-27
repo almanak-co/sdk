@@ -58,7 +58,7 @@ class MyStrategy(IntentStrategy):
 
 ## Architecture
 
-```
+```text
 almanak/
   framework/           # V2 Strategy Framework
     strategies/        # IntentStrategy base class

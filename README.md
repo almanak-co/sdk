@@ -25,6 +25,13 @@
   <a href="https://docs.almanak.co/">Docs</a>
 </p>
 
+<p align="center">
+  <a href="https://sdk.docs.almanak.co/">English</a> |
+  <a href="https://sdk.docs.almanak.co/zh/">中文</a> |
+  <a href="https://sdk.docs.almanak.co/fr/">Français</a> |
+  <a href="https://sdk.docs.almanak.co/es/">Español</a>
+</p>
+
 ---
 
 Almanak is an intent-based Python framework for developing, testing, and deploying autonomous DeFi strategies. Express trading logic as high-level intents - the framework handles compilation, execution, and state management across 12 chains and 20+ protocols.
