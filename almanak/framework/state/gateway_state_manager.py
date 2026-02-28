@@ -15,7 +15,7 @@ from almanak.framework.state.state_manager import StateData
 from almanak.gateway.proto import gateway_pb2
 
 if TYPE_CHECKING:
-    from almanak.framework.state.portfolio import PortfolioSnapshot
+    from almanak.framework.state.portfolio import PortfolioSnapshot  # type: ignore[import-untyped]
 
 logger = logging.getLogger(__name__)
 

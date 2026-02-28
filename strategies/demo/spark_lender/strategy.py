@@ -141,12 +141,19 @@ class SparkLenderStrategy(IntentStrategy):
         # Extract configuration
         # =====================================================================
 
+        def get_config(key: str, default: Any) -> Any:
+            if isinstance(self.config, dict):
+                return self.config.get(key, default)
+            if hasattr(self.config, "get"):
+                return self.config.get(key, default)
+            return getattr(self.config, key, default)
+
         # Supply configuration
-        self.min_supply_amount = Decimal(str(self.get_config("min_supply_amount", "100")))
-        self.supply_token = str(self.get_config("supply_token", "DAI"))
+        self.min_supply_amount = Decimal(str(get_config("min_supply_amount", "100")))
+        self.supply_token = str(get_config("supply_token", "DAI"))
 
         # Force action for testing
-        self.force_action = str(self.get_config("force_action", "")).lower()
+        self.force_action = str(get_config("force_action", "")).lower()
 
         # Internal state tracking
         self._supplied = False

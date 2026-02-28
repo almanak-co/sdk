@@ -36,7 +36,7 @@ from typing import Any
 
 from hexbytes import HexBytes
 from web3 import AsyncHTTPProvider, AsyncWeb3
-from web3.types import RPCEndpoint, TxParams, Wei
+from web3.types import TxParams, Wei
 
 from almanak.framework.execution.interfaces import (
     SimulationResult,
@@ -214,29 +214,12 @@ class LocalSimulator(Simulator):
         # Return truncated original error
         return error_str[:200] if len(error_str) > 200 else error_str
 
-    # Approval call selectors that can safely fall back to compiler gas limit when
-    # eth_estimateGas fails (e.g., due to "missing trie node" on Anvil fork).
-    # For these, the compiler-provided gas limit is a reliable upper bound.
-    _APPROVAL_SELECTORS: frozenset[str] = frozenset(
-        {
-            "0x095ea7b3",  # ERC20 approve(address,uint256)
-            "0xa22cb465",  # ERC1155 setApprovalForAll(address,bool) - standard ERC1155
-            "0xe584b654",  # TraderJoe V2 LBPair approveForAll(address,bool) - custom name
-        }
-    )
-
     def _is_approve_tx(self, tx: UnsignedTransaction) -> bool:
-        """Check if transaction is an approval call.
-
-        Handles ERC20 approve, ERC1155 setApprovalForAll, and TraderJoe V2
-        LBPair approveForAll. All are safe to fall back to the compiler-provided
-        gas limit when eth_estimateGas fails (e.g., due to missing trie nodes on
-        Anvil forks). TraderJoe V2 uses approveForAll (0xe584b654) rather than
-        the standard ERC1155 setApprovalForAll (0xa22cb465).
-        """
+        """Check if transaction is an ERC20 approve call."""
         if not tx.data or len(tx.data) < 10:
             return False
-        return tx.data[:10].lower() in self._APPROVAL_SELECTORS
+        # ERC20 approve selector is 0x095ea7b3
+        return tx.data[:10].lower() == "0x095ea7b3"
 
     async def _execute_tx(self, tx: UnsignedTransaction, gas_limit: int) -> tuple[bool, str | None]:
         """Execute a transaction on Anvil and wait for receipt.
@@ -316,7 +299,7 @@ class LocalSimulator(Simulator):
         snapshot_unavailable = False
         if tx_count > 1:
             try:
-                result = await web3.provider.make_request(RPCEndpoint("evm_snapshot"), [])
+                result = await web3.provider.make_request("evm_snapshot", [])
                 snapshot_id = result.get("result")
                 if snapshot_id is not None:
                     logger.debug(f"Created EVM snapshot: {snapshot_id}")
@@ -341,40 +324,10 @@ class LocalSimulator(Simulator):
                     "earlier transactions (e.g., approvals). Consider using an Anvil fork."
                 )
 
-        is_multi_tx_bundle = tx_count > 1
-
         try:
             for i, tx in enumerate(txs):
                 is_approve = self._is_approve_tx(tx)
                 is_last = i == tx_count - 1
-
-                # For multi-TX bundles, skip estimation for non-first transactions.
-                # Subsequent TXs depend on state changes from prior TXs (e.g., approve
-                # must execute before addLiquidity/multicall), so eth_estimateGas against
-                # the current chain state will revert even though the bundle would succeed
-                # when executed sequentially. Use the compiler-provided gas_limit instead.
-                # This mirrors the VIB-157 fix for _maybe_estimate_gas_limits().
-                if is_multi_tx_bundle and i > 0:
-                    fallback_gas = tx.gas_limit if tx.gas_limit and tx.gas_limit > 0 else 300_000
-                    gas_estimates.append(fallback_gas)
-                    logger.info(
-                        f"Transaction {i + 1}/{tx_count}: skipping estimation (multi-TX dependent), "
-                        f"using compiler gas_limit={fallback_gas}",
-                        extra={"tx_index": i, "to": tx.to},
-                    )
-
-                    # Execute non-last txs for state setup (if snapshot available)
-                    if not is_last and snapshot_id is not None:
-                        success, exec_error = await self._execute_tx(tx, fallback_gas)
-                        if not success:
-                            logger.warning(f"Failed to execute tx {i + 1} for state setup: {exec_error}")
-                            return SimulationResult(
-                                success=False,
-                                simulated=True,
-                                gas_estimates=gas_estimates,
-                                revert_reason=f"Transaction {i + 1} execution failed: {exec_error}",
-                            )
-                    continue
 
                 gas_estimate, error = await self._estimate_gas(tx)
 
@@ -464,7 +417,7 @@ class LocalSimulator(Simulator):
             # Revert to snapshot to restore original state
             if snapshot_id is not None:
                 try:
-                    await web3.provider.make_request(RPCEndpoint("evm_revert"), [snapshot_id])
+                    await web3.provider.make_request("evm_revert", [snapshot_id])
                     logger.debug(f"Reverted to snapshot: {snapshot_id}")
                 except Exception as e:
                     logger.warning(f"Failed to revert snapshot: {e}")

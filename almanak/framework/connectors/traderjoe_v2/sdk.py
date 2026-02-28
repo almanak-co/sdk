@@ -233,9 +233,6 @@ class TraderJoeV2SDK:
         # Contract caches
         self._token_contracts: dict[str, Contract] = {}
         self._pair_contracts: dict[str, Contract] = {}
-        # Pool address cache: (token_x_lower, token_y_lower, bin_step) -> pool_address
-        # LBFactory.getLBPairInformation is immutable (pair address never changes)
-        self._pool_address_cache: dict[tuple[str, str, int], str] = {}
 
         # Default deadline (100 days)
         self.deadline = int(time.time()) + DEADLINE_100_DAYS
@@ -275,9 +272,6 @@ class TraderJoeV2SDK:
     def get_pool_address(self, token_x: str, token_y: str, bin_step: int) -> str:
         """Get the LBPair (pool) address for a given token pair and binStep.
 
-        Results are cached in-process: the LBFactory pair address is immutable
-        and does not change after pool creation.
-
         Args:
             token_x: Address of token X
             token_y: Address of token Y
@@ -292,25 +286,15 @@ class TraderJoeV2SDK:
         token_x = Web3.to_checksum_address(token_x)
         token_y = Web3.to_checksum_address(token_y)
 
-        # Check in-process cache first (pool address is immutable once created).
-        # Use sorted (canonical) key so reversed token order hits the same entry.
-        cache_key = (min(token_x.lower(), token_y.lower()), max(token_x.lower(), token_y.lower()), bin_step)
-        if cache_key in self._pool_address_cache:
-            logger.debug(f"LBFactory cache hit for {token_x[:8]}/{token_y[:8]} binStep={bin_step}")
-            return self._pool_address_cache[cache_key]
-
         try:
             # getLBPairInformation returns (binStep, LBPair, createdByOwner, ignoredForRouting)
-            t0 = time.perf_counter()
             pair_info = self._factory_contract.functions.getLBPairInformation(token_x, token_y, bin_step).call()
-            logger.debug(f"LBFactory.getLBPairInformation: {time.perf_counter() - t0:.2f}s")
 
             pair_address = pair_info[1]
 
             if pair_address == "0x0000000000000000000000000000000000000000":
                 raise PoolNotFoundError(token_x, token_y, bin_step)
 
-            self._pool_address_cache[cache_key] = pair_address
             return pair_address
 
         except Exception as e:
@@ -778,16 +762,11 @@ class TraderJoeV2SDK:
             Dict mapping bin ID to balance
         """
         pair = self.get_pair_contract(pool_address)
-
-        t0 = time.perf_counter()
         active_id = pair.functions.getActiveId().call()
-        logger.debug(f"LBPair.getActiveId: {time.perf_counter() - t0:.2f}s")
-
         wallet = Web3.to_checksum_address(wallet_address)
-        total_bins = bin_range * 2 + 1
+
         balances: dict[int, int] = {}
 
-        t0 = time.perf_counter()
         for delta in range(-bin_range, bin_range + 1):
             bin_id = active_id + delta
             try:
@@ -796,9 +775,6 @@ class TraderJoeV2SDK:
                     balances[bin_id] = balance
             except Exception:
                 continue
-        logger.debug(
-            f"Position balance scan ({total_bins} bins, {len(balances)} with balance): {time.perf_counter() - t0:.2f}s"
-        )
 
         return balances
 
@@ -806,25 +782,17 @@ class TraderJoeV2SDK:
         self,
         pool_address: str,
         wallet_address: str,
-        precomputed_balances: dict[int, int] | None = None,
     ) -> tuple[int, int]:
         """Get total token amounts for a wallet's position in a pool.
 
         Args:
             pool_address: Address of the LBPair contract
             wallet_address: Address to query
-            precomputed_balances: Optional pre-fetched bin balances to avoid a
-                redundant get_position_balances() call (pass the result from a
-                prior call to get_position_balances).
 
         Returns:
             Tuple of (amount_x, amount_y) the wallet would receive if removing all liquidity
         """
-        balances = (
-            precomputed_balances
-            if precomputed_balances is not None
-            else self.get_position_balances(pool_address, wallet_address)
-        )
+        balances = self.get_position_balances(pool_address, wallet_address)
 
         if not balances:
             return 0, 0
@@ -833,7 +801,6 @@ class TraderJoeV2SDK:
         total_x = 0
         total_y = 0
 
-        t0 = time.perf_counter()
         for bin_id, balance in balances.items():
             try:
                 # Get bin reserves and total supply to calculate share
@@ -850,6 +817,5 @@ class TraderJoeV2SDK:
                     total_y += share_y
             except Exception:
                 continue
-        logger.debug(f"Position value calculation ({len(balances)} bins): {time.perf_counter() - t0:.2f}s")
 
         return total_x, total_y

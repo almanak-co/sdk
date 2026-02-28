@@ -160,17 +160,6 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
     PancakeSwap V3-specific event decoding.
     """
 
-    SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset(
-        {
-            "position_id",
-            "swap_amounts",
-            "tick_lower",
-            "tick_upper",
-            "liquidity",
-            "lp_close_data",
-        }
-    )
-
     def __init__(self, chain: str = "bsc", **kwargs: Any) -> None:
         """Initialize the parser.
 
@@ -511,12 +500,6 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
     def extract_liquidity(self, receipt: dict[str, Any]) -> int | None:
         """Extract liquidity from LP mint transaction receipt.
 
-        Mint event data layout (non-indexed fields, 32-byte padded):
-        - sender (address): offset 0
-        - amount (uint128): offset 32
-        - amount0 (uint256): offset 64
-        - amount1 (uint256): offset 96
-
         Args:
             receipt: Transaction receipt dict with 'logs' field
 
@@ -547,8 +530,7 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
                 if not data or data == "0x":
                     continue
 
-                # Liquidity is at offset 32 (after sender address at offset 0)
-                liquidity = HexDecoder.decode_uint128(data, 32)
+                liquidity = HexDecoder.decode_uint128(data, 0)
                 return liquidity
 
             return None
@@ -595,12 +577,8 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
                 data = HexDecoder.normalize_hex(log.get("data", ""))
 
                 if first_topic == collect_topic and len(topics) >= 4:
-                    # Collect event data layout (non-indexed fields):
-                    # - recipient (address, padded to 32 bytes) - offset 0
-                    # - amount0 (uint128) - offset 32
-                    # - amount1 (uint128) - offset 64
-                    amount0 = HexDecoder.decode_uint128(data, 32)
-                    amount1 = HexDecoder.decode_uint128(data, 64)
+                    amount0 = HexDecoder.decode_uint128(data, 0)
+                    amount1 = HexDecoder.decode_uint128(data, 32)
                     total_amount0 += amount0
                     total_amount1 += amount1
 

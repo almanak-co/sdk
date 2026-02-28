@@ -59,10 +59,6 @@ DEFAULT_SIMULATION_BUFFER: float = 0.1
 # Default gas price cap for chains not explicitly listed (default 500 GWEI; 0 = no limit)
 DEFAULT_GAS_PRICE_CAP_GWEI: int = 500
 
-# Gas price cap used in Anvil mode. Gas costs no real money on Anvil forks,
-# so the cap is set very high to avoid blocking development and test workflows.
-ANVIL_GAS_PRICE_CAP_GWEI: int = 9999
-
 # Recommended maximum gas prices per chain.
 # These reflect typical upper bounds for normal operation. Prices above
 # these thresholds usually indicate network congestion or spike conditions
@@ -121,30 +117,6 @@ CHAIN_TX_TIMEOUTS: dict[str, int] = {
     "base": 120,  # 120s - L2 fast blocks (~2s)
     "avalanche": 120,  # 120s - 2s blocks
     "plasma": 120,  # 120s - fast finality
-}
-
-# =============================================================================
-# gRPC Execute Call Timeouts (seconds)
-# =============================================================================
-
-# Default gRPC timeout for the Execute call (covers gas estimation + submission + TX confirmation).
-# Must be larger than CHAIN_TX_TIMEOUTS to account for overhead before TX is submitted.
-# Overhead components: gas estimation (LocalSimulator snapshot+execute), signing, submission.
-DEFAULT_GRPC_EXECUTE_TIMEOUT_SECONDS: int = 300
-
-# Chain-specific gRPC Execute timeouts.
-# Rule of thumb: CHAIN_TX_TIMEOUTS[chain] + 180s overhead for gas estimation + processing.
-# Anvil forks can have especially slow gas estimation when LocalSimulator takes multiple snapshots.
-CHAIN_GRPC_EXECUTE_TIMEOUTS: dict[str, int] = {
-    "ethereum": 600,  # 300s TX + 300s overhead (L1 finality + slow gas estimation)
-    "arbitrum": 300,  # 120s TX + 180s overhead
-    "optimism": 300,  # 120s TX + 180s overhead
-    "polygon": 360,  # 180s TX + 180s overhead
-    "base": 300,  # 120s TX + 180s overhead
-    "avalanche": 300,  # 120s TX + 180s overhead (was 120s; LP_CLOSE hit DEADLINE_EXCEEDED)
-    "plasma": 300,  # 120s TX + 180s overhead
-    "bnb": 300,  # BSC 3s blocks
-    "sonic": 300,  # fast finality
 }
 
 CHAIN_SIMULATION_BUFFERS: dict[str, float] = {

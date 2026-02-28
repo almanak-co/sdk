@@ -65,13 +65,6 @@ BINANCE_SYMBOL_MAP: dict[str, str] = {
     "OP": "OPUSDT",
     "MATIC": "MATICUSDT",
     "POL": "MATICUSDT",  # Polygon rebranding
-    # Wrapped native tokens (chain-specific)
-    "WBNB": "BNBUSDT",
-    "BNB": "BNBUSDT",
-    "WAVAX": "AVAXUSDT",
-    "WMATIC": "MATICUSDT",
-    "S": "SUSDT",
-    "WS": "SUSDT",
     # Other popular tokens
     "SOL": "SOLUSDT",
     "AVAX": "AVAXUSDT",

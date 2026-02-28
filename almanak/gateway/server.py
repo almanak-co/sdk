@@ -15,7 +15,6 @@ from grpc_health.v1 import health_pb2, health_pb2_grpc
 from grpc_health.v1.health import aio as health_aio
 from grpc_reflection.v1alpha import reflection
 
-from almanak.core.redaction import install_redaction
 from almanak.gateway.audit import AuditInterceptor, configure_structlog
 from almanak.gateway.auth import AuthInterceptor
 from almanak.gateway.core.settings import GatewaySettings, get_settings
@@ -403,9 +402,6 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-
-    # Install centralized secret redaction on all logging channels
-    install_redaction()
 
     # Initialize structlog for audit logging
     configure_structlog()

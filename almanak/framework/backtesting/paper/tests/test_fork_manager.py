@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from almanak.framework.anvil.fork_manager import (
+from almanak.framework.backtesting.paper.fork_manager import (
     CHAIN_IDS,
     KNOWN_BALANCE_SLOTS,
     TOKEN_ADDRESSES,
@@ -247,12 +247,12 @@ class TestRollingForkManagerRpcUrl:
     def test_get_rpc_url_default_port(self, rpc_url: str) -> None:
         """Test RPC URL with default port."""
         manager = RollingForkManager(rpc_url=rpc_url, chain="arbitrum")
-        assert manager.get_rpc_url() == "http://localhost:8546"
+        assert manager.get_rpc_url() == "http://127.0.0.1:8546"
 
     def test_get_rpc_url_custom_port(self, rpc_url: str) -> None:
         """Test RPC URL with custom port."""
         manager = RollingForkManager(rpc_url=rpc_url, chain="arbitrum", anvil_port=9545)
-        assert manager.get_rpc_url() == "http://localhost:9545"
+        assert manager.get_rpc_url() == "http://127.0.0.1:9545"
 
 
 class TestRollingForkManagerCommand:
@@ -614,6 +614,242 @@ class TestFundWalletWithMockedRpc:
         """Test fund_wallet returns False when fork is not running."""
         result = await fork_manager.fund_wallet("0x1234567890123456789012345678901234567890", Decimal("10"))
         assert result is False
+
+
+# =============================================================================
+# RPC Timeout Tests
+# =============================================================================
+
+
+class TestRpcCallRawTimeout:
+    """Tests for _rpc_call_raw with explicit timeout parameter."""
+
+    def test_default_timeout_values(self, rpc_url: str) -> None:
+        """Test that default timeout values are set correctly."""
+        manager = RollingForkManager(rpc_url=rpc_url, chain="arbitrum")
+        assert manager.rpc_timeout_seconds == 8.0
+        assert manager.health_timeout_seconds == 2.0
+
+    def test_custom_timeout_values(self, rpc_url: str) -> None:
+        """Test custom timeout values can be set."""
+        manager = RollingForkManager(
+            rpc_url=rpc_url,
+            chain="arbitrum",
+            rpc_timeout_seconds=15.0,
+            health_timeout_seconds=5.0,
+        )
+        assert manager.rpc_timeout_seconds == 15.0
+        assert manager.health_timeout_seconds == 5.0
+
+    @pytest.mark.asyncio
+    async def test_rpc_call_raw_timeout_returns_false(self, fork_manager: RollingForkManager) -> None:
+        """Test that _rpc_call_raw returns (False, None) on timeout."""
+
+        # Mock a session that raises TimeoutError
+        mock_session_ctx = AsyncMock()
+        mock_session_ctx.__aenter__ = AsyncMock(side_effect=TimeoutError("Connection timed out"))
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session_ctx):
+            success, result = await fork_manager._rpc_call_raw("eth_blockNumber", [], timeout_seconds=0.001)
+
+        assert success is False
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_rpc_call_raw_applies_timeout_to_session(self, fork_manager: RollingForkManager) -> None:
+        """Test that _rpc_call_raw passes timeout to aiohttp.ClientSession."""
+        import aiohttp
+
+        captured_timeout = None
+
+        class CapturingSession:
+            def __init__(self, **kwargs):
+                nonlocal captured_timeout
+                captured_timeout = kwargs.get("timeout")
+                self._mock_response = AsyncMock(spec=aiohttp.ClientResponse)
+                self._mock_response.json = AsyncMock(return_value={"jsonrpc": "2.0", "id": 1, "result": "0x1"})
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            def post(self, *args, **kwargs):
+                ctx = AsyncMock()
+                ctx.__aenter__ = AsyncMock(return_value=self._mock_response)
+                ctx.__aexit__ = AsyncMock(return_value=False)
+                return ctx
+
+        with patch("aiohttp.ClientSession", CapturingSession):
+            await fork_manager._rpc_call_raw("eth_blockNumber", [], timeout_seconds=5.0)
+
+        assert captured_timeout is not None
+        assert captured_timeout.total == 5.0
+
+
+# =============================================================================
+# Health Check Tests
+# =============================================================================
+
+
+class TestHealthCheck:
+    """Tests for health_check method."""
+
+    @pytest.mark.asyncio
+    async def test_health_check_not_running(self, fork_manager: RollingForkManager) -> None:
+        """Test health_check returns False when not running."""
+        result = await fork_manager.health_check()
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_health_check_success(self, fork_manager: RollingForkManager) -> None:
+        """Test health_check returns True when both probes succeed."""
+        fork_manager._is_running = True
+        fork_manager._process = AsyncMock()
+        fork_manager._process.poll = lambda: None
+
+        # Mock both RPC calls to succeed
+        call_count = 0
+
+        async def mock_rpc_call_raw(method, params, timeout_seconds=None):
+            nonlocal call_count
+            call_count += 1
+            if method == "eth_chainId":
+                return (True, "0xa4b1")
+            elif method == "eth_blockNumber":
+                return (True, "0x1234")
+            return (False, None)
+
+        fork_manager._rpc_call_raw = mock_rpc_call_raw
+        result = await fork_manager.health_check()
+        assert result is True
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_health_check_chain_id_fails(self, fork_manager: RollingForkManager) -> None:
+        """Test health_check returns False when eth_chainId fails."""
+        fork_manager._is_running = True
+        fork_manager._process = AsyncMock()
+        fork_manager._process.poll = lambda: None
+
+        async def mock_rpc_call_raw(method, params, timeout_seconds=None):
+            return (False, None)
+
+        fork_manager._rpc_call_raw = mock_rpc_call_raw
+        result = await fork_manager.health_check()
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_health_check_block_number_fails(self, fork_manager: RollingForkManager) -> None:
+        """Test health_check returns False when eth_blockNumber fails."""
+        fork_manager._is_running = True
+        fork_manager._process = AsyncMock()
+        fork_manager._process.poll = lambda: None
+
+        async def mock_rpc_call_raw(method, params, timeout_seconds=None):
+            if method == "eth_chainId":
+                return (True, "0xa4b1")
+            return (False, None)
+
+        fork_manager._rpc_call_raw = mock_rpc_call_raw
+        result = await fork_manager.health_check()
+        assert result is False
+
+
+# =============================================================================
+# Restart Tests
+# =============================================================================
+
+
+class TestRestart:
+    """Tests for restart method."""
+
+    @pytest.mark.asyncio
+    async def test_restart_calls_stop_then_start(self, fork_manager: RollingForkManager) -> None:
+        """Test that restart calls stop then start in sequence."""
+        call_order = []
+
+        async def mock_stop():
+            call_order.append("stop")
+
+        async def mock_start():
+            call_order.append("start")
+            fork_manager._is_running = True
+            fork_manager._process = AsyncMock()
+            fork_manager._process.poll = lambda: None
+            return True
+
+        async def mock_health_check(timeout_seconds=None):
+            call_order.append("health_check")
+            return True
+
+        fork_manager.stop = mock_stop
+        fork_manager.start = mock_start
+        fork_manager.health_check = mock_health_check
+
+        result = await fork_manager.restart()
+        assert result is True
+        assert call_order == ["stop", "start", "health_check"]
+
+    @pytest.mark.asyncio
+    async def test_restart_returns_false_on_start_failure(self, fork_manager: RollingForkManager) -> None:
+        """Test that restart returns False when start fails."""
+
+        async def mock_stop():
+            pass
+
+        async def mock_start():
+            return False
+
+        fork_manager.stop = mock_stop
+        fork_manager.start = mock_start
+
+        result = await fork_manager.restart()
+        assert result is False
+
+
+# =============================================================================
+# Log Tail Tests
+# =============================================================================
+
+
+class TestAnvilLogTail:
+    """Tests for _tail_anvil_log method."""
+
+    def test_tail_no_log_path(self, fork_manager: RollingForkManager) -> None:
+        """Test tail returns placeholder when no log path set."""
+        assert fork_manager._anvil_log_path is None
+        result = fork_manager._tail_anvil_log()
+        assert result == "<no log file>"
+
+    def test_tail_reads_log_file(self, fork_manager: RollingForkManager, tmp_path) -> None:
+        """Test tail reads the last N lines from a log file."""
+        log_file = tmp_path / "test.log"
+        lines = [f"line {i}\n" for i in range(200)]
+        log_file.write_text("".join(lines))
+
+        fork_manager._anvil_log_path = str(log_file)
+        result = fork_manager._tail_anvil_log(num_lines=10)
+
+        # Should contain the last 10 lines
+        assert "line 190" in result
+        assert "line 199" in result
+        # Should not contain early lines
+        assert "line 0\n" not in result
+
+    def test_tail_handles_missing_file(self, fork_manager: RollingForkManager) -> None:
+        """Test tail handles missing log file gracefully."""
+        fork_manager._anvil_log_path = "/tmp/nonexistent-almanak-test.log"
+        result = fork_manager._tail_anvil_log()
+        assert "<could not read log:" in result
+
+    def test_anvil_log_path_property(self, fork_manager: RollingForkManager) -> None:
+        """Test anvil_log_path property."""
+        assert fork_manager.anvil_log_path is None
+        fork_manager._anvil_log_path = "/tmp/test.log"
+        assert fork_manager.anvil_log_path == "/tmp/test.log"
 
 
 # =============================================================================

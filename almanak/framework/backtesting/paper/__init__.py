@@ -49,7 +49,6 @@ Usage:
     await trader.stop()
 """
 
-from almanak.framework.anvil.fork_manager import RollingForkManager
 from almanak.framework.backtesting.paper.background import (
     BackgroundPaperTrader,
     BackgroundStatus,
@@ -70,6 +69,7 @@ from almanak.framework.backtesting.paper.engine import (
     get_token_decimals,
     get_token_decimals_with_fallback,
 )
+from almanak.framework.backtesting.paper.fork_manager import RollingForkManager
 from almanak.framework.backtesting.paper.models import (
     PaperTrade,
     PaperTradeError,

@@ -139,20 +139,18 @@ class RateLimitState:
     consecutive_429s: int = 0
     requests_this_minute: int = 0
     minute_start: float = 0.0
-    max_backoff_seconds: float = 10.0
 
     def record_rate_limit(self) -> None:
         """Record a rate limit hit and increase backoff."""
         self.last_429_time = time.time()
         self.consecutive_429s += 1
-        # Exponential backoff: 1s, 2s, 4s, 8s, max 10s (capped to prevent timeouts)
-        self.backoff_seconds = min(self.max_backoff_seconds, 2 ** (self.consecutive_429s - 1))
+        # Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 32s
+        self.backoff_seconds = min(32.0, 2 ** (self.consecutive_429s - 1))
 
     def record_success(self) -> None:
-        """Record successful request, fully reset backoff state."""
+        """Record successful request, reset backoff."""
         self.consecutive_429s = 0
         self.backoff_seconds = 1.0
-        self.last_429_time = None
 
     def get_wait_time(self) -> float:
         """Get time to wait before next request (with jitter)."""
@@ -694,11 +692,6 @@ class CoinGeckoDataProvider:
                         raise ValueError(f"CoinGecko API error {response.status}: {text}")
 
                     self._rate_limit_state.record_success()
-                    # Restore proactive rate limiter to original rate after success.
-                    # on_rate_limit_response() permanently reduces the rate by 20%
-                    # on each 429; without this reset the rate degrades to 1 req/min
-                    # over a long session and never recovers.
-                    self._rate_limiter.reset_rate()
                     result: dict[str, Any] = await response.json()
                     return result
 

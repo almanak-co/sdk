@@ -68,7 +68,7 @@ def create_withdraw_collateral_log(src: str, to: str, asset: str, amount: int) -
     return {
         "address": COMET_ADDRESS,
         "topics": [
-            "0xd6d480d5b3068db003533b170d67561494d72e3bf9fa40a266471351ebba9e16",  # WithdrawCollateral
+            "0xd6d480d5b3068db003533b170d67561494d72e3bf9fa40a266f1b28c8f0496c6",  # WithdrawCollateral
             f"0x000000000000000000000000{src[2:].lower()}",
             f"0x000000000000000000000000{to[2:].lower()}",
             f"0x000000000000000000000000{asset[2:].lower()}",
@@ -97,7 +97,7 @@ def create_transfer_collateral_log(from_addr: str, to: str, asset: str, amount: 
     return {
         "address": COMET_ADDRESS,
         "topics": [
-            "0x29db89d45e1a802b4d55e202984fce9faf1d30aedf86503ff1ea0ed9ebb64201",  # TransferCollateral
+            "0x0792b43c00b92b22e75de7a65c15c4e60bd6bea78568e02aee5e07f47cdd7a3e",  # TransferCollateral
             f"0x000000000000000000000000{from_addr[2:].lower()}",
             f"0x000000000000000000000000{to[2:].lower()}",
             f"0x000000000000000000000000{asset[2:].lower()}",
@@ -112,7 +112,7 @@ def create_absorb_debt_log(absorber: str, borrower: str, base_paid_out: int, usd
     return {
         "address": COMET_ADDRESS,
         "topics": [
-            "0x1547a878dc89ad3c367b6338b4be6a65a5dd74fb77ae044da1e8747ef1f4f62f",  # AbsorbDebt
+            "0x1547a878dc8ded417e3e62a6cff47e3c5052a7b0d24c0a87db3fef36eb0d7a38",  # AbsorbDebt
             f"0x000000000000000000000000{absorber[2:].lower()}",
             f"0x000000000000000000000000{borrower[2:].lower()}",
         ],
@@ -128,7 +128,7 @@ def create_absorb_collateral_log(
     return {
         "address": COMET_ADDRESS,
         "topics": [
-            "0x9850ab1af75177e4a9201c65a2cf7976d5d28e40ef63494b44366f86b2f9412e",  # AbsorbCollateral
+            "0xacf85bc25a9867b87dc71f764e2ca82e0948e2c1f52e1c5e88fee73a0c4cca6",  # AbsorbCollateral
             f"0x000000000000000000000000{absorber[2:].lower()}",
             f"0x000000000000000000000000{borrower[2:].lower()}",
             f"0x000000000000000000000000{asset[2:].lower()}",
@@ -143,7 +143,7 @@ def create_buy_collateral_log(buyer: str, asset: str, base_amount: int, collater
     return {
         "address": COMET_ADDRESS,
         "topics": [
-            "0xf891b2a411b0e66a5f0a6ff1368670fefa287a13f541eb633a386a1a9cc7046b",  # BuyCollateral
+            "0x2dbf2d9f38f04afb35d0da3c8bdf4a5b3b08cdd5a3d5c9c4e6b1d75b2a0ae2c8",  # BuyCollateral
             f"0x000000000000000000000000{buyer[2:].lower()}",
             f"0x000000000000000000000000{asset[2:].lower()}",
         ],

@@ -403,58 +403,6 @@ class TestOutlierDetection:
         # Confidence slightly reduced due to outlier
         assert result.confidence < 1.0
 
-    def test_magnitude_outlier_raises_when_two_sources(self) -> None:
-        """Test that extreme price divergence (feed misconfiguration) raises AllDataSourcesFailed.
-
-        Reproduces the wstETH/$6.14B bug: Chainlink wstETH/ETH exchange rate feed (~1.228)
-        decoded with 8-decimal assumption gives ~$12.28B. CoinGecko returns ~$3,400.
-        Both differ from the midpoint median (~$6.14B) by ~100%, flagging both as outliers.
-        Old behaviour: average them -> $6.14B garbage. New behaviour: raise AllDataSourcesFailed.
-        """
-        sources = [
-            MockPriceSource(name="coingecko", price=Decimal("3400")),  # Correct USD price
-            MockPriceSource(name="onchain", price=Decimal("12280000000")),  # Wrong: ratio feed
-        ]
-        aggregator = PriceAggregator(sources=sources)
-
-        # Should raise, not return $6.14B
-        with pytest.raises(AllDataSourcesFailed) as exc_info:
-            run_async(aggregator.get_aggregated_price("WSTETH", "USD"))
-
-        assert "coingecko" in exc_info.value.errors and "onchain" in exc_info.value.errors
-
-    def test_three_sources_one_magnitude_outlier_returns_correct_price(self) -> None:
-        """Test that with 3 sources where only one is a magnitude outlier, the correct
-        sources win via normal 2% outlier detection (no error raised)."""
-        # With 3 sources, median($3400, $3420, $12.28B) = $3420 (middle sorted value).
-        # Only $12.28B deviates from $3420 by more than 2%, so it's the only outlier.
-        # valid_results = [$3400, $3420] -> no magnitude check needed.
-        sources = [
-            MockPriceSource(name="coingecko", price=Decimal("3400")),
-            MockPriceSource(name="binance", price=Decimal("3420")),
-            MockPriceSource(name="onchain_bad", price=Decimal("12280000000")),  # Wrong
-        ]
-        aggregator = PriceAggregator(sources=sources)
-
-        result = run_async(aggregator.get_aggregated_price("WSTETH", "USD"))
-
-        # Normal outlier detection removes $12.28B, returns median of [$3400, $3420] = $3410
-        assert result.price == Decimal("3410")
-        assert result.confidence < 1.0  # Reduced due to outlier
-
-    def test_normal_divergence_does_not_trigger_magnitude_check(self) -> None:
-        """Test that normal high-volatility divergence (< 100x) still uses all sources."""
-        # 50% divergence is unusual but not a feed misconfiguration
-        sources = [
-            MockPriceSource(name="source1", price=Decimal("2000")),
-            MockPriceSource(name="source2", price=Decimal("3000")),  # 50% above source1
-        ]
-        aggregator = PriceAggregator(sources=sources)
-
-        # Should succeed (ratio=1.5x << 100x threshold), returning median of 2 = average
-        result = run_async(aggregator.get_aggregated_price("ETH", "USD"))
-        assert result.price == Decimal("2500")
-
 
 # =============================================================================
 # Partial Failure Tests

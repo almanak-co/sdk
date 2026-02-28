@@ -55,7 +55,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from almanak.core.redaction import install_redaction
 from almanak.framework.backtesting.paper.config import PaperTraderConfig
 from almanak.framework.backtesting.paper.models import (
     PaperTrade,
@@ -1051,9 +1050,6 @@ def _run_background_paper_trader(
         ],
     )
 
-    # Install centralized secret redaction
-    install_redaction()
-
     bg_logger = logging.getLogger("almanak.framework.backtesting.paper.background")
     bg_logger.info(f"Starting background Paper Trader for {config.strategy_id}")
 
@@ -1148,8 +1144,8 @@ def _run_background_paper_trader(
         nonlocal shutdown_requested
 
         # Import here to avoid circular imports
-        from almanak.framework.anvil.fork_manager import RollingForkManager
         from almanak.framework.backtesting.paper.engine import PaperTrader
+        from almanak.framework.backtesting.paper.fork_manager import RollingForkManager
         from almanak.framework.backtesting.paper.portfolio_tracker import PaperPortfolioTracker
 
         # Create components

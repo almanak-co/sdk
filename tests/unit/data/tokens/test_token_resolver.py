@@ -1393,57 +1393,6 @@ class TestGatewayMockedIntegration:
         # Gateway should be marked as unavailable
         assert resolver._gateway_available is False
 
-    def test_skip_gateway_avoids_slow_lookup(self, temp_cache_file):
-        """Test skip_gateway=True prevents 30s gateway timeout for unknown addresses.
-
-        Regression test for VIB-300: Aerodrome LP_CLOSE compilation blocked for
-        30 seconds because pool LP token address was sent through full token
-        resolver including gateway on-chain lookup.
-        """
-        from unittest.mock import MagicMock
-
-        mock_channel = MagicMock()
-
-        resolver = TokenResolver(
-            cache_file=temp_cache_file,
-            gateway_channel=mock_channel,
-        )
-
-        mock_stub = MagicMock()
-        resolver._gateway_stub = mock_stub
-        resolver._gateway_available = True
-
-        # With skip_gateway=True, resolution should fail fast without calling gateway
-        with pytest.raises(TokenNotFoundError):
-            resolver.resolve(
-                "0x6666666666666666666666666666666666666666",
-                "base",
-                skip_gateway=True,
-            )
-
-        # Gateway should NOT have been called
-        mock_stub.GetTokenMetadata.assert_not_called()
-        stats = resolver.stats()
-        assert stats["gateway_lookups"] == 0
-
-    def test_skip_gateway_still_returns_cached_tokens(self, temp_cache_file):
-        """Test skip_gateway=True still resolves tokens in cache/static registry."""
-        resolver = TokenResolver(cache_file=temp_cache_file)
-
-        # USDC on Arbitrum is in the static registry - should resolve fine
-        token = resolver.resolve("USDC", "arbitrum", skip_gateway=True)
-        assert token.symbol == "USDC"
-        assert token.decimals == 6
-
-    def test_skip_gateway_still_returns_known_addresses(self, temp_cache_file):
-        """Test skip_gateway=True still resolves known addresses from static registry."""
-        resolver = TokenResolver(cache_file=temp_cache_file)
-
-        # USDC address on Arbitrum is in the static registry
-        token = resolver.resolve("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum", skip_gateway=True)
-        assert token.symbol == "USDC"
-        assert token.decimals == 6
-
 
 class TestResolverLockContention:
     """Test that gateway calls don't block cached lookups."""

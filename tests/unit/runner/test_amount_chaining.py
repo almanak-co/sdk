@@ -3,10 +3,8 @@
 Verifies that when swap_amounts.amount_out_decimal is None, the runner resets
 previous_amount_received to None instead of silently reusing a stale value.
 Also tests that Enso-extracted SwapAmounts feeds into chaining correctly.
-Tests that non-swap intents (LP, lending) don't produce spurious warnings.
 """
 
-import logging
 from decimal import Decimal
 from enum import StrEnum
 from unittest.mock import MagicMock, patch
@@ -163,102 +161,3 @@ def test_enso_swap_amounts_frozen_dataclass():
         assert False, "SwapAmounts should be frozen"
     except AttributeError:
         pass  # Expected
-
-
-# ---------------------------------------------------------------------------
-# VIB-156: LP/lending intents should NOT produce amount-chaining WARNING
-# ---------------------------------------------------------------------------
-
-
-def _simulate_chaining_log(intent_type_value: str, caplog):
-    """Simulate the chaining logic from strategy_runner.py and capture log output.
-
-    Mirrors the exact logic in strategy_runner.py lines 1100-1122.
-    """
-    from almanak.framework.intents.vocabulary import IntentType
-
-    # Build a mock intent with the given type
-    mock_intent = MagicMock()
-    mock_intent.intent_type = IntentType(intent_type_value)
-
-    # Simulate: execution succeeded but no swap_amounts
-    er = MagicMock()
-    er.swap_amounts = None
-
-    previous_amount_received = Decimal("999")  # stale value
-
-    # This mirrors the exact logic from strategy_runner.py
-    if er.swap_amounts and er.swap_amounts.amount_out_decimal is not None:
-        previous_amount_received = er.swap_amounts.amount_out_decimal
-    else:
-        previous_amount_received = None
-        intent_type_val = getattr(mock_intent, "intent_type", None)
-        is_swap = intent_type_val == IntentType.SWAP
-        if is_swap:
-            logging.getLogger("test").warning(
-                "Amount chaining: no output amount extracted from step %d; "
-                "subsequent amount='all' steps will fail",
-                1,
-            )
-        else:
-            logging.getLogger("test").debug(
-                "Amount chaining: step %d (%s) has no chainable output amount (normal for non-swap intents)",
-                1,
-                intent_type_val.value if intent_type_val else "unknown",
-            )
-
-    return previous_amount_received
-
-
-def test_lp_open_no_warning(caplog):
-    """LP_OPEN should log at DEBUG, not WARNING, when no output amount."""
-    with caplog.at_level(logging.DEBUG, logger="test"):
-        result = _simulate_chaining_log("LP_OPEN", caplog)
-
-    assert result is None  # Still resets to None
-
-    warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
-    debug_msgs = [r for r in caplog.records if r.levelno == logging.DEBUG and "Amount chaining" in r.message]
-
-    assert len(warning_msgs) == 0, "LP_OPEN should NOT produce WARNING"
-    assert len(debug_msgs) == 1, "LP_OPEN should produce DEBUG message"
-
-
-def test_lp_close_no_warning(caplog):
-    """LP_CLOSE should log at DEBUG, not WARNING."""
-    with caplog.at_level(logging.DEBUG, logger="test"):
-        result = _simulate_chaining_log("LP_CLOSE", caplog)
-
-    assert result is None
-    warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warning_msgs) == 0, "LP_CLOSE should NOT produce WARNING"
-
-
-def test_supply_no_warning(caplog):
-    """SUPPLY should log at DEBUG, not WARNING."""
-    with caplog.at_level(logging.DEBUG, logger="test"):
-        result = _simulate_chaining_log("SUPPLY", caplog)
-
-    assert result is None
-    warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warning_msgs) == 0, "SUPPLY should NOT produce WARNING"
-
-
-def test_borrow_no_warning(caplog):
-    """BORROW should log at DEBUG, not WARNING."""
-    with caplog.at_level(logging.DEBUG, logger="test"):
-        result = _simulate_chaining_log("BORROW", caplog)
-
-    assert result is None
-    warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warning_msgs) == 0, "BORROW should NOT produce WARNING"
-
-
-def test_swap_still_warns(caplog):
-    """SWAP should still produce WARNING when no output amount."""
-    with caplog.at_level(logging.DEBUG, logger="test"):
-        result = _simulate_chaining_log("SWAP", caplog)
-
-    assert result is None
-    warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING and "Amount chaining" in r.message]
-    assert len(warning_msgs) == 1, "SWAP should still produce WARNING"

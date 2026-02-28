@@ -153,26 +153,30 @@ class AaveBorrowStrategy(IntentStrategy):
         # Extract configuration
         # =====================================================================
 
+        def get_config(key: str, default: Any) -> Any:
+            if isinstance(self.config, dict):
+                return self.config.get(key, default)
+            return getattr(self.config, key, default)
+
         # Collateral configuration
-        self.collateral_token = self.get_config("collateral_token", "WETH")
-        self.collateral_amount = Decimal(str(self.get_config("collateral_amount", "0.1")))
+        self.collateral_token = get_config("collateral_token", "WETH")
+        self.collateral_amount = Decimal(str(get_config("collateral_amount", "0.1")))
 
         # Borrow configuration
-        self.borrow_token = self.get_config("borrow_token", "USDC")
-        self.ltv_target = Decimal(str(self.get_config("ltv_target", "0.5")))  # 50% LTV
+        self.borrow_token = get_config("borrow_token", "USDC")
+        self.ltv_target = Decimal(str(get_config("ltv_target", "0.5")))  # 50% LTV
 
         # Risk parameters
-        self.min_health_factor = Decimal(str(self.get_config("min_health_factor", "2.0")))
+        self.min_health_factor = Decimal(str(get_config("min_health_factor", "2.0")))
 
         # Interest rate mode: "variable" or "stable"
-        self.interest_rate_mode = self.get_config("interest_rate_mode", "variable")
+        self.interest_rate_mode = get_config("interest_rate_mode", "variable")
 
         # Force action for testing
-        self.force_action = str(self.get_config("force_action", "")).lower()
+        self.force_action = str(get_config("force_action", "")).lower()
 
         # Internal state tracking
-        self._loop_state = "idle"  # idle -> supplying -> supplied -> borrowing -> complete
-        self._previous_stable_state = "idle"  # Revert target on intent failure
+        self._loop_state = "idle"  # idle -> supplied -> borrowed -> complete
         self._supplied_amount = Decimal("0")
         self._borrowed_amount = Decimal("0")
 
@@ -270,7 +274,6 @@ class AaveBorrowStrategy(IntentStrategy):
                         details={"old_state": "idle", "new_state": "supplying"},
                     )
                 )
-                self._previous_stable_state = self._loop_state
                 self._loop_state = "supplying"
                 return self._create_supply_intent()
 
@@ -286,7 +289,6 @@ class AaveBorrowStrategy(IntentStrategy):
                         details={"old_state": "supplied", "new_state": "borrowing"},
                     )
                 )
-                self._previous_stable_state = self._loop_state
                 self._loop_state = "borrowing"
                 return self._create_borrow_intent(collateral_price, borrow_price)
 
@@ -294,15 +296,8 @@ class AaveBorrowStrategy(IntentStrategy):
             elif self._loop_state == "complete":
                 return Intent.hold(reason="Loop complete - position established")
 
-            # Safety net: if we're in a transitional state (supplying, borrowing)
-            # it means the previous intent failed. Revert to last stable state.
+            # Default: Hold
             else:
-                if self._loop_state in ("supplying", "borrowing"):
-                    revert_to = self._previous_stable_state
-                    logger.warning(
-                        f"Stuck in transitional state '{self._loop_state}' — reverting to '{revert_to}'"
-                    )
-                    self._loop_state = revert_to
                 return Intent.hold(reason=f"Waiting for state transition (current: {self._loop_state})")
 
         except Exception as e:
@@ -452,12 +447,9 @@ class AaveBorrowStrategy(IntentStrategy):
                 )
 
         else:
-            # On failure, revert to previous stable state so decide() can retry
-            revert_to = self._previous_stable_state
-            logger.warning(
-                f"{intent_type} failed in state '{self._loop_state}' — reverting to '{revert_to}'"
-            )
-            self._loop_state = revert_to
+            # On failure, reset state
+            logger.warning(f"{intent_type} failed - resetting state")
+            self._loop_state = "idle"
 
     # =========================================================================
     # STATUS REPORTING
@@ -494,7 +486,6 @@ class AaveBorrowStrategy(IntentStrategy):
         """
         return {
             "loop_state": self._loop_state,
-            "previous_stable_state": self._previous_stable_state,
             "supplied_amount": str(self._supplied_amount),
             "borrowed_amount": str(self._borrowed_amount),
         }
@@ -507,8 +498,6 @@ class AaveBorrowStrategy(IntentStrategy):
         if "loop_state" in state:
             self._loop_state = state["loop_state"]
             logger.info(f"Restored loop_state: {self._loop_state}")
-        if "previous_stable_state" in state:
-            self._previous_stable_state = state["previous_stable_state"]
 
         if "supplied_amount" in state:
             self._supplied_amount = Decimal(str(state["supplied_amount"]))

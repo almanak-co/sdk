@@ -33,19 +33,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Mapping from TransactionReceipt.to_dict() snake_case keys to web3-style camelCase keys.
-# All receipt parsers expect camelCase (transactionHash, gasUsed, blockNumber).
-_SNAKE_TO_CAMEL = {
-    "tx_hash": "transactionHash",
-    "gas_used": "gasUsed",
-    "block_number": "blockNumber",
-    "block_hash": "blockHash",
-    "from_address": "from",
-    "to_address": "to",
-    "contract_address": "contractAddress",
-    "effective_gas_price": "effectiveGasPrice",
-}
-
 
 class ResultEnricher:
     """Enriches ExecutionResult with intent-specific extracted data.
@@ -385,12 +372,6 @@ class ResultEnricher:
                 receipt_dict = receipt
             else:
                 continue  # Unknown format
-
-            # Add camelCase aliases so receipt parsers work regardless of
-            # which key convention (snake_case vs camelCase) the receipt uses.
-            for snake_key, camel_key in _SNAKE_TO_CAMEL.items():
-                if snake_key in receipt_dict and camel_key not in receipt_dict:
-                    receipt_dict[camel_key] = receipt_dict[snake_key]
 
             receipts.append(receipt_dict)
 

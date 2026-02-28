@@ -17,7 +17,7 @@ import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from almanak.framework.anvil.fork_manager import RollingForkManager
+    from almanak.framework.backtesting.paper.fork_manager import RollingForkManager
     from almanak.gateway.server import GatewayServer
 
 from almanak.gateway.core.settings import GatewaySettings
@@ -176,7 +176,7 @@ class ManagedGateway:
         """
         import shutil
 
-        from almanak.framework.anvil.fork_manager import RollingForkManager
+        from almanak.framework.backtesting.paper.fork_manager import RollingForkManager
         from almanak.gateway.utils.rpc_provider import get_rpc_url
 
         if not shutil.which("anvil"):

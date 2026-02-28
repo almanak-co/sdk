@@ -152,54 +152,6 @@ class ATRCalculator:
 
         return atr
 
-    @staticmethod
-    def calculate_atr_from_prices(
-        prices: list,
-        period: int = 14,
-    ) -> float:
-        """Calculate ATR from close prices only using Wilder's smoothing.
-
-        When only close prices are available (e.g., synthetic Monte Carlo paths),
-        True Range is approximated as |close[i] - close[i-1]|. This is
-        mathematically equivalent to ATR computed from OHLCV data where
-        open = high = low = close for each candle.
-
-        Args:
-            prices: List of close prices (oldest first), as Decimal or float
-            period: ATR period (default 14)
-
-        Returns:
-            ATR value (float)
-
-        Raises:
-            InsufficientDataError: If not enough price data
-            ValueError: If period < 1
-        """
-        if period < 1:
-            raise ValueError("ATR period must be at least 1")
-        required = period + 1
-        if len(prices) < required:
-            raise InsufficientDataError(
-                required=required,
-                available=len(prices),
-                indicator="ATR",
-            )
-
-        # Approximate True Range as absolute price change between consecutive closes
-        true_ranges: list[float] = []
-        for i in range(1, len(prices)):
-            tr = abs(float(prices[i]) - float(prices[i - 1]))
-            true_ranges.append(tr)
-
-        # Calculate initial ATR (simple average of first 'period' TRs)
-        atr = sum(true_ranges[:period]) / period
-
-        # Apply Wilder's smoothing for remaining values
-        for tr in true_ranges[period:]:
-            atr = ((atr * (period - 1)) + tr) / period
-
-        return atr
-
     async def calculate_atr(
         self,
         token: str,

@@ -24,6 +24,14 @@ Or with [uv](https://docs.astral.sh/uv/):
 uv pip install almanak
 ```
 
+**Using an AI coding agent?** Teach it the SDK in one command:
+
+```bash
+almanak agent install
+```
+
+This auto-detects your platform (Claude Code, Codex, Cursor, Copilot, and [6 more](agent-skills.md)) and installs the strategy builder skill.
+
 ## 1. Get a Strategy
 
 ### Option A: Copy a working demo (recommended for beginners)

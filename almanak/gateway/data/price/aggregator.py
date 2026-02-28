@@ -44,13 +44,6 @@ DEFAULT_OUTLIER_DEVIATION_THRESHOLD = 0.02  # 2% deviation from median
 DEFAULT_STALE_CONFIDENCE_PENALTY = 0.3  # Reduce confidence by 30% for stale data
 DEFAULT_PARTIAL_FAILURE_CONFIDENCE_PENALTY = 0.1  # Reduce by 10% per failed source
 
-# Magnitude outlier threshold: if max/min price ratio exceeds this, the sources
-# fundamentally disagree (feed misconfiguration, wrong units, decimal mismatch).
-# Example: wstETH/ETH exchange rate feed (~1.228) decoded with 8-decimal assumption
-# produces ~$12.28B, while CoinGecko returns ~$3,400. Ratio ≈ 3.6M× >> 100×.
-# At this scale, averaging produces nonsense -- we must raise AllDataSourcesFailed.
-DEFAULT_MAGNITUDE_OUTLIER_RATIO = 100.0
-
 # Stablecoins that fall back to $1.00 when all price sources fail
 STABLECOIN_FALLBACK_TOKENS = frozenset({"USDC", "USDT", "DAI", "FRAX", "LUSD", "USDC.E", "USDT.E"})
 
@@ -180,7 +173,6 @@ class PriceAggregator:
         outlier_threshold: float = DEFAULT_OUTLIER_DEVIATION_THRESHOLD,
         stale_confidence_penalty: float = DEFAULT_STALE_CONFIDENCE_PENALTY,
         partial_failure_penalty: float = DEFAULT_PARTIAL_FAILURE_CONFIDENCE_PENALTY,
-        magnitude_outlier_ratio: float = DEFAULT_MAGNITUDE_OUTLIER_RATIO,
     ) -> None:
         """Initialize the PriceAggregator.
 
@@ -189,10 +181,6 @@ class PriceAggregator:
             outlier_threshold: Deviation threshold for outlier detection (default 0.02 = 2%)
             stale_confidence_penalty: Confidence reduction for stale data (default 0.3)
             partial_failure_penalty: Confidence reduction per failed source (default 0.1)
-            magnitude_outlier_ratio: When max/min price ratio exceeds this, treat as feed
-                misconfiguration (wrong units/decimals) and raise AllDataSourcesFailed
-                instead of averaging garbage values. Default 100× (e.g., $3,400 vs $12.28B
-                wstETH case triggers at ~3,600,000×). Set higher to allow more divergence.
 
         Raises:
             ValueError: If sources list is empty
@@ -204,7 +192,6 @@ class PriceAggregator:
         self._outlier_threshold = outlier_threshold
         self._stale_confidence_penalty = stale_confidence_penalty
         self._partial_failure_penalty = partial_failure_penalty
-        self._magnitude_outlier_ratio = magnitude_outlier_ratio
 
         # Health metrics per source
         self._health_metrics: dict[str, SourceHealthMetrics] = {
@@ -217,7 +204,6 @@ class PriceAggregator:
                 "source_count": len(sources),
                 "sources": [s.source_name for s in sources],
                 "outlier_threshold": outlier_threshold,
-                "magnitude_outlier_ratio": magnitude_outlier_ratio,
             },
         )
 
@@ -438,49 +424,8 @@ class PriceAggregator:
             else:
                 valid_results.append(result)
 
-        # If all results are outliers, check whether the divergence is due to feed
-        # misconfiguration (magnitude-level disagreement) vs genuine market volatility.
+        # If all results are outliers, use all of them (better than nothing)
         if not valid_results:
-            prices_float = sorted(float(r.price) for r in results)
-            min_price = prices_float[0]
-            max_price = prices_float[-1]
-
-            ratio = 0.0
-            if min_price > 0:
-                ratio = max_price / min_price
-            elif max_price > 0:  # min_price <= 0: zero or negative price is always extreme
-                ratio = float("inf")
-
-            if ratio > self._magnitude_outlier_ratio:
-                # Extreme divergence: max/min ratio far exceeds normal market volatility.
-                # Likely cause: feed returning price in wrong units (e.g., wstETH/ETH
-                # exchange rate decoded as USD via 8-decimal assumption gives ~$12.28B
-                # while correct USD price is ~$3,400, ratio ≈ 3,600,000×).
-                # Averaging these values produces nonsense -- fail explicitly.
-                ratio_str = "inf" if ratio == float("inf") else f"{ratio:.0f}"
-                logger.error(
-                    "Extreme price divergence detected across %d sources: min=%s, max=%s "
-                    "(ratio=%s× exceeds limit of %.0f×). This indicates a feed "
-                    "configuration error (wrong units/decimals), not market volatility. "
-                    "Raising AllDataSourcesFailed to prevent corrupted price from being used.",
-                    len(results),
-                    min_price,
-                    max_price,
-                    ratio_str,
-                    self._magnitude_outlier_ratio,
-                )
-                magnitude_errors = {
-                    r.source: (
-                        f"Magnitude outlier: price={r.price} (min={min_price:.4g}, "
-                        f"max={max_price:.4g}, ratio={ratio_str}×)"
-                    )
-                    for r in results
-                }
-                magnitude_errors.update(errors)
-                raise AllDataSourcesFailed(errors=magnitude_errors)
-
-            # Normal divergence across all sources (e.g., volatile market with 3 sources
-            # each 15% apart). Use all results -- median is still meaningful.
             logger.warning(
                 "All prices flagged as outliers, using all %d results",
                 len(results),

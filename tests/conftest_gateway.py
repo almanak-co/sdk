@@ -41,7 +41,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.anvil.fork_manager import RollingForkManager
+from almanak.framework.backtesting.paper.fork_manager import RollingForkManager
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
 from almanak.framework.web3 import get_gateway_web3
 from almanak.gateway.core.settings import GatewaySettings
@@ -222,6 +222,101 @@ class AnvilFixture:
         except Exception as e:
             logger.error(f"Failed to fund tokens on {self.chain}: {e}")
             return False
+
+    def health_check(self, timeout_seconds: float = 2.0) -> bool:
+        """Check if the Anvil fork is healthy (sync wrapper).
+
+        Args:
+            timeout_seconds: Timeout for the health probe
+
+        Returns:
+            True if fork is healthy
+        """
+        if not self._loop or not self._manager:
+            return False
+
+        try:
+            if not self._loop.is_running():
+                return False
+            future = asyncio.run_coroutine_threadsafe(
+                self._manager.health_check(timeout_seconds=timeout_seconds),
+                self._loop,
+            )
+            return future.result(timeout=timeout_seconds + 2)
+        except Exception as e:
+            logger.debug(f"Health check failed for {self.chain}: {e}")
+            return False
+
+    def restart(self, timeout: float = 60.0, health_timeout_seconds: float = 2.0) -> bool:
+        """Restart the Anvil fork (sync wrapper).
+
+        Stops the current fork thread and starts a new one on the same port.
+
+        Args:
+            timeout: Maximum seconds to wait for restart
+            health_timeout_seconds: Timeout for the post-restart health probe
+
+        Returns:
+            True if restart successful
+        """
+        logger.info(f"Restarting Anvil fixture for {self.chain}...")
+
+        # Stop existing thread/process
+        self.stop()
+
+        # Verify old thread actually terminated
+        if self._thread and self._thread.is_alive():
+            logger.error(f"Anvil thread did not stop cleanly for {self.chain}")
+            return False
+
+        # Reset internal state
+        self._error = None
+        self._ready = threading.Event()
+        self._stop_event = threading.Event()
+
+        # Start fresh
+        try:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+
+            if not self._ready.wait(timeout=timeout):
+                if self._error:
+                    logger.error(f"Anvil restart failed for {self.chain}: {self._error}")
+                    return False
+                logger.error(f"Anvil restart timed out for {self.chain}")
+                return False
+
+            if self._error:
+                logger.error(f"Anvil restart failed for {self.chain}: {self._error}")
+                return False
+
+            # Verify post-restart health via RPC probe
+            if not self.health_check(timeout_seconds=health_timeout_seconds):
+                logger.error(f"Anvil restart completed but health check failed for {self.chain}")
+                return False
+
+            logger.info(f"Anvil fixture restarted: chain={self.chain}, port={self.port}")
+            return True
+        except Exception as e:
+            logger.error(f"Anvil restart exception for {self.chain}: {e}")
+            return False
+
+    def ensure_healthy(self, timeout_seconds: float = 2.0) -> bool:
+        """Ensure the Anvil fork is healthy, restarting if necessary.
+
+        Args:
+            timeout_seconds: Timeout for the health probe
+
+        Returns:
+            True if fork is healthy (possibly after restart)
+        """
+        if self.health_check(timeout_seconds=timeout_seconds):
+            return True
+
+        logger.warning(f"Anvil fork unhealthy for {self.chain}, attempting restart...")
+        if not self.restart(health_timeout_seconds=timeout_seconds):
+            return False
+        return self.health_check(timeout_seconds=timeout_seconds)
 
     def _run(self) -> None:
         """Thread target: create event loop and run Anvil manager."""

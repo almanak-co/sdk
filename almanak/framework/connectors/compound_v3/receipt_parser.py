@@ -28,15 +28,15 @@ EVENT_TOPICS: dict[str, str] = {
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
     # Collateral events
     "SupplyCollateral": "0xfa56f7b24f17183d81894d3ac2ee654e3c26388d17a28dbd9549b8114304e1f4",
-    "WithdrawCollateral": "0xd6d480d5b3068db003533b170d67561494d72e3bf9fa40a266471351ebba9e16",
-    "TransferCollateral": "0x29db89d45e1a802b4d55e202984fce9faf1d30aedf86503ff1ea0ed9ebb64201",
+    "WithdrawCollateral": "0xd6d480d5b3068db003533b170d67561494d72e3bf9fa40a266f1b28c8f0496c6",
+    "TransferCollateral": "0x0792b43c00b92b22e75de7a65c15c4e60bd6bea78568e02aee5e07f47cdd7a3e",
     # Liquidation events
-    "AbsorbDebt": "0x1547a878dc89ad3c367b6338b4be6a65a5dd74fb77ae044da1e8747ef1f4f62f",
-    "AbsorbCollateral": "0x9850ab1af75177e4a9201c65a2cf7976d5d28e40ef63494b44366f86b2f9412e",
-    "BuyCollateral": "0xf891b2a411b0e66a5f0a6ff1368670fefa287a13f541eb633a386a1a9cc7046b",
+    "AbsorbDebt": "0x1547a878dc8ded417e3e62a6cff47e3c5052a7b0d24c0a87db3fef36eb0d7a38",
+    "AbsorbCollateral": "0xacf85bc25a9867b87dc71f764e2ca82e0948e2c1f52e1c5e88fee73a0c4cca6",
+    "BuyCollateral": "0x2dbf2d9f38f04afb35d0da3c8bdf4a5b3b08cdd5a3d5c9c4e6b1d75b2a0ae2c8",
     # Administrative events
-    "PauseAction": "0x3be39979091ae7ca962aa1c44e645f2df3c221b79f324afa5f44aedc8d2f690d",
-    "WithdrawReserves": "0xec4431f2ba1a9382f6b0c4352b888cba6f7db91667d9f776abe5ad8ddc5401b6",
+    "PauseAction": "0x2dbf2d9f38f04afb35d0da3c8bdf4a5b3b08cdd5a3d5c9c4e6b1d75b2a0ae2c9",
+    "WithdrawReserves": "0x5a07df76f7c5b5a4ef9c6dd6b4e8c4e2b5a7c3d1e9f8a6b4c2d0e8f6a4b2c0d8",
     # ERC20 events
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
 }

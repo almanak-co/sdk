@@ -301,7 +301,7 @@ if TYPE_CHECKING:
         PredictionOrder,
         PredictionPosition,
     )
-    from .price.multi_dex import (
+    from .price.multi_dex import (  # type: ignore[import-untyped]
         BestDexResult,
         MultiDexPriceResult,
         MultiDexPriceService,

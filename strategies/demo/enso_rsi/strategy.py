@@ -126,22 +126,28 @@ class EnsoRSIStrategy(IntentStrategy):
         # CONFIGURATION PARSING
         # =====================================================================
 
+        config_dict = self.config if isinstance(self.config, dict) else {}
+
+        # Handle DictConfigWrapper (from CLI)
+        if hasattr(self.config, "get"):
+            config_dict = {k: getattr(self.config, k) for k in dir(self.config) if not k.startswith("_")}
+
         # Trading parameters
-        self.trade_size_usd = Decimal(str(self.get_config("trade_size_usd", "100")))
+        self.trade_size_usd = Decimal(str(config_dict.get("trade_size_usd", "100")))
 
         # RSI thresholds
-        self.rsi_oversold = int(self.get_config("rsi_oversold", 30))
-        self.rsi_overbought = int(self.get_config("rsi_overbought", 70))
+        self.rsi_oversold = int(config_dict.get("rsi_oversold", 30))
+        self.rsi_overbought = int(config_dict.get("rsi_overbought", 70))
 
         # Slippage (as percentage, e.g., 0.5 = 0.5%)
-        self.max_slippage_pct = float(self.get_config("max_slippage_pct", 0.5))
+        self.max_slippage_pct = float(config_dict.get("max_slippage_pct", 0.5))
 
         # Token configuration
-        self.base_token = self.get_config("base_token", "WETH")
-        self.quote_token = self.get_config("quote_token", "USDC")
+        self.base_token = config_dict.get("base_token", "WETH")
+        self.quote_token = config_dict.get("quote_token", "USDC")
 
         # Force action for testing
-        self.force_action = self.get_config("force_action", None)
+        self.force_action = config_dict.get("force_action", None)
 
         # Internal state
         self._trades_executed = 0

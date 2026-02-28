@@ -513,8 +513,7 @@ class TestSushiSwapV3LPCloseIntent:
         print("Executing LP Close on empty position...")
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
 
-        assert not execution_result.success, "LP Close on empty position should report failure (VIB-234)"
-        assert "Empty ActionBundle" in execution_result.error
+        assert execution_result.success, f"LP Close should succeed for empty position. Error: {execution_result.error}"
 
         # 7. Verify ERC-20 balances unchanged (nothing to collect)
         usdc_after_close = get_token_balance(web3, usdc_addr, funded_wallet)

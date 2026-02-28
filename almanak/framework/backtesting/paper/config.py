@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Literal
 
-from almanak.framework.anvil.fork_manager import CHAIN_IDS
+from almanak.framework.backtesting.paper.fork_manager import CHAIN_IDS
 
 
 @dataclass

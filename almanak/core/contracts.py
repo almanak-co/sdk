@@ -507,13 +507,6 @@ AERODROME: dict[str, dict[str, str]] = {
         "cl_router": "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5",
         "cl_factory": "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A",
     },
-    # Velodrome V2 on Optimism — same Solidly fork interface as Aerodrome on Base.
-    # Addresses verified on Optimism block explorer (optimistic.etherscan.io).
-    "optimism": {
-        "router": "0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858",
-        "factory": "0xF1046053aa5682b4F9a81b5481394DA16BE5FF5a",
-        "voter": "0x41C914ee0c7E1A5edCD0295623e6dC557B5aBf3C",
-    },
 }
 
 AERODROME_TOKENS: dict[str, dict[str, str]] = {

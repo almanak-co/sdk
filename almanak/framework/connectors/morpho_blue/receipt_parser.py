@@ -91,16 +91,16 @@ class MorphoBlueEventType(Enum):
 
 EVENT_TOPICS: dict[str, str] = {
     "Supply": "0xedf8870433c83823eb071d3df1caa8d008f12f6440918c20d75a3602cda30fe0",
-    "Withdraw": "0xa56fc0ad5702ec05ce63666221f796fb62437c32db1aa1aa075fc6484cf58fbf",
+    "Withdraw": "0xa56fc0ad5702ec05ce63666221f796fb62437c32db1aa1aa075fc6484cf58fbb",
     "Borrow": "0x570954540bed6b1304a87dfe815a5eda4a648f7097a16240dcd85c9b5fd42a43",
     "Repay": "0x52acb05cebbd3cd39715469f22afbf5a17496295ef3bc9bb5944056c63ccaa09",
     "SupplyCollateral": "0xa3b9472a1399e17e123f3c2e6586c23e504184d504de59cdaa2b375e880c6184",
-    "WithdrawCollateral": "0xe80ebd7cc9223d7382aab2e0d1d6155c65651f83d53c8b9b06901d167e321142",
-    "Liquidate": "0xa4946ede45d0c6f06a0f5ce92c9ad3b4751452d2fe0e25010783bcab57a67e41",
-    "FlashLoan": "0xc76f1b4fe4396ac07a9fa55a415d4ca430e72651d37d3401f3bed7cb13fc4f12",
+    "WithdrawCollateral": "0xe80ebd7cc9223d7382aab2e0d1d6155c65651f83d53c8b9b06571723e9fcc5a2",
+    "Liquidate": "0xa4946ede45d0c6f06a0f5ce92c9ad3b4751e2b7f8a8c2f57aae4c7e5b4c18a69",
+    "FlashLoan": "0xf039e75a3c98d8b8c0e7b74a57f1449b6a0c38b2d3b5b4a89f9e8c7d6e5f4a3b",
     "CreateMarket": "0xac4b2400f169220b0c0afdde7a0b32e775ba727ea1cb30b35f935cdaab8683ac",
-    "SetAuthorization": "0xd5e969f01efe921d3f766bdebad25f0a05e3f237311f56482bf132d0326309c0",
-    "AccrueInterest": "0x9d9bd501d0657d7dfe415f779a620a62b78bc508ddc0891fbbd8b7ac0f8fce87",
+    "SetAuthorization": "0x4b3f81827f311b18fd5f37dc45c14c9139b5bda8a1d0c0ee16b52bc424da0c0e",
+    "AccrueInterest": "0xdd6b5c54f2f9a65c00c31b1a8ed53e5e3ae4caa0bbd1e8d7bb6a7c455f3f7e9c",
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
 }

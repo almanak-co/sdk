@@ -630,8 +630,7 @@ class TraderJoeV2Adapter:
         if not balances:
             return None
 
-        # Pass pre-computed balances to avoid a redundant get_position_balances() call
-        amount_x, amount_y = self.sdk.get_total_position_value(pool_addr, wallet_addr, precomputed_balances=balances)
+        amount_x, amount_y = self.sdk.get_total_position_value(pool_addr, wallet_addr)
         pool_info = self.sdk.get_pool_info(pool_addr)
 
         return LiquidityPosition(
@@ -747,7 +746,6 @@ class TraderJoeV2Adapter:
         token_y: str,
         bin_step: int = 20,
         slippage_bps: int | None = None,
-        position: LiquidityPosition | None = None,
     ) -> TransactionData | None:
         """Build a remove liquidity transaction for all positions.
 
@@ -756,15 +754,11 @@ class TraderJoeV2Adapter:
             token_y: Token Y symbol or address
             bin_step: Bin step of the pool
             slippage_bps: Slippage tolerance in basis points
-            position: Optional pre-fetched position. If provided, skips the
-                get_position() call (avoids redundant RPC round trips when the
-                caller already holds the position data).
 
         Returns:
             TransactionData if position exists, None otherwise
         """
-        if position is None:
-            position = self.get_position(token_x, token_y, bin_step)
+        position = self.get_position(token_x, token_y, bin_step)
         if not position or not position.bin_ids:
             return None
 

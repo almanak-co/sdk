@@ -59,13 +59,11 @@ logger = logging.getLogger(__name__)
 
 # Pendle market addresses by chain
 PENDLE_MARKETS = {
-    # Arbitrum markets (active)
-    "PT-wstETH-25JUN2026": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
-    # Arbitrum markets (expired)
+    # Arbitrum markets
     "PT-wstETH-26JUN2025": "0x08a152834de126d2ef83D612ff36e4523FD0017F",
     "PT-wstETH-26DEC2024": "0xF769035A247AF48bF55BaA82D8b5e14E02E49a25",
     "PT-eETH-26DEC2024": "0x952083cde7aaa11AB8449057F7de23A970AA8472",
-    # Plasma markets (expired 2026-02-26)
+    # Plasma markets
     "PT-fUSDT0-26FEB2026": "0x0cb289e9df2d0dcfe13732638c89655fb80c2be2",
 }
 
@@ -126,23 +124,29 @@ class PendleBasicsStrategy(IntentStrategy):
         """Initialize the strategy with configuration."""
         super().__init__(*args, **kwargs)
 
+        # Helper to get config values
+        def get_config(key: str, default: Any) -> Any:
+            if isinstance(self.config, dict):
+                return self.config.get(key, default)
+            return getattr(self.config, key, default)
+
         # Market configuration
-        self.market = self.get_config("market", PENDLE_MARKETS["PT-wstETH-25JUN2026"])
-        self.market_name = self.get_config("market_name", "PT-wstETH-25JUN2026")
+        self.market = get_config("market", PENDLE_MARKETS["PT-wstETH-26JUN2025"])
+        self.market_name = get_config("market_name", "PT-wstETH-26JUN2025")
 
         # Trading parameters - support both token-based and USD-based amounts
-        self.trade_size_token = self.get_config("trade_size_token", None)
+        self.trade_size_token = get_config("trade_size_token", None)
         if self.trade_size_token is not None:
             self.trade_size_token = Decimal(str(self.trade_size_token))
-        self.trade_size_usd = Decimal(str(self.get_config("trade_size_usd", "10")))
-        self.max_slippage_bps = int(self.get_config("max_slippage_bps", 100))
+        self.trade_size_usd = Decimal(str(get_config("trade_size_usd", "10")))
+        self.max_slippage_bps = int(get_config("max_slippage_bps", 100))
 
         # Token configuration - support both symbols and addresses
-        self.base_token = self.get_config("base_token", "WSTETH")
-        self.base_token_symbol = self.get_config("base_token_symbol", self.base_token)
-        self.base_token_decimals = int(self.get_config("base_token_decimals", 18))
-        self.pt_token = self.get_config("pt_token", "PT-wstETH")
-        self.pt_token_symbol = self.get_config("pt_token_symbol", self.pt_token)
+        self.base_token = get_config("base_token", "WSTETH")
+        self.base_token_symbol = get_config("base_token_symbol", self.base_token)
+        self.base_token_decimals = int(get_config("base_token_decimals", 18))
+        self.pt_token = get_config("pt_token", "PT-wstETH")
+        self.pt_token_symbol = get_config("pt_token_symbol", self.pt_token)
 
         # Track state
         self._has_entered_position = False

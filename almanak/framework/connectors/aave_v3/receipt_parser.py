@@ -64,7 +64,7 @@ EVENT_TOPICS: dict[str, str] = {
     # E-Mode events
     "UserEModeSet": "0xd728da875fc88944cbf17638bcbe4af0eedaef63becd1d1c57cc097eb4608d84",
     # Isolation mode events
-    "IsolationModeTotalDebtUpdated": "0xaef84d3b40895fd58c561f3998000f0583abb992a52fbdc99ace8e8de4d676a5",
+    "IsolationModeTotalDebtUpdated": "0xaef84d3b40895fd58c561f3998c1f5f2c5e36db64d1c8b90d7e92dc08b6a7a38",
     # Approval events (aTokens)
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
@@ -584,9 +584,6 @@ class AaveV3ReceiptParser:
             "repay_amount",
             "a_token_received",
             "borrow_rate",
-            "debt_token",
-            "supply_rate",
-            "remaining_debt",
         }
     )
 
@@ -1406,124 +1403,6 @@ class AaveV3ReceiptParser:
 
         except Exception as e:
             logger.warning(f"Failed to extract borrow rate: {e}")
-            return None
-
-    def extract_debt_token(self, receipt: dict[str, Any]) -> str | None:
-        """Extract debt token address from a Borrow transaction receipt.
-
-        Finds the variable debt token by looking for Transfer events from 0x0
-        (minting) where the amount matches the borrow amount. The emitting
-        contract address is the debt token.
-
-        Args:
-            receipt: Transaction receipt dict with 'logs' field
-
-        Returns:
-            Debt token contract address if found, None otherwise
-        """
-        try:
-            result = self.parse_receipt(receipt)
-            if not result.borrows:
-                return None
-
-            borrow = result.borrows[0]
-            borrow_amount = int(borrow.amount)
-
-            logs = receipt.get("logs", [])
-            if not logs:
-                return None
-
-            transfer_topic = EVENT_TOPICS["Transfer"].lower()
-            zero_addr = "0x0000000000000000000000000000000000000000"
-
-            for log in logs:
-                topics = log.get("topics", [])
-                if len(topics) < 3:
-                    continue
-
-                first_topic = topics[0]
-                if isinstance(first_topic, bytes):
-                    first_topic = "0x" + first_topic.hex()
-                first_topic = str(first_topic).lower()
-
-                if first_topic != transfer_topic:
-                    continue
-
-                # Check if this is a mint (from 0x0)
-                from_addr = HexDecoder.topic_to_address(topics[1])
-                if from_addr.lower() != zero_addr:
-                    continue
-
-                # Check if the minted amount matches the borrow amount
-                data = HexDecoder.normalize_hex(log.get("data", ""))
-                amount = HexDecoder.decode_uint256(data, 0)
-                if amount == borrow_amount:
-                    # The contract emitting this Transfer is the debt token
-                    log_address = log.get("address", "")
-                    if isinstance(log_address, bytes):
-                        log_address = "0x" + log_address.hex()
-                    if log_address:
-                        return str(log_address)
-
-            return None
-
-        except Exception as e:
-            logger.warning(f"Failed to extract debt token: {e}")
-            return None
-
-    def extract_supply_rate(self, receipt: dict[str, Any]) -> Decimal | None:
-        """Extract supply rate (APY) from a transaction receipt.
-
-        Reads the currentLiquidityRate from the ReserveDataUpdated event, which
-        is emitted by the Aave V3 pool on every supply/borrow/repay/withdraw.
-
-        Args:
-            receipt: Transaction receipt dict with 'logs' field
-
-        Returns:
-            Supply rate as decimal (e.g., 0.035 for 3.5% APY) if found, None otherwise
-        """
-        try:
-            result = self.parse_receipt(receipt)
-
-            # Find ReserveDataUpdated events in the parsed events list
-            for event in result.events:
-                if event.event_type == AaveV3EventType.RESERVE_DATA_UPDATED:
-                    liquidity_rate = event.data.get("liquidity_rate")
-                    if liquidity_rate is not None:
-                        return Decimal(str(liquidity_rate))
-
-            return None
-
-        except Exception as e:
-            logger.warning(f"Failed to extract supply rate: {e}")
-            return None
-
-    def extract_remaining_debt(self, receipt: dict[str, Any]) -> int | None:
-        """Extract remaining debt after a Repay transaction.
-
-        Aave V3 does not emit authoritative post-repay debt balance in receipt events.
-        Debt token Transfer amounts use scaled units (not raw amounts), and accrued
-        interest can cause Mint events during burns. Determining remaining debt
-        reliably requires an on-chain state query (balanceOf on the debt token).
-
-        Args:
-            receipt: Transaction receipt dict with 'logs' field
-
-        Returns:
-            Always None - remaining debt cannot be reliably inferred from receipts
-        """
-        try:
-            result = self.parse_receipt(receipt)
-            if not result.repays:
-                return None
-
-            # Remaining debt requires on-chain balanceOf query on the variable/stable
-            # debt token. Receipt-based inference is unreliable due to scaled amounts.
-            return None
-
-        except Exception as e:
-            logger.warning(f"Failed to extract remaining debt: {e}")
             return None
 
     def is_aave_event(self, topic: str | bytes) -> bool:

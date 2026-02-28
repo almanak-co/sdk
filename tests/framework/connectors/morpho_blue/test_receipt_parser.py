@@ -35,7 +35,7 @@ def create_withdraw_log(market_id, on_behalf_of, receiver, caller, assets, share
     return {
         "address": MORPHO_ADDRESS,
         "topics": [
-            "0xa56fc0ad5702ec05ce63666221f796fb62437c32db1aa1aa075fc6484cf58fbf",
+            "0xa56fc0ad5702ec05ce63666221f796fb62437c32db1aa1aa075fc6484cf58fbb",
             market_id,
             f"0x000000000000000000000000{on_behalf_of[2:].lower()}",
             f"0x000000000000000000000000{receiver[2:].lower()}",
@@ -99,7 +99,7 @@ def create_withdraw_collateral_log(market_id, on_behalf_of, receiver, caller, as
     return {
         "address": MORPHO_ADDRESS,
         "topics": [
-            "0xe80ebd7cc9223d7382aab2e0d1d6155c65651f83d53c8b9b06901d167e321142",
+            "0xe80ebd7cc9223d7382aab2e0d1d6155c65651f83d53c8b9b06571723e9fcc5a2",
             market_id,
             f"0x000000000000000000000000{on_behalf_of[2:].lower()}",
             f"0x000000000000000000000000{receiver[2:].lower()}",
@@ -117,7 +117,7 @@ def create_liquidate_log(
     return {
         "address": MORPHO_ADDRESS,
         "topics": [
-            "0xa4946ede45d0c6f06a0f5ce92c9ad3b4751452d2fe0e25010783bcab57a67e41",
+            "0xa4946ede45d0c6f06a0f5ce92c9ad3b4751e2b7f8a8c2f57aae4c7e5b4c18a69",
             market_id,
             f"0x000000000000000000000000{caller[2:].lower()}",
             f"0x000000000000000000000000{borrower[2:].lower()}",
@@ -133,7 +133,7 @@ def create_flash_loan_log(caller, token, assets):
     return {
         "address": MORPHO_ADDRESS,
         "topics": [
-            "0xc76f1b4fe4396ac07a9fa55a415d4ca430e72651d37d3401f3bed7cb13fc4f12",
+            "0xf039e75a3c98d8b8c0e7b74a57f1449b6a0c38b2d3b5b4a89f9e8c7d6e5f4a3b",
             f"0x000000000000000000000000{caller[2:].lower()}",
             f"0x000000000000000000000000{token[2:].lower()}",
         ],
@@ -168,7 +168,7 @@ def create_set_authorization_log(caller, authorizer, authorized, is_authorized):
     return {
         "address": MORPHO_ADDRESS,
         "topics": [
-            "0xd5e969f01efe921d3f766bdebad25f0a05e3f237311f56482bf132d0326309c0",
+            "0x4b3f81827f311b18fd5f37dc45c14c9139b5bda8a1d0c0ee16b52bc424da0c0e",
             f"0x000000000000000000000000{caller[2:].lower()}",
             f"0x000000000000000000000000{authorizer[2:].lower()}",
             f"0x000000000000000000000000{authorized[2:].lower()}",
@@ -184,7 +184,7 @@ def create_accrue_interest_log(market_id, prev_borrow_rate, interest, fee_shares
     return {
         "address": MORPHO_ADDRESS,
         "topics": [
-            "0x9d9bd501d0657d7dfe415f779a620a62b78bc508ddc0891fbbd8b7ac0f8fce87",
+            "0xdd6b5c54f2f9a65c00c31b1a8ed53e5e3ae4caa0bbd1e8d7bb6a7c455f3f7e9c",
             market_id,
         ],
         "data": data,

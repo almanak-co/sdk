@@ -22,7 +22,7 @@ Examples:
     Basic usage for strategy testing:
 
         from almanak.framework.backtesting.paper import PaperTrader, PaperTraderConfig
-        from almanak.framework.anvil.fork_manager import RollingForkManager
+        from almanak.framework.backtesting.paper.fork_manager import RollingForkManager
         from almanak.framework.backtesting.paper.portfolio_tracker import PaperPortfolioTracker
 
         # Create components
@@ -70,12 +70,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
-if TYPE_CHECKING:
-    from almanak.framework.data.indicators.rsi import RSICalculator
-
-from almanak.framework.anvil.fork_manager import RollingForkManager
 from almanak.framework.backtesting.models import (
     BacktestEngine,
     BacktestMetrics,
@@ -85,6 +81,7 @@ from almanak.framework.backtesting.models import (
     TradeRecord,
 )
 from almanak.framework.backtesting.paper.config import PaperTraderConfig
+from almanak.framework.backtesting.paper.fork_manager import RollingForkManager
 from almanak.framework.backtesting.paper.models import (
     PaperTrade,
     PaperTradeError,
@@ -524,7 +521,6 @@ async def create_market_snapshot_from_fork(
     portfolio_tracker: PaperPortfolioTracker | None = None,
     token_prices: dict[str, Decimal] | None = None,
     price_oracle: Any | None = None,
-    rsi_calculator: "RSICalculator | None" = None,
 ) -> MarketSnapshot:
     """Create a MarketSnapshot from the current fork state.
 
@@ -538,7 +534,6 @@ async def create_market_snapshot_from_fork(
         portfolio_tracker: Optional portfolio tracker for balance data
         token_prices: Optional dict of token symbol to USD price for valuation
         price_oracle: Optional PriceOracle/PriceAggregator for market.price() calls
-        rsi_calculator: Optional RSICalculator for indicator support (RSI, MACD, BB, ATR)
 
     Returns:
         MarketSnapshot populated with fork-based data
@@ -549,7 +544,6 @@ async def create_market_snapshot_from_fork(
         wallet_address=wallet_address,
         timestamp=datetime.now(UTC),
         price_oracle=price_oracle,
-        rsi_calculator=rsi_calculator,
     )
 
     # Add metadata about fork state
@@ -653,7 +647,6 @@ class PaperTrader:
     _error_handler: BacktestErrorHandler | None = field(default=None, init=False, repr=False)
     _used_hardcoded_fallback: bool = field(default=False, init=False, repr=False)
     _fallback_usage: dict[str, int] = field(default_factory=dict, init=False, repr=False)
-    _rsi_calculator: "RSICalculator | None" = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -669,9 +662,6 @@ class PaperTrader:
 
         # Initialize price provider based on config
         self._init_price_provider()
-
-        # Initialize indicator calculators (RSI, MACD, BB, ATR all derive from OHLCV)
-        self._init_indicator_calculators()
 
     def _track_fallback(self, fallback_type: str) -> None:
         """Track usage of a fallback value.
@@ -1329,7 +1319,6 @@ class PaperTrader:
                 portfolio_tracker=self.portfolio_tracker,
                 token_prices=token_prices,
                 price_oracle=self._price_aggregator,
-                rsi_calculator=self._rsi_calculator,
             )
 
             # Call strategy decide
@@ -2282,32 +2271,6 @@ class PaperTrader:
                     self._backtest_id,
                     str(e),
                 )
-
-    def _init_indicator_calculators(self) -> None:
-        """Initialize indicator calculators (RSI, MACD, BB, ATR) using Binance OHLCV.
-
-        Creates an RSICalculator backed by BinanceOHLCVProvider. The RSI calculator
-        also exposes its OHLCV provider, which MarketSnapshot uses lazily for
-        MACD, Bollinger Bands, ATR, SMA, and EMA calculations.
-        """
-        try:
-            from almanak.framework.data.indicators.rsi import RSICalculator as RSICalc
-            from almanak.framework.data.ohlcv.binance_provider import BinanceOHLCVProvider
-
-            ohlcv_provider = BinanceOHLCVProvider(cache_ttl=120)
-            self._rsi_calculator = RSICalc(ohlcv_provider=ohlcv_provider)
-            logger.info(
-                "[%s] Initialized indicator calculators (RSI, MACD, BB, ATR) via Binance OHLCV",
-                self._backtest_id,
-            )
-        except Exception as e:
-            logger.warning(
-                "[%s] Failed to initialize indicator calculators: %s. "
-                "Strategies using market.rsi()/macd()/bollinger_bands() will raise ValueError.",
-                self._backtest_id,
-                str(e),
-            )
-            self._rsi_calculator = None
 
     async def _get_token_price(self, token: str) -> Decimal:
         """Get token price in USD using the configured fallback chain.

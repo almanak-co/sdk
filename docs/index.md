@@ -33,33 +33,32 @@ Anvil fork testing is the recommended starting point. The SDK auto-starts a loca
 
 ## Writing a Strategy
 
-Strategies use an intent-based architecture. Implement the `decide()` method to return an intent based on market conditions:
+Strategies implement the `decide()` method, which receives a `MarketSnapshot` and returns an `Intent` (or `None` to skip the cycle):
 
 ```python
 from decimal import Decimal
-from almanak import IntentStrategy, Intent, MarketSnapshot
+from almanak.framework.intents import Intent
+from almanak.framework.strategies import IntentStrategy, MarketSnapshot
 
 class MyStrategy(IntentStrategy):
     """A simple mean-reversion strategy."""
 
-    def decide(self, market: MarketSnapshot) -> Intent:
+    def decide(self, market: MarketSnapshot) -> Intent | None:
         eth_price = market.price("ETH")
-        usdc_balance = market.balance("USDC")
+        usdc = market.balance("USDC")
 
-        if eth_price < 2000 and usdc_balance > 1000:
+        if eth_price < Decimal("2000") and usdc.balance_usd > Decimal("500"):
             return Intent.swap(
                 from_token="USDC",
                 to_token="ETH",
-                amount_usd=Decimal("1000"),
-                max_slippage=Decimal("0.005"),
+                amount_usd=Decimal("500"),
             )
-
         return Intent.hold(reason="Waiting for better conditions")
 ```
 
 ## Architecture
 
-```
+```text
 almanak/
   framework/           # V2 Strategy Framework
     strategies/        # IntentStrategy base class

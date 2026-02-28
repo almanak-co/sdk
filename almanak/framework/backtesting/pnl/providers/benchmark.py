@@ -33,9 +33,8 @@ Example:
 """
 
 import logging
-import os
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
@@ -43,10 +42,6 @@ from typing import Any
 import aiohttp
 
 logger = logging.getLogger(__name__)
-
-# CoinGecko API base URLs (same as CoinGeckoDataProvider)
-_FREE_API_BASE = "https://api.coingecko.com/api/v3"
-_PRO_API_BASE = "https://pro-api.coingecko.com/api/v3"
 
 
 class Benchmark(StrEnum):
@@ -295,36 +290,29 @@ async def _get_single_token_prices(
     start_ts = int(start.timestamp())
     end_ts = int(end.timestamp())
 
-    # Use Pro API if API key is available (matches CoinGeckoDataProvider pattern)
-    api_key = os.environ.get("COINGECKO_API_KEY", "")
-    api_base = _PRO_API_BASE if api_key else _FREE_API_BASE
-
-    url = f"{api_base}/coins/{token_id}/market_chart/range"
+    # CoinGecko API endpoint for market chart range
+    url = f"https://api.coingecko.com/api/v3/coins/{token_id}/market_chart/range"
     params: dict[str, str | int] = {
         "vs_currency": "usd",
         "from": start_ts,
         "to": end_ts,
     }
 
-    headers: dict[str, str] = {}
-    if api_key:
-        headers["x-cg-pro-api-key"] = api_key
-
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, headers=headers) as response:
+            async with session.get(url, params=params) as response:
                 if response.status == 429:
-                    logger.warning("CoinGecko rate limit hit for benchmark %s, returning empty prices", token)
+                    logger.warning("CoinGecko rate limit hit, returning empty prices")
                     return []
 
                 if response.status != 200:
-                    logger.error("CoinGecko API error %d for benchmark %s", response.status, token)
+                    logger.error(f"CoinGecko API error: {response.status} for {token}")
                     return []
 
                 data = await response.json()
 
     except aiohttp.ClientError as e:
-        logger.error("Network error fetching benchmark %s prices: %s", token, e)
+        logger.error(f"Network error fetching {token} prices: {e}")
         return []
 
     return _parse_coingecko_prices(data, interval_seconds)
@@ -438,7 +426,7 @@ def _parse_coingecko_prices(
             continue
 
         timestamp_ms, price = item[0], item[1]
-        timestamp = datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC)
+        timestamp = datetime.utcfromtimestamp(timestamp_ms / 1000)
 
         # Filter to desired interval
         if last_timestamp is not None:

@@ -1,6 +1,6 @@
-"""Aerodrome/Velodrome Finance SDK for Solidly-fork AMMs.
+"""Aerodrome Finance SDK for Base Chain.
 
-Supports Aerodrome on Base and Velodrome V2 on Optimism. Both are Solidly-based AMMs with dual pool types:
+Aerodrome is a Solidly-based AMM on Base with dual pool types:
 - Volatile pools: x*y=k formula (0.3% fee)
 - Stable pools: x^3*y + y^3*x formula (0.05% fee)
 
@@ -201,9 +201,9 @@ class InsufficientLiquidityError(AerodromeSDKError):
 
 
 class AerodromeSDK:
-    """Low-level SDK for Aerodrome/Velodrome Finance (Solidly forks).
+    """Low-level SDK for Aerodrome Finance on Base.
 
-    This SDK provides direct interaction with Solidly-fork contracts (Aerodrome on Base, Velodrome V2 on Optimism):
+    This SDK provides direct interaction with Aerodrome contracts:
     - Pool queries (reserves, amounts)
     - Transaction building (swaps, liquidity)
     - ABI encoding for all operations
@@ -239,7 +239,7 @@ class AerodromeSDK:
         """Initialize the SDK.
 
         Args:
-            chain: Target chain ("base" for Aerodrome, "optimism" for Velodrome V2)
+            chain: Target chain (currently only "base" supported)
             rpc_url: RPC endpoint URL (optional)
             token_resolver: Optional TokenResolver instance. If None, uses singleton.
         """
@@ -311,7 +311,7 @@ class AerodromeSDK:
             try:
                 from almanak.gateway.utils.rpc_provider import get_rpc_url
 
-                rpc_url = get_rpc_url(self.chain)
+                rpc_url = get_rpc_url("base")
             except (ImportError, ValueError):
                 pass
 

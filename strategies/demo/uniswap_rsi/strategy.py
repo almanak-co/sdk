@@ -183,25 +183,32 @@ class UniswapRSIStrategy(IntentStrategy):
         # - A custom dataclass
         # We handle all cases here for flexibility
 
+        # Helper to get config value from dict or object attributes
+        def get_config(key: str, default: Any) -> Any:
+            if isinstance(self.config, dict):
+                return self.config.get(key, default)
+            else:
+                return getattr(self.config, key, default)
+
         # Trading parameters
-        self.trade_size_usd = Decimal(str(self.get_config("trade_size_usd", "10")))
+        self.trade_size_usd = Decimal(str(get_config("trade_size_usd", "10")))
 
         # RSI parameters
         # - rsi_period: How many candles to use for RSI calculation
         # - rsi_oversold: RSI below this = buy signal
         # - rsi_overbought: RSI above this = sell signal
-        self.rsi_period = int(self.get_config("rsi_period", 14))
-        self.rsi_oversold = Decimal(str(self.get_config("rsi_oversold", "30")))
-        self.rsi_overbought = Decimal(str(self.get_config("rsi_overbought", "70")))
+        self.rsi_period = int(get_config("rsi_period", 14))
+        self.rsi_oversold = Decimal(str(get_config("rsi_oversold", "30")))
+        self.rsi_overbought = Decimal(str(get_config("rsi_overbought", "70")))
 
         # Slippage protection
         # 50 bps = 0.5% slippage tolerance
-        self.max_slippage_bps = int(self.get_config("max_slippage_bps", 50))
+        self.max_slippage_bps = int(get_config("max_slippage_bps", 50))
 
         # Token configuration
         # WETH/USDC is the most liquid pair on Uniswap
-        self.base_token = self.get_config("base_token", "WETH")
-        self.quote_token = self.get_config("quote_token", "USDC")
+        self.base_token = get_config("base_token", "WETH")
+        self.quote_token = get_config("quote_token", "USDC")
 
         # =====================================================================
         # Internal state tracking (optional but useful)

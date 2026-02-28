@@ -1,10 +1,10 @@
 # E2E Strategy Test Report: enso_rsi (Mainnet)
 
-**Date:** 2026-02-09 19:01:04
-**Result:** PASS
+**Date:** 2026-02-26 18:30 UTC
+**Result:** FAIL
 **Mode:** Mainnet (live on-chain)
-**Chain:** Base
-**Duration:** ~3 minutes
+**Chain:** base
+**Duration:** ~8 minutes
 
 ## Configuration
 
@@ -13,127 +13,147 @@
 | Strategy | enso_rsi |
 | Chain | base |
 | Network | Mainnet |
-| Wallet | 0x54776446Aa29Fc49d152B4850bD410eA1E4d24bF |
-| Trade Size | $5 USD |
-| RSI Oversold | 30 |
-| RSI Overbought | 70 |
-| Slippage | 1.0% |
-| Base Token | WETH |
-| Quote Token | USDC |
+| Wallet | 0x0738Ea642faA28fFc588717625e45F3078fDBAC9 |
+
+## Configuration Changes
+
+Modified config.json for test:
+- **Original**: `trade_size_usd: "3"`
+- **Test**: `trade_size_usd: "1"` (reduced to match available balance)
+- **Test**: Added `force_action: "sell"` to trigger immediate WETH→USDC swap
+- **Restored**: Config restored to original values after test
 
 ## Wallet Preparation
 
+### Cross-Chain Balance Check
+
+**Total Portfolio**: $21.39 across all chains
+
+| Chain | Assets |
+|-------|--------|
+| Base (target) | $12.03 (0.000629 WETH, 1.072384 USDC, 0.000205 ETH) |
+| Arbitrum | $3.45 (0.000541 WETH, 0.993657 USDC) |
+| Ethereum | $3.41 (0.702383 USDe) |
+| Avalanche | $2.25 (2.017985 USDC) |
+
+### Balance Analysis
+
+**Requirements** (for $3 trade):
+- Trade amount: $3 worth of WETH
+- Gas reserve: ~0.0005 ETH (~$1 on Base)
+- **Total**: ~$4
+
+**Available on Base**:
+- ETH: 0.000205 ($0.42) — SHORT by $0.58 for gas
+- WETH: 0.000629 ($1.30) — SHORT by $1.70 for $3 trade
+- USDC: 1.072384 ($1.07) — SHORT by $1.93
+
+**Decision**: Wallet insufficient for $3 trade. Attempted cross-chain bridge from Avalanche (2.02 USDC) but hit Enso API rate limit. Reduced trade size to $1 and used existing WETH balance.
+
+### Funding Actions
+
 | Token | Required | Had Before | Funded | Method |
 |-------|----------|------------|--------|--------|
-| ETH   | ~0.001   | 0.001736   | -      | existing |
-| WETH  | ~0.0024  | 0.001577   | -      | existing |
-| USDC  | ~2.50    | 2.244317   | -      | existing |
+| ETH   | 0.0003   | 0.000205   | —      | Existing (sufficient for Base gas) |
+| WETH  | 0.0005   | 0.000629   | —      | Existing (sufficient for $1 trade) |
+| USDC  | —        | 1.072384   | —      | Not needed for sell action |
 
-**Funding:** Wallet already had sufficient tokens. No funding transactions needed.
+**Funding attempt**: Tried Enso cross-chain bridge (Avalanche→Base) but encountered API rate limit: "You've exceeded the request limit of 1rps."
 
-**Pre-run Balance Summary:**
-- ETH: 0.001736 (~$3.61 @ $2,080/ETH)
-- WETH: 0.001577 (~$3.28)
-- USDC: 2.244317
-- **Total value: ~$9.13**
+**Adjusted strategy**: Reduced trade size to $1 and set `force_action: "sell"` to use existing WETH balance.
+
+**Balance Gate**: PASS (after config adjustment)
+- ETH: 0.000205 ≥ 0.0002 for gas ✓
+- WETH: 0.000629 ≥ 0.0005 for $1 trade ✓
 
 ## Strategy Execution
 
-Strategy executed successfully with `--network mainnet --once`.
+**Command**:
+```bash
+ALMANAK_PRIVATE_KEY=$PK \
+ALMANAK_GATEWAY_ALLOW_INSECURE=true \
+uv run almanak strat run \
+  -d strategies/demo/enso_rsi \
+  --network mainnet \
+  --once
+```
 
-**Decision Flow:**
-1. Strategy initialized with config: trade_size=$5, RSI thresholds 30/70, WETH/USDC pair
-2. RSI calculated for WETH via gateway (Binance ETHUSDT klines)
-3. **Current RSI: 50.12** (neutral zone: 30-70)
-4. **Decision: HOLD** - "RSI 50.12 in neutral zone"
-5. No swap executed (neutral market conditions)
+**Result**: Strategy failed during intent compilation phase. No on-chain transaction was submitted.
 
-**Strategy Logic:**
-- RSI < 30 (oversold) → BUY WETH with USDC via Enso
-- RSI > 70 (overbought) → SELL WETH for USDC via Enso
-- RSI 30-70 (neutral) → HOLD (no action)
-
-**Intents Executed:**
-- HOLD: "RSI 50.12 in neutral zone"
+**Failure Reason**: **Missing ENSO_API_KEY environment variable**
 
 ### Key Log Output
 
 ```text
-Using config: strategies/demo/enso_rsi/config.json
-Connected to gateway at localhost:50051
+[info] Force action requested: sell
+[info] Creating SELL intent via Enso: WETH -> USDC, slippage=1.0%
+[info] 📈 EnsoRSIStrategy intent: 🔄 SWAP: $1.00 WETH → USDC (slippage: 1.00%) via enso
+[info] IntentCompiler initialized for chain=base, wallet=0x0738Ea64..., protocol=uniswap_v3
+[warning] IntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT.
+[info] Getting Enso route: WETH -> USDC, amount=500000000000000
+[error] Failed to compile Enso SWAP intent: Configuration Error: API key is required. Set ENSO_API_KEY env var or pass api_key. (Parameter: api_key)
 
-============================================================
-ALMANAK STRATEGY RUNNER
-============================================================
-Strategy: EnsoRSIStrategy
-Instance ID: EnsoRSIStrategy:40870be0e6f3 (generated)
-Mode: FRESH START (no existing state)
-Chain: base
-Wallet: 0x54776446Aa29Fc49d152B4850bD410eA1E4d24bF
-Execution: Single run
-Dry run: False
-Gateway: localhost:50051
-============================================================
+almanak.framework.connectors.enso.exceptions.EnsoConfigError: Configuration Error: API key is required. Set ENSO_API_KEY env var or pass api_key. (Parameter: api_key)
 
-[2026-02-09T19:01:04.046957Z] EnsoRSIStrategy initialized:
-  trade_size=$5, rsi_oversold=30, rsi_overbought=70,
-  slippage=1.0%, pair=WETH/USDC
-
-[2026-02-09T19:01:04.047108Z] Initialized RSICalculator with default_period=14
-
-[2026-02-09T19:01:04.050309Z] Starting iteration for strategy: EnsoRSIStrategy:40870be0e6f3
-
-[2026-02-09T19:01:04.244188Z] ⏸️ EnsoRSIStrategy:40870be0e6f3 HOLD: RSI 50.12 in neutral zone
-
-Status: HOLD | Intent: HOLD | Duration: 194ms
-Iteration completed successfully.
+[warning] Step error: Configuration Error: API key is required. Set ENSO_API_KEY env var or pass api_key. (Parameter: api_key) (retry 0/3)
+[info] Retrying intent (attempt 1/3, delay=1.09s)
+[... retries 2 and 3 with same error ...]
+[error] Intent failed after 3 retries: Configuration Error: API key is required.
 ```
 
 ### Gateway Log Highlights
 
 ```text
-2026-02-10 02:00:42,743 - EnsoService initialized: available=True
-2026-02-10 02:00:42,746 - Metrics server started on http://0.0.0.0:9090/metrics
-2026-02-10 02:00:42,747 - Gateway gRPC server started on 127.0.0.1:50051
-
-2026-02-10 02:01:04,049 - StateService.LoadState:
-  strategy_id=EnsoRSIStrategy:40870be0e6f3, latency_ms=1.682, success=true
-
-2026-02-10 02:01:04,243 - IntegrationService.BinanceGetKlines:
-  symbol=ETHUSDT, latency_ms=191.55, success=true
+[info] EnsoService initialized: available=False
+[warning] INSECURE MODE on network 'mainnet': Auth interceptor disabled - no auth_token configured.
 ```
 
-**Gateway Services Used:**
-- StateService: Load strategy state (fresh start, no previous state)
-- IntegrationService: Fetch Binance ETHUSDT klines for RSI calculation
-- EnsoService: Available and initialized (not invoked - no swap needed)
+The gateway correctly reported that EnsoService was unavailable due to missing API key. The strategy attempted to compile an Enso swap intent but failed immediately at the configuration validation stage.
 
 ## Transactions
 
-**No transactions executed** - strategy issued HOLD intent due to neutral RSI.
+No on-chain transactions were submitted. The strategy failed during the intent compilation phase before any blockchain interaction.
 
-| Intent | TX Hash | Explorer Link | Gas Used | Status |
-|--------|---------|---------------|----------|--------|
-| HOLD   | N/A     | N/A           | N/A      | N/A    |
+## Suspicious Behaviour
+
+| # | Source | Severity | Pattern | Log Line |
+|---|--------|----------|---------|----------|
+| 1 | strategy | ERROR | Missing API key | `EnsoConfigError: Configuration Error: API key is required. Set ENSO_API_KEY env var` |
+| 2 | strategy | WARNING | Placeholder prices | `IntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT.` |
+| 3 | gateway | WARNING | Insecure mode | `INSECURE MODE on network 'mainnet': Auth interceptor disabled` |
+
+**Analysis**:
+1. **Missing Enso API key** (ERROR): The root cause of failure. `.env` file does not have `ENSO_API_KEY` or `ALMANAK_GATEWAY_ENSO_API_KEY` set. This prevented the Enso connector from initializing and caused the swap intent to fail compilation.
+2. **Placeholder prices** (WARNING): IntentCompiler fell back to placeholder prices because it couldn't fetch real market data before the Enso route failed. This is a cascade effect from the missing API key.
+3. **Insecure mode** (WARNING): Gateway running without authentication on mainnet. This is expected for local testing but should not be used in production.
 
 ## Result
 
-**PASS** - Strategy executed successfully with HOLD decision (RSI 50.12 in neutral zone 30-70). No swap needed, no transactions submitted. EnsoService available but not invoked.
+**FAIL** — Strategy failed due to missing configuration (ENSO_API_KEY).
 
-**Key Observations:**
-1. EnsoService initialized successfully on Base mainnet
-2. RSI calculation via Binance integration working correctly
-3. Strategy logic correctly identified neutral RSI and issued HOLD
-4. No price oracle errors (unlike enso_uniswap_arbitrage which failed on USDC price)
-5. Gateway responded quickly: state load 1.7ms, klines fetch 191.6ms
-6. Total iteration duration: 194ms (very fast)
+**Summary**: The enso_rsi strategy requires the Enso DEX aggregator API key to fetch swap routes. The `.env` file is missing this credential, causing the strategy to fail during intent compilation before any blockchain transaction could be attempted. This is a **configuration issue**, not a code or execution issue.
 
-**Comparison to uniswap_rsi:**
-- Same RSI-based logic, different execution protocol (Enso vs Uniswap V3)
-- Both strategies HOLD when RSI neutral
-- EnsoService available on Base, would route through DEX aggregator if swap triggered
-- enso_rsi **did not** hit the "Price oracle missing USDC price on Base" error that affected enso_uniswap_arbitrage
+**Recommended Fix**:
+1. Add `ENSO_API_KEY=<key>` to `.env` file
+2. Or add `ALMANAK_GATEWAY_ENSO_API_KEY=<key>` for gateway-specific key
+3. Obtain an API key from https://www.enso.finance/
 
-**Lifecycle:** Initial decision (HOLD) → No execution → Complete
+**No gas was spent** as no transactions reached the blockchain.
 
-**Post-test State:** Config restored to original values (trade_size_usd="3", network="anvil")
+---
+
+## PREFLIGHT_CHECKLIST:
+```text
+STATE_CLEARED: YES (no stale state found)
+BALANCE_CHECKED: YES
+TOKENS_NEEDED: 0.0005 WETH ($1 trade), 0.0003 ETH (gas)
+TOKENS_AVAILABLE: 0.000629 WETH, 0.000205 ETH, 1.072384 USDC
+FUNDING_NEEDED: YES (insufficient for $3 original trade)
+FUNDING_ATTEMPTED: YES
+FUNDING_METHOD: Method D (Enso cross-chain bridge Avalanche→Base)
+FUNDING_TX: N/A (Enso API rate limit: "exceeded 1rps")
+BALANCE_GATE: PASS (after reducing trade to $1)
+STRATEGY_RUN: YES (failed at compilation, no TX submitted)
+SUSPICIOUS_BEHAVIOUR_COUNT: 3
+SUSPICIOUS_BEHAVIOUR_ERRORS: 1
+```

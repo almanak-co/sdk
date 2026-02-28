@@ -1079,6 +1079,24 @@ def new_strategy(
             fh.write(env_content)
         files_created.append(".env")
 
+        # AGENTS.md (per-strategy agent guide)
+        from almanak.framework.cli.strategy_agent_guide import (
+            StrategyGuideConfig,
+            generate_strategy_agents_md,
+        )
+
+        guide_config = StrategyGuideConfig(
+            strategy_name=snake_name,
+            template_name=template_enum.value,
+            chain=chain_enum.value,
+            class_name=to_pascal_case(name) + "Strategy",
+        )
+        agents_md_file = strategy_dir / "AGENTS.md"
+        agents_md_content = generate_strategy_agents_md(guide_config)
+        with open(agents_md_file, "w") as fh:
+            fh.write(agents_md_content)
+        files_created.append("AGENTS.md")
+
         # Print success message
         click.echo("Files created:")
         for file_path in files_created:
@@ -1096,6 +1114,9 @@ def new_strategy(
         click.echo("  almanak backtest pnl -s <name> --start 2024-01-01 --end 2024-06-01")
         click.echo("  almanak backtest sweep -s <name> --start ... --end ... --param 'key:v1,v2,v3'")
         click.echo("  almanak backtest optimize -s <name> --start ... --end ... --config-file cfg.json")
+        click.echo()
+        click.echo("AI agent support:")
+        click.echo("  almanak agent install    # Teach your AI agent this SDK")
 
     except Exception as e:
         click.echo(f"Error creating strategy: {e}", err=True)

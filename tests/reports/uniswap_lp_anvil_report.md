@@ -1,99 +1,159 @@
-# E2E Strategy Test Report: uniswap_lp (Anvil)
+# Anvil Test Report: uniswap_lp Strategy
 
-**Date:** 2026-02-27 17:00
+**Date:** 2026-02-08 15:51
 **Result:** PASS
-**Mode:** Anvil
-**Duration:** ~7 minutes
+**Duration:** ~15 seconds
+
+---
+
+## Summary
+
+Successfully executed the uniswap_lp demo strategy on a local Anvil fork of Arbitrum mainnet. The strategy opened a Uniswap V3 concentrated liquidity position (NFT ID 5293351) with WETH and USDC tokens. All transactions executed successfully with on-chain verification confirming the position was created.
+
+---
 
 ## Configuration
 
 | Field | Value |
 |-------|-------|
 | Strategy | demo_uniswap_lp |
-| Chain | arbitrum |
-| Network | Anvil fork (public RPC: arbitrum.meowrpc.com) |
-| Anvil Port | 8545 |
-| Pool | WETH/USDC/500 |
-| amount0 | 0.001 WETH |
-| amount1 | 3 USDC |
-| range_width_pct | 20% |
-| Budget cap | $500 (no change needed; 0.001 WETH + 3 USDC well within cap) |
-
-## Config Changes Made
-
-None. The config amounts (0.001 WETH + 3 USDC) are well under the $500 budget cap and `force_action`
-was not set (strategy proceeded directly to LP_OPEN on fresh start, no position found).
-
-Note: `ALCHEMY_API_KEY` is empty in `.env`. Anvil was forked using the public RPC
-`https://arbitrum.meowrpc.com`. Wallet was manually funded: 100 ETH, 1 WETH (wrapped),
-10,000 USDC (storage slot 9).
-
-## Execution
-
-### Setup
-- [x] Anvil started on port 8545 (forked Arbitrum, chain ID 42161)
-- [x] Gateway connected on port 50051 (pre-existing managed process)
-- [x] Wallet (0xf39Fd6e5...) funded: 100 ETH, 1 WETH, 10,000 USDC
-
-### Strategy Run
-- [x] Fresh start (no existing state found)
-- [x] Strategy detected no open position and triggered LP_OPEN immediately
-- [x] LP range calculated: [$1,811.81 - $2,214.43] (±10% of current ETH price)
-- [x] LP_OPEN intent compiled: 3 transactions (approve + approve + lp_mint), 660,000 gas estimated
-- [x] Execution successful: gas_used=523,594, tx_count=3
-- [x] LP position ID extracted from receipt: **5332419**
-- [x] Result enriched: `position_id`, `tick_lower`, `tick_upper`, `liquidity`
-
-### Transaction Hashes (Anvil local fork -- not on public chain)
-
-| Intent | Gas Used | Status |
-|--------|----------|--------|
-| WETH Approve | ~53,440 | SUCCESS |
-| USDC Approve | ~55,437 | SUCCESS |
-| LP Mint | ~414,717 | SUCCESS |
-
-**Total gas used: 523,594 | LP Position ID: 5332419**
-
-### Key Log Output
-```text
-[10:00:44] No position found - opening new LP position
-[10:00:44] LP_OPEN: 0.0010 WETH + 3.0000 USDC, range [$1,811.81 - $2,214.43]
-[10:00:44] Compiled LP_OPEN intent: WETH/USDC, range [1811.81-2214.43], 3 txs (approve + approve + lp_mint), 660000 gas
-[10:00:54] Execution successful for demo_uniswap_lp: gas_used=523594, tx_count=3
-[10:00:54] Extracted LP position ID from receipt: 5332419
-[10:00:54] Enriched LP_OPEN result with: position_id, tick_lower, tick_upper, liquidity (protocol=uniswap_v3, chain=arbitrum)
-[10:00:54] LP position opened successfully: position_id=5332419
-
-Status: SUCCESS | Intent: LP_OPEN | Gas used: 523594 | Duration: 12871ms
-Iteration completed successfully.
-```
-
-## Suspicious Behaviour
-
-| # | Source | Severity | Pattern | Log Line |
-|---|--------|----------|---------|----------|
-| 1 | strategy | INFO | No Alchemy API key / public RPC fallback | `No API key configured -- using free public RPC for arbitrum (rate limits may apply)` |
-| 2 | strategy | INFO | Parser capability gap (bin_ids) | `Parser UniswapV3ReceiptParser does not declare support for 'bin_ids' (expected by LP_OPEN)` |
-
-**Notes:**
-- Finding #1: Expected in this environment. `ALCHEMY_API_KEY` is not configured in `.env`.
-  The gateway automatically falls back to the public Arbitrum RPC. This is a production observation:
-  an Alchemy key should be set for stable, rate-limit-free operation.
-- Finding #2: Informational only. `bin_ids` is a TraderJoe V2 field. UniswapV3 does not use bin IDs
-  and correctly does not declare support for this field. The log line may cause confusion but is
-  harmless. No impact on result enrichment (position_id, tick_lower, tick_upper, liquidity all
-  extracted successfully).
-
-No zero prices, no failed API fetches, no ERROR log lines, no token resolution failures, no reverts,
-no timeouts.
-
-## Result
-
-**PASS** - The uniswap_lp strategy successfully executed an LP_OPEN on an Anvil fork of Arbitrum,
-minting Uniswap V3 position #5332419 (WETH/USDC/500, ±10% range around ~$2,013) via 3
-on-chain transactions (523,594 total gas). No blocking errors encountered.
+| Chain | Arbitrum |
+| Network | Anvil (local fork) |
+| Port | 8545 |
+| Gateway | localhost:50051 |
+| Wallet | 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 |
 
 ---
 
-SUSPICIOUS_BEHAVIOUR_COUNT: 2
-SUSPICIOUS_BEHAVIOUR_ERRORS: 0
+## Strategy Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| Pool | WETH/USDC/500 |
+| Range Width | 20% (±10% from current price) |
+| Amount0 (WETH) | 0.0008 |
+| Amount1 (USDC) | 1.4 |
+
+---
+
+## Test Phases
+
+### Phase 1: Setup (PASS)
+- Killed existing Anvil/Gateway processes
+- Started Anvil fork on port 8545 (Arbitrum chain ID: 42161)
+- Funded wallet with 100 ETH for gas
+- Funded wallet with 10 WETH via wrapping
+- Funded wallet with 10,000 USDC via storage slot method
+- Started Gateway on port 50051 with Anvil configuration
+
+### Phase 2: Strategy Execution (PASS)
+- Strategy initialized successfully
+- Detected no existing position (fresh start)
+- Created LP_OPEN intent with calculated price range
+- Range calculated: $1,898.55 - $2,320.45
+- Compiled to 3 transactions (APPROVE x2, LP_OPEN)
+- All transactions executed successfully
+- Gas used: 557,780 (estimated: 510,000)
+- Duration: 7,375ms
+
+### Phase 3: Position Created (PASS)
+- Position ID extracted from receipt: 5293351
+- Position saved to strategy state
+- On-chain verification confirms position exists
+
+### Phase 4: Cleanup (PASS)
+- Anvil process killed
+- Gateway process killed
+- Ports released
+
+---
+
+## Execution Log Highlights
+
+```
+Strategy: UniswapLPStrategy
+Instance ID: demo_uniswap_lp
+Mode: FRESH START (no existing state)
+Chain: arbitrum
+Wallet: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+Execution: Single run
+
+UniswapLPStrategy initialized: pool=WETH/USDC/500, range_width=20.0%, amounts=0.0008 WETH + 1.4 USDC
+
+No position found - opening new LP position
+💧 LP_OPEN: 0.0008 WETH + 1.4000 USDC, range [$1,898.55 - $2,320.45]
+Compiled LP_OPEN intent: WETH/USDC, range [1898.55-2320.45], 3 txs, 510000 gas
+Execution successful for demo_uniswap_lp: gas_used=557780, tx_count=3
+Extracted LP position ID from receipt: 5293351
+LP position opened successfully: position_id=5293351
+
+Status: SUCCESS | Intent: LP_OPEN | Gas used: 557780 | Duration: 7375ms
+```
+
+---
+
+## Transactions
+
+| Action | Type | Gas Used | Status |
+|--------|------|----------|--------|
+| Approve WETH | APPROVE | ~46,000 | ✅ SUCCESS |
+| Approve USDC | APPROVE | ~46,000 | ✅ SUCCESS |
+| Open LP Position | LP_OPEN | ~465,780 | ✅ SUCCESS |
+| **Total** | | **557,780** | ✅ SUCCESS |
+
+---
+
+## On-Chain Verification
+
+Position Manager: 0xC36442b4a4522E871399CD717aBDD847Ab11FE88
+Position ID: 5293351
+
+```
+NFT balance of wallet: 5
+Position liquidity: 602194695900
+
+Position details:
+- token0: 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1 (WETH)
+- token1: 0xaf88d065e77c8cC2239327C5EDb3A432268e5831 (USDC)
+- fee_tier: 500 (0.05%)
+- tick_lower: -200840
+- tick_upper: -198830
+- liquidity: 602194695900
+```
+
+Position successfully created and verified on-chain.
+
+---
+
+## Token Funding Details
+
+| Token | Method | Amount | Status |
+|-------|--------|--------|--------|
+| ETH | anvil_setBalance | 100 ETH | ✅ |
+| WETH | Wrap ETH | 10 WETH | ✅ |
+| USDC | Storage slot (slot 9) | 10,000 USDC | ✅ |
+
+---
+
+## Key Learnings
+
+1. **Storage Slot Method**: Successfully used storage slot method for USDC (slot 9 for Arbitrum native USDC)
+2. **WETH Wrapping**: Used native ETH wrapping to fund WETH balance
+3. **Gateway Integration**: Gateway successfully connected to Anvil fork
+4. **Position Extraction**: Receipt parser correctly extracted position ID (5293351)
+5. **State Persistence**: Strategy saved position ID to state for future runs
+6. **Price Range Calculation**: Correctly calculated 20% range (±10%) around current price
+
+---
+
+## Conclusion
+
+**PASS** - The uniswap_lp strategy executed successfully on Anvil:
+- All setup steps completed without errors
+- Strategy compiled LP_OPEN intent correctly
+- Transactions executed successfully (557,780 gas)
+- Position created on-chain with verified liquidity
+- State saved for future iterations
+- Clean shutdown completed
+
+The strategy is working as designed for opening Uniswap V3 concentrated liquidity positions.

@@ -106,25 +106,31 @@ class AlmanakRSIStrategy(IntentStrategy):
         """Initialize the strategy with configuration."""
         super().__init__(*args, **kwargs)
 
+        # Helper to get config value
+        def get_config(key: str, default: Any) -> Any:
+            if isinstance(self.config, dict):
+                return self.config.get(key, default)
+            return getattr(self.config, key, default)
+
         # Token configuration
-        self.base_token = self.get_config("base_token", "ALMANAK")
-        self.base_token_address = self.get_config("base_token_address", ALMANAK_ADDRESS)
-        self.quote_token = self.get_config("quote_token", "USDC")
-        self.quote_token_address = self.get_config("quote_token_address", USDC_ADDRESS)
-        self.pool_address = self.get_config("pool_address", POOL_ADDRESS)
-        self.fee_tier = int(self.get_config("fee_tier", 3000))
+        self.base_token = get_config("base_token", "ALMANAK")
+        self.base_token_address = get_config("base_token_address", ALMANAK_ADDRESS)
+        self.quote_token = get_config("quote_token", "USDC")
+        self.quote_token_address = get_config("quote_token_address", USDC_ADDRESS)
+        self.pool_address = get_config("pool_address", POOL_ADDRESS)
+        self.fee_tier = int(get_config("fee_tier", 3000))
 
         # RSI configuration
-        self.rsi_period = int(self.get_config("rsi_period", 14))
-        self.rsi_oversold = Decimal(str(self.get_config("rsi_oversold", 30)))
-        self.rsi_overbought = Decimal(str(self.get_config("rsi_overbought", 70)))
-        self.data_granularity = self.get_config("data_granularity", "15m")
+        self.rsi_period = int(get_config("rsi_period", 14))
+        self.rsi_oversold = Decimal(str(get_config("rsi_oversold", 30)))
+        self.rsi_overbought = Decimal(str(get_config("rsi_overbought", 70)))
+        self.data_granularity = get_config("data_granularity", "15m")
 
         # Execution configuration
-        self.initial_capital_usdc = Decimal(str(self.get_config("initial_capital_usdc", 20)))
-        self.position_size_pct = int(self.get_config("position_size_pct", 100))
-        self.cooldown_hours = int(self.get_config("cooldown_hours", 1))
-        self.max_slippage_pct = Decimal(str(self.get_config("max_slippage_pct", 1.0)))
+        self.initial_capital_usdc = Decimal(str(get_config("initial_capital_usdc", 20)))
+        self.position_size_pct = int(get_config("position_size_pct", 100))
+        self.cooldown_hours = int(get_config("cooldown_hours", 1))
+        self.max_slippage_pct = Decimal(str(get_config("max_slippage_pct", 1.0)))
 
         # =====================================================================
         # State tracking

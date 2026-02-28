@@ -19,12 +19,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from almanak.framework.execution.gas.constants import (
-    CHAIN_GRPC_EXECUTE_TIMEOUTS,
-    CHAIN_TX_TIMEOUTS,
-    DEFAULT_GRPC_EXECUTE_TIMEOUT_SECONDS,
-    DEFAULT_TX_TIMEOUT_SECONDS,
-)
 from almanak.framework.gateway_client import GatewayClient
 from almanak.gateway.proto import gateway_pb2
 
@@ -207,7 +201,6 @@ class GatewayExecutionOrchestrator:
         chain: str = "arbitrum",
         wallet_address: str | None = None,
         timeout: float | None = None,
-        execute_timeout: float | None = None,
         max_gas_price_gwei: int = 0,
     ):
         """Initialize gateway-backed execution orchestrator.
@@ -216,28 +209,18 @@ class GatewayExecutionOrchestrator:
             client: Connected GatewayClient instance
             chain: Chain name for execution
             wallet_address: Wallet address for signing
-            timeout: gRPC timeout for CompileIntent/GetTransactionStatus calls in
-                seconds. If None, uses chain-specific TX confirmation timeout
+            timeout: RPC timeout in seconds. If None, uses chain-specific default
                 (300s for Ethereum L1, 120s for L2s).
-            execute_timeout: gRPC timeout for the Execute call in seconds. Must be
-                larger than ``timeout`` to account for gas estimation overhead before
-                TX submission. If None, uses chain-specific execute timeout
-                (600s for Ethereum, 300s for L2s). Complex intents like LP_CLOSE can
-                take 100s+ to estimate gas on Anvil forks; this timeout must cover
-                gas estimation + TX confirmation combined.
             max_gas_price_gwei: Gas price cap in gwei (0 = use gateway default).
                 Passed to the gateway so the ExecutionOrchestrator enforces the cap.
         """
+        from almanak.framework.execution.gas.constants import CHAIN_TX_TIMEOUTS, DEFAULT_TX_TIMEOUT_SECONDS
+
         self._client = client
         self._chain = chain
         self._wallet_address = wallet_address
         self._timeout = (
             timeout if timeout is not None else CHAIN_TX_TIMEOUTS.get(chain.lower(), DEFAULT_TX_TIMEOUT_SECONDS)
-        )
-        self._execute_timeout = (
-            execute_timeout
-            if execute_timeout is not None
-            else CHAIN_GRPC_EXECUTE_TIMEOUTS.get(chain.lower(), DEFAULT_GRPC_EXECUTE_TIMEOUT_SECONDS)
         )
         self._max_gas_price_gwei = max_gas_price_gwei
 
@@ -362,7 +345,7 @@ class GatewayExecutionOrchestrator:
                 wallet_address=wallet,
                 max_gas_price_gwei=self._max_gas_price_gwei,
             )
-            response = self._client.execution.Execute(request, timeout=self._execute_timeout)
+            response = self._client.execution.Execute(request, timeout=self._timeout)
 
             # Deserialize receipts
             receipts = []

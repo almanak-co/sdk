@@ -21,11 +21,9 @@ Example:
 """
 
 import logging
-import os
-import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
@@ -255,8 +253,6 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     "optimism": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
         "sushiswap_v3": "0x1af415a1EbA07a4986a52B6f2e7dE7003D82231e",
-        # Velodrome V2 uses the Router for liquidity operations (fungible LP tokens, same as Aerodrome)
-        "aerodrome": "0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858",  # Velodrome V2 Router
     },
     "polygon": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
@@ -856,20 +852,9 @@ class DefaultSwapAdapter:
 
         resolver = get_token_resolver()
 
-        def resolve_address(symbol: str, probe: bool = False) -> str | None:
-            """Resolve a token symbol to its address.
-
-            Args:
-                symbol: Token symbol to resolve.
-                probe: If True, suppress WARNING-level resolver logs for
-                    expected probe failures (e.g. USDC.e on chains with
-                    only native USDC).
-            """
+        def resolve_address(symbol: str) -> str | None:
             try:
-                # Use log_errors=False for probe lookups (expected failures should not warn).
-                # This is thread-safe -- unlike mutating a shared logger level, the
-                # log_errors flag is passed per-call and does not affect other threads.
-                token = resolver.resolve(symbol, self.chain, log_errors=not probe)
+                token = resolver.resolve(symbol, self.chain)
             except Exception:
                 return None
             if token is None:
@@ -878,7 +863,7 @@ class DefaultSwapAdapter:
             return address.lower() if isinstance(address, str) else None
 
         usdc_addr = resolve_address("USDC")
-        usdc_bridged = resolve_address("USDC.e", probe=True) or resolve_address("USDC_BRIDGED", probe=True)
+        usdc_bridged = resolve_address("USDC.e") or resolve_address("USDC_BRIDGED")
 
         # Only resolve the wrapped native token for the current chain (not all chains)
         _wrapped_symbols = {
@@ -1983,9 +1968,8 @@ class IntentCompiler:
         1. The chain is 'polygon' (case-insensitive)
         2. A PolymarketConfig is provided in the IntentCompilerConfig
 
-        If on Polygon without a PolymarketConfig, the method silently returns.
-        VIB-307: Warning is deferred to compile time so non-prediction Polygon
-        strategies don't see noisy Polymarket warnings at startup.
+        If on Polygon without a PolymarketConfig, a warning is logged but no error
+        is raised - prediction intents will fail at compilation time instead.
 
         This lazy initialization ensures:
         - Non-Polygon usage is unaffected (no import overhead)
@@ -1996,11 +1980,15 @@ class IntentCompiler:
         if self.chain.lower() != "polygon":
             return
 
-        # Check if config is provided -- silently skip if not.
-        # VIB-307: Warning deferred to compile time so non-prediction strategies on Polygon
-        # don't see noisy Polymarket warnings at startup.
+        # Check if config is provided
         polymarket_config = self._config.polymarket_config
         if polymarket_config is None:
+            logger.warning(
+                "IntentCompiler on Polygon without PolymarketConfig. "
+                "Prediction market intents (PredictionBuyIntent, PredictionSellIntent, "
+                "PredictionRedeemIntent) will fail to compile. "
+                "Provide polymarket_config in IntentCompilerConfig to enable prediction intents."
+            )
             return
 
         # Lazy import to avoid circular imports and allow optional usage
@@ -2029,9 +2017,10 @@ class IntentCompiler:
     def _get_chain_rpc_url(self) -> str | None:
         """Get RPC URL for the current chain.
 
-        If rpc_url is set on the compiler, use it. Otherwise, check if a managed
-        Anvil fork is running (via ANVIL_{CHAIN}_PORT env var set by managed.py),
-        and use that. Finally, fall back to the gateway's RPC provider.
+        If rpc_url is set on the compiler, use it. Otherwise, try to fetch from
+        the gateway's RPC provider using custom RPC URL env vars or ALCHEMY_API_KEY.
+        Falls back to Anvil (localhost) if mainnet resolution fails, to support
+        local fork testing.
 
         This is needed for protocol adapters (like Aerodrome, TraderJoe, Pendle)
         that need to make direct RPC calls for pool queries when the compiler is
@@ -2042,20 +2031,6 @@ class IntentCompiler:
         """
         if self.rpc_url:
             return self.rpc_url
-
-        # Check if a managed Anvil fork is running for this chain.
-        # managed.py sets ANVIL_{CHAIN}_PORT when it starts an Anvil fork.
-        # This MUST take priority over mainnet RPC so that protocol adapters
-        # (e.g., TraderJoe, Aerodrome) query on-chain state from the fork
-        # where LP positions actually exist, not mainnet.
-        anvil_port_var = f"ANVIL_{self.chain.upper()}_PORT"
-        anvil_port = os.environ.get(anvil_port_var)
-        if anvil_port:
-            anvil_url = f"http://127.0.0.1:{anvil_port}"
-            logger.debug(
-                f"Anvil fork detected for {self.chain} ({anvil_port_var}={anvil_port}), using fork URL: {anvil_url}"
-            )
-            return anvil_url
 
         try:
             from almanak.gateway.utils import get_rpc_url
@@ -2371,10 +2346,6 @@ class IntentCompiler:
         # Handle Pendle separately (yield tokenization protocol with PT/YT tokens)
         if protocol == "pendle":
             return self._compile_pendle_swap(intent)
-
-        # Handle Curve separately (pool-based AMM with direct pool addressing)
-        if protocol == "curve":
-            return self._compile_swap_curve(intent)
 
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
@@ -3148,10 +3119,6 @@ class IntentCompiler:
         if intent.protocol == "pendle":
             return self._compile_pendle_lp_open(intent)
 
-        # Handle Curve LP (pool-based AMM with proportional liquidity)
-        if intent.protocol == "curve":
-            return self._compile_lp_open_curve(intent)
-
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
             intent_id=intent.intent_id,
@@ -3355,10 +3322,8 @@ class IntentCompiler:
             result.total_gas_estimate = total_gas
             result.warnings = warnings
 
-            tx_types = " + ".join(tx.tx_type for tx in transactions) if transactions else ""
-            tx_summary = f" ({tx_types})" if tx_types else ""
             logger.info(
-                f"Compiled LP_OPEN intent: {token0_info.symbol}/{token1_info.symbol}, range [{intent.range_lower:.2f}-{intent.range_upper:.2f}], {len(transactions)} txs{tx_summary}, {total_gas} gas"
+                f"Compiled LP_OPEN intent: {token0_info.symbol}/{token1_info.symbol}, range [{intent.range_lower:.2f}-{intent.range_upper:.2f}], {len(transactions)} txs, {total_gas} gas"
             )
 
         except Exception as e:
@@ -3539,10 +3504,8 @@ class IntentCompiler:
             result.total_gas_estimate = total_gas
             result.warnings = warnings
 
-            tx_types = " + ".join(tx.tx_type for tx in transactions) if transactions else ""
-            tx_summary = f" ({tx_types})" if tx_types else ""
             logger.info(
-                f"Compiled TraderJoe V2 LP_OPEN intent: {token_x_symbol}/{token_y_symbol}, bin_step={bin_step}, {len(transactions)} txs{tx_summary}, {total_gas} gas"
+                f"Compiled TraderJoe V2 LP_OPEN intent: {token_x_symbol}/{token_y_symbol}, bin_step={bin_step}, {len(transactions)} txs, {total_gas} gas"
             )
 
         except Exception as e:
@@ -3577,10 +3540,6 @@ class IntentCompiler:
         # Handle Pendle LP close
         if intent.protocol == "pendle":
             return self._compile_pendle_lp_close(intent)
-
-        # Handle Curve LP close (pool-based AMM, proportional removal)
-        if intent.protocol == "curve":
-            return self._compile_lp_close_curve(intent)
 
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
@@ -3738,10 +3697,8 @@ class IntentCompiler:
             result.total_gas_estimate = total_gas
             result.warnings = warnings
 
-            tx_types = " + ".join(tx.tx_type for tx in transactions) if transactions else ""
-            tx_summary = f" ({tx_types})" if tx_types else ""
             logger.info(
-                f"Compiled LP_CLOSE intent: position #{token_id}, collect_fees={intent.collect_fees}, {len(transactions)} txs{tx_summary}, {total_gas} gas"
+                f"Compiled LP_CLOSE intent: position #{token_id}, collect_fees={intent.collect_fees}, {len(transactions)} txs, {total_gas} gas"
             )
 
         except Exception as e:
@@ -3826,10 +3783,7 @@ class IntentCompiler:
             tj_adapter = TraderJoeV2Adapter(config)
 
             # Get position to check if we have liquidity
-            t0 = time.perf_counter()
             position = tj_adapter.get_position(token_x_addr, token_y_addr, bin_step)
-            logger.debug(f"TraderJoe V2 get_position (LP_CLOSE): {time.perf_counter() - t0:.2f}s")
-
             if not position or not position.bin_ids:
                 warnings.append("No LP position found to close")
                 action_bundle = ActionBundle(
@@ -3863,13 +3817,11 @@ class IntentCompiler:
             )
             transactions.append(approve_tx_data)
 
-            # Build remove liquidity transaction - pass pre-fetched position to
-            # avoid a redundant get_position() call (saves ~50 serial RPC calls)
+            # Build remove liquidity transaction
             lp_tx = tj_adapter.build_remove_liquidity_transaction(
                 token_x=token_x_addr,
                 token_y=token_y_addr,
                 bin_step=bin_step,
-                position=position,
             )
 
             if lp_tx is None:
@@ -3919,10 +3871,8 @@ class IntentCompiler:
             result.total_gas_estimate = total_gas
             result.warnings = warnings
 
-            tx_types = " + ".join(tx.tx_type for tx in transactions) if transactions else ""
-            tx_summary = f" ({tx_types})" if tx_types else ""
             logger.info(
-                f"Compiled TraderJoe V2 LP_CLOSE intent: {token_x_symbol}/{token_y_symbol}, {len(transactions)} txs{tx_summary}, {total_gas} gas"
+                f"Compiled TraderJoe V2 LP_CLOSE intent: {token_x_symbol}/{token_y_symbol}, {len(transactions)} txs, {total_gas} gas"
             )
 
         except Exception as e:
@@ -4250,10 +4200,8 @@ class IntentCompiler:
             result.total_gas_estimate = total_gas
             result.warnings = warnings
 
-            tx_types = " + ".join(tx.tx_type for tx in transactions) if transactions else ""
-            tx_summary = f" ({tx_types})" if tx_types else ""
             logger.info(
-                f"Compiled Aerodrome LP_OPEN intent: {token0_symbol}/{token1_symbol}, stable={stable}, {len(transactions)} txs{tx_summary}, {total_gas} gas"
+                f"Compiled Aerodrome LP_OPEN intent: {token0_symbol}/{token1_symbol}, stable={stable}, {len(transactions)} txs, {total_gas} gas"
             )
 
         except Exception as e:
@@ -4438,10 +4386,8 @@ class IntentCompiler:
             result.total_gas_estimate = total_gas
             result.warnings = warnings
 
-            tx_types = " + ".join(str(getattr(tx, "tx_type", "")) for tx in transactions) if transactions else ""
-            tx_summary = f" ({tx_types})" if tx_types else ""
             logger.info(
-                f"Compiled Aerodrome LP_CLOSE intent: {token0_symbol}/{token1_symbol}, {len(transactions)} txs{tx_summary}, {total_gas} gas"
+                f"Compiled Aerodrome LP_CLOSE intent: {token0_symbol}/{token1_symbol}, {len(transactions)} txs, {total_gas} gas"
             )
 
         except Exception as e:
@@ -4606,458 +4552,6 @@ class IntentCompiler:
 
         except Exception as e:
             logger.exception(f"Failed to compile Aerodrome SWAP intent: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
-
-    def _compile_swap_curve(self, intent: SwapIntent) -> CompilationResult:
-        """Compile SWAP intent for Curve Finance.
-
-        Curve uses pool-specific AMMs (StableSwap, CryptoSwap, Tricrypto).
-        The pool is selected automatically from the registry by matching the
-        token pair, or can be overridden via swap_params={"pool": "0x..."}.
-
-        swap_params options:
-        - pool (str): Explicit pool address (overrides auto-lookup)
-        - slippage_bps (int): Override slippage in basis points
-
-        Args:
-            intent: SwapIntent with from_token, to_token, and amount
-
-        Returns:
-            CompilationResult with Curve exchange ActionBundle
-        """
-        from almanak.framework.connectors.curve.adapter import (
-            CURVE_ADDRESSES,
-            CURVE_POOLS,
-            CurveAdapter,
-            CurveConfig,
-        )
-
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-        transactions: list[Any] = []
-
-        try:
-            # Check chain support
-            if self.chain not in CURVE_ADDRESSES:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Curve is not supported on {self.chain}. Supported chains: {list(CURVE_ADDRESSES.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            # Resolve tokens
-            from_token = self._resolve_token(intent.from_token)
-            to_token = self._resolve_token(intent.to_token)
-
-            if from_token is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unknown from_token: {intent.from_token}",
-                    intent_id=intent.intent_id,
-                )
-            if to_token is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unknown to_token: {intent.to_token}",
-                    intent_id=intent.intent_id,
-                )
-
-            # Calculate input amount (in token units)
-            if intent.amount_usd is not None:
-                price = self._require_token_price(from_token.symbol)
-                amount_decimal = intent.amount_usd / price
-            elif intent.amount is not None:
-                if intent.amount == "all":
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error="amount='all' must be resolved before compilation. Use Intent.set_resolved_amount() to resolve chained amounts.",
-                        intent_id=intent.intent_id,
-                    )
-                amount_decimal = Decimal(str(intent.amount))
-            else:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="Either amount_usd or amount must be provided",
-                    intent_id=intent.intent_id,
-                )
-
-            # Resolve pool address: explicit override or auto-lookup by token pair
-            swap_params = intent.swap_params if hasattr(intent, "swap_params") and intent.swap_params else {}
-            pool_address: str | None = swap_params.get("pool")
-            pool_name: str = ""
-
-            if not pool_address:
-                chain_pools = CURVE_POOLS.get(self.chain, {})
-                for name, pool_data in chain_pools.items():
-                    coins_upper = [c.upper() for c in pool_data["coins"]]
-                    if from_token.symbol.upper() in coins_upper and to_token.symbol.upper() in coins_upper:
-                        pool_address = pool_data["address"]
-                        pool_name = name
-                        break
-
-            if not pool_address:
-                chain_pools = CURVE_POOLS.get(self.chain, {})
-                available = {name: d["coins"] for name, d in chain_pools.items()}
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        f"No Curve pool found for {from_token.symbol}/{to_token.symbol} on {self.chain}. "
-                        f"Available pools: {available}. "
-                        f'You can specify a pool explicitly via swap_params={{"pool": "0x..."}}.'
-                    ),
-                    intent_id=intent.intent_id,
-                )
-
-            slippage_bps = int(intent.max_slippage * Decimal("10000"))
-
-            logger.info(
-                "Compiling Curve SWAP: %s -> %s, pool=%s (%s), amount=%s",
-                from_token.symbol,
-                to_token.symbol,
-                pool_name or pool_address,
-                self.chain,
-                amount_decimal,
-            )
-
-            config = CurveConfig(
-                chain=self.chain,
-                wallet_address=self.wallet_address,
-                default_slippage_bps=slippage_bps,
-            )
-            adapter = CurveAdapter(config)
-
-            swap_result = adapter.swap(
-                pool_address=pool_address,
-                token_in=from_token.symbol,
-                token_out=to_token.symbol,
-                amount_in=amount_decimal,
-                slippage_bps=slippage_bps,
-            )
-
-            if not swap_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=swap_result.error or "Curve swap failed",
-                    intent_id=intent.intent_id,
-                )
-
-            transactions = swap_result.transactions
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.SWAP.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "from_token": from_token.to_dict(),
-                    "to_token": to_token.to_dict(),
-                    "amount_in": str(amount_decimal),
-                    "pool_address": pool_address,
-                    "pool_name": pool_name,
-                    "protocol": "curve",
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions  # type: ignore[assignment]
-            result.total_gas_estimate = total_gas
-
-            logger.info(
-                "Compiled Curve SWAP intent: %s -> %s, %d txs, %d gas",
-                from_token.symbol,
-                to_token.symbol,
-                len(transactions),
-                total_gas,
-            )
-
-        except Exception as e:
-            logger.exception("Failed to compile Curve SWAP intent")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
-
-    def _compile_lp_open_curve(self, intent: LPOpenIntent) -> CompilationResult:
-        """Compile LP_OPEN intent for Curve Finance.
-
-        Curve LP positions are fungible (not NFT-based). The pool is specified
-        via intent.pool (address or name like "3pool"). Both amount0 and amount1
-        are used; for 3-coin pools, only these two coins are deposited (third = 0).
-
-        Pool format: "0xPoolAddress" or pool name like "3pool", "frax_usdc"
-
-        Args:
-            intent: LPOpenIntent with pool, amount0, amount1
-
-        Returns:
-            CompilationResult with Curve add_liquidity ActionBundle
-        """
-        from almanak.framework.connectors.curve.adapter import (
-            CURVE_ADDRESSES,
-            CURVE_POOLS,
-            CurveAdapter,
-            CurveConfig,
-        )
-
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-        transactions: list[Any] = []
-
-        try:
-            # Check chain support
-            if self.chain not in CURVE_ADDRESSES:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Curve is not supported on {self.chain}. Supported chains: {list(CURVE_ADDRESSES.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            chain_pools = CURVE_POOLS.get(self.chain, {})
-
-            # Resolve pool: by address or by name
-            pool_name: str = ""
-            pool_address: str = intent.pool
-            pool_data: dict[str, Any] | None = None
-
-            # Check by name first (e.g., "3pool", "frax_usdc")
-            if intent.pool in chain_pools:
-                pool_name = intent.pool
-                pool_data = chain_pools[intent.pool]
-                pool_address = pool_data["address"]
-            else:
-                # Check by address
-                for name, data in chain_pools.items():
-                    if data["address"].lower() == intent.pool.lower():
-                        pool_name = name
-                        pool_data = data
-                        pool_address = data["address"]
-                        break
-
-            if pool_data is None:
-                available = {name: d["address"] for name, d in chain_pools.items()}
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(f"Unknown Curve pool: {intent.pool} on {self.chain}. Available pools: {available}"),
-                    intent_id=intent.intent_id,
-                )
-
-            n_coins = pool_data["n_coins"]
-
-            # Build amounts list padded to n_coins (amount0, amount1, then 0s for remaining)
-            amounts: list[Decimal] = [intent.amount0, intent.amount1]
-            while len(amounts) < n_coins:
-                amounts.append(Decimal("0"))
-
-            slippage_bps = 50  # Default 0.5% for LP
-
-            logger.info(
-                "Compiling Curve LP_OPEN: pool=%s (%s), amounts=%s",
-                pool_name,
-                self.chain,
-                amounts,
-            )
-
-            config = CurveConfig(
-                chain=self.chain,
-                wallet_address=self.wallet_address,
-                default_slippage_bps=slippage_bps,
-            )
-            adapter = CurveAdapter(config)
-
-            liq_result = adapter.add_liquidity(
-                pool_address=pool_address,
-                amounts=amounts,
-                slippage_bps=slippage_bps,
-            )
-
-            if not liq_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=liq_result.error or "Curve add_liquidity failed",
-                    intent_id=intent.intent_id,
-                )
-
-            transactions = liq_result.transactions
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.LP_OPEN.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "pool_address": pool_address,
-                    "pool_name": pool_name,
-                    "amounts": [str(a) for a in amounts],
-                    "n_coins": n_coins,
-                    "lp_token": pool_data["lp_token"],
-                    "protocol": "curve",
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions  # type: ignore[assignment]
-            result.total_gas_estimate = total_gas
-
-            logger.info(
-                "Compiled Curve LP_OPEN intent: pool=%s, %d txs, %d gas",
-                pool_name,
-                len(transactions),
-                total_gas,
-            )
-
-        except Exception as e:
-            logger.exception("Failed to compile Curve LP_OPEN intent")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
-
-    def _compile_lp_close_curve(self, intent: LPCloseIntent) -> CompilationResult:
-        """Compile LP_CLOSE intent for Curve Finance.
-
-        Burns LP tokens in exchange for underlying tokens (proportional removal).
-        LP token amount is passed via intent.position_id (as a decimal string).
-
-        intent.pool: Curve pool address or name
-        intent.position_id: LP token amount to burn (e.g., "100.5")
-
-        Args:
-            intent: LPCloseIntent with pool and position_id (LP amount)
-
-        Returns:
-            CompilationResult with Curve remove_liquidity ActionBundle
-        """
-        from almanak.framework.connectors.curve.adapter import (
-            CURVE_ADDRESSES,
-            CURVE_POOLS,
-            CurveAdapter,
-            CurveConfig,
-        )
-
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
-        transactions: list[Any] = []
-
-        try:
-            # Check chain support
-            if self.chain not in CURVE_ADDRESSES:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Curve is not supported on {self.chain}. Supported chains: {list(CURVE_ADDRESSES.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            if not intent.pool:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="intent.pool must be set to the Curve pool address for LP_CLOSE",
-                    intent_id=intent.intent_id,
-                )
-
-            chain_pools = CURVE_POOLS.get(self.chain, {})
-
-            # Resolve pool: by name or address
-            pool_name: str = ""
-            pool_address: str = intent.pool
-            pool_data: dict[str, Any] | None = None
-
-            if intent.pool in chain_pools:
-                pool_name = intent.pool
-                pool_data = chain_pools[intent.pool]
-                pool_address = pool_data["address"]
-            else:
-                for name, data in chain_pools.items():
-                    if data["address"].lower() == intent.pool.lower():
-                        pool_name = name
-                        pool_data = data
-                        pool_address = data["address"]
-                        break
-
-            if pool_data is None:
-                available = {name: d["address"] for name, d in chain_pools.items()}
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(f"Unknown Curve pool: {intent.pool} on {self.chain}. Available pools: {available}"),
-                    intent_id=intent.intent_id,
-                )
-
-            # Parse LP token amount from position_id
-            try:
-                lp_amount = Decimal(intent.position_id)
-            except (InvalidOperation, TypeError, ValueError):
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        f"Invalid position_id for Curve LP_CLOSE: '{intent.position_id}'. "
-                        f"Must be the LP token amount as a decimal string (e.g., '100.5')."
-                    ),
-                    intent_id=intent.intent_id,
-                )
-
-            slippage_bps = 50  # Default 0.5%
-
-            logger.info(
-                "Compiling Curve LP_CLOSE: pool=%s (%s), lp_amount=%s",
-                pool_name,
-                self.chain,
-                lp_amount,
-            )
-
-            config = CurveConfig(
-                chain=self.chain,
-                wallet_address=self.wallet_address,
-                default_slippage_bps=slippage_bps,
-            )
-            adapter = CurveAdapter(config)
-
-            liq_result = adapter.remove_liquidity(
-                pool_address=pool_address,
-                lp_amount=lp_amount,
-                slippage_bps=slippage_bps,
-            )
-
-            if not liq_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=liq_result.error or "Curve remove_liquidity failed",
-                    intent_id=intent.intent_id,
-                )
-
-            transactions = liq_result.transactions
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.LP_CLOSE.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "pool_address": pool_address,
-                    "pool_name": pool_name,
-                    "lp_amount": str(lp_amount),
-                    "lp_token": pool_data["lp_token"],
-                    "protocol": "curve",
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions  # type: ignore[assignment]
-            result.total_gas_estimate = total_gas
-
-            logger.info(
-                "Compiled Curve LP_CLOSE intent: pool=%s, %d txs, %d gas",
-                pool_name,
-                len(transactions),
-                total_gas,
-            )
-
-        except Exception as e:
-            logger.exception("Failed to compile Curve LP_CLOSE intent")
             result.status = CompilationStatus.FAILED
             result.error = str(e)
 
@@ -6216,155 +5710,12 @@ class IntentCompiler:
                 logger.info(f"   Protocol: Spark | Txs: {len(transactions)} | Gas: {total_gas:,}")
 
             # =================================================================
-            # COMPOUND V3 PATH
-            # =================================================================
-            elif protocol_lower == "compound_v3":
-                from ..connectors.compound_v3.adapter import (
-                    COMPOUND_V3_COMET_ADDRESSES,
-                    CompoundV3Adapter,
-                    CompoundV3Config,
-                )
-
-                market = intent.market_id or "usdc"
-
-                if self.chain not in COMPOUND_V3_COMET_ADDRESSES:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Compound V3 not available on chain: {self.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
-                        intent_id=intent.intent_id,
-                    )
-
-                available_markets = COMPOUND_V3_COMET_ADDRESSES.get(self.chain, {})
-                if market not in available_markets:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Compound V3 market '{market}' not available on {self.chain}. Available: {list(available_markets.keys())}",
-                        intent_id=intent.intent_id,
-                    )
-
-                compound_config = CompoundV3Config(
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                    market=market,
-                )
-                compound_adapter = CompoundV3Adapter(compound_config)
-
-                # If collateral > 0, first supply collateral
-                if collateral_amount_decimal > 0:
-                    collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
-
-                    # Build approve TX for Comet contract (collateral token)
-                    approve_txs = self._build_approve_tx(
-                        collateral_token.address,
-                        compound_adapter.comet_address,
-                        collateral_amount_wei,
-                    )
-                    transactions.extend(approve_txs)
-
-                    # Build supply collateral TX
-                    # Determine collateral symbol for adapter
-                    collateral_symbol = collateral_token.symbol.upper()
-                    supply_result = compound_adapter.supply_collateral(
-                        asset=collateral_symbol,
-                        amount=collateral_amount_decimal,
-                    )
-
-                    if not supply_result.success:
-                        return CompilationResult(
-                            status=CompilationStatus.FAILED,
-                            error=f"Compound V3 supply collateral failed: {supply_result.error}",
-                            intent_id=intent.intent_id,
-                        )
-
-                    assert supply_result.tx_data is not None
-                    supply_data = supply_result.tx_data["data"]
-                    if not supply_data.startswith("0x"):
-                        supply_data = "0x" + supply_data
-
-                    supply_tx = TransactionData(
-                        to=supply_result.tx_data["to"],
-                        value=int(supply_result.tx_data.get("value", 0)),
-                        data=supply_data,
-                        gas_estimate=supply_result.gas_estimate,
-                        description=supply_result.description
-                        or f"Supply {collateral_amount_decimal} {collateral_token.symbol} as collateral to Compound V3",
-                        tx_type="lending_supply_collateral",
-                    )
-                    transactions.append(supply_tx)
-                else:
-                    warnings.append("No collateral supplied - borrowing against existing collateral")
-
-                # Build borrow TX
-                borrow_result = compound_adapter.borrow(amount=intent.borrow_amount)
-
-                if not borrow_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Compound V3 borrow failed: {borrow_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-
-                assert borrow_result.tx_data is not None
-                borrow_data = borrow_result.tx_data["data"]
-                if not borrow_data.startswith("0x"):
-                    borrow_data = "0x" + borrow_data
-
-                borrow_tx = TransactionData(
-                    to=borrow_result.tx_data["to"],
-                    value=int(borrow_result.tx_data.get("value", 0)),
-                    data=borrow_data,
-                    gas_estimate=borrow_result.gas_estimate,
-                    description=borrow_result.description
-                    or f"Borrow {intent.borrow_amount} {borrow_token.symbol} from Compound V3",
-                    tx_type="lending_borrow",
-                )
-                transactions.append(borrow_tx)
-
-                # Build ActionBundle
-                total_gas = sum(tx.gas_estimate for tx in transactions)
-                action_bundle = ActionBundle(
-                    intent_type=IntentType.BORROW.value,
-                    transactions=[tx.to_dict() for tx in transactions],
-                    metadata={
-                        "protocol": intent.protocol,
-                        "comet_address": compound_adapter.comet_address,
-                        "market": market,
-                        "collateral_token": collateral_token.to_dict(),
-                        "borrow_token": borrow_token.to_dict(),
-                        "collateral_amount": str(collateral_amount_decimal),
-                        "borrow_amount": str(intent.borrow_amount),
-                        "chain": self.chain,
-                    },
-                )
-
-                result.action_bundle = action_bundle
-                result.transactions = transactions
-                result.total_gas_estimate = total_gas
-                result.warnings = warnings
-
-                collateral_fmt = format_token_amount(
-                    int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
-                    collateral_token.symbol,
-                    collateral_token.decimals,
-                )
-                borrow_fmt = format_token_amount(
-                    int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
-                    borrow_token.symbol,
-                    borrow_token.decimals,
-                )
-
-                logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
-                logger.info(
-                    f"   Protocol: Compound V3 ({market} market) | Txs: {len(transactions)} | Gas: {total_gas:,}"
-                )
-
-            # =================================================================
             # UNSUPPORTED PROTOCOL
             # =================================================================
             else:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3",
+                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark",
                     intent_id=intent.intent_id,
                 )
 
@@ -6710,115 +6061,12 @@ class IntentCompiler:
                 )
 
             # =================================================================
-            # COMPOUND V3 PATH
-            # =================================================================
-            elif protocol_lower == "compound_v3":
-                from ..connectors.compound_v3.adapter import (
-                    COMPOUND_V3_COMET_ADDRESSES,
-                    CompoundV3Adapter,
-                    CompoundV3Config,
-                )
-
-                market = intent.market_id or "usdc"
-
-                if self.chain not in COMPOUND_V3_COMET_ADDRESSES:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Compound V3 not available on chain: {self.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
-                        intent_id=intent.intent_id,
-                    )
-
-                available_markets = COMPOUND_V3_COMET_ADDRESSES.get(self.chain, {})
-                if market not in available_markets:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Compound V3 market '{market}' not available on {self.chain}. Available: {list(available_markets.keys())}",
-                        intent_id=intent.intent_id,
-                    )
-
-                compound_config = CompoundV3Config(
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                    market=market,
-                )
-                compound_adapter = CompoundV3Adapter(compound_config)
-
-                # Build approve TX for Comet contract (repay token -> Comet)
-                if repay_amount_decimal is not None:
-                    approve_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
-                else:
-                    approve_amount = MAX_UINT256  # Approve max for full repay
-
-                approve_txs = self._build_approve_tx(
-                    repay_token.address,
-                    compound_adapter.comet_address,
-                    approve_amount,
-                )
-                transactions.extend(approve_txs)
-
-                # Build repay TX via Compound V3 adapter
-                repay_result = compound_adapter.repay(
-                    amount=repay_amount_decimal if repay_amount_decimal else Decimal("0"),
-                    on_behalf_of=self.wallet_address,
-                    repay_all=intent.repay_full,
-                )
-
-                if not repay_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Compound V3 repay failed: {repay_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-
-                assert repay_result.tx_data is not None
-                repay_data = repay_result.tx_data["data"]
-                if not repay_data.startswith("0x"):
-                    repay_data = "0x" + repay_data
-
-                repay_tx = TransactionData(
-                    to=repay_result.tx_data["to"],
-                    value=int(repay_result.tx_data.get("value", 0)),
-                    data=repay_data,
-                    gas_estimate=repay_result.gas_estimate,
-                    description=repay_result.description
-                    or f"Repay {amount_description} {repay_token.symbol} to Compound V3",
-                    tx_type="lending_repay",
-                )
-                transactions.append(repay_tx)
-
-                total_gas = sum(tx.gas_estimate for tx in transactions)
-
-                action_bundle = ActionBundle(
-                    intent_type=IntentType.REPAY.value,
-                    transactions=[tx.to_dict() for tx in transactions],
-                    metadata={
-                        "protocol": intent.protocol,
-                        "comet_address": compound_adapter.comet_address,
-                        "market": market,
-                        "repay_token": repay_token.to_dict(),
-                        "repay_amount": amount_description,
-                        "repay_full": intent.repay_full,
-                        "chain": self.chain,
-                    },
-                )
-
-                result.action_bundle = action_bundle
-                result.transactions = transactions
-                result.total_gas_estimate = total_gas
-                result.warnings = warnings
-
-                logger.info(
-                    f"Compiled REPAY: {amount_description} {repay_token.symbol} to Compound V3 {market}, "
-                    f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
-                )
-
-            # =================================================================
             # UNSUPPORTED PROTOCOL
             # =================================================================
             else:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3",
+                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark",
                     intent_id=intent.intent_id,
                 )
 
@@ -7185,107 +6433,12 @@ class IntentCompiler:
                 logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
 
             # =================================================================
-            # COMPOUND V3 PATH
-            # =================================================================
-            elif protocol_lower == "compound_v3":
-                from ..connectors.compound_v3.adapter import (
-                    COMPOUND_V3_COMET_ADDRESSES,
-                    CompoundV3Adapter,
-                    CompoundV3Config,
-                )
-
-                market = intent.market_id or "usdc"
-
-                if self.chain not in COMPOUND_V3_COMET_ADDRESSES:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Compound V3 not available on chain: {self.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
-                        intent_id=intent.intent_id,
-                    )
-
-                available_markets = COMPOUND_V3_COMET_ADDRESSES.get(self.chain, {})
-                if market not in available_markets:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Compound V3 market '{market}' not available on {self.chain}. Available: {list(available_markets.keys())}",
-                        intent_id=intent.intent_id,
-                    )
-
-                compound_config = CompoundV3Config(
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                    market=market,
-                )
-                compound_adapter = CompoundV3Adapter(compound_config)
-
-                supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
-
-                # Build approve TX for Comet contract
-                approve_txs = self._build_approve_tx(
-                    supply_token.address,
-                    compound_adapter.comet_address,
-                    supply_amount_wei,
-                )
-                transactions.extend(approve_txs)
-
-                # Build supply TX via Compound V3 adapter
-                supply_result = compound_adapter.supply(amount=amount_decimal)
-
-                if not supply_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Compound V3 supply failed: {supply_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-
-                assert supply_result.tx_data is not None
-                supply_data = supply_result.tx_data["data"]
-                if not supply_data.startswith("0x"):
-                    supply_data = "0x" + supply_data
-
-                supply_tx = TransactionData(
-                    to=supply_result.tx_data["to"],
-                    value=int(supply_result.tx_data.get("value", 0)),
-                    data=supply_data,
-                    gas_estimate=supply_result.gas_estimate,
-                    description=supply_result.description
-                    or f"Supply {amount_decimal} {supply_token.symbol} to Compound V3",
-                    tx_type="lending_supply",
-                )
-                transactions.append(supply_tx)
-
-                # Build ActionBundle
-                total_gas = sum(tx.gas_estimate for tx in transactions)
-
-                action_bundle = ActionBundle(
-                    intent_type=IntentType.SUPPLY.value,
-                    transactions=[tx.to_dict() for tx in transactions],
-                    metadata={
-                        "protocol": intent.protocol,
-                        "comet_address": compound_adapter.comet_address,
-                        "market": market,
-                        "supply_token": supply_token.to_dict(),
-                        "supply_amount": str(amount_decimal),
-                        "chain": self.chain,
-                    },
-                )
-
-                result.action_bundle = action_bundle
-                result.transactions = transactions
-                result.total_gas_estimate = total_gas
-                result.warnings = warnings
-
-                supply_fmt = format_token_amount(supply_amount_wei, supply_token.symbol, supply_token.decimals)
-                logger.info(f"Compiled SUPPLY: {supply_fmt} to Compound V3 ({market} market)")
-                logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
-
-            # =================================================================
             # UNSUPPORTED PROTOCOL
             # =================================================================
             else:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3",
+                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark",
                     intent_id=intent.intent_id,
                 )
 
@@ -7604,102 +6757,12 @@ class IntentCompiler:
                 return self._compile_pendle_redeem(intent)
 
             # =================================================================
-            # COMPOUND V3 PATH
-            # =================================================================
-            elif protocol_lower == "compound_v3":
-                from ..connectors.compound_v3.adapter import (
-                    COMPOUND_V3_COMET_ADDRESSES,
-                    CompoundV3Adapter,
-                    CompoundV3Config,
-                )
-
-                market = intent.market_id or "usdc"
-
-                if self.chain not in COMPOUND_V3_COMET_ADDRESSES:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Compound V3 not available on chain: {self.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
-                        intent_id=intent.intent_id,
-                    )
-
-                available_markets = COMPOUND_V3_COMET_ADDRESSES.get(self.chain, {})
-                if market not in available_markets:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Compound V3 market '{market}' not available on {self.chain}. Available: {list(available_markets.keys())}",
-                        intent_id=intent.intent_id,
-                    )
-
-                compound_config = CompoundV3Config(
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                    market=market,
-                )
-                compound_adapter = CompoundV3Adapter(compound_config)
-
-                # Build withdraw TX via Compound V3 adapter
-                withdraw_result = compound_adapter.withdraw(
-                    amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
-                    withdraw_all=intent.withdraw_all,
-                )
-
-                if not withdraw_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Compound V3 withdraw failed: {withdraw_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-
-                amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
-
-                assert withdraw_result.tx_data is not None
-                withdraw_data = withdraw_result.tx_data["data"]
-                if not withdraw_data.startswith("0x"):
-                    withdraw_data = "0x" + withdraw_data
-
-                withdraw_tx = TransactionData(
-                    to=withdraw_result.tx_data["to"],
-                    value=int(withdraw_result.tx_data.get("value", 0)),
-                    data=withdraw_data,
-                    gas_estimate=withdraw_result.gas_estimate,
-                    description=withdraw_result.description
-                    or f"Withdraw {amount_display} {withdraw_token.symbol} from Compound V3",
-                    tx_type="lending_withdraw",
-                )
-                transactions.append(withdraw_tx)
-
-                total_gas = sum(tx.gas_estimate for tx in transactions)
-
-                action_bundle = ActionBundle(
-                    intent_type=IntentType.WITHDRAW.value,
-                    transactions=[tx.to_dict() for tx in transactions],
-                    metadata={
-                        "protocol": intent.protocol,
-                        "comet_address": compound_adapter.comet_address,
-                        "market": market,
-                        "withdraw_token": withdraw_token.to_dict(),
-                        "withdraw_amount": amount_display,
-                        "withdraw_all": intent.withdraw_all,
-                        "chain": self.chain,
-                    },
-                )
-
-                result.action_bundle = action_bundle
-                result.transactions = transactions
-                result.total_gas_estimate = total_gas
-                result.warnings = warnings
-
-                logger.info(
-                    f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Compound V3)"
-                )
-
-            # =================================================================
             # UNSUPPORTED PROTOCOL
             # =================================================================
             else:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, pendle, compound_v3",
+                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, pendle",
                     intent_id=intent.intent_id,
                 )
 
@@ -7959,19 +7022,6 @@ class IntentCompiler:
 
             # Build the multicall transaction with real calldata
             tx_data = sdk.build_increase_order_multicall(order_params)
-
-            # Step 5.5: Prepend ERC-20 approval for collateral token.
-            # ExchangeRouter.sendTokens() calls transferFrom() on the collateral,
-            # so the wallet must approve ExchangeRouter to spend the collateral.
-            # Native tokens (WETH/ETH) are sent as msg.value via sendWnt(), no approval needed.
-            is_native_collateral = collateral_token_upper in ("WETH", "ETH", "WAVAX", "AVAX")
-            if not is_native_collateral and collateral_wei > 0:
-                approve_txs = self._build_approve_tx(
-                    token_address=collateral_address,
-                    spender=sdk.EXCHANGE_ROUTER_ADDRESS,
-                    amount=collateral_wei,
-                )
-                transactions.extend(approve_txs)
 
             open_tx = TransactionData(
                 to=tx_data.to,
@@ -8597,12 +7647,6 @@ class IntentCompiler:
                     error=f"Prediction market intents are only supported on Polygon, not {self.chain}",
                     intent_id=intent.intent_id,
                 )
-            # VIB-307: Warn at compile time (not at init) so non-prediction Polygon strategies
-            # don't see this warning unless they actually attempt a prediction intent.
-            logger.warning(
-                "PredictionBuyIntent requires polymarket_config in IntentCompilerConfig. "
-                "Provide polymarket_config to enable prediction market intents on Polygon."
-            )
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
@@ -8668,12 +7712,6 @@ class IntentCompiler:
                     error=f"Prediction market intents are only supported on Polygon, not {self.chain}",
                     intent_id=intent.intent_id,
                 )
-            # VIB-307: Warn at compile time (not at init) so non-prediction Polygon strategies
-            # don't see this warning unless they actually attempt a prediction intent.
-            logger.warning(
-                "PredictionSellIntent requires polymarket_config in IntentCompilerConfig. "
-                "Provide polymarket_config to enable prediction market intents on Polygon."
-            )
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
@@ -8739,12 +7777,6 @@ class IntentCompiler:
                     error=f"Prediction market intents are only supported on Polygon, not {self.chain}",
                     intent_id=intent.intent_id,
                 )
-            # VIB-307: Warn at compile time (not at init) so non-prediction Polygon strategies
-            # don't see this warning unless they actually attempt a prediction intent.
-            logger.warning(
-                "PredictionRedeemIntent requires polymarket_config in IntentCompilerConfig. "
-                "Provide polymarket_config to enable prediction market intents on Polygon."
-            )
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(

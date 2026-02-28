@@ -8,9 +8,7 @@ import pytest
 from almanak.gateway.utils.rpc_provider import (
     NodeProvider,
     _get_custom_url,
-    _has_chain_specific_url,
     _has_custom_url,
-    _has_generic_url,
     get_rpc_url,
     has_api_key_configured,
 )
@@ -114,32 +112,12 @@ class TestHasCustomUrl:
 class TestGetRpcUrl:
     """Test get_rpc_url end-to-end behavior."""
 
-    def test_chain_specific_url_beats_alchemy(self):
-        """Chain-specific URL env var is preferred over ALCHEMY_API_KEY."""
-        with patch.dict(os.environ, {
-            "ARBITRUM_RPC_URL": "https://arb-specific",
-            "ALCHEMY_API_KEY": "test-alchemy-key",
-        }):
-            url = get_rpc_url("arbitrum")
-            assert url == "https://arb-specific"
-
-    def test_alchemy_beats_generic_rpc_url(self):
-        """Alchemy takes priority over generic RPC_URL for supported chains (VIB-225)."""
-        with patch.dict(os.environ, {
-            "RPC_URL": "https://arb1.arbitrum.io/rpc",
-            "ALCHEMY_API_KEY": "test-alchemy-key",
-        }):
-            url = get_rpc_url("base")
-            # Should use Alchemy for base, NOT the generic arb1 RPC_URL
-            assert "alchemy.com" in url
-            assert "arb1.arbitrum.io" not in url
-
-    def test_generic_rpc_url_used_when_no_alchemy_for_chain(self):
-        """Generic RPC_URL used as fallback when ALCHEMY_API_KEY is not set."""
+    def test_custom_url_beats_alchemy(self):
+        """Custom URL env var is preferred over ALCHEMY_API_KEY."""
         with patch.dict(os.environ, {
             "RPC_URL": "https://custom-rpc",
+            "ALCHEMY_API_KEY": "test-alchemy-key",
         }):
-            # For a chain that is in ALCHEMY_CHAIN_KEYS but no Alchemy key set
             url = get_rpc_url("arbitrum")
             assert url == "https://custom-rpc"
 
@@ -194,23 +172,14 @@ class TestGetRpcUrl:
 class TestAutoSelectProvider:
     """Test _auto_select_provider ordering."""
 
-    def test_chain_specific_url_selected_over_alchemy(self):
-        """Chain-specific URL takes priority over Alchemy."""
+    def test_custom_url_selected_over_alchemy(self):
+        """Custom URL env var takes priority over Alchemy."""
         with patch.dict(os.environ, {
-            "ARBITRUM_RPC_URL": "https://arb-specific",
+            "RPC_URL": "https://custom",
             "ALCHEMY_API_KEY": "test-key",
         }):
             url = get_rpc_url("arbitrum")
-            assert url == "https://arb-specific"
-
-    def test_alchemy_selected_over_generic_rpc_url(self):
-        """Alchemy takes priority over generic RPC_URL for supported chains (VIB-225)."""
-        with patch.dict(os.environ, {
-            "RPC_URL": "https://generic-rpc",
-            "ALCHEMY_API_KEY": "test-key",
-        }):
-            url = get_rpc_url("base")
-            assert "alchemy.com" in url
+            assert url == "https://custom"
 
     def test_alchemy_selected_over_tenderly(self):
         """Alchemy takes priority over Tenderly."""
@@ -271,44 +240,3 @@ class TestHasApiKeyConfigured:
     def test_with_nothing(self):
         """Returns False when nothing is configured."""
         assert has_api_key_configured() is False
-
-
-class TestChainSpecificVsGenericUrl:
-    """Test _has_chain_specific_url vs _has_generic_url split (VIB-225)."""
-
-    def test_chain_specific_detected(self):
-        """Chain-specific env var detected by _has_chain_specific_url."""
-        with patch.dict(os.environ, {"BASE_RPC_URL": "https://base-rpc"}):
-            assert _has_chain_specific_url("base") is True
-            assert _has_chain_specific_url("arbitrum") is False
-
-    def test_generic_not_detected_as_chain_specific(self):
-        """Generic RPC_URL is NOT detected by _has_chain_specific_url."""
-        with patch.dict(os.environ, {"RPC_URL": "https://generic"}):
-            assert _has_chain_specific_url("base") is False
-            assert _has_chain_specific_url("arbitrum") is False
-
-    def test_generic_detected_by_has_generic_url(self):
-        """Generic RPC_URL detected by _has_generic_url."""
-        with patch.dict(os.environ, {"RPC_URL": "https://generic"}):
-            assert _has_generic_url() is True
-
-    def test_almanak_generic_detected(self):
-        """ALMANAK_RPC_URL detected by _has_generic_url."""
-        with patch.dict(os.environ, {"ALMANAK_RPC_URL": "https://almanak-generic"}):
-            assert _has_generic_url() is True
-
-    @pytest.mark.parametrize("env_vars", [
-        {"RPC_URL": "https://generic"},
-        {"BASE_RPC_URL": "https://base"},
-    ])
-    def test_has_custom_url_still_covers_both(self, env_vars):
-        """_has_custom_url returns True for both chain-specific and generic."""
-        with patch.dict(os.environ, env_vars):
-            assert _has_custom_url("base") is True
-
-    def test_no_urls_all_false(self):
-        """All helpers return False when nothing is set."""
-        assert _has_chain_specific_url("base") is False
-        assert _has_generic_url() is False
-        assert _has_custom_url("base") is False

@@ -32,7 +32,7 @@ def get_langchain_tools(catalog: ToolCatalog, executor: ToolExecutor) -> list:
     Requires ``langchain-core`` to be installed.
     """
     try:
-        from langchain_core.tools import StructuredTool
+        from langchain_core.tools import StructuredTool  # type: ignore[import-not-found]
     except ImportError as e:
         raise ImportError(
             "langchain-core is required for the LangChain adapter. Install it with: pip install langchain-core"

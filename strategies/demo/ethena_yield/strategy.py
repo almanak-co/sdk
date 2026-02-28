@@ -150,16 +150,23 @@ class EthenaYieldStrategy(IntentStrategy):
         # Extract configuration
         # =====================================================================
 
+        def get_config(key: str, default: Any) -> Any:
+            if isinstance(self.config, dict):
+                return self.config.get(key, default)
+            if hasattr(self.config, "get"):
+                return self.config.get(key, default)
+            return getattr(self.config, key, default)
+
         # Staking configuration
-        self.min_stake_amount = Decimal(str(self.get_config("min_stake_amount", "100")))
+        self.min_stake_amount = Decimal(str(get_config("min_stake_amount", "100")))
 
         # USDC -> USDe swap configuration (optional)
-        self.swap_usdc_to_usde = bool(self.get_config("swap_usdc_to_usde", False))
-        self.min_usdc_amount = Decimal(str(self.get_config("min_usdc_amount", "100")))
-        self.max_slippage_pct = float(self.get_config("max_slippage_pct", 0.5))
+        self.swap_usdc_to_usde = bool(get_config("swap_usdc_to_usde", False))
+        self.min_usdc_amount = Decimal(str(get_config("min_usdc_amount", "100")))
+        self.max_slippage_pct = float(get_config("max_slippage_pct", 0.5))
 
         # Force action for testing
-        self.force_action = str(self.get_config("force_action", "")).lower()
+        self.force_action = str(get_config("force_action", "")).lower()
 
         # Internal state tracking
         self._swapped = False

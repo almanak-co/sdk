@@ -1,81 +1,172 @@
-# E2E Strategy Test Report: uniswap_rsi (Anvil)
+# Anvil Test Report: uniswap_rsi Strategy
 
-**Date:** 2026-02-27 10:05
+**Date:** 2026-02-08 15:53
 **Result:** PASS
-**Mode:** Anvil
-**Duration:** ~13 seconds (including Anvil fork startup)
+**Duration:** ~2 minutes (including setup)
+
+---
+
+## Summary
+
+The `uniswap_rsi` demo strategy was successfully tested on an Anvil fork of Ethereum mainnet. The strategy executed correctly, calculated RSI from market data, and returned the appropriate HOLD intent since the RSI value (49.63) was in the neutral zone (40-70).
+
+---
 
 ## Configuration
 
 | Field | Value |
 |-------|-------|
-| Strategy | uniswap_rsi |
+| Strategy | demo_uniswap_rsi |
 | Chain | ethereum |
-| Network | Anvil fork (publicnode.com, block 24547550) |
-| Anvil Port | 60790 (auto-assigned by managed gateway) |
-| trade_size_usd | $3 (within $500 cap, no change needed) |
-| rsi_period | 14 |
-| rsi_oversold | 40 |
-| rsi_overbought | 70 |
-| base_token | WETH |
-| quote_token | USDC |
-
-**Config changes made:** None. `trade_size_usd` was already $3, well under the $500 cap. The strategy does not support `force_action`.
-
-## Execution
-
-### Setup
-- [x] Managed gateway auto-started on 127.0.0.1:50052 (network=anvil)
-- [x] Anvil fork started on port 60790 (forked from https://ethereum-rpc.publicnode.com at block 24547550, chain_id=1)
-- [x] Wallet funded: 100 ETH, 1 WETH (slot 3), 10000 USDC (slot 9) for 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
-
-### Strategy Run
-- [x] Strategy executed with `--network anvil --once`
-- [x] WETH price: $2,011.455 (aggregated from on-chain Chainlink + CoinGecko free tier, 2 sources, confidence 1.00)
-- [x] USDC price: $0.9999945
-- [x] OHLCV data: 34 candles from Binance (28 finalized, 6 provisional)
-- [x] RSI(14) = 52.92 -- in neutral zone [40-70]
-- [x] Intent: HOLD (no on-chain transaction)
-
-### Key Log Output
-
-```text
-Anvil fork started: port=60790, block=24547550, chain_id=1
-Funded 0xf39Fd6e5... with 100 ETH
-Funded 0xf39Fd6e5... with WETH via known slot 3
-Funded 0xf39Fd6e5... with USDC via known slot 9
-AggregatedPrice for WETH/USD: 2011.455 (confidence: 1.00, sources: 2/2, outliers: 0)
-ohlcv_fetched provider=binance instrument=WETH/USD candles=34 finalized=28 provisional=6
-demo_uniswap_rsi HOLD: RSI=52.92 in neutral zone [40-70] (hold #1)
-Status: HOLD | Intent: HOLD | Duration: 2639ms
-```
-
-## On-Chain Transactions
-
-None. RSI=52.92 is in the neutral zone, so the strategy correctly returned HOLD. No swap was executed.
-
-## Suspicious Behaviour
-
-| # | Source | Severity | Pattern | Log Line |
-|---|--------|----------|---------|----------|
-| 1 | strategy | WARNING | Token resolution failures x9 (BTC, COMP, MKR, SNX, LDO, STETH, CBETH, RETH, SOL) | `token_resolution_error token=BTC chain=ethereum error_type=TokenNotFoundError ... Symbol 'BTC' not found in registry for ethereum` |
-| 2 | strategy | INFO | No Alchemy key -- using free public RPC | `No API key configured -- using free public RPC for ethereum (rate limits may apply)` |
-| 3 | strategy | INFO | No CoinGecko key -- using on-chain primary with free CoinGecko fallback | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback` |
-| 4 | strategy | INFO | Anvil port cleanup timeout (cosmetic) | `Port 60790 not freed after 5.0s` |
-
-### Findings Analysis
-
-**Finding 1 (WARNING - 9 token resolution failures):** The gateway's Chainlink price source initialization batch-resolves a list of common tokens (BTC, COMP, MKR, SNX, LDO, STETH, CBETH, RETH, SOL) on the target chain to build its oracle map. Nine of these symbols are absent from the ethereum static token registry. The strategy's actual tokens (WETH, USDC) resolved correctly, so this does not affect execution. However, the volume of warnings (9 per run) is noisy. Known missing tokens: `BTC` (registry has `WBTC`), `STETH` (registry has `WSTETH`), and 7 others. The static token registry for ethereum should be expanded or the Chainlink init batch should be filtered to only symbols known to exist on the target chain.
-
-**Findings 2-3 (INFO):** Expected in this environment -- no Alchemy or CoinGecko API keys configured in `.env`. Graceful degradation to public endpoints and on-chain oracles is working correctly. Prices were fetched successfully.
-
-**Finding 4 (INFO):** Cosmetic Anvil cleanup timing warning -- the port release takes slightly longer than the 5s shutdown timeout. Does not affect test correctness or reproducibility.
-
-## Result
-
-**PASS** - The strategy executed cleanly on an Ethereum Anvil fork. RSI=52.92 placed the strategy correctly in HOLD (neutral zone [40-70]). No on-chain transactions were submitted. Price data (WETH=$2,011.46, USDC=$1.00) and OHLCV data (34 Binance candles) were fetched successfully. The 9 token resolution warnings at startup are a known gap: common token symbols (BTC, COMP, MKR, etc.) are missing from the ethereum static registry, causing noisy but non-blocking warnings on every run.
+| Network | Anvil fork (port 8549) |
+| Trade Size | $3 USD |
+| RSI Period | 14 |
+| RSI Oversold | 40 |
+| RSI Overbought | 70 |
+| Base Token | WETH |
+| Quote Token | USDC |
+| Max Slippage | 100 bps (1%) |
 
 ---
 
-SUSPICIOUS_BEHAVIOUR_COUNT: 4
-SUSPICIOUS_BEHAVIOUR_ERRORS: 0
+## Test Phases
+
+### Phase 1: Setup
+- [x] Anvil started on port 8549 (Ethereum fork)
+- [x] Wallet funded with 100 ETH for gas
+- [x] Wallet funded with 10 WETH (wrapped from ETH)
+- [x] Wallet funded with 10,000 USDC (via storage slot)
+- [x] Gateway started on port 50051
+
+**Wallet Address:** `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`
+
+**Initial Balances:**
+- ETH: 100 (gas)
+- WETH: 10.0
+- USDC: 10,000
+
+### Phase 2: Strategy Execution
+- [x] Strategy loaded successfully: `UniswapRSIStrategy`
+- [x] Config loaded from: `strategies/demo/uniswap_rsi/config.json`
+- [x] Gateway connection established
+- [x] Market data retrieved successfully
+- [x] RSI calculated: 49.63
+- [x] Decision made: HOLD (neutral zone)
+
+**Strategy Output:**
+```
+⏸️ demo_uniswap_rsi HOLD: RSI=49.63 in neutral zone [40-70] (hold #1)
+Status: HOLD | Intent: HOLD | Duration: 1763ms
+```
+
+### Phase 3: Cleanup
+- [x] Anvil process killed
+- [x] Gateway process killed
+
+---
+
+## Execution Log Highlights
+
+### Strategy Initialization
+```
+Strategy: UniswapRSIStrategy
+Instance ID: demo_uniswap_rsi
+Mode: FRESH START (no existing state)
+Chain: ethereum
+Wallet: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+Execution: Single run
+Dry run: False
+Gateway: localhost:50051
+```
+
+### Strategy Configuration
+```
+UniswapRSIStrategy initialized: trade_size=$3, RSI period=14, oversold=40, overbought=70, pair=WETH/USDC
+```
+
+### Decision Logic
+```
+⏸️ demo_uniswap_rsi HOLD: RSI=49.63 in neutral zone [40-70] (hold #1)
+```
+
+---
+
+## Validation
+
+### Gateway Integration
+- [x] Gateway gRPC connection established successfully
+- [x] Market data provider (OHLCVProvider) initialized
+- [x] RSI calculator initialized with period=14
+- [x] Price data retrieved for WETH
+- [x] RSI indicator calculated successfully
+
+### Strategy Behavior
+- [x] RSI value: 49.63 (within neutral zone [40-70])
+- [x] No trade signal generated (correct behavior)
+- [x] HOLD intent returned with clear reason
+- [x] No transaction execution attempted
+
+### Token Balances (Post-Run)
+No changes expected since strategy returned HOLD intent:
+- WETH: 10.0 (unchanged)
+- USDC: 10,000 (unchanged)
+
+---
+
+## Decision Logic Validation
+
+The strategy correctly evaluated the RSI-based trading logic:
+
+| Condition | Threshold | Actual Value | Expected Action | Actual Action |
+|-----------|-----------|--------------|-----------------|---------------|
+| RSI < Oversold | RSI < 40 | RSI = 49.63 | No action | ✅ Correct |
+| RSI > Overbought | RSI > 70 | RSI = 49.63 | No action | ✅ Correct |
+| Neutral Zone | 40 ≤ RSI ≤ 70 | RSI = 49.63 | HOLD | ✅ Correct |
+
+**Result:** Strategy decision logic is working as expected.
+
+---
+
+## Performance Metrics
+
+| Metric | Value |
+|--------|-------|
+| Total execution time | 1763ms (~1.8 seconds) |
+| Gateway connection | Success |
+| Market data fetch | Success |
+| RSI calculation | Success |
+| Decision latency | < 2 seconds |
+
+---
+
+## Conclusion
+
+**PASS** - The `uniswap_rsi` strategy executed successfully on Anvil fork.
+
+### What Worked
+- Anvil fork started and maintained stable connection
+- Wallet funding (ETH, WETH, USDC) succeeded
+- Gateway started and provided data services
+- Strategy loaded configuration correctly
+- Market data (prices, RSI) retrieved successfully
+- Decision logic executed correctly (HOLD when RSI in neutral zone)
+- Clean shutdown of all processes
+
+### Expected Behavior
+The strategy returned HOLD because:
+- Current RSI (49.63) is between oversold (40) and overbought (70) thresholds
+- This is the neutral zone where the strategy waits for better entry/exit signals
+- No trade is executed, which is the correct behavior
+
+### Next Steps for Full Testing
+To test the complete trading logic, you would need to:
+1. Run the strategy over a longer period or with different market conditions
+2. Test with RSI < 40 to trigger a buy signal (USDC → WETH)
+3. Test with RSI > 70 to trigger a sell signal (WETH → USDC)
+4. Verify that swaps are executed correctly on Uniswap V3
+
+### Files Generated
+- `/tmp/anvil_ethereum.log` - Anvil fork logs
+- `/tmp/gateway.log` - Gateway service logs
+- `/tmp/strategy_run.log` - Strategy execution logs
+- `/Users/nick/Documents/Almanak/src/almanak-sdk/tests/reports/uniswap_rsi_anvil_report.md` - This report

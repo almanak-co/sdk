@@ -67,7 +67,7 @@ TRANSFER_BATCH_TOPIC = "0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c
 
 # PayoutRedemption(address,address,bytes32,bytes32,uint256[],uint256)
 # This is the CTF-specific redemption event from Conditional Tokens contract
-PAYOUT_REDEMPTION_TOPIC = "0x2682012a4a4f1973119f1c9b90745d1bd91fa2bab387344f044cb3586864d18d"
+PAYOUT_REDEMPTION_TOPIC = "0x2682012a4a4f1973119f1c9b90745f714c4c1e002c60c52b89896745d90ab678"
 
 # ERC-20 Transfer event
 ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"

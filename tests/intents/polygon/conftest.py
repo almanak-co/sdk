@@ -14,8 +14,6 @@ Polygon-specific considerations:
   incorrect slots early.
 """
 
-import subprocess
-
 import pytest
 from web3 import Web3
 
@@ -26,7 +24,6 @@ from almanak.framework.execution.simulator import DirectSimulator
 from almanak.framework.execution.submitter import PublicMempoolSubmitter
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
-    TEST_CAST_TIMEOUT_SECONDS,
     TEST_PRIVATE_KEY,
     TEST_SUBMITTER_MAX_RETRIES,
     TEST_TX_TIMEOUT_SECONDS,
@@ -55,25 +52,71 @@ def _lower_anvil_base_fee(rpc_url: str) -> None:
     EIP-1559 doubling formula, exceed the orchestrator's gas price cap.  By
     resetting the base fee on the fork we avoid false-positive gas guard
     failures in tests.
+
+    Uses in-process Web3 provider RPC instead of subprocess (cast).
     """
+    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": TEST_WEB3_REQUEST_TIMEOUT}))
     base_fee_hex = hex(_ANVIL_BASE_FEE_WEI)
-    subprocess.run(
-        [
-            "cast", "rpc", "anvil_setNextBlockBaseFeePerGas",
-            base_fee_hex,
-            "--rpc-url", rpc_url,
-        ],
-        capture_output=True,
-        check=True,
-        timeout=TEST_CAST_TIMEOUT_SECONDS,
-    )
+    w3.provider.make_request("anvil_setNextBlockBaseFeePerGas", [base_fee_hex])
     # Mine a block so the new base fee takes effect
-    subprocess.run(
-        ["cast", "rpc", "evm_mine", "--rpc-url", rpc_url],
-        capture_output=True,
-        check=True,
-        timeout=TEST_CAST_TIMEOUT_SECONDS,
-    )
+    w3.provider.make_request("evm_mine", [])
+
+
+def _seed_wallet_state(web3: Web3, rpc_url: str) -> str:
+    """Seed test wallet balances for Polygon on the current fork instance."""
+    config = CHAIN_CONFIGS[CHAIN_NAME]
+    # Required tokens for Polygon intent tests - fixture must fail if these can't be funded
+    required_tokens = {"USDC", "WETH"}
+    failed_tokens: list[str] = []
+
+    # Ensure sane base fee on every reseed (important after fork restart)
+    _lower_anvil_base_fee(rpc_url)
+
+    # Fund with 100 native tokens (MATIC on Polygon)
+    fund_native_token(TEST_WALLET, 100 * 10**18, rpc_url)
+
+    # Fund with common tokens
+    # Note: WETH on Polygon is bridged (not wrapped native), so all tokens
+    # use storage slot funding. After each token, verify balance to catch
+    # incorrect storage slots early.
+    for token_symbol, token_address in config.get("tokens", {}).items():
+        balance_slot = config.get("balance_slots", {}).get(token_symbol)
+        if balance_slot is not None:
+            try:
+                decimals = get_token_decimals(web3, token_address)
+                amount = 100_000 * (10**decimals)
+                fund_erc20_token(TEST_WALLET, token_address, amount, balance_slot, rpc_url)
+
+                # Verify the balance was actually set (catches wrong storage slots)
+                actual_balance = get_token_balance(web3, token_address, TEST_WALLET)
+                if actual_balance == 0:
+                    print(
+                        f"WARNING: {token_symbol} balance is 0 after funding with slot {balance_slot}. "
+                        f"Storage slot may be incorrect for {token_address}"
+                    )
+                    failed_tokens.append(token_symbol)
+                else:
+                    from tests.intents.conftest import format_token_amount
+                    print(f"  Funded {token_symbol}: {format_token_amount(actual_balance, decimals)}")
+            except Exception as e:
+                print(f"Warning: Could not fund {token_symbol}: {e}")
+                failed_tokens.append(token_symbol)
+
+    # Fail fast if required tokens couldn't be funded
+    missing_required = set(failed_tokens) & required_tokens
+    if missing_required:
+        raise AssertionError(
+            f"Failed to fund required tokens: {missing_required}. "
+            f"All failed tokens: {failed_tokens}"
+        )
+
+    return TEST_WALLET
+
+
+@pytest.fixture(scope="module")
+def anvil_instance(anvil_polygon: AnvilFixture) -> AnvilFixture:
+    """Expose the chain-specific AnvilFixture for shared recovery logic."""
+    return anvil_polygon
 
 
 @pytest.fixture(scope="module")
@@ -110,50 +153,17 @@ def funded_wallet(web3: Web3, anvil_rpc_url: str) -> str:
     They cannot be wrapped from native MATIC, so we use storage slot manipulation
     and verify the resulting balance.
     """
-    config = CHAIN_CONFIGS[CHAIN_NAME]
-    # Required tokens for Polygon intent tests - fixture must fail if these can't be funded
-    required_tokens = {"USDC", "WETH"}
-    failed_tokens: list[str] = []
+    return _seed_wallet_state(web3, anvil_rpc_url)
 
-    # Fund with 100 native tokens (MATIC on Polygon)
-    fund_native_token(TEST_WALLET, 100 * 10**18, anvil_rpc_url)
 
-    # Fund with common tokens
-    # Note: WETH on Polygon is bridged (not wrapped native), so all tokens
-    # use storage slot funding.  After each token, verify balance to catch
-    # incorrect storage slots early.
-    for token_symbol, token_address in config.get("tokens", {}).items():
-        balance_slot = config.get("balance_slots", {}).get(token_symbol)
-        if balance_slot is not None:
-            try:
-                decimals = get_token_decimals(web3, token_address)
-                amount = 100_000 * (10**decimals)
-                fund_erc20_token(TEST_WALLET, token_address, amount, balance_slot, anvil_rpc_url)
+@pytest.fixture(scope="module")
+def reseed_wallet_state(web3: Web3, anvil_instance: AnvilFixture):
+    """Return a callable that re-seeds balances on demand (for fork recovery)."""
 
-                # Verify the balance was actually set (catches wrong storage slots)
-                actual_balance = get_token_balance(web3, token_address, TEST_WALLET)
-                if actual_balance == 0:
-                    print(
-                        f"WARNING: {token_symbol} balance is 0 after funding with slot {balance_slot}. "
-                        f"Storage slot may be incorrect for {token_address}"
-                    )
-                    failed_tokens.append(token_symbol)
-                else:
-                    from tests.intents.conftest import format_token_amount
-                    print(f"  Funded {token_symbol}: {format_token_amount(actual_balance, decimals)}")
-            except Exception as e:
-                print(f"Warning: Could not fund {token_symbol}: {e}")
-                failed_tokens.append(token_symbol)
+    def _reseed() -> str:
+        return _seed_wallet_state(web3, anvil_instance.get_rpc_url())
 
-    # Fail fast if required tokens couldn't be funded
-    missing_required = set(failed_tokens) & required_tokens
-    if missing_required:
-        raise AssertionError(
-            f"Failed to fund required tokens: {missing_required}. "
-            f"All failed tokens: {failed_tokens}"
-        )
-
-    return TEST_WALLET
+    return _reseed
 
 
 @pytest.fixture
