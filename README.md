@@ -336,6 +336,6 @@ For detailed documentation, visit [docs.almanak.co](https://docs.almanak.co/)
 
 ## Support
 
-- [Discord](https://discord.gg/c4jY28WrEB)
+- [Discord](https://discord.gg/yuCMvQv3rN)
 - [Telegram](https://t.me/+G1O9NFuz-AAzYmQy)
 - [Twitter](https://x.com/Almanak__)

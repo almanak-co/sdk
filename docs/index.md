@@ -1,5 +1,28 @@
 ![Almanak](assets/logo-dark.svg){ .hero-logo }
 
+<div style="text-align: center">
+
+<p><strong>Production DeFi strategy framework for Quants</strong></p>
+
+<p>
+  <a href="https://pypi.org/project/almanak/"><img src="https://img.shields.io/pypi/v/almanak?style=flat-square&color=blue" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/almanak/"><img src="https://img.shields.io/pypi/pyversions/almanak?style=flat-square" alt="Python 3.12+"></a>
+  <a href="https://github.com/almanak-co/almanak-sdk/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License: Apache-2.0"></a>
+  <a href="https://discord.gg/yuCMvQv3rN"><img src="https://img.shields.io/badge/Discord-join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
+  <a href="https://x.com/Almanak__"><img src="https://img.shields.io/badge/Twitter-follow-1DA1F2?style=flat-square&logo=x&logoColor=white" alt="Twitter"></a>
+</p>
+
+<p>
+  <a href="/">English</a> |
+  <a href="/zh/">中文</a> |
+  <a href="/fr/">Français</a> |
+  <a href="/es/">Español</a>
+</p>
+
+</div>
+
+---
+
 The Almanak SDK provides a comprehensive framework for developing, testing, and deploying autonomous DeFi agents. Built on an intent-based architecture, strategies are expressed as high-level intents with minimal boilerplate.
 
 ## Features
