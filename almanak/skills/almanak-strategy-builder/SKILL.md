@@ -67,6 +67,9 @@ my_strategy/
   .env           # Secrets (ALMANAK_PRIVATE_KEY, ALCHEMY_API_KEY)
 ```
 
+For Anvil testing, add `anvil_funding` to `config.json` so your wallet is auto-funded on fork start
+(see [Configuration](#configuration) below).
+
 ```python
 # strategy.py
 from decimal import Decimal
@@ -94,6 +97,10 @@ class MyStrategy(IntentStrategy):
             )
         return Intent.hold(reason=f"RSI={rsi.value:.1f}, waiting")
 ```
+
+> **Note:** `amount_usd=` requires a live price oracle from the gateway. If swaps revert with
+> "Too little received", switch to `amount=` (token units) which bypasses USD-to-token conversion.
+> Always verify pricing on first live run with `--dry-run --once`.
 
 <!-- almanak-sdk-end: quick-start -->
 
@@ -181,6 +188,10 @@ Intent.swap(
 ```
 
 Use `amount="all"` to swap the entire balance.
+
+**`amount=` vs `amount_usd=`**: Use `amount_usd=` to specify trade size in USD (requires a live
+price oracle from the gateway). Use `amount=` to specify exact token units (more reliable for live
+trading since it bypasses USD-to-token conversion). When in doubt, prefer `amount=` for mainnet.
 
 ### Liquidity Provision
 
@@ -276,7 +287,7 @@ Intent.withdraw(
 
 ```python
 Intent.perp_open(
-    market="ETH-USD",
+    market="ETH/USD",
     collateral_token="USDC",
     collateral_amount=Decimal("1000"),
     size_usd=Decimal("5000"),
@@ -291,7 +302,7 @@ Intent.perp_open(
 
 ```python
 Intent.perp_close(
-    market="ETH-USD",
+    market="ETH/USD",
     collateral_token="USDC",
     is_long=True,
     size_usd=None,               # None = close full position
@@ -620,32 +631,81 @@ market.timestamp        # datetime - snapshot timestamp
 
 ## State Management
 
-Persist data between iterations using `self.state` (dict-like, backed by gateway):
+`self.state` is a dict that persists across iterations **and restarts**. The runner calls
+`load_state()` on startup, restoring previously saved state from the StateManager (SQLite locally,
+gateway when deployed). Write to `self.state` during `decide()` or `on_intent_executed()` and
+changes are automatically persisted after each iteration.
 
 ```python
 def decide(self, market):
-    # Read state
+    # Read state (survives restarts)
     last_trade = self.state.get("last_trade_time")
     position_id = self.state.get("lp_position_id")
 
-    # Write state (persisted automatically)
+    # Write state (persisted automatically after each iteration)
     self.state["last_trade_time"] = datetime.now().isoformat()
     self.state["consecutive_holds"] = self.state.get("consecutive_holds", 0) + 1
 ```
 
-### on_intent_executed Callback
+Use `--fresh` to clear saved state when starting over: `almanak strat run --fresh --once`.
 
-After execution, access results (position IDs, swap amounts) via the callback:
+For strategies that need custom serialization (e.g., Decimal fields, complex objects), override
+`get_persistent_state()` and `load_persistent_state()`:
 
 ```python
+def get_persistent_state(self) -> dict:
+    """Called by framework to serialize state for persistence."""
+    return {
+        "phase": self.state.get("phase", "idle"),
+        "position_id": self.state.get("position_id"),
+        "entry_price": str(self.state.get("entry_price", "0")),
+    }
+
+def load_persistent_state(self, saved: dict) -> None:
+    """Called by framework on startup to restore state."""
+    self.state["phase"] = saved.get("phase", "idle")
+    self.state["position_id"] = saved.get("position_id")
+    self.state["entry_price"] = Decimal(saved.get("entry_price", "0"))
+```
+
+### on_intent_executed Callback
+
+After execution, access results (position IDs, swap amounts) via the callback. The framework
+automatically enriches `result` with protocol-specific data - no manual receipt parsing needed.
+
+```python
+# In your strategy file, import logging at the top:
+# import logging
+# logger = logging.getLogger(__name__)
+
 def on_intent_executed(self, intent, success: bool, result):
-    if success and result.position_id:
+
+    if not success:
+        logger.warning(f"Intent failed: {intent.intent_type}")
+        return
+
+    # Capture LP position ID (enriched automatically by ResultEnricher)
+    if result.position_id is not None:
         self.state["lp_position_id"] = result.position_id
-    if success and result.swap_amounts:
+        logger.info(f"Opened LP position {result.position_id}")
+
+        # Store range bounds for rebalancing strategies (keep as Decimal)
+        if (
+            hasattr(intent, "range_lower") and intent.range_lower is not None
+            and hasattr(intent, "range_upper") and intent.range_upper is not None
+        ):
+            self.state["range_lower"] = intent.range_lower
+            self.state["range_upper"] = intent.range_upper
+
+    # Capture swap amounts
+    if result.swap_amounts:
         self.state["last_swap"] = {
             "amount_in": str(result.swap_amounts.amount_in),
             "amount_out": str(result.swap_amounts.amount_out),
         }
+        logger.info(
+            f"Swapped {result.swap_amounts.amount_in} -> {result.swap_amounts.amount_out}"
+        )
 ```
 
 <!-- almanak-sdk-end: state-management -->
@@ -742,7 +802,7 @@ Never default to 18 decimals. If the token is unknown, `TokenNotFoundError` is r
 ### PnL Backtest (historical prices, no on-chain execution)
 
 ```bash
-almanak strat backtest pnl \
+almanak strat backtest pnl -s my_strategy \
     --start 2024-01-01 --end 2024-06-01 \
     --initial-capital 10000
 ```
@@ -750,7 +810,7 @@ almanak strat backtest pnl \
 ### Paper Trading (Anvil fork with real execution, PnL tracking)
 
 ```bash
-almanak strat backtest paper \
+almanak strat backtest paper -s my_strategy \
     --duration 3600 --interval 60 \
     --initial-capital 10000
 ```
@@ -761,7 +821,7 @@ execution, equity curve tracking, and JSON result logs.
 ### Parameter Sweep
 
 ```bash
-almanak strat backtest sweep \
+almanak strat backtest sweep -s my_strategy \
     --start 2024-01-01 --end 2024-06-01 \
     --param "rsi_oversold:20,25,30" \
     --param "rsi_overbought:70,75,80"
@@ -787,6 +847,13 @@ results.max_drawdown
 results.total_return
 results.plot()  # Matplotlib equity curve
 ```
+
+### Backtesting Limitations
+
+- **OHLCV data**: The PnL backtester uses historical close prices from CoinGecko. Indicators that require OHLCV data (ATR, Stochastic, Ichimoku) need a paid CoinGecko tier or an external data source.
+- **RPC for paper trading**: Paper trading requires an RPC endpoint. Alchemy free tier is recommended for performance; public RPCs work but are slow.
+- **No CWD auto-discovery**: Backtest CLI commands (`backtest pnl`, `backtest paper`, `backtest sweep`) require an explicit `-s strategy_name` flag. They do not auto-discover strategies from the current directory like `strat run` does.
+- **Percentage fields**: `total_return_pct` and similar `_pct` result fields are decimal fractions (0.33 = 33%), not percentages.
 
 <!-- almanak-sdk-end: backtesting -->
 
@@ -820,10 +887,9 @@ almanak strat run --dashboard         # Launch live monitoring dashboard
 ### Backtesting
 
 ```bash
-almanak strat backtest pnl            # Historical PnL simulation
-almanak strat backtest paper          # Paper trading on Anvil fork
-almanak strat backtest sweep          # Parameter sweep optimization
-almanak strat backtest block          # Block-based backtest (legacy)
+almanak strat backtest pnl -s my_strategy            # Historical PnL simulation
+almanak strat backtest paper -s my_strategy            # Paper trading on Anvil fork
+almanak strat backtest sweep -s my_strategy           # Parameter sweep optimization
 ```
 
 ### Teardown
@@ -903,15 +969,17 @@ almanak docs agent-skill --dump       # Print agent skill content
 | Vault | `VAULT` | ERC-4626 | `vault` |
 | Curve | `CURVE` | DEX / LP | `curve` |
 | Balancer | `BALANCER` | DEX / LP | `balancer` |
-| Aave V3 | - | Lending | `aave_v3` |
-| Morpho Blue | - | Lending | `morpho_blue` |
-| Compound V3 | - | Lending | `compound_v3` |
-| GMX V2 | - | Perps | `gmx_v2` |
-| Hyperliquid | - | Perps | `hyperliquid` |
-| Polymarket | - | Prediction | `polymarket` |
-| Kraken | - | CEX | `kraken` |
-| Lido | - | Staking | `lido` |
-| Lagoon | - | Vault | `lagoon` |
+| Aave V3 | * | Lending | `aave_v3` |
+| Morpho Blue | * | Lending | `morpho_blue` |
+| Compound V3 | * | Lending | `compound_v3` |
+| GMX V2 | * | Perps | `gmx_v2` |
+| Hyperliquid | * | Perps | `hyperliquid` |
+| Polymarket | * | Prediction | `polymarket` |
+| Kraken | * | CEX | `kraken` |
+| Lido | * | Staking | `lido` |
+| Lagoon | * | Vault | `lagoon` |
+
+\* These protocols do not have a `Protocol` enum value. Use the string config name (e.g., `protocol="aave_v3"`) in intents. They are resolved by the intent compiler and transaction builder directly.
 
 ### Networks
 
@@ -920,6 +988,18 @@ almanak docs agent-skill --dump       # Print agent skill content
 | Mainnet | `MAINNET` | Production chains |
 | Anvil | `ANVIL` | Local fork for testing |
 | Sepolia | `SEPOLIA` | Testnet |
+
+### Protocol-Specific Notes
+
+**GMX V2 (Perpetuals)**
+
+- **Market format**: Use slash separator: `"BTC/USD"`, `"ETH/USD"`, `"LINK/USD"` (not dash).
+- **Two-step execution**: GMX V2 uses a keeper-based execution model. When you call `Intent.perp_open()`, the SDK submits an order creation transaction. A GMX keeper then executes the actual position change in a separate transaction. `on_intent_executed(success=True)` fires when the order creation TX confirms, **not** when the keeper executes the position. Strategies should poll position state before relying on it.
+- **Minimum position size**: GMX V2 enforces a minimum position size of approximately $11 net of fees. Orders below this threshold are silently rejected by the keeper with no on-chain error.
+- **Collateral approvals**: Handled automatically by the intent compiler (same as LP opens).
+- **Position monitoring**: `get_all_positions()` may not return positions immediately after opening due to keeper delay. Allow a few seconds before querying.
+- **Supported chains**: Arbitrum, Avalanche.
+- **Collateral tokens**: USDC, USDT (chain-dependent).
 
 <!-- almanak-sdk-end: supported-protocols -->
 
@@ -1156,6 +1236,23 @@ class MyStrategy(IntentStrategy):
 
 <!-- almanak-sdk-end: common-patterns -->
 
+<!-- almanak-sdk-start: going-live -->
+
+## Going Live Checklist
+
+Before deploying to mainnet:
+
+- [ ] Test on Anvil with `--network anvil --once` until `decide()` works correctly
+- [ ] Run `--dry-run --once` on mainnet to verify compilation without submitting transactions
+- [ ] Use `amount=` (token units) for swaps if `amount_usd=` causes reverts (see swap reference above)
+- [ ] Override `get_persistent_state()` / `load_persistent_state()` if your strategy tracks positions or phase state
+- [ ] Verify token approvals for all protocols used (auto-handled for most, but verify on first run)
+- [ ] Fund wallet on the correct chain with sufficient tokens plus gas (ETH/AVAX/MATIC)
+- [ ] Note your instance ID after first successful iteration (needed for `--id` resume)
+- [ ] Start with small amounts and monitor the first few iterations
+
+<!-- almanak-sdk-end: going-live -->
+
 <!-- almanak-sdk-start: troubleshooting -->
 
 ## Troubleshooting
@@ -1180,6 +1277,6 @@ class MyStrategy(IntentStrategy):
 - Use `--dry-run` to test decide() without submitting transactions
 - Use `--log-file out.json` for machine-readable JSON logs
 - Check strategy state: `self.state` persists between iterations
-- Paper trade first: `almanak strat backtest paper` runs real execution on Anvil
+- Paper trade first: `almanak strat backtest paper -s my_strategy` runs real execution on Anvil
 
 <!-- almanak-sdk-end: troubleshooting -->

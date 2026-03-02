@@ -136,6 +136,15 @@ almanak strat run --once
 
 See [Environment Variables](environment-variables.md) for the full list of configuration options including protocol-specific API keys.
 
+!!! info "Before going live"
+    - Always run `--dry-run --once` before your first live execution to verify intent compilation
+      without submitting transactions.
+    - If swaps revert with "Too little received", switch from `amount_usd=` to `amount=` (token
+      units). `amount_usd=` relies on the gateway price oracle for USD-to-token conversion, which
+      may diverge from the DEX price.
+    - Start with small amounts, monitor the first few iterations, and note your instance ID for
+      `--id` resume.
+
 ## Strategy Structure
 
 A strategy implements the `decide()` method, which receives a `MarketSnapshot` and returns an `Intent`:
@@ -183,6 +192,11 @@ class MyStrategy(IntentStrategy):
 | `VaultRedeemIntent` | Redeem from a vault |
 | `BridgeIntent` | Bridge tokens cross-chain |
 | `EnsureBalanceIntent` | Meta-intent that resolves to a `BridgeIntent` or `HoldIntent` to ensure minimum token balance on a target chain |
+
+!!! note "Backtest CLI"
+    Unlike `almanak strat run` which auto-discovers the strategy from the current directory,
+    backtest commands require an explicit strategy name: `almanak strat backtest pnl -s my_strategy`.
+    Use `--list-strategies` to see available strategies.
 
 ## Next Steps
 
