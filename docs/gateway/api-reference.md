@@ -342,14 +342,6 @@ message RecordTimelineEventResponse {
 }
 ```
 
-### RecordTimelineEvent
-
-Record a timeline event for strategy execution history.
-
-```protobuf
-rpc RecordTimelineEvent(RecordTimelineEventRequest) returns (RecordTimelineEventResponse)
-```
-
 ## RpcService
 
 ### Call

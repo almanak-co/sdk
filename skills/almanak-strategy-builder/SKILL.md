@@ -380,6 +380,23 @@ Intent.prediction_sell(protocol="polymarket", market="...", amount_shares=Decima
 Intent.prediction_redeem(protocol="polymarket", market="...")
 ```
 
+### Cross-Chain
+
+**Intent.ensure_balance** - Meta-intent that resolves to a `BridgeIntent` (if balance is insufficient) or `HoldIntent` (if already met). Call `.resolve(market)` before returning from `decide()`.
+
+```python
+intent = Intent.ensure_balance(
+    token="USDC",
+    min_amount=Decimal("1000"),
+    target_chain="arbitrum",
+    max_slippage=Decimal("0.005"),
+    preferred_bridge=None,
+)
+# Must resolve before returning - returns BridgeIntent or HoldIntent
+resolved = intent.resolve(market)
+return resolved
+```
+
 ### Control Flow
 
 **Intent.hold** - Do nothing this iteration
@@ -424,6 +441,14 @@ The `MarketSnapshot` passed to `decide()` provides these methods:
 ```python
 price = market.price("WETH")                    # Decimal, USD price
 price = market.price("WETH", quote="USDC")      # Price in USDC terms
+
+pd = market.price_data("WETH")                  # PriceData object
+pd.price             # Decimal - current price
+pd.price_24h_ago     # Decimal
+pd.change_24h_pct    # Decimal
+pd.high_24h          # Decimal
+pd.low_24h           # Decimal
+pd.timestamp         # datetime
 ```
 
 ### Balances
@@ -480,47 +505,105 @@ ema = market.ema("WETH", period=12)
 # Both return MAData with: .value, .is_price_above, .is_price_below, .signal
 
 adx = market.adx("WETH", period=14)
-adx.adx             # Decimal (0-100)
-adx.plus_di         # Decimal
-adx.minus_di        # Decimal
-adx.is_strong_trend # bool (adx > 25)
-adx.is_uptrend      # bool
+adx.adx             # Decimal (0-100, trend strength)
+adx.plus_di          # Decimal (+DI)
+adx.minus_di         # Decimal (-DI)
+adx.is_strong_trend  # bool (adx >= 25)
+adx.is_uptrend       # bool (+DI > -DI)
+adx.is_downtrend     # bool (-DI > +DI)
 
 obv = market.obv("WETH")
-obv.obv             # Decimal
-obv.signal_line     # Decimal
-obv.is_bullish      # bool
+obv.obv              # Decimal (OBV value)
+obv.signal_line      # Decimal (SMA of OBV)
+obv.is_bullish       # bool (OBV > signal)
+obv.is_bearish       # bool (OBV < signal)
 
 cci = market.cci("WETH", period=20)
 cci.value            # Decimal
-cci.is_oversold      # bool (value < -100)
+cci.is_oversold      # bool (value <= -100)
+cci.is_overbought    # bool (value >= 100)
 
-ichimoku = market.ichimoku("WETH", timeframe="4h")
-# IchimokuData with tenkan_sen, kijun_sen, senkou_span_a/b, chikou_span
+ich = market.ichimoku("WETH")
+ich.tenkan_sen       # Decimal (conversion line)
+ich.kijun_sen        # Decimal (base line)
+ich.senkou_span_a    # Decimal (leading span A)
+ich.senkou_span_b    # Decimal (leading span B)
+ich.cloud_top        # Decimal
+ich.cloud_bottom     # Decimal
+ich.is_bullish_crossover  # bool (tenkan > kijun)
+ich.is_above_cloud   # bool
+ich.signal           # "BUY" | "SELL" | "HOLD"
 ```
 
-### Extended Price and Balance Data
+### Multi-Token Queries
 
 ```python
-# Full price data with 24h stats
-pd = market.price_data("WETH")
-pd.price             # Decimal - current price
-pd.price_24h_ago     # Decimal
-pd.change_24h_pct    # Decimal
-pd.high_24h          # Decimal
-pd.low_24h           # Decimal
+prices = market.prices(["WETH", "WBTC"])           # dict[str, Decimal]
+balances = market.balances(["USDC", "WETH"])        # dict[str, Decimal]
+usd_val = market.balance_usd("WETH")               # Decimal - USD value of holdings
+total = market.total_portfolio_usd()                # Decimal
+```
 
-# Quick USD balance for a token
-usd_val = market.balance_usd("WETH")  # Decimal - USD value of holdings
+### OHLCV Data
 
-# Total portfolio value across all tokens
-total = market.total_portfolio_usd()   # Decimal
+```python
+df = market.ohlcv("WETH", timeframe="1h", limit=100)  # pd.DataFrame
+# Columns: open, high, low, close, volume
+```
 
-# Wallet activity (for copy trading strategies)
-signals = market.wallet_activity(action_types=["SWAP", "LP_OPEN"])
+### Pool and DEX Data
 
-# Prediction market price
-pred_price = market.prediction_price("polymarket", "market_id")
+```python
+pool = market.pool_price("0x...")                   # DataEnvelope[PoolPrice]
+pool = market.pool_price_by_pair("WETH", "USDC")   # DataEnvelope[PoolPrice]
+reserves = market.pool_reserves("0x...")            # PoolReserves
+history = market.pool_history("0x...", resolution="1h")  # DataEnvelope[list[PoolSnapshot]]
+analytics = market.pool_analytics("0x...")          # DataEnvelope[PoolAnalytics]
+best = market.best_pool("WETH", "USDC", metric="fee_apr")  # DataEnvelope[PoolAnalyticsResult]
+```
+
+### Price Aggregation and Slippage
+
+```python
+twap = market.twap("WETH/USDC", window_seconds=300)       # DataEnvelope[AggregatedPrice]
+lwap = market.lwap("WETH/USDC")                           # DataEnvelope[AggregatedPrice]
+depth = market.liquidity_depth("0x...")                    # DataEnvelope[LiquidityDepth]
+slip = market.estimate_slippage("WETH", "USDC", Decimal("10000"))  # DataEnvelope[SlippageEstimate]
+best_dex = market.best_dex_price("WETH", "USDC", Decimal("1"))    # BestDexResult
+```
+
+### Lending and Funding Rates
+
+```python
+rate = market.lending_rate("aave_v3", "USDC", side="supply")   # LendingRate
+best = market.best_lending_rate("USDC", side="supply")         # BestRateResult
+fr = market.funding_rate("binance", "ETH-PERP")               # FundingRate
+spread = market.funding_rate_spread("ETH-PERP", "binance", "hyperliquid")  # FundingRateSpread
+```
+
+### Impermanent Loss
+
+```python
+il = market.il_exposure("position_id", fees_earned=Decimal("50"))  # ILExposure
+proj = market.projected_il("WETH", "USDC", price_change_pct=Decimal("0.1"))  # ProjectedILResult
+```
+
+### Prediction Markets
+
+```python
+mkt = market.prediction("market_id")                    # PredictionMarket
+price = market.prediction_price("market_id", "YES")     # Decimal
+positions = market.prediction_positions("market_id")     # list[PredictionPosition]
+orders = market.prediction_orders("market_id")           # list[PredictionOrder]
+```
+
+### Yield and Analytics
+
+```python
+yields = market.yield_opportunities("USDC", min_tvl=100_000, sort_by="apy")  # DataEnvelope[list[YieldOpportunity]]
+gas = market.gas_price()                                # GasPrice
+health = market.health()                                # HealthReport
+signals = market.wallet_activity(action_types=["SWAP", "LP_OPEN"])  # list
 ```
 
 ### Context Properties
@@ -820,6 +903,15 @@ almanak docs agent-skill --dump       # Print agent skill content
 | Vault | `VAULT` | ERC-4626 | `vault` |
 | Curve | `CURVE` | DEX / LP | `curve` |
 | Balancer | `BALANCER` | DEX / LP | `balancer` |
+| Aave V3 | - | Lending | `aave_v3` |
+| Morpho Blue | - | Lending | `morpho_blue` |
+| Compound V3 | - | Lending | `compound_v3` |
+| GMX V2 | - | Perps | `gmx_v2` |
+| Hyperliquid | - | Perps | `hyperliquid` |
+| Polymarket | - | Prediction | `polymarket` |
+| Kraken | - | CEX | `kraken` |
+| Lido | - | Staking | `lido` |
+| Lagoon | - | Vault | `lagoon` |
 
 ### Networks
 

@@ -181,6 +181,8 @@ class MyStrategy(IntentStrategy):
 | `PredictionRedeemIntent` | 赎回预测市场收益 |
 | `VaultDepositIntent` | 存入金库 |
 | `VaultRedeemIntent` | 从金库赎回 |
+| `BridgeIntent` | 跨链桥接代币 |
+| `EnsureBalanceIntent` | 元意图，解析为 `BridgeIntent` 或 `HoldIntent`，确保目标链上的最低代币余额 |
 
 ## 下一步
 

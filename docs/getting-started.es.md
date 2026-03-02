@@ -181,6 +181,8 @@ class MyStrategy(IntentStrategy):
 | `PredictionRedeemIntent` | Canjear ganancias de mercado de predicción |
 | `VaultDepositIntent` | Depositar en una bóveda |
 | `VaultRedeemIntent` | Canjear desde una bóveda |
+| `BridgeIntent` | Transferir tokens entre cadenas |
+| `EnsureBalanceIntent` | Meta-intent que se resuelve a un `BridgeIntent` o `HoldIntent` para asegurar un saldo mínimo de tokens en una cadena destino |
 
 ## Próximos pasos
 
