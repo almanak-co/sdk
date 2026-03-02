@@ -12,6 +12,7 @@ This module provides common infrastructure for all per-chain Intent tests:
 import os
 import time
 import weakref
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
@@ -40,6 +41,12 @@ TEST_SUBMITTER_MAX_RETRIES = int(os.environ.get("ALMANAK_TEST_SUBMITTER_MAX_RETR
 
 # requests-style (connect, read) timeouts for sync Web3 HTTPProvider
 TEST_WEB3_REQUEST_TIMEOUT = (TEST_RPC_CONNECT_TIMEOUT_SECONDS, TEST_RPC_READ_TIMEOUT_SECONDS)
+
+# Fixed Anvil recovery policy for intent tests
+TEST_ANVIL_RECOVERY_MAX_RESTARTS = 2
+TEST_ANVIL_RECOVERY_SETTLE_SECONDS = 0.5
+TEST_ANVIL_RECOVERY_PROBE_TIMEOUT_SECONDS = 3.0
+TEST_ANVIL_PROBE_SENTINEL_WALLET = "0x000000000000000000000000000000000000dEaD"
 
 # =============================================================================
 # Constants
@@ -368,12 +375,135 @@ def configure_web3_default_http_timeout():
         web3_http.DEFAULT_HTTP_TIMEOUT = original
 
 
+def make_intent_test_web3(rpc_url: str) -> Web3:
+    """Create a Web3 HTTP provider using intent-test timeout defaults."""
+    return Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": TEST_WEB3_REQUEST_TIMEOUT}))
+
+
+def _is_timeout_chain_error(error: BaseException) -> bool:
+    """Return True if error/cause chain indicates an RPC timeout."""
+    current: BaseException | None = error
+    visited: set[int] = set()
+
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, TimeoutError | requests.exceptions.Timeout):
+            return True
+        message = str(current).lower()
+        if "read timed out" in message or "timed out" in message:
+            return True
+        current = current.__cause__ or current.__context__
+
+    return False
+
+
+def _rpc_response_success(response: Any) -> bool:
+    """Return True when a JSON-RPC response does not contain an error."""
+    if isinstance(response, dict):
+        return "error" not in response
+    return True
+
+
+def _probe_anvil_admin_rpc(rpc_url: str) -> bool:
+    """Probe admin RPC methods required by intent fixture seeding.
+
+    A healthy fork for our setup path must answer both anvil_setBalance and
+    evm_mine, not just eth_chainId/eth_blockNumber.
+    """
+    probe_timeout = (
+        min(TEST_RPC_CONNECT_TIMEOUT_SECONDS, TEST_ANVIL_RECOVERY_PROBE_TIMEOUT_SECONDS),
+        TEST_ANVIL_RECOVERY_PROBE_TIMEOUT_SECONDS,
+    )
+    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": probe_timeout}))
+    if not w3.is_connected():
+        return False
+
+    set_balance_resp = w3.provider.make_request("anvil_setBalance", [TEST_ANVIL_PROBE_SENTINEL_WALLET, "0x0"])
+    if not _rpc_response_success(set_balance_resp):
+        return False
+
+    mine_resp = w3.provider.make_request("evm_mine", [])
+    return _rpc_response_success(mine_resp)
+
+
+def _force_restart_anvil(anvil_instance: Any, chain_name: str, attempt: int) -> tuple[bool, str]:
+    """Force-restart an Anvil fixture and verify admin RPC readiness."""
+    restart = getattr(anvil_instance, "restart", None)
+    get_rpc_url = getattr(anvil_instance, "get_rpc_url", None)
+
+    if not callable(restart) or not callable(get_rpc_url):
+        print(f"WARNING: {chain_name} recovery attempt {attempt}: missing restart/get_rpc_url on fixture")
+        return (False, "")
+
+    print(f"WARNING: {chain_name} recovery attempt {attempt}/{TEST_ANVIL_RECOVERY_MAX_RESTARTS}: forcing Anvil restart")
+    restarted = restart(health_timeout_seconds=TEST_RPC_CONNECT_TIMEOUT_SECONDS)
+    if not restarted:
+        print(f"WARNING: {chain_name} recovery attempt {attempt}: Anvil restart failed")
+        return (False, "")
+
+    time.sleep(TEST_ANVIL_RECOVERY_SETTLE_SECONDS)
+    recovered_rpc_url = get_rpc_url()
+    try:
+        admin_ready = _probe_anvil_admin_rpc(recovered_rpc_url)
+    except Exception as e:
+        print(f"WARNING: {chain_name} recovery attempt {attempt}: admin RPC probe raised {type(e).__name__}: {e}")
+        return (False, recovered_rpc_url)
+
+    if not admin_ready:
+        print(f"WARNING: {chain_name} recovery attempt {attempt}: admin RPC probe failed at {recovered_rpc_url}")
+        return (False, recovered_rpc_url)
+
+    print(f"WARNING: {chain_name} recovery attempt {attempt}: restart+probe succeeded at {recovered_rpc_url}")
+    return (True, recovered_rpc_url)
+
+
+def seed_wallet_state_with_recovery(
+    *,
+    seed_wallet_state: Callable[[Web3, str], str],
+    web3: Web3,
+    rpc_url: str,
+    anvil_instance: Any,
+    chain_name: str,
+) -> str:
+    """Seed wallet state with forced restart recovery on local Anvil timeout."""
+    active_web3 = web3
+    active_rpc_url = rpc_url
+    last_timeout_error: Exception | None = None
+
+    for attempt in range(TEST_ANVIL_RECOVERY_MAX_RESTARTS + 1):
+        try:
+            return seed_wallet_state(active_web3, active_rpc_url)
+        except Exception as e:
+            if not _is_timeout_chain_error(e):
+                raise
+            last_timeout_error = e
+
+            if attempt >= TEST_ANVIL_RECOVERY_MAX_RESTARTS:
+                break
+
+            restart_attempt = attempt + 1
+            restarted, recovered_rpc_url = _force_restart_anvil(anvil_instance, chain_name, restart_attempt)
+            if not restarted:
+                continue
+
+            active_rpc_url = recovered_rpc_url
+            active_web3 = make_intent_test_web3(active_rpc_url)
+
+    if last_timeout_error is None:
+        raise RuntimeError(f"{chain_name} Anvil recovery failed without timeout error context")
+
+    raise RuntimeError(
+        f"{chain_name} Anvil wallet seed failed after {TEST_ANVIL_RECOVERY_MAX_RESTARTS} forced restart attempts "
+        f"(rpc_url={active_rpc_url}, last_error={type(last_timeout_error).__name__}: {last_timeout_error})"
+    ) from last_timeout_error
+
+
 def get_latest_block(rpc_url: str) -> int:
     """Get the latest block number from an RPC endpoint.
 
     Uses in-process Web3 provider instead of subprocess (cast).
     """
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": TEST_WEB3_REQUEST_TIMEOUT}))
+    w3 = make_intent_test_web3(rpc_url)
     return w3.eth.block_number
 
 
@@ -391,7 +521,12 @@ def fund_native_token(wallet: str, amount_wei: int, rpc_url: str) -> None:
 
     Uses in-process Web3 provider RPC instead of subprocess (cast).
     """
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": TEST_WEB3_REQUEST_TIMEOUT}))
+    w3 = make_intent_test_web3(rpc_url)
+    checksum_wallet = Web3.to_checksum_address(wallet)
+    current_balance = w3.eth.get_balance(checksum_wallet)
+    if current_balance >= amount_wei:
+        return
+
     amount_hex = hex(amount_wei)
     w3.provider.make_request("anvil_setBalance", [wallet, amount_hex])
 
@@ -425,7 +560,7 @@ def fund_erc20_token(
 
     Uses in-process Web3 provider and keccak256 instead of subprocess (cast).
     """
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": TEST_WEB3_REQUEST_TIMEOUT}))
+    w3 = make_intent_test_web3(rpc_url)
 
     # Calculate storage slot in-process (replaces `cast index`)
     storage_slot = _calculate_mapping_slot(wallet, balance_slot)
@@ -497,7 +632,7 @@ def _wrap_native_token(wallet: str, weth_address: str, amount: int, rpc_url: str
     This is more reliable than storage slot manipulation because WETH
     storage layouts can vary across chains and implementations.
     """
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": TEST_WEB3_REQUEST_TIMEOUT}))
+    w3 = make_intent_test_web3(rpc_url)
     checksum_wallet = Web3.to_checksum_address(wallet)
     checksum_weth = Web3.to_checksum_address(weth_address)
 
@@ -685,11 +820,13 @@ def _attempt_recovery(request: pytest.FixtureRequest, web3_instance: Any, key: t
         return False
 
     try:
-        if not hasattr(anvil, "ensure_healthy"):
-            print("WARNING: Recovery unavailable (anvil_instance has no ensure_healthy)")
-            return False
-
-        if not anvil.ensure_healthy():
+        chain_name = str(getattr(anvil, "chain", key[0]))
+        recovered = False
+        for attempt in range(1, TEST_ANVIL_RECOVERY_MAX_RESTARTS + 1):
+            recovered, _ = _force_restart_anvil(anvil, chain_name, attempt)
+            if recovered:
+                break
+        if not recovered:
             print("WARNING: Fork restart failed during recovery")
             return False
 
@@ -710,7 +847,9 @@ def _attempt_recovery(request: pytest.FixtureRequest, web3_instance: Any, key: t
             return False
 
         # Capture new baseline after restart + reseed
-        new_baseline = _capture_baseline(web3_instance)
+        recovered_rpc_url = anvil.get_rpc_url()
+        recovered_web3 = make_intent_test_web3(recovered_rpc_url)
+        new_baseline = _capture_baseline(recovered_web3)
         if new_baseline is not None:
             _module_baselines[key] = new_baseline
             print(f"  [baseline] Recovery successful, new baseline {new_baseline}")

@@ -6,11 +6,11 @@ Uses gateway's Anvil fixtures to avoid duplicate fork instances.
 import pytest
 from web3 import Web3
 
-from tests.conftest_gateway import AnvilFixture
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.execution.signer import LocalKeySigner
 from almanak.framework.execution.simulator import DirectSimulator
 from almanak.framework.execution.submitter import PublicMempoolSubmitter
+from tests.conftest_gateway import AnvilFixture
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     TEST_PRIVATE_KEY,
@@ -22,6 +22,8 @@ from tests.intents.conftest import (
     fund_erc20_token,
     fund_native_token,
     get_token_decimals,
+    make_intent_test_web3,
+    seed_wallet_state_with_recovery,
 )
 
 CHAIN_NAME = "optimism"
@@ -83,17 +85,24 @@ def test_private_key() -> str:
 
 
 @pytest.fixture(scope="module")
-def funded_wallet(web3: Web3, anvil_rpc_url: str) -> str:
+def funded_wallet(web3: Web3, anvil_rpc_url: str, anvil_instance: AnvilFixture) -> str:
     """Fund the test wallet with native token and common ERC20s."""
-    return _seed_wallet_state(web3, anvil_rpc_url)
+    return seed_wallet_state_with_recovery(
+        seed_wallet_state=_seed_wallet_state,
+        web3=web3,
+        rpc_url=anvil_rpc_url,
+        anvil_instance=anvil_instance,
+        chain_name=CHAIN_NAME,
+    )
 
 
 @pytest.fixture(scope="module")
-def reseed_wallet_state(web3: Web3, anvil_instance: AnvilFixture):
+def reseed_wallet_state(anvil_instance: AnvilFixture):
     """Return a callable that re-seeds balances on demand (for fork recovery)."""
 
     def _reseed() -> str:
-        return _seed_wallet_state(web3, anvil_instance.get_rpc_url())
+        rpc_url = anvil_instance.get_rpc_url()
+        return _seed_wallet_state(make_intent_test_web3(rpc_url), rpc_url)
 
     return _reseed
 

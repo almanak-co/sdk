@@ -293,6 +293,7 @@ class AnvilFixture:
             # Verify post-restart health via RPC probe
             if not self.health_check(timeout_seconds=health_timeout_seconds):
                 logger.error(f"Anvil restart completed but health check failed for {self.chain}")
+                self.stop()
                 return False
 
             logger.info(f"Anvil fixture restarted: chain={self.chain}, port={self.port}")

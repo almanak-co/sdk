@@ -624,8 +624,10 @@ class TestFundWalletWithMockedRpc:
 class TestRpcCallRawTimeout:
     """Tests for _rpc_call_raw with explicit timeout parameter."""
 
-    def test_default_timeout_values(self, rpc_url: str) -> None:
+    def test_default_timeout_values(self, rpc_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test that default timeout values are set correctly."""
+        monkeypatch.delenv("ALMANAK_FORK_RPC_TIMEOUT", raising=False)
+        monkeypatch.delenv("ALMANAK_FORK_HEALTH_TIMEOUT", raising=False)
         manager = RollingForkManager(rpc_url=rpc_url, chain="arbitrum")
         assert manager.rpc_timeout_seconds == 8.0
         assert manager.health_timeout_seconds == 2.0
