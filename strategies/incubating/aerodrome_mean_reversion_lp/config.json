@@ -1,0 +1,17 @@
+{
+    "chain": "base",
+    "pool": "WETH/USDC",
+    "stable": false,
+    "amount0": "0.001",
+    "amount1": "2",
+    "rsi_period": 14,
+    "rsi_timeframe": "1h",
+    "rsi_lower": 42,
+    "rsi_upper": 58,
+    "force_action": "",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

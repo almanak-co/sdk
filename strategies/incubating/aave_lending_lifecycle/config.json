@@ -1,0 +1,17 @@
+{
+    "strategy_id": "aave_lending_lifecycle",
+    "strategy_name": "aave_lending_lifecycle",
+    "description": "Aave V3 full lending lifecycle: supply -> borrow -> repay",
+    "collateral_token": "WETH",
+    "collateral_amount": "0.01",
+    "borrow_token": "USDC",
+    "ltv_target": 0.3,
+    "interest_rate_mode": "variable",
+    "force_action": "lifecycle",
+    "chain": "arbitrum",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

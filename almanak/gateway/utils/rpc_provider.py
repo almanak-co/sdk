@@ -218,10 +218,11 @@ def _get_custom_url(chain: str) -> str:
     )
 
 
-def _has_custom_url(chain: str) -> bool:
-    """Check if a custom RPC URL env var is set for this chain.
+def _has_chain_specific_url(chain: str) -> bool:
+    """Check if a chain-specific RPC URL env var is set.
 
-    Same precedence as _get_custom_url but returns bool without logging/error.
+    Only checks chain-specific vars (ALMANAK_{CHAIN}_RPC_URL, {CHAIN}_RPC_URL).
+    Does NOT check generic catch-all vars (ALMANAK_RPC_URL, RPC_URL).
     """
     chain_upper = chain.upper()
     variants = [chain_upper]
@@ -236,12 +237,20 @@ def _has_custom_url(chain: str) -> bool:
         if os.environ.get(f"{variant}_RPC_URL"):
             return True
 
-    if os.environ.get("ALMANAK_RPC_URL"):
-        return True
-    if os.environ.get("RPC_URL"):
-        return True
-
     return False
+
+
+def _has_generic_url() -> bool:
+    """Check if a generic catch-all RPC URL env var is set (ALMANAK_RPC_URL or RPC_URL)."""
+    return bool(os.environ.get("ALMANAK_RPC_URL") or os.environ.get("RPC_URL"))
+
+
+def _has_custom_url(chain: str) -> bool:
+    """Check if any custom RPC URL env var is set (chain-specific or generic).
+
+    Same precedence as _get_custom_url but returns bool without logging/error.
+    """
+    return _has_chain_specific_url(chain) or _has_generic_url()
 
 
 def get_rpc_url(
@@ -325,28 +334,46 @@ def _auto_select_provider(chain: str) -> NodeProvider:
     """Auto-select the best available provider for a chain.
 
     Priority:
-    1. Custom URL (if any custom RPC URL env var is set)
-    2. Alchemy (if ALCHEMY_API_KEY is set)
+    1. Chain-specific custom URL (e.g., BASE_RPC_URL, ALMANAK_BASE_RPC_URL)
+    2. Alchemy (if ALCHEMY_API_KEY is set and chain is supported)
     3. Tenderly (if chain-specific key is set)
-    4. Public RPC (free, no API key -- last resort)
-    5. Raise error
+    4. Generic catch-all URL (RPC_URL, ALMANAK_RPC_URL) -- with warning
+    5. Public RPC (free, no API key)
+    6. Raise error
+
+    IMPORTANT: Generic RPC_URL must NOT override Alchemy for supported chains.
+    A single RPC_URL pointing to Arbitrum would silently fork all chains from
+    Arbitrum state, causing silent wrong-chain execution.
     """
-    # Check custom URL env vars first
-    if _has_custom_url(chain):
+    # 1. Chain-specific custom URL (highest priority -- user explicitly set it for this chain)
+    if _has_chain_specific_url(chain):
         return NodeProvider.CUSTOM
 
-    # Check Alchemy
+    # 2. Alchemy (API key set, chain supported)
     if os.environ.get("ALCHEMY_API_KEY"):
         if chain in ALCHEMY_CHAIN_KEYS:
             return NodeProvider.ALCHEMY
 
-    # Check Tenderly
+    # 3. Tenderly
     tenderly_key_var = f"TENDERLY_API_KEY_{chain.upper()}"
     if os.environ.get(tenderly_key_var):
         if chain in TENDERLY_SUBDOMAINS:
             return NodeProvider.TENDERLY
 
-    # Fall back to free public RPC
+    # 4. Generic catch-all URL (RPC_URL, ALMANAK_RPC_URL)
+    # WARNING: This uses the same URL for ALL chains, which is almost certainly wrong
+    # for multi-chain setups. Log a warning so the user notices.
+    if _has_generic_url():
+        generic_var = "ALMANAK_RPC_URL" if os.environ.get("ALMANAK_RPC_URL") else "RPC_URL"
+        logger.warning(
+            f"Using generic {generic_var} for chain '{chain}'. "
+            f"This URL is shared across ALL chains -- if it points to a specific chain "
+            f"(e.g., Arbitrum), other chains will get wrong-chain state. "
+            f"Set {chain.upper()}_RPC_URL for chain-specific routing."
+        )
+        return NodeProvider.CUSTOM
+
+    # 5. Fall back to free public RPC
     if chain in PUBLIC_RPC_URLS:
         logger.info(f"No API key configured -- using free public RPC for {chain} (rate limits may apply)")
         return NodeProvider.PUBLIC

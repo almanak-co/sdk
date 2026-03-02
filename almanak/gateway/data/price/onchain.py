@@ -284,7 +284,7 @@ class OnChainPriceSource(BasePriceSource):
             token_to_pair[token_upper] = pair
 
             try:
-                resolved = self._token_resolver.resolve(token_upper, self._chain)
+                resolved = self._token_resolver.resolve(token_upper, self._chain, log_errors=False)
             except TokenResolutionError:
                 continue
 

@@ -1013,36 +1013,127 @@ class AerodromeReceiptParser:
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> "LPCloseData | None":
         """Extract LP close data from transaction receipt.
 
-        Looks for Burn events which indicate LP tokens being burned.
+        Primary path: extracts from Burn events (amount0, amount1).
+        Fallback path: extracts from Transfer events when Burn event is not
+        detected (some Aerodrome pool variants may not emit a standard Burn event,
+        but always emit Transfer events for the returned tokens).
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
 
         Returns:
-            LPCloseData dataclass if Burn event found, None otherwise
+            LPCloseData dataclass if token amounts found, None otherwise
         """
         from almanak.framework.execution.extracted_data import LPCloseData
 
         try:
             result = self.parse_receipt(receipt)
-            if not result.burn_events:
-                return None
 
-            # Sum up all burn events
-            total_amount0 = sum(b.amount0 for b in result.burn_events)
-            total_amount1 = sum(b.amount1 for b in result.burn_events)
+            # Primary: use Burn events
+            if result.burn_events:
+                total_amount0 = sum(b.amount0 for b in result.burn_events)
+                total_amount1 = sum(b.amount1 for b in result.burn_events)
 
-            return LPCloseData(
-                amount0_collected=total_amount0,
-                amount1_collected=total_amount1,
-                fees0=0,  # Aerodrome V1 doesn't separate fees
-                fees1=0,
-                liquidity_removed=None,  # LP tokens burned (could extract from Transfer)
-            )
+                return LPCloseData(
+                    amount0_collected=total_amount0,
+                    amount1_collected=total_amount1,
+                    fees0=0,  # Aerodrome V1 doesn't separate fees
+                    fees1=0,
+                    liquidity_removed=None,
+                )
+
+            # Fallback: use Transfer events for token returns.
+            # In a removeLiquidity TX, the pool transfers token0 and token1
+            # to the recipient. We identify these by:
+            # 1. Filtering out LP token burns (transfers to/from zero address)
+            # 2. Matching by known token0/token1 addresses if available
+            # 3. Otherwise grouping by token_address (contract that emitted Transfer)
+            if result.transfer_events:
+                lp_close = self._extract_lp_close_from_transfers(result.transfer_events)
+                if lp_close:
+                    logger.info("Extracted lp_close_data via Transfer fallback (no Burn event detected)")
+                    return lp_close
+
+            return None
 
         except Exception as e:
             logger.warning(f"Failed to extract lp_close_data: {e}")
             return None
+
+    def _extract_lp_close_from_transfers(self, transfer_events: list[TransferEventData]) -> "LPCloseData | None":
+        """Extract LP close data from Transfer events (fallback path).
+
+        In an Aerodrome removeLiquidity TX, the pool transfers token0 and
+        token1 to the recipient. LP token burns go to the zero address.
+
+        Strategy:
+        - Path A: If token0/token1 addresses are known, find the final transfer
+          of each token to a non-zero recipient. Uses only the last transfer per
+          token to avoid double-counting from router hops.
+        - Path B: Group transfers by recipient, then find a recipient who received
+          2+ distinct tokens (the actual liquidity recipient). This avoids
+          misidentifying LP token transfers or router intermediaries.
+
+        Args:
+            transfer_events: List of Transfer events from the receipt
+
+        Returns:
+            LPCloseData if token amounts found, None otherwise
+        """
+        from almanak.framework.execution.extracted_data import LPCloseData
+
+        zero_addr = "0x0000000000000000000000000000000000000000"
+
+        # Path A: match by known token addresses, take last transfer per token
+        if self.token0_address and self.token1_address:
+            amount0 = 0
+            amount1 = 0
+            for t in transfer_events:
+                addr = t.token_address.lower()
+                to = t.to_addr.lower()
+                frm = t.from_addr.lower()
+                # Skip burns and mints (to/from zero)
+                if to == zero_addr or frm == zero_addr:
+                    continue
+                if addr == self.token0_address:
+                    amount0 = t.value  # last write wins, avoiding router double-count
+                elif addr == self.token1_address:
+                    amount1 = t.value
+            if amount0 > 0 or amount1 > 0:
+                return LPCloseData(
+                    amount0_collected=amount0,
+                    amount1_collected=amount1,
+                    fees0=0,
+                    fees1=0,
+                    liquidity_removed=None,
+                )
+
+        # Path B: group by recipient, find one who received 2+ distinct tokens
+        token_amounts_by_recipient: dict[str, dict[str, int]] = {}
+        for t in transfer_events:
+            to = t.to_addr.lower()
+            frm = t.from_addr.lower()
+            # Skip LP token burns (to zero) and mints (from zero)
+            if to == zero_addr or frm == zero_addr:
+                continue
+            token_addr = t.token_address.lower()
+            if to not in token_amounts_by_recipient:
+                token_amounts_by_recipient[to] = {}
+            token_amounts_by_recipient[to][token_addr] = token_amounts_by_recipient[to].get(token_addr, 0) + t.value
+
+        # Find a recipient who received 2+ types of tokens (the LP closer)
+        for token_amounts in token_amounts_by_recipient.values():
+            if len(token_amounts) >= 2:
+                amounts = sorted(token_amounts.values(), reverse=True)
+                return LPCloseData(
+                    amount0_collected=amounts[0],
+                    amount1_collected=amounts[1],
+                    fees0=0,
+                    fees1=0,
+                    liquidity_removed=None,
+                )
+
+        return None
 
     def extract_liquidity(self, receipt: dict[str, Any]) -> int | None:
         """Extract liquidity from LP mint transaction receipt.

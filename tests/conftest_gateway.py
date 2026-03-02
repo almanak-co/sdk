@@ -41,7 +41,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.backtesting.paper.fork_manager import RollingForkManager
+from almanak.framework.anvil.fork_manager import RollingForkManager
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
 from almanak.framework.web3 import get_gateway_web3
 from almanak.gateway.core.settings import GatewaySettings

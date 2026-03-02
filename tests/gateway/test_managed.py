@@ -249,7 +249,7 @@ class TestManagedGatewayExternalAnvil:
 
         with (
             patch("almanak.gateway.managed.is_port_in_use", return_value=True),
-            patch("almanak.framework.backtesting.paper.fork_manager.RollingForkManager", return_value=mock_manager),
+            patch("almanak.framework.anvil.fork_manager.RollingForkManager", return_value=mock_manager),
             patch("almanak.gateway.utils.rpc_provider.get_rpc_url", return_value="http://mock"),
             patch("shutil.which", return_value="/usr/bin/anvil"),
         ):

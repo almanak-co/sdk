@@ -1657,8 +1657,10 @@ def run(
                         # Convert numeric values to Decimal where needed
                         type_hints = get_type_hints(config_class)
                         converted_config: dict[str, Any] = {}
-                        # Track fields that are NOT in the dataclass (excluding runtime fields)
+                        # Track fields that are NOT in the dataclass (excluding runtime + framework meta-keys)
                         runtime_fields = {"strategy_id", "chain", "wallet_address"}
+                        # Meta-keys consumed by the CLI/framework, not by strategy config classes
+                        framework_meta_keys = {"anvil_funding", "strategy_display_name"}
                         unknown_fields = []
                         for k, v in strategy_config.items():
                             if k in config_class.__dataclass_fields__:
@@ -1671,7 +1673,7 @@ def run(
                                         converted_config[k] = v
                                 else:
                                     converted_config[k] = v
-                            elif k not in runtime_fields:
+                            elif k not in runtime_fields and k not in framework_meta_keys:
                                 unknown_fields.append(k)
 
                         # Use dataclass config, filtering out unknown fields

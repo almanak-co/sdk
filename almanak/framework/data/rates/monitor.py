@@ -84,6 +84,24 @@ RAY = Decimal("1000000000000000000000000000")
 # Seconds per year for APY calculations
 SECONDS_PER_YEAR = 365 * 24 * 60 * 60
 
+# =============================================================================
+# Aave V3 On-Chain Constants
+# =============================================================================
+
+# Function selector for AaveProtocolDataProvider.getReserveData(address)
+# Computed: keccak256("getReserveData(address)")[:4].hex() == "35ea6a75"
+_AAVE_V3_GET_RESERVE_DATA_SELECTOR = "35ea6a75"
+
+# Return value indices for AaveProtocolDataProvider.getReserveData()
+# Returns: (unbacked, accruedToTreasuryScaled, totalAToken, totalStableDebt,
+#           totalVariableDebt, liquidityRate, variableBorrowRate, stableBorrowRate,
+#           averageStableBorrowRate, liquidityIndex, variableBorrowIndex, lastUpdateTimestamp)
+_AAVE_IDX_TOTAL_ATOKEN = 2  # totalAToken (for utilization numerator)
+_AAVE_IDX_TOTAL_VARIABLE_DEBT = 4  # totalVariableDebt (for utilization denominator)
+_AAVE_IDX_LIQUIDITY_RATE = 5  # currentLiquidityRate = supply APY in ray
+_AAVE_IDX_VARIABLE_BORROW_RATE = 6  # currentVariableBorrowRate = borrow APY in ray
+_AAVE_MIN_RESPONSE_WORDS = 7  # Minimum words needed to read both rates
+
 
 # =============================================================================
 # Exceptions
@@ -604,9 +622,9 @@ class RateMonitor:
     ) -> LendingRate:
         """Fetch Aave V3 lending rate.
 
-        Aave V3 rates are stored in the pool's reserve data as ray units (1e27).
-        - liquidityRate: Current supply APY
-        - variableBorrowRate: Current variable borrow APY
+        Uses on-chain data via AaveProtocolDataProvider.getReserveData(asset) when
+        rpc_url is configured. Falls back to placeholder rates otherwise for
+        backward compatibility (e.g., in tests without a live RPC).
 
         Args:
             token: Token symbol
@@ -615,10 +633,127 @@ class RateMonitor:
         Returns:
             LendingRate with Aave V3 rate
         """
-        # In production, this would call the Aave Pool's getReserveData()
-        # For now, we use realistic default rates based on market conditions
+        if self._rpc_url:
+            return await self._fetch_aave_v3_rate_onchain(token, side)
+        return self._aave_v3_placeholder_rate(token, side)
 
-        # Default APYs (these would come from on-chain data)
+    async def _fetch_aave_v3_rate_onchain(self, token: str, side: str) -> LendingRate:
+        """Fetch live Aave V3 rate from AaveProtocolDataProvider via JSON-RPC eth_call.
+
+        Calls AaveProtocolDataProvider.getReserveData(asset) which returns:
+            (unbacked, accruedToTreasuryScaled, totalAToken, totalStableDebt,
+             totalVariableDebt, liquidityRate, variableBorrowRate, stableBorrowRate,
+             averageStableBorrowRate, liquidityIndex, variableBorrowIndex, lastUpdateTimestamp)
+
+        liquidityRate (index 5) = supply APY in ray (1e27)
+        variableBorrowRate (index 6) = borrow APY in ray (1e27)
+
+        Args:
+            token: Token symbol (must be in AAVE_V3_TOKENS for this chain)
+            side: supply or borrow
+
+        Returns:
+            LendingRate with real on-chain APY data
+
+        Raises:
+            TokenNotSupportedError: Token not in Aave V3 on this chain
+            RateUnavailableError: RPC call failed or returned unexpected data
+        """
+        import httpx
+
+        from almanak.core.contracts import AAVE_V3, AAVE_V3_TOKENS
+
+        # Resolve data provider address for this chain
+        chain_contracts = AAVE_V3.get(self._chain, {})
+        data_provider = chain_contracts.get("pool_data_provider")
+        if not data_provider:
+            raise RateUnavailableError(
+                "aave_v3", token, side, f"No Aave V3 data provider configured for chain {self._chain!r}"
+            )
+
+        # Resolve token address
+        chain_tokens = AAVE_V3_TOKENS.get(self._chain, {})
+        token_address = chain_tokens.get(token)
+        if not token_address:
+            raise TokenNotSupportedError(token, "aave_v3", self._chain)
+
+        # Encode eth_call: getReserveData(address)
+        # Data = 4-byte selector + 32-byte padded address
+        padded_addr = token_address[2:].lower().zfill(64)
+        calldata = f"0x{_AAVE_V3_GET_RESERVE_DATA_SELECTOR}{padded_addr}"
+
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "eth_call",
+            "params": [{"to": data_provider, "data": calldata}, "latest"],
+            "id": 1,
+        }
+
+        assert self._rpc_url is not None, "RPC URL required for on-chain rate fetch"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(self._rpc_url, json=payload)
+            response.raise_for_status()
+            rpc_result = response.json()
+
+        if "error" in rpc_result:
+            msg = rpc_result["error"].get("message", "RPC error")
+            raise RateUnavailableError("aave_v3", token, side, msg)
+
+        hex_data = rpc_result.get("result", "")
+        if not hex_data or hex_data == "0x":
+            raise TokenNotSupportedError(token, "aave_v3", self._chain)
+
+        # ABI-decode: each return value is padded to 32 bytes
+        raw = bytes.fromhex(hex_data[2:])
+        word_size = 32
+        words = [raw[i : i + word_size] for i in range(0, len(raw), word_size)]
+
+        if len(words) < _AAVE_MIN_RESPONSE_WORDS:
+            raise RateUnavailableError(
+                "aave_v3", token, side, f"Unexpected response: {len(words)} words (need {_AAVE_MIN_RESPONSE_WORDS})"
+            )
+
+        # Extract APY in ray units
+        if side == "supply":
+            apy_ray = Decimal(int.from_bytes(words[_AAVE_IDX_LIQUIDITY_RATE], "big"))
+        else:
+            apy_ray = Decimal(int.from_bytes(words[_AAVE_IDX_VARIABLE_BORROW_RATE], "big"))
+
+        # Convert ray -> percentage: percent = (ray / 1e27) * 100
+        apy_percent = apy_ray / RAY * Decimal("100")
+
+        # Compute utilization: totalVariableDebt / totalAToken
+        utilization: Decimal | None = None
+        total_atoken = Decimal(int.from_bytes(words[_AAVE_IDX_TOTAL_ATOKEN], "big"))
+        total_variable_debt = Decimal(int.from_bytes(words[_AAVE_IDX_TOTAL_VARIABLE_DEBT], "big"))
+        if total_atoken > 0:
+            utilization = total_variable_debt / total_atoken * Decimal("100")
+
+        logger.debug("Aave V3 %s %s on %s: %.4f%% (on-chain)", token, side, self._chain, float(apy_percent))
+
+        return LendingRate(
+            protocol="aave_v3",
+            token=token,
+            side=side,
+            apy_ray=apy_ray,
+            apy_percent=apy_percent,
+            utilization_percent=utilization,
+            chain=self._chain,
+        )
+
+    def _aave_v3_placeholder_rate(self, token: str, side: str) -> LendingRate:
+        """Return placeholder Aave V3 rate when no rpc_url is configured.
+
+        These are representative rates used in tests and environments without
+        a live RPC connection. Not suitable for production use.
+
+        Args:
+            token: Token symbol
+            side: supply or borrow
+
+        Returns:
+            LendingRate with placeholder APY
+        """
         default_supply_apys: dict[str, Decimal] = {
             "USDC": Decimal("4.25"),
             "USDT": Decimal("3.85"),
@@ -655,7 +790,7 @@ class RateMonitor:
             side=side,
             apy_ray=apy_percent * RAY / Decimal("100"),
             apy_percent=apy_percent,
-            utilization_percent=Decimal("72.5"),  # Typical utilization
+            utilization_percent=Decimal("72.5"),  # Representative utilization
             chain=self._chain,
         )
 

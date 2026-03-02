@@ -73,7 +73,7 @@ test-all:
 
 # Run all tests with coverage report
 test-coverage:
-	uv run pytest tests/ --ignore=tests/intents -v --import-mode=importlib \
+	uv run pytest tests/ -v --import-mode=importlib \
 		--cov=almanak --cov-report=html:coverage-html --cov-report=xml:coverage.xml --cov-report=term \
 		--junitxml=test-results.xml
 

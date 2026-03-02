@@ -818,6 +818,8 @@ almanak docs agent-skill --dump       # Print agent skill content
 | MetaMorpho | `METAMORPHO` | Lending | `metamorpho` |
 | LiFi | `LIFI` | Bridge | `lifi` |
 | Vault | `VAULT` | ERC-4626 | `vault` |
+| Curve | `CURVE` | DEX / LP | `curve` |
+| Balancer | `BALANCER` | DEX / LP | `balancer` |
 
 ### Networks
 

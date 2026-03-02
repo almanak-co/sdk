@@ -859,6 +859,13 @@ class IntentStateMachine:
         if "connection" in error_lower or "network" in error_lower:
             return "NETWORK_ERROR"
 
+        # Permanent configuration/support errors (non-retriable)
+        # These indicate missing protocol support, unsupported chains, etc.
+        # Placed last so transient errors (timeout, revert, network) are caught first.
+        permanent_keywords = ("not supported", "unsupported", "feature not available")
+        if any(kw in error_lower for kw in permanent_keywords):
+            return "COMPILATION_PERMANENT"
+
         return None
 
     def set_receipt(self, receipt: TransactionReceipt) -> None:

@@ -1,100 +1,105 @@
 # E2E Strategy Test Report: ethena_yield (Anvil)
 
-**Date:** 2026-02-22 20:50
-**Result:** PASS
+**Date:** 2026-02-27 15:59
+**Result:** PASS (stake path) / FAIL (swap path -- ENSO_API_KEY not set)
 **Mode:** Anvil
-**Duration:** ~2 minutes
+**Duration:** ~5 minutes
 
 ## Configuration
 
 | Field | Value |
 |-------|-------|
-| Strategy | ethena_yield |
+| Strategy | EthenaYieldStrategy (demo_ethena_yield) |
 | Chain | ethereum |
-| Network | Anvil fork (Ethereum mainnet) |
-| Anvil Port | 60470 (managed gateway auto-port) |
-| Wallet | 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 |
+| Network | Anvil fork (public RPC: https://ethereum-rpc.publicnode.com) |
+| Anvil Port | 62292 (managed, auto-assigned) |
+| Fork Block | 24549314 |
 
-### Config Values
+## Config Changes Made
 
-```json
-{
-    "min_stake_amount": "5",
-    "min_usdc_amount": "5",
-    "swap_usdc_to_usde": true,
-    "force_action": "swap",
-    "chain": "ethereum"
-}
-```
+| Field | Original | Changed To | Restored |
+|-------|----------|-----------|---------|
+| `force_action` | `"swap"` | `"stake"` | YES -- restored to `"swap"` after run |
 
-Config changes made: None. Trade size is 5 USDC (well under the $100 budget cap). `force_action: "swap"` was already set to trigger an immediate SWAP of 5 USDC -> USDe via Enso.
+**Reason for change:** The `force_action: "swap"` (USDC → USDe via Enso) is blocked by a missing `ENSO_API_KEY`. Changed to `"stake"` to validate the primary DeFi action (USDe → sUSDe deposit with Ethena). Config was restored to original value after the test.
 
 ## Execution
 
 ### Setup
-- Anvil fork of Ethereum mainnet started (chain_id=1 confirmed)
-- Managed gateway auto-started on port 50052
-- Wallet funded by managed gateway: 100 ETH, 10,000 USDC, 1 WETH
-- Strategy loaded persisted state (swapped=True, staked=True from a prior run), but `force_action: "swap"` bypassed state checks and forced a fresh swap
+- Managed gateway auto-started on port 50051 (network=anvil)
+- Anvil fork of Ethereum started on port 62292 (block 24549314, chain_id=1)
+- Wallet auto-funded by managed gateway via `anvil_funding` config:
+  - 100 ETH, 10,000 USDC (slot 9), 1 WETH (slot 3), 1,000 USDe (brute-force slot 2)
 
-### Strategy Run
+### Run 1: force_action=swap -- FAIL
 
-The strategy emitted a SWAP intent: 5 USDC -> USDe via Enso aggregator.
+- Intent: SWAP 5 USDC → USDe via Enso
+- Result: EXECUTION_FAILED (3 retries exhausted)
+- Error: `EnsoConfigError: Configuration Error: API key is required. Set ENSO_API_KEY env var`
+- No on-chain transactions submitted
 
-Enso route resolved successfully:
-- Route: `0xA0b86991...` (USDC) -> `0x4c9EDD58...` (USDe)
-- Amount out: 5.0056 USDe (min: 4.9805 USDe with 0.5% slippage)
-- Price impact: 0 bp
+### Run 2: force_action=stake -- PASS
 
-Two transactions submitted and confirmed:
+- Intent: STAKE 5 USDe → sUSDe via Ethena
+- Result: SUCCESS
+- On-chain transactions: 2 TXs confirmed (approve + deposit)
+- Total gas used: 134,881
 
-| # | Purpose | TX Hash | Block | Gas Used |
-|---|---------|---------|-------|----------|
-| 1 | Approve (USDC -> Permit2) | `927b6096ad83d624306237df50b4801102aadd7f315a3ec55dbaf4ad046328bb` | 24514915 | 55,558 |
-| 2 | Enso Swap (USDC -> USDe) | `57c288001ed9185cc47712e50d5fc27dc797acd668350acebf2076e46f7401bd` | 24514916 | 490,260 |
-
-**Total gas used: 545,818**
-
-### Key Log Output
-
+### Key Log Output (Run 2)
 ```text
-[info] Forced action: SWAP USDC -> USDe
-[info] SWAP intent: 5.0000 USDC -> USDe via Enso (slippage=0.5%)
-[info] EthenaYieldStrategy intent: SWAP: 5 USDC -> USDe (slippage: 0.50%) via enso
-[info] Getting Enso route: USDC -> USDE, amount=5000000
-[info] Route found: 0xA0b86991... -> 0x4c9EDD58..., amount_out=5005566999634751419, price_impact=0bp
-[info] Compiled SWAP (Enso): 5.0000 USDC -> 5.0056 USDE (min: 4.9805 USDE)
-[info] Transaction confirmed: tx_hash=927b60...28bb, block=24514915, gas_used=55558
-[info] Transaction confirmed: tx_hash=57c288...01bd, block=24514916, gas_used=490260
-[info] EXECUTED: SWAP completed successfully
-[info] Txs: 2 (927b60...28bb, 57c288...01bd) | 545,818 gas
-[info] Swap successful: 5 USDC -> USDe
-Status: SUCCESS | Intent: SWAP | Gas used: 545818 | Duration: 21648ms
+Forced action: STAKE USDe
+STAKE intent: 5.0000 USDe -> sUSDe
+EthenaAdapter initialized for chain=ethereum, wallet=0xf39Fd6e5...
+Compiled STAKE intent: 5 USDe via ethena, 2 txs, 200000 gas
+Simulation successful: 2 transaction(s), total gas: 211281
+Gas estimate tx[0]: raw=46,281 buffered=50,909 (x1.1)
+Gas estimate tx[1]: raw=165,000 buffered=181,500 (x1.1)
+Transaction submitted: tx_hash=82f629a2..., confirmed block=24549320, gas=46281
+Transaction submitted: tx_hash=b2390039..., confirmed block=24549321, gas=88600
+EXECUTED: STAKE completed successfully
+  Txs: 2 (82f629...6e5f, b23900...373e) | 134,881 gas
+Parsed Ethena receipt: tx=0xb2390039..., stakes=1, withdraws=0
+Enriched STAKE result with: stake_amount, shares_received (protocol=ethena, chain=ethereum)
+Staking successful: 5 USDe -> sUSDe
+Status: SUCCESS | Intent: STAKE | Gas used: 134881 | Duration: 26282ms
+Iteration completed successfully.
 ```
+
+## Transactions (Anvil -- not mainnet)
+
+| Step | TX Hash | Gas Used | Status |
+|------|---------|----------|--------|
+| TX 1: Approve USDe | `82f629a25a14271501b4836648a4002187b96731fc2c3057d89d1c4bea3f6e5f` | 46,281 | SUCCESS |
+| TX 2: Stake USDe → sUSDe | `b23900399c32f3b5d52a7e2e28c5f7c5ca0d6002b156922df06c255df5c1373e` | 88,600 | SUCCESS |
+
+*(Anvil local fork transactions -- no block explorer links)*
 
 ## Suspicious Behaviour
 
 | # | Source | Severity | Pattern | Log Line |
 |---|--------|----------|---------|----------|
-| 1 | strategy | INFO | Insecure mode (expected) | `INSECURE MODE: Auth interceptor disabled - no auth_token configured. This is acceptable for local development on 'anvil'.` |
-| 2 | strategy | INFO | CoinGecko free tier | `COINGECKO_API_KEY not configured - CoinGecko will use free tier API (30 requests/minute limit)` |
-| 3 | strategy | WARNING | Placeholder prices in compiler | `IntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT. This is only acceptable for unit tests.` |
-| 4 | strategy | WARNING | Amount chaining failure | `Amount chaining: no output amount extracted from step 1; subsequent amount='all' steps will fail` |
-| 5 | strategy | INFO | Port not freed timely | `Port 60470 not freed after 5.0s` |
+| 1 | strategy | ERROR | Enso API key missing (Run 1 only) | `Failed to compile Enso SWAP intent: Configuration Error: API key is required. Set ENSO_API_KEY env var or pass api_key. (Parameter: api_key)` |
+| 2 | strategy | WARNING | Placeholder prices in IntentCompiler | `IntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT. This is only acceptable for unit tests.` |
+| 3 | gateway | INFO | No public RPC API key (rate limits possible) | `No API key configured -- using free public RPC for ethereum (rate limits may apply)` |
+| 4 | gateway | INFO | No CoinGecko API key -- on-chain fallback | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback.` |
+| 5 | gateway | WARNING | 9 tokens not in Ethereum registry (Run 1 only) | `token_resolution_error token=BTC ... COMP ... MKR ... SNX ... LDO ... STETH ... CBETH ... RETH ... SOL chain=ethereum error_type=TokenNotFoundError` |
 
-**Finding analysis:**
+### Analysis
 
-- **Finding 1 (Insecure mode)**: Expected for Anvil testing. Not a bug.
-- **Finding 2 (CoinGecko free tier)**: Normal for local dev. Rate limit could cause intermittent failures in intensive batch testing but was not triggered here.
-- **Finding 3 (Placeholder prices)**: The IntentCompiler does not have real price data during compilation on Anvil, so slippage bounds are computed from placeholder values. In practice, Enso provides the real `amount_out`, so the actual swap route is correct. However, the slippage guard in the compiler is inaccurate. This is a known limitation in Anvil mode. Would be an ERROR in production if placeholder prices were used for real slippage enforcement.
-- **Finding 4 (Amount chaining)**: After the SWAP step completed, the framework could not extract the exact USDe output amount from the Enso swap receipt. If a subsequent intent used `amount='all'` USDe (e.g., to stake immediately after swapping), it would fail. This indicates the Enso receipt parser does not return `swap_amounts` in a way the runner can use for chaining. No impact on this single-step strategy run.
-- **Finding 5 (Port not freed)**: Minor infrastructure issue during shutdown. Not a strategy bug.
+- **Finding 1 (Enso API key)**: Hard blocker for `force_action: "swap"`. The USDC→USDe swap via Enso aggregator requires `ENSO_API_KEY`. Without it, all 3 retries fail immediately. The strategy's default config has swap as the primary action; this makes the full strategy flow non-functional without the key. No graceful fallback is implemented (e.g., fall back to staking existing USDe balance).
+- **Finding 2 (Placeholder prices)**: Expected in Anvil mode. No live Chainlink oracle feed on the fork when pricing context is not available. For the STAKE intent this is low-risk (no slippage parameter). For SWAP intents it would be a real issue.
+- **Finding 3-4 (Missing API keys)**: Expected for a bare `.env`. Public RPC and on-chain pricing fallbacks worked for the stake path.
+- **Finding 5 (Token registry gaps)**: Multiple well-known Ethereum tokens (BTC, COMP, MKR, SNX, LDO, STETH, CBETH, RETH, SOL) are missing from the static token registry for Ethereum. Raised during market service initialization. These are all real Ethereum tokens (WBTC, stETH, cbETH, rETH, etc.) that should be registered. BTC/SOL are non-Ethereum but the resolver should recognize them as non-EVM and return a clearer error.
+
+No zero prices, transaction reverts, or gas-related errors in the successful run.
 
 ## Result
 
-**PASS** - The ethena_yield strategy successfully executed a SWAP of 5 USDC -> ~5.006 USDe via the Enso aggregator on an Ethereum mainnet Anvil fork, submitting 2 on-chain transactions (approve + swap) totalling 545,818 gas.
+**PASS (stake path)** -- The Ethena STAKE intent (USDe → sUSDe deposit) executed successfully on Ethereum Anvil fork, confirming 2 transactions (134,881 gas). The receipt parser correctly extracted `stakes=1` and enriched the result with `stake_amount` and `shares_received`.
+
+**FAIL (swap path)** -- The `force_action: "swap"` (USDC → USDe via Enso) fails hard without `ENSO_API_KEY`. This is the default configured action, meaning the strategy is non-functional out-of-the-box unless `ENSO_API_KEY` is set or the user has a native USDe balance.
 
 ---
 
 SUSPICIOUS_BEHAVIOUR_COUNT: 5
-SUSPICIOUS_BEHAVIOUR_ERRORS: 0
+SUSPICIOUS_BEHAVIOUR_ERRORS: 1

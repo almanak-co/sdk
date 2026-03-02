@@ -21,6 +21,7 @@ Usage:
             pass
 """
 
+import dataclasses
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -546,11 +547,16 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
         self.persistent_state["config_version"] += 1
         version = self.persistent_state["config_version"]
 
-        # Handle plain dicts that don't have to_dict()
+        # Serialize config to dict, supporting multiple patterns:
+        # 1. Objects with to_dict() (Pydantic models, custom classes)
+        # 2. Plain dicts
+        # 3. @dataclass instances (idiomatic pattern for strategy configs)
         if hasattr(self.config, "to_dict"):
             config_dict = self.config.to_dict()
         elif isinstance(self.config, dict):
             config_dict = dict(self.config)
+        elif dataclasses.is_dataclass(self.config) and not isinstance(self.config, type):
+            config_dict = dataclasses.asdict(self.config)
         else:
             config_dict = {}
             logger.warning(
@@ -709,6 +715,40 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
             Current config version
         """
         return self.persistent_state.get("config_version", 0)
+
+    def get_config(self, key: str, default: Any = None) -> Any:
+        """Get a configuration value by key, regardless of config type.
+
+        Works transparently with:
+        - Plain ``dict`` configs (from tests or raw JSON)
+        - ``DictConfigWrapper`` objects (from the CLI)
+        - Dataclasses and Pydantic models (attribute access)
+
+        This eliminates the per-strategy boilerplate of checking
+        ``isinstance(self.config, dict)`` before every ``config.get()`` call.
+
+        Args:
+            key: Configuration key to retrieve
+            default: Value to return if the key is not found
+
+        Returns:
+            The configuration value, or ``default`` if not found
+
+        Example::
+
+            # In decide() -- no more boilerplate!
+            trade_size = self.get_config("trade_size_usd", "100")
+            rsi_period = self.get_config("rsi_period", 14)
+        """
+        if self.config is None:
+            return default
+        if isinstance(self.config, dict):
+            return self.config.get(key, default)
+        # DictConfigWrapper and other objects with a .get() method
+        if hasattr(self.config, "get"):
+            return self.config.get(key, default)
+        # Dataclasses, Pydantic models, and plain attribute objects
+        return getattr(self.config, key, default)
 
     def restore_config_from_snapshot(
         self,

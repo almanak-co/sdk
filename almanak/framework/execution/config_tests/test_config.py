@@ -421,6 +421,126 @@ class TestFromEnv:
                 LocalRuntimeConfig.from_env()
             assert "ALMANAK_MAX_GAS_PRICE_GWEI" in exc_info.value.field
 
+    # VIB-303: Chain-specific gas price cap defaults
+    # Note: load_dotenv is patched to prevent the real .env file from polluting test defaults.
+    def test_from_env_polygon_uses_500_gwei_default(self):
+        """Polygon should use 500 gwei by default (not 100)."""
+        env_vars = {
+            "ALMANAK_CHAIN": "polygon",
+            "ALMANAK_RPC_URL": "https://polygon-rpc.com",
+            "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
+        }
+        with patch("almanak.framework.execution.config.load_dotenv"):
+            with patch.dict(os.environ, env_vars, clear=True):
+                config = LocalRuntimeConfig.from_env()
+        assert config.max_gas_price_gwei == 500
+
+    def test_from_env_arbitrum_uses_10_gwei_default(self):
+        """Arbitrum should use 10 gwei by default (L2 is cheap)."""
+        env_vars = {
+            "ALMANAK_CHAIN": "arbitrum",
+            "ALMANAK_RPC_URL": "https://arb1.arbitrum.io/rpc",
+            "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
+        }
+        with patch("almanak.framework.execution.config.load_dotenv"):
+            with patch.dict(os.environ, env_vars, clear=True):
+                config = LocalRuntimeConfig.from_env()
+        assert config.max_gas_price_gwei == 10
+
+    def test_from_env_ethereum_uses_300_gwei_default(self):
+        """Ethereum should use 300 gwei by default."""
+        env_vars = {
+            "ALMANAK_CHAIN": "ethereum",
+            "ALMANAK_RPC_URL": "https://mainnet.infura.io",
+            "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
+        }
+        with patch("almanak.framework.execution.config.load_dotenv"):
+            with patch.dict(os.environ, env_vars, clear=True):
+                config = LocalRuntimeConfig.from_env()
+        assert config.max_gas_price_gwei == 300
+
+    def test_from_env_berachain_uses_chain_specific_cap(self):
+        """Berachain should use its own CHAIN_GAS_PRICE_CAPS_GWEI entry (50 gwei)."""
+        env_vars = {
+            "ALMANAK_CHAIN": "berachain",
+            "ALMANAK_RPC_URL": "https://rpc.berachain.com",
+            "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
+        }
+        with patch("almanak.framework.execution.config.load_dotenv"):
+            with patch.dict(os.environ, env_vars, clear=True):
+                config = LocalRuntimeConfig.from_env()
+        assert config.max_gas_price_gwei == 50  # berachain entry in CHAIN_GAS_PRICE_CAPS_GWEI
+
+    def test_from_env_explicit_override_respected(self):
+        """Explicit ALMANAK_MAX_GAS_PRICE_GWEI should override chain-specific default."""
+        env_vars = {
+            "ALMANAK_CHAIN": "polygon",
+            "ALMANAK_RPC_URL": "https://polygon-rpc.com",
+            "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
+            "ALMANAK_MAX_GAS_PRICE_GWEI": "1000",
+        }
+        with patch("almanak.framework.execution.config.load_dotenv"):
+            with patch.dict(os.environ, env_vars, clear=True):
+                config = LocalRuntimeConfig.from_env()
+        assert config.max_gas_price_gwei == 1000
+
+    # VIB-304: Anvil mode disables effective gas cap
+    def test_from_env_anvil_mode_uses_9999_gwei(self):
+        """Anvil mode should use 9999 gwei by default to avoid cap errors during dev."""
+        env_vars = {
+            "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
+        }
+        with patch("almanak.framework.execution.config.load_dotenv"):
+            with patch.dict(os.environ, env_vars, clear=True):
+                config = LocalRuntimeConfig.from_env(chain="arbitrum", network="anvil")
+        assert config.max_gas_price_gwei == 9999
+
+    def test_from_env_anvil_mode_override_still_works(self):
+        """Users can still set a lower cap in Anvil mode if needed."""
+        env_vars = {
+            "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
+            "ALMANAK_MAX_GAS_PRICE_GWEI": "5",
+        }
+        with patch("almanak.framework.execution.config.load_dotenv"):
+            with patch.dict(os.environ, env_vars, clear=True):
+                config = LocalRuntimeConfig.from_env(chain="arbitrum", network="anvil")
+        assert config.max_gas_price_gwei == 5
+
+    # VIB-308: Warning for unprefixed env vars
+    def test_from_env_warns_on_unprefixed_max_gas_price_gwei(self):
+        """Should log a warning when MAX_GAS_PRICE_GWEI is set without ALMANAK_ prefix."""
+        env_vars = {
+            "ALMANAK_CHAIN": "arbitrum",
+            "ALMANAK_RPC_URL": "https://arb1.arbitrum.io/rpc",
+            "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
+            "MAX_GAS_PRICE_GWEI": "500",  # missing ALMANAK_ prefix
+        }
+        with patch("almanak.framework.execution.config.load_dotenv"):
+            with patch.dict(os.environ, env_vars, clear=True):
+                with patch("almanak.framework.execution.config.logger") as mock_logger:
+                    LocalRuntimeConfig.from_env()
+                # Check that a warning was emitted mentioning MAX_GAS_PRICE_GWEI
+                warning_calls = mock_logger.warning.call_args_list
+                warning_messages = [str(call) for call in warning_calls]
+                assert any("MAX_GAS_PRICE_GWEI" in msg for msg in warning_messages)
+
+    def test_from_env_no_warning_when_prefixed_var_set(self):
+        """Should NOT warn when ALMANAK_MAX_GAS_PRICE_GWEI is correctly set."""
+        env_vars = {
+            "ALMANAK_CHAIN": "arbitrum",
+            "ALMANAK_RPC_URL": "https://arb1.arbitrum.io/rpc",
+            "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
+            "ALMANAK_MAX_GAS_PRICE_GWEI": "50",  # correctly prefixed
+        }
+        with patch("almanak.framework.execution.config.load_dotenv"):
+            with patch.dict(os.environ, env_vars, clear=True):
+                with patch("almanak.framework.execution.config.logger") as mock_logger:
+                    LocalRuntimeConfig.from_env()
+                # No warning about MAX_GAS_PRICE_GWEI should be emitted
+                warning_calls = mock_logger.warning.call_args_list
+                warning_messages = [str(call) for call in warning_calls]
+                assert not any("MAX_GAS_PRICE_GWEI" in msg and "ignored" in msg for msg in warning_messages)
+
 
 class TestSecurityContract:
     """Tests for security requirements."""

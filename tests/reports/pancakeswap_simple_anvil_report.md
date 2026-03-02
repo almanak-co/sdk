@@ -1,6 +1,6 @@
 # E2E Strategy Test Report: pancakeswap_simple (Anvil)
 
-**Date:** 2026-02-23 03:58
+**Date:** 2026-02-27 16:15
 **Result:** PASS
 **Mode:** Anvil
 **Duration:** ~3 minutes
@@ -11,80 +11,83 @@
 |-------|-------|
 | Strategy | pancakeswap_simple |
 | Chain | arbitrum |
-| Network | Anvil fork |
-| Anvil Port | 8545 (manual pre-fund), 62149 (managed by runner) |
+| Network | Anvil fork (managed, public RPC fallback) |
+| Anvil Port | 52508 (auto-assigned by managed gateway) |
 | swap_amount_usd | $10 |
 | from_token | WETH |
 | to_token | USDC |
 | max_slippage | 1.00% |
 
-**Config changes made:** None. `swap_amount_usd` was already $10 (well within $100 cap).
+**Config changes made:** None. `swap_amount_usd` was already $10, well within the $500 budget cap. The strategy unconditionally executes a swap on every call (no `force_action` field needed).
 
 ## Execution
 
 ### Setup
-- [x] Anvil started on port 8545 (Arbitrum fork, chain ID 42161)
-- [x] Gateway started on port 50051
-- [x] Wallet pre-funded: 100 ETH, 10 WETH, 10,000 USDC (Anvil default wallet `0xf39Fd6e5...`)
-- [x] Runner also auto-managed its own Anvil fork (port 62149) + gateway (port 50052) with anvil_funding from config
+- [x] Anvil fork auto-started by managed gateway (port 52508, chain_id=42161, block 436566613, public RPC)
+- [x] Gateway started on port 50052 (insecure mode, anvil network, managed/embedded)
+- [x] Wallet funded by managed gateway: 100 ETH, 10 WETH (storage slot 51), 10,000 USDC (storage slot 9)
+- [x] Pricing: on-chain Chainlink (primary) + free CoinGecko (fallback), no API key required
 
 ### Strategy Run
-- [x] Strategy executed with `--network anvil --once`
-- [x] Prices fetched: WETH = $1,940.06, USDC = $0.999896
-- [x] Balance confirmed: 10 WETH ($19,400.60)
-- [x] Intent produced: SWAP $10 WETH -> USDC via pancakeswap_v3
-- [x] Intent compiled: 0.0052 WETH -> 9.9710 USDC (min: 9.8713 USDC)
-- [x] 2 transactions submitted and confirmed
+- [x] Strategy executed with `uv run almanak strat run -d strategies/demo/pancakeswap_simple --network anvil --once`
+- [x] Prices fetched: WETH=$1,937.05, USDC=$0.999992 (aggregated, confidence 1.00, sources 2/2)
+- [x] Balance confirmed: 10 WETH ($19,370.48)
+- [x] SWAP intent returned: $10.00 WETH -> USDC via pancakeswap_v3 (1.00% slippage)
+- [x] Intent compiled: 0.0052 WETH -> 9.9701 USDC (min: 9.8704 USDC), 2 TXs, gas estimate 280,000
+- [x] Simulation: successful via eth_estimateGas (total gas 353,800)
+- [x] Receipt parsed: PancakeSwap V3 swap detected (swaps=1)
+- [x] Result enriched with swap_amounts
 
 ### Transactions
 
-| # | TX Hash | Gas Used | Status |
-|---|---------|----------|--------|
-| 1 (approve) | `67cda978c109ed015eb8aa501d322887a4ac229a874591bd081059033803f448` | 53,452 | SUCCESS |
-| 2 (swap) | `817e8d011267f940e6edcaf59f67e80519e901b7f058c028552198652fbc4f13` | 173,292 | SUCCESS |
+| TX # | Hash | Block | Gas Used | Status |
+|------|------|-------|----------|--------|
+| 1 (Approve) | `30d465d22e9b6384cddd20e7014e9aa7a4da601355016eb01b87777367f6e510` | 436566616 | 53,452 | SUCCESS |
+| 2 (Swap) | `79abcb0525099bfe9dd023aa0821f1296b67d1a77ae4ce1aac6ab5fd425c1f1d` | 436566617 | 173,264 | SUCCESS |
 
-**Total gas used:** 226,744
+**Total gas used:** 226,716
 
 ### Key Log Output
 
 ```text
-Aggregated price for WETH/USD: 1940.06 (confidence: 1.00, sources: 1/1, outliers: 0)
-Aggregated price for USDC/USD: 0.999896 (confidence: 1.00, sources: 1/1, outliers: 0)
-Balance: 10 WETH ($19400.60)
+Aggregated price for WETH/USD: 1937.04823223 (confidence: 1.00, sources: 2/2, outliers: 0)
+Aggregated price for USDC/USD: 0.999992 (confidence: 1.00, sources: 2/2, outliers: 0)
+Prices: WETH=$1937.05, USDC=$0.999992
+Balance: 10 WETH ($19370.48)
 Swapping $10 WETH -> USDC via PancakeSwap V3
-Compiled SWAP: 0.0052 WETH -> 9.9710 USDC (min: 9.8713 USDC) | Slippage: 1.00% | Txs: 2 | Gas: 280,000
-Transaction confirmed: tx_hash=67cda978..., block=434902203, gas_used=53452
-Transaction confirmed: tx_hash=817e8d01..., block=434902204, gas_used=173292
-EXECUTED: SWAP completed successfully | Txs: 2 | 226,744 gas
-Status: SUCCESS | Intent: SWAP | Gas used: 226744 | Duration: 21816ms
+intent: SWAP: $10.00 WETH -> USDC (slippage: 1.00%) via pancakeswap_v3
+Compiled SWAP: 0.0052 WETH -> 9.9701 USDC (min: 9.8704 USDC) | Slippage: 1.00% | Txs: 2 | Gas: 280,000
+Simulation successful: 2 transaction(s), total gas: 353800
+TX 30d465... confirmed block=436566616, gas=53452
+TX 79abcb... confirmed block=436566617, gas=173264
+EXECUTED: SWAP completed successfully | Txs: 2 (30d465...e510, 79abcb...1f1d) | 226,716 gas
+Parsed PancakeSwap V3 receipt: tx=0x79abcb05..., swaps=1
+Enriched SWAP result with: swap_amounts (protocol=pancakeswap_v3, chain=arbitrum)
+Status: SUCCESS | Intent: SWAP | Gas used: 226716 | Duration: 38536ms
 ```
 
 ## Suspicious Behaviour
 
 | # | Source | Severity | Pattern | Log Line |
 |---|--------|----------|---------|----------|
-| 1 | strategy | INFO | Insecure mode (expected for Anvil) | `INSECURE MODE: Auth interceptor disabled - no auth_token configured. This is acceptable for local development on 'anvil'.` |
-| 2 | strategy | WARNING | CoinGecko free tier rate limit risk | `COINGECKO_API_KEY not configured - CoinGecko will use free tier API (30 requests/minute limit)` |
-| 3 | strategy | WARNING | Gas estimate below compiler limit | `Gas estimate tx[0]: raw=53,800 buffered=80,700 (x1.5) < compiler=120,000, using compiler limit` |
-| 4 | strategy | WARNING | PancakeSwapV3ReceiptParser missing swap_amounts | `Parser PancakeSwapV3ReceiptParser does not declare support for 'swap_amounts' (expected by SWAP)` |
-| 5 | strategy | WARNING | Amount chaining broken due to missing swap_amounts | `Amount chaining: no output amount extracted from step 1; subsequent amount='all' steps will fail` |
-| 6 | strategy | INFO | Anvil fork port not freed cleanly on shutdown | `Port 62149 not freed after 5.0s` |
+| 1 | strategy | WARNING | Token resolution failure: BTC | `token_resolution_error token=BTC chain=arbitrum error_type=TokenNotFoundError detail=Cannot resolve token 'BTC' on arbitrum: Symbol 'BTC' not found in registry. Suggestions: Did you mean 'WBTC'?` |
+| 2 | strategy | WARNING | Token resolution failure: STETH | `token_resolution_error token=STETH chain=arbitrum error_type=TokenNotFoundError detail=Cannot resolve token 'STETH' on arbitrum. Suggestions: Did you mean 'WSTETH'?` |
+| 3 | strategy | WARNING | Token resolution failure: RDNT | `token_resolution_error token=RDNT chain=arbitrum error_type=TokenNotFoundError detail=Cannot resolve token 'RDNT' on arbitrum` |
+| 4 | strategy | WARNING | Token resolution failure: MAGIC | `token_resolution_error token=MAGIC chain=arbitrum error_type=TokenNotFoundError detail=Cannot resolve token 'MAGIC' on arbitrum` |
+| 5 | strategy | WARNING | Token resolution failure: WOO | `token_resolution_error token=WOO chain=arbitrum error_type=TokenNotFoundError detail=Cannot resolve token 'WOO' on arbitrum` |
+| 6 | strategy | INFO | Public RPC in use (no Alchemy key) | `No API key configured -- using free public RPC for arbitrum (rate limits may apply)` |
+| 7 | strategy | INFO | Anvil port cleanup timing | `Port 53042 not freed after 5.0s` |
 
 **Notes on findings:**
 
-- Findings #1 and #2 are normal/expected for local Anvil testing with no production API keys. No functional impact on this run.
-- Finding #3 (gas estimate below compiler limit) is benign -- the compiler limit was used as the floor and both transactions confirmed successfully. Actual gas (53,452) was well within the limit.
-- **Findings #4 and #5 are a real bug:** `PancakeSwapV3ReceiptParser` does not implement the `extract_swap_amounts()` method required by the `ResultEnricher` framework contract. This means:
-  - The strategy cannot chain swap output amounts (e.g., `amount='all'` for a subsequent step would fail silently).
-  - Post-execution enrichment data (actual in/out amounts) is not surfaced to the strategy author's `on_intent_executed` callback.
-  - This is a gap compared to Uniswap V3 and Enso receipt parsers which both implement `extract_swap_amounts()`.
-- Finding #6 is a minor Anvil cleanup race condition on teardown; not functionally impactful.
+- Findings 1-5 (BTC, STETH, RDNT, MAGIC, WOO resolution warnings): These appear during CoinGecko price source initialization at gateway startup. The gateway iterates a pre-warm token list that includes symbols not registered in the Arbitrum static registry. This does not affect strategy execution -- WETH and USDC both resolved correctly. The pre-warm list should be trimmed to symbols registered per chain.
+- Finding 6 is informational -- the public RPC worked for this test. Risk exists at high request rates.
+- Finding 7 is a cosmetic cleanup race condition at teardown. Anvil was stopped successfully.
+- No zero prices, no failed API fetches, no reverts, no NaN/None in numeric contexts.
 
 ## Result
 
-**PASS** - The pancakeswap_simple strategy executed a $10 WETH->USDC swap via PancakeSwap V3 on Arbitrum Anvil fork. 2 transactions confirmed (approve + swap), total 226,744 gas. One notable bug detected: `PancakeSwapV3ReceiptParser` does not implement `swap_amounts` extraction, breaking amount chaining for multi-step intents that depend on prior swap outputs.
+**PASS** - The `pancakeswap_simple` strategy executed a WETH->USDC swap on PancakeSwap V3 on an Arbitrum Anvil fork. Both transactions (approve + swap) confirmed on-chain. 0.0052 WETH swapped for ~9.97 USDC. Total gas: 226,716. Receipt parsing and result enrichment succeeded cleanly.
 
----
-
-SUSPICIOUS_BEHAVIOUR_COUNT: 6
+SUSPICIOUS_BEHAVIOUR_COUNT: 7
 SUSPICIOUS_BEHAVIOUR_ERRORS: 0

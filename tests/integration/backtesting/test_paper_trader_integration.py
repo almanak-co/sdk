@@ -37,7 +37,7 @@ from web3 import Web3
 from almanak.framework.backtesting.models import BacktestEngine
 from almanak.framework.backtesting.paper.config import PaperTraderConfig
 from almanak.framework.backtesting.paper.engine import PaperTrader
-from almanak.framework.backtesting.paper.fork_manager import (
+from almanak.framework.anvil.fork_manager import (
     ForkManagerConfig,
     RollingForkManager,
 )

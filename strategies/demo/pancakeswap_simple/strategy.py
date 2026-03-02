@@ -9,7 +9,6 @@ Purpose: Debug and verify PancakeSwap V3 integration works correctly.
 
 import logging
 from decimal import Decimal
-from typing import Any
 
 from almanak.framework.intents import Intent
 from almanak.framework.strategies import (
@@ -37,15 +36,10 @@ class PancakeSwapSimpleStrategy(IntentStrategy):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        def get_config(key: str, default: Any) -> Any:
-            if isinstance(self.config, dict):
-                return self.config.get(key, default)
-            return getattr(self.config, key, default)
-
-        self.swap_amount_usd = Decimal(str(get_config("swap_amount_usd", "10")))
-        self.max_slippage = Decimal(str(get_config("max_slippage", "0.01")))
-        self.from_token = get_config("from_token", "WETH")
-        self.to_token = get_config("to_token", "USDC")
+        self.swap_amount_usd = Decimal(str(self.get_config("swap_amount_usd", "10")))
+        self.max_slippage = Decimal(str(self.get_config("max_slippage", "0.01")))
+        self.from_token = self.get_config("from_token", "WETH")
+        self.to_token = self.get_config("to_token", "USDC")
 
         logger.info(
             f"PancakeSwapSimpleStrategy initialized: "

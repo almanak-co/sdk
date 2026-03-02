@@ -464,12 +464,27 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             # Build execution context
             from almanak.framework.execution.orchestrator import ExecutionContext
 
+            # For Anvil (local fork) networks, always enable simulation so that the
+            # LocalSimulator handles gas estimation. The default simulation_enabled=False
+            # path (_maybe_estimate_gas_limits) calls eth_estimateGas against the public
+            # RPC, which fails with "missing trie node" for storage slots that exist only
+            # in the Anvil fork's local state (e.g., ERC1155 LP tokens minted by LP_OPEN).
+            # LocalSimulator uses snapshot+execute to estimate gas against actual fork state.
+            is_anvil_network = self.settings.network == "anvil"
+            effective_simulation_enabled = request.simulation_enabled or is_anvil_network
+
+            if is_anvil_network and not request.simulation_enabled:
+                logger.debug(
+                    "Anvil network: enabling simulation to use LocalSimulator "
+                    "for accurate gas estimation of post-state-change transactions"
+                )
+
             exec_context = ExecutionContext(
                 strategy_id=request.strategy_id,
                 intent_id=request.intent_id,
                 chain=chain,
                 wallet_address=wallet_address,
-                simulation_enabled=request.simulation_enabled,
+                simulation_enabled=effective_simulation_enabled,
                 dry_run=request.dry_run,
             )
 

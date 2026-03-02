@@ -51,6 +51,8 @@ from typing import Any
 
 import click
 
+from almanak.framework.anvil.fork_manager import CHAIN_IDS
+
 from ..backtesting import (
     BacktestResult,
     CoinGeckoDataProvider,
@@ -65,7 +67,6 @@ from ..backtesting import (
     RollingForkManager,
 )
 from ..backtesting.paper.background import BackgroundPaperTrader
-from ..backtesting.paper.fork_manager import CHAIN_IDS
 from ..backtesting.pnl.config_loader import ConfigLoadError, load_config_from_result
 from ..backtesting.pnl.logging_utils import configure_backtest_logging
 from ..backtesting.scenarios import (
@@ -333,11 +334,24 @@ def load_strategy_config(strategy_name: str, chain: str) -> dict[str, Any]:
     Returns:
         Configuration dictionary
     """
+    # Strip demo_/incubating_ prefix to get the directory name
+    # e.g. "demo_uniswap_rsi" -> "uniswap_rsi"
+    dir_name = strategy_name
+    if dir_name.startswith("demo_"):
+        dir_name = dir_name[len("demo_") :]
+    elif dir_name.startswith("incubating_"):
+        dir_name = dir_name[len("incubating_") :]
+
     # Look for config file in standard locations
     config_paths = [
         Path(f"configs/{strategy_name}.json"),
         Path(f"configs/{strategy_name}_{chain}.json"),
         Path(f"src/strategies/{strategy_name}/config.json"),
+        # Demo and incubating strategy directories
+        Path(f"strategies/demo/{dir_name}/config.json"),
+        Path(f"strategies/demo/{strategy_name}/config.json"),
+        Path(f"strategies/incubating/{dir_name}/config.json"),
+        Path(f"strategies/incubating/{strategy_name}/config.json"),
     ]
 
     for path in config_paths:
@@ -789,9 +803,22 @@ def pnl_backtest(
     # Create strategy instance
     strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, chain)
 
-    # Ensure strategy has strategy_id attribute
-    if not hasattr(strategy_instance, "strategy_id"):
-        strategy_instance.strategy_id = f"backtest-{strategy}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    # Ensure strategy has a non-empty strategy_id.
+    # IntentStrategy.__init__ sets _strategy_id="" which shadows StrategyBase's config-based value,
+    # so we check for falsy values, not just missing attributes.
+    existing_id = getattr(strategy_instance, "strategy_id", "")
+    if not existing_id:
+        fallback_id = (
+            strategy_config.get("strategy_id")
+            or strategy_config.get("name")
+            or strategy
+            or strategy_instance.__class__.__name__
+        )
+        # Set the private attribute to avoid property/setter issues
+        if hasattr(strategy_instance, "_strategy_id"):
+            strategy_instance._strategy_id = fallback_id
+        else:
+            strategy_instance.strategy_id = fallback_id
 
     # Create data provider
     click.echo()
@@ -1204,10 +1231,15 @@ async def run_sweep_backtest(
             except ValueError:
                 setattr(strategy_instance, name, value)
 
-    # Ensure strategy has strategy_id
-    if not hasattr(strategy_instance, "strategy_id"):
+    # Ensure strategy has a non-empty strategy_id (same pattern as PnL backtest)
+    existing_id = getattr(strategy_instance, "strategy_id", "")
+    if not existing_id:
         param_str = "_".join(f"{k}{v}" for k, v in params.items())
-        strategy_instance.strategy_id = f"sweep-{param_str}"
+        fallback_id = f"sweep-{param_str}" if param_str else "sweep"
+        if hasattr(strategy_instance, "_strategy_id"):
+            strategy_instance._strategy_id = fallback_id
+        else:
+            strategy_instance.strategy_id = fallback_id
 
     # Create backtester
     backtester = PnLBacktester(
@@ -1615,9 +1647,14 @@ def _run_sweep_task_worker(task: _SweepTask) -> SweepResult:
             except ValueError:
                 setattr(strategy_instance, name, value)
 
-    if not hasattr(strategy_instance, "strategy_id"):
+    existing_id = getattr(strategy_instance, "strategy_id", "")
+    if not existing_id:
         param_str = "_".join(f"{k}{v}" for k, v in task.params.items())
-        strategy_instance.strategy_id = f"sweep-{param_str}"
+        fallback_id = f"sweep-{param_str}" if param_str else "sweep"
+        if hasattr(strategy_instance, "_strategy_id"):
+            strategy_instance._strategy_id = fallback_id
+        else:
+            strategy_instance.strategy_id = fallback_id
 
     # Recreate PnL config (remove computed properties first)
     pnl_config_dict = task.pnl_config_dict.copy()

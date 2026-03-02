@@ -205,8 +205,22 @@ module = [
     "matplotlib.*",
     "structlog.*",
     "simple_term_menu.*",
+    "yaml",
+    "yaml.*",
+    "langchain_core.*",
+    "pytz",
+    "pytz.*",
 ]
 ignore_missing_imports = true
+
+# Internal modules that may or may not be present depending on the environment
+[[tool.mypy.overrides]]
+module = [
+    "almanak.framework.data.price.multi_dex",
+    "almanak.framework.state.portfolio",
+]
+ignore_missing_imports = true
+follow_imports = "skip"
 
 # In-tree test files (intentionally pass wrong types for testing)
 [[tool.mypy.overrides]]

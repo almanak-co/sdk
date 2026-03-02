@@ -318,7 +318,9 @@ class TokenResolver:
         with cls._instance_lock:
             cls._instance = None
 
-    def resolve(self, token: str, chain: str | Chain) -> ResolvedToken:
+    def resolve(
+        self, token: str, chain: str | Chain, *, log_errors: bool = True, skip_gateway: bool = False
+    ) -> ResolvedToken:
         """Resolve a token by symbol or address on a specific chain.
 
         This is the main resolution method. It checks:
@@ -330,6 +332,11 @@ class TokenResolver:
         Args:
             token: Token symbol (e.g., "USDC") or address (e.g., "0x...")
             chain: Chain name or Chain enum
+            log_errors: If False, suppress warning logs on resolution failure (default True).
+                Use False for best-effort lookups where failures are expected and handled.
+            skip_gateway: If True, skip the slow gateway on-chain lookup and fail fast
+                after cache + static registry. Use for cosmetic/best-effort lookups
+                where a 30s gateway timeout is unacceptable.
 
         Returns:
             ResolvedToken with full metadata
@@ -373,7 +380,7 @@ class TokenResolver:
 
             # Slow path: gateway on-chain lookup (NO lock held)
             # Only reached for address resolution when not in cache/static
-            if self._gateway_channel is not None or self._gateway_client is not None:
+            if not skip_gateway and (self._gateway_channel is not None or self._gateway_client is not None):
                 resolved = self._resolve_via_gateway(token, chain_lower, chain_enum)
                 if resolved:
                     # Write back to cache (under lock)
@@ -405,21 +412,22 @@ class TokenResolver:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             error_type = type(e).__name__
             latency_ms = round(elapsed_ms, 3)
-            logger.debug(
-                "token_resolution_error token=%s chain=%s error_type=%s detail=%s latency_ms=%.3f",
-                token,
-                chain_lower,
-                error_type,
-                str(e),
-                latency_ms,
-                extra={
-                    "token": token,
-                    "chain": chain_lower,
-                    "error_type": error_type,
-                    "latency_ms": latency_ms,
-                    "error_detail": str(e),
-                },
-            )
+            if log_errors:
+                logger.warning(
+                    "token_resolution_error token=%s chain=%s error_type=%s detail=%s latency_ms=%.3f",
+                    token,
+                    chain_lower,
+                    error_type,
+                    str(e),
+                    latency_ms,
+                    extra={
+                        "token": token,
+                        "chain": chain_lower,
+                        "error_type": error_type,
+                        "latency_ms": latency_ms,
+                        "error_detail": str(e),
+                    },
+                )
             _try_record_metric("record_token_resolution_error", chain_lower, error_type)
             raise
 

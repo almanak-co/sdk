@@ -1,0 +1,17 @@
+{
+    "strategy_id": "swap_and_supply",
+    "strategy_name": "swap_and_supply",
+    "description": "IntentSequence test: swap USDC->WETH on Uniswap V3, then supply WETH to Aave V3",
+    "swap_amount_usd": 5,
+    "max_slippage_bps": 100,
+    "base_token": "WETH",
+    "quote_token": "USDC",
+    "lending_protocol": "aave_v3",
+    "chain": "arbitrum",
+    "force_action": "",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

@@ -1,0 +1,18 @@
+{
+    "chain": "bnb",
+    "pool": "USDT/WBNB/500",
+    "range_width_pct": "0.10",
+    "amount0": "60",
+    "amount1": "0.1",
+    "fee_tier": 500,
+    "rsi_period": 14,
+    "rsi_timeframe": "4h",
+    "rsi_open_lower": 40,
+    "rsi_open_upper": 60,
+    "force_action": "open",
+    "anvil_funding": {
+        "BNB": 100,
+        "WBNB": 10,
+        "USDT": 10000
+    }
+}

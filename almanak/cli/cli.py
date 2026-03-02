@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from almanak import __version__
 from almanak.cli.agent import agent as agent_group
+from almanak.core.redaction import install_redaction
 
 # V2 Framework CLI commands
 from almanak.framework.cli import backtest as framework_backtest_group
@@ -442,6 +443,9 @@ def gateway(port, network, metrics, metrics_port, log_level, chains):
         level=log_level_map.get(log_level, logging.INFO),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
+
+    # Install centralized secret redaction on all logging channels
+    install_redaction()
 
     # Parse chains list
     parsed_chains = [c.strip().lower() for c in chains.split(",") if c.strip()] if chains else []
@@ -943,6 +947,11 @@ def strategy_run(
     if env_file.exists():
         load_dotenv(env_file)
         click.echo(f"Loaded environment from: {env_file}")
+
+    # Install secret redaction after env is loaded so all secrets are registered.
+    # (The managed gateway also calls install_redaction(), but strat run may log
+    # before the gateway starts, so we install here too.)
+    install_redaction()
 
     # Invoke the v2 framework's run command
     try:

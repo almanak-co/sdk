@@ -1,7 +1,7 @@
-"""Aerodrome Finance Protocol Adapter.
+"""Aerodrome/Velodrome Finance Protocol Adapter.
 
 This module provides the AerodromeAdapter class for executing swaps and managing
-liquidity positions on Aerodrome Finance (Base chain).
+liquidity positions on Solidly-fork AMMs (Aerodrome on Base, Velodrome V2 on Optimism).
 
 Aerodrome Architecture:
 - Router: Main entry point for swaps and liquidity operations
@@ -105,7 +105,7 @@ class AerodromeConfig:
     """Configuration for AerodromeAdapter.
 
     Attributes:
-        chain: Target blockchain (currently only "base")
+        chain: Target blockchain ("base" for Aerodrome, "optimism" for Velodrome V2)
         wallet_address: Address executing transactions
         default_slippage_bps: Default slippage tolerance in basis points (default 50 = 0.5%)
         deadline_seconds: Transaction deadline in seconds (default 300 = 5 minutes)
@@ -696,7 +696,6 @@ class AerodromeAdapter:
                     token_address=pool_address,
                     spender=self.addresses["router"],
                     amount=liquidity_wei,
-                    token_label=f"LP({token_a}/{token_b})",
                 )
                 if approve_tx:
                     transactions.append(approve_tx)
@@ -1030,7 +1029,6 @@ class AerodromeAdapter:
         token_address: str,
         spender: str,
         amount: int,
-        token_label: str | None = None,
     ) -> TransactionData | None:
         """Build an ERC-20 approve transaction if needed."""
         # Check cache for existing allowance
@@ -1046,7 +1044,7 @@ class AerodromeAdapter:
         # Update cache
         self._allowance_cache[cache_key] = MAX_UINT256
 
-        token_symbol = token_label or self._get_token_symbol(token_address)
+        token_symbol = self._get_token_symbol(token_address)
 
         return TransactionData(
             to=token_address,
@@ -1176,19 +1174,26 @@ class AerodromeAdapter:
             ) from e
 
     def _get_token_symbol(self, address: str) -> str:
-        """Get token symbol from address using TokenResolver."""
+        """Get token symbol from address using TokenResolver.
+
+        Falls back to a truncated address string for unresolvable addresses
+        (e.g., LP pool contracts). The symbol is used in TransactionData.description
+        which is cosmetic -- it must never block execution.
+
+        Uses skip_gateway=True to avoid 30-second gateway timeouts for
+        LP pool addresses that are valid ERC-20s but not in the static registry.
+        """
         if not address.startswith("0x"):
             return address
         try:
-            resolved = self._token_resolver.resolve(address, self.chain)
+            resolved = self._token_resolver.resolve(address, self.chain, skip_gateway=True, log_errors=False)
             return resolved.symbol
-        except TokenResolutionError as e:
-            raise TokenResolutionError(
-                token=address,
-                chain=str(self.chain),
-                reason=f"[AerodromeAdapter] Cannot resolve symbol: {e.reason}",
-                suggestions=e.suggestions,
-            ) from e
+        except TokenResolutionError:
+            # LP pool addresses, gauge contracts, and other non-token contracts
+            # are not in the token registry. Return a truncated address as fallback
+            # since the symbol is only used for cosmetic descriptions.
+            logger.debug(f"Token symbol lookup failed for {address} on {self.chain}, using truncated address")
+            return f"{address[:6]}...{address[-4:]}"
 
     def _get_token_decimals(self, symbol: str) -> int:
         """Get token decimals from symbol using TokenResolver."""

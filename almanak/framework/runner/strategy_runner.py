@@ -82,7 +82,7 @@ from ..intents.state_machine import (
     StateMachineConfig,
     TransactionReceipt,
 )
-from ..intents.vocabulary import AnyIntent, DecideResult, HoldIntent, Intent, IntentSequence
+from ..intents.vocabulary import AnyIntent, DecideResult, HoldIntent, Intent, IntentSequence, IntentType
 from ..models.actions import AvailableAction, SuggestedAction
 from ..models.operator_card import EventType, OperatorCard, PositionSummary, Severity
 from ..models.stuck_reason import StuckReason
@@ -176,19 +176,24 @@ def _format_intent_for_log(intent: "AnyIntent") -> str:
 
     # BorrowIntent
     if intent_type == "BORROW":
-        token = getattr(intent, "token", "")
-        amount = getattr(intent, "amount", None)
-        amount_usd = getattr(intent, "amount_usd", None)
+        borrow_token = getattr(intent, "borrow_token", "")
+        borrow_amount = getattr(intent, "borrow_amount", None)
+        collateral_token = getattr(intent, "collateral_token", "")
+        collateral_amount = getattr(intent, "collateral_amount", None)
         protocol = getattr(intent, "protocol", "")
 
-        if amount_usd:
-            amount_str = format_usd(amount_usd)
-        elif amount:
-            amount_str = f"{amount} {token}"
+        if borrow_amount:
+            amount_str = f"{borrow_amount} {borrow_token}"
         else:
-            amount_str = f"N/A {token}"
+            amount_str = f"N/A {borrow_token}"
 
-        return f"{emoji_type}: {amount_str} from {protocol}"
+        collateral_str = ""
+        if collateral_amount == "all":
+            collateral_str = f" (collateral: ALL {collateral_token})"
+        elif collateral_amount:
+            collateral_str = f" (collateral: {collateral_amount} {collateral_token})"
+
+        return f"{emoji_type}: {amount_str} from {protocol}{collateral_str}"
 
     # WithdrawIntent
     if intent_type == "WITHDRAW":
@@ -1107,11 +1112,23 @@ class StrategyRunner:
                             # Reset to None so the next chained step fails explicitly
                             # if it uses amount="all" (prevents stale value reuse).
                             previous_amount_received = None
-                            logger.warning(
-                                "Amount chaining: no output amount extracted from step %d; "
-                                "subsequent amount='all' steps will fail",
-                                idx + 1,
-                            )
+                            # Only warn for SWAP intents where amount chaining is expected.
+                            # LP_OPEN, LP_CLOSE, SUPPLY, BORROW, etc. don't produce a
+                            # single chainable output amount -- this is normal, not a bug.
+                            intent_type_val = getattr(intent_to_execute, "intent_type", None)
+                            is_swap = intent_type_val == IntentType.SWAP
+                            if is_swap:
+                                logger.warning(
+                                    "Amount chaining: no output amount extracted from step %d; "
+                                    "subsequent amount='all' steps will fail",
+                                    idx + 1,
+                                )
+                            else:
+                                logger.debug(
+                                    "Amount chaining: step %d (%s) has no chainable output amount (normal for non-swap intents)",
+                                    idx + 1,
+                                    intent_type_val.value if intent_type_val else "unknown",
+                                )
 
                     # Stop on failure - don't execute subsequent intents
                     if intent_result.status not in (IterationStatus.SUCCESS, IterationStatus.HOLD):
@@ -1437,9 +1454,12 @@ class StrategyRunner:
         surface the root cause faster.
         """
         _ = attempt  # Included for callback compatibility
-        non_retryable_types = {"INSUFFICIENT_FUNDS", "NONCE_ERROR"}
+        non_retryable_types = {"INSUFFICIENT_FUNDS", "NONCE_ERROR", "COMPILATION_PERMANENT"}
         if error_type in non_retryable_types:
-            logger.warning(f"Non-retryable execution error ({error_type}): {context.error_message}. Aborting retries.")
+            logger.warning(
+                f"Non-retryable error ({error_type}): {context.error_message}. "
+                "Skipping retries — this error will not resolve by retrying."
+            )
             return SadflowAction.abort(context.error_message)
         return None
 

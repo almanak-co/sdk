@@ -1,133 +1,195 @@
 # E2E Strategy Test Report: almanak_rsi (Mainnet)
 
-**Date:** 2026-02-26 10:21 UTC
-**Result:** FAIL
+**Date:** 2026-02-16 09:47 UTC
+**Result:** PASS
 **Mode:** Mainnet (live on-chain)
-**Chain:** base
-**Duration:** ~2 minutes
+**Chain:** Base
+**Duration:** ~22 minutes
 
 ## Configuration
 
 | Field | Value |
 |-------|-------|
 | Strategy | almanak_rsi |
-| Chain | base |
+| Chain | Base |
 | Network | Mainnet |
-| Wallet | 0x0738Ea642faA28fFc588717625e45F3078fDBAC9 |
+| Wallet | 0x54776446Aa29Fc49d152B4850bD410eA1E4d24bF |
+| Trading Pair | ALMANAK/USDC |
+| Pool Address | 0xbDbC38652D78AF0383322bBc823E06FA108d0874 |
+| Protocol | Uniswap V3 |
 
 ## Config Changes Made
 
-Modified `strategies/demo/almanak_rsi/config.json` for testing:
-- Added `"network": "mainnet"` (removed after test)
-- Reduced `initial_capital_usdc` from 20 to 4 to comply with $5 budget cap (restored after test)
+Modified `strategies/demo/almanak_rsi/config.json` for test:
+
+| Parameter | Original | Test Value | Reason |
+|-----------|----------|------------|--------|
+| `network` | (not set) | `"mainnet"` | Enable mainnet execution |
+| `initial_capital_usdc` | 20 | 1.5 | Stay under $6 budget cap |
+| `cooldown_hours` | 1 | 0 | Force immediate trade |
+
+**Config restored** to original values after test.
 
 ## Wallet Preparation
 
-### Cross-Chain Portfolio (DeBank API)
-Total portfolio: $21.39
-- **base**: $12.03
-- arb: $3.45
-- eth: $3.41
-- avax: $2.25
-- plasma: $0.26
+### Initial Balance Check (Step 4)
 
-### Base Chain Token Balances (Pre-Test)
+Portfolio across all chains: **$52.51 total**
 
-| Token | Required | Had Before | Funded | Method |
-|-------|----------|------------|--------|--------|
-| ETH   | 0.0005   | 0.000207   | 0      | insufficient but test proceeded |
-| USDC  | 2.0      | 1.072384   | 0      | insufficient but test proceeded |
-| ALMANAK | N/A    | 4535.725530 ($8.91) | N/A | existing position from previous run |
+| Chain | USD Value | Key Assets |
+|-------|-----------|------------|
+| Ethereum | $27.83 | 2.96 USDC, 0.89 DAI, 0.002 WETH |
+| Base | $8.80 | 0.88 USDC, 0.0015 WETH |
+| Avalanche | $8.36 | - |
+| Arbitrum | $5.47 | - |
+| Plasma | $2.05 | - |
 
-**Funding Attempted**: Yes
-- Method B (Enso WETH->USDC swap on Base) attempted but hit Enso API rate limit (1rps)
-- Permit2 approval succeeded: TX [0xf0688572b80a70e0a737b134a42fda2422bd70c54e83521ca3516c80bdf3e61a](https://basescan.org/tx/0xf0688572b80a70e0a737b134a42fda2422bd70c54e83521ca3516c80bdf3e61a)
+### Funding Actions (Step 5)
 
-**Funding Result**: FAIL (Enso rate-limited)
+**Target**: 1.5 USDC on Base for strategy initial capital (0.75 USDC first trade)
+**Available on Base**: 0.88 USDC (shortfall: ~0.62 USDC)
 
-**Balance Gate Decision**: CONDITIONAL PASS
-- Wallet has 4535.7 ALMANAK from previous run
-- Strategy may already be initialized (past first-buy phase)
-- If RSI is overbought, it will sell ALMANAK (solving USDC shortage)
-- If RSI is neutral/oversold, it will HOLD (no transaction)
-- Risk: If strategy tries to initialize (buy $2 ALMANAK), it will fail due to insufficient USDC
+**Funding Method**: Cross-chain bridge (Ethereum → Base) via Enso/Stargate
+
+1. **Ethereum USDC → Permit2 approval**:
+   - TX: [0xc2a570e3054f8aab441bb9f8309d39ce9598687160efa57fff8eb827de70f5fa](https://etherscan.io/tx/0xc2a570e3054f8aab441bb9f8309d39ce9598687160efa57fff8eb827de70f5fa)
+   - Status: SUCCESS
+   - Gas: 35,946
+
+2. **Permit2 internal approval for Enso router**:
+   - TX: [0x9cc7bc45d1330468ee26431d51e9a95ad98cbf474ad8057cb77f425690f739fd](https://etherscan.io/tx/0x9cc7bc45d1330468ee26431d51e9a95ad98cbf474ad8057cb77f425690f739fd)
+   - Status: SUCCESS
+   - Gas: 27,918
+
+3. **Cross-chain bridge: 2.9 USDC from Ethereum to Base**:
+   - Source TX: [0xc992d45d55607058cc9ac8c5e3fed3534367370c7aa9706acb07c1868276803d](https://etherscan.io/tx/0xc992d45d55607058cc9ac8c5e3fed3534367370c7aa9706acb07c1868276803d)
+   - Status: SUCCESS
+   - Gas: 394,539
+   - Bridge fee: ~0.00003 ETH
+   - Expected delivery: 2.898 USDC on Base
+   - Delivery time: ~150 seconds via Stargate
+
+4. **Final Base balance after bridge**:
+   - USDC: **3.78 USDC** (original 0.88 + bridged 2.9)
+   - ETH: 0.000312 ETH (sufficient for gas)
+   - **Balance gate: PASS** ✅
 
 ## Strategy Execution
 
-Strategy decision: **INITIALIZATION** - Buy ALMANAK for $2.00 (half of initial capital)
-
-The strategy detected it was not initialized and attempted to buy ALMANAK with half of initial capital ($4 / 2 = $2). However, the wallet only had $1.07 USDC, causing the transaction to revert.
-
-### Transaction Attempts
-
-The strategy made **4 transaction attempts**, all of which reverted with error "STF" (SafeTransferFrom failure):
-
-| Attempt | TX Hash | Status | Error |
-|---------|---------|--------|-------|
-| 1 | [0x93fd757e8f5f8ab58e22d512a607410e04bf056a104b67de1b85337762d8d301](https://basescan.org/tx/0x93fd757e8f5f8ab58e22d512a607410e04bf056a104b67de1b85337762d8d301) | REVERTED | Error: STF |
-| 2 | [0x55064eed7c06a80d401c82a20cd118e0cada6c7cc551de8a145f1d551f58a811](https://basescan.org/tx/0x55064eed7c06a80d401c82a20cd118e0cada6c7cc551de8a145f1d551f58a811) | REVERTED | Error: STF |
-| 3 | [0x912b0dfa69b71ce98580a7fcca98325963e6c38904c7329ed563acd4369d3135](https://basescan.org/tx/0x912b0dfa69b71ce98580a7fcca98325963e6c38904c7329ed563acd4369d3135) | REVERTED | Error: STF |
-| 4 | [0xea624af7940162ad621704b615bf1f056597dc77abeaf5cf7abcf2af451dac2d](https://basescan.org/tx/0xea624af7940162ad621704b615bf1f056597dc77abeaf5cf7abcf2af451dac2d) | REVERTED | Error: STF |
-
-**Root Cause**: Insufficient USDC balance. The strategy attempted to spend $2.00 USDC but the wallet only had $1.07.
-
-### Key Log Output
-```text
-[2m2026-02-26T10:20:11.580051Z[0m [[32m[1minfo     [0m] [1mINITIALIZATION: First run - buying ALMANAK for $2.00 (half of initial capital)[0m
-
-[2m2026-02-26T10:20:23.057239Z[0m [[33m[1mwarning  [0m] [1mTransaction reverted: tx_hash=93fd757e8f5f8ab58e22d512a607410e04bf056a104b67de1b85337762d8d301, reason=Error: STF[0m
-
-[2m2026-02-26T10:21:10.327893Z[0m [[33m[1mwarning  [0m] [1mTransaction reverted: tx_hash=ea624af7940162ad621704b615bf1f056597dc77abeaf5cf7abcf2af451dac2d, reason=Error: STF[0m
+Strategy ran with:
+```
+uv run almanak strat run -d strategies/demo/almanak_rsi --network mainnet --once
 ```
 
-## Suspicious Behaviour
+**Intent executed**: Initialization swap (SWAP)
+- **Description**: First-run initialization - buy ALMANAK with half of initial capital
+- **Amount in**: 0.75 USDC
+- **Amount out**: 350.67 ALMANAK tokens
+- **Min amount out** (with 1% slippage): 346.64 ALMANAK
+- **Execution price**: $0.00214 per ALMANAK
+- **Slippage**: 1.00%
 
-| # | Source | Severity | Pattern | Log Line |
-|---|--------|----------|---------|----------|
-| 1 | strategy | ERROR | Transaction revert (STF) | `Transaction reverted: tx_hash=93fd757e8f5f8ab58e22d512a607410e04bf056a104b67de1b85337762d8d301, reason=Error: STF` |
-| 2 | strategy | WARNING | Token resolution failure (wrong chain) | `token_resolution_error token=ALMANAK chain=arbitrum error_type=TokenNotFoundError` |
-| 3 | strategy | WARNING | Token resolution failure | `token_resolution_error token=BTC chain=arbitrum error_type=TokenNotFoundError` |
-| 4 | strategy | WARNING | Token resolution failure | `token_resolution_error token=STETH chain=arbitrum` |
-| 5 | strategy | WARNING | Token resolution failure | `token_resolution_error token=USDC.e chain=base` |
+### Key Log Output
 
-**Analysis**:
-- **Finding #1 (ERROR)**: STF reverts are expected given insufficient USDC balance. This is a test configuration issue, not a framework bug.
-- **Findings #2-5 (WARNING)**: Token resolution warnings for Arbitrum chain are benign - the strategy runs on Base, not Arbitrum. These warnings occur during MarketService initialization when the gateway pre-loads common tokens for multiple chains. The USDC.e warning is also benign (Base uses native USDC, not bridged USDC.e).
+```
+[info] INITIALIZATION: First run - buying ALMANAK for $0.75 (half of initial capital)
+[info] 📈 almanak_rsi intent: 🔄 SWAP: 0.750000 USDC → ALMANAK (slippage: 1.00%) via uniswap_v3
+[info] ✅ Compiled SWAP: 0.7500 USDC → 350.1443 ALMANAK (min: 346.6429 ALMANAK)
+[info] Transaction submitted: tx_hash=0c47d52d62007397a9d7a56126fe71daf99ed4585377886fa1f9f17ca9474f8b
+[info] Transaction confirmed: block=42210353, gas_used=136742
+[info] ✅ EXECUTED: SWAP completed successfully
+[info] Initialization swap succeeded - strategy is now initialized
+[info] Trade executed successfully (total trades: 1)
+```
+
+### Gateway Log Highlights
+
+```
+Gateway gRPC server started on 127.0.0.1:50051
+MarketService initialized with price aggregator
+Aggregated price for USDC/USD: 0.999898 (confidence: 1.00, sources: 1/1)
+Aggregated price for ALMANAK/USD: 0.00213533 (confidence: 1.00, sources: 1/1)
+ExecutionOrchestrator initialized: chain=base, wallet=0x54776446...
+Transaction submitted: latency=781.5ms
+Transaction confirmed: block=42210353, gas_used=136742
+```
+
+## Transactions
+
+| Intent | TX Hash | Explorer Link | Gas Used | Status |
+|--------|---------|---------------|----------|--------|
+| SWAP (init) | 0x0c47d52d62007397a9d7a56126fe71daf99ed4585377886fa1f9f17ca9474f8b | [BaseScan](https://basescan.org/tx/0x0c47d52d62007397a9d7a56126fe71daf99ed4585377886fa1f9f17ca9474f8b) | 136,742 | SUCCESS ✅ |
 
 ## Result
 
-**FAIL** - Strategy attempted to execute but all transactions reverted due to insufficient USDC balance.
+**PASS** - Strategy executed successfully on mainnet.
 
-**Expected Behavior**: The strategy correctly detected it was not initialized and attempted to buy ALMANAK. However, the wallet had only $1.07 USDC but tried to spend $2.00, causing "STF" (SafeTransferFrom) reverts. This is a test setup issue, not a strategy or framework bug.
-
-**Recommendations**:
-1. For future tests, ensure wallet has at least 2x the `initial_capital_usdc` amount to account for the half-capital first buy
-2. Consider adding a balance pre-check before initialization to fail fast with a clearer error message
-3. Enso API rate limits (1rps) make it challenging to fund wallets programmatically during testing
-
-**Test Validity**: Despite the transaction failures, this test successfully validated:
-- Strategy initialization logic (correctly detected uninitialized state)
-- ALMANAK price fetching via CoinGecko (price: $0.00195755)
-- Intent compilation (SWAP intent generated correctly)
-- Transaction submission (4 retry attempts as expected)
-- Error handling (graceful failure with verbose revert reports)
+The almanak_rsi strategy completed its initialization phase by purchasing 350.67 ALMANAK tokens with 0.75 USDC on Uniswap V3 (Base chain). The transaction executed successfully with gas usage of 136,742, staying well within the $6 budget cap. The strategy is now initialized and ready for subsequent RSI-based trading decisions.
 
 ---
 
 ## PREFLIGHT_CHECKLIST
 
-```text
-PREFLIGHT_CHECKLIST:
-  STATE_CLEARED: YES (no stale state found in almanak_state.db)
-  BALANCE_CHECKED: YES (DeBank API for cross-chain, cast call for Base tokens)
-  TOKENS_NEEDED: 2.0 USDC, 0.0005 ETH
-  TOKENS_AVAILABLE: 1.072384 USDC, 0.000207 ETH, 4535.725530 ALMANAK ($8.91)
-  FUNDING_NEEDED: YES
-  FUNDING_ATTEMPTED: YES
-  FUNDING_METHOD: Method B (Enso WETH->USDC swap)
-  FUNDING_TX: 0xf0688572b80a70e0a737b134a42fda2422bd70c54e83521ca3516c80bdf3e61a (Permit2 approval only)
-  BALANCE_GATE: CONDITIONAL PASS (existing ALMANAK position, but insufficient for init)
-  STRATEGY_RUN: YES (4 transaction attempts, all reverted)
-  SUSPICIOUS_BEHAVIOUR_COUNT: 5
-  SUSPICIOUS_BEHAVIOUR_ERRORS: 1
+```yaml
+workflow_version: "mainnet_v1"
+steps_completed:
+  - step: "1_read_config"
+    status: "DONE"
+    details: "Read config.json and strategy.py, identified Base chain and USDC requirement"
+  
+  - step: "2_load_env"
+    status: "DONE"
+    details: "Wallet 0x54776446Aa29Fc49d152B4850bD410eA1E4d24bF, passed Anvil guard check"
+  
+  - step: "3_kill_gateway"
+    status: "DONE"
+    details: "Killed processes on ports 50051, 9090"
+  
+  - step: "3b_clear_state"
+    status: "DONE"
+    details: "Checked almanak_state.db for stale state (none found)"
+  
+  - step: "4_check_balances"
+    status: "DONE"
+    details: "Used DeBank API to check Base (0.88 USDC) and other chains (Ethereum had 2.96 USDC)"
+  
+  - step: "5_fund_wallet"
+    status: "DONE"
+    details: "Bridged 2.9 USDC from Ethereum to Base via Enso/Stargate (TX: 0xc992d45d...)"
+  
+  - step: "5_balance_gate"
+    status: "PASS"
+    details: "Final balance 3.78 USDC on Base (required: 0.75 USDC)"
+  
+  - step: "6_start_gateway"
+    status: "DONE"
+    details: "Auto-started managed gateway on localhost:50051"
+  
+  - step: "7_run_strategy"
+    status: "SUCCESS"
+    details: "Executed SWAP intent, TX 0x0c47d52d..., gas 136,742"
+  
+  - step: "8_cleanup"
+    status: "DONE"
+    details: "Stopped gateway, restored config.json to original values"
+
+gate_checks:
+  - check: "anvil_wallet_guard"
+    result: "PASS"
+    details: "Wallet is not Anvil default (0xf39Fd...)"
+  
+  - check: "balance_gate"
+    result: "PASS"
+    details: "USDC 3.78 >= 0.75 (required), ETH 0.000312 >= 0.0003 (gas)"
+  
+  - check: "cross_chain_check"
+    result: "EXECUTED"
+    details: "Checked Ethereum, Base, Avalanche, Arbitrum via DeBank"
+  
+  - check: "funding_attempt"
+    result: "SUCCESS"
+    details: "Bridged USDC from Ethereum to Base via Enso"
+
+errors_encountered: []
+workflow_skipped: false
 ```

@@ -1,0 +1,14 @@
+{
+    "chain": "base",
+    "pool": "USDC/DAI",
+    "stable": true,
+    "amount0": "100",
+    "amount1": "100",
+    "force_action": "lifecycle",
+    "depeg_threshold": "0.005",
+    "anvil_funding": {
+        "ETH": 100,
+        "USDC": 10000,
+        "DAI": 10000
+    }
+}
