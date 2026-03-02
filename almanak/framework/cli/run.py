@@ -38,17 +38,25 @@ from almanak.gateway.data.balance import Web3BalanceProvider
 from almanak.gateway.data.price import CoinGeckoPriceSource, PriceAggregator
 
 from ..data.balance.gateway_provider import GatewayBalanceProvider
+from ..data.indicators.adx import ADXCalculator
 from ..data.indicators.atr import ATRCalculator
 from ..data.indicators.bollinger_bands import BollingerBandsCalculator
+from ..data.indicators.cci import CCICalculator
+from ..data.indicators.ichimoku import IchimokuCalculator
 from ..data.indicators.macd import MACDCalculator
 from ..data.indicators.moving_averages import MovingAverageCalculator
+from ..data.indicators.obv import OBVCalculator
 from ..data.indicators.rsi import RSICalculator
 from ..data.indicators.stochastic import StochasticCalculator
 from ..data.indicators.sync_wrappers import (
+    create_sync_adx_func,
     create_sync_atr_func,
     create_sync_bollinger_func,
+    create_sync_cci_func,
     create_sync_ema_func,
+    create_sync_ichimoku_func,
     create_sync_macd_func,
+    create_sync_obv_func,
     create_sync_rsi_func,
     create_sync_sma_func,
     create_sync_stochastic_func,
@@ -437,6 +445,10 @@ def _wire_indicators(
     stoch_calculator = StochasticCalculator(ohlcv_provider=ohlcv_provider)
     atr_calculator = ATRCalculator(ohlcv_provider=ohlcv_provider)
     ma_calculator = MovingAverageCalculator(ohlcv_provider=ohlcv_provider)
+    adx_calculator = ADXCalculator(ohlcv_provider=ohlcv_provider)
+    obv_calculator = OBVCalculator(ohlcv_provider=ohlcv_provider)
+    cci_calculator = CCICalculator(ohlcv_provider=ohlcv_provider)
+    ichimoku_calculator = IchimokuCalculator(ohlcv_provider=ohlcv_provider)
 
     if hasattr(strategy_instance, "_price_oracle"):
         sync_price_oracle = create_sync_price_oracle_func(price_oracle)
@@ -450,8 +462,12 @@ def _wire_indicators(
             atr=create_sync_atr_func(atr_calculator, sync_price_oracle),
             sma=create_sync_sma_func(ma_calculator, sync_price_oracle),
             ema=create_sync_ema_func(ma_calculator, sync_price_oracle),
+            adx=create_sync_adx_func(adx_calculator),
+            obv=create_sync_obv_func(obv_calculator),
+            cci=create_sync_cci_func(cci_calculator),
+            ichimoku=create_sync_ichimoku_func(ichimoku_calculator),
         )
-        click.echo("  Providers injected into strategy (RSI + MACD/Bollinger/Stochastic/ATR/SMA/EMA)")
+        click.echo("  Providers injected into strategy (RSI + full indicator suite incl. ADX/OBV/CCI/Ichimoku)")
 
 
 def create_balance_provider(

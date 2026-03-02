@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage test-gateway test-demo-strategies test-demo-quick test-demo-single list-demo-strategies set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop
+.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage test-nightly-visual test-gateway test-demo-strategies test-demo-quick test-demo-single list-demo-strategies set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop
 
 # Load .env file if it exists
 -include .env
@@ -76,6 +76,10 @@ test-coverage:
 	uv run pytest tests/ -v --import-mode=importlib \
 		--cov=almanak --cov-report=html:coverage-html --cov-report=xml:coverage.xml --cov-report=term \
 		--junitxml=test-results.xml
+
+# Run nightly-only visual Market Data API contract tests
+test-nightly-visual:
+	uv run pytest tests/visual/nightly/ -q -n0 --import-mode=importlib
 
 # Generate documentation for the CLI
 docs-cli:

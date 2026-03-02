@@ -620,6 +620,7 @@ class IchimokuData:
         kijun_sen: Base line (26-period midpoint)
         senkou_span_a: Leading span A
         senkou_span_b: Leading span B
+        chikou_span: Lagging span (current close plotted 26 periods back)
         current_price: Current price for cloud position check
         tenkan_period: Tenkan-sen period (default 9)
         kijun_period: Kijun-sen period (default 26)
@@ -630,6 +631,7 @@ class IchimokuData:
     kijun_sen: Decimal
     senkou_span_a: Decimal
     senkou_span_b: Decimal
+    chikou_span: Decimal = Decimal("0")
     current_price: Decimal = Decimal("0")
     tenkan_period: int = 9
     kijun_period: int = 26
@@ -701,6 +703,10 @@ class IndicatorProvider:
         atr: Callable[..., ATRData] | None = None,
         sma: Callable[..., MAData] | None = None,
         ema: Callable[..., MAData] | None = None,
+        adx: Callable[..., ADXData] | None = None,
+        obv: Callable[..., OBVData] | None = None,
+        cci: Callable[..., CCIData] | None = None,
+        ichimoku: Callable[..., IchimokuData] | None = None,
     ):
         self.macd = macd
         self.bollinger = bollinger
@@ -708,6 +714,10 @@ class IndicatorProvider:
         self.atr = atr
         self.sma = sma
         self.ema = ema
+        self.adx = adx
+        self.obv = obv
+        self.cci = cci
+        self.ichimoku = ichimoku
 
 
 class MarketSnapshot:
@@ -786,6 +796,10 @@ class MarketSnapshot:
         self._stochastic_cache: dict[tuple[str, str, int, int], StochasticData] = {}
         self._atr_cache: dict[tuple[str, str, int], ATRData] = {}
         self._ma_cache: dict[tuple[str, str, str, int], MAData] = {}
+        self._adx_cache: dict[tuple[str, str, int], ADXData] = {}
+        self._obv_cache: dict[tuple[str, str, int], OBVData] = {}
+        self._cci_cache: dict[tuple[str, str, int], CCIData] = {}
+        self._ichimoku_cache: dict[tuple[str, str, int, int, int], IchimokuData] = {}
 
         # Pre-populated data (can be set directly)
         self._prices: dict[str, Decimal] = {}
@@ -799,10 +813,10 @@ class MarketSnapshot:
         self._stochastic_values: dict[str, tuple[StochasticData, str | None]] = {}
         self._atr_values: dict[str, tuple[ATRData, str | None]] = {}
         self._ma_values: dict[str, tuple[MAData, str | None]] = {}
-        self._adx_values: dict[str, ADXData] = {}
-        self._obv_values: dict[str, OBVData] = {}
-        self._cci_values: dict[str, CCIData] = {}
-        self._ichimoku_values: dict[str, IchimokuData] = {}
+        self._adx_values: dict[str, tuple[ADXData, str | None]] = {}
+        self._obv_values: dict[str, tuple[OBVData, str | None]] = {}
+        self._cci_values: dict[str, tuple[CCIData, str | None]] = {}
+        self._ichimoku_values: dict[str, tuple[IchimokuData, str | None]] = {}
 
     @property
     def chain(self) -> str:
@@ -1254,12 +1268,13 @@ class MarketSnapshot:
 
         raise ValueError(f"EMA data not available for {token} with period {period}")
 
-    def adx(self, token: str, period: int = 14) -> ADXData:
+    def adx(self, token: str, period: int = 14, timeframe: str = "4h") -> ADXData:
         """Get ADX (Average Directional Index) for a token.
 
         Args:
             token: Token symbol
             period: ADX period (default 14)
+            timeframe: OHLCV candle timeframe (default "4h")
 
         Returns:
             ADXData with ADX, +DI, and -DI values
@@ -1272,15 +1287,37 @@ class MarketSnapshot:
             if adx.is_uptrend:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        cache_key = (token, timeframe, period)
+
         if token in self._adx_values:
-            return self._adx_values[token]
+            pre, stored_tf = self._adx_values[token]
+            if pre.period == period and (stored_tf is None or stored_tf == timeframe):
+                return pre
+
+        if cache_key in self._adx_cache:
+            return self._adx_cache[cache_key]
+
+        if self._indicator_provider and self._indicator_provider.adx:
+            try:
+                adx_data = self._indicator_provider.adx(
+                    token,
+                    period=period,
+                    timeframe=timeframe,
+                )
+                self._adx_cache[cache_key] = adx_data
+                return adx_data
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"ADX provider failed for {cache_key}: {e}")
+
         raise ValueError(f"ADX data not available for {token}")
 
-    def obv(self, token: str) -> OBVData:
+    def obv(self, token: str, signal_period: int = 21, timeframe: str = "4h") -> OBVData:
         """Get OBV (On-Balance Volume) for a token.
 
         Args:
             token: Token symbol
+            signal_period: OBV signal line period (default 21)
+            timeframe: OHLCV candle timeframe (default "4h")
 
         Returns:
             OBVData with OBV and signal line values
@@ -1293,16 +1330,37 @@ class MarketSnapshot:
             if obv.is_bullish:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        cache_key = (token, timeframe, signal_period)
+
         if token in self._obv_values:
-            return self._obv_values[token]
+            pre, stored_tf = self._obv_values[token]
+            if pre.signal_period == signal_period and (stored_tf is None or stored_tf == timeframe):
+                return pre
+
+        if cache_key in self._obv_cache:
+            return self._obv_cache[cache_key]
+
+        if self._indicator_provider and self._indicator_provider.obv:
+            try:
+                obv_data = self._indicator_provider.obv(
+                    token,
+                    signal_period=signal_period,
+                    timeframe=timeframe,
+                )
+                self._obv_cache[cache_key] = obv_data
+                return obv_data
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"OBV provider failed for {cache_key}: {e}")
+
         raise ValueError(f"OBV data not available for {token}")
 
-    def cci(self, token: str, period: int = 20) -> CCIData:
+    def cci(self, token: str, period: int = 20, timeframe: str = "4h") -> CCIData:
         """Get CCI (Commodity Channel Index) for a token.
 
         Args:
             token: Token symbol
             period: CCI period (default 20)
+            timeframe: OHLCV candle timeframe (default "4h")
 
         Returns:
             CCIData with CCI value and overbought/oversold status
@@ -1315,15 +1373,46 @@ class MarketSnapshot:
             if cci.is_oversold:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        cache_key = (token, timeframe, period)
+
         if token in self._cci_values:
-            return self._cci_values[token]
+            pre, stored_tf = self._cci_values[token]
+            if pre.period == period and (stored_tf is None or stored_tf == timeframe):
+                return pre
+
+        if cache_key in self._cci_cache:
+            return self._cci_cache[cache_key]
+
+        if self._indicator_provider and self._indicator_provider.cci:
+            try:
+                cci_data = self._indicator_provider.cci(
+                    token,
+                    period=period,
+                    timeframe=timeframe,
+                )
+                self._cci_cache[cache_key] = cci_data
+                return cci_data
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"CCI provider failed for {cache_key}: {e}")
+
         raise ValueError(f"CCI data not available for {token}")
 
-    def ichimoku(self, token: str) -> IchimokuData:
+    def ichimoku(
+        self,
+        token: str,
+        tenkan_period: int = 9,
+        kijun_period: int = 26,
+        senkou_b_period: int = 52,
+        timeframe: str = "4h",
+    ) -> IchimokuData:
         """Get Ichimoku Cloud data for a token.
 
         Args:
             token: Token symbol
+            tenkan_period: Conversion line period (default 9)
+            kijun_period: Base line period (default 26)
+            senkou_b_period: Leading span B period (default 52)
+            timeframe: OHLCV candle timeframe (default "4h")
 
         Returns:
             IchimokuData with all Ichimoku components
@@ -1336,8 +1425,35 @@ class MarketSnapshot:
             if ich.is_bullish_crossover and ich.is_above_cloud:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        cache_key = (token, timeframe, tenkan_period, kijun_period, senkou_b_period)
+
         if token in self._ichimoku_values:
-            return self._ichimoku_values[token]
+            pre, stored_tf = self._ichimoku_values[token]
+            if (
+                pre.tenkan_period == tenkan_period
+                and pre.kijun_period == kijun_period
+                and pre.senkou_b_period == senkou_b_period
+                and (stored_tf is None or stored_tf == timeframe)
+            ):
+                return pre
+
+        if cache_key in self._ichimoku_cache:
+            return self._ichimoku_cache[cache_key]
+
+        if self._indicator_provider and self._indicator_provider.ichimoku:
+            try:
+                ichimoku_data = self._indicator_provider.ichimoku(
+                    token,
+                    tenkan_period=tenkan_period,
+                    kijun_period=kijun_period,
+                    senkou_b_period=senkou_b_period,
+                    timeframe=timeframe,
+                )
+                self._ichimoku_cache[cache_key] = ichimoku_data
+                return ichimoku_data
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Ichimoku provider failed for {cache_key}: {e}")
+
         raise ValueError(f"Ichimoku data not available for {token}")
 
     def balance(self, token: str) -> TokenBalance:
@@ -1539,12 +1655,13 @@ class MarketSnapshot:
         # Also store under simple token key for convenience
         self._ma_values[token] = entry
 
-    def set_adx(self, token: str, adx_data: ADXData) -> None:
+    def set_adx(self, token: str, adx_data: ADXData, timeframe: str | None = None) -> None:
         """Pre-populate ADX data for a token.
 
         Args:
             token: Token symbol
             adx_data: ADXData instance
+            timeframe: Optional timeframe (None matches any query)
 
         Example:
             market.set_adx("WETH", ADXData(
@@ -1553,14 +1670,15 @@ class MarketSnapshot:
                 minus_di=Decimal("15"),
             ))
         """
-        self._adx_values[token] = adx_data
+        self._adx_values[token] = (adx_data, timeframe)
 
-    def set_obv(self, token: str, obv_data: OBVData) -> None:
+    def set_obv(self, token: str, obv_data: OBVData, timeframe: str | None = None) -> None:
         """Pre-populate OBV data for a token.
 
         Args:
             token: Token symbol
             obv_data: OBVData instance
+            timeframe: Optional timeframe (None matches any query)
 
         Example:
             market.set_obv("WETH", OBVData(
@@ -1568,28 +1686,30 @@ class MarketSnapshot:
                 signal_line=Decimal("950000"),
             ))
         """
-        self._obv_values[token] = obv_data
+        self._obv_values[token] = (obv_data, timeframe)
 
-    def set_cci(self, token: str, cci_data: CCIData) -> None:
+    def set_cci(self, token: str, cci_data: CCIData, timeframe: str | None = None) -> None:
         """Pre-populate CCI data for a token.
 
         Args:
             token: Token symbol
             cci_data: CCIData instance
+            timeframe: Optional timeframe (None matches any query)
 
         Example:
             market.set_cci("WETH", CCIData(
                 value=Decimal("-120"),
             ))
         """
-        self._cci_values[token] = cci_data
+        self._cci_values[token] = (cci_data, timeframe)
 
-    def set_ichimoku(self, token: str, ichimoku_data: IchimokuData) -> None:
+    def set_ichimoku(self, token: str, ichimoku_data: IchimokuData, timeframe: str | None = None) -> None:
         """Pre-populate Ichimoku data for a token.
 
         Args:
             token: Token symbol
             ichimoku_data: IchimokuData instance
+            timeframe: Optional timeframe (None matches any query)
 
         Example:
             market.set_ichimoku("WETH", IchimokuData(
@@ -1600,7 +1720,7 @@ class MarketSnapshot:
                 current_price=Decimal("3100"),
             ))
         """
-        self._ichimoku_values[token] = ichimoku_data
+        self._ichimoku_values[token] = (ichimoku_data, timeframe)
 
     def wallet_activity(
         self,
