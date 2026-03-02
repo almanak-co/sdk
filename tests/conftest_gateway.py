@@ -223,7 +223,7 @@ class AnvilFixture:
             logger.error(f"Failed to fund tokens on {self.chain}: {e}")
             return False
 
-    def health_check(self, timeout_seconds: float = 2.0) -> bool:
+    def health_check(self, timeout_seconds: float = 10.0) -> bool:
         """Check if the Anvil fork is healthy (sync wrapper).
 
         Args:
@@ -247,7 +247,7 @@ class AnvilFixture:
             logger.debug(f"Health check failed for {self.chain}: {e}")
             return False
 
-    def restart(self, timeout: float = 60.0, health_timeout_seconds: float = 2.0) -> bool:
+    def restart(self, timeout: float = 60.0, health_timeout_seconds: float = 10.0) -> bool:
         """Restart the Anvil fork (sync wrapper).
 
         Stops the current fork thread and starts a new one on the same port.
@@ -302,7 +302,7 @@ class AnvilFixture:
             logger.error(f"Anvil restart exception for {self.chain}: {e}")
             return False
 
-    def ensure_healthy(self, timeout_seconds: float = 2.0) -> bool:
+    def ensure_healthy(self, timeout_seconds: float = 10.0) -> bool:
         """Ensure the Anvil fork is healthy, restarting if necessary.
 
         Args:
