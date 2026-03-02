@@ -65,8 +65,7 @@ BENEFITS
 - Graceful degradation and error handling
 
 See Also:
-    - notes/tech-debt/service-layer-base-pattern.md
-    - blueprints/08-services-layer.md
+    - almanak.framework.services module documentation
 """
 
 import logging

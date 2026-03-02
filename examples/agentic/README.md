@@ -141,7 +141,7 @@ All errors are wrapped in `ToolResponse` envelopes -- the LLM never sees raw exc
 5. Create a mock LLM flow for testing (see `create_dynamic_mock_llm()` in `defai_vault_lp/run.py` for the advanced pattern)
 6. Run: `AGENT_LLM_API_KEY=... python your_agent/run.py --once`
 
-For the full tool catalog and framework documentation, see [`blueprints/25-agent-tools.md`](../../blueprints/25-agent-tools.md).
+For the full tool catalog and framework documentation, see [docs.almanak.co](https://docs.almanak.co/).
 
 ## Tests
 

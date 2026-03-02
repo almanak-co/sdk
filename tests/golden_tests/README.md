@@ -124,4 +124,4 @@ When updating fixtures:
 - `tests/validation/backtesting/test_lp_historical_accuracy.py` - LP validation tests
 - `tests/validation/backtesting/test_perp_historical_accuracy.py` - Perp validation tests
 - `tests/validation/backtesting/test_lending_historical_accuracy.py` - Lending validation tests
-- `blueprints/10-testing-quality.md` - Testing patterns documentation
+- [CONTRIBUTING.md](../../CONTRIBUTING.md) - Contributing and testing guidelines

@@ -42,7 +42,7 @@ class TestTokenRegistryDeprecation:
 
             msg = str(w[0].message)
             assert "get_token_resolver()" in msg
-            assert "blueprints/17-token-resolution.md" in msg
+            assert "almanak.framework.data.tokens" in msg
 
     def test_token_registry_warning_only_once(self) -> None:
         """Verify deprecation warning is only emitted once per session."""
@@ -104,4 +104,4 @@ class TestGetDefaultRegistryDeprecation:
             deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
             msg = str(deprecation_warnings[0].message)
             assert "get_token_resolver()" in msg
-            assert "blueprints/17-token-resolution.md" in msg
+            assert "almanak.framework.data.tokens" in msg

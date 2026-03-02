@@ -127,5 +127,5 @@ result = await trader.run(strategy=my_strategy, duration_seconds=3600)
 ## Need Help?
 
 - See the backtest CLI help: `almanak backtest --help`
-- Check blueprints: `blueprints/16-cli-reference.md`
+- Check the CLI docs: https://docs.almanak.co/cli/
 - View examples in `strategies/demo/`

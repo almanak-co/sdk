@@ -5,7 +5,7 @@ enabling consistent token lookups across the data module.
 
 .. deprecated::
     TokenRegistry is deprecated. Use TokenResolver via `get_token_resolver()` instead.
-    See blueprints/17-token-resolution.md for migration guide.
+    See almanak.framework.data.tokens.resolver module for details.
 
 Key Components:
     - TokenRegistry: Central registry for token metadata (deprecated)
@@ -23,7 +23,7 @@ class TokenRegistry:
         TokenRegistry is deprecated. Use `get_token_resolver()` from
         ``almanak.framework.data.tokens`` instead. The TokenResolver provides
         better performance through caching and a unified API.
-        See blueprints/17-token-resolution.md for migration guide.
+        See almanak.framework.data.tokens.resolver module for details.
 
     Provides a unified interface for looking up token information
     by symbol and chain, supporting cross-chain token resolution.
@@ -53,13 +53,13 @@ class TokenRegistry:
         .. deprecated::
             Use `get_token_resolver()` instead. The TokenResolver provides
             better performance through caching and a unified API.
-            See blueprints/17-token-resolution.md for migration guide.
+            See almanak.framework.data.tokens.resolver module for details.
         """
         if not TokenRegistry._warned:
             warnings.warn(
                 "TokenRegistry is deprecated. Use get_token_resolver() from "
                 "almanak.framework.data.tokens instead. "
-                "See blueprints/17-token-resolution.md for migration guide.",
+                "See almanak.framework.data.tokens.resolver module for details.",
                 DeprecationWarning,
                 stacklevel=2,
             )

@@ -78,6 +78,9 @@ This auto-detects your platform (Claude Code, Codex, Cursor, Copilot, and [6 mor
 
    This single command auto-starts Anvil + gateway, opens the dashboard in your browser, and runs one iteration of the strategy.
 
+> **New here?** Start with the [`uniswap_rsi` demo strategy](strategies/demo/uniswap_rsi/) -
+> a fully commented tutorial that walks through RSI-based trading on Uniswap V3.
+
 ## Writing a Strategy
 
 Strategies implement the `decide()` method, which receives a `MarketSnapshot` and returns an `Intent` (or `None` to skip the cycle):
@@ -329,6 +332,13 @@ clawhub install almanak-strategy-builder
 ```
 
 Once installed, your agent understands the full intent vocabulary, market data API, backtesting tools, and CLI commands. Just describe what you want to build.
+
+## Contributing
+
+We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and the PR process.
+
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Security Policy](SECURITY.md)
 
 ## Documentation
 

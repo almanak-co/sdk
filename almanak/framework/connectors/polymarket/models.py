@@ -23,7 +23,8 @@ Model Type Usage:
        - Used for trusted internal data structures and method parameters
        - Minimal overhead, good for performance-sensitive code
 
-    See blueprints/18-model-type-selection.md for detailed guidelines on when to use each type.
+    General guideline: use Enum for fixed constants, Pydantic BaseModel for external API
+    boundaries requiring validation, and @dataclass for trusted internal data structures.
 """
 
 import os

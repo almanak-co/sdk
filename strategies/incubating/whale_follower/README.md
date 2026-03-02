@@ -231,7 +231,7 @@ I pieced together the copy-trading architecture from:
 - `almanak/framework/data/wallet_activity.py` (provider wiring)
 - `CLAUDE.md` (no copy-trading section)
 
-There's no single "Copy Trading Guide" in the blueprints. Blueprint `05-connectors.md` covers protocol connectors but not copy trading. A dedicated `blueprints/XX-copy-trading.md` would help.
+There's no single "Copy Trading Guide" in the documentation. A dedicated copy trading guide would help.
 
 ### 5. Signal polling takes 40+ seconds for 100 blocks
 The `WalletMonitor` polls block-by-block via `eth_getBlockByNumber` + `eth_getTransactionReceipt`. For a 100-block lookback on Arbitrum (~250ms blocks), this means ~40s of RPC calls on startup. This is expected for RPC-based monitoring, but it would be good to document expected latencies.

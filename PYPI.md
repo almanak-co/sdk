@@ -82,6 +82,10 @@ Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Plasma, Blas
 - **CEX Integration**: Kraken
 - **Aggregators**: Enso, LiFi
 
+## Contributing
+
+See the [Contributing Guide](https://github.com/almanak-co/almanak-sdk/blob/main/CONTRIBUTING.md) to get started.
+
 ## Documentation
 
 For detailed documentation, visit [docs.almanak.co](https://docs.almanak.co/)

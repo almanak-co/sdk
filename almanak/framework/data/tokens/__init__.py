@@ -104,7 +104,7 @@ def get_default_registry() -> TokenRegistry:
     .. deprecated::
         Use `get_token_resolver()` instead. The TokenResolver provides
         better performance through caching and a unified API.
-        See blueprints/17-token-resolution.md for migration guide.
+        See almanak.framework.data.tokens.resolver module for details.
 
     Returns:
         TokenRegistry with pre-registered tokens.
@@ -120,7 +120,7 @@ def get_default_registry() -> TokenRegistry:
     """
     warnings.warn(
         "get_default_registry() is deprecated. Use get_token_resolver() instead. "
-        "See blueprints/17-token-resolution.md for migration guide.",
+        "See almanak.framework.data.tokens.resolver module for details.",
         DeprecationWarning,
         stacklevel=2,
     )
