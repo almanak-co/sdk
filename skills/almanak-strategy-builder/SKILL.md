@@ -1040,6 +1040,120 @@ def decide(self, market):
         return Intent.hold(reason=f"Error: {e}")
 ```
 
+### Execution Failure Tracking (Circuit Breaker)
+
+The framework retries each failed intent up to `max_retries` (default: 3) with
+exponential backoff. However, after all retries are exhausted the strategy
+**continues running** and will attempt the same trade on the next iteration.
+Without a circuit breaker, this creates an infinite loop of reverted transactions
+that burn gas without any hope of success.
+
+**Always track consecutive execution failures in persistent state** and stop
+trading (or enter an extended cooldown) after a threshold is reached:
+
+```python
+MAX_CONSECUTIVE_FAILURES = 3     # Stop after 3 rounds of failed intents
+FAILURE_COOLDOWN_SECONDS = 1800  # 30-min cooldown before retrying
+
+def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.consecutive_failures = 0
+    self.failure_cooldown_until = 0.0
+
+def decide(self, market):
+    try:
+        now = time.time()
+
+        # Circuit breaker: skip trading while in cooldown
+        if now < self.failure_cooldown_until:
+            remaining = int(self.failure_cooldown_until - now)
+            return Intent.hold(
+                reason=f"Circuit breaker active, cooldown {remaining}s remaining"
+            )
+
+        # Circuit breaker: enter cooldown after too many failures
+        if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            self.failure_cooldown_until = now + FAILURE_COOLDOWN_SECONDS
+            self.consecutive_failures = 0
+            logger.warning(
+                f"Circuit breaker tripped after {MAX_CONSECUTIVE_FAILURES} "
+                f"consecutive failures, cooling down {FAILURE_COOLDOWN_SECONDS}s"
+            )
+            return Intent.hold(reason="Circuit breaker tripped")
+
+        # ... normal strategy logic ...
+
+    except Exception as e:
+        logger.exception(f"Error in decide(): {e}")
+        return Intent.hold(reason=f"Error: {e}")
+
+def on_intent_executed(self, intent, success: bool, result):
+    if success:
+        self.consecutive_failures = 0   # Reset on success
+    else:
+        self.consecutive_failures += 1
+        logger.warning(
+            f"Intent failed ({self.consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})"
+        )
+
+def get_persistent_state(self) -> dict:
+    return {
+        "consecutive_failures": self.consecutive_failures,
+        "failure_cooldown_until": self.failure_cooldown_until,
+    }
+
+def load_persistent_state(self, state: dict) -> None:
+    self.consecutive_failures = int(state.get("consecutive_failures", 0))
+    self.failure_cooldown_until = float(state.get("failure_cooldown_until", 0))
+```
+
+**Important:** Only update trade-timing state (e.g. `last_trade_ts`) inside
+`on_intent_executed` when `success=True`, not when the intent is created. Setting
+it at creation time means a failed trade still resets the interval timer, causing
+the strategy to wait before retrying — or worse, to keep retrying on a fixed
+schedule with no failure awareness.
+
+### Handling Gas and Slippage Errors (Sadflow Hook)
+
+Override `on_sadflow_enter` to react to specific error types during intent
+retries. This hook is called before each retry attempt and lets you modify the
+transaction (e.g. increase gas or slippage) or abort early:
+
+```python
+from almanak.framework.intents.state_machine import SadflowAction
+
+class MyStrategy(IntentStrategy):
+    def on_sadflow_enter(self, error_type, attempt, context):
+        # Abort immediately on insufficient funds — retrying won't help
+        if error_type == "INSUFFICIENT_FUNDS":
+            return SadflowAction.abort("Insufficient funds, stopping retries")
+
+        # Increase gas limit for gas-related errors
+        if error_type == "GAS_ERROR" and context.action_bundle:
+            modified = self._increase_gas(context.action_bundle)
+            return SadflowAction.modify(modified, reason="Increased gas limit")
+
+        # For slippage errors ("Too little received"), abort after 1 attempt
+        # since retrying with the same parameters will produce the same result
+        if error_type == "SLIPPAGE" and attempt >= 1:
+            return SadflowAction.abort("Slippage error persists, aborting")
+
+        # Default: let the framework retry with backoff
+        return None
+```
+
+**Error types** passed to `on_sadflow_enter` (from `_categorize_error` in `state_machine.py`):
+- `GAS_ERROR` — gas estimation failed or gas limit exceeded
+- `INSUFFICIENT_FUNDS` — wallet balance too low
+- `SLIPPAGE` — "Too little received" or similar DEX revert
+- `TIMEOUT` — transaction confirmation timed out
+- `NONCE_ERROR` — nonce mismatch or conflict
+- `REVERT` — generic transaction revert
+- `RATE_LIMIT` — RPC or API rate limit hit
+- `NETWORK_ERROR` — connection or network failure
+- `COMPILATION_PERMANENT` — unsupported protocol/chain (non-retriable)
+- `None` — unclassified error
+
 <!-- almanak-sdk-end: common-patterns -->
 
 <!-- almanak-sdk-start: troubleshooting -->
@@ -1055,6 +1169,9 @@ def decide(self, market):
 | `RSI data unavailable` | Insufficient price history | The gateway needs time to accumulate data. Try a longer timeframe or wait. |
 | `Insufficient balance` | Wallet doesn't have enough tokens | For Anvil: add `anvil_funding` to config.json. For mainnet: fund the wallet. |
 | `Slippage exceeded` | Trade too large or pool illiquid | Increase `max_slippage` or reduce trade size. |
+| `Too little received` (repeated reverts) | Placeholder prices used for slippage calculation, or stale price data | Ensure real price feeds are active (not placeholder). Implement `on_sadflow_enter` to abort on persistent slippage errors. Add a circuit breaker to stop retrying the same failing trade. |
+| Transactions keep reverting after max retries | Strategy re-emits the same failing intent on subsequent iterations | Track `consecutive_failures` in persistent state and enter cooldown after a threshold. See the "Execution Failure Tracking" pattern. |
+| Gas wasted on reverted transactions | No circuit breaker; framework retries 3x per intent, then strategy retries next iteration indefinitely | Implement `on_intent_executed` callback to count failures and `on_sadflow_enter` to abort non-recoverable errors early. |
 | Intent compilation fails | Wrong parameter types | Ensure amounts are `Decimal`, not `float`. Use `Decimal(str(value))`. |
 
 ### Debugging Tips
