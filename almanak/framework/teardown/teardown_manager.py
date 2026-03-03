@@ -370,6 +370,7 @@ class TeardownManager:
                 on_progress=on_progress,
                 is_auto_mode=is_auto_mode,
                 price_oracle=price_oracle,
+                market=market,
             )
 
             # Step 7: Verify positions closed
@@ -508,6 +509,7 @@ class TeardownManager:
             on_progress=on_progress,
             start_from_index=state.current_intent_index,
             price_oracle=price_oracle,
+            market=market,
         )
 
     async def _execute_intents(
@@ -523,6 +525,7 @@ class TeardownManager:
         start_from_index: int = 0,
         is_auto_mode: bool = False,
         price_oracle: dict | None = None,
+        market: Any = None,
     ) -> TeardownResult:
         """Execute intents with escalating slippage.
 
@@ -598,6 +601,54 @@ class TeardownManager:
                                 intent_dict = intent_to_exec.to_dict()
                                 intent_dict["max_slippage"] = str(slippage)
                                 intent_with_slippage = type(intent_to_exec).from_dict(intent_dict)
+
+                    # Resolve amount="all" to actual wallet balance before compilation
+                    # Support both object intents and dict intents (resume path)
+                    _is_dict = isinstance(intent_with_slippage, dict)
+                    amount_value = (
+                        intent_with_slippage.get("amount")
+                        if _is_dict
+                        else getattr(intent_with_slippage, "amount", None)
+                    )
+                    from_token = (
+                        intent_with_slippage.get("from_token")
+                        if _is_dict
+                        else getattr(intent_with_slippage, "from_token", None)
+                    )
+                    if amount_value == "all":
+                        if not from_token or market is None:
+                            return ExecutionAttempt(
+                                success=False,
+                                slippage_used=slippage,
+                                actual_slippage=Decimal("0"),
+                                error="Cannot resolve amount='all': missing from_token or market context",
+                            )
+                        try:
+                            bal = market.balance(from_token)
+                        except Exception as e:
+                            return ExecutionAttempt(
+                                success=False,
+                                slippage_used=slippage,
+                                actual_slippage=Decimal("0"),
+                                error=f"Cannot resolve amount='all' for {from_token}: {e}",
+                            )
+                        if bal.balance <= 0:
+                            return ExecutionAttempt(
+                                success=False,
+                                slippage_used=slippage,
+                                actual_slippage=Decimal("0"),
+                                error=f"{from_token} balance is 0, nothing to teardown",
+                            )
+                        if _is_dict:
+                            intent_with_slippage = {
+                                **intent_with_slippage,
+                                "amount": str(bal.balance),
+                            }
+                        else:
+                            from almanak.framework.intents import Intent
+
+                            intent_with_slippage = Intent.set_resolved_amount(intent_with_slippage, bal.balance)
+                        logger.info(f"Resolved amount='all' for {from_token}: {bal.balance}")
 
                     # Apply real prices to compiler if available
                     original_oracle = getattr(self.compiler, "price_oracle", None)

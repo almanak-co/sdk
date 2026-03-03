@@ -766,6 +766,20 @@ class ExecutionOrchestrator:
         if self._web3 is None:
             if self.rpc_url:
                 self._web3 = AsyncWeb3(AsyncHTTPProvider(self.rpc_url))
+                # Inject POA middleware for chains like Polygon, Avalanche, BSC
+                from almanak.gateway.utils.rpc_provider import is_poa_chain
+
+                if is_poa_chain(self.chain):
+                    try:
+                        from web3.middleware import ExtraDataToPOAMiddleware
+
+                        poa_mw = ExtraDataToPOAMiddleware
+                    except ImportError:
+                        from web3.middleware import geth_poa_middleware  # type: ignore[attr-defined]
+
+                        poa_mw = geth_poa_middleware
+                    self._web3.middleware_onion.inject(poa_mw, layer=0)
+                    logger.debug(f"Injected POA middleware for chain={self.chain}")
             else:
                 raise ExecutionError("RPC URL required for nonce queries")
         return self._web3

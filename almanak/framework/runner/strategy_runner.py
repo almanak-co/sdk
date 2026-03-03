@@ -879,6 +879,35 @@ class StrategyRunner:
                     except Exception as e:
                         logger.warning(f"Failed to pre-fetch teardown prices: {e}")
 
+                # Step T2.6: Resolve amount="all" in teardown intents
+                # The compiler rejects amount="all" — it must be resolved to a concrete
+                # token balance before compilation. Strategy authors commonly use
+                # amount="all" in generate_teardown_intents() (and the scaffold suggests it),
+                # so we resolve it here using the wallet balance from the market snapshot.
+                if teardown_market is not None:
+                    resolved_intents = []
+                    for intent in teardown_intents:
+                        if getattr(intent, "amount", None) == "all":
+                            amount_token = (
+                                getattr(intent, "from_token", None)
+                                or getattr(intent, "token", None)
+                                or getattr(intent, "collateral_token", None)
+                            )
+                            if amount_token:
+                                try:
+                                    bal = teardown_market.balance(amount_token)
+                                    numeric_balance = bal.balance if hasattr(bal, "balance") else bal
+                                    if numeric_balance > 0:
+                                        intent = Intent.set_resolved_amount(intent, numeric_balance)
+                                        logger.info(f"Resolved amount='all' for {amount_token}: {numeric_balance}")
+                                    else:
+                                        logger.warning(f"Teardown: {amount_token} balance is 0, skipping")
+                                        continue
+                                except Exception as e:
+                                    logger.warning(f"Could not resolve amount='all' for {amount_token}: {e}")
+                        resolved_intents.append(intent)
+                    teardown_intents = resolved_intents
+
                 # Step T3: Execute (SAME as normal path)
                 if self._is_multi_chain:
                     result = await self._execute_multi_chain(

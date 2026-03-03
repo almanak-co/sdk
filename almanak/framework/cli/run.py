@@ -1109,6 +1109,36 @@ def run(
         # (not ALMANAK_PRIVATE_KEY), so we must pass it explicitly.
         gateway_private_key = os.environ.get("ALMANAK_PRIVATE_KEY") if isolated_wallet_address else None
 
+        # Ensure gateway knows the strategy's chain for on-chain pricing.
+        # For anvil mode, anvil_chains is already populated from config.
+        # For mainnet, we need to read the chain from config so the MarketService
+        # uses the correct Chainlink oracle chain instead of defaulting to arbitrum.
+        gateway_chains = anvil_chains
+        if not gateway_chains:
+            resolved_config_path_gw: Path | None = Path(config_file) if config_file else None
+            if resolved_config_path_gw is None:
+                for name in ["config.json", "config.yaml", "config.yml"]:
+                    candidate = Path(working_dir) / name
+                    if candidate.exists():
+                        resolved_config_path_gw = candidate
+                        break
+            if resolved_config_path_gw and resolved_config_path_gw.exists():
+                with open(resolved_config_path_gw) as f:
+                    if resolved_config_path_gw.suffix.lower() in [".yaml", ".yml"]:
+                        import yaml
+
+                        _quick = yaml.safe_load(f)
+                    else:
+                        _quick = json.load(f)
+                    if not isinstance(_quick, dict):
+                        _quick = {}
+                    _chains_val = _quick.get("chains")
+                    _chain_val = _quick.get("chain")
+                    if _chains_val:
+                        gateway_chains = [_chains_val] if isinstance(_chains_val, str) else list(_chains_val)
+                    elif _chain_val:
+                        gateway_chains = [_chain_val]
+
         gateway_kwargs: dict[str, Any] = {
             "grpc_host": effective_host,
             "grpc_port": gateway_port,
@@ -1116,7 +1146,7 @@ def run(
             "allow_insecure": True,
             "metrics_enabled": False,
             "audit_enabled": False,
-            "chains": anvil_chains,
+            "chains": gateway_chains,
         }
         if gateway_private_key:
             gateway_kwargs["private_key"] = gateway_private_key
