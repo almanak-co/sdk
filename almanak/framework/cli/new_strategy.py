@@ -365,6 +365,20 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
             return Intent.hold(reason="Strategy logic not implemented")"""
 
 
+def _get_teardown_comment(template: StrategyTemplate) -> str:
+    """Return a template-specific TODO hint for generate_teardown_intents()."""
+    hints = {
+        StrategyTemplate.MEAN_REVERSION: "Swap all holdings back to quote token",
+        StrategyTemplate.BOLLINGER: "Swap all holdings back to quote token",
+        StrategyTemplate.DYNAMIC_LP: "Close LP position, then swap tokens to quote",
+        StrategyTemplate.BASIS_TRADE: "Close perp position, then swap to quote",
+        StrategyTemplate.LENDING_LOOP: "Repay borrows, withdraw collateral, swap to quote",
+        StrategyTemplate.COPY_TRADER: "Close all positions in order: perps -> borrows -> supplies -> LPs -> swaps",
+        StrategyTemplate.BLANK: "Swap all holdings back to quote token",
+    }
+    return hints.get(template, "Close all positions and convert to stable")
+
+
 def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig) -> str:
     """Generate template-specific __init__ parameter extraction."""
     if template == StrategyTemplate.MEAN_REVERSION:
@@ -603,6 +617,77 @@ class {class_name}(IntentStrategy):
             "chain": self.chain,
             "wallet": self.wallet_address[:10] + "..." if self.wallet_address else None,
         }}
+
+    # -------------------------------------------------------------------------
+    # TEARDOWN (required) - implement so operators can safely close positions
+    # Without these methods, operator close-requests are silently ignored.
+    # See: blueprints/14-teardown-system.md
+    # -------------------------------------------------------------------------
+
+    def supports_teardown(self) -> bool:
+        """Indicate this strategy supports safe teardown."""
+        return True
+
+    def get_open_positions(self) -> "TeardownPositionSummary":
+        """Return all open positions for teardown preview.
+
+        IMPORTANT: Query on-chain state here, not cached values.
+        The framework calls this to show operators what will be closed.
+        """
+        from datetime import UTC, datetime
+
+        from almanak.framework.teardown import (
+            PositionInfo,
+            PositionType,
+            TeardownPositionSummary,
+        )
+
+        positions: list["PositionInfo"] = []
+
+        # TODO: Add your open positions here. Example:
+        # positions.append(
+        #     PositionInfo(
+        #         position_type=PositionType.TOKEN,
+        #         position_id="{strategy_name}_token_0",
+        #         chain=self.chain,
+        #         protocol="{config.default_protocol}",
+        #         value_usd=Decimal("0"),  # Query actual on-chain balance
+        #         details={{"asset": "WETH"}},
+        #     )
+        # )
+
+        return TeardownPositionSummary(
+            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            timestamp=datetime.now(UTC),
+            positions=positions,
+        )
+
+    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
+        """Generate intents to close all positions.
+
+        Teardown goal: {_get_teardown_comment(template)}
+
+        Args:
+            mode: TeardownMode.SOFT (normal slippage) or TeardownMode.HARD (emergency, 3% slippage)
+        """
+        from almanak.framework.teardown import TeardownMode
+
+        intents: list[Intent] = []
+
+        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
+
+        # TODO: Add teardown intents here. Example for a swap strategy:
+        # intents.append(
+        #     Intent.swap(
+        #         from_token="WETH",
+        #         to_token="USDC",
+        #         amount="all",
+        #         max_slippage=max_slippage,
+        #         protocol="{config.default_protocol}",
+        #     )
+        # )
+
+        return intents
 
 
 if __name__ == "__main__":

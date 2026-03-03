@@ -37,6 +37,7 @@ Commands:
   pull      Downloads your strategy.
   push      Push a new version of your strategy.
   run       Run a strategy from its working directory.
+  teardown  Manage strategy teardowns (close all positions safely).
 ```
 
 ## almanak strat demo

@@ -148,6 +148,7 @@ nav:
     - cli/almanak.md
     - cli/almanak-strat.md
     - cli/strat-run.md
+    - cli/strat-teardown.md
     - cli/strat-new.md
     - cli/strat-example.md
     - cli/almanak-gateway.md

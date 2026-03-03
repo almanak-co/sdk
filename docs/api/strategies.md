@@ -2,6 +2,72 @@
 
 Strategy base classes and the market snapshot interface.
 
+## Implementing Teardown
+
+Every strategy **must** implement three teardown methods so operators can safely close positions. Without them, close-requests are silently ignored.
+
+### Required Methods
+
+| Method | Purpose |
+|--------|---------|
+| `supports_teardown() -> bool` | Return `True` to enable teardown |
+| `get_open_positions()` | Return a `TeardownPositionSummary` listing all open positions |
+| `generate_teardown_intents(mode, market)` | Return an ordered list of `Intent` objects that unwind positions |
+
+### Execution Order
+
+If your strategy holds multiple position types, teardown intents must follow this order:
+
+1. **PERP** -- close perpetual positions first (highest risk)
+2. **BORROW** -- repay borrows to free collateral
+3. **SUPPLY** -- withdraw supplied collateral
+4. **LP** -- close liquidity positions
+5. **TOKEN** -- swap remaining tokens to stable
+
+### Example: Swap Strategy Teardown
+
+```python
+from decimal import Decimal
+from almanak import IntentStrategy, Intent
+
+class MyStrategy(IntentStrategy):
+    def supports_teardown(self) -> bool:
+        return True
+
+    def get_open_positions(self) -> "TeardownPositionSummary":
+        from datetime import UTC, datetime
+        from almanak.framework.teardown import (
+            PositionInfo, PositionType, TeardownPositionSummary,
+        )
+        return TeardownPositionSummary(
+            strategy_id=getattr(self, "strategy_id", "my_strategy"),
+            timestamp=datetime.now(UTC),
+            positions=[
+                PositionInfo(
+                    position_type=PositionType.TOKEN,
+                    position_id="my_strategy_eth",
+                    chain=self.chain,
+                    protocol="uniswap_v3",
+                    value_usd=Decimal("1000"),  # query on-chain balance, not cache
+                    details={"asset": "WETH"},
+                )
+            ],
+        )
+
+    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
+        from almanak.framework.teardown import TeardownMode
+        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
+        return [
+            Intent.swap(
+                from_token="WETH", to_token="USDC",
+                amount="all", max_slippage=max_slippage, protocol="uniswap_v3",
+            )
+        ]
+```
+
+!!! warning "Always query on-chain state"
+    `get_open_positions()` must query live on-chain balances, not cached values. Stale data can cause teardown to skip positions or attempt to close positions that no longer exist.
+
 ## IntentStrategy
 
 The primary base class for writing strategies. Implement the `decide()` method to return an `Intent`.

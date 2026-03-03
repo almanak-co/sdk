@@ -126,6 +126,22 @@ All intents are created via `from almanak.framework.intents import Intent`.
 - Config values are read via `self.config.get("key", default)` in `__init__`
 - State persists between iterations via `self.state` dict
 
+## Teardown (Required)
+
+Every strategy **must** implement three teardown methods. Without them, operator
+close-requests are silently ignored and positions remain open.
+
+| Method | Purpose |
+|--------|---------|
+| `supports_teardown() -> bool` | Return `True` to enable teardown |
+| `get_open_positions() -> TeardownPositionSummary` | List positions to close (query on-chain state, not cache) |
+| `generate_teardown_intents(mode, market) -> list[Intent]` | Return ordered intents to unwind positions |
+
+**Execution order** (if multiple position types): PERP -> BORROW -> SUPPLY -> LP -> TOKEN
+
+The generated `strategy.py` includes teardown stubs with TODO comments -- fill them in.
+See `blueprints/14-teardown-system.md` for the full teardown system reference.
+
 ## Testing
 
 ```bash

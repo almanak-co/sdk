@@ -193,6 +193,29 @@ class MyStrategy(IntentStrategy):
 | `BridgeIntent` | Bridge tokens cross-chain |
 | `EnsureBalanceIntent` | Meta-intent that resolves to a `BridgeIntent` or `HoldIntent` to ensure minimum token balance on a target chain |
 
+## Strategy Teardown (Required)
+
+Every strategy must implement teardown so operators can safely close positions. Without teardown, close-requests are silently ignored and positions remain open. The `almanak strat new` templates include stubs -- fill them in as you build your strategy.
+
+```python
+class MyStrategy(IntentStrategy):
+    def supports_teardown(self) -> bool:
+        return True
+
+    def get_open_positions(self) -> "TeardownPositionSummary":
+        """Query on-chain state and return open positions."""
+        from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
+        # ... return TeardownPositionSummary with your positions
+
+    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
+        """Return ordered intents to unwind all positions."""
+        from almanak.framework.teardown import TeardownMode
+        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
+        return [Intent.swap(from_token="WETH", to_token="USDC", amount="all", max_slippage=max_slippage)]
+```
+
+If your strategy holds multiple position types, close them in order: **perps -> borrows -> supplies -> LPs -> tokens**. See the [Teardown CLI](cli/strat-teardown.md) for how operators trigger teardown.
+
 !!! note "Backtest CLI"
     Unlike `almanak strat run` which auto-discovers the strategy from the current directory,
     backtest commands require an explicit strategy name: `almanak strat backtest pnl -s my_strategy`.
