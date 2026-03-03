@@ -191,7 +191,7 @@ almanak agent update -g
 Si vous utilisez le registre [skills.sh](https://skills.sh), vous pouvez installer directement depuis GitHub :
 
 ```bash
-npx skills add almanak-co/almanak-sdk
+npx skills add almanak-co/sdk
 ```
 
 Cela découvre la compétence `almanak-strategy-builder` depuis le dépôt public et l'installe pour votre plateforme détectée.

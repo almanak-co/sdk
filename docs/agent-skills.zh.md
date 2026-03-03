@@ -191,7 +191,7 @@ almanak agent update -g
 如果您使用 [skills.sh](https://skills.sh) 注册表，可以直接从 GitHub 安装：
 
 ```bash
-npx skills add almanak-co/almanak-sdk
+npx skills add almanak-co/sdk
 ```
 
 这会从公共仓库发现 `almanak-strategy-builder` 技能，并为您检测到的平台安装。

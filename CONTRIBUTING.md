@@ -4,7 +4,7 @@ Thank you for your interest in contributing to the Almanak SDK. This guide cover
 
 ## Reporting Issues
 
-- **Bugs**: Open an issue on [GitHub Issues](https://github.com/almanak-co/almanak-sdk/issues) with steps to reproduce, expected vs actual behavior, and your environment (Python version, OS, SDK version).
+- **Bugs**: Open an issue on [GitHub Issues](https://github.com/almanak-co/sdk/issues) with steps to reproduce, expected vs actual behavior, and your environment (Python version, OS, SDK version).
 - **Feature requests**: Open an issue describing the use case and proposed solution.
 - **Security vulnerabilities**: Do NOT open a public issue. See [SECURITY.md](SECURITY.md) for responsible disclosure.
 
@@ -21,8 +21,8 @@ Thank you for your interest in contributing to the Almanak SDK. This guide cover
 
 ```bash
 # Clone the repository
-git clone https://github.com/almanak-co/almanak-sdk.git
-cd almanak-sdk
+git clone https://github.com/almanak-co/sdk.git
+cd sdk
 
 # Install dependencies (including dev extras)
 make install-dev

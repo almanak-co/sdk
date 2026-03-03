@@ -129,4 +129,4 @@ ENSO_API_KEY=your_enso_key
 COINGECKO_API_KEY=your_coingecko_key
 ```
 
-Todos los demás ajustes de la pasarela y del framework tienen valores predeterminados razonables y no necesitan configurarse. Consulta [`.env.example`](https://github.com/almanak-co/almanak-sdk/blob/main/.env.example) para la lista completa de opciones avanzadas.
+Todos los demás ajustes de la pasarela y del framework tienen valores predeterminados razonables y no necesitan configurarse. Consulta [`.env.example`](https://github.com/almanak-co/sdk/blob/main/.env.example) para la lista completa de opciones avanzadas.

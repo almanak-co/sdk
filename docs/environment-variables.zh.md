@@ -129,4 +129,4 @@ ENSO_API_KEY=your_enso_key
 COINGECKO_API_KEY=your_coingecko_key
 ```
 
-所有其他网关和框架设置都有合理的默认值，不需要设置。请参阅 [`.env.example`](https://github.com/almanak-co/almanak-sdk/blob/main/.env.example) 了解高级选项的完整列表。
+所有其他网关和框架设置都有合理的默认值，不需要设置。请参阅 [`.env.example`](https://github.com/almanak-co/sdk/blob/main/.env.example) 了解高级选项的完整列表。

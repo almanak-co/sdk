@@ -24,7 +24,7 @@ metadata:
       bins:
         - almanak
     emoji: "📊"
-    homepage: https://github.com/almanak-co/almanak-sdk
+    homepage: https://github.com/almanak-co/sdk
     install:
       - kind: uv
         package: almanak

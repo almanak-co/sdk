@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://pypi.org/project/almanak/"><img src="https://img.shields.io/pypi/v/almanak?style=flat-square&color=blue" alt="PyPI version"></a>
   <a href="https://pypi.org/project/almanak/"><img src="https://img.shields.io/pypi/pyversions/almanak?style=flat-square" alt="Python 3.12+"></a>
-  <a href="https://github.com/almanak-co/almanak-sdk/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License: Apache-2.0"></a>
+  <a href="https://github.com/almanak-co/sdk/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License: Apache-2.0"></a>
   <a href="https://docs.almanak.co/"><img src="https://img.shields.io/badge/docs-almanak.co-purple?style=flat-square" alt="Docs"></a>
   <a href="https://discord.gg/c4jY28WrEB"><img src="https://img.shields.io/badge/Discord-join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://x.com/Almanak__"><img src="https://img.shields.io/badge/Twitter-follow-1DA1F2?style=flat-square&logo=x&logoColor=white" alt="Twitter"></a>
@@ -322,7 +322,7 @@ Supercharge your strategy development with AI agent support. The Almanak strateg
 
 ```bash
 # Claude Code / Codex / any skills.sh-compatible agent
-npx skills add almanak-co/almanak-sdk
+npx skills add almanak-co/sdk
 
 # Or via the Almanak CLI (auto-detects your agent platform)
 almanak agent install

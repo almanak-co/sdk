@@ -129,4 +129,4 @@ ENSO_API_KEY=your_enso_key
 COINGECKO_API_KEY=your_coingecko_key
 ```
 
-All other gateway and framework settings have sensible defaults and do not need to be set. See [`.env.example`](https://github.com/almanak-co/almanak-sdk/blob/main/.env.example) for the full list of advanced options.
+All other gateway and framework settings have sensible defaults and do not need to be set. See [`.env.example`](https://github.com/almanak-co/sdk/blob/main/.env.example) for the full list of advanced options.
