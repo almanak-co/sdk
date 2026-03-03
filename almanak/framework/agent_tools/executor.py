@@ -10,13 +10,20 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from decimal import Decimal, localcontext
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import ValidationError
 
-from almanak.framework.agent_tools.catalog import ToolCatalog, ToolCategory, get_default_catalog
+from almanak.framework.agent_tools.catalog import (
+    RiskTier,
+    ToolCatalog,
+    ToolCategory,
+    ToolDefinition,
+    get_default_catalog,
+)
 from almanak.framework.agent_tools.errors import (
     ExecutionFailedError,
     RiskBlockedError,
@@ -236,9 +243,16 @@ class ToolExecutor:
             ) from e
 
         # 3. Policy check
-        self._policy_engine.record_tool_call()
-        decision = self._policy_engine.check(tool_def, request.model_dump())
-        decision.raise_if_denied(tool_name)
+        # validate_risk is a read-only pre-trade check: its request args contain
+        # the *hypothetical* trade's chain/token/protocol, not the tool's own
+        # execution context. Skip the tool-level policy check entirely -- the
+        # real trade-level checks happen inside _execute_validate_risk. This
+        # allows agents to query risk status even when the circuit breaker is
+        # tripped (they need to know *why* trading is blocked).
+        if tool_name != "validate_risk":
+            self._policy_engine.record_tool_call()
+            decision = self._policy_engine.check(tool_def, request.model_dump())
+            decision.raise_if_denied(tool_name)
 
         # 4. Dispatch by category
         request_dict = request.model_dump()
@@ -490,15 +504,7 @@ class ToolExecutor:
             )
 
         if tool_name == "validate_risk":
-            return ToolResponse(
-                status="error",
-                error={
-                    "error_code": "not_implemented",
-                    "message": "validate_risk is not yet wired to the gateway RiskGuard. "
-                    "Risk validation still runs automatically at execution time.",
-                    "recoverable": False,
-                },
-            )
+            return self._execute_validate_risk(args)
 
         if tool_name == "compute_rebalance_candidate":
             result = await self._execute_compute_rebalance_candidate(args)
@@ -1408,6 +1414,285 @@ class ToolExecutor:
         "STAKE": ["approve", "swap_simple"],
         "UNSTAKE": ["swap_simple"],
     }
+
+    # Intent types that map to MEDIUM or HIGH risk actions for validation purposes.
+    _HIGH_RISK_INTENT_TYPES: ClassVar[frozenset[str]] = frozenset({"lp_open", "borrow", "flash_loan"})
+
+    # Map intent types to canonical action tool names for accurate policy checks.
+    _INTENT_TO_TOOL_NAME: ClassVar[dict[str, str]] = {
+        "swap": "swap_tokens",
+        "lp_open": "open_lp_position",
+        "lp_close": "close_lp_position",
+        "supply": "supply_lending",
+        "borrow": "borrow_lending",
+        "repay": "repay_lending",
+        "flash_loan": "flash_loan",
+    }
+
+    def _execute_validate_risk(self, args: dict) -> ToolResponse:
+        """Run pre-trade risk validation without executing.
+
+        Evaluates the proposed trade against all PolicyEngine checks (token,
+        protocol, chain, spend limits, cooldown, rate limits, circuit breaker)
+        and returns a structured report of violations, warnings, and a risk
+        summary including remaining daily spend capacity.
+
+        This is a read-only operation -- no state is mutated.
+        """
+        intent_type = args.get("intent_type", "")
+        params = args.get("params", {})
+        chain = args.get("chain", self._default_chain)
+
+        # Build a synthetic action-args dict from intent params + chain so
+        # that PolicyEngine checks can inspect the same fields they see on
+        # real action tool calls.
+        synthetic_args = self._build_synthetic_args(intent_type, params, chain)
+
+        # Determine the appropriate risk tier for this intent type.
+        intent_lower = intent_type.lower()
+        if intent_lower in self._HIGH_RISK_INTENT_TYPES:
+            risk_tier = RiskTier.HIGH
+        elif intent_lower == "hold":
+            risk_tier = RiskTier.NONE
+        else:
+            risk_tier = RiskTier.MEDIUM
+
+        # Create a synthetic tool definition to represent this intent for
+        # policy checking. Use the canonical action tool name so that
+        # allowed_tools, rebalance gate, and approval threshold checks
+        # match the same names used during real execution.
+        mapped_tool_name = self._INTENT_TO_TOOL_NAME.get(intent_lower, "validate_risk")
+        base_tool = self._catalog.get("validate_risk")
+        if base_tool is None:
+            raise ToolValidationError(
+                "validate_risk tool is not registered in the catalog",
+                tool_name="validate_risk",
+            )
+        synthetic_tool = ToolDefinition(
+            name=mapped_tool_name,
+            description="Synthetic tool for risk validation",
+            category=ToolCategory.PLANNING,
+            risk_tier=risk_tier,
+            request_schema=base_tool.request_schema,
+            response_schema=base_tool.response_schema,
+        )
+
+        # Run policy checks (read-only: does not record trade or tool call).
+        decision = self._policy_engine.check(synthetic_tool, synthetic_args)
+
+        # Collect violations with structured detail.
+        violations = []
+        for v in decision.violations:
+            # Infer a check name from the violation text for structured output.
+            check_name = self._infer_check_name(v)
+            violations.append(
+                {
+                    "check": check_name,
+                    "message": v,
+                    "severity": "blocking",
+                }
+            )
+
+        # Generate warnings for near-limit scenarios.
+        warnings = self._generate_risk_warnings(synthetic_args)
+
+        # Build risk summary.
+        estimated_value_usd = self._policy_engine._estimate_usd_value(synthetic_args)
+        daily_spend_used = self._policy_engine._daily_spend_usd
+        daily_limit = self._policy_engine.policy.max_daily_spend_usd
+        daily_remaining = max(daily_limit - daily_spend_used, Decimal("0"))
+
+        risk_summary = {
+            "estimated_value_usd": str(estimated_value_usd),
+            "daily_spend_remaining_usd": str(daily_remaining),
+            "daily_spend_used_usd": str(daily_spend_used),
+            "daily_spend_limit_usd": str(daily_limit),
+            "single_trade_limit_usd": str(self._policy_engine.policy.max_single_trade_usd),
+        }
+
+        is_valid = len(violations) == 0
+
+        return ToolResponse(
+            status="success",
+            data={
+                "valid": is_valid,
+                "violations": violations,
+                "warnings": warnings,
+                "risk_summary": risk_summary,
+            },
+            explanation=(
+                "All policy checks passed. Trade is within risk limits."
+                if is_valid
+                else f"Trade blocked by {len(violations)} policy violation(s). Review violations for details."
+            ),
+        )
+
+    @staticmethod
+    def _build_synthetic_args(intent_type: str, params: dict, chain: str) -> dict:
+        """Build a synthetic args dict suitable for PolicyEngine checks.
+
+        Maps intent parameter names to the canonical field names that
+        policy checks look for (token_in, token_out, protocol, chain, etc.).
+        """
+        synthetic: dict = {"chain": chain}
+        intent_lower = intent_type.lower()
+
+        if intent_lower == "swap":
+            synthetic["token_in"] = params.get("from_token") or params.get("token_in", "")
+            synthetic["token_out"] = params.get("to_token") or params.get("token_out", "")
+            synthetic["amount"] = params.get("amount") or params.get("amount_usd", "")
+            synthetic["protocol"] = params.get("protocol", "")
+        elif intent_lower in ("lp_open", "lp_close"):
+            pool = params.get("pool", "")
+            if "/" in pool:
+                parts = pool.split("/")
+                synthetic["token_a"] = parts[0]
+                synthetic["token_b"] = parts[1] if len(parts) > 1 else ""
+            else:
+                synthetic["token_a"] = params.get("token_a", "")
+                synthetic["token_b"] = params.get("token_b", "")
+            synthetic["amount_a"] = params.get("amount0") or params.get("amount_a", "")
+            synthetic["amount_b"] = params.get("amount1") or params.get("amount_b", "")
+            synthetic["protocol"] = params.get("protocol", "")
+            if "position_id" in params:
+                synthetic["position_id"] = params["position_id"]
+        elif intent_lower in ("supply", "repay"):
+            synthetic["token"] = params.get("token", "")
+            synthetic["amount"] = params.get("amount", "")
+            synthetic["protocol"] = params.get("protocol", "")
+        elif intent_lower == "borrow":
+            synthetic["token"] = params.get("borrow_token") or params.get("token", "")
+            synthetic["amount"] = params.get("borrow_amount") or params.get("amount", "")
+            synthetic["collateral_token"] = params.get("collateral_token", "")
+            synthetic["collateral_amount"] = params.get("collateral_amount", "")
+            synthetic["protocol"] = params.get("protocol", "")
+        else:
+            # Fallback: pass through all params so policy checks can inspect them.
+            synthetic.update(params)
+
+        # Carry through intent_type for intent-type-allowed check.
+        synthetic["intent_type"] = intent_type
+
+        return synthetic
+
+    def _generate_risk_warnings(self, synthetic_args: dict) -> list[dict]:
+        """Generate warnings for near-limit scenarios (non-blocking advisories)."""
+        warnings: list[dict] = []
+        policy = self._policy_engine.policy
+
+        estimated_usd = self._policy_engine._estimate_usd_value(synthetic_args)
+
+        # Warn if trade would use >80% of single-trade limit
+        if estimated_usd > 0 and policy.max_single_trade_usd > 0:
+            pct_of_single = estimated_usd / policy.max_single_trade_usd * 100
+            if pct_of_single > Decimal("80") and estimated_usd <= policy.max_single_trade_usd:
+                warnings.append(
+                    {
+                        "check": "single_trade_near_limit",
+                        "message": f"Trade value ${estimated_usd:.2f} is {pct_of_single:.0f}% of "
+                        f"single-trade limit ${policy.max_single_trade_usd}.",
+                        "severity": "warning",
+                    }
+                )
+
+        # Warn if projected daily spend would exceed 80% of daily limit
+        projected_daily = self._policy_engine._daily_spend_usd + estimated_usd
+        if projected_daily > 0 and policy.max_daily_spend_usd > 0:
+            pct_of_daily = projected_daily / policy.max_daily_spend_usd * 100
+            if pct_of_daily > Decimal("80") and projected_daily <= policy.max_daily_spend_usd:
+                warnings.append(
+                    {
+                        "check": "daily_spend_near_limit",
+                        "message": f"Projected daily spend ${projected_daily:.2f} is {pct_of_daily:.0f}% of "
+                        f"daily limit ${policy.max_daily_spend_usd}.",
+                        "severity": "warning",
+                    }
+                )
+
+        # Warn about cooldown if it's partially elapsed
+        if self._policy_engine._last_trade_timestamp > 0 and policy.cooldown_seconds > 0:
+            elapsed = time.time() - self._policy_engine._last_trade_timestamp
+            if elapsed >= policy.cooldown_seconds:
+                # Cooldown fully elapsed -- no warning needed
+                pass
+            elif elapsed >= policy.cooldown_seconds * 0.5:
+                remaining = int(policy.cooldown_seconds - elapsed)
+                warnings.append(
+                    {
+                        "check": "cooldown_partial",
+                        "message": f"Cooldown has {remaining}s remaining (will be blocking at execution time).",
+                        "severity": "warning",
+                    }
+                )
+
+        # Warn about trade rate approaching limit
+        now = time.time()
+        recent_trades = [t for t in self._policy_engine._trades_this_hour if now - t < 3600]
+        if len(recent_trades) >= policy.max_trades_per_hour - 1 and len(recent_trades) < policy.max_trades_per_hour:
+            warnings.append(
+                {
+                    "check": "trade_rate_near_limit",
+                    "message": f"Trade count {len(recent_trades)}/{policy.max_trades_per_hour} per hour. "
+                    "Next trade will hit the rate limit.",
+                    "severity": "warning",
+                }
+            )
+
+        # Warn about consecutive failures approaching circuit breaker
+        failures = self._policy_engine._consecutive_failures
+        if (
+            failures > 0
+            and failures >= policy.max_consecutive_failures - 1
+            and not self._policy_engine.is_circuit_breaker_tripped
+        ):
+            warnings.append(
+                {
+                    "check": "circuit_breaker_near",
+                    "message": f"Consecutive failures: {failures}/{policy.max_consecutive_failures}. "
+                    "One more failure will trip the circuit breaker.",
+                    "severity": "warning",
+                }
+            )
+
+        return warnings
+
+    @staticmethod
+    def _infer_check_name(violation_text: str) -> str:
+        """Infer a machine-readable check name from a policy violation message."""
+        text_lower = violation_text.lower()
+        if "tool" in text_lower and "not in the allowed set" in text_lower:
+            return "tool_not_allowed"
+        if "chain" in text_lower and "not allowed" in text_lower:
+            return "chain_not_allowed"
+        if "protocol" in text_lower and "not allowed" in text_lower:
+            return "protocol_not_allowed"
+        if "token" in text_lower and "not in the allowed set" in text_lower:
+            return "token_not_allowed"
+        if "intent type" in text_lower and "not allowed" in text_lower:
+            return "intent_type_not_allowed"
+        if "single-trade limit" in text_lower:
+            return "single_trade_limit"
+        if "daily" in text_lower and ("spend" in text_lower or "limit" in text_lower):
+            return "daily_spend_limit"
+        if "rate limit" in text_lower and "tool call" in text_lower:
+            return "tool_rate_limit"
+        if "rate limit" in text_lower and "trade" in text_lower:
+            return "trade_rate_limit"
+        if "circuit breaker" in text_lower:
+            return "circuit_breaker"
+        if "cooldown" in text_lower:
+            return "cooldown"
+        if "stop-loss" in text_lower:
+            return "stop_loss"
+        if "position" in text_lower and "size" in text_lower:
+            return "position_size_limit"
+        if "approval threshold" in text_lower:
+            return "approval_gate"
+        if "rebalance" in text_lower:
+            return "rebalance_gate"
+        if "wallet" in text_lower and "not in the allowed set" in text_lower:
+            return "execution_wallet_not_allowed"
+        return "policy_violation"
 
     def _execute_estimate_gas(self, args: dict) -> ToolResponse:
         """Estimate gas for an intent using static gas tables with chain overrides."""

@@ -1416,3 +1416,331 @@ class TestSafeAddressValidation:
             },
         )
         assert result.status == "success"
+
+
+class TestValidateRisk:
+    """Tests for the validate_risk tool -- pre-trade risk validation."""
+
+    @pytest.mark.asyncio
+    async def test_validate_risk_passes_all_checks(self, executor):
+        """A trade within all policy limits should return valid=True with no violations."""
+        result = await executor.execute(
+            "validate_risk",
+            {
+                "intent_type": "swap",
+                "params": {"from_token": "USDC", "to_token": "ETH", "amount": "100"},
+                "chain": "arbitrum",
+            },
+        )
+        assert result.status == "success"
+        assert result.data["valid"] is True
+        assert result.data["violations"] == []
+        assert "risk_summary" in result.data
+        assert "estimated_value_usd" in result.data["risk_summary"]
+        assert "daily_spend_remaining_usd" in result.data["risk_summary"]
+        assert "daily_spend_used_usd" in result.data["risk_summary"]
+
+    @pytest.mark.asyncio
+    async def test_validate_risk_blocked_token(self, mock_gateway):
+        """A trade with a token not in allowed_tokens should report a violation."""
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            allowed_tokens={"USDC", "ETH"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+        )
+        executor = ToolExecutor(mock_gateway, policy=policy, wallet_address="0x1234")
+
+        result = await executor.execute(
+            "validate_risk",
+            {
+                "intent_type": "swap",
+                "params": {"from_token": "USDC", "to_token": "DOGE", "amount": "100"},
+                "chain": "arbitrum",
+            },
+        )
+        assert result.status == "success"
+        assert result.data["valid"] is False
+        assert len(result.data["violations"]) >= 1
+        # Check that the violation is about the blocked token
+        token_violations = [v for v in result.data["violations"] if v["check"] == "token_not_allowed"]
+        assert len(token_violations) >= 1
+        assert "DOGE" in token_violations[0]["message"]
+        assert token_violations[0]["severity"] == "blocking"
+
+    @pytest.mark.asyncio
+    async def test_validate_risk_exceeded_spend_limit(self, mock_gateway):
+        """A trade exceeding the single-trade limit should be flagged."""
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+            max_single_trade_usd=Decimal("500"),
+            max_daily_spend_usd=Decimal("999999999"),
+            max_position_size_usd=Decimal("999999999"),
+            require_human_approval_above_usd=Decimal("999999999"),
+        )
+        executor = ToolExecutor(mock_gateway, policy=policy, wallet_address="0x1234")
+
+        result = await executor.execute(
+            "validate_risk",
+            {
+                "intent_type": "swap",
+                "params": {"from_token": "USDC", "to_token": "ETH", "amount": "1000"},
+                "chain": "arbitrum",
+            },
+        )
+        assert result.status == "success"
+        assert result.data["valid"] is False
+        spend_violations = [v for v in result.data["violations"] if v["check"] == "single_trade_limit"]
+        assert len(spend_violations) >= 1
+        assert "1000" in spend_violations[0]["message"]
+
+    @pytest.mark.asyncio
+    async def test_validate_risk_multiple_violations(self, mock_gateway):
+        """A trade that violates multiple policies should report all violations."""
+        policy = AgentPolicy(
+            allowed_chains={"ethereum"},  # Not arbitrum
+            allowed_tokens={"USDC", "ETH"},  # Not DOGE
+            allowed_protocols={"uniswap_v3"},  # Not sushiswap
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+        )
+        executor = ToolExecutor(mock_gateway, policy=policy, wallet_address="0x1234")
+
+        result = await executor.execute(
+            "validate_risk",
+            {
+                "intent_type": "swap",
+                "params": {
+                    "from_token": "USDC",
+                    "to_token": "DOGE",
+                    "amount": "100",
+                    "protocol": "sushiswap",
+                },
+                "chain": "arbitrum",
+            },
+        )
+        assert result.status == "success"
+        assert result.data["valid"] is False
+        # Should have at least violations for chain, token, and protocol
+        violation_checks = {v["check"] for v in result.data["violations"]}
+        assert "chain_not_allowed" in violation_checks
+        assert "token_not_allowed" in violation_checks
+        assert "protocol_not_allowed" in violation_checks
+        assert len(result.data["violations"]) >= 3
+
+    @pytest.mark.asyncio
+    async def test_validate_risk_near_limit_warnings(self, mock_gateway):
+        """Trades near policy limits should produce warnings."""
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+            max_single_trade_usd=Decimal("1000"),
+            max_daily_spend_usd=Decimal("999999999"),
+            max_position_size_usd=Decimal("999999999"),
+            require_human_approval_above_usd=Decimal("999999999"),
+        )
+        executor = ToolExecutor(mock_gateway, policy=policy, wallet_address="0x1234")
+
+        # Trade at 90% of single-trade limit
+        result = await executor.execute(
+            "validate_risk",
+            {
+                "intent_type": "swap",
+                "params": {"from_token": "USDC", "to_token": "ETH", "amount": "900"},
+                "chain": "arbitrum",
+            },
+        )
+        assert result.status == "success"
+        assert result.data["valid"] is True  # Not blocking
+        # Should have a near-limit warning
+        warning_checks = {w["check"] for w in result.data["warnings"]}
+        assert "single_trade_near_limit" in warning_checks
+
+    @pytest.mark.asyncio
+    async def test_validate_risk_no_side_effects(self, executor):
+        """validate_risk must not modify any PolicyEngine state."""
+        # Record the initial state
+        initial_daily_spend = executor._policy_engine._daily_spend_usd
+        initial_trades = list(executor._policy_engine._trades_this_hour)
+        initial_failures = executor._policy_engine._consecutive_failures
+        initial_last_trade = executor._policy_engine._last_trade_timestamp
+
+        await executor.execute(
+            "validate_risk",
+            {
+                "intent_type": "swap",
+                "params": {"from_token": "USDC", "to_token": "ETH", "amount": "5000"},
+                "chain": "arbitrum",
+            },
+        )
+
+        # Verify no state was changed
+        assert executor._policy_engine._daily_spend_usd == initial_daily_spend
+        assert executor._policy_engine._trades_this_hour == initial_trades
+        assert executor._policy_engine._consecutive_failures == initial_failures
+        assert executor._policy_engine._last_trade_timestamp == initial_last_trade
+
+    @pytest.mark.asyncio
+    async def test_validate_risk_blocked_chain(self, mock_gateway):
+        """A trade on a disallowed chain should report a chain violation."""
+        policy = AgentPolicy(
+            allowed_chains={"ethereum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+        )
+        executor = ToolExecutor(mock_gateway, policy=policy, wallet_address="0x1234")
+
+        result = await executor.execute(
+            "validate_risk",
+            {
+                "intent_type": "swap",
+                "params": {"from_token": "USDC", "to_token": "ETH", "amount": "100"},
+                "chain": "arbitrum",
+            },
+        )
+        assert result.status == "success"
+        assert result.data["valid"] is False
+        chain_violations = [v for v in result.data["violations"] if v["check"] == "chain_not_allowed"]
+        assert len(chain_violations) >= 1
+
+    @pytest.mark.asyncio
+    async def test_validate_risk_circuit_breaker_tripped(self, mock_gateway):
+        """When circuit breaker is tripped, validate_risk should report it."""
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+            max_consecutive_failures=2,
+            max_single_trade_usd=Decimal("999999999"),
+            max_daily_spend_usd=Decimal("999999999"),
+            max_position_size_usd=Decimal("999999999"),
+            require_human_approval_above_usd=Decimal("999999999"),
+        )
+        executor = ToolExecutor(mock_gateway, policy=policy, wallet_address="0x1234")
+
+        # Trip the circuit breaker
+        executor._policy_engine.record_trade(Decimal("100"), success=False)
+        executor._policy_engine.record_trade(Decimal("100"), success=False)
+        assert executor._policy_engine.is_circuit_breaker_tripped
+
+        result = await executor.execute(
+            "validate_risk",
+            {
+                "intent_type": "swap",
+                "params": {"from_token": "USDC", "to_token": "ETH", "amount": "100"},
+                "chain": "arbitrum",
+            },
+        )
+        assert result.status == "success"
+        assert result.data["valid"] is False
+        cb_violations = [v for v in result.data["violations"] if v["check"] == "circuit_breaker"]
+        assert len(cb_violations) >= 1
+
+    @pytest.mark.asyncio
+    async def test_validate_risk_lp_open_intent(self, executor):
+        """LP open intents should map pool tokens correctly for validation."""
+        result = await executor.execute(
+            "validate_risk",
+            {
+                "intent_type": "lp_open",
+                "params": {
+                    "pool": "WETH/USDC/3000",
+                    "amount0": "1.0",
+                    "amount1": "3200",
+                    "protocol": "uniswap_v3",
+                },
+                "chain": "arbitrum",
+            },
+        )
+        assert result.status == "success"
+        # Should pass with permissive executor policy
+        assert result.data["valid"] is True
+
+    @pytest.mark.asyncio
+    async def test_validate_risk_returns_risk_summary(self, executor):
+        """Risk summary should include daily spend tracking."""
+        result = await executor.execute(
+            "validate_risk",
+            {
+                "intent_type": "swap",
+                "params": {"from_token": "USDC", "to_token": "ETH", "amount": "1000"},
+                "chain": "arbitrum",
+            },
+        )
+        assert result.status == "success"
+        summary = result.data["risk_summary"]
+        assert "estimated_value_usd" in summary
+        assert "daily_spend_remaining_usd" in summary
+        assert "daily_spend_used_usd" in summary
+        assert "daily_spend_limit_usd" in summary
+        assert "single_trade_limit_usd" in summary
+        # With no prior spend, remaining should equal the limit
+        assert summary["daily_spend_used_usd"] == "0"
+
+    @pytest.mark.asyncio
+    async def test_validate_risk_daily_spend_near_limit_warning(self, mock_gateway):
+        """When prior daily spend puts this trade near the daily limit, a warning should appear."""
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+            max_single_trade_usd=Decimal("999999999"),
+            max_daily_spend_usd=Decimal("10000"),
+            max_position_size_usd=Decimal("999999999"),
+            require_human_approval_above_usd=Decimal("999999999"),
+        )
+        executor = ToolExecutor(mock_gateway, policy=policy, wallet_address="0x1234")
+
+        # Pre-spend $7500 of $10000 daily limit
+        executor._policy_engine._daily_spend_usd = Decimal("7500")
+
+        result = await executor.execute(
+            "validate_risk",
+            {
+                "intent_type": "swap",
+                "params": {"from_token": "USDC", "to_token": "ETH", "amount": "1500"},
+                "chain": "arbitrum",
+            },
+        )
+        assert result.status == "success"
+        assert result.data["valid"] is True  # 7500 + 1500 = 9000 <= 10000
+        # Projected spend 9000/10000 = 90% > 80% threshold => warning
+        warning_checks = {w["check"] for w in result.data["warnings"]}
+        assert "daily_spend_near_limit" in warning_checks
+
+    @pytest.mark.asyncio
+    async def test_validate_risk_explanation_on_pass(self, executor):
+        """When all checks pass, explanation should indicate success."""
+        result = await executor.execute(
+            "validate_risk",
+            {
+                "intent_type": "swap",
+                "params": {"from_token": "USDC", "to_token": "ETH", "amount": "100"},
+                "chain": "arbitrum",
+            },
+        )
+        assert "passed" in result.explanation.lower()
+
+    @pytest.mark.asyncio
+    async def test_validate_risk_explanation_on_fail(self, mock_gateway):
+        """When checks fail, explanation should indicate the violation count."""
+        policy = AgentPolicy(
+            allowed_chains={"ethereum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+        )
+        executor = ToolExecutor(mock_gateway, policy=policy, wallet_address="0x1234")
+
+        result = await executor.execute(
+            "validate_risk",
+            {
+                "intent_type": "swap",
+                "params": {"from_token": "USDC", "to_token": "ETH", "amount": "100"},
+                "chain": "arbitrum",
+            },
+        )
+        assert "blocked" in result.explanation.lower()
+        assert "violation" in result.explanation.lower()
