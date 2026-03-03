@@ -75,9 +75,13 @@ def test_execute_teardown_restores_state_before_position_detection(
     class FakeGatewayClient:
         def __init__(self, _config) -> None:
             self.connected = False
+            self.channel = None
 
         def connect(self) -> None:
             self.connected = True
+
+        def health_check(self) -> bool:
+            return True
 
         def disconnect(self) -> None:
             self.connected = False
@@ -148,6 +152,12 @@ def test_execute_teardown_restores_state_before_position_detection(
     monkeypatch.setattr(teardown_cli_module, "load_strategy_from_file", lambda _path: (FakeStrategy, None))
     monkeypatch.setattr("almanak.framework.gateway_client.GatewayClient", FakeGatewayClient)
 
+    # Monkeypatch TokenResolver.set_gateway_channel to accept the fake channel
+    monkeypatch.setattr(
+        "almanak.framework.data.tokens.resolver.TokenResolver.set_gateway_channel",
+        lambda _self, _channel: None,
+    )
+
     result = cli_runner.invoke(
         teardown_cli_module.teardown,
         [
@@ -156,6 +166,7 @@ def test_execute_teardown_restores_state_before_position_detection(
             str(tmp_path),
             "-c",
             str(config_file),
+            "--no-gateway",
             "--preview",
             "--force",
         ],

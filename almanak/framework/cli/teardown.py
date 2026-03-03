@@ -304,6 +304,13 @@ def teardown():
     envvar="GATEWAY_PORT",
     help="Gateway sidecar gRPC port.",
 )
+@click.option(
+    "--no-gateway",
+    "no_gateway",
+    is_flag=True,
+    default=False,
+    help="Do not auto-start a gateway; connect to an existing one.",
+)
 def execute_teardown(
     working_dir: str,
     config_file: str | None,
@@ -312,15 +319,18 @@ def execute_teardown(
     force: bool,
     gateway_host: str,
     gateway_port: int,
+    no_gateway: bool,
 ):
     """Execute teardown directly from a strategy working directory.
 
     This command loads a strategy from its working directory and immediately
-    executes a teardown to close all open positions. The gateway must be running.
+    executes a teardown to close all open positions. A managed gateway is
+    auto-started by default (like ``strat run``). Use --no-gateway to connect
+    to an already-running gateway instead.
 
     Examples:
 
-        # Preview what will be closed
+        # Preview what will be closed (auto-starts gateway)
         almanak strat teardown execute -d strategies/demo/aerodrome_lp --preview
 
         # Execute graceful teardown
@@ -329,6 +339,9 @@ def execute_teardown(
         # Emergency teardown (faster, accepts higher slippage)
         almanak strat teardown execute -d strategies/demo/aave_borrow --mode emergency
 
+        # Connect to an existing gateway instead of auto-starting
+        almanak strat teardown execute -d strategies/demo/uniswap_lp --no-gateway
+
         # Skip confirmation
         almanak strat teardown execute -d strategies/demo/uniswap_lp --force
     """
@@ -336,13 +349,24 @@ def execute_teardown(
 
     from eth_account import Account
 
-    from ..gateway_client import GatewayClient, GatewayClientConfig
-
     click.echo("=" * 60)
     click.echo("ALMANAK STRATEGY TEARDOWN")
     click.echo("=" * 60)
 
     working_path = Path(working_dir).resolve()
+
+    # Load environment from .env if present
+    from dotenv import load_dotenv
+
+    from almanak.core.redaction import install_redaction
+
+    env_file = working_path / ".env"
+    if env_file.exists():
+        load_dotenv(env_file)
+        click.echo(f"Loaded environment from: {env_file}")
+
+    # Install secret redaction after env is loaded so all secrets are registered.
+    install_redaction()
 
     # Find strategy.py
     strategy_file = working_path / "strategy.py"
@@ -378,18 +402,101 @@ def execute_teardown(
 
     chain = config_dict.get("chain", "arbitrum")
 
-    # Connect to gateway
-    click.echo(f"Connecting to gateway at {gateway_host}:{gateway_port}...")
-    gateway_config = GatewayClientConfig(host=gateway_host, port=gateway_port)
-    gateway_client = GatewayClient(gateway_config)
+    # Gateway setup: auto-start a managed gateway or connect to an existing one
+    import atexit
 
-    try:
+    from almanak.gateway.core.settings import GatewaySettings
+    from almanak.gateway.managed import ManagedGateway, find_available_gateway_port
+
+    from ..gateway_client import GatewayClient, GatewayClientConfig
+
+    # Normalize "localhost" to "127.0.0.1" (gateway binds to 127.0.0.1)
+    effective_host = "127.0.0.1" if gateway_host == "localhost" else gateway_host
+
+    managed_gateway: ManagedGateway | None = None
+
+    if no_gateway:
+        # --no-gateway: connect to an existing gateway, fail if unavailable
+        click.echo(f"Connecting to existing gateway at {effective_host}:{gateway_port}...")
+        gateway_config = GatewayClientConfig(host=effective_host, port=gateway_port)
+        gateway_client = GatewayClient(gateway_config)
         gateway_client.connect()
-        click.echo("Connected to gateway")
-    except Exception as e:
-        raise click.ClickException(f"Failed to connect to gateway: {e}") from None
+
+        if not gateway_client.health_check():
+            gateway_client.disconnect()
+            click.echo()
+            click.secho("ERROR: Gateway is not running or not healthy", fg="red", bold=True)
+            click.echo()
+            click.echo("The gateway sidecar is required for teardown operations.")
+            click.echo("Start the gateway first with:")
+            click.echo()
+            click.echo("  almanak gateway")
+            click.echo()
+            raise click.ClickException(f"Gateway not available at {effective_host}:{gateway_port}")
+
+        click.secho(f"Connected to existing gateway at {effective_host}:{gateway_port}", fg="green")
+    else:
+        # Default: auto-start a managed gateway
+        try:
+            gateway_port = find_available_gateway_port(effective_host, gateway_port)
+        except RuntimeError as e:
+            click.echo()
+            click.secho(f"ERROR: {e}", fg="red", bold=True)
+            click.echo()
+            click.echo("Set a specific port with:")
+            click.echo()
+            click.echo("  almanak strat teardown execute --gateway-port <port>")
+            click.echo()
+            click.echo("Or connect to an existing gateway:")
+            click.echo()
+            click.echo("  almanak strat teardown execute --no-gateway --gateway-port <port>")
+            click.echo()
+            raise click.ClickException(str(e)) from None
+
+        gateway_settings = GatewaySettings(
+            grpc_host=effective_host,
+            grpc_port=gateway_port,
+            network="mainnet",
+            allow_insecure=True,
+            metrics_enabled=False,
+            audit_enabled=False,
+        )
+
+        click.echo(f"Starting managed gateway on {effective_host}:{gateway_port} (network=mainnet)...")
+        managed_gateway = ManagedGateway(gateway_settings)
+        try:
+            managed_gateway.start(timeout=10.0)
+        except RuntimeError as e:
+            click.echo()
+            click.secho(f"ERROR: Failed to start managed gateway: {e}", fg="red", bold=True)
+            click.echo()
+            raise click.ClickException("Managed gateway startup failed") from e
+
+        # Register atexit handler as safety net for sys.exit() paths that skip cleanup
+        atexit.register(managed_gateway.stop)
+
+        click.secho(f"Managed gateway started on {effective_host}:{gateway_port}", fg="green")
+
+        # Connect client to the managed gateway
+        gateway_config = GatewayClientConfig(host=effective_host, port=gateway_port)
+        gateway_client = GatewayClient(gateway_config)
+        gateway_client.connect()
+
+        if not gateway_client.health_check():
+            managed_gateway.stop()
+            gateway_client.disconnect()
+            raise click.ClickException(
+                "Managed gateway started but health check failed. Check gateway logs above for details."
+            )
+
+    # Wire gateway channel into TokenResolver for on-chain token discovery
+    from ..data.tokens import get_token_resolver
+
+    resolver = get_token_resolver()
 
     try:
+        resolver.set_gateway_channel(gateway_client.channel)
+
         # Resolve wallet address from config first, then private key.
         wallet_address = config_dict.get("wallet_address")
         if not wallet_address:
@@ -568,7 +675,10 @@ def execute_teardown(
         if not result.success:
             sys.exit(1)
     finally:
+        resolver.set_gateway_channel(None)
         gateway_client.disconnect()
+        if managed_gateway is not None:
+            managed_gateway.stop()
 
 
 @teardown.command()
