@@ -326,9 +326,6 @@ npx skills add almanak-co/sdk
 
 # Or via the Almanak CLI (auto-detects your agent platform)
 almanak agent install
-
-# OpenClaw
-clawhub install almanak-strategy-builder
 ```
 
 Once installed, your agent understands the full intent vocabulary, market data API, backtesting tools, and CLI commands. Just describe what you want to build.

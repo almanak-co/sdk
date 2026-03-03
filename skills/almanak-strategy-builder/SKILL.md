@@ -15,19 +15,6 @@ metadata:
   version: "2.0.0"
   author: Almanak
   license: Apache-2.0
-  openclaw:
-    primaryEnv: ALMANAK_API_KEY
-    requires:
-      env:
-        - ALMANAK_API_KEY
-        - ALCHEMY_API_KEY
-      bins:
-        - almanak
-    emoji: "📊"
-    homepage: https://github.com/almanak-co/sdk
-    install:
-      - kind: uv
-        package: almanak
 ---
 
 # Almanak Strategy Builder

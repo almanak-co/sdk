@@ -142,7 +142,7 @@ almanak agent install -p amazonq
 
 ### OpenClaw
 
-OpenClaw 从 `.openclaw/skills/` 子目录发现技能。也可通过 ClawHub 市场获取：`clawhub install almanak-strategy-builder`。
+OpenClaw 从 `.openclaw/skills/` 子目录发现技能。
 
 ```bash
 almanak agent install -p openclaw

@@ -61,7 +61,7 @@ _PLATFORM_DESCRIPTIONS: dict[Platform, str] = {
     Platform.ROO: "Roo Code (VS Code extension)",
     Platform.AIDER: "Aider CLI",
     Platform.AMAZONQ: "Amazon Q Developer",
-    Platform.OPENCLAW: "OpenClaw / ClawHub",
+    Platform.OPENCLAW: "OpenClaw",
 }
 
 
