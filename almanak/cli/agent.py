@@ -50,6 +50,66 @@ def _detect_platforms(directory: Path) -> list[Platform]:
     return found
 
 
+# Platform descriptions for the interactive selector
+_PLATFORM_DESCRIPTIONS: dict[Platform, str] = {
+    Platform.CLAUDE: "Claude Code / Anthropic CLI",
+    Platform.CODEX: "OpenAI Codex CLI",
+    Platform.CURSOR: "Cursor editor",
+    Platform.COPILOT: "GitHub Copilot",
+    Platform.WINDSURF: "Windsurf editor",
+    Platform.CLINE: "Cline (VS Code extension)",
+    Platform.ROO: "Roo Code (VS Code extension)",
+    Platform.AIDER: "Aider CLI",
+    Platform.AMAZONQ: "Amazon Q Developer",
+    Platform.OPENCLAW: "OpenClaw / ClawHub",
+}
+
+
+def _interactive_platform_select() -> list[Platform] | None:
+    """Show interactive arrow-key menu for platform selection.
+
+    Returns None if the user cancels or selects nothing.
+    Raises click.UsageError if the terminal is non-interactive or the dependency is missing.
+    """
+    import sys
+
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise click.UsageError(
+            "No agent platforms detected and terminal is non-interactive.\nUse: almanak agent install -p <platform>"
+        )
+
+    try:
+        from simple_term_menu import TerminalMenu
+    except ImportError as e:
+        raise click.UsageError(
+            "Interactive selection requires 'simple-term-menu'.\n"
+            "Install with: pip install simple-term-menu\n"
+            "Alternatively, use: almanak agent install -p <platform>"
+        ) from e
+
+    all_platforms = list(Platform)
+    max_name = max(len(p.value) for p in all_platforms)
+    entries = [f"{p.value:<{max_name}}  {_PLATFORM_DESCRIPTIONS.get(p, p.value)}" for p in all_platforms]
+
+    click.echo("No agent platforms detected. Select the ones you use:\n")
+    menu = TerminalMenu(
+        entries,
+        title="",
+        multi_select=True,
+        show_multi_select_hint=True,
+        multi_select_select_on_accept=False,
+        menu_cursor_style=("fg_cyan", "bold"),
+        menu_highlight_style=("bg_gray", "fg_cyan", "bold"),
+    )
+    indices = menu.show()
+
+    if indices is None or len(indices) == 0:
+        click.echo("Cancelled.")
+        return None
+
+    return [all_platforms[i] for i in indices]
+
+
 _VERSION_RE = re.compile(r"<!--\s*version:\s*([\d.]+\S*)\s*-->")
 
 
@@ -162,9 +222,9 @@ def agent():
 def install(platforms: tuple[str, ...], directory: str, global_install: bool, dry_run: bool) -> None:
     """Install agent skill files into the current project.
 
-    Auto-detects platforms if none specified. Falls back to Claude Code
-    if no platforms are detected. Use --global to install into ~/ for
-    all projects.
+    Auto-detects platforms if none specified. Shows an interactive
+    selection menu if no platforms are detected. Use --global to install
+    into ~/ for all projects.
 
     Examples:
 
@@ -189,9 +249,10 @@ def install(platforms: tuple[str, ...], directory: str, global_install: bool, dr
                 click.echo(f"Auto-detected platforms: {', '.join(p.value for p in detected)}")
                 resolved = detected
             else:
-                click.echo("No platforms detected. Installing as Claude Code skill.")
-                click.echo("Tip: 'npx skills add almanak-co/almanak-sdk' works across all platforms.")
-                resolved = [Platform.CLAUDE]
+                selected = _interactive_platform_select()
+                if selected is None:
+                    return
+                resolved = selected
     elif "all" in platforms:
         resolved = list(Platform)
     else:
