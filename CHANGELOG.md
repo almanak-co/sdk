@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-03-03
+
+### Changed
+- `teardown execute` now auto-starts gateway and loads `.env` from strategy directory, matching `strat run` behavior (#477)
+- Added `--no-gateway` flag to `teardown execute` to connect to an existing gateway (#477)
+- Balance provider injection in teardown CLI so `market.balance()` works during teardown (#452)
+
+### Fixed
+- POA middleware injection for Polygon, Avalanche, and BSC chains - strategies no longer crash with `ExtraDataLengthError` (#478)
+- `amount="all"` resolution in teardown intents - demo strategies and scaffold template teardown now works correctly (#478)
+- Chain-aware Chainlink pricing on mainnet - MarketService no longer defaults to Arbitrum for oracle lookups (#478)
+- CLOB bundle routing to ClobActionHandler in single-chain path - Polymarket prediction intents no longer silently fail (#475)
+- Clarify ATR `value_percent` returns percentage points, not decimal fraction (#476)
+- Broken X/Twitter links updated to x.com/almanak
+- Eliminate 177 mkdocs build warnings and update documentation site URL
+
 ## [2.2.0] - 2026-03-03
 
 ### Added
