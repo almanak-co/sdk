@@ -495,7 +495,7 @@ stoch.is_overbought # bool
 
 atr_val = market.atr("WETH", period=14)
 atr_val.value       # Decimal (absolute)
-atr_val.value_percent  # Decimal (as % of price)
+atr_val.value_percent  # Decimal, percentage points (2.62 means 2.62%, not 0.0262)
 atr_val.is_high_volatility  # bool
 
 sma = market.sma("WETH", period=20)
@@ -1029,7 +1029,7 @@ def decide(self, market):
 
     # Open new position centered on current price
     atr = market.atr(self.base_token)
-    half_range = price * atr.value_percent * 2
+    half_range = price * (atr.value_percent / Decimal("100")) * 2  # value_percent is percentage points
     return Intent.lp_open(
         pool="WETH/USDC",
         amount0=Decimal("1"), amount1=Decimal("2000"),

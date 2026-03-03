@@ -428,9 +428,9 @@ class ATRData:
 
     Attributes:
         value: ATR value in price units
-        value_percent: ATR as percentage of current price
+        value_percent: ATR as percentage points of current price (e.g., 2.62 means 2.62%, not 0.0262)
         period: ATR period (default 14)
-        volatility_threshold: Max volatility threshold percentage (default 5.0)
+        volatility_threshold: Max volatility threshold in percentage points (e.g., 5.0 means 5.0%)
     """
 
     value: Decimal
