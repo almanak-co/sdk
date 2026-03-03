@@ -82,7 +82,7 @@ from ..intents.state_machine import (
     StateMachineConfig,
     TransactionReceipt,
 )
-from ..intents.vocabulary import AnyIntent, DecideResult, HoldIntent, Intent, IntentSequence, IntentType
+from ..intents.vocabulary import AnyIntent, DecideResult, HoldIntent, Intent, IntentSequence
 from ..models.actions import AvailableAction, SuggestedAction
 from ..models.operator_card import EventType, OperatorCard, PositionSummary, Severity
 from ..models.stuck_reason import StuckReason
@@ -1122,22 +1122,13 @@ class StrategyRunner:
                             # Reset to None so the next chained step fails explicitly
                             # if it uses amount="all" (prevents stale value reuse).
                             previous_amount_received = None
-                            # Only warn for SWAP intents where amount chaining is expected.
-                            # LP_OPEN, LP_CLOSE, SUPPLY, BORROW, etc. don't produce a
-                            # single chainable output amount -- this is normal, not a bug.
-                            intent_type_val = getattr(intent_to_execute, "intent_type", None)
-                            is_swap = intent_type_val == IntentType.SWAP
-                            if is_swap:
+                            # Only warn when there's actually a next step that could need chaining.
+                            # Single intents (LP_OPEN, LP_CLOSE, etc.) don't chain amounts.
+                            if is_multi_intent and idx < len(intents) - 1:
                                 logger.warning(
                                     "Amount chaining: no output amount extracted from step %d; "
                                     "subsequent amount='all' steps will fail",
                                     idx + 1,
-                                )
-                            else:
-                                logger.debug(
-                                    "Amount chaining: step %d (%s) has no chainable output amount (normal for non-swap intents)",
-                                    idx + 1,
-                                    intent_type_val.value if intent_type_val else "unknown",
                                 )
 
                     # Stop on failure - don't execute subsequent intents
