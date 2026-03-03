@@ -869,6 +869,16 @@ class StrategyRunner:
                 if request:
                     manager.mark_started(strategy_id, total_positions=len(teardown_intents))
 
+                # Step T2.5: Pre-fetch prices for tokens in teardown intents
+                # MarketSnapshot is lazy — prices only populate on market.price() calls.
+                # generate_teardown_intents() typically doesn't call market.price(),
+                # so without this the compiler falls back to placeholder prices.
+                if teardown_market is not None and hasattr(teardown_market, "price"):
+                    try:
+                        self._prefetch_teardown_prices(teardown_market, teardown_intents)
+                    except Exception as e:
+                        logger.warning(f"Failed to pre-fetch teardown prices: {e}")
+
                 # Step T3: Execute (SAME as normal path)
                 if self._is_multi_chain:
                     result = await self._execute_multi_chain(
@@ -2805,6 +2815,38 @@ class StrategyRunner:
             chain=destination_chain,
             reason=(f"Unable to resolve token decimals for bridge balance normalization (candidates={candidates})"),
         )
+
+    @staticmethod
+    def _prefetch_teardown_prices(market: Any, intents: list) -> None:
+        """Eagerly fetch prices for tokens referenced in teardown intents.
+
+        MarketSnapshot uses lazy loading — prices only populate when market.price()
+        is called. During teardown, generate_teardown_intents() typically doesn't call
+        market.price(), so get_price_oracle_dict() returns {} and the compiler falls
+        back to placeholder prices. This method pre-populates the cache.
+        """
+        token_attrs = ("from_token", "to_token", "token", "collateral_token", "borrow_token", "token_in")
+        tokens: set[str] = set()
+        for intent in intents:
+            for attr in token_attrs:
+                val = getattr(intent, attr, None)
+                if val and isinstance(val, str):
+                    tokens.add(val)
+
+        if not tokens:
+            return
+
+        fetched = []
+        for token in sorted(tokens):
+            try:
+                market.price(token)
+                fetched.append(token)
+            except Exception:
+                # Non-fatal: teardown proceeds with placeholders for this token
+                logger.debug(f"Could not pre-fetch price for teardown token {token}")
+
+        if fetched:
+            logger.info(f"Pre-fetched {len(fetched)} teardown prices: {fetched}")
 
     def _create_error_result(
         self,
