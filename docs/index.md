@@ -41,6 +41,13 @@ The Almanak SDK provides a comprehensive framework for developing, testing, and 
 pip install almanak
 ```
 
+Anvil fork testing (below) requires [Foundry](https://book.getfoundry.sh/getting-started/installation):
+
+```bash
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
+```
+
 ## Quick Start
 
 ```bash

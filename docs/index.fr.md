@@ -41,6 +41,13 @@ Le SDK Almanak fournit un framework complet pour le développement, le test et l
 pip install almanak
 ```
 
+Le test sur fork Anvil (ci-dessous) nécessite [Foundry](https://book.getfoundry.sh/getting-started/installation) :
+
+```bash
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
+```
+
 ## Démarrage rapide
 
 ```bash
