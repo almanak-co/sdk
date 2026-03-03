@@ -94,12 +94,15 @@ docs:
 	@$(MAKE) docs-llms
 
 # Generate llms.txt (separate config, no i18n - see mkdocs-llms.yml)
+# Copies llms.txt, llms-full.txt, and all per-page .md files that the plugin
+# generates (these are the targets of the URLs in llms.txt).
 docs-llms:
 	uv run mkdocs build -f mkdocs-llms.yml -d site-llms
 	mkdir -p site
 	test -f site-llms/llms.txt
 	test -f site-llms/llms-full.txt
 	cp site-llms/llms.txt site-llms/llms-full.txt site/
+	cd site-llms && find . -name '*.md' ! -name 'llms*' -exec sh -c 'mkdir -p "../site/$$(dirname "{}")" && cp "{}" "../site/{}"' \;
 	rm -rf site-llms
 
 # Serve documentation locally for development
