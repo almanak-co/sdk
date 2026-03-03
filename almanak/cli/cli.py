@@ -268,6 +268,189 @@ almanak.add_command(agent_group, name="agent")
 
 
 @almanak.group()
+def mcp():
+    """MCP (Model Context Protocol) server commands."""
+    pass
+
+
+@mcp.command("serve")
+@click.option(
+    "--gateway-host",
+    default="localhost",
+    type=str,
+    envvar="GATEWAY_HOST",
+    help="Gateway hostname (default: localhost).",
+)
+@click.option(
+    "--gateway-port",
+    default=50051,
+    type=int,
+    envvar="GATEWAY_PORT",
+    help="Gateway gRPC port (default: 50051).",
+)
+@click.option(
+    "--allowed-tokens",
+    multiple=True,
+    help="Restrict to specific tokens (can be repeated). Default: all tokens.",
+)
+@click.option(
+    "--allowed-protocols",
+    multiple=True,
+    help="Restrict to specific protocols (can be repeated). Default: all protocols.",
+)
+@click.option(
+    "--allowed-chains",
+    multiple=True,
+    default=("arbitrum",),
+    help="Restrict to specific chains (can be repeated). Default: arbitrum.",
+)
+@click.option(
+    "--max-single-trade-usd",
+    type=click.FloatRange(min=0.0),
+    default=10000,
+    help="Max single trade size in USD (default: 10000).",
+)
+@click.option(
+    "--max-daily-spend-usd",
+    type=click.FloatRange(min=0.0),
+    default=50000,
+    help="Max daily spend in USD (default: 50000).",
+)
+@click.option(
+    "--schema-only",
+    is_flag=True,
+    default=False,
+    help="Serve tool schemas only (no gateway connection required).",
+)
+@click.option(
+    "--log-level",
+    default="warning",
+    type=click.Choice(["debug", "info", "warning", "error"]),
+    help="Log level (default: warning). Logs go to stderr, never stdout.",
+)
+def mcp_serve(
+    gateway_host,
+    gateway_port,
+    allowed_tokens,
+    allowed_protocols,
+    allowed_chains,
+    max_single_trade_usd,
+    max_daily_spend_usd,
+    schema_only,
+    log_level,
+):
+    """Start Almanak as an MCP tool server (stdio transport).
+
+    Serves all Almanak agent tools over the MCP protocol using stdio
+    transport. Compatible with Claude Desktop, Cursor, and any MCP client.
+
+    The server reads JSON-RPC messages from stdin and writes responses
+    to stdout using content-length framing (LSP-style).
+
+    Examples:
+
+    \b
+        # Start with gateway connection (full tool execution)
+        almanak mcp serve
+
+    \b
+        # Schema-only mode (no gateway needed, tools/list only)
+        almanak mcp serve --schema-only
+
+    \b
+        # With policy constraints
+        almanak mcp serve --max-single-trade-usd 5000 --allowed-chains arbitrum --allowed-chains base
+
+    \b
+        # Claude Desktop config (~/.claude/claude_desktop_config.json):
+        {
+          "mcpServers": {
+            "almanak": {
+              "command": "almanak",
+              "args": ["mcp", "serve"]
+            }
+          }
+        }
+    """
+    import asyncio
+    import logging
+
+    # Configure logging to stderr only (stdout is reserved for MCP protocol)
+    log_level_map = {
+        "debug": logging.DEBUG,
+        "info": logging.INFO,
+        "warning": logging.WARNING,
+        "error": logging.ERROR,
+    }
+    logging.basicConfig(
+        level=log_level_map.get(log_level, logging.WARNING),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        stream=sys.stderr,
+    )
+    install_redaction()
+
+    from almanak.framework.agent_tools.adapters.mcp_server import AlmanakMCPStdioServer
+
+    if schema_only:
+        # No executor, just serve tool schemas
+        server = AlmanakMCPStdioServer(executor=None)
+        try:
+            asyncio.run(server.run())
+        except KeyboardInterrupt:
+            pass
+        return
+
+    # Connect to gateway for full tool execution
+    from decimal import Decimal
+
+    from almanak.framework.agent_tools.executor import ToolExecutor
+    from almanak.framework.agent_tools.policy import AgentPolicy
+    from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
+
+    config = GatewayClientConfig.from_env()
+    config.host = gateway_host
+    config.port = gateway_port
+    client = GatewayClient(config)
+
+    try:
+        client.connect()
+        if not client.wait_for_ready(timeout=10.0):
+            click.echo(
+                "Error: Cannot connect to gateway at "
+                f"{gateway_host}:{gateway_port}. "
+                "Start gateway first with: almanak gateway",
+                err=True,
+            )
+            sys.exit(1)
+
+        policy = AgentPolicy(
+            max_single_trade_usd=Decimal(str(max_single_trade_usd)),
+            max_daily_spend_usd=Decimal(str(max_daily_spend_usd)),
+            allowed_chains=set(allowed_chains),
+            allowed_tokens=set(allowed_tokens) if allowed_tokens else None,
+            allowed_protocols=set(allowed_protocols) if allowed_protocols else None,
+        )
+
+        executor = ToolExecutor(
+            gateway_client=client,
+            policy=policy,
+        )
+
+        server = AlmanakMCPStdioServer(executor=executor)
+        asyncio.run(server.run())
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    finally:
+        client.disconnect()
+
+
+almanak.add_command(mcp, name="mcp")
+
+
+@almanak.group()
 def docs():
     """Access bundled SDK documentation for LLM agents."""
     pass
