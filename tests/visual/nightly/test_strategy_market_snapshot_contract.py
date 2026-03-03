@@ -63,6 +63,12 @@ pytestmark = pytest.mark.integration
 
 OUTPUT_DIR = Path(__file__).parent / "output"
 
+# Tokens to test prices for — all have CoinGecko + Chainlink dual-source on Arbitrum
+PRICE_TOKENS = ["WETH", "WBTC", "USDC", "LINK", "ARB", "UNI", "AAVE", "GMX", "DAI", "USDT", "PENDLE", "wstETH"]
+
+# Stablecoins expected to be pegged near $1
+STABLECOIN_TOKENS = {"USDC", "DAI", "USDT"}
+
 
 def _run_async(coro: Any) -> Any:
     """Run async coroutine synchronously, handling nested loops."""
@@ -235,23 +241,31 @@ def test_strategy_market_snapshot_contract() -> None:
             indicator_provider=indicator_provider,
         )
 
-        prices: dict[str, Decimal] = (
-            _record_step(
-                summary,
-                "price_sanity",
-                lambda: {
-                    "WETH": market.price("WETH"),
-                    "WBTC": market.price("WBTC"),
-                    "USDC": market.price("USDC"),
-                },
-            )
-            or {}
-        )
+        # -- Price sanity (per-token, resilient) --
+        prices: dict[str, Decimal] = {}
+        price_errors: list[str] = []
+        _price_start = time.perf_counter()
+
+        for token in PRICE_TOKENS:
+            try:
+                val = market.price(token)
+                assert val > 0, f"{token} price must be > 0"
+                if token.upper() in STABLECOIN_TOKENS:
+                    assert Decimal("0.90") <= val <= Decimal("1.10"), f"{token} depeg: {val}"
+                prices[token] = val
+            except Exception as exc:  # noqa: BLE001
+                price_errors.append(f"{token}: {exc}")
+
+        summary["timings_ms"]["price_sanity"] = round((time.perf_counter() - _price_start) * 1000, 2)
+
+        if price_errors:
+            summary["checks"]["price_sanity"] = {"ok": False, "errors": price_errors}
+            for err in price_errors:
+                summary["errors"].append(f"price_sanity: {err}")
+        else:
+            summary["checks"]["price_sanity"] = {"ok": True}
+
         if prices:
-            assert prices["WETH"] > 0
-            assert prices["WBTC"] > 0
-            assert prices["USDC"] > 0
-            assert Decimal("0.90") <= prices["USDC"] <= Decimal("1.10")
             summary["metrics"]["prices"] = {k: str(v) for k, v in prices.items()}
 
         price_data = _record_step(summary, "price_data_shape", lambda: market.price_data("WETH"))
@@ -346,6 +360,41 @@ def test_strategy_market_snapshot_contract() -> None:
             assert isinstance(prediction_price, Decimal)
         else:
             summary["metrics"]["prediction_price"] = None
+
+        def _provider_attribution() -> dict[str, Any]:
+            """Probe async/envelope APIs to collect provider source metadata."""
+            price_sources: dict[str, dict[str, Any]] = {}
+            for token in PRICE_TOKENS:
+                try:
+                    result = _run_async(price_oracle.get_aggregated_price(token, "USD"))
+                    price_sources[token] = {
+                        "source": result.source,
+                        "confidence": result.confidence,
+                        "stale": result.stale,
+                    }
+                    if result.source_details:
+                        price_sources[token]["source_details"] = result.source_details
+                except Exception:  # noqa: BLE001
+                    price_sources[token] = {"source": "unknown", "confidence": 0.0, "stale": True}
+
+            ohlcv_source: dict[str, Any] = {}
+            try:
+                envelope = router.get_ohlcv("WETH", chain=chain, timeframe="4h", limit=120)
+                ohlcv_source = {
+                    "source": envelope.meta.source,
+                    "confidence": envelope.meta.confidence,
+                    "latency_ms": envelope.meta.latency_ms,
+                    "cache_hit": envelope.meta.cache_hit,
+                    "candle_count": len(envelope.value),
+                }
+            except Exception:  # noqa: BLE001
+                ohlcv_source = {"source": "unknown", "confidence": 0.0, "latency_ms": 0, "cache_hit": False, "candle_count": 0}
+
+            return {"price_sources": price_sources, "ohlcv_source": ohlcv_source}
+
+        provider_info = _record_step(summary, "provider_attribution", _provider_attribution)
+        if provider_info:
+            summary["metrics"]["providers"] = provider_info
 
         def _artifact_step() -> dict[str, str]:
             candles = _run_async(ohlcv_provider.get_ohlcv("WETH", quote="USD", timeframe="4h", limit=120))

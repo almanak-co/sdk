@@ -81,6 +81,9 @@ message PriceResponse {
   string source = 3;
   double confidence = 4;  // 0.0-1.0
   bool stale = 5;
+  repeated string sources_ok = 6;
+  map<string, string> sources_failed = 7;
+  repeated string outliers = 8;
 }
 
 message BalanceRequest {

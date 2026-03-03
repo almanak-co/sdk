@@ -71,12 +71,21 @@ class GatewayPriceOracle(PriceOracle):
             if not response.price:
                 raise AllDataSourcesFailed(errors={"gateway": "Empty price response from gateway"})
 
+            source_details = None
+            if response.sources_ok or response.sources_failed or response.outliers:
+                source_details = {
+                    "sources_ok": list(response.sources_ok),
+                    "sources_failed": dict(response.sources_failed),
+                    "outliers": list(response.outliers),
+                }
+
             return PriceResult(
                 price=Decimal(response.price),
                 source=response.source or "gateway",
                 timestamp=datetime.fromtimestamp(response.timestamp, tz=UTC),
                 confidence=response.confidence,
                 stale=response.stale,
+                source_details=source_details,
             )
 
         except Exception as e:

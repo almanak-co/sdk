@@ -132,14 +132,21 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
 
         try:
             result = await self._price_aggregator.get_aggregated_price(token, quote)
+            details = self._price_aggregator.get_last_details(token, quote)
 
-            return gateway_pb2.PriceResponse(
+            response = gateway_pb2.PriceResponse(
                 price=str(result.price),
                 timestamp=int(result.timestamp.timestamp()),
                 source=result.source,
                 confidence=result.confidence,
                 stale=result.stale,
             )
+            if details:
+                response.sources_ok.extend(details.get("sources_ok", []))
+                for k, v in details.get("sources_failed", {}).items():
+                    response.sources_failed[k] = v
+                response.outliers.extend(details.get("outliers", []))
+            return response
         except Exception as e:
             logger.error(f"GetPrice failed for {token}/{quote}: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)

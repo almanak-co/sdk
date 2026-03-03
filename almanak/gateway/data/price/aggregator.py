@@ -211,6 +211,9 @@ class PriceAggregator:
             source.source_name: SourceHealthMetrics(source_name=source.source_name) for source in sources
         }
 
+        # Per-call diagnostics: stores last aggregation details per token/quote pair
+        self._last_details: dict[str, dict[str, Any]] = {}
+
         logger.info(
             "Initialized PriceAggregator",
             extra={
@@ -255,6 +258,15 @@ class PriceAggregator:
 
         # Fetch from all sources concurrently
         results = await self._fetch_all_sources(token, quote)
+
+        # Store per-call diagnostics BEFORE the failure check so that
+        # get_last_details() is populated even when all sources fail.
+        detail_key = f"{token.upper()}/{quote.upper()}"
+        self._last_details[detail_key] = {
+            "sources_ok": [r.source for r in results.valid_results],
+            "sources_failed": results.errors,
+            "outliers": [r.source for r in results.outliers],
+        }
 
         # Check if all sources failed
         if not results.valid_results:
@@ -564,6 +576,15 @@ class PriceAggregator:
             Dictionary mapping source names to their health metrics
         """
         return {name: metrics.to_dict() for name, metrics in self._health_metrics.items()}
+
+    def get_last_details(self, token: str, quote: str = "USD") -> dict[str, Any] | None:
+        """Get per-source diagnostics from the last aggregation call for a token pair.
+
+        Returns:
+            Dict with sources_ok, sources_failed, and outliers lists, or None if
+            no aggregation has been performed for this pair yet.
+        """
+        return self._last_details.get(f"{token.upper()}/{quote.upper()}")
 
     def reset_health_metrics(self, source_name: str | None = None) -> None:
         """Reset health metrics for one or all sources.

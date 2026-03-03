@@ -162,11 +162,31 @@ Global___PriceRequest: _TypeAlias = PriceRequest  # noqa: Y015
 class PriceResponse(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
+    @_typing.final
+    class SourcesFailedEntry(_message.Message):
+        DESCRIPTOR: _descriptor.Descriptor
+
+        KEY_FIELD_NUMBER: _builtins.int
+        VALUE_FIELD_NUMBER: _builtins.int
+        key: _builtins.str
+        value: _builtins.str
+        def __init__(
+            self,
+            *,
+            key: _builtins.str = ...,
+            value: _builtins.str = ...,
+        ) -> None: ...
+        _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
+        def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
     PRICE_FIELD_NUMBER: _builtins.int
     TIMESTAMP_FIELD_NUMBER: _builtins.int
     SOURCE_FIELD_NUMBER: _builtins.int
     CONFIDENCE_FIELD_NUMBER: _builtins.int
     STALE_FIELD_NUMBER: _builtins.int
+    SOURCES_OK_FIELD_NUMBER: _builtins.int
+    SOURCES_FAILED_FIELD_NUMBER: _builtins.int
+    OUTLIERS_FIELD_NUMBER: _builtins.int
     price: _builtins.str
     """Decimal as string"""
     timestamp: _builtins.int
@@ -174,6 +194,12 @@ class PriceResponse(_message.Message):
     confidence: _builtins.float
     """0.0-1.0"""
     stale: _builtins.bool
+    @_builtins.property
+    def sources_ok(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
+    @_builtins.property
+    def sources_failed(self) -> _containers.ScalarMap[_builtins.str, _builtins.str]: ...
+    @_builtins.property
+    def outliers(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
     def __init__(
         self,
         *,
@@ -182,8 +208,11 @@ class PriceResponse(_message.Message):
         source: _builtins.str = ...,
         confidence: _builtins.float = ...,
         stale: _builtins.bool = ...,
+        sources_ok: _abc.Iterable[_builtins.str] | None = ...,
+        sources_failed: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
+        outliers: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["confidence", b"confidence", "price", b"price", "source", b"source", "stale", b"stale", "timestamp", b"timestamp"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["confidence", b"confidence", "outliers", b"outliers", "price", b"price", "source", b"source", "sources_failed", b"sources_failed", "sources_ok", b"sources_ok", "stale", b"stale", "timestamp", b"timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PriceResponse: _TypeAlias = PriceResponse  # noqa: Y015

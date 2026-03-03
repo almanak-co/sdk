@@ -306,6 +306,7 @@ class PriceResult:
     timestamp: datetime
     confidence: float
     stale: bool = False
+    source_details: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         """Validate confidence is within bounds."""
@@ -334,6 +335,7 @@ class PriceResult:
             "confidence": self.confidence,
             "stale": self.stale,
             "age_seconds": self.age_seconds,
+            "source_details": self.source_details,
         }
 
     @classmethod
@@ -345,6 +347,7 @@ class PriceResult:
             timestamp=datetime.fromisoformat(data["timestamp"]),
             confidence=data["confidence"],
             stale=data.get("stale", False),
+            source_details=data.get("source_details"),
         )
 
 
