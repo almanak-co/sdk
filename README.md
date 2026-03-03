@@ -26,10 +26,10 @@
 </p>
 
 <p align="center">
-  <a href="https://sdk.docs.almanak.co/">English</a> |
-  <a href="https://sdk.docs.almanak.co/zh/">中文</a> |
-  <a href="https://sdk.docs.almanak.co/fr/">Français</a> |
-  <a href="https://sdk.docs.almanak.co/es/">Español</a>
+  <a href="https://docs.almanak.co/">English</a> |
+  <a href="https://docs.almanak.co/zh/">中文</a> |
+  <a href="https://docs.almanak.co/fr/">Français</a> |
+  <a href="https://docs.almanak.co/es/">Español</a>
 </p>
 
 ---

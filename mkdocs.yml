@@ -1,6 +1,6 @@
 site_name: Almanak SDK
 site_description: Python SDK for developing and deploying autonomous DeFi agents
-site_url: https://sdk.docs.almanak.co
+site_url: https://docs.almanak.co
 repo_url: https://github.com/almanak-co/sdk
 repo_name: almanak-co/sdk
 use_directory_urls: false
