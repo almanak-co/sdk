@@ -6,34 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-03-03
+
 ### Added
-- Unified Token Resolution System via `TokenResolver` class
-  - Single source of truth for token addresses and decimals across all chains
-  - Multi-layer resolution: memory cache, disk cache, static registry, gateway on-chain lookup
-  - Native token auto-wrapping for DEX operations (ETH -> WETH, etc.)
-  - Bridged token alias handling (USDC.e, USDbC, USDT.e, WETH.e)
-  - On-chain ERC-20 metadata discovery via gateway
-  - Thread-safe singleton with disk-persistent caching
-- `get_token_resolver()` as primary entry point for all token resolution
-- `TokenService` gRPC service in gateway for on-chain token discovery
-- 50+ tokens across 8 chains (Ethereum, Arbitrum, Optimism, Base, Polygon, Avalanche, BSC, Plasma)
+- Curve Finance swap and LP support wired into intent compiler (#403)
+- Velodrome V2 (Optimism) addresses added to Aerodrome connector for cross-chain Solidly-fork support (#412)
+- `--teardown-after` CLI flag to auto-close positions after `--once` runs (#416)
+- Live on-chain Aave V3 supply/borrow rates via `market.lending_rate()` (#404)
+- Live on-chain Compound V3 lending rate fetching (#430)
+- `MarketSnapshot.collateral_value_usd()` helper for perp position sizing (#424)
+- Interactive platform selector for `almanak agent install` when no platform is auto-detected (#407)
+- Nightly Market Data API contract tests and 4 new indicator calculators: ADX, OBV, CCI, Ichimoku (#442)
+- Multi-language documentation: Mandarin, French, Spanish translations (#418)
+- `/release` skill for automated changelog, tagging, and GitHub release creation
 
-### Removed
-- `TOKEN_ADDRESSES` dict from `almanak.framework.intents.compiler` - use `get_token_resolver()` instead
-- `_DeprecatedDict` wrapper class from `almanak.framework.intents.compiler`
-- `TOKEN_REGISTRY` dict from `almanak.gateway.data.balance.web3_provider` - use `get_token_resolver()` instead
-- `TOKEN_ADDRESSES` and `TOKEN_DECIMALS` dicts from `almanak.gateway.data.price.multi_dex` - use `get_token_resolver()` instead
-- Local fallback registries from `Web3BalanceProvider` and `MultiDexPriceService` - both now use `TokenResolver` exclusively
+### Changed
+- Renamed public repo references from almanak-sdk to sdk (#467)
+- Removed ClawHub marketplace references; OpenClaw platform support retained
 
-### Deprecated
-- `get_default_registry()` function - use `get_token_resolver()` instead
-- `TokenRegistry` class - use `TokenResolver` via `get_token_resolver()` instead
-- Internal `TOKEN_ADDRESSES` and `TOKEN_DECIMALS` dicts in protocol adapters - all adapters now use `TokenResolver` internally
-
-  **Migration:** Replace all usage of the deprecated APIs with `get_token_resolver()`.
-  See `almanak/framework/data/tokens/` for the resolver implementation and migration examples.
-
-  **Timeline:** Deprecated APIs emit `DeprecationWarning` in this release. They will be removed in the next major release (minimum 1 release cycle).
+### Fixed
+- Prevent $6.14B wstETH price via magnitude outlier detection in price aggregator (#401)
+- Suppress spurious amount-chaining warnings for single intents (#443)
+- Pre-fetch prices in teardown path to avoid placeholder fallback (#437)
+- Load .env in backtest commands (#453)
+- Patch _version.py during release so CLI reports correct version (#448)
+- Harden Anvil fork lifecycle and fix flaky intent tests (#417, #441)
+- Correct Polygon WETH balance slot from 3 to 0 (#415)
+- Accurate revert diagnostic for compilation failures (#414)
+- Skip simulation estimation for non-first TXs in multi-TX bundles (#402, #421)
+- BorrowIntent summary shows actual amounts instead of N/A (#427)
+- GMX V2 receipt parser: correct event topic hashes and EventEmitter matching (#423)
+- Prevent 30s gateway timeout during Aerodrome LP_CLOSE compilation (#408)
+- Defer Polymarket warning from init to compile time (#406)
+- Gas price cap quick wins (#405)
+- Receipt parser logs tx=N/A, 0 gas (#410)
+- Transfer-based fallback for Aerodrome LP_CLOSE lp_close_data (#409)
 
 ## [2.0.0] - 2026-02-28
 
