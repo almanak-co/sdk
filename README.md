@@ -14,7 +14,7 @@
   <a href="https://github.com/almanak-co/sdk/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License: Apache-2.0"></a>
   <a href="https://docs.almanak.co/"><img src="https://img.shields.io/badge/docs-almanak.co-purple?style=flat-square" alt="Docs"></a>
   <a href="https://discord.gg/c4jY28WrEB"><img src="https://img.shields.io/badge/Discord-join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
-  <a href="https://x.com/Almanak__"><img src="https://img.shields.io/badge/Twitter-follow-1DA1F2?style=flat-square&logo=x&logoColor=white" alt="Twitter"></a>
+  <a href="https://x.com/almanak"><img src="https://img.shields.io/badge/Twitter-follow-1DA1F2?style=flat-square&logo=x&logoColor=white" alt="Twitter"></a>
 </p>
 
 <p align="center">
@@ -345,4 +345,4 @@ For detailed documentation, visit [docs.almanak.co](https://docs.almanak.co/)
 
 - [Discord](https://discord.gg/yuCMvQv3rN)
 - [Telegram](https://t.me/+G1O9NFuz-AAzYmQy)
-- [Twitter](https://x.com/Almanak__)
+- [Twitter](https://x.com/almanak)
