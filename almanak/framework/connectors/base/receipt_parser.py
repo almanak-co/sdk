@@ -129,7 +129,7 @@ class BaseReceiptParser[TEvent, TResult](ABC):
                 - blockNumber: Block number (int)
                 - status: Transaction status (1=success, 0=reverted)
                 - logs: List of log dicts
-            **kwargs: Additional protocol-specific parameters
+            **kwargs (Any): Additional protocol-specific parameters
 
         Returns:
             Protocol-specific result object
@@ -372,7 +372,7 @@ class BaseReceiptParser[TEvent, TResult](ABC):
             tx_hash: Transaction hash
             block_number: Block number
             tx_success: Whether transaction succeeded
-            **kwargs: Additional protocol-specific parameters from parse_receipt()
+            **kwargs (Any): Additional protocol-specific parameters from parse_receipt()
 
         Returns:
             Protocol-specific result object

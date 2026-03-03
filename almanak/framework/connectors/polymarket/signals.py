@@ -228,7 +228,7 @@ class PredictionSignal(Protocol):
 
         Args:
             market_id: The Polymarket market ID to analyze
-            **kwargs: Additional parameters (market question, end date, etc.)
+            **kwargs (Any): Additional parameters (market question, end date, etc.)
 
         Returns:
             SignalResult with direction and confidence
@@ -289,7 +289,7 @@ class NewsAPISignalProvider:
 
         Args:
             market_id: The Polymarket market ID
-            **kwargs: Optional parameters:
+            **kwargs (Any): Optional parameters:
                 - question: Market question text for keyword extraction
                 - keywords: Explicit keywords to search for
                 - lookback_hours: How far back to search (default 24)
@@ -420,7 +420,7 @@ class SocialSentimentProvider:
 
         Args:
             market_id: The Polymarket market ID
-            **kwargs: Optional parameters:
+            **kwargs (Any): Optional parameters:
                 - topic: Topic to search for
                 - hashtags: Hashtags to track
                 - lookback_hours: How far back to search (default 6)
@@ -498,10 +498,11 @@ class ModelPredictionProvider:
     outcome, which is then converted to a SignalResult.
 
     Attributes:
-        model: The prediction model (any callable returning float 0-1)
+        model: The prediction model (any callable returning float between 0 and 1)
         confidence_calibration: Calibration factor for model confidence
 
     Example:
+        ```python
         from sklearn.linear_model import LogisticRegression
 
         # Train your model
@@ -514,6 +515,7 @@ class ModelPredictionProvider:
 
         provider = ModelPredictionProvider(model=predict_fn)
         signal = provider.get_signal("market-123", features=[0.5, 0.3, 0.8])
+        ```
     """
 
     def __init__(
@@ -526,7 +528,7 @@ class ModelPredictionProvider:
         """Initialize the model prediction provider.
 
         Args:
-            model: Callable that takes (market_id, **kwargs) and returns probability 0-1
+            model: Callable that takes (market_id, **kwargs) and returns probability between 0 and 1
             confidence_calibration: Factor to scale model confidence
             threshold_bullish: Probability above which signal is BULLISH
             threshold_bearish: Probability below which signal is BEARISH
@@ -541,7 +543,7 @@ class ModelPredictionProvider:
 
         Args:
             market_id: The Polymarket market ID
-            **kwargs: Parameters to pass to the model (e.g., features)
+            **kwargs (Any): Parameters to pass to the model (e.g., features)
 
         Returns:
             SignalResult based on model prediction
@@ -721,7 +723,7 @@ def combine_with_market_price(
 
     Args:
         signal: The signal to evaluate
-        current_price: Current YES token price (0-1)
+        current_price: Current YES token price (between 0 and 1)
         edge_threshold: Minimum edge required for confident signal
 
     Returns:

@@ -28,6 +28,8 @@ theme:
 
 plugins:
   - search
+  - autorefs:
+      resolve_closest: true
   - i18n:
       docs_structure: suffix
       fallback_to_default: true

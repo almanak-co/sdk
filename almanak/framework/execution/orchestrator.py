@@ -174,8 +174,7 @@ class ExecutionResult:
         completed_at: When execution completed
         correlation_id: Unique identifier for this execution
 
-        # Enriched Data (populated by ResultEnricher)
-        position_id: LP position ID for LP_OPEN intents (NFT tokenId)
+        position_id: LP position ID for LP_OPEN intents (NFT tokenId), populated by ResultEnricher
         swap_amounts: Swap execution data for SWAP intents
         lp_close_data: LP close data for LP_CLOSE intents
         bin_ids: TraderJoe V2 bin IDs for LP positions

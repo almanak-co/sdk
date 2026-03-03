@@ -36,6 +36,7 @@ Example:
 
 import logging
 import sys
+from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -371,7 +372,7 @@ def unbind_context(*keys: str) -> None:
     structlog.contextvars.unbind_contextvars(*keys)
 
 
-def with_context(**kwargs: Any):
+def with_context(**kwargs: Any) -> AbstractContextManager[None]:
     """Context manager for temporary logging context.
 
     Adds context for the duration of a block, then removes it.

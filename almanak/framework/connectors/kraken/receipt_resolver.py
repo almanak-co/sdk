@@ -519,7 +519,7 @@ class KrakenReceiptResolver:
 
         Args:
             key: Idempotency key from persisted state
-            **context: Additional context (asset names, decimals, etc.)
+            **context (Any): Additional context (asset names, decimals, etc.)
 
         Returns:
             ExecutionDetails if operation completed, None if still pending
