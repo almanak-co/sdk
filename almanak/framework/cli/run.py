@@ -1835,6 +1835,19 @@ def run(
             )
             _wire_indicators(strategy_instance, ohlcv_provider, price_oracle, balance_provider)
 
+            # Initialize lending rate monitor for multi-chain (uses first chain)
+            if hasattr(strategy_instance, "_rate_monitor"):
+                try:
+                    from ..data.rates import RateMonitor
+
+                    primary_chain = strategy_chains[0]
+                    chain_rpc_url = runtime_config.rpc_urls.get(primary_chain)
+                    rate_monitor = RateMonitor(chain=primary_chain, rpc_url=chain_rpc_url)
+                    strategy_instance._rate_monitor = rate_monitor
+                    click.echo(f"  Rate monitor initialized (chain={primary_chain})")
+                except Exception as e:
+                    logger.debug(f"Rate monitor not available: {e}")
+
             click.echo(f"  Multi-chain orchestrator created for {len(strategy_chains)} chains")
         else:
             # Single-chain setup - always use gateway-backed providers
@@ -1877,6 +1890,18 @@ def run(
                     click.echo("  Prediction market provider initialized")
                 except Exception as e:
                     logger.debug(f"Prediction market provider not available: {e}")
+
+            # Initialize lending rate monitor
+            if hasattr(strategy_instance, "_rate_monitor"):
+                try:
+                    from ..data.rates import RateMonitor
+
+                    rpc_url = getattr(runtime_config, "rpc_url", None)
+                    rate_monitor = RateMonitor(chain=runtime_config.chain, rpc_url=rpc_url)
+                    strategy_instance._rate_monitor = rate_monitor
+                    click.echo(f"  Rate monitor initialized (chain={runtime_config.chain})")
+                except Exception as e:
+                    logger.debug(f"Rate monitor not available: {e}")
 
             # Initialize copy trading components if configured
             if strategy_config.get("copy_trading"):

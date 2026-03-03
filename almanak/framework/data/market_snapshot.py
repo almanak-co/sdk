@@ -583,44 +583,19 @@ class RSICalculator(Protocol):
 
 
 class MarketSnapshot:
-    """Unified market data interface for strategy decision-making.
+    """Data-layer MarketSnapshot — DEPRECATED, use almanak.framework.strategies.intent_strategy.MarketSnapshot.
 
-    MarketSnapshot provides a clean, synchronous interface for strategies to
-    access market data. It wraps underlying async data providers and handles
-    event loop management internally.
+    .. deprecated::
+        This class is the internal data-layer variant with different return types
+        (e.g., balance() -> Decimal, rsi() -> float) than the canonical strategy-facing
+        MarketSnapshot (balance() -> TokenBalance, rsi() -> RSIData). New code should
+        import from ``almanak.framework.strategies`` instead.
 
-    All methods raise clear exceptions on failure - there are no silent defaults
-    or fallback values. Strategies should handle exceptions appropriately.
+        The canonical MarketSnapshot now supports lending_rate() and best_lending_rate()
+        directly — see VIB-437 for details.
 
-    Attributes:
-        chain: Blockchain network (e.g., "arbitrum", "ethereum")
-        wallet_address: Address of the wallet for balance queries
-        timestamp: When the snapshot was created
-
-    Example:
-        # Create snapshot with all providers
-        snapshot = MarketSnapshot(
-            chain="arbitrum",
-            wallet_address="0x...",
-            price_oracle=price_aggregator,
-            balance_provider=web3_balance_provider,
-            rsi_calculator=rsi_calculator,
-        )
-
-        # Get aggregated price
-        eth_price = snapshot.price("WETH")  # Decimal("2500.50")
-
-        # Get wallet balance
-        usdc_balance = snapshot.balance("USDC")  # Decimal("1000.00")
-
-        # Get RSI indicator
-        rsi = snapshot.rsi("WETH", period=14)  # 45.5
-
-        # Get balance in USD terms
-        usdc_value = snapshot.balance_usd("USDC")  # Decimal("1000.00")
-
-        # Get total portfolio value
-        total = snapshot.total_portfolio_usd(["WETH", "USDC", "ARB"])
+    This class is retained for backward compatibility with paper trading engine
+    and data-layer tests. It will be fully consolidated in a future release.
     """
 
     def __init__(

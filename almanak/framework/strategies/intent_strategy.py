@@ -761,6 +761,7 @@ class MarketSnapshot:
         wallet_activity_provider: "WalletActivityProvider | None" = None,
         prediction_provider: Any | None = None,
         indicator_provider: IndicatorProvider | None = None,
+        rate_monitor: Any | None = None,
     ) -> None:
         """Initialize market snapshot.
 
@@ -774,6 +775,7 @@ class MarketSnapshot:
             wallet_activity_provider: Provider for leader wallet activity signals
             prediction_provider: PredictionMarketDataProvider for prediction market data
             indicator_provider: IndicatorProvider for calculator-backed TA indicators
+            rate_monitor: RateMonitor instance for lending rate queries
         """
         self._chain = chain
         self._wallet_address = wallet_address
@@ -784,6 +786,7 @@ class MarketSnapshot:
         self._wallet_activity_provider = wallet_activity_provider
         self._prediction_provider = prediction_provider
         self._indicator_provider = indicator_provider
+        self._rate_monitor = rate_monitor
 
         # Cache for fetched data
         self._price_cache: dict[str, PriceData] = {}
@@ -800,6 +803,9 @@ class MarketSnapshot:
         self._obv_cache: dict[tuple[str, str, int], OBVData] = {}
         self._cci_cache: dict[tuple[str, str, int], CCIData] = {}
         self._ichimoku_cache: dict[tuple[str, str, int, int, int], IchimokuData] = {}
+
+        # Lending rate cache (populated by lending_rate() or set_lending_rate())
+        self._lending_rate_cache: dict[str, Any] = {}
 
         # Pre-populated data (can be set directly)
         self._prices: dict[str, Decimal] = {}
@@ -1721,6 +1727,145 @@ class MarketSnapshot:
             ))
         """
         self._ichimoku_values[token] = (ichimoku_data, timeframe)
+
+    @staticmethod
+    def _lending_cache_key(protocol: str, token: str, side: str) -> str:
+        """Normalize lending rate cache key to avoid case-sensitive misses."""
+        return f"{protocol.strip().lower()}/{token.strip().upper()}/{side.strip().lower()}"
+
+    def _run_async_bridged(self, coro: Any) -> Any:
+        """Bridge an async coroutine to sync, handling running event loops."""
+        import asyncio
+        import concurrent.futures
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(asyncio.run, coro)
+            try:
+                return future.result(timeout=10)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+        else:
+            return asyncio.run(coro)
+
+    def lending_rate(
+        self,
+        protocol: str,
+        token: str,
+        side: str = "supply",
+    ) -> Any:
+        """Get the lending rate for a specific protocol and token.
+
+        Fetches the current supply or borrow APY from the specified lending
+        protocol. Rates are cached for efficiency (typically 12s = ~1 block).
+
+        Args:
+            protocol: Protocol identifier (aave_v3, morpho_blue, compound_v3)
+            token: Token symbol (e.g., "USDC", "WETH")
+            side: Rate side - "supply" or "borrow" (default "supply")
+
+        Returns:
+            LendingRate dataclass with apy_percent, apy_ray, utilization_percent, etc.
+
+        Raises:
+            ValueError: If no rate monitor is configured
+
+        Example:
+            rate = market.lending_rate("aave_v3", "USDC", "supply")
+            print(f"Aave USDC Supply APY: {rate.apy_percent:.2f}%")
+        """
+        # Check pre-populated rates first
+        cache_key = self._lending_cache_key(protocol, token, side)
+        if cache_key in self._lending_rate_cache:
+            return self._lending_rate_cache[cache_key]
+
+        if self._rate_monitor is None:
+            raise ValueError(
+                "No rate monitor configured for MarketSnapshot. "
+                "Pass rate_monitor= to MarketSnapshot() or use set_lending_rate() to pre-populate rates."
+            )
+
+        from almanak.framework.data.rates import RateSide
+
+        try:
+            rate_side = RateSide(side)
+            result = self._run_async_bridged(self._rate_monitor.get_lending_rate(protocol, token, rate_side))
+            self._lending_rate_cache[cache_key] = result
+            return result
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"Failed to get lending rate for {protocol}/{token}/{side}: {e}") from e
+
+    def best_lending_rate(
+        self,
+        token: str,
+        side: str = "supply",
+        protocols: list[str] | None = None,
+    ) -> Any:
+        """Get the best lending rate for a token across protocols.
+
+        For supply rates, returns highest APY. For borrow rates, returns lowest APY.
+
+        Args:
+            token: Token symbol (e.g., "USDC", "WETH")
+            side: Rate side - "supply" or "borrow" (default "supply")
+            protocols: Protocols to compare (default: all available on chain)
+
+        Returns:
+            BestRateResult with best_rate, all_rates, etc.
+
+        Raises:
+            ValueError: If no rate monitor is configured
+
+        Example:
+            result = market.best_lending_rate("USDC", "supply")
+            if result.best_rate:
+                print(f"Best: {result.best_rate.protocol} at {result.best_rate.apy_percent:.2f}%")
+        """
+        if self._rate_monitor is None:
+            raise ValueError(
+                "No rate monitor configured for MarketSnapshot. "
+                "Pass rate_monitor= to MarketSnapshot() or use set_lending_rate() to pre-populate rates."
+            )
+
+        from almanak.framework.data.rates import RateSide
+
+        try:
+            rate_side = RateSide(side)
+            result = self._run_async_bridged(self._rate_monitor.get_best_lending_rate(token, rate_side, protocols))
+            return result
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"Failed to get best lending rate for {token}/{side}: {e}") from e
+
+    def set_lending_rate(self, protocol: str, token: str, side: str, rate: Any) -> None:
+        """Pre-populate a lending rate for a protocol/token/side.
+
+        Useful for backtesting and testing where you want to inject known rates
+        without needing a live RateMonitor.
+
+        Args:
+            protocol: Protocol identifier (e.g., "aave_v3")
+            token: Token symbol (e.g., "USDC")
+            side: Rate side ("supply" or "borrow")
+            rate: LendingRate dataclass instance
+
+        Example:
+            from almanak.framework.data.rates import LendingRate
+            market.set_lending_rate("aave_v3", "USDC", "supply", LendingRate(
+                protocol="aave_v3", token="USDC", side="supply",
+                apy_ray=Decimal("0"), apy_percent=Decimal("4.25"),
+            ))
+        """
+        cache_key = self._lending_cache_key(protocol, token, side)
+        self._lending_rate_cache[cache_key] = rate
 
     def wallet_activity(
         self,
@@ -3404,6 +3549,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         self._wallet_activity_provider = wallet_activity_provider
         self._prediction_provider: Any | None = None
         self._indicator_provider: IndicatorProvider | None = None
+        self._rate_monitor: Any | None = None
 
         # Multi-chain providers (set by set_multi_chain_providers)
         self._multi_chain_price_oracle: MultiChainPriceOracle | None = None
@@ -3777,6 +3923,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
             wallet_activity_provider=self._wallet_activity_provider,
             prediction_provider=self._prediction_provider,
             indicator_provider=self._indicator_provider,
+            rate_monitor=self._rate_monitor,
         )
 
     def run(self) -> ActionBundle | None:
