@@ -1556,47 +1556,63 @@ class StrategyRunner:
                     "Prediction market intents will not be available for this strategy."
                 )
 
-        # Build compiler config
-        # Allow placeholder prices when no real prices are available (empty oracle).
-        # This happens legitimately when the strategy uses indicators (RSI, BB)
-        # instead of calling market.price() directly.  Placeholder prices are only
-        # used as fallback for tokens not in the oracle dict, so an empty oracle
-        # with placeholders enabled is safe -- the compiler will use conservative
-        # hardcoded estimates for slippage calculations.
-        if price_oracle is None:
-            logger.debug(
-                "No prices in market snapshot -- compiler will use placeholder prices. "
-                "This is normal for strategies that use indicators instead of market.price()."
+        # Build CLOB handler for Polymarket prediction market execution
+        clob_handler = None
+        clob_client = None
+        if polymarket_config is not None:
+            from ..connectors.polymarket.clob_client import ClobClient
+            from ..execution.clob_handler import ClobActionHandler
+
+            clob_client = ClobClient(polymarket_config)
+            clob_handler = ClobActionHandler(clob_client=clob_client)
+
+        # Build compiler and state machine. If setup fails, ensure ClobClient cleanup.
+        try:
+            # Build compiler config
+            # Allow placeholder prices when no real prices are available (empty oracle).
+            # This happens legitimately when the strategy uses indicators (RSI, BB)
+            # instead of calling market.price() directly.  Placeholder prices are only
+            # used as fallback for tokens not in the oracle dict, so an empty oracle
+            # with placeholders enabled is safe -- the compiler will use conservative
+            # hardcoded estimates for slippage calculations.
+            if price_oracle is None:
+                logger.debug(
+                    "No prices in market snapshot -- compiler will use placeholder prices. "
+                    "This is normal for strategies that use indicators instead of market.price()."
+                )
+            compiler_config = IntentCompilerConfig(
+                allow_placeholder_prices=price_oracle is None,
+                polymarket_config=polymarket_config,
             )
-        compiler_config = IntentCompilerConfig(
-            allow_placeholder_prices=price_oracle is None,
-            polymarket_config=polymarket_config,
-        )
 
-        compiler = IntentCompiler(
-            chain=strategy.chain,
-            wallet_address=strategy.wallet_address,
-            rpc_url=rpc_url,
-            price_oracle=price_oracle,
-            config=compiler_config,
-            gateway_client=gateway_client,
-        )
+            compiler = IntentCompiler(
+                chain=strategy.chain,
+                wallet_address=strategy.wallet_address,
+                rpc_url=rpc_url,
+                price_oracle=price_oracle,
+                config=compiler_config,
+                gateway_client=gateway_client,
+            )
 
-        state_machine_config = StateMachineConfig(
-            retry_config=RetryConfig(
-                max_retries=self.config.max_retries,
-                initial_delay_seconds=self.config.initial_retry_delay,
-                max_delay_seconds=self.config.max_retry_delay,
-            ),
-            emit_metrics=True,
-        )
+            state_machine_config = StateMachineConfig(
+                retry_config=RetryConfig(
+                    max_retries=self.config.max_retries,
+                    initial_delay_seconds=self.config.initial_retry_delay,
+                    max_delay_seconds=self.config.max_retry_delay,
+                ),
+                emit_metrics=True,
+            )
 
-        state_machine = IntentStateMachine(
-            intent=intent,
-            compiler=compiler,
-            config=state_machine_config,
-            on_sadflow_enter=self._on_sadflow_enter,
-        )
+            state_machine = IntentStateMachine(
+                intent=intent,
+                compiler=compiler,
+                config=state_machine_config,
+                on_sadflow_enter=self._on_sadflow_enter,
+            )
+        except Exception:
+            if clob_client is not None:
+                clob_client.close()
+            raise
 
         logger.info(
             f"Created IntentStateMachine for {strategy_id} "
@@ -1628,6 +1644,8 @@ class StrategyRunner:
                         f"Dry run mode - skipping execution for {strategy_id}. "
                         f"Would execute {len(step_result.action_bundle.transactions)} transactions."
                     )
+                    if clob_client is not None:
+                        clob_client.close()
                     if record_metrics:
                         self._record_success()
                     return IterationResult(
@@ -1728,22 +1746,39 @@ class StrategyRunner:
                                 )
                                 continue
 
-                    # Update native token price for USD gas guard
-                    # tx_risk_config only exists on local ExecutionOrchestrator, not GatewayExecutionOrchestrator
-                    tx_risk_cfg = getattr(single_chain_orch, "tx_risk_config", None)
-                    if tx_risk_cfg and tx_risk_cfg.max_gas_cost_usd > 0 and price_oracle:
-                        from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
+                    # Route CLOB bundles to ClobActionHandler (off-chain orders),
+                    # all other bundles to the on-chain ExecutionOrchestrator.
+                    if clob_handler and clob_handler.can_handle(step_result.action_bundle):
+                        clob_result = await clob_handler.execute(step_result.action_bundle)
+                        execution_result = ExecutionResult(
+                            success=clob_result.success,
+                            phase=ExecutionPhase.COMPLETE,
+                            completed_at=datetime.now(UTC),
+                            error=clob_result.error,
+                        )
+                        execution_result.extracted_data = {
+                            "clob_status": clob_result.status.value,
+                        }
+                        if clob_result.order_id:
+                            execution_result.extracted_data["order_id"] = clob_result.order_id
+                        last_execution_result = execution_result
+                    else:
+                        # Update native token price for USD gas guard
+                        # tx_risk_config only exists on local ExecutionOrchestrator, not GatewayExecutionOrchestrator
+                        tx_risk_cfg = getattr(single_chain_orch, "tx_risk_config", None)
+                        if tx_risk_cfg and tx_risk_cfg.max_gas_cost_usd > 0 and price_oracle:
+                            from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
 
-                        native_symbol = NATIVE_TOKEN_SYMBOLS.get(strategy.chain.lower(), "ETH")
-                        native_price = price_oracle.get(native_symbol, 0)
-                        if native_price:
-                            tx_risk_cfg.native_token_price_usd = float(native_price)
+                            native_symbol = NATIVE_TOKEN_SYMBOLS.get(strategy.chain.lower(), "ETH")
+                            native_price = price_oracle.get(native_symbol, 0)
+                            if native_price:
+                                tx_risk_cfg.native_token_price_usd = float(native_price)
 
-                    execution_result = await single_chain_orch.execute(
-                        action_bundle=step_result.action_bundle,
-                        context=execution_context,
-                    )
-                    last_execution_result = execution_result
+                        execution_result = await single_chain_orch.execute(
+                            action_bundle=step_result.action_bundle,
+                            context=execution_context,
+                        )
+                        last_execution_result = execution_result
 
                     # Convert ExecutionResult to TransactionReceipt for state machine
                     tx_hash = ""
@@ -1806,6 +1841,13 @@ class StrategyRunner:
                     logger.warning(
                         f"Step error: {step_result.error} (retry {state_machine.retry_count}/{self.config.max_retries})"
                     )
+
+        # Close ClobClient to release httpx connection pool resources
+        if clob_client is not None:
+            try:
+                clob_client.close()
+            except Exception:
+                logger.debug("Failed to close ClobClient", exc_info=True)
 
         # State machine completed - check final result
         if state_machine.success:
