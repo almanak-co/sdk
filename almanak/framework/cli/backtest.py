@@ -651,7 +651,7 @@ def pnl_backtest(
             click.echo("No strategies registered.")
             click.echo()
             click.echo("Strategies must be registered in the factory. See:")
-            click.echo("  almanak new-strategy --help")
+            click.echo("  almanak strat new --help")
         return
 
     # Handle --from-result flag to load config from previous backtest
@@ -708,7 +708,7 @@ def pnl_backtest(
         click.echo(f"Error: Unknown strategy '{strategy}'", err=True)
         click.echo(f"Available strategies: {', '.join(sorted(available_strategies))}", err=True)
         click.echo()
-        click.echo("Create a new strategy with: almanak new-strategy --name <name>", err=True)
+        click.echo("Create a new strategy with: almanak strat new --name <name>", err=True)
         raise click.Abort()
 
     # Prepare output path

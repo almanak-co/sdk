@@ -300,6 +300,7 @@ class IterationStatus(StrEnum):
     """Status of a strategy iteration."""
 
     SUCCESS = "SUCCESS"
+    DRY_RUN = "DRY_RUN"  # Dry run mode - no transactions submitted
     HOLD = "HOLD"  # Strategy decided to hold
     TEARDOWN = "TEARDOWN"  # Strategy is executing teardown
     COMPILATION_FAILED = "COMPILATION_FAILED"
@@ -332,8 +333,8 @@ class IterationResult:
 
     @property
     def success(self) -> bool:
-        """Check if iteration was successful (including HOLD)."""
-        return self.status in (IterationStatus.SUCCESS, IterationStatus.HOLD)
+        """Check if iteration was successful (including DRY_RUN and HOLD)."""
+        return self.status in (IterationStatus.SUCCESS, IterationStatus.DRY_RUN, IterationStatus.HOLD)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -916,7 +917,7 @@ class StrategyRunner:
                         start_time=start_time,
                         market=teardown_market,
                     )
-                    if result.status == IterationStatus.SUCCESS:
+                    if result.success:
                         result.status = IterationStatus.TEARDOWN
                         logger.info(f"🛑 {strategy_id} teardown complete - shutting down strategy runner")
                         self.request_shutdown()
@@ -943,7 +944,7 @@ class StrategyRunner:
                             market=teardown_market,
                         )
                         last_result = result
-                        if result.status != IterationStatus.SUCCESS:
+                        if not result.success:
                             all_success = False
                             logger.error(f"🛑 Teardown intent {i + 1} failed: {result.error}")
                             break  # Stop on first failure - don't continue partial teardown
@@ -1161,7 +1162,7 @@ class StrategyRunner:
                                 )
 
                     # Stop on failure - don't execute subsequent intents
-                    if intent_result.status not in (IterationStatus.SUCCESS, IterationStatus.HOLD):
+                    if not intent_result.success:
                         if is_multi_intent:
                             logger.warning(
                                 f"  Intent {idx + 1}/{len(intents)} failed with {intent_result.status.value}, "
@@ -1171,7 +1172,7 @@ class StrategyRunner:
 
                 # For multi-intent sequences, record metrics once per iteration
                 if is_multi_intent and intent_result is not None:
-                    if intent_result.status in (IterationStatus.SUCCESS, IterationStatus.HOLD):
+                    if intent_result.success:
                         self._record_success()
                     else:
                         # Only track total_iterations here; consecutive_errors is
@@ -1678,7 +1679,7 @@ class StrategyRunner:
                     if record_metrics:
                         self._record_success()
                     return IterationResult(
-                        status=IterationStatus.SUCCESS,
+                        status=IterationStatus.DRY_RUN,
                         intent=intent,
                         strategy_id=strategy_id,
                         duration_ms=self._calculate_duration_ms(start_time),
@@ -2283,7 +2284,7 @@ class StrategyRunner:
             logger.info(f"Dry run mode - skipping execution for {strategy_id}. Would execute {len(intents)} intents.")
             self._record_success()
             return IterationResult(
-                status=IterationStatus.SUCCESS,
+                status=IterationStatus.DRY_RUN,
                 intent=intents[0] if intents else None,
                 strategy_id=strategy_id,
                 duration_ms=self._calculate_duration_ms(start_time),

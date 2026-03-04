@@ -414,7 +414,7 @@ class TestRunIteration:
 
         result = await dry_run_runner.run_iteration(strategy)
 
-        assert result.status == IterationStatus.SUCCESS
+        assert result.status == IterationStatus.DRY_RUN
         assert result.success is True
         # Orchestrator should NOT be called in dry run mode
         assert execution_orchestrator.execute_called is False
