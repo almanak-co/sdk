@@ -25,11 +25,13 @@ from almanak.framework.agent_tools.catalog import (
     get_default_catalog,
 )
 from almanak.framework.agent_tools.errors import (
+    AgentErrorCode,
     ExecutionFailedError,
     RiskBlockedError,
     SimulationFailedError,
     ToolError,
     ToolValidationError,
+    get_error_category,
 )
 from almanak.framework.agent_tools.policy import AgentPolicy, PolicyEngine
 from almanak.framework.agent_tools.schemas import ToolResponse
@@ -38,6 +40,21 @@ if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
+
+
+def _error_dict(code: AgentErrorCode, message: str, *, recoverable: bool = False) -> dict:
+    """Build a standardized error dict for ToolResponse envelopes.
+
+    Includes ``error_code``, ``message``, ``recoverable``, and ``error_category``
+    so LLM agents can reliably pattern-match on error types and decide
+    retry vs abort vs escalate.
+    """
+    return {
+        "error_code": code.value,
+        "message": message,
+        "recoverable": recoverable,
+        "error_category": get_error_category(code).value,
+    }
 
 
 class ToolExecutor:
@@ -223,11 +240,7 @@ class ToolExecutor:
             logger.exception("Unexpected error in tool %s", tool_name)
             return ToolResponse(
                 status="error",
-                error={
-                    "error_code": "internal_error",
-                    "message": str(e),
-                    "recoverable": False,
-                },
+                error=_error_dict(AgentErrorCode.INTERNAL_ERROR, str(e), recoverable=False),
                 explanation=f"Unexpected error: {e}",
             )
 
@@ -305,11 +318,11 @@ class ToolExecutor:
             except Exception as e:
                 return ToolResponse(
                     status="error",
-                    error={
-                        "error_code": "gateway_error",
-                        "message": f"Price unavailable for {args['token']}: {e}",
-                        "recoverable": True,
-                    },
+                    error=_error_dict(
+                        AgentErrorCode.GATEWAY_ERROR,
+                        f"Price unavailable for {args['token']}: {e}",
+                        recoverable=True,
+                    ),
                 )
 
         if tool_name == "get_balance":
@@ -337,11 +350,11 @@ class ToolExecutor:
             if not tokens:
                 return ToolResponse(
                     status="error",
-                    error={
-                        "error_code": "validation_error",
-                        "message": "tokens list is required; pass explicit token symbols to query.",
-                        "recoverable": True,
-                    },
+                    error=_error_dict(
+                        AgentErrorCode.VALIDATION_ERROR,
+                        "tokens list is required; pass explicit token symbols to query.",
+                        recoverable=True,
+                    ),
                     explanation="Cannot enumerate all tokens automatically. "
                     "Provide a list of token symbols (e.g. ['ETH', 'USDC']).",
                 )
@@ -482,7 +495,7 @@ class ToolExecutor:
                 if not compile_resp.success:
                     return ToolResponse(
                         status="error",
-                        error={"error_code": "simulation_failed", "message": compile_resp.error, "recoverable": True},
+                        error=_error_dict(AgentErrorCode.SIMULATION_FAILED, compile_resp.error, recoverable=True),
                     )
                 bundle_bytes = compile_resp.action_bundle
             else:
@@ -1108,14 +1121,12 @@ class ToolExecutor:
                     logger.warning("deploy_vault: cannot verify saved vault %s on-chain: %s", existing_vault[:10], e)
                     return ToolResponse(
                         status="error",
-                        error={
-                            "error_code": "vault_verification_failed",
-                            "message": (
-                                f"deploy_vault aborted: saved vault {existing_vault} exists in state "
-                                f"but on-chain verification failed: {e}"
-                            ),
-                            "recoverable": True,
-                        },
+                        error=_error_dict(
+                            AgentErrorCode.VAULT_VERIFICATION_FAILED,
+                            f"deploy_vault aborted: saved vault {existing_vault} exists in state "
+                            f"but on-chain verification failed: {e}",
+                            recoverable=True,
+                        ),
                     )
         except Exception as e:
             import grpc
@@ -1126,11 +1137,11 @@ class ToolExecutor:
                 logger.warning("deploy_vault: failed to load state for idempotency check: %s", e)
                 return ToolResponse(
                     status="error",
-                    error={
-                        "error_code": "state_load_failed",
-                        "message": f"deploy_vault aborted: unable to verify existing vault due to state load failure: {e}",
-                        "recoverable": True,
-                    },
+                    error=_error_dict(
+                        AgentErrorCode.STATE_LOAD_FAILED,
+                        f"deploy_vault aborted: unable to verify existing vault due to state load failure: {e}",
+                        recoverable=True,
+                    ),
                 )
 
         params = VaultDeployParams(
@@ -1235,7 +1246,7 @@ class ToolExecutor:
             if chain not in FACTORY_ADDRESSES:
                 return ToolResponse(
                     status="error",
-                    error={"error_code": "unsupported_chain", "message": f"No Uniswap V3 factory on {chain}"},
+                    error=_error_dict(AgentErrorCode.UNSUPPORTED_CHAIN, f"No Uniswap V3 factory on {chain}"),
                 )
             pool_address = compute_pool_address(FACTORY_ADDRESSES[chain], token_a.address, token_b.address, fee_tier)
 
@@ -1253,22 +1264,21 @@ class ToolExecutor:
         if not slot0_resp.success:
             return ToolResponse(
                 status="error",
-                error={
-                    "error_code": "rpc_failed",
-                    "message": f"slot0() failed: {slot0_resp.error}",
-                    "recoverable": True,
-                },
+                error=_error_dict(
+                    AgentErrorCode.RPC_FAILED,
+                    f"slot0() failed: {slot0_resp.error}",
+                    recoverable=True,
+                ),
             )
 
         slot0_hex = json.loads(slot0_resp.result).removeprefix("0x")
         if len(slot0_hex) < 128:
             return ToolResponse(
                 status="error",
-                error={
-                    "error_code": "empty_pool",
-                    "message": "Pool may not exist or is uninitialized",
-                    "recoverable": False,
-                },
+                error=_error_dict(
+                    AgentErrorCode.EMPTY_POOL,
+                    "Pool may not exist or is uninitialized",
+                ),
             )
 
         sqrt_price_x96 = int(slot0_hex[0:64], 16)
@@ -1338,7 +1348,7 @@ class ToolExecutor:
         if not nft_manager:
             return ToolResponse(
                 status="error",
-                error={"error_code": "unsupported_chain", "message": f"No position manager on {chain}"},
+                error=_error_dict(AgentErrorCode.UNSUPPORTED_CHAIN, f"No position manager on {chain}"),
             )
 
         # positions(uint256) selector = 0x99fbab88
@@ -1355,14 +1365,14 @@ class ToolExecutor:
         if not resp.success:
             return ToolResponse(
                 status="error",
-                error={"error_code": "rpc_failed", "message": f"positions() failed: {resp.error}", "recoverable": True},
+                error=_error_dict(AgentErrorCode.RPC_FAILED, f"positions() failed: {resp.error}", recoverable=True),
             )
 
         raw = json.loads(resp.result).removeprefix("0x")
         if len(raw) < 768:  # 12 words * 64 hex chars
             return ToolResponse(
                 status="error",
-                error={"error_code": "invalid_position", "message": f"Position {position_id} not found or burned"},
+                error=_error_dict(AgentErrorCode.INVALID_POSITION, f"Position {position_id} not found or burned"),
             )
 
         words = [raw[i * 64 : (i + 1) * 64] for i in range(12)]
@@ -1800,11 +1810,11 @@ class ToolExecutor:
             valid = ", ".join(sorted(self._INTENT_GAS_OPS))
             return ToolResponse(
                 status="error",
-                error={
-                    "error_code": "invalid_intent_type",
-                    "message": f"Unknown intent_type '{intent_type}'. Valid types: {valid}",
-                    "recoverable": True,
-                },
+                error=_error_dict(
+                    AgentErrorCode.INVALID_INTENT_TYPE,
+                    f"Unknown intent_type '{intent_type}'. Valid types: {valid}",
+                    recoverable=True,
+                ),
             )
         total_gas = sum(get_gas_estimate(chain, op) for op in ops)
 
@@ -1861,21 +1871,21 @@ class ToolExecutor:
             logger.warning("Failed to fetch balances for risk metrics: %s", e)
             return ToolResponse(
                 status="error",
-                error={
-                    "error_code": "gateway_error",
-                    "message": f"Failed to fetch balances for risk metrics: {e}",
-                    "recoverable": True,
-                },
+                error=_error_dict(
+                    AgentErrorCode.GATEWAY_ERROR,
+                    f"Failed to fetch balances for risk metrics: {e}",
+                    recoverable=True,
+                ),
             )
 
         if not any_success:
             return ToolResponse(
                 status="error",
-                error={
-                    "error_code": "all_queries_failed",
-                    "message": "All balance queries returned errors; portfolio value is unknown.",
-                    "recoverable": True,
-                },
+                error=_error_dict(
+                    AgentErrorCode.ALL_QUERIES_FAILED,
+                    "All balance queries returned errors; portfolio value is unknown.",
+                    recoverable=True,
+                ),
             )
 
         return ToolResponse(
@@ -1910,11 +1920,11 @@ class ToolExecutor:
         except Exception as e:
             return ToolResponse(
                 status="error",
-                error={
-                    "error_code": "vault_read_failed",
-                    "message": f"Failed to read vault state: {e}",
-                    "recoverable": True,
-                },
+                error=_error_dict(
+                    AgentErrorCode.VAULT_READ_FAILED,
+                    f"Failed to read vault state: {e}",
+                    recoverable=True,
+                ),
             )
 
         return ToolResponse(
@@ -2287,11 +2297,10 @@ class ToolExecutor:
             logger.error("settle_vault preflight failed: %s", preflight_error)
             return ToolResponse(
                 status="error",
-                error={
-                    "error_code": "preflight_failed",
-                    "message": preflight_error,
-                    "recoverable": False,
-                },
+                error=_error_dict(
+                    AgentErrorCode.PREFLIGHT_FAILED,
+                    preflight_error,
+                ),
             )
 
         # Load crash-recovery state
@@ -2405,11 +2414,11 @@ class ToolExecutor:
             )
             return ToolResponse(
                 status="error",
-                error={
-                    "error_code": "insufficient_liquidity",
-                    "message": f"Safe has {liquid} underlying but {needed} needed for pending redemptions",
-                    "recoverable": True,
-                },
+                error=_error_dict(
+                    AgentErrorCode.INSUFFICIENT_LIQUIDITY,
+                    f"Safe has {liquid} underlying but {needed} needed for pending redemptions",
+                    recoverable=True,
+                ),
                 decision_hints={
                     "action_needed": "close_lp_position",
                     "shortfall": str(needed - liquid),
@@ -2687,14 +2696,11 @@ class ToolExecutor:
             if missing:
                 return ToolResponse(
                     status="error",
-                    error={
-                        "error_code": "teardown_missing_sub_tools",
-                        "message": (
-                            f"teardown_vault requires these sub-tools to be in allowed_tools: "
-                            f"{sorted(missing)}. Add them to the policy's allowed_tools set."
-                        ),
-                        "recoverable": False,
-                    },
+                    error=_error_dict(
+                        AgentErrorCode.TEARDOWN_MISSING_SUB_TOOLS,
+                        f"teardown_vault requires these sub-tools to be in allowed_tools: "
+                        f"{sorted(missing)}. Add them to the policy's allowed_tools set.",
+                    ),
                 )
 
         chain = args.get("chain", self._default_chain)
@@ -2784,11 +2790,11 @@ class ToolExecutor:
                 )
                 return ToolResponse(
                     status="error",
-                    error={
-                        "error_code": "teardown_lp_close_failed",
-                        "message": f"LP position close failed: {lp_close_error}. Will retry on next teardown attempt.",
-                        "recoverable": True,
-                    },
+                    error=_error_dict(
+                        AgentErrorCode.TEARDOWN_LP_CLOSE_FAILED,
+                        f"LP position close failed: {lp_close_error}. Will retry on next teardown attempt.",
+                        recoverable=True,
+                    ),
                 )
         elif teardown_phase in ("lp_closed", "swapping", "settling"):
             # LP already closed in a previous attempt
@@ -3117,11 +3123,11 @@ class ToolExecutor:
                 logger.error("Failed to load agent state: %s", e)
                 return ToolResponse(
                     status="error",
-                    error={
-                        "error_code": "state_load_failed",
-                        "message": f"Failed to load state: {e}",
-                        "recoverable": True,
-                    },
+                    error=_error_dict(
+                        AgentErrorCode.STATE_LOAD_FAILED,
+                        f"Failed to load state: {e}",
+                        recoverable=True,
+                    ),
                     explanation="State loading failed due to a gateway error. Retry or investigate.",
                 )
 
@@ -3148,11 +3154,11 @@ class ToolExecutor:
                 logger.warning("Failed to record agent decision: %s", e)
                 return ToolResponse(
                     status="error",
-                    error={
-                        "error_code": "record_failed",
-                        "message": f"Failed to record decision: {e}",
-                        "recoverable": True,
-                    },
+                    error=_error_dict(
+                        AgentErrorCode.RECORD_FAILED,
+                        f"Failed to record decision: {e}",
+                        recoverable=True,
+                    ),
                     data={"recorded": False, "decision_id": decision_id},
                 )
 

@@ -22,6 +22,8 @@ from almanak.framework.agent_tools.catalog import (  # noqa: F401
     get_default_catalog,
 )
 from almanak.framework.agent_tools.errors import (  # noqa: F401
+    AgentErrorCode,
+    ErrorCategory,
     ExecutionFailedError,
     PermissionDeniedError,
     RiskBlockedError,
@@ -30,6 +32,7 @@ from almanak.framework.agent_tools.errors import (  # noqa: F401
     ToolTimeoutError,
     ToolValidationError,
     UpstreamUnavailableError,
+    get_error_category,
 )
 from almanak.framework.agent_tools.executor import ToolExecutor  # noqa: F401
 from almanak.framework.agent_tools.policy import (  # noqa: F401
