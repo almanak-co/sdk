@@ -35,6 +35,7 @@ from almanak.framework.agent_tools.errors import (
 )
 from almanak.framework.agent_tools.policy import AgentPolicy, PolicyEngine
 from almanak.framework.agent_tools.schemas import ToolResponse
+from almanak.framework.agent_tools.tracing import DecisionTracer, sanitize_args
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
@@ -88,6 +89,7 @@ class ToolExecutor:
         default_chain: str = "arbitrum",
         alert_manager: Any | None = None,
         safe_addresses: set[str] | None = None,
+        tracer: DecisionTracer | None = None,
         max_retries: int = 3,
         initial_retry_delay: float = 1.0,
         max_retry_delay: float = 60.0,
@@ -103,6 +105,7 @@ class ToolExecutor:
         self._strategy_id = strategy_id
         self._default_chain = default_chain
         self._alert_manager = alert_manager
+        self._tracer = tracer or DecisionTracer()
         # Allowlist of known Safe addresses for execution_wallet validation.
         # None = not configured (warning only); empty set = deny all overrides.
         self._safe_addresses: set[str] | None = (
@@ -218,35 +221,88 @@ class ToolExecutor:
 
     # -- Public API ---------------------------------------------------------
 
+    @property
+    def tracer(self) -> DecisionTracer:
+        """Access the decision tracer for this executor."""
+        return self._tracer
+
     async def execute(self, tool_name: str, arguments: dict) -> ToolResponse:
         """Execute a tool call end-to-end.
 
         Returns a ``ToolResponse`` envelope. Errors are caught and returned
         as structured error payloads (never raised to the agent).
+
+        Every call is automatically traced via the ``DecisionTracer``,
+        capturing arguments (sanitized), policy result, execution outcome,
+        and timing.
         """
+        start = time.monotonic()
+        policy_result_dict: dict | None = None
+        execution_result_dict: dict | None = None
+        error_str: str | None = None
+        result: ToolResponse | None = None
+
         try:
-            return await self._execute_inner(tool_name, arguments)
+            result, policy_result_dict = await self._execute_inner(tool_name, arguments)
+            execution_result_dict = {"status": result.status}
+            if result.data:
+                execution_result_dict["data_keys"] = list(result.data.keys())
+            return result
         except ToolError as e:
             logger.warning("Tool %s failed: %s", tool_name, e)
-            # Alert on policy denials
-            if isinstance(e, RiskBlockedError) and self._alert_manager:
-                self._fire_alert(f"Policy denied {tool_name}: {e.message}", severity="warning")
-            return ToolResponse(
+            error_str = f"[{e.code}] {e.message}"
+            # Capture policy denial info in the trace
+            if isinstance(e, RiskBlockedError):
+                policy_result_dict = (
+                    e.policy_result
+                    if hasattr(e, "policy_result")
+                    else {
+                        "allowed": False,
+                        "violations": [e.message],
+                    }
+                )
+                if self._alert_manager:
+                    self._fire_alert(f"Policy denied {tool_name}: {e.message}", severity="warning")
+            result = ToolResponse(
                 status="error",
                 error=e.to_dict(),
                 explanation=e.message,
             )
+            execution_result_dict = {"status": result.status, "error_code": e.code}
+            return result
         except Exception as e:
             logger.exception("Unexpected error in tool %s", tool_name)
-            return ToolResponse(
+            error_str = f"internal_error: {e}"
+            result = ToolResponse(
                 status="error",
                 error=_error_dict(AgentErrorCode.INTERNAL_ERROR, str(e), recoverable=False),
                 explanation=f"Unexpected error: {e}",
             )
+            execution_result_dict = {"status": result.status, "error_code": "internal_error"}
+            return result
+        finally:
+            try:
+                duration_ms = (time.monotonic() - start) * 1000
+                safe_args = sanitize_args(arguments) if isinstance(arguments, dict) else {"_raw": str(arguments)}
+                self._tracer.trace_tool_call(
+                    tool_name=tool_name,
+                    args=safe_args,
+                    policy_result=policy_result_dict,
+                    execution_result=execution_result_dict,
+                    error=error_str,
+                    duration_ms=duration_ms,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("Tracing failed (non-fatal, execution result preserved)")
 
     # -- Internal dispatch --------------------------------------------------
 
-    async def _execute_inner(self, tool_name: str, arguments: dict) -> ToolResponse:
+    async def _execute_inner(self, tool_name: str, arguments: dict) -> tuple[ToolResponse, dict | None]:
+        """Execute the tool and return (response, policy_result_dict).
+
+        Returns a tuple to avoid storing policy result on the instance
+        (which would create a data race under concurrent async calls).
+        """
         # 1. Lookup tool
         tool_def = self._catalog.get(tool_name)
         if tool_def is None:
@@ -274,10 +330,24 @@ class ToolExecutor:
         # real trade-level checks happen inside _execute_validate_risk. This
         # allows agents to query risk status even when the circuit breaker is
         # tripped (they need to know *why* trading is blocked).
+        policy_result_dict: dict | None = None
         if tool_name != "validate_risk":
             self._policy_engine.record_tool_call()
             decision = self._policy_engine.check(tool_def, request.model_dump())
-            decision.raise_if_denied(tool_name)
+            policy_result_dict = {
+                "allowed": decision.allowed,
+                "violations": decision.violations,
+                "suggestions": decision.suggestions,
+            }
+            if not decision.allowed:
+                suggestion = "; ".join(decision.suggestions) if decision.suggestions else None
+                err = RiskBlockedError(
+                    f"Policy denied '{tool_name}': {'; '.join(decision.violations)}",
+                    suggestion=suggestion,
+                    tool_name=tool_name,
+                )
+                err.policy_result = policy_result_dict  # type: ignore[attr-defined]
+                raise err
 
         # 4. Dispatch by category
         request_dict = request.model_dump()
@@ -296,7 +366,7 @@ class ToolExecutor:
         # Fire-and-forget audit trail for every tool execution
         self._record_tool_event(tool_name, tool_def, result)
 
-        return result
+        return result, policy_result_dict
 
     # ── DATA TOOLS ──────────────────────────────────────────────────────
 
