@@ -1,5 +1,6 @@
 """Tests for agent policy engine."""
 
+import json
 import time
 from decimal import Decimal
 from unittest.mock import patch
@@ -8,7 +9,7 @@ import pytest
 
 from almanak.framework.agent_tools.catalog import RiskTier, ToolCategory, ToolDefinition, get_default_catalog
 from almanak.framework.agent_tools.errors import RiskBlockedError
-from almanak.framework.agent_tools.policy import AgentPolicy, PolicyDecision, PolicyEngine
+from almanak.framework.agent_tools.policy import AgentPolicy, PolicyDecision, PolicyEngine, PolicyStateStore
 from almanak.framework.agent_tools.schemas import GetPriceRequest, GetPriceResponse, SwapTokensRequest, SwapTokensResponse
 
 
@@ -726,3 +727,148 @@ class TestExecutionWalletValidation:
         tool = _make_tool("swap_tokens", category=ToolCategory.ACTION, risk_tier=RiskTier.MEDIUM)
         decision = engine.check(tool, {"execution_wallet": "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "chain": "arbitrum"})
         assert decision.allowed
+
+
+
+class TestPolicyStateStore:
+    def test_save_and_load(self, tmp_path):
+        store = PolicyStateStore(tmp_path / "state.json")
+        state = {"daily_spend_usd": "1000", "consecutive_failures": 2}
+        store.save(state)
+        assert store.load() == state
+
+    def test_load_missing_file(self, tmp_path):
+        assert PolicyStateStore(tmp_path / "nonexistent.json").load() is None
+
+    def test_load_corrupt_file(self, tmp_path):
+        path = tmp_path / "bad.json"
+        path.write_text("not valid json {{{", encoding="utf-8")
+        assert PolicyStateStore(path).load() is None
+
+    def test_load_non_dict(self, tmp_path):
+        path = tmp_path / "list.json"
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        assert PolicyStateStore(path).load() is None
+
+    def test_save_creates_parent_dirs(self, tmp_path):
+        store = PolicyStateStore(tmp_path / "a" / "b" / "state.json")
+        store.save({"key": "val"})
+        assert store.load() == {"key": "val"}
+
+
+class TestPolicyEnginePersistence:
+    def test_no_persistence_by_default(self, tmp_path):
+        engine = PolicyEngine(AgentPolicy())
+        engine.record_trade(Decimal("1000"), success=True)
+        assert not list(tmp_path.glob("*.json"))
+
+    def test_state_survives_restart(self, tmp_path):
+        state_path = tmp_path / "policy_state.json"
+        engine1 = PolicyEngine(AgentPolicy(cooldown_seconds=0), state_persistence_path=state_path)
+        engine1.record_trade(Decimal("3000"), success=True)
+        engine1.record_trade(Decimal("100"), success=False)
+        engine1.record_trade(Decimal("100"), success=False)
+        engine1.update_portfolio_value(Decimal("50000"))
+
+        engine2 = PolicyEngine(AgentPolicy(cooldown_seconds=0), state_persistence_path=state_path)
+        assert engine2._daily_spend_usd == Decimal("3000")
+        assert engine2._consecutive_failures == 2
+        assert engine2._peak_portfolio_usd == Decimal("50000")
+
+    def test_daily_spend_accumulates_across_restarts(self, tmp_path):
+        state_path = tmp_path / "policy_state.json"
+        policy = AgentPolicy(max_single_trade_usd=Decimal("100000"), max_daily_spend_usd=Decimal("5000"), cooldown_seconds=0)
+        PolicyEngine(policy, state_persistence_path=state_path).record_trade(Decimal("4000"), success=True)
+        engine2 = PolicyEngine(policy, state_persistence_path=state_path)
+        tool = _make_tool("swap_tokens", category=ToolCategory.ACTION, risk_tier=RiskTier.MEDIUM)
+        decision = engine2.check(tool, {"amount": "2000", "chain": "arbitrum"})
+        assert not decision.allowed
+        assert "daily limit" in decision.violations[0]
+
+    def test_circuit_breaker_persists_across_restarts(self, tmp_path):
+        state_path = tmp_path / "policy_state.json"
+        policy = AgentPolicy(max_consecutive_failures=2, cooldown_seconds=0)
+        engine1 = PolicyEngine(policy, state_persistence_path=state_path)
+        engine1.record_trade(Decimal("100"), success=False)
+        engine1.record_trade(Decimal("100"), success=False)
+        assert engine1.is_circuit_breaker_tripped
+
+        engine2 = PolicyEngine(policy, state_persistence_path=state_path)
+        assert engine2.is_circuit_breaker_tripped
+
+    def test_stop_loss_high_water_mark_persists(self, tmp_path):
+        state_path = tmp_path / "policy_state.json"
+        policy = AgentPolicy(stop_loss_pct=Decimal("5.0"), cooldown_seconds=0)
+        engine1 = PolicyEngine(policy, state_persistence_path=state_path)
+        engine1.update_portfolio_value(Decimal("100000"))
+        engine1.update_portfolio_value(Decimal("94000"))
+
+        engine2 = PolicyEngine(policy, state_persistence_path=state_path)
+        assert engine2._peak_portfolio_usd == Decimal("100000")
+        tool = _make_tool("swap_tokens", category=ToolCategory.ACTION, risk_tier=RiskTier.MEDIUM)
+        decision = engine2.check(tool, {"amount": "100", "chain": "arbitrum"})
+        assert any("Stop-loss" in v for v in decision.violations)
+
+    def test_stale_state_resets_daily_counters(self, tmp_path):
+        state_path = tmp_path / "policy_state.json"
+        state_path.write_text(json.dumps({
+            "daily_spend_usd": "4000", "day_start": time.time() - 90000,
+            "day_start_date": "2020-01-01", "trades_this_hour": [],
+            "tool_calls_this_minute": [], "consecutive_failures": 5,
+            "last_trade_timestamp": time.time() - 100,
+            "peak_portfolio_usd": "80000", "current_portfolio_usd": "75000",
+            "rebalance_approved": True,
+        }), encoding="utf-8")
+        engine = PolicyEngine(AgentPolicy(cooldown_seconds=0), state_persistence_path=state_path)
+        assert engine._daily_spend_usd == Decimal("0")
+        assert engine._consecutive_failures == 5
+        assert engine._peak_portfolio_usd == Decimal("80000")
+        assert engine._rebalance_approved is True
+
+    def test_persistence_disabled_no_regression(self, tmp_path):
+        engine = PolicyEngine(AgentPolicy(cooldown_seconds=0))
+        engine.record_trade(Decimal("1000"), success=True)
+        engine.record_tool_call()
+        engine.update_portfolio_value(Decimal("50000"))
+        engine.set_rebalance_approved(True)
+        engine.reset_daily()
+        assert engine._daily_spend_usd == Decimal("0")
+
+    def test_rebalance_approved_persists(self, tmp_path):
+        state_path = tmp_path / "policy_state.json"
+        PolicyEngine(AgentPolicy(cooldown_seconds=0), state_persistence_path=state_path).set_rebalance_approved(True)
+        engine2 = PolicyEngine(AgentPolicy(cooldown_seconds=0), state_persistence_path=state_path)
+        assert engine2._rebalance_approved is True
+
+    def test_corrupt_field_values_start_fresh(self, tmp_path):
+        """Engine must not crash on valid JSON with corrupt field values."""
+        state_path = tmp_path / "policy_state.json"
+        state_path.write_text(json.dumps({
+            "daily_spend_usd": "not_a_number",
+            "day_start": "garbage",
+            "day_start_date": "2020-01-01",
+            "consecutive_failures": "nope",
+            "peak_portfolio_usd": "NaN",
+        }), encoding="utf-8")
+        engine = PolicyEngine(AgentPolicy(cooldown_seconds=0), state_persistence_path=state_path)
+        # Should start fresh without crashing
+        assert engine._daily_spend_usd == Decimal("0")
+        assert engine._consecutive_failures == 0
+
+    def test_nan_decimal_fields_start_fresh(self, tmp_path):
+        """NaN/Infinity in Decimal fields must not slip through to runtime."""
+        state_path = tmp_path / "policy_state.json"
+        state_path.write_text(json.dumps({
+            "daily_spend_usd": "0",
+            "day_start": time.time(),
+            "day_start_date": "2020-01-01",
+            "consecutive_failures": 0,
+            "last_trade_timestamp": 0.0,
+            "peak_portfolio_usd": "NaN",
+            "current_portfolio_usd": "Infinity",
+            "rebalance_approved": False,
+        }), encoding="utf-8")
+        engine = PolicyEngine(AgentPolicy(cooldown_seconds=0), state_persistence_path=state_path)
+        # NaN/Infinity should be rejected, engine starts fresh
+        assert engine._peak_portfolio_usd == Decimal("0")
+        assert engine._current_portfolio_usd == Decimal("0")

@@ -32,5 +32,10 @@ from almanak.framework.agent_tools.errors import (  # noqa: F401
     UpstreamUnavailableError,
 )
 from almanak.framework.agent_tools.executor import ToolExecutor  # noqa: F401
-from almanak.framework.agent_tools.policy import AgentPolicy, PolicyDecision, PolicyEngine  # noqa: F401
+from almanak.framework.agent_tools.policy import (  # noqa: F401
+    AgentPolicy,
+    PolicyDecision,
+    PolicyEngine,
+    PolicyStateStore,
+)
 from almanak.framework.agent_tools.schemas import ToolResponse  # noqa: F401

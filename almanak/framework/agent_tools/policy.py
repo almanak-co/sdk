@@ -7,11 +7,14 @@ before reaching the gateway.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 from almanak.framework.agent_tools.catalog import RiskTier, ToolDefinition
 from almanak.framework.agent_tools.errors import RiskBlockedError
@@ -107,6 +110,46 @@ class PolicyDecision:
 _LP_TOOLS = frozenset({"open_lp_position", "close_lp_position"})
 
 
+class PolicyStateStore:
+    """Simple JSON file-backed persistence for PolicyEngine runtime state.
+
+    Writes are synchronous and happen on every mutation (write-through).
+    Reads happen once at initialization. Malformed or missing files are
+    handled gracefully by starting with fresh state.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+
+    def save(self, state: dict) -> None:
+        """Persist state dict to JSON file."""
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(state, default=str), encoding="utf-8")
+            tmp.replace(self._path)
+        except OSError:
+            logger.warning("Failed to persist policy state to %s", self._path, exc_info=True)
+
+    def load(self) -> dict | None:
+        """Load state dict from JSON file. Returns None if missing or corrupt."""
+        if not self._path.exists():
+            return None
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                logger.warning("Policy state file %s is not a dict, ignoring", self._path)
+                return None
+            return data
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            logger.warning(
+                "Failed to load policy state from %s, starting fresh",
+                self._path,
+                exc_info=True,
+            )
+            return None
+
+
 class PolicyEngine:
     """Evaluates tool calls against an ``AgentPolicy``.
 
@@ -120,6 +163,7 @@ class PolicyEngine:
         *,
         price_lookup: Callable[[str], Decimal | None] | None = None,
         default_wallet: str = "",
+        state_persistence_path: str | Path | None = None,
     ) -> None:
         self.policy = policy
         self._price_lookup = price_lookup
@@ -139,6 +183,13 @@ class PolicyEngine:
 
         # Rebalance viability gate
         self._rebalance_approved: bool = False
+
+        # State persistence (opt-in)
+        self._state_store: PolicyStateStore | None = (
+            PolicyStateStore(state_persistence_path) if state_persistence_path else None
+        )
+        if self._state_store:
+            self._restore_state()
 
     # -- Public API ---------------------------------------------------------
 
@@ -191,25 +242,31 @@ class PolicyEngine:
             self._consecutive_failures = 0
         else:
             self._consecutive_failures += 1
+        self._save_state()
 
     def record_tool_call(self) -> None:
         """Track a tool call for rate-limiting."""
         self._tool_calls_this_minute.append(time.time())
+        self._save_state()
 
     def reset_daily(self) -> None:
         """Reset daily accumulators (call at day boundary)."""
         self._daily_spend_usd = Decimal("0")
         self._trades_this_hour.clear()
+        self._day_start = time.time()
+        self._save_state()
 
     def update_portfolio_value(self, usd_value: Decimal) -> None:
         """Update portfolio value for stop-loss tracking (high-water mark)."""
         self._current_portfolio_usd = usd_value
         if usd_value > self._peak_portfolio_usd:
             self._peak_portfolio_usd = usd_value
+        self._save_state()
 
     def set_rebalance_approved(self, approved: bool) -> None:
         """Set rebalance viability gate (called after compute_rebalance_candidate)."""
         self._rebalance_approved = approved
+        self._save_state()
 
     @property
     def consecutive_failures(self) -> int:
@@ -220,6 +277,105 @@ class PolicyEngine:
     def is_circuit_breaker_tripped(self) -> bool:
         """True if consecutive failures have reached the circuit breaker threshold."""
         return self._consecutive_failures >= self.policy.max_consecutive_failures
+
+    # -- State persistence --------------------------------------------------
+
+    def _get_state_dict(self) -> dict:
+        """Serialize mutable runtime state to a JSON-safe dict."""
+        return {
+            "daily_spend_usd": str(self._daily_spend_usd),
+            "day_start": self._day_start,
+            "day_start_date": datetime.fromtimestamp(self._day_start, UTC).date().isoformat(),
+            "trades_this_hour": self._trades_this_hour,
+            "tool_calls_this_minute": self._tool_calls_this_minute,
+            "consecutive_failures": self._consecutive_failures,
+            "last_trade_timestamp": self._last_trade_timestamp,
+            "peak_portfolio_usd": str(self._peak_portfolio_usd),
+            "current_portfolio_usd": str(self._current_portfolio_usd),
+            "rebalance_approved": self._rebalance_approved,
+            "saved_at": datetime.now(UTC).isoformat(),
+        }
+
+    def _restore_state(self) -> None:
+        """Load persisted state, handling stale data gracefully.
+
+        All deserialization is parsed into local variables first so that a
+        corrupt field never leaves the engine in a partially-restored state.
+        Fields are only committed to ``self`` after all conversions succeed.
+        """
+        if not self._state_store:
+            return
+        state = self._state_store.load()
+        if not state:
+            return
+
+        try:
+            today = datetime.now(UTC).date().isoformat()
+            saved_date = state.get("day_start_date", "")
+            same_day = saved_date == today
+
+            # Parse non-daily fields first (always restored)
+            consecutive_failures = int(state.get("consecutive_failures", 0))
+            last_trade_timestamp = float(state.get("last_trade_timestamp", 0.0))
+            peak_portfolio_usd = Decimal(state.get("peak_portfolio_usd", "0"))
+            current_portfolio_usd = Decimal(state.get("current_portfolio_usd", "0"))
+            rebalance_approved = bool(state.get("rebalance_approved", False))
+
+            # Guard against NaN/Infinity in Decimal fields (Decimal('NaN') parses
+            # without error but crashes comparisons with InvalidOperation later)
+            for val in (peak_portfolio_usd, current_portfolio_usd):
+                if val.is_nan() or val.is_infinite():
+                    raise ValueError(f"Invalid Decimal value in persisted state: {val}")
+
+            # Parse daily fields (only restored if same day)
+            if same_day:
+                daily_spend_usd = Decimal(state.get("daily_spend_usd", "0"))
+                if daily_spend_usd.is_nan() or daily_spend_usd.is_infinite():
+                    raise ValueError(f"Invalid daily_spend_usd: {daily_spend_usd}")
+                day_start = float(state.get("day_start", time.time()))
+                now = time.time()
+                trades_this_hour = [float(t) for t in state.get("trades_this_hour", []) if now - float(t) < 3600]
+                tool_calls_this_minute = [
+                    float(t) for t in state.get("tool_calls_this_minute", []) if now - float(t) < 60
+                ]
+            else:
+                logger.info(
+                    "Policy state is from a previous day (%s), resetting daily counters",
+                    saved_date,
+                )
+        except (InvalidOperation, ValueError, TypeError, KeyError):
+            logger.warning(
+                "Failed to deserialize policy state from %s, starting fresh",
+                self._state_store._path,
+                exc_info=True,
+            )
+            return
+
+        # All conversions succeeded -- commit to self atomically
+        self._consecutive_failures = consecutive_failures
+        self._last_trade_timestamp = last_trade_timestamp
+        self._peak_portfolio_usd = peak_portfolio_usd
+        self._current_portfolio_usd = current_portfolio_usd
+        self._rebalance_approved = rebalance_approved
+
+        if same_day:
+            self._daily_spend_usd = daily_spend_usd
+            self._day_start = day_start
+            self._trades_this_hour = trades_this_hour
+            self._tool_calls_this_minute = tool_calls_this_minute
+
+        logger.info(
+            "Restored policy state: failures=%d, peak=$%s, daily_spend=$%s (same_day=%s)",
+            self._consecutive_failures,
+            self._peak_portfolio_usd,
+            self._daily_spend_usd,
+            same_day,
+        )
+
+    def _save_state(self) -> None:
+        """Persist current state if a store is configured."""
+        if self._state_store:
+            self._state_store.save(self._get_state_dict())
 
     # -- Private checks -----------------------------------------------------
 
@@ -306,7 +462,6 @@ class PolicyEngine:
         now = time.time()
         if now - self._day_start >= 86400:
             self.reset_daily()
-            self._day_start = now
 
         total_usd = self._estimate_usd_value(args)
 
