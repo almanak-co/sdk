@@ -37,6 +37,12 @@ Example:
         print(f"Iteration succeeded: {result.status.value}")
 """
 
+from almanak.framework.runner.inner_runner import (
+    EnrichedExecutionResult,
+    IntentExecutionService,
+    RetryPolicy,
+    SadflowEvent,
+)
 from almanak.framework.runner.strategy_runner import (
     CriticalCallbackError,
     IterationResult,
@@ -48,9 +54,13 @@ from almanak.framework.runner.strategy_runner import (
 
 __all__ = [
     "CriticalCallbackError",
-    "StrategyRunner",
-    "RunnerConfig",
+    "EnrichedExecutionResult",
+    "IntentExecutionService",
     "IterationResult",
     "IterationStatus",
+    "RetryPolicy",
+    "RunnerConfig",
+    "SadflowEvent",
     "StrategyProtocol",
+    "StrategyRunner",
 ]

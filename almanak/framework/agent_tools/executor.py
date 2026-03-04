@@ -71,6 +71,9 @@ class ToolExecutor:
         default_chain: str = "arbitrum",
         alert_manager: Any | None = None,
         safe_addresses: set[str] | None = None,
+        max_retries: int = 3,
+        initial_retry_delay: float = 1.0,
+        max_retry_delay: float = 60.0,
     ) -> None:
         self._client = gateway_client
         self._catalog = catalog or get_default_catalog()
@@ -87,6 +90,15 @@ class ToolExecutor:
         # None = not configured (warning only); empty set = deny all overrides.
         self._safe_addresses: set[str] | None = (
             {a.lower() for a in safe_addresses} if safe_addresses is not None else None
+        )
+
+        # Retry policy for intent execution (shared with IntentExecutionService)
+        from almanak.framework.runner.inner_runner import RetryPolicy
+
+        self._retry_policy = RetryPolicy(
+            max_retries=max_retries,
+            initial_delay_seconds=initial_retry_delay,
+            max_delay_seconds=max_retry_delay,
         )
 
         # Bundle cache for compile -> execute flow
@@ -521,8 +533,6 @@ class ToolExecutor:
     # ── ACTION TOOLS ────────────────────────────────────────────────────
 
     async def _dispatch_action(self, tool_name: str, args: dict) -> ToolResponse:
-        from almanak.gateway.proto import gateway_pb2
-
         # Handle execute_compiled_bundle separately -- it already has a compiled bundle
         if tool_name == "execute_compiled_bundle":
             return await self._execute_compiled_bundle(args)
@@ -565,42 +575,40 @@ class ToolExecutor:
                     wallet,
                 )
 
-        # Step 1: Compile intent
-        compile_resp = self._client.execution.CompileIntent(
-            gateway_pb2.CompileIntentRequest(
-                intent_type=intent_type,
-                intent_data=json.dumps(intent_params).encode(),
-                chain=chain,
-                wallet_address=wallet,
-            )
-        )
-
-        if not compile_resp.success:
-            raise ExecutionFailedError(
-                f"Compilation failed for {tool_name}: {compile_resp.error}",
-                tool_name=tool_name,
-            )
-
         simulate = self._resolve_simulation_flag(wallet, tool_name=tool_name)
 
-        # Step 2: Execute (or dry_run)
-        exec_resp = self._client.execution.Execute(
-            gateway_pb2.ExecuteRequest(
-                action_bundle=compile_resp.action_bundle,
-                dry_run=dry_run,
-                simulation_enabled=simulate,
-                strategy_id=self._strategy_id,
-                chain=chain,
-                wallet_address=wallet,
-            )
+        # Infer protocol for result enrichment
+        protocol = intent_params.get("protocol")
+
+        # Execute through the shared IntentExecutionService (retry + enrichment)
+        from almanak.framework.runner.inner_runner import IntentExecutionService
+
+        service = IntentExecutionService(
+            self._client,
+            chain=chain,
+            wallet_address=wallet,
+            strategy_id=self._strategy_id,
+            retry_policy=self._retry_policy,
+            on_sadflow=self._on_sadflow_event,
+        )
+
+        enriched = await service.execute_intent(
+            intent_type=intent_type,
+            intent_params=intent_params,
+            chain=chain,
+            wallet_address=wallet,
+            dry_run=dry_run,
+            simulate=simulate,
+            tool_name=tool_name,
+            protocol=protocol,
         )
 
         # Track spend (and failures) before raising so circuit breaker works
         if not dry_run:
             usd_amount = await self._estimate_usd_spend(args)
-            self._policy_engine.record_trade(usd_amount, success=exec_resp.success, tool_name=tool_name)
+            self._policy_engine.record_trade(usd_amount, success=enriched.success, tool_name=tool_name)
             # Update portfolio value for stop-loss tracking after successful trades
-            if exec_resp.success:
+            if enriched.success:
                 portfolio_usd = await self._fetch_portfolio_value()
                 if portfolio_usd > 0:
                     self._policy_engine.update_portfolio_value(portfolio_usd)
@@ -612,14 +620,17 @@ class ToolExecutor:
                     severity="critical",
                 )
 
-        if not exec_resp.success and not dry_run:
+        if not enriched.success and not dry_run:
             raise ExecutionFailedError(
-                f"Execution failed for {tool_name}: {exec_resp.error}",
+                f"Execution failed for {tool_name}: {enriched.error}",
                 tool_name=tool_name,
             )
 
-        status = "simulated" if dry_run else ("success" if exec_resp.success else "error")
-        data = self._build_action_response(tool_name, exec_resp, args)
+        if dry_run:
+            status = "simulated" if enriched.success else "error"
+        else:
+            status = "success" if enriched.success else "error"
+        data = self._build_action_response_from_enriched(tool_name, enriched, args)
 
         # Reset rebalance gate after LP open/close execution
         if tool_name in ("open_lp_position", "close_lp_position"):
@@ -849,6 +860,90 @@ class ToolExecutor:
             return {**base, "amount_repaid": args.get("amount", "")}
 
         return base
+
+    def _build_action_response_from_enriched(self, tool_name: str, enriched: Any, args: dict) -> dict:
+        """Build tool-specific response data from EnrichedExecutionResult.
+
+        This is the enrichment-aware replacement for _build_action_response.
+        It uses data extracted by ResultEnricher (via IntentExecutionService)
+        to populate response fields that were previously empty strings.
+        """
+        tx_hash = enriched.tx_hash
+        base = {"tx_hash": tx_hash, "gas_usd": ""}
+
+        if tool_name == "swap_tokens":
+            swap = enriched.swap_amounts
+            return {
+                **base,
+                "amount_in": str(swap.amount_in_decimal)
+                if swap and swap.amount_in_decimal is not None
+                else args.get("amount", ""),
+                "amount_out": str(swap.amount_out_decimal) if swap and swap.amount_out_decimal is not None else "",
+                "effective_price": str(swap.effective_price) if swap and swap.effective_price is not None else "",
+                "price_impact": "",
+                "slippage_bps": swap.slippage_bps if swap and swap.slippage_bps is not None else None,
+                "token_in": swap.token_in if swap else args.get("token_in", ""),
+                "token_out": swap.token_out if swap else args.get("token_out", ""),
+            }
+
+        if tool_name == "open_lp_position":
+            position_id = enriched.position_id
+            liquidity = enriched.extracted_data.get("liquidity", "")
+            tick_lower = enriched.extracted_data.get("tick_lower", 0)
+            tick_upper = enriched.extracted_data.get("tick_upper", 0)
+            return {
+                **base,
+                "position_id": position_id,
+                "liquidity": liquidity,
+                "tick_lower": tick_lower,
+                "tick_upper": tick_upper,
+            }
+
+        if tool_name == "close_lp_position":
+            lp_data = enriched.lp_close_data
+            return {
+                **base,
+                "token_a_received": str(lp_data.amount0_collected)
+                if lp_data and lp_data.amount0_collected is not None
+                else "",
+                "token_b_received": str(lp_data.amount1_collected)
+                if lp_data and lp_data.amount1_collected is not None
+                else "",
+                "fees_collected_a": str(lp_data.fees0) if lp_data and lp_data.fees0 is not None else "",
+                "fees_collected_b": str(lp_data.fees1) if lp_data and lp_data.fees1 is not None else "",
+            }
+
+        if tool_name == "supply_lending":
+            return {**base, "amount_supplied": args.get("amount", "")}
+        if tool_name == "borrow_lending":
+            return {**base, "amount_borrowed": args.get("amount", "")}
+        if tool_name == "repay_lending":
+            return {**base, "amount_repaid": args.get("amount", "")}
+
+        return base
+
+    def _on_sadflow_event(self, event: Any) -> None:
+        """Handle sadflow events from IntentExecutionService.
+
+        Fires alerts and logs failure context. This bridges the
+        IntentExecutionService's sadflow hooks to the ToolExecutor's
+        existing alert infrastructure.
+        """
+        if event.is_final:
+            severity = "critical"
+            message = (
+                f"Intent execution permanently failed after {event.max_retries + 1} attempts: "
+                f"{event.tool_name or event.intent_type} on {event.chain}: {event.error}"
+            )
+        else:
+            severity = "warning"
+            message = (
+                f"Intent execution failed (attempt {event.attempt + 1}/{event.max_retries + 1}): "
+                f"{event.tool_name or event.intent_type} on {event.chain}: {event.error}"
+            )
+
+        logger.warning(message)
+        self._fire_alert(message, severity=severity)
 
     def _extract_position_id(self, exec_resp: Any, args: dict) -> int | None:
         """Extract LP position NFT tokenId from execution receipts."""
