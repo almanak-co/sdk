@@ -2130,15 +2130,19 @@ class IntentCompiler:
         Returns:
             CompilationResult with ActionBundle and metadata
         """
-        if self._using_placeholders and not self._placeholder_warning_logged:
-            logger.warning(
-                "IntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT. "
-                "This is only acceptable for unit tests."
-            )
-            self._placeholder_warning_logged = True
-
         try:
             intent_type = intent.intent_type
+
+            # Suppress placeholder price warning for intent types that don't use prices.
+            # STAKE/UNSTAKE amounts are in native units, not USD, so no price conversion needed.
+            # HOLD is a no-op with no transactions.
+            _price_irrelevant = intent_type in (IntentType.STAKE, IntentType.UNSTAKE, IntentType.HOLD)
+            if self._using_placeholders and not self._placeholder_warning_logged and not _price_irrelevant:
+                logger.warning(
+                    "IntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT. "
+                    "This is only acceptable for unit tests."
+                )
+                self._placeholder_warning_logged = True
 
             if intent_type == IntentType.SWAP:
                 return self._compile_swap(intent)  # type: ignore[arg-type]

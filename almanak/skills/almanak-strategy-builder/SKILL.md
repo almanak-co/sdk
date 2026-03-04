@@ -542,6 +542,11 @@ usd_val = market.balance_usd("WETH")               # Decimal - USD value of hold
 total = market.total_portfolio_usd()                # Decimal
 ```
 
+```python
+# USD value of an arbitrary collateral amount (for perp position sizing)
+col_usd = market.collateral_value_usd("WETH", Decimal("2"))  # Decimal - amount * price
+```
+
 ### OHLCV Data
 
 ```python

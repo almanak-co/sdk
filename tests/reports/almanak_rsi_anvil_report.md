@@ -1,9 +1,9 @@
 # E2E Strategy Test Report: almanak_rsi (Anvil)
 
-**Date:** 2026-02-27 22:43
+**Date:** 2026-03-03 11:37 (kitchen iter-29 re-run)
 **Result:** PASS
 **Mode:** Anvil
-**Duration:** ~35 seconds (strategy iteration)
+**Duration:** ~25 seconds (strategy run)
 
 ## Configuration
 
@@ -12,7 +12,7 @@
 | Strategy | almanak_rsi |
 | Chain | base (Chain ID 8453) |
 | Network | Anvil fork (Base mainnet, public RPC fallback) |
-| Anvil Port | 55137 (managed, auto-selected) |
+| Anvil Port | 65018/65150 (managed, auto-selected by CLI) |
 | Protocol | uniswap_v3 |
 | Trading Pair | ALMANAK/USDC |
 | Pool | 0xbDbC38652D78AF0383322bBc823E06FA108d0874 |
@@ -31,19 +31,19 @@ the initialization phase guarantees a trade on the first run when no prior state
 
 ### Setup
 - Managed gateway auto-started on port 50052 (network=anvil)
-- Base mainnet fork created at block 42708804 (chain ID 8453)
+- Base mainnet fork created at block 42874218 (chain ID 8453)
 - Wallet auto-funded per `anvil_funding` config: 100 ETH, 10,000 USDC (slot 9), 1 WETH (slot 3)
 - No existing `almanak_rsi` strategy state found (fresh start)
-- Public RPC used: `https://base-rpc.publicnode.com` (no ALCHEMY_API_KEY configured)
+- Public RPC used: `https://base-rpc.publicnode.com` (no ALCHEMY_API_KEY configured in .env)
 
 ### Strategy Run
 - Strategy executed with `--network anvil --once`
 - Mode: FRESH START (no existing state)
 - Initialization phase triggered (`_initialized = False` on first run)
-- ALMANAK price fetched: $0.00201819 (GeckoTerminal, confidence 0.90, 1/2 sources)
-- USDC price fetched: $0.999994 (confidence 1.00, 2/2 sources)
+- ALMANAK price fetched: $0.00207676 (GeckoTerminal, confidence 0.90, 1/2 sources)
+- USDC price fetched: $0.9999990 (confidence 1.00, 2/2 sources)
 - Initial buy: 10.000000 USDC -> ALMANAK (half of $20 initial capital)
-- Compiled: 10.0000 USDC -> 4940.0404 ALMANAK (min: 4890.6400 ALMANAK, 1% slippage)
+- Compiled: 10.0000 USDC -> 4800.7425 ALMANAK (min: 4752.7351 ALMANAK, 1% slippage)
 - 2 transactions submitted and confirmed on-chain
 - Strategy state saved: `initialized=True`, `trade_count=1`
 
@@ -51,75 +51,63 @@ the initialization phase guarantees a trade on the first run when no prior state
 
 | Intent | TX Hash | Block | Gas Used | Status |
 |--------|---------|-------|----------|--------|
-| APPROVE (USDC) | `0x20064ba2b9004bce98158ca8f454edff0a1581a890a1bff2430065ba8a2fc17b` | 42708807 | 55,437 | SUCCESS |
-| SWAP (USDC->ALMANAK) | `0x354d77f44a0cfc9f49830b5ee8dfd1fe786647b99717f41f5d5197a68e50d1c7` | 42708808 | 136,678 | SUCCESS |
-| **Total** | | | **192,115** | |
+| APPROVE (USDC) | `0x2afcac272eb1bb20426e346dd7c6744706a01f6527f6231bb60c7825e260b719` | 42874258 | 55,437 | SUCCESS |
+| SWAP (USDC->ALMANAK) | `0x87d4775f30806e0dd29e1f8af446621c3317bcb0002c74de7d3fdc7240e4505d` | 42874259 | 145,336 | SUCCESS |
+| **Total** | | | **200,773** | |
 
 *Note: These are Anvil local fork transactions, not mainnet.*
 
 ### Key Log Output
 
 ```text
-[info] Aggregated price for USDC/USD: 0.999994 (confidence: 1.00, sources: 2/2)
-[info] Aggregated price for ALMANAK/USD: 0.00201819 (confidence: 0.90, sources: 1/2)
+[info] Aggregated price for USDC/USD: 0.9999990000000001 (confidence: 1.00, sources: 2/2, outliers: 0)
+[info] Aggregated price for ALMANAK/USD: 0.00207676 (confidence: 0.90, sources: 1/2, outliers: 0)
 [info] INITIALIZATION: First run - buying ALMANAK for $10.00 (half of initial capital)
 [info] almanak_rsi intent: SWAP: 10.000000 0x833589fcd6...02913 -> 0xdefa1d21c5...cc3a3 (slippage: 1.00%) via uniswap_v3
-[info] Compiled SWAP: 10.0000 USDC -> 4940.0404 ALMANAK (min: 4890.6400 ALMANAK)
+[info] Compiled SWAP: 10.0000 USDC -> 4800.7425 ALMANAK (min: 4752.7351 ALMANAK)
 [info]    Slippage: 1.00% | Txs: 2 | Gas: 280,000
-[info] Simulation successful: 2 transaction(s), total gas: 355819
-[info] TX 1 confirmed: block=42708807, gas=55437
-[info] TX 2 confirmed: block=42708808, gas=136678
+[info] Simulation successful: 2 transaction(s), total gas: 355,819
+[info] TX 1 confirmed: block=42874258, gas=55437
+[info] TX 2 confirmed: block=42874259, gas=145336
 [info] EXECUTED: SWAP completed successfully
-[info]    Txs: 2 (20064b...c17b, 354d77...d1c7) | 192,115 gas
-[info] Parsed Uniswap V3 swap: 0.0000 token0 -> 4940.0603 token1, slippage=N/A
+[info]    Txs: 2 (2afcac...b719, 87d477...505d) | 200,773 gas
+[info] Parsed Uniswap V3 swap: 0.0000 token0 -> 4829.7565 token1, slippage=N/A
 [info] Initialization swap succeeded - strategy is now initialized
 [info] Trade executed successfully (total trades: 1)
-Status: SUCCESS | Intent: SWAP | Gas used: 192115 | Duration: 34476ms
+Status: SUCCESS | Intent: SWAP | Gas used: 200773 | Duration: 24925ms
 ```
 
 ## Suspicious Behaviour
 
 | # | Source | Severity | Pattern | Log Line |
 |---|--------|----------|---------|----------|
-| 1 | gateway | WARNING | Token resolution failure: BTC not in Base registry | `token_resolution_error token=BTC chain=base error_type=TokenNotFoundError ... Symbol 'BTC' not found in registry for base` |
-| 2 | gateway | WARNING | Token resolution failure: WBTC not in Base registry | `token_resolution_error token=WBTC chain=base error_type=TokenNotFoundError` |
-| 3 | gateway | WARNING | Token resolution failure: STETH not in Base registry | `token_resolution_error token=STETH chain=base ... Did you mean 'WSTETH'?` |
-| 4 | gateway | WARNING | Token resolution failure: CBETH not in Base registry | `token_resolution_error token=CBETH chain=base error_type=TokenNotFoundError` |
-| 5 | gateway | INFO | Public RPC fallback for Base (no Alchemy key) | `No API key configured -- using free public RPC for base (rate limits may apply)` |
-| 6 | gateway | INFO | CoinGecko fallback mode active | `No CoinGecko API key -- using on-chain pricing with free CoinGecko as fallback` |
-| 7 | gateway | INFO | ALMANAK price confidence 0.90 (1 of 2 sources) | `ALMANAK/USD: 0.00201755 (confidence: 0.90, sources: 1/2, outliers: 0)` |
-| 8 | gateway | WARNING | Anvil port not freed within 5s after strategy exit | `Port 61479 not freed after 5.0s` |
+| 1 | gateway | INFO | ALMANAK price: only 1 of 2 sources available (no Chainlink oracle) | `ALMANAK/USD: 0.00207019 (confidence: 0.90, sources: 1/2, outliers: 0)` |
+| 2 | gateway | INFO | No CoinGecko API key, using free tier as fallback | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback` |
+| 3 | gateway | INFO | No Alchemy API key, using public RPC (rate limits apply) | `No API key configured -- using free public RPC for base (rate limits may apply)` |
+| 4 | gateway | WARNING | Port 58000 not freed after 5.0s (cleanup timing) | `Port 58000 not freed after 5.0s` |
+| 5 | gateway | WARNING | Insecure mode active (expected for anvil) | `INSECURE MODE: Auth interceptor disabled -- acceptable for local development on 'anvil'` |
 
 **Notes on findings:**
 
-- **Findings 1-4 (Token resolution warnings):** Emitted during gateway market service
-  initialization when the price aggregator pre-warms its source list. BTC, WBTC, STETH, and
-  CBETH are not tokens this strategy uses -- noise from a generic startup probe. Indicates
-  these tokens are missing from the Base token registry (registry gap), but non-fatal for
-  this strategy.
-- **Findings 5-6 (Public RPC / CoinGecko fallback):** Expected in a dev/test environment
-  without `ALCHEMY_API_KEY` or `ALMANAK_GATEWAY_COINGECKO_API_KEY`. Both fallbacks functioned
-  correctly.
-- **Finding 7 (Price confidence 0.90):** ALMANAK has only 1/2 price sources available; no
-  Chainlink oracle exists for this small-cap token. Price sourced solely via GeckoTerminal.
-  Acceptable for testing; worth noting for production risk assessment.
-- **Finding 8 (Port not freed):** Minor cleanup timing issue in Anvil fork manager. Does not
-  affect test correctness.
-- **Finding 9 (slippage=N/A in receipt):** The Uniswap V3 receipt parser shows `slippage=N/A`
-  after the ALMANAK swap. This occurs because the parser cannot compute post-execution slippage
-  without a reference price for the ALMANAK token (no Chainlink oracle). Non-blocking but a
-  data quality gap in the receipt parser for tokens without price oracles.
+- **Finding 1 (Price confidence 0.90):** ALMANAK has only 1/2 price sources; no Chainlink oracle
+  exists for this small-cap token. Price sourced solely via GeckoTerminal (CoinGecko free tier).
+  Non-blocking; strategy handled it correctly. Worth noting for production risk assessment.
+- **Findings 2-3 (Public RPC / CoinGecko fallback):** Expected in a dev/test environment
+  without `ALCHEMY_API_KEY` or `ALMANAK_GATEWAY_COINGECKO_API_KEY`. Both fallbacks worked correctly.
+- **Finding 4 (Port not freed):** Minor cleanup timing issue in Anvil fork manager after strategy
+  exit. Does not affect test correctness.
+- **Finding 5 (Insecure mode):** Expected and correct for local Anvil development mode.
 
-**No ERROR-severity findings. No zero prices. No transaction reverts.**
+**No ERROR-severity findings. No zero prices. No transaction reverts. No token resolution failures.**
 
 ## Result
 
 **PASS** - The `almanak_rsi` strategy on Base (Anvil fork) successfully executed its
-initialization swap, buying ALMANAK for $10.00 USDC via Uniswap V3. Both the USDC approval
-and swap transactions were confirmed on-chain (192,115 gas total). Strategy marked as
-initialized and state persisted.
+initialization swap, buying 4829.76 ALMANAK for $10.00 USDC via Uniswap V3. Both the USDC approval
+and swap transactions were confirmed on-chain (200,773 gas total). Strategy correctly transitioned
+from uninitialized to initialized state and persisted state to SQLite.
 
 ---
 
-SUSPICIOUS_BEHAVIOUR_COUNT: 9
+SUSPICIOUS_BEHAVIOUR_COUNT: 4
 SUSPICIOUS_BEHAVIOUR_ERRORS: 0

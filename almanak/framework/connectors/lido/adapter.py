@@ -561,6 +561,10 @@ class LidoAdapter:
                 )
 
             # Approve wstETH contract to spend stETH
+            # stETH uses a proxy contract with rebasing share-based logic,
+            # requiring higher gas than standard ERC-20 approve (~46K on mainnet).
+            # 80K provides safe headroom for proxy overhead.
+            steth_approve_gas = 80000
             amount_wei = int(amount * Decimal(10**18))
             approve_data = "0x095ea7b3" + self._pad_address(self.wsteth_address) + self._pad_uint256(amount_wei)
             transactions.append(
@@ -568,12 +572,12 @@ class LidoAdapter:
                     "to": self.steth_address,
                     "value": 0,
                     "data": approve_data,
-                    "gas_estimate": 50000,
+                    "gas_estimate": steth_approve_gas,
                     "description": f"Approve wstETH to spend {amount} stETH",
                     "action_type": "approve",
                 }
             )
-            total_gas += 50000
+            total_gas += steth_approve_gas
 
             wrap_result = self.wrap(amount)
             if not wrap_result.success or wrap_result.tx_data is None:

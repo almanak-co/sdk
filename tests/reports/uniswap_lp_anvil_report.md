@@ -1,9 +1,9 @@
 # E2E Strategy Test Report: uniswap_lp (Anvil)
 
-**Date:** 2026-02-27 16:52-16:53
+**Date:** 2026-03-03 19:35
 **Result:** PASS
 **Mode:** Anvil
-**Duration:** ~45 seconds
+**Duration:** ~4 minutes
 
 ## Configuration
 
@@ -11,60 +11,62 @@
 |-------|-------|
 | Strategy | demo_uniswap_lp |
 | Chain | arbitrum |
-| Network | Anvil fork (public RPC: arbitrum-one-rpc.publicnode.com) |
-| Anvil Port | 52409 (auto-assigned by managed gateway) |
+| Network | Anvil fork (publicnode.com, port auto-assigned by managed gateway) |
 | Pool | WETH/USDC/500 |
-| amount0 | 0.001 WETH |
-| amount1 | 3 USDC |
-| range_width_pct | 20% |
-| Budget cap | $500 (no change needed; 0.001 WETH + 3 USDC well within cap) |
+| Amount0 | 0.001 WETH |
+| Amount1 | 3 USDC |
+| Range Width | 20% (±10% from current price) |
 
 ## Config Changes Made
 
-- Temporarily added `"force_action": "open"` to trigger immediate LP open on first run
-- Restored to original after test (field removed)
+- Added `"force_action": "open"` temporarily to trigger an immediate LP_OPEN on first run.
+- **Restored** after test (field removed from config.json).
+- Trade size (0.001 WETH + 3 USDC) is well within the $500 budget cap.
 
 ## Execution
 
 ### Setup
-- [x] Managed gateway auto-started on port 50052 (insecure mode, acceptable for Anvil)
-- [x] Anvil fork started on port 52409 (block 436575775, chain_id=42161)
-- [x] Wallet (0xf39Fd6e5...) auto-funded: 100 ETH, 1 WETH (slot 51), 10,000 USDC (slot 9)
-- [x] RPC: https://arbitrum-one-rpc.publicnode.com (ALCHEMY_API_KEY not set in .env)
+- [x] Previous Anvil/Gateway processes killed
+- [x] Managed gateway auto-started with fresh Anvil fork on Arbitrum (publicnode.com)
+- [x] Wallet 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 auto-funded via config anvil_funding:
+  - ETH: 100 ETH
+  - WETH: 1 WETH (via storage slot 51)
+  - USDC: 10,000 USDC (via storage slot 9)
 
 ### Strategy Run
 - [x] Strategy executed with `--network anvil --once`
-- [x] force_action="open" triggered LP_OPEN immediately
-- [x] ETH price: $1,927.01 (WETH/USD, confidence 1.00, 2/2 sources)
-- [x] USDC price: $0.9999 (confidence 1.00, 2/2 sources)
-- [x] LP range calculated: [$1,734.39 - $2,119.81] (±10% of current ETH price)
-- [x] Compiled: 3 txs (approve WETH + approve USDC + lp_mint), 660,000 gas estimated
-- [x] All 3 transactions confirmed on Anvil fork
-- [x] LP position opened: position_id=5333197
-- [x] Result enriched: position_id, tick_lower, tick_upper, liquidity
+- [x] Intent: LP_OPEN on WETH/USDC/500
+- [x] Price fetched: WETH = $1,971.35, USDC = $0.9999 (Chainlink on-chain, confidence 1.00, 2/2 sources)
+- [x] Range calculated: [$1,774.28 - $2,168.56] (±10%)
+- [x] 3 transactions submitted sequentially and confirmed
+- [x] LP position opened: position_id = **5341845**
+- [x] ResultEnricher extracted: position_id, tick_lower, tick_upper, liquidity
 
-### Transaction Details (Anvil local fork -- not on public chain)
+### Transactions (Anvil local fork - not on public chain)
 
-| # | TX Hash | Block | Gas Used | Status |
-|---|---------|-------|----------|--------|
-| 1 (WETH approve) | `1fa2a8b73ad94905b00540aafec27e12ceac90004a602e09343dca244aef2f21` | 436575778 | 53,440 | SUCCESS |
-| 2 (USDC approve) | `66e7d3d8d346880b2dad0f0ec0ec40e34d0a94a33c063d234840ad71ce5bbea5` | 436575779 | 55,437 | SUCCESS |
-| 3 (LP mint) | `e16571c18e2f6ba214742ef6edc4f8b818113daee4f96eaff9a3b9a8cca218a9` | 436575780 | 448,917 | SUCCESS |
+| # | Type | TX Hash | Block | Gas Used | Status |
+|---|------|---------|-------|----------|--------|
+| 1 | APPROVE (WETH) | `37a373f99f0f2970d1979bfd3fb640cb18c1b79a4fd6c39d5be592fca9b86204` | 437899187 | 53,440 | SUCCESS |
+| 2 | APPROVE (USDC) | `e57e0c0cfe8e97f2cffca1f84ca58eeee9e3be351f93af6af53b56b6af0ade36` | 437899188 | 55,437 | SUCCESS |
+| 3 | LP_MINT | `4d1da7f8338698fe18a77f79fd9668dada2731c90b77af11e108256b9eef55be` | 437899189 | 414,829 | SUCCESS |
 
-**Total gas used: 557,794 | LP Position ID: 5333197**
+**Total gas used: 523,706 | LP Position ID: 5341845**
 
 ### Key Log Output
+
 ```text
-Aggregated price for WETH/USD: 1927.0055655 (confidence: 1.00, sources: 2/2, outliers: 0)
-Aggregated price for USDC/USD: 0.9999495 (confidence: 1.00, sources: 2/2, outliers: 0)
-Forced action: OPEN LP position
-LP_OPEN: 0.0010 WETH + 3.0000 USDC, range [$1,734.39 - $2,119.81]
-Compiled LP_OPEN intent: WETH/USDC, range [1734.39-2119.81], 3 txs (approve + approve + lp_mint), 660000 gas
-EXECUTED: LP_OPEN completed successfully
-Txs: 3 (1fa2a8...2f21, 66e7d3...bea5, e16571...18a9) | 557,794 gas
-Extracted LP position ID from receipt: 5333197
-LP position opened successfully: position_id=5333197
-Status: SUCCESS | Intent: LP_OPEN | Gas used: 557794 | Duration: 35468ms
+2026-03-03T12:34:27.021114Z [info] Aggregated price for WETH/USD: 1971.3457285650002 (confidence: 1.00, sources: 2/2)
+2026-03-03T12:34:27.347227Z [info] Aggregated price for USDC/USD: 0.999962 (confidence: 1.00, sources: 2/2)
+2026-03-03T12:34:27.349025Z [info] Forced action: OPEN LP position
+2026-03-03T12:34:27.350646Z [info] LP_OPEN: 0.0010 WETH + 3.0000 USDC, range [$1,774.28 - $2,168.56]
+2026-03-03T12:34:28.543257Z [info] Compiled LP_OPEN intent: WETH/USDC, range [1774.28-2168.56], 3 txs (approve + approve + lp_mint), 660000 gas
+2026-03-03T12:34:32.911010Z [info] Simulation successful: 3 transaction(s), total gas: 923788
+2026-03-03T12:35:00.837155Z [info] EXECUTED: LP_OPEN completed successfully
+2026-03-03T12:35:00.837573Z [info]    Txs: 3 (37a373...6204, e57e0c...de36, 4d1da7...55be) | 523,706 gas
+2026-03-03T12:35:00.840192Z [info] Extracted LP position ID from receipt: 5341845
+2026-03-03T12:35:00.840597Z [info] Enriched LP_OPEN result with: position_id, tick_lower, tick_upper, liquidity (protocol=uniswap_v3, chain=arbitrum)
+2026-03-03T12:35:00.853011Z [info] LP position opened successfully: position_id=5341845
+Status: SUCCESS | Intent: LP_OPEN | Gas used: 523706 | Duration: 36150ms
 Iteration completed successfully.
 ```
 
@@ -72,26 +74,33 @@ Iteration completed successfully.
 
 | # | Source | Severity | Pattern | Log Line |
 |---|--------|----------|---------|----------|
-| 1 | gateway | WARNING | Token resolution failures (BTC, STETH, RDNT, MAGIC, WOO) during market service init | `token_resolution_error token=BTC chain=arbitrum error_type=TokenNotFoundError detail=Symbol 'BTC' not found in registry for arbitrum` (same for STETH, RDNT, MAGIC, WOO) |
-| 2 | gateway | INFO | No Alchemy API key -- free public RPC used (rate limit risk) | `No API key configured -- using free public RPC for arbitrum (rate limits may apply)` |
-| 3 | gateway | INFO | UniswapV3ReceiptParser does not declare support for `bin_ids` (expected by LP_OPEN enricher) | `Parser UniswapV3ReceiptParser does not declare support for 'bin_ids' (expected by LP_OPEN)` |
-| 4 | gateway | WARNING | Anvil port not freed within 5 seconds during shutdown | `Port 52409 not freed after 5.0s` |
+| 1 | strategy | WARNING | Insecure mode (expected for Anvil dev) | `INSECURE MODE: Auth interceptor disabled - no auth_token configured. This is acceptable for local development on 'anvil'.` |
+| 2 | strategy | INFO | No CoinGecko API key - on-chain Chainlink pricing active | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback.` |
+| 3 | strategy | INFO | Compiler using placeholder prices on initial compile | `IntentCompiler initialized for chain=arbitrum, ... using_placeholders=True` |
+| 4 | strategy | INFO | Parser capability mismatch (bin_ids field not declared) | `Parser UniswapV3ReceiptParser does not declare support for 'bin_ids' (expected by LP_OPEN)` |
+| 5 | strategy | WARNING | Anvil port not freed after 5s (cosmetic, fork shutdown race) | `Port 58935 not freed after 5.0s [almanak.framework.anvil.fork_manager]` |
 
 **Notes:**
-- Finding #1: The gateway's market service init attempts to resolve BTC, STETH, RDNT, MAGIC, and WOO on Arbitrum (likely a default price-watch list). These symbols don't exist under those exact names on Arbitrum (correct forms: WBTC, WSTETH). WARNING-level only, did not block execution.
-- Finding #2: ALCHEMY_API_KEY is not set in .env. The gateway auto-falls-back to the publicnode RPC. Acceptable for local testing; an Alchemy key should be configured for production or CI use.
-- Finding #3: Informational only. `bin_ids` is a TraderJoe V2 field that leaked into the LP_OPEN enricher's expected-field list. UniswapV3 correctly does not declare it. No impact on enrichment; position_id, tick_lower, tick_upper, liquidity all extracted correctly.
-- Finding #4: Cosmetic. Anvil port release is slightly delayed on shutdown. No functional impact.
+- Finding 1: Expected and correct for Anvil dev mode. Not a bug.
+- Finding 2: Expected when `COINGECKO_API_KEY` is not configured. Both prices were fetched via
+  Chainlink on-chain oracles (2/2 sources, confidence 1.00). Acceptable for Anvil testing.
+- Finding 3: The compiler initializes with placeholders before gateway price data is available.
+  Second compilation (when run) used real prices (`using_placeholders=False`). Normal startup sequence.
+- Finding 4: `UniswapV3ReceiptParser` does not declare support for `bin_ids` (a TraderJoe V2 concept).
+  Benign parser metadata gap - all relevant fields (position_id, tick_lower, tick_upper, liquidity)
+  were enriched correctly. Noisy but harmless.
+- Finding 5: Cosmetic port-cleanup race condition on managed Anvil fork shutdown. Non-blocking.
 
-No zero prices, no failed API fetches, no ERROR log lines, no transaction reverts, no timeouts.
+No zero prices, no failed API fetches, no ERROR-level log lines, no transaction reverts,
+no timeouts, no token resolution failures detected.
 
 ## Result
 
 **PASS** - The uniswap_lp strategy successfully executed an LP_OPEN on an Anvil fork of Arbitrum,
-minting Uniswap V3 position #5333197 (WETH/USDC/500, ±10% range around $1,927) via 3
-on-chain transactions (557,794 total gas). No blocking errors encountered.
+minting Uniswap V3 position #5341845 (WETH/USDC 0.05% pool, 20% range around $1,971 ETH price)
+via 3 on-chain transactions totaling 523,706 gas. No blocking errors encountered.
 
 ---
 
-SUSPICIOUS_BEHAVIOUR_COUNT: 4
+SUSPICIOUS_BEHAVIOUR_COUNT: 5
 SUSPICIOUS_BEHAVIOUR_ERRORS: 0

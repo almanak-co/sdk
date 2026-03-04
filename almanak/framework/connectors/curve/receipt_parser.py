@@ -565,13 +565,13 @@ class CurveReceiptParser:
     def extract_swap_amounts(self, receipt: dict[str, Any]) -> "SwapAmounts | None":
         """Extract swap amounts from a transaction receipt.
 
-        Note: Decimal conversions assume 18 decimals. Curve pools often use tokens
-        with different decimals (e.g., USDC/USDT with 6, WBTC with 8). The raw
-        amount_in/amount_out fields are always accurate; use those with your own
-        decimal scaling for precise calculations.
+        Uses ERC-20 Transfer events to identify token addresses, then resolves
+        actual decimals via TokenResolver for accurate decimal conversion.
+        Falls back to returning None if decimals cannot be resolved (rather than
+        returning wildly wrong amounts).
 
         Args:
-            receipt: Transaction receipt dict with 'logs' field
+            receipt: Transaction receipt dict with 'logs' and 'from' fields
 
         Returns:
             SwapAmounts dataclass if swap event found, None otherwise
@@ -587,9 +587,26 @@ class CurveReceiptParser:
             amount_in = swap.tokens_sold
             amount_out = swap.tokens_bought
 
-            # Calculate decimal amounts (assuming 18 decimals - see docstring for limitations)
-            amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**18)
-            amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**18)
+            # Find token addresses from ERC-20 Transfer events in the receipt
+            token_in_addr, token_out_addr = self._find_swap_token_addresses(receipt)
+
+            # Resolve actual decimals for accurate conversion
+            decimals_in = self._resolve_decimals(token_in_addr)
+            decimals_out = self._resolve_decimals(token_out_addr)
+
+            # If we can't resolve decimals for either token, bail out rather
+            # than returning wildly wrong amounts (e.g., 10^12x off for USDC)
+            if decimals_in is None or decimals_out is None:
+                logger.warning("Cannot compute Curve swap amounts: token decimals unknown")
+                return None
+
+            # Guard against malicious/bogus decimals values (ERC-20 max is uint8 = 255)
+            if decimals_in > 77 or decimals_out > 77:
+                logger.warning(f"Unreasonable decimals ({decimals_in}, {decimals_out}), refusing to compute")
+                return None
+
+            amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**decimals_in)
+            amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**decimals_out)
             effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal(0)
 
             return SwapAmounts(
@@ -599,12 +616,83 @@ class CurveReceiptParser:
                 amount_out_decimal=amount_out_decimal,
                 effective_price=effective_price,
                 slippage_bps=None,
-                token_in=f"token{swap.sold_id}",
-                token_out=f"token{swap.bought_id}",
+                token_in=token_in_addr or f"token{swap.sold_id}",
+                token_out=token_out_addr or f"token{swap.bought_id}",
             )
 
         except Exception as e:
             logger.warning(f"Failed to extract swap amounts: {e}")
+            return None
+
+    def _find_swap_token_addresses(self, receipt: dict[str, Any]) -> tuple[str, str]:
+        """Find token_in and token_out addresses from ERC-20 Transfer events.
+
+        Heuristic: token_in is the Transfer FROM the wallet (first),
+        token_out is the Transfer TO the wallet (last).
+
+        Args:
+            receipt: Transaction receipt dict
+
+        Returns:
+            Tuple of (token_in_address, token_out_address), empty string if not found
+        """
+        wallet = receipt.get("from", "")
+        if isinstance(wallet, bytes):
+            wallet = "0x" + wallet.hex()
+        wallet = str(wallet).lower()
+        if not wallet:
+            return ("", "")
+
+        transfer_topic = EVENT_TOPICS["Transfer"].lower()
+        token_in_addr = ""
+        token_out_addr = ""
+
+        for log in receipt.get("logs", []):
+            topics = log.get("topics", [])
+            if len(topics) < 3:
+                continue
+
+            first_topic = topics[0]
+            if isinstance(first_topic, bytes):
+                first_topic = "0x" + first_topic.hex()
+            if str(first_topic).lower() != transfer_topic:
+                continue
+
+            log_from = HexDecoder.topic_to_address(topics[1])
+            log_to = HexDecoder.topic_to_address(topics[2])
+            token_address = log.get("address", "")
+            if isinstance(token_address, bytes):
+                token_address = "0x" + token_address.hex()
+            token_address = str(token_address).lower()
+
+            if log_from == wallet and not token_in_addr:
+                token_in_addr = token_address
+            if log_to == wallet:
+                token_out_addr = token_address  # last Transfer TO wallet wins
+
+        return (token_in_addr, token_out_addr)
+
+    def _resolve_decimals(self, token_address: str) -> int | None:
+        """Resolve token decimals via the token resolver.
+
+        Returns None if the resolver is unavailable or the token is unknown.
+
+        Args:
+            token_address: Lowercase token address
+
+        Returns:
+            Token decimals (e.g. 6 for USDC, 18 for WETH), or None if unknown.
+        """
+        if not token_address:
+            return None
+        try:
+            from almanak.framework.data.tokens import get_token_resolver
+
+            resolver = get_token_resolver()
+            token = resolver.resolve(token_address, self.chain)
+            return token.decimals
+        except Exception:
+            logger.warning(f"Could not resolve decimals for {token_address}")
             return None
 
     def extract_lp_tokens_received(self, receipt: dict[str, Any]) -> int | None:

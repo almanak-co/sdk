@@ -1,8 +1,14 @@
-"""Tests for GMX V2 Receipt Parser (Refactored)."""
+"""Tests for GMX V2 Receipt Parser (Refactored).
+
+Updated to use GMX V2 EventEmitter pattern:
+- topic[0] = EventLog/EventLog1/EventLog2 signature (generic)
+- topic[1] = keccak256(eventName) — the actual event identifier
+"""
 
 import pytest
 
 from almanak.framework.connectors.gmx_v2.receipt_parser import (
+    EVENT_TOPICS,
     GMXv2EventType,
     GMXv2ReceiptParser,
 )
@@ -14,6 +20,9 @@ MARKET_ADDRESS = "0x70d95587d40a2caf56bd97485ab3eec10bee6336"
 USDC_ADDRESS = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
 WETH_ADDRESS = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
 POSITION_KEY = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+# EventLog1 signature (topic[0] for GMX V2 EventEmitter logs)
+EVENT_LOG1_TOPIC = "0x137a44067c8961cd7e1d876f4754a5a3a75989b4552f1843fc0a3ffa67d28dc3"
 
 
 def create_position_increase_log(
@@ -35,7 +44,7 @@ def create_position_increase_log(
     price_impact_usd=0,
     order_type=0,
 ):
-    """Create PositionIncrease log.
+    """Create PositionIncrease log using EventEmitter pattern.
 
     Layout: account, market, collateral_token, is_long, size_in_usd,
     size_in_tokens, collateral_amount, execution_price, size_delta_usd,
@@ -69,8 +78,9 @@ def create_position_increase_log(
     return {
         "address": GMX_ROUTER_ADDRESS,
         "topics": [
-            "0x137a44067c8961cd7e1d876f4754a5a3a75989b4552f1843fc0a3ffa67d28dc3",  # PositionIncrease
-            key,
+            EVENT_LOG1_TOPIC,  # topic[0] = EventLog1 signature
+            EVENT_TOPICS["PositionIncrease"],  # topic[1] = keccak256("PositionIncrease")
+            key,  # topic[2] = additional indexed param
         ],
         "data": data,
         "logIndex": 0,
@@ -96,7 +106,7 @@ def create_position_decrease_log(
     collateral_token_price_min=0,
     price_impact_usd=0,
 ):
-    """Create PositionDecrease log.
+    """Create PositionDecrease log using EventEmitter pattern.
 
     Layout: account, market, collateral_token, is_long, size_in_usd,
     size_in_tokens, collateral_amount, execution_price, size_delta_usd,
@@ -128,8 +138,9 @@ def create_position_decrease_log(
     return {
         "address": GMX_ROUTER_ADDRESS,
         "topics": [
-            "0x2e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000001",  # PositionDecrease
-            key,
+            EVENT_LOG1_TOPIC,  # topic[0] = EventLog1 signature
+            EVENT_TOPICS["PositionDecrease"],  # topic[1] = keccak256("PositionDecrease")
+            key,  # topic[2] = additional indexed param
         ],
         "data": data,
         "logIndex": 1,
@@ -153,7 +164,7 @@ def create_order_created_log(
     min_output_amount=0,
     updated_at_block=0,
 ):
-    """Create OrderCreated log.
+    """Create OrderCreated log using EventEmitter pattern.
 
     Layout: account, receiver, market, initial_collateral_token, order_type,
     decrease_position_swap_type, is_long, size_delta_usd,
@@ -184,8 +195,9 @@ def create_order_created_log(
     return {
         "address": GMX_ROUTER_ADDRESS,
         "topics": [
-            "0x3a3c9eff40a8c51a3d8ccf8f9eb47e7c9a0000000000000000000000000000001",  # OrderCreated
-            key,
+            EVENT_LOG1_TOPIC,  # topic[0] = EventLog1 signature
+            EVENT_TOPICS["OrderCreated"],  # topic[1] = keccak256("OrderCreated")
+            key,  # topic[2] = additional indexed param
         ],
         "data": data,
         "logIndex": 2,
@@ -400,37 +412,25 @@ class TestGMXv2ReceiptParser:
         assert len(result.events) == 0  # Unknown events are skipped
 
     def test_is_gmx_event(self):
-        """Test is_gmx_event method."""
+        """Test is_gmx_event method with real event topic hashes."""
         parser = GMXv2ReceiptParser()
 
-        # Known events
-        assert parser.is_gmx_event(
-            "0x137a44067c8961cd7e1d876f4754a5a3a75989b4552f1843fc0a3ffa67d28dc3"
-        )  # PositionIncrease
-        assert parser.is_gmx_event(
-            "0x2e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000001"
-        )  # PositionDecrease
+        # Known events (use real keccak256 hashes from EVENT_TOPICS)
+        assert parser.is_gmx_event(EVENT_TOPICS["PositionIncrease"])
+        assert parser.is_gmx_event(EVENT_TOPICS["PositionDecrease"])
+        assert parser.is_gmx_event(EVENT_TOPICS["OrderCreated"])
 
         # Unknown event
         assert not parser.is_gmx_event("0x0000000000000000000000000000000000000000000000000000000000000000")
 
     def test_get_event_type(self):
-        """Test get_event_type method."""
+        """Test get_event_type method with real event topic hashes."""
         parser = GMXv2ReceiptParser()
 
-        # Known events
-        assert (
-            parser.get_event_type("0x137a44067c8961cd7e1d876f4754a5a3a75989b4552f1843fc0a3ffa67d28dc3")
-            == GMXv2EventType.POSITION_INCREASE
-        )
-        assert (
-            parser.get_event_type("0x2e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000001")
-            == GMXv2EventType.POSITION_DECREASE
-        )
-        assert (
-            parser.get_event_type("0x3a3c9eff40a8c51a3d8ccf8f9eb47e7c9a0000000000000000000000000000001")
-            == GMXv2EventType.ORDER_CREATED
-        )
+        # Known events (use real keccak256 hashes from EVENT_TOPICS)
+        assert parser.get_event_type(EVENT_TOPICS["PositionIncrease"]) == GMXv2EventType.POSITION_INCREASE
+        assert parser.get_event_type(EVENT_TOPICS["PositionDecrease"]) == GMXv2EventType.POSITION_DECREASE
+        assert parser.get_event_type(EVENT_TOPICS["OrderCreated"]) == GMXv2EventType.ORDER_CREATED
 
         # Unknown event
         assert (

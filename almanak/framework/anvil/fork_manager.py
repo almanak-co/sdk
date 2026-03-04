@@ -53,6 +53,10 @@ CHAIN_IDS: dict[str, int] = {
     "bnb": 56,
     "linea": 59144,
     "plasma": 9745,
+    "blast": 81457,
+    "mantle": 5000,
+    "berachain": 80094,
+    "sonic": 146,
 }
 
 
@@ -483,18 +487,23 @@ class RollingForkManager:
     async def _wait_for_port_free(self, timeout: float = 5.0) -> None:
         """Wait for the Anvil port to be freed after process termination.
 
+        Uses SO_REUSEADDR on the check socket to match Anvil's own binding
+        behavior (tokio sets SO_REUSEADDR by default on Unix). This avoids
+        false negatives from TCP TIME_WAIT connections after process exit.
+
         Args:
             timeout: Maximum seconds to wait for port to be freed
         """
-        start = time.time()
-        while time.time() - start < timeout:
+        start = time.monotonic()
+        while time.monotonic() - start < timeout:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                     s.bind(("127.0.0.1", self.anvil_port))
-                    return  # Port is free
+                    return  # Port is free (or only TIME_WAIT remnants)
             except OSError:
                 await asyncio.sleep(0.1)
-        logger.warning(f"Port {self.anvil_port} not freed after {timeout}s")
+        logger.debug(f"Port {self.anvil_port} still in use after {timeout}s")
 
     async def reset_to_latest(self) -> bool:
         """Reset the fork to the latest mainnet block.

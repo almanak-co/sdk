@@ -33,6 +33,7 @@ The Almanak SDK provides a comprehensive framework for developing, testing, and 
 - **Multi-Chain Support** - Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Plasma, Blast, Mantle, Berachain, and more.
 - **Protocol Integration** - Uniswap V3, Aave V3, Morpho Blue, GMX V2, Pendle, Polymarket, Kraken, and more.
 - **Non-Custodial Design** - Full control over your funds through Safe smart accounts.
+- **Agentic DeFAI Trading** - Build autonomous LLM-driven agents with 29 built-in tools, policy-enforced safety, and support for OpenAI, MCP, and LangChain.
 - **Production-Ready** - Built-in alerting, stuck detection, emergency management, and canary deployments.
 
 ## Installation
@@ -60,6 +61,14 @@ almanak strat run --network anvil --once
 ```
 
 Anvil fork testing is the recommended starting point. The SDK auto-starts a local fork, uses a default funded wallet, and runs your strategy with zero configuration. See [Getting Started](getting-started.md) for the full walkthrough.
+
+!!! info "Two Ways to Build"
+    **Deterministic strategies** (recommended) -- write Python logic in `decide()`.
+    See [Getting Started](getting-started.md).
+
+    **Agentic strategies** -- let an LLM decide using Almanak's tools.
+    Requires your own LLM API key.
+    See [Agentic Trading](agentic/index.md).
 
 ## Writing a Strategy
 
@@ -115,6 +124,7 @@ Have an idea, found a bug, or want to request a feature? Head over to our [Disco
 ## Next Steps
 
 - [Getting Started](getting-started.md) - Installation and first strategy walkthrough
+- [Agentic Trading](agentic/index.md) - Build LLM-driven autonomous agents
 - [CLI Reference](cli/almanak.md) - All CLI commands
 - [API Reference](api/index.md) - Full Python API documentation
 - [Gateway](gateway/api-reference.md) - Gateway gRPC API

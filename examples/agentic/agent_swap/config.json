@@ -1,0 +1,13 @@
+{
+    "chain": "arbitrum",
+    "wallet_address": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "buy_token": "WETH",
+    "sell_token": "USDC",
+    "trade_size_usd": "10",
+    "rsi_period": 14,
+    "rsi_oversold": 30,
+    "rsi_overbought": 70,
+    "interval_seconds": 60,
+    "max_tool_rounds": 10,
+    "strategy_id": "agent-swap-eth-usdc"
+}

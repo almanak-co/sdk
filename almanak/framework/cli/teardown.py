@@ -240,6 +240,49 @@ def _restore_strategy_state_for_teardown(
     logger.info("No persisted strategy state restored for teardown (candidates=%s)", candidates)
 
 
+def _inject_balance_provider(
+    strategy: Any,
+    gateway_client: Any,
+    chain: str,
+    wallet_address: str,
+) -> None:
+    """Inject a gateway-backed balance provider into the strategy.
+
+    This enables generate_teardown_intents() to call market.balance() during
+    teardown. Without this, strategies that check balances before deciding
+    teardown amounts crash with ValueError.
+    """
+    if not hasattr(strategy, "_balance_provider"):
+        return
+
+    try:
+        from ..data.balance.gateway_provider import GatewayBalanceProvider
+        from .run import create_sync_balance_func
+
+        balance_provider = GatewayBalanceProvider(
+            client=gateway_client,
+            wallet_address=wallet_address,
+            chain=chain,
+        )
+
+        # Create a price oracle for USD conversion (best-effort)
+        price_oracle = None
+        try:
+            from ..data.price.gateway_oracle import GatewayPriceOracle
+
+            price_oracle = GatewayPriceOracle(gateway_client)
+        except Exception as e:
+            logger.debug("Could not create GatewayPriceOracle for teardown, balance injection will be skipped: %s", e)
+
+        if price_oracle:
+            strategy._balance_provider = create_sync_balance_func(balance_provider, price_oracle)
+            logger.info("Injected gateway balance provider for teardown (chain=%s)", chain)
+        else:
+            logger.debug("Skipped balance provider injection -- no price oracle available")
+    except Exception as e:
+        logger.warning("Could not inject balance provider for teardown: %s", e)
+
+
 # =============================================================================
 # CLI Commands
 # =============================================================================
@@ -519,6 +562,10 @@ def execute_teardown(
             )
         except Exception as e:
             raise click.ClickException(f"Failed to instantiate strategy: {e}") from None
+
+        # Inject balance provider so generate_teardown_intents() can use market.balance().
+        # Without this, custom strategies that check balances during teardown crash.
+        _inject_balance_provider(strategy, gateway_client, chain, wallet_address)
 
         # Check if strategy supports teardown
         if not hasattr(strategy, "supports_teardown") or not strategy.supports_teardown():

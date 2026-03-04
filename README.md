@@ -44,6 +44,7 @@ Almanak is an intent-based Python framework for developing, testing, and deployi
 - **Multi-Chain Support**: Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Blast, Mantle, Berachain
 - **Protocol Integration**: Uniswap V3, Aave V3, Morpho Blue, GMX V2, Lido, Ethena, Polymarket, Kraken, and more
 - **Non-Custodial Design**: Full control over your funds through Safe smart accounts
+- **Agentic DeFAI Trading**: Build autonomous LLM-driven agents with 29 built-in tools and policy-enforced safety (BYO LLM API key)
 - **Production-Ready**: Built-in alerting, stuck detection, emergency management, and canary deployments
 
 ## Installation
@@ -329,6 +330,24 @@ almanak agent install
 ```
 
 Once installed, your agent understands the full intent vocabulary, market data API, backtesting tools, and CLI commands. Just describe what you want to build.
+
+## Agentic DeFAI Trading
+
+The SDK also supports LLM-driven autonomous agents. Instead of writing `decide()` logic,
+you write a system prompt and let the LLM reason over market data and call tools.
+
+**Requirements:** Your own LLM API key (OpenAI, Anthropic, or any OpenAI-compatible provider).
+
+```bash
+# Smoke test with mock LLM (no API key needed)
+python examples/agentic/agent_swap/run.py --once --mock
+
+# Run with real LLM
+AGENT_LLM_API_KEY=sk-... python examples/agentic/agent_swap/run.py --once
+```
+
+See [Agentic Trading docs](https://docs.almanak.co/agentic/) for the full guide, or browse
+the [4 working examples](examples/agentic/).
 
 ## Contributing
 

@@ -139,6 +139,41 @@ class IntentState(Enum):
     VALIDATING_LP_COLLECT_FEES = auto()
     SADFLOW_LP_COLLECT_FEES = auto()
 
+    # PREDICTION_BUY intent states
+    PREPARING_PREDICTION_BUY = auto()
+    VALIDATING_PREDICTION_BUY = auto()
+    SADFLOW_PREDICTION_BUY = auto()
+
+    # PREDICTION_SELL intent states
+    PREPARING_PREDICTION_SELL = auto()
+    VALIDATING_PREDICTION_SELL = auto()
+    SADFLOW_PREDICTION_SELL = auto()
+
+    # PREDICTION_REDEEM intent states
+    PREPARING_PREDICTION_REDEEM = auto()
+    VALIDATING_PREDICTION_REDEEM = auto()
+    SADFLOW_PREDICTION_REDEEM = auto()
+
+    # VAULT_DEPOSIT intent states
+    PREPARING_VAULT_DEPOSIT = auto()
+    VALIDATING_VAULT_DEPOSIT = auto()
+    SADFLOW_VAULT_DEPOSIT = auto()
+
+    # VAULT_REDEEM intent states
+    PREPARING_VAULT_REDEEM = auto()
+    VALIDATING_VAULT_REDEEM = auto()
+    SADFLOW_VAULT_REDEEM = auto()
+
+    # VAULT_REALLOCATE intent states
+    PREPARING_VAULT_REALLOCATE = auto()
+    VALIDATING_VAULT_REALLOCATE = auto()
+    SADFLOW_VAULT_REALLOCATE = auto()
+
+    # VAULT_MANAGE intent states
+    PREPARING_VAULT_MANAGE = auto()
+    VALIDATING_VAULT_MANAGE = auto()
+    SADFLOW_VAULT_MANAGE = auto()
+
 
 def get_preparing_state(intent_type: IntentType) -> IntentState:
     """Get the PREPARING state for an intent type.
@@ -163,6 +198,13 @@ def get_preparing_state(intent_type: IntentType) -> IntentState:
         IntentType.STAKE: IntentState.PREPARING_STAKE,
         IntentType.UNSTAKE: IntentState.PREPARING_UNSTAKE,
         IntentType.LP_COLLECT_FEES: IntentState.PREPARING_LP_COLLECT_FEES,
+        IntentType.PREDICTION_BUY: IntentState.PREPARING_PREDICTION_BUY,
+        IntentType.PREDICTION_SELL: IntentState.PREPARING_PREDICTION_SELL,
+        IntentType.PREDICTION_REDEEM: IntentState.PREPARING_PREDICTION_REDEEM,
+        IntentType.VAULT_DEPOSIT: IntentState.PREPARING_VAULT_DEPOSIT,
+        IntentType.VAULT_REDEEM: IntentState.PREPARING_VAULT_REDEEM,
+        IntentType.VAULT_REALLOCATE: IntentState.PREPARING_VAULT_REALLOCATE,
+        IntentType.VAULT_MANAGE: IntentState.PREPARING_VAULT_MANAGE,
     }
     return state_map.get(intent_type, IntentState.IDLE)
 
@@ -190,6 +232,13 @@ def get_validating_state(intent_type: IntentType) -> IntentState:
         IntentType.STAKE: IntentState.VALIDATING_STAKE,
         IntentType.UNSTAKE: IntentState.VALIDATING_UNSTAKE,
         IntentType.LP_COLLECT_FEES: IntentState.VALIDATING_LP_COLLECT_FEES,
+        IntentType.PREDICTION_BUY: IntentState.VALIDATING_PREDICTION_BUY,
+        IntentType.PREDICTION_SELL: IntentState.VALIDATING_PREDICTION_SELL,
+        IntentType.PREDICTION_REDEEM: IntentState.VALIDATING_PREDICTION_REDEEM,
+        IntentType.VAULT_DEPOSIT: IntentState.VALIDATING_VAULT_DEPOSIT,
+        IntentType.VAULT_REDEEM: IntentState.VALIDATING_VAULT_REDEEM,
+        IntentType.VAULT_REALLOCATE: IntentState.VALIDATING_VAULT_REALLOCATE,
+        IntentType.VAULT_MANAGE: IntentState.VALIDATING_VAULT_MANAGE,
     }
     return state_map.get(intent_type, IntentState.IDLE)
 
@@ -217,6 +266,13 @@ def get_sadflow_state(intent_type: IntentType) -> IntentState:
         IntentType.STAKE: IntentState.SADFLOW_STAKE,
         IntentType.UNSTAKE: IntentState.SADFLOW_UNSTAKE,
         IntentType.LP_COLLECT_FEES: IntentState.SADFLOW_LP_COLLECT_FEES,
+        IntentType.PREDICTION_BUY: IntentState.SADFLOW_PREDICTION_BUY,
+        IntentType.PREDICTION_SELL: IntentState.SADFLOW_PREDICTION_SELL,
+        IntentType.PREDICTION_REDEEM: IntentState.SADFLOW_PREDICTION_REDEEM,
+        IntentType.VAULT_DEPOSIT: IntentState.SADFLOW_VAULT_DEPOSIT,
+        IntentType.VAULT_REDEEM: IntentState.SADFLOW_VAULT_REDEEM,
+        IntentType.VAULT_REALLOCATE: IntentState.SADFLOW_VAULT_REALLOCATE,
+        IntentType.VAULT_MANAGE: IntentState.SADFLOW_VAULT_MANAGE,
     }
     return state_map.get(intent_type, IntentState.IDLE)
 
@@ -237,6 +293,13 @@ def is_preparing_state(state: IntentState) -> bool:
         IntentState.PREPARING_STAKE,
         IntentState.PREPARING_UNSTAKE,
         IntentState.PREPARING_LP_COLLECT_FEES,
+        IntentState.PREPARING_PREDICTION_BUY,
+        IntentState.PREPARING_PREDICTION_SELL,
+        IntentState.PREPARING_PREDICTION_REDEEM,
+        IntentState.PREPARING_VAULT_DEPOSIT,
+        IntentState.PREPARING_VAULT_REDEEM,
+        IntentState.PREPARING_VAULT_REALLOCATE,
+        IntentState.PREPARING_VAULT_MANAGE,
     }
 
 
@@ -256,6 +319,13 @@ def is_validating_state(state: IntentState) -> bool:
         IntentState.VALIDATING_STAKE,
         IntentState.VALIDATING_UNSTAKE,
         IntentState.VALIDATING_LP_COLLECT_FEES,
+        IntentState.VALIDATING_PREDICTION_BUY,
+        IntentState.VALIDATING_PREDICTION_SELL,
+        IntentState.VALIDATING_PREDICTION_REDEEM,
+        IntentState.VALIDATING_VAULT_DEPOSIT,
+        IntentState.VALIDATING_VAULT_REDEEM,
+        IntentState.VALIDATING_VAULT_REALLOCATE,
+        IntentState.VALIDATING_VAULT_MANAGE,
     }
 
 
@@ -275,6 +345,13 @@ def is_sadflow_state(state: IntentState) -> bool:
         IntentState.SADFLOW_STAKE,
         IntentState.SADFLOW_UNSTAKE,
         IntentState.SADFLOW_LP_COLLECT_FEES,
+        IntentState.SADFLOW_PREDICTION_BUY,
+        IntentState.SADFLOW_PREDICTION_SELL,
+        IntentState.SADFLOW_PREDICTION_REDEEM,
+        IntentState.SADFLOW_VAULT_DEPOSIT,
+        IntentState.SADFLOW_VAULT_REDEEM,
+        IntentState.SADFLOW_VAULT_REALLOCATE,
+        IntentState.SADFLOW_VAULT_MANAGE,
     }
 
 
@@ -769,7 +846,14 @@ class IntentStateMachine:
         self._last_step_start: float | None = None
 
         # Initialize to PREPARING state
-        self._transition_to(get_preparing_state(intent.intent_type))
+        preparing = get_preparing_state(intent.intent_type)
+        if preparing == IntentState.IDLE:
+            raise ValueError(
+                f"IntentType.{intent.intent_type.name} has no state machine wiring. "
+                f"Add PREPARING_{intent.intent_type.name}, VALIDATING_{intent.intent_type.name}, "
+                f"and SADFLOW_{intent.intent_type.name} to IntentState enum and the get_*_state() maps."
+            )
+        self._transition_to(preparing)
 
     @property
     def state(self) -> IntentState:
@@ -860,9 +944,16 @@ class IntentStateMachine:
             return "NETWORK_ERROR"
 
         # Permanent configuration/support errors (non-retriable)
-        # These indicate missing protocol support, unsupported chains, etc.
+        # These indicate missing protocol support, unsupported chains, missing positions, etc.
         # Placed last so transient errors (timeout, revert, network) are caught first.
-        permanent_keywords = ("not supported", "unsupported", "feature not available")
+        permanent_keywords = (
+            "not supported",
+            "unsupported",
+            "feature not available",
+            "no existing position",
+            "no position found",
+            "no size specified",
+        )
         if any(kw in error_lower for kw in permanent_keywords):
             return "COMPILATION_PERMANENT"
 
@@ -915,7 +1006,7 @@ class IntentStateMachine:
             return self._handle_sadflow()
         else:
             # Unknown state - fail
-            self._last_error = f"Unknown state: {self._state}"
+            self._last_error = f"Unknown state: {self._state} for IntentType.{self.intent.intent_type.name}"
             self._transition_to(IntentState.FAILED)
             return StepResult(
                 state=self._state,

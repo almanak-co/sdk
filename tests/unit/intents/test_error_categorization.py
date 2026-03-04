@@ -14,6 +14,7 @@ from almanak.framework.intents.state_machine import (
     SadflowContext,
     StateMachineConfig,
 )
+from almanak.framework.intents.vocabulary import IntentType
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +28,7 @@ class TestErrorCategorization:
     def _make_state_machine(self) -> IntentStateMachine:
         """Create a minimal IntentStateMachine for testing error categorization."""
         intent = MagicMock()
-        intent.intent_type.value = "SWAP"
+        intent.intent_type = IntentType.SWAP
         intent.intent_id = "test-intent"
         compiler = MagicMock()
         return IntentStateMachine(intent=intent, compiler=compiler)
@@ -57,6 +58,20 @@ class TestErrorCategorization:
     def test_compilation_error_not_supported(self):
         sm = self._make_state_machine()
         assert sm._categorize_error("Compilation error: Aerodrome not supported on optimism") == "COMPILATION_PERMANENT"
+
+    # Position/perp-related permanent errors
+
+    def test_no_existing_position(self):
+        sm = self._make_state_machine()
+        assert sm._categorize_error("No size specified and no existing position found") == "COMPILATION_PERMANENT"
+
+    def test_no_position_found(self):
+        sm = self._make_state_machine()
+        assert sm._categorize_error("No position found for user in market") == "COMPILATION_PERMANENT"
+
+    def test_no_size_specified(self):
+        sm = self._make_state_machine()
+        assert sm._categorize_error("No size specified for close order") == "COMPILATION_PERMANENT"
 
     # Transient errors (should NOT be COMPILATION_PERMANENT)
 
@@ -278,3 +293,43 @@ class TestStateMachinePermanentErrorFlow:
         assert result.retry_delay is not None  # Has retry delay
         assert sm.retry_count == 1  # First retry counted
         assert not result.is_complete  # Not done yet
+
+
+# ---------------------------------------------------------------------------
+# VIB-493: Improved error message for missing state machine wiring
+# ---------------------------------------------------------------------------
+
+
+class TestMissingStateWiringError:
+    """Test that missing state machine wiring produces actionable error messages."""
+
+    def test_unsupported_intent_type_raises_with_name(self):
+        """An IntentType without state machine wiring should raise ValueError naming the type."""
+        import pytest
+
+        # Create a mock IntentType that won't be in the state machine maps
+        mock_intent_type = MagicMock()
+        mock_intent_type.name = "FICTIONAL_INTENT"
+
+        intent = MagicMock()
+        intent.intent_type = mock_intent_type
+        intent.intent_id = "test-intent"
+        compiler = MagicMock()
+
+        with pytest.raises(ValueError, match="FICTIONAL_INTENT"):
+            IntentStateMachine(intent=intent, compiler=compiler)
+
+    def test_error_message_includes_fix_guidance(self):
+        """Error message should tell the developer what to add."""
+        import pytest
+
+        mock_intent_type = MagicMock()
+        mock_intent_type.name = "MY_NEW_INTENT"
+
+        intent = MagicMock()
+        intent.intent_type = mock_intent_type
+        intent.intent_id = "test-intent"
+        compiler = MagicMock()
+
+        with pytest.raises(ValueError, match="PREPARING_MY_NEW_INTENT.*VALIDATING_MY_NEW_INTENT.*SADFLOW_MY_NEW_INTENT"):
+            IntentStateMachine(intent=intent, compiler=compiler)

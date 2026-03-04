@@ -61,23 +61,6 @@ logger = logging.getLogger(__name__)
 PENDLE_MARKETS = {
     # Arbitrum markets (active)
     "PT-wstETH-25JUN2026": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
-    # Arbitrum markets (expired)
-    "PT-wstETH-26JUN2025": "0x08a152834de126d2ef83D612ff36e4523FD0017F",
-    "PT-wstETH-26DEC2024": "0xF769035A247AF48bF55BaA82D8b5e14E02E49a25",
-    "PT-eETH-26DEC2024": "0x952083cde7aaa11AB8449057F7de23A970AA8472",
-    # Plasma markets (expired 2026-02-26)
-    "PT-fUSDT0-26FEB2026": "0x0cb289e9df2d0dcfe13732638c89655fb80c2be2",
-}
-
-# Token addresses by chain
-TOKEN_ADDRESSES = {
-    # Arbitrum
-    "WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-    "WSTETH": "0x5979D7b546E38E414F7E9822514be443A4800529",
-    "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-    # Plasma
-    "USDT0": "0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb",
-    "FUSDT0": "0x1dd4b13fcae900c60a350589be8052959d2ed27b",
 }
 
 
@@ -87,7 +70,7 @@ TOKEN_ADDRESSES = {
     version="1.0.0",
     author="Almanak",
     tags=["demo", "tutorial", "pendle", "yield", "pt", "fixed-yield"],
-    supported_chains=["arbitrum", "plasma"],
+    supported_chains=["arbitrum"],
     supported_protocols=["pendle"],
     intent_types=["SWAP", "HOLD"],
 )
@@ -113,8 +96,8 @@ class PendleBasicsStrategy(IntentStrategy):
     Example Config:
     ---------------
     {
-        "market": "0x08a152834de126d2ef83D612ff36e4523FD0017F",
-        "market_name": "PT-wstETH-26JUN2025",
+        "market": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
+        "market_name": "PT-wstETH-25JUN2026",
         "trade_size_token": 0.001,
         "max_slippage_bps": 100,
         "base_token": "WSTETH",
@@ -176,26 +159,8 @@ class PendleBasicsStrategy(IntentStrategy):
             # =================================================================
             # STEP 1: Get current market data
             # =================================================================
-            # For stablecoins (USDT0, USDC, etc), assume $1 if price not available
-            stablecoins = {"USDT0", "USDC", "USDT", "DAI", "FUSDT0"}
-            # Known stablecoin addresses (Plasma)
-            stablecoin_addresses = {
-                "0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb",  # USDT0
-                "0x1dd4b13fcae900c60a350589be8052959d2ed27b",  # fUSDT0
-            }
-            try:
-                base_price = market.price(self.base_token)
-                logger.debug(f"Current {self.base_token_symbol} price: ${base_price:,.2f}")
-            except ValueError:
-                is_stablecoin = (
-                    self.base_token_symbol.upper() in stablecoins
-                    or self.base_token.lower() in stablecoin_addresses
-                )
-                if is_stablecoin:
-                    base_price = 1.0
-                    logger.debug(f"Using $1.00 for stablecoin {self.base_token_symbol}")
-                else:
-                    raise
+            base_price = market.price(self.base_token)
+            logger.debug(f"Current {self.base_token_symbol} price: ${base_price:,.2f}")
 
             # =================================================================
             # STEP 2: Check balances
@@ -279,7 +244,7 @@ class PendleBasicsStrategy(IntentStrategy):
     def _get_tracked_tokens(self) -> list[str]:
         """Get list of tokens to track for wallet balance.
 
-        Override default to return only Plasma tokens used by this strategy.
+        Override default to return only tokens used by this strategy.
         """
         return [self.base_token_symbol, self.pt_token_symbol]
 

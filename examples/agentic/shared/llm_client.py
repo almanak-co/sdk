@@ -16,6 +16,13 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+class LLMConfigError(Exception):
+    """Raised when LLM configuration is missing or invalid.
+
+    Provides actionable error messages for common misconfigurations.
+    """
+
+
 @dataclass
 class LLMConfig:
     """Configuration for the LLM client."""
@@ -133,8 +140,73 @@ class LLMClient:
         # Unreachable, but satisfies type checker
         raise last_error or RuntimeError("LLM retry exhausted")
 
+    async def preflight_check(self) -> None:
+        """Send a minimal request to verify the LLM endpoint is reachable and the API key is valid.
+
+        Raises LLMConfigError with actionable message on failure.
+        """
+        try:
+            resp = await self._http.post(
+                "/chat/completions",
+                json={
+                    "model": self._config.model,
+                    "messages": [{"role": "system", "content": "ping"}],
+                    "max_tokens": 1,
+                },
+                timeout=15.0,
+            )
+            if resp.status_code in (401, 403):
+                raise LLMConfigError(
+                    f"Invalid AGENT_LLM_API_KEY (HTTP {resp.status_code}).\n"
+                    "Check your key and ensure it has access to the configured model.\n"
+                    f"Endpoint: {self._config.base_url}"
+                )
+            if resp.status_code == 404:
+                raise LLMConfigError(
+                    f"Model '{self._config.model}' not found at {self._config.base_url} (HTTP 404).\n"
+                    "Check AGENT_LLM_MODEL is correct for your provider."
+                )
+            if resp.status_code >= 400:
+                raise LLMConfigError(
+                    f"LLM endpoint returned HTTP {resp.status_code}.\n"
+                    f"Endpoint: {self._config.base_url}\n"
+                    f"Response: {resp.text[:200]}"
+                )
+        except httpx.ConnectError:
+            raise LLMConfigError(
+                f"Cannot reach LLM at {self._config.base_url}.\n"
+                "Is the endpoint running? Check AGENT_LLM_BASE_URL."
+            )
+        except httpx.TimeoutException:
+            raise LLMConfigError(
+                f"LLM endpoint at {self._config.base_url} timed out.\n"
+                "Check network connectivity and AGENT_LLM_BASE_URL."
+            )
+
     async def close(self) -> None:
         await self._http.aclose()
+
+
+async def validate_llm_config(config: LLMConfig) -> None:
+    """Fail-fast validation: check API key is set, then ping the endpoint.
+
+    Call this at the top of run_once() (before gateway connection) to give
+    users an immediate, actionable error instead of failing mid-execution.
+    """
+    if not config.api_key:
+        raise LLMConfigError(
+            "No LLM API key configured.\n\n"
+            "Agentic strategies require your own LLM API key.\n"
+            "Set it via environment variable:\n\n"
+            "  export AGENT_LLM_API_KEY=sk-...\n\n"
+            "Any OpenAI-compatible provider works (OpenAI, Anthropic, Ollama, etc.).\n"
+            "See: https://docs.almanak.co/agentic/"
+        )
+    client = LLMClient(config)
+    try:
+        await client.preflight_check()
+    finally:
+        await client.close()
 
 
 class MockLLMClient:

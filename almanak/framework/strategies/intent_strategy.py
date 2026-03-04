@@ -1504,6 +1504,22 @@ class MarketSnapshot:
         """
         return self.balance(token).balance_usd
 
+    def collateral_value_usd(self, token: str, amount: Decimal) -> Decimal:
+        """Get the USD value of a given amount of collateral.
+
+        Convenience helper for perp position sizing. Multiplies the given
+        amount by the token's current price.
+
+        Args:
+            token: Token symbol (e.g., "WETH", "USDC", "WBTC")
+            amount: Token amount in human-readable units (not wei)
+
+        Returns:
+            USD value as a Decimal
+        """
+        token_price = self.price(token)
+        return amount * token_price
+
     def total_portfolio_usd(self) -> Decimal:
         """Calculate total portfolio value in USD across all known balances.
 

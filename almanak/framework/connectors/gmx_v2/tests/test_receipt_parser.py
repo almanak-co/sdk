@@ -339,7 +339,7 @@ class TestGMXv2ReceiptParser:
     def test_parser_creation(self, parser: GMXv2ReceiptParser) -> None:
         """Test parser creation."""
         assert parser is not None
-        assert len(parser._known_topics) > 0
+        assert len(parser.registry.known_topics) > 0
 
     def test_parse_empty_receipt(self, parser: GMXv2ReceiptParser) -> None:
         """Test parsing empty receipt."""
@@ -633,3 +633,141 @@ class TestGMXv2EventType:
         assert GMXv2EventType.ORDER_CREATED.value == "ORDER_CREATED"
         assert GMXv2EventType.POSITION_INCREASE.value == "POSITION_INCREASE"
         assert GMXv2EventType.UNKNOWN.value == "UNKNOWN"
+
+
+# =============================================================================
+# Event Topic Hash Validation Tests
+# =============================================================================
+
+
+class TestEventTopicHashValidation:
+    """Verify EVENT_TOPICS contain correct keccak256 hashes of event name strings.
+
+    GMX V2 uses EventEmitter which stores keccak256(eventName) as an indexed
+    string parameter (eventNameHash) in topic[1]. These hashes must be the
+    exact keccak256 of the event name string, not arbitrary values.
+    """
+
+    def test_all_event_topic_hashes_are_correct_keccak256(self) -> None:
+        """Every entry in EVENT_TOPICS must be keccak256 of its event name string."""
+        from web3 import Web3
+
+        for event_name, topic_hash in EVENT_TOPICS.items():
+            expected = "0x" + Web3.keccak(text=event_name).hex()
+            assert topic_hash == expected, (
+                f"EVENT_TOPICS['{event_name}'] hash mismatch: got {topic_hash}, expected {expected}"
+            )
+
+    def test_event_topic_hashes_are_valid_32_byte_hex(self) -> None:
+        """All topic hashes must be valid 0x-prefixed 32-byte hex strings."""
+        for event_name, topic_hash in EVENT_TOPICS.items():
+            assert topic_hash.startswith("0x"), f"{event_name} hash missing 0x prefix"
+            hex_part = topic_hash[2:]
+            assert len(hex_part) == 64, f"{event_name} hash wrong length: {len(hex_part)}"
+            int(hex_part, 16)  # Should not raise ValueError
+
+
+# =============================================================================
+# EventEmitter Pattern Tests (topic[1] matching)
+# =============================================================================
+
+
+class TestEventEmitterTopicMatching:
+    """Test that the parser correctly matches events using topic[1] (EventEmitter pattern).
+
+    GMX V2's EventEmitter emits events with:
+        topic[0] = EventLog/EventLog1/EventLog2 signature (shared across all events)
+        topic[1] = keccak256(eventName) - the actual discriminator
+    """
+
+    @pytest.fixture
+    def parser(self) -> GMXv2ReceiptParser:
+        return GMXv2ReceiptParser()
+
+    def test_position_increase_matched_via_topic1(self, parser: GMXv2ReceiptParser) -> None:
+        """PositionIncrease should be matched via topic[1] in EventEmitter pattern."""
+        # topic[0] is an arbitrary EventLog signature, topic[1] is the event name hash
+        eventlog_signature = "0x" + "ab" * 32  # Arbitrary EventLog topic[0]
+        log = {
+            "topics": [eventlog_signature, EVENT_TOPICS["PositionIncrease"]],
+            "data": "0x" + "00" * 320,
+            "address": "0x1234567890123456789012345678901234567890",
+            "logIndex": 0,
+        }
+        receipt = {
+            "transactionHash": "0x1234",
+            "blockNumber": 12345678,
+            "logs": [log],
+        }
+        result = parser.parse_receipt(receipt)
+        assert result.success is True
+        assert len(result.events) == 1
+        assert result.events[0].event_type == GMXv2EventType.POSITION_INCREASE
+
+    def test_order_created_matched_via_topic1(self, parser: GMXv2ReceiptParser) -> None:
+        """OrderCreated should be matched via topic[1] in EventEmitter pattern."""
+        eventlog_signature = "0x" + "cd" * 32
+        log = {
+            "topics": [eventlog_signature, EVENT_TOPICS["OrderCreated"]],
+            "data": "0x" + "00" * 256,
+            "address": "0x1234567890123456789012345678901234567890",
+            "logIndex": 0,
+        }
+        receipt = {
+            "transactionHash": "0x1234",
+            "blockNumber": 12345678,
+            "logs": [log],
+        }
+        result = parser.parse_receipt(receipt)
+        assert result.success is True
+        assert len(result.events) == 1
+        assert result.events[0].event_type == GMXv2EventType.ORDER_CREATED
+
+    def test_mixed_gmx_and_erc20_events(self, parser: GMXv2ReceiptParser) -> None:
+        """Non-GMX events (like ERC20 Transfer) should be skipped."""
+        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        from_addr = "0x" + "00" * 12 + "aa" * 20  # padded address
+        to_addr = "0x" + "00" * 12 + "bb" * 20
+        logs = [
+            {  # ERC20 Transfer - should be skipped
+                "topics": [transfer_topic, from_addr, to_addr],
+                "data": "0x" + "00" * 32,
+                "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",  # USDC
+                "logIndex": 0,
+            },
+            {  # GMX OrderCreated via EventEmitter - should be matched
+                "topics": ["0x" + "cd" * 32, EVENT_TOPICS["OrderCreated"]],
+                "data": "0x" + "00" * 256,
+                "address": "0xC8ee91A54287DB53897056e12D9819156D3822Fb",  # EventEmitter
+                "logIndex": 1,
+            },
+        ]
+        receipt = {
+            "transactionHash": "0x1234",
+            "blockNumber": 12345678,
+            "logs": logs,
+        }
+        result = parser.parse_receipt(receipt)
+        assert result.success is True
+        assert len(result.events) == 1
+        assert result.events[0].event_type == GMXv2EventType.ORDER_CREATED
+
+    def test_eventlog1_with_additional_topic(self, parser: GMXv2ReceiptParser) -> None:
+        """EventLog1 has 3 topics: signature, eventNameHash, topic1."""
+        eventlog1_sig = "0x" + "ef" * 32
+        order_key = "0x" + "11" * 32  # Additional indexed param
+        log = {
+            "topics": [eventlog1_sig, EVENT_TOPICS["OrderExecuted"], order_key],
+            "data": "0x" + "00" * 256,
+            "address": "0xC8ee91A54287DB53897056e12D9819156D3822Fb",
+            "logIndex": 0,
+        }
+        receipt = {
+            "transactionHash": "0x1234",
+            "blockNumber": 12345678,
+            "logs": [log],
+        }
+        result = parser.parse_receipt(receipt)
+        assert result.success is True
+        assert len(result.events) == 1
+        assert result.events[0].event_type == GMXv2EventType.ORDER_EXECUTED

@@ -42,7 +42,7 @@ from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
 # Local shared utilities
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from shared.agent_loop import run_agent_loop  # noqa: E402
-from shared.llm_client import DynamicMockLLMClient, LLMClient, LLMConfig  # noqa: E402
+from shared.llm_client import DynamicMockLLMClient, LLMClient, LLMConfig, LLMConfigError, validate_llm_config  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -570,6 +570,12 @@ def create_teardown_mock_llm(config: dict, state: dict) -> DynamicMockLLMClient:
 
 async def run_once(config: dict, *, use_mock: bool = False, scenario: str = "init") -> None:
     """Run a single iteration of the DeFAI agent."""
+    # 0. Validate LLM config before anything else (fail-fast)
+    if not use_mock:
+        llm_config = LLMConfig.from_env()
+        await validate_llm_config(llm_config)
+        logger.info("LLM verified: %s via %s", llm_config.model, llm_config.base_url)
+
     # 1. Connect to gateway
     gw_config = GatewayClientConfig.from_env()
     gateway = GatewayClient(gw_config)
@@ -627,10 +633,6 @@ async def run_once(config: dict, *, use_mock: bool = False, scenario: str = "ini
                 llm = create_dynamic_mock_llm(config)
                 logger.info("LLM: DynamicMockLLMClient (11-round vault lifecycle)")
         else:
-            llm_config = LLMConfig.from_env()
-            if not llm_config.api_key:
-                logger.error("Set AGENT_LLM_API_KEY environment variable")
-                return
             llm = LLMClient(llm_config)
             logger.info("LLM: %s via %s", llm_config.model, llm_config.base_url)
 
@@ -737,10 +739,14 @@ def main() -> None:
         args.scenario,
     )
 
-    if args.once:
-        asyncio.run(run_once(config, use_mock=args.mock, scenario=args.scenario))
-    else:
-        asyncio.run(run_loop(config, use_mock=args.mock, scenario=args.scenario))
+    try:
+        if args.once:
+            asyncio.run(run_once(config, use_mock=args.mock, scenario=args.scenario))
+        else:
+            asyncio.run(run_loop(config, use_mock=args.mock, scenario=args.scenario))
+    except LLMConfigError as e:
+        logger.error("ERROR: %s", e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

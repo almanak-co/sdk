@@ -2,6 +2,17 @@
 
 Consumer examples showing how to use the Almanak `agent_tools` framework to build autonomous AI agents that trade on-chain. Each example is a standalone agent with its own config, prompts, and policy.
 
+## Prerequisites
+
+- **Almanak SDK** installed (`pip install almanak`)
+- **Foundry** for Anvil fork testing
+- **Your own LLM API key** -- any OpenAI-compatible provider:
+  - OpenAI: `AGENT_LLM_API_KEY=sk-...`
+  - Anthropic (via proxy): `AGENT_LLM_API_KEY=sk-ant-... AGENT_LLM_BASE_URL=...`
+  - Local (Ollama): `AGENT_LLM_API_KEY=dummy AGENT_LLM_BASE_URL=http://localhost:11434/v1`
+
+The `--mock` flag bypasses the LLM requirement for smoke testing.
+
 ## Architecture
 
 ```
@@ -39,6 +50,15 @@ Autonomous LP management on Trader Joe V2 (Avalanche). The LLM reads WAVAX price
 - **Protocol:** Trader Joe V2
 - **Tools:** 7 (get_price, get_balance, open_lp_position, close_lp_position, swap_tokens, save/load state)
 
+### AgentSwap (`agent_swap/`)
+
+The simplest agentic example -- a "Buy the Dip" RSI agent on Arbitrum.
+Reads ETH price and RSI, buys when oversold, sells when overbought.
+
+- **Chain:** Arbitrum
+- **Protocol:** Uniswap V3 (via Enso)
+- **Tools:** 7 (get_price, get_balance, get_indicator, swap_tokens, save/load state, record decision)
+
 ### AgentYield (`agent_yield/`)
 
 Autonomous yield farming on Aave V3 (Avalanche). The LLM reads prices and RSI, supplies stablecoins, and rotates between USDC and WAVAX based on momentum signals.
@@ -72,6 +92,19 @@ Reusable components shared across all examples:
 | `llm_client.py` | `LLMClient` (OpenAI-compatible), `MockLLMClient`, `DynamicMockLLMClient` |
 
 ## Quick Start
+
+### AgentSwap (Arbitrum) -- Simplest Example
+
+```bash
+# Terminal 1: Start gateway with Anvil fork
+almanak gateway --network anvil
+
+# Terminal 2: Run the agent (real LLM)
+AGENT_LLM_API_KEY=sk-... python examples/agentic/agent_swap/run.py --once
+
+# Or smoke test with mock LLM (no API key needed)
+python examples/agentic/agent_swap/run.py --once --mock
+```
 
 ### AgentLP / AgentYield (Avalanche)
 

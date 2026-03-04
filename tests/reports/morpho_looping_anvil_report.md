@@ -1,9 +1,9 @@
 # E2E Strategy Test Report: morpho_looping (Anvil)
 
-**Date:** 2026-02-27 16:06
+**Date:** 2026-03-03 12:01 UTC
 **Result:** PASS
 **Mode:** Anvil
-**Duration:** ~25 seconds
+**Duration:** ~5 minutes total (~22 seconds strategy execution)
 
 ## Configuration
 
@@ -11,107 +11,133 @@
 |-------|-------|
 | Strategy | demo_morpho_looping |
 | Chain | ethereum |
-| Network | Anvil fork (publicnode.com, block 24549347) |
-| Anvil Port | 65340 (auto-assigned by framework) |
+| Network | Anvil fork (publicnode.com, block 24576794) |
+| Anvil Port | 53080 (auto-assigned by managed gateway) |
 | Market ID | 0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc |
-| Collateral | 0.1 wstETH (~$239 at $2390/wstETH) |
+| Collateral Token | wstETH |
 | Borrow Token | USDC |
+| Initial Collateral | 0.1 wstETH (~$241 @ $2,409) |
 | Target Loops | 2 |
 | Target LTV | 70% |
+| Min Health Factor | 1.5 |
 | Wallet | 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 (Anvil default) |
+
+## Budget Cap Check
+
+`initial_collateral = 0.1 wstETH`. At $2,409/wstETH = ~$241. Within $500 cap. No amount
+changes needed.
 
 ## Config Changes Made
 
-| Field | Before | After Test (restored) |
-|-------|--------|----------------------|
-| `force_action` | `""` | Set to `"supply"` for test, restored to `""` |
+| Field | Original | Changed To | Reason | Restored |
+|-------|----------|------------|--------|---------|
+| `force_action` | `""` | `"supply"` | Trigger immediate SUPPLY on `--once` run (state machine would otherwise advance to SUPPLY from IDLE on the first iteration, which also works, but `force_action` makes it explicit) | Yes |
 
-The `force_action` was set to `"supply"` to trigger an immediate SUPPLY_COLLATERAL intent on the first `--once` run, bypassing the idle state machine's balance check. Restored to `""` after the test.
-
-No amount changes needed: 0.1 wstETH at ~$2,390/wstETH equals ~$239, well within the $500 budget cap.
+Config was restored to original values after the run.
 
 ## Execution
 
 ### Setup
-
-- Anvil fork auto-started by managed gateway for Ethereum mainnet at block 24549347
-- Fork source: `https://ethereum-rpc.publicnode.com` (no Alchemy API key configured)
-- Gateway auto-started on port 50051
+- Anvil fork auto-started by managed gateway at block 24576794
+- Fork source: free public Ethereum RPC (https://ethereum-rpc.publicnode.com) - ALCHEMY_API_KEY is empty in .env
+- Gateway started on managed port 50052 (insecure mode - acceptable for anvil)
 - Wallet funded via `anvil_funding` config: 100 ETH, 1 wstETH, 10,000 USDC
-  - wstETH funded via storage slot 0 (known slot)
-  - USDC funded via storage slot 9 (known slot)
+  - wstETH: funded via storage slot 0
+  - USDC: funded via storage slot 9
 
 ### Strategy Run
+- [x] Strategy executed with `--network anvil --once`
+- [x] Intent: SUPPLY_COLLATERAL - 0.1 wstETH to Morpho Blue market
+- [x] Compilation successful (2 actions: APPROVE + SUPPLY_COLLATERAL)
+- [x] Simulation successful via eth_estimateGas (LocalSimulator)
+- [x] 2 transactions submitted and confirmed sequentially
 
-With `force_action = "supply"`, the strategy immediately created a SUPPLY_COLLATERAL intent for 0.1 wstETH to Morpho Blue market `0xb323495f...`.
+### Price Data
+- wstETH/USD: $2,409.65 (confidence: 0.90, sources: 1/2 - Chainlink only)
+- USDC/USD: $0.9999865 (confidence: 1.00, sources: 2/2)
 
-Prices fetched:
-- wstETH/USD: $2,390.17 (Chainlink oracle, confidence: 0.90, sources: 1/2)
-- USDC/USD: $0.99996 (Chainlink + CoinGecko, confidence: 1.00, sources: 2/2)
+### Transaction Details
 
-Two transactions were compiled, simulated, submitted, and confirmed:
-
-| # | Description | Block | Gas Used | TX Hash |
-|---|-------------|-------|----------|---------|
-| 1/2 | wstETH APPROVE to Morpho Blue | 24549350 | 46,228 | `60b18e6f30b8a01e21a35e989346aed122145ba087f37dc4cc66f3cc01fbff3d` |
-| 2/2 | SUPPLY_COLLATERAL (0.1 wstETH) | 24549351 | 76,407 | `0afb863ff42d64b32a949f60c99ec7bfe778438e3c9b258bfc305024450fa436` |
-| **Total** | | | **122,635** | |
+| Step | TX Hash | Block | Gas Used | Status |
+|------|---------|-------|----------|--------|
+| Approve wstETH | `0xfbf96c8aa77b72fcd175d3b351d9241f37698dae557429ba2d766d4ab0e30400` | 24576797 | 46,228 | SUCCESS |
+| Supply Collateral | `0x6080e74f03183a5f93636c8fee600d62ba7360793d0f6b5369361e58ce9cbb4f` | 24576798 | 76,407 | SUCCESS |
+| **Total** | — | — | **122,635** | **SUCCESS** |
 
 ### Key Log Output
 
 ```text
-Anvil fork started: port=65340, block=24549347, chain_id=1
+Anvil fork started: port=53080, block=24576794, chain_id=1
+Fork source: https://ethereum-rpc.publicnode.com
 Funded 0xf39Fd6e5... with 100 ETH
 Funded 0xf39Fd6e5... with wstETH via known slot 0
 Funded 0xf39Fd6e5... with USDC via known slot 9
 
-Aggregated price for wstETH/USD: 2390.17 (confidence: 0.90, sources: 1/2, outliers: 0)
-Aggregated price for USDC/USD: 0.99996 (confidence: 1.00, sources: 2/2, outliers: 0)
+Aggregated price for wstETH/USD: 2409.65 (confidence: 0.90, sources: 1/2, outliers: 0)
+Aggregated price for USDC/USD: 0.9999865 (confidence: 1.00, sources: 2/2, outliers: 0)
 
 Forced action: SUPPLY collateral
 SUPPLY intent: 0.1000 wstETH to Morpho Blue
 Compiled SUPPLY: 0.1 WSTETH to Morpho Blue market 0xb323495f7e4148...
 
 Simulating 2 transaction(s) via eth_estimateGas
+Transaction 2/2: skipping estimation (multi-TX dependent), using compiler gas_limit=198000
 Simulation successful: 2 transaction(s), total gas: 244228
 
-Transaction submitted: tx_hash=60b18e...ff3d
-Transaction confirmed: block=24549350, gas_used=46228
-Transaction submitted: tx_hash=0afb86...a436
-Transaction confirmed: block=24549351, gas_used=76407
+Sequential submit: TX 1/2
+Transaction confirmed: tx_hash=fbf96c8a...0400, block=24576797, gas_used=46228
+Sequential submit: TX 2/2
+Transaction confirmed: tx_hash=6080e74f...bb4f, block=24576798, gas_used=76407
 
 EXECUTED: SUPPLY completed successfully
-   Txs: 2 (60b18e...ff3d, 0afb86...a436) | 122,635 gas
-Parsed Morpho Blue: SUPPLY_COLLATERAL=1, TRANSFER=1, APPROVAL=1
+   Txs: 2 (fbf96c...0400, 6080e7...bb4f) | 122,635 gas
+Parsed Morpho Blue: APPROVAL=1, tx=0xfbf9...0400, 46,228 gas
+Parsed Morpho Blue: SUPPLY_COLLATERAL=1, TRANSFER=1, APPROVAL=1, tx=0x6080...bb4f, 76,407 gas
 
-Status: SUCCESS | Intent: SUPPLY | Gas used: 122635 | Duration: 25177ms
+Status: SUCCESS | Intent: SUPPLY | Gas used: 122635 | Duration: 22199ms
 ```
 
 ## Suspicious Behaviour
 
 | # | Source | Severity | Pattern | Log Line |
 |---|--------|----------|---------|----------|
-| 1 | strategy | WARNING | 9 tokens missing from Ethereum registry (price prefetch) | `token_resolution_error token=BTC chain=ethereum error_type=TokenNotFoundError` (also COMP, MKR, SNX, LDO, STETH, CBETH, RETH, SOL) |
-| 2 | strategy | WARNING | MorphoBlueAdapter using placeholder prices | `MorphoBlueAdapter: No price_oracle or price_provider provided. Using placeholder prices. For production, use create_adapter_with_prices().` |
-| 3 | strategy | INFO | wstETH price from only 1/2 sources (CoinGecko unavailable) | `Aggregated price for wstETH/USD: 2390.17 (confidence: 0.90, sources: 1/2, outliers: 0)` |
-| 4 | strategy | INFO | Free public RPC in use (no ALCHEMY_API_KEY configured) | `No API key configured -- using free public RPC for ethereum (rate limits may apply)` |
-| 5 | strategy | INFO | Cosmetic port cleanup delay | `Port 65340 not freed after 5.0s` |
+| 1 | strategy | WARNING | MorphoBlueAdapter using placeholder prices | `MorphoBlueAdapter: No price_oracle or price_provider provided. Using placeholder prices. For production, use create_adapter_with_prices().` |
+| 2 | strategy | INFO | No Alchemy API key - using free public RPC with rate limits | `No API key configured -- using free public RPC for ethereum (rate limits may apply)` |
+| 3 | strategy | INFO | wstETH price only from 1/2 sources (Chainlink only, no CoinGecko) | `Aggregated price for wstETH/USD: 2409.65 (confidence: 0.90, sources: 1/2, outliers: 0)` |
+| 4 | strategy | WARNING | Anvil port not freed within 5s (cosmetic) | `Port 53080 not freed after 5.0s` |
+| 5 | strategy | INFO | INSECURE MODE (expected for Anvil) | `INSECURE MODE: Auth interceptor disabled - no auth_token configured` |
 
 ### Analysis
 
-**Finding 1 (WARNING):** The gateway's MarketService pre-fetches prices for a list of common tokens on startup. Nine tokens — BTC, COMP, MKR, SNX, LDO, STETH, CBETH, RETH, SOL — are not in the static Ethereum registry. The `STETH` failure is notable: the correct symbol is `WSTETH`, and the suggestion "Did you mean 'WSTETH'?" confirms the alias is missing. Any strategy that references `STETH` directly will fail. These 9 warnings appear on every strategy iteration and represent a data quality gap in the registry.
+**Finding 1 (WARNING) - MorphoBlueAdapter placeholder prices:** The adapter is initialized
+without a live price oracle or price provider. For SUPPLY_COLLATERAL this is benign (no price
+needed at the connector level). However, for subsequent BORROW intents in the looping cycle,
+health-factor calculations and borrow amount sizing inside the adapter will use hardcoded
+placeholder values rather than live prices. The strategy-level `decide()` fetches live prices
+independently via the gateway, but the Morpho connector layer does not receive them. This
+represents a production correctness risk for the BORROW and health-factor steps.
 
-**Finding 2 (WARNING):** `MorphoBlueAdapter` initialises without an injected price oracle. For SUPPLY_COLLATERAL this is benign (no price needed to compute the deposit amount), but for BORROW and health-factor monitoring intents the adapter would rely on placeholder values — a correctness risk in full looping runs.
+**Finding 2 (INFO) - No Alchemy key:** `ALCHEMY_API_KEY` is unset in `.env`. The SDK
+automatically falls back to `publicnode.com` free public Ethereum RPC, which worked for this
+test but is rate-limited and may fail under repeated or parallel strategy runs.
 
-**Finding 3 (INFO):** wstETH pricing relied on only Chainlink (1/2 sources). CoinGecko is unavailable without an API key. The 0.90 confidence score is acceptable but degrades price reliability.
+**Finding 3 (INFO) - wstETH price from 1/2 sources:** With no CoinGecko key, the price
+aggregator relies solely on Chainlink for wstETH, yielding 0.90 confidence. Acceptable for
+testing.
 
-**Finding 4 (INFO):** Free public RPC via `publicnode.com` was used. The test succeeded cleanly; no rate limiting was observed. This is expected behaviour when `ALCHEMY_API_KEY` is not configured.
+**Finding 4 (WARNING) - Port cleanup delay:** Cosmetic. The managed Anvil fork's port was not
+released within the 5-second window. Non-blocking; shutdown succeeded.
 
-**Finding 5 (INFO):** Minor cosmetic warning about Anvil port cleanup not completing within 5 seconds — non-critical, Anvil was stopped successfully.
+**Finding 5 (INFO):** Expected and benign for Anvil mode.
 
 ## Result
 
-**PASS** - The morpho_looping strategy successfully compiled and executed a SUPPLY_COLLATERAL intent on an Ethereum Anvil fork. Two transactions were confirmed on-chain (wstETH APPROVE + SUPPLY_COLLATERAL) with 122,635 total gas. The strategy ran cleanly from fresh state without any execution errors.
+**PASS** - morpho_looping successfully compiled and executed a `SUPPLY_COLLATERAL` intent on an
+Ethereum Anvil fork, depositing 0.1 wstETH into Morpho Blue market `0xb323495f...`. Two on-chain
+transactions confirmed (APPROVE + SUPPLY_COLLATERAL) with 122,635 total gas. The primary finding
+worth ticketing is that `MorphoBlueAdapter` initializes without a price provider and falls back
+to placeholder prices, which will cause incorrect BORROW amounts and health factor calculations
+in the subsequent looping steps.
 
 ---
 

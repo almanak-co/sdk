@@ -4,6 +4,7 @@ Tests for the refactored Compound V3 receipt parser using base infrastructure
 (EventRegistry + HexDecoder).
 """
 
+import logging
 from decimal import Decimal
 
 from almanak.framework.connectors.compound_v3.receipt_parser import (
@@ -537,6 +538,95 @@ class TestCompoundV3ReceiptParser:
 
         unknown_type = parser.get_event_type(unknown_topic)
         assert unknown_type == CompoundV3EventType.UNKNOWN
+
+    def test_borrow_context_log_alias(self, caplog):
+        """Test that WITHDRAW with SUPPLY_COLLATERAL logs as 'borrow via Compound V3'."""
+        parser = CompoundV3ReceiptParser()
+
+        collateral_amount = 1_000_000_000_000_000_000  # 1 WETH
+        borrow_amount = 1_000_000_000  # 1000 USDC
+
+        receipt = {
+            "transactionHash": "0xborrow1",
+            "blockNumber": 99999,
+            "logs": [
+                create_supply_collateral_log(USER_ADDRESS, USER_ADDRESS, COLLATERAL_ASSET, collateral_amount),
+                create_withdraw_log(USER_ADDRESS, USER_ADDRESS, borrow_amount),
+            ],
+            "gasUsed": 200000,
+        }
+
+        with caplog.at_level(logging.INFO):
+            result = parser.parse_receipt(receipt)
+
+        assert result.success is True
+        assert result.withdraw_amount == Decimal(borrow_amount)
+        # Verify log contains "borrow via Compound V3" context
+        log_messages = " ".join(caplog.messages)
+        assert "borrow via Compound V3" in log_messages
+
+    def test_repay_context_log_alias(self, caplog):
+        """Test that SUPPLY with WITHDRAW_COLLATERAL logs as 'repay via Compound V3'."""
+        parser = CompoundV3ReceiptParser()
+
+        repay_amount = 500_000_000  # 500 USDC
+        collateral_amount = 1_000_000_000_000_000_000  # 1 WETH
+
+        receipt = {
+            "transactionHash": "0xrepay1",
+            "blockNumber": 99998,
+            "logs": [
+                create_supply_log(USER_ADDRESS, USER_ADDRESS, repay_amount),
+                create_withdraw_collateral_log(USER_ADDRESS, USER_ADDRESS, COLLATERAL_ASSET, collateral_amount),
+            ],
+            "gasUsed": 200000,
+        }
+
+        with caplog.at_level(logging.INFO):
+            result = parser.parse_receipt(receipt)
+
+        assert result.success is True
+        assert result.supply_amount == Decimal(repay_amount)
+        log_messages = " ".join(caplog.messages)
+        assert "repay via Compound V3" in log_messages
+
+    def test_pure_withdraw_no_borrow_alias(self, caplog):
+        """Test that a pure WITHDRAW (no collateral) does NOT show borrow alias."""
+        parser = CompoundV3ReceiptParser()
+
+        withdraw_amount = 500_000_000
+
+        receipt = {
+            "transactionHash": "0xpure_withdraw",
+            "blockNumber": 99997,
+            "logs": [create_withdraw_log(USER_ADDRESS, USER_ADDRESS, withdraw_amount)],
+            "gasUsed": 100000,
+        }
+
+        with caplog.at_level(logging.INFO):
+            parser.parse_receipt(receipt)
+
+        log_messages = " ".join(caplog.messages)
+        assert "borrow via Compound V3" not in log_messages
+
+    def test_pure_supply_no_repay_alias(self, caplog):
+        """Test that a pure SUPPLY (no collateral) does NOT show repay alias."""
+        parser = CompoundV3ReceiptParser()
+
+        supply_amount = 500_000_000
+
+        receipt = {
+            "transactionHash": "0xpure_supply",
+            "blockNumber": 99996,
+            "logs": [create_supply_log(USER_ADDRESS, USER_ADDRESS, supply_amount)],
+            "gasUsed": 100000,
+        }
+
+        with caplog.at_level(logging.INFO):
+            parser.parse_receipt(receipt)
+
+        log_messages = " ".join(caplog.messages)
+        assert "repay via Compound V3" not in log_messages
 
     def test_parse_logs_method(self):
         """Test parsing logs directly."""

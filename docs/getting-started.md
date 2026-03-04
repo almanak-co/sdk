@@ -227,3 +227,23 @@ If your strategy holds multiple position types, close them in order: **perps -> 
 - [API Reference](api/index.md) - Full Python API documentation
 - [CLI Reference](cli/almanak.md) - All CLI commands
 - [Gateway API](gateway/api-reference.md) - Gateway gRPC services
+
+## Want an LLM to Make the Decisions?
+
+The SDK also supports **agentic strategies** where an LLM autonomously decides
+what to do using Almanak's 29 built-in tools. Instead of writing `decide()` logic
+in Python, you write a system prompt and let the LLM reason over market data.
+
+This approach requires **your own LLM API key** (OpenAI, Anthropic, or any
+OpenAI-compatible provider).
+
+| | Deterministic (this guide) | Agentic |
+|---|---|---|
+| **You write** | Python `decide()` method | System prompt + policy |
+| **Decision maker** | Your code | LLM (GPT-4, Claude, etc.) |
+| **Requires** | Just the SDK | SDK + LLM API key |
+| **Best for** | Known rules, quantitative signals | Complex reasoning, multi-step plans |
+
+Both paths share the same gateway, connectors, and execution pipeline.
+
+**Get started:** [Agentic Trading Guide](agentic/index.md)

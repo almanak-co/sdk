@@ -2440,6 +2440,36 @@ class MarketSnapshot:
         token_price = self.price(token)
         return token_balance * token_price
 
+    def collateral_value_usd(self, token: str, amount: Decimal) -> Decimal:
+        """Get the USD value of a given amount of collateral.
+
+        Convenience helper for perp position sizing. Multiplies the given
+        amount by the token's current price. For stablecoins, the price
+        behavior follows the configured StablecoinConfig mode (market,
+        pegged, or hybrid).
+
+        Args:
+            token: Token symbol (e.g., "WETH", "USDC", "WBTC")
+            amount: Token amount in human-readable units (not wei)
+
+        Returns:
+            USD value as a Decimal
+
+        Raises:
+            PriceUnavailableError: If price cannot be determined
+
+        Example:
+            # USDC collateral (stablecoin, ~$1)
+            usd = snapshot.collateral_value_usd("USDC", Decimal("5000"))
+            # Returns: ~Decimal("5000.00")
+
+            # WETH collateral
+            usd = snapshot.collateral_value_usd("WETH", Decimal("2"))
+            # If ETH price is $2500, returns: Decimal("5000.00")
+        """
+        token_price = self.price(token)
+        return amount * token_price
+
     def total_portfolio_usd(self, tokens: list[str] | None = None) -> Decimal:
         """Get the total portfolio value in USD.
 

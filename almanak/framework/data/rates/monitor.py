@@ -102,6 +102,38 @@ _AAVE_IDX_LIQUIDITY_RATE = 5  # currentLiquidityRate = supply APY in ray
 _AAVE_IDX_VARIABLE_BORROW_RATE = 6  # currentVariableBorrowRate = borrow APY in ray
 _AAVE_MIN_RESPONSE_WORDS = 7  # Minimum words needed to read both rates
 
+# =============================================================================
+# Compound V3 On-Chain Constants
+# =============================================================================
+
+# Function selector for Comet.getUtilization() -> returns uint256 (1e18 scale)
+# keccak256("getUtilization()")[:4].hex() == "7eb71131"
+_COMPOUND_V3_GET_UTILIZATION_SELECTOR = "7eb71131"
+
+# Function selector for Comet.getSupplyRate(uint256 utilization) -> returns uint64
+# keccak256("getSupplyRate(uint256)")[:4].hex() == "d955759d"
+_COMPOUND_V3_GET_SUPPLY_RATE_SELECTOR = "d955759d"
+
+# Function selector for Comet.getBorrowRate(uint256 utilization) -> returns uint64
+# keccak256("getBorrowRate(uint256)")[:4].hex() == "9fa83b5a"
+_COMPOUND_V3_GET_BORROW_RATE_SELECTOR = "9fa83b5a"
+
+# Compound V3 rate scaling: per-second rates are scaled by 1e18
+_COMPOUND_V3_RATE_SCALE = Decimal("1000000000000000000")  # 1e18
+
+# Compound V3 utilization scaling: 1e18 = 100%
+_COMPOUND_V3_UTIL_SCALE = Decimal("1000000000000000000")  # 1e18
+
+# Map token symbol to Comet market key (lowercase, matching COMPOUND_V3_COMET_ADDRESSES)
+_COMPOUND_V3_TOKEN_TO_MARKET: dict[str, str] = {
+    "USDC": "usdc",
+    "USDC.e": "usdc_bridged",
+    "USDT": "usdt",
+    "WETH": "weth",
+    "wstETH": "wsteth",
+    "USDS": "usds",
+}
+
 
 # =============================================================================
 # Exceptions
@@ -854,7 +886,10 @@ class RateMonitor:
     ) -> LendingRate:
         """Fetch Compound V3 lending rate.
 
-        Compound V3 has separate markets per base asset (USDC, WETH).
+        Uses on-chain data via Comet.getUtilization() + getSupplyRate()/getBorrowRate()
+        when rpc_url is configured. Falls back to placeholder rates otherwise.
+
+        Compound V3 has separate Comet markets per base asset (USDC, WETH, USDT).
         Only the base asset earns supply interest; collateral does not.
 
         Args:
@@ -864,7 +899,131 @@ class RateMonitor:
         Returns:
             LendingRate with Compound V3 rate
         """
-        # Compound V3 rates for base assets only
+        if self._rpc_url:
+            return await self._fetch_compound_v3_rate_onchain(token, side)
+        return self._compound_v3_placeholder_rate(token, side)
+
+    async def _fetch_compound_v3_rate_onchain(self, token: str, side: str) -> LendingRate:
+        """Fetch live Compound V3 rate from Comet contract via JSON-RPC eth_call.
+
+        Makes two sequential calls:
+        1. getUtilization() -> current utilization (uint256, 1e18 scale)
+        2. getSupplyRate(utilization) or getBorrowRate(utilization) -> per-second rate (uint64)
+
+        Per-second rate is converted to APY: rate * SECONDS_PER_YEAR / 1e18 * 100
+
+        Args:
+            token: Token symbol (must map to a Comet market)
+            side: supply or borrow
+
+        Returns:
+            LendingRate with real on-chain APY data
+        """
+        import httpx
+
+        from almanak.framework.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
+
+        # Resolve Comet address for this token on this chain
+        market_key = _COMPOUND_V3_TOKEN_TO_MARKET.get(token)
+        if not market_key:
+            raise TokenNotSupportedError(token, "compound_v3", self._chain)
+
+        chain_comets = COMPOUND_V3_COMET_ADDRESSES.get(self._chain, {})
+        comet_address = chain_comets.get(market_key)
+        if not comet_address:
+            raise RateUnavailableError("compound_v3", token, side, f"No Comet market for {token!r} on {self._chain!r}")
+
+        assert self._rpc_url is not None, "RPC URL required for on-chain rate fetch"
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # Step 1: getUtilization()
+            util_payload = {
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [{"to": comet_address, "data": f"0x{_COMPOUND_V3_GET_UTILIZATION_SELECTOR}"}, "latest"],
+                "id": 1,
+            }
+            util_response = await client.post(self._rpc_url, json=util_payload)
+            util_response.raise_for_status()
+            util_result = util_response.json()
+
+            if "error" in util_result:
+                msg = util_result["error"].get("message", "RPC error")
+                raise RateUnavailableError("compound_v3", token, side, f"getUtilization failed: {msg}")
+
+            util_hex = util_result.get("result", "")
+            if not util_hex or util_hex == "0x":
+                raise RateUnavailableError("compound_v3", token, side, "getUtilization returned empty")
+
+            utilization_raw = int(util_hex, 16)
+
+            # Step 2: getSupplyRate(utilization) or getBorrowRate(utilization)
+            padded_util = f"{utilization_raw:064x}"
+            if side == "supply":
+                selector = _COMPOUND_V3_GET_SUPPLY_RATE_SELECTOR
+            else:
+                selector = _COMPOUND_V3_GET_BORROW_RATE_SELECTOR
+
+            rate_payload = {
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [{"to": comet_address, "data": f"0x{selector}{padded_util}"}, "latest"],
+                "id": 2,
+            }
+            rate_response = await client.post(self._rpc_url, json=rate_payload)
+            rate_response.raise_for_status()
+            rate_result = rate_response.json()
+
+            if "error" in rate_result:
+                msg = rate_result["error"].get("message", "RPC error")
+                raise RateUnavailableError("compound_v3", token, side, f"getRate failed: {msg}")
+
+            rate_hex = rate_result.get("result", "")
+            if not rate_hex or rate_hex == "0x":
+                raise RateUnavailableError("compound_v3", token, side, "getRate returned empty")
+
+        rate_per_second = Decimal(int(rate_hex, 16))
+
+        # Convert per-second rate to APY percentage
+        # APY = rate_per_second * SECONDS_PER_YEAR / 1e18 * 100
+        apy_percent = rate_per_second * Decimal(SECONDS_PER_YEAR) / _COMPOUND_V3_RATE_SCALE * Decimal("100")
+
+        # Convert to ray for consistency with Aave V3 format
+        apy_ray = apy_percent * RAY / Decimal("100")
+
+        # Convert utilization to percentage
+        utilization_percent = Decimal(utilization_raw) / _COMPOUND_V3_UTIL_SCALE * Decimal("100")
+
+        logger.debug(
+            "Compound V3 %s %s on %s: %.4f%% (util: %.2f%%, on-chain)",
+            token,
+            side,
+            self._chain,
+            float(apy_percent),
+            float(utilization_percent),
+        )
+
+        return LendingRate(
+            protocol="compound_v3",
+            token=token,
+            side=side,
+            apy_ray=apy_ray,
+            apy_percent=apy_percent,
+            utilization_percent=utilization_percent,
+            chain=self._chain,
+            market_id=market_key,
+        )
+
+    def _compound_v3_placeholder_rate(self, token: str, side: str) -> LendingRate:
+        """Return placeholder Compound V3 rate when no rpc_url is configured.
+
+        Args:
+            token: Token symbol
+            side: supply or borrow
+
+        Returns:
+            LendingRate with placeholder APY
+        """
         default_supply_apys: dict[str, Decimal] = {
             "USDC": Decimal("4.85"),
             "USDT": Decimal("4.25"),
@@ -885,6 +1044,7 @@ class RateMonitor:
         if apy_percent is None:
             raise TokenNotSupportedError(token, "compound_v3", self._chain)
 
+        market_key = _COMPOUND_V3_TOKEN_TO_MARKET.get(token, "usdc")
         return LendingRate(
             protocol="compound_v3",
             token=token,
@@ -893,7 +1053,7 @@ class RateMonitor:
             apy_percent=apy_percent,
             utilization_percent=Decimal("75.0"),
             chain=self._chain,
-            market_id="usdc",
+            market_id=market_key,
         )
 
     # =========================================================================

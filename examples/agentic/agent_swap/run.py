@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-"""AgentYield -- Autonomous yield farming agent on Aave V3.
+"""AgentSwap -- Autonomous buy-the-dip RSI agent on Arbitrum.
 
-Demonstrates how a third-party consumer uses the Almanak agent_tools framework
-to build an autonomous yield optimization agent. The LLM reads market data and
-indicators (RSI), decides whether to supply/withdraw/rotate positions on
-Aave V3, and executes via the gateway.
+Demonstrates the simplest agentic trading pattern: read price + RSI,
+swap when oversold/overbought, hold otherwise.
 
 Usage:
     # Start gateway first (separate terminal):
     almanak gateway --network anvil
 
     # Run the agent (real LLM):
-    AGENT_LLM_API_KEY=sk-... python examples/agentic/agent_yield/run.py --once
+    AGENT_LLM_API_KEY=sk-... python examples/agentic/agent_swap/run.py --once
 
     # Run smoke test with mock LLM (no API key needed):
-    python examples/agentic/agent_yield/run.py --once --mock
+    python examples/agentic/agent_swap/run.py --once --mock
 """
 
 from __future__ import annotations
@@ -40,7 +38,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
-logger = logging.getLogger("agent_yield")
+logger = logging.getLogger("agent_swap")
 
 
 def load_config() -> dict:
@@ -51,20 +49,18 @@ def load_config() -> dict:
 
 
 def create_policy() -> AgentPolicy:
-    """Create a tightly scoped policy for the yield agent."""
+    """Create a tightly scoped policy for the swap agent."""
     return AgentPolicy(
-        allowed_chains={"avalanche"},
-        allowed_tokens={"USDC", "WAVAX", "AVAX", "WETH", "USDC.e"},
-        max_single_trade_usd=Decimal("100"),
-        max_daily_spend_usd=Decimal("500"),
+        allowed_chains={"arbitrum"},
+        allowed_tokens={"WETH", "USDC", "ETH"},
+        max_single_trade_usd=Decimal("50"),
+        max_daily_spend_usd=Decimal("200"),
         cooldown_seconds=30,
         max_trades_per_hour=5,
         allowed_tools={
             "get_price",
             "get_balance",
             "get_indicator",
-            "supply_lending",
-            "repay_lending",
             "swap_tokens",
             "save_agent_state",
             "load_agent_state",
@@ -93,49 +89,63 @@ def _mock_response(*tool_calls, content: str | None = None) -> dict:
 
 
 def create_mock_llm(config: dict) -> MockLLMClient:
-    """Create a MockLLMClient with realistic scripted responses for yield agent smoke test.
+    """Create a MockLLMClient with scripted responses for swap agent smoke test.
 
-    Sequence: load_state -> get_price -> get_balance -> get_indicator (RSI) ->
-    supply_lending -> save_agent_state -> record_agent_decision -> final text
+    Sequence: load_state + get_price + get_balance x2 + get_indicator ->
+    swap_tokens -> save_agent_state + record_agent_decision -> final text
     """
-    token = config.get("default_supply_token", "USDC")
-    amount = config.get("default_supply_amount", "10")
-    strategy_id = config.get("strategy_id", "agent-yield")
+    buy_token = config["buy_token"]
+    sell_token = config["sell_token"]
+    strategy_id = config.get("strategy_id", "agent-swap-eth-usdc")
 
     return MockLLMClient([
-        # Round 1: load state + get price + get balance + RSI (parallel)
+        # Round 1: load state + get price + get balances + get RSI (parallel)
         _mock_response(
             _mock_tool_call("load_agent_state", {"strategy_id": strategy_id}),
-            _mock_tool_call("get_price", {"token": "WAVAX"}),
-            _mock_tool_call("get_balance", {"token": token}),
-            _mock_tool_call("get_indicator", {"indicator": "rsi", "token": "WAVAX", "period": 14}),
+            _mock_tool_call("get_price", {"token": buy_token, "chain": "arbitrum"}),
+            _mock_tool_call("get_balance", {"token": buy_token, "chain": "arbitrum"}),
+            _mock_tool_call("get_balance", {"token": sell_token, "chain": "arbitrum"}),
+            _mock_tool_call("get_indicator", {
+                "token": buy_token,
+                "indicator": "RSI",
+                "period": config["rsi_period"],
+                "chain": "arbitrum",
+            }),
         ),
-        # Round 2: supply to Aave
+        # Round 2: swap (RSI is low in mock scenario -> buy the dip)
         _mock_response(
-            _mock_tool_call("supply_lending", {
-                "token": token,
-                "amount": amount,
-                "protocol": "aave_v3",
+            _mock_tool_call("swap_tokens", {
+                "token_in": sell_token,
+                "token_out": buy_token,
+                "amount": config["trade_size_usd"],
+                "chain": "arbitrum",
             }),
         ),
         # Round 3: save state + record decision
         _mock_response(
             _mock_tool_call("save_agent_state", {
                 "strategy_id": strategy_id,
-                "state": {"position": "supplied", "token": token, "amount": amount, "protocol": "aave_v3"},
+                "state": {
+                    "last_action": "buy",
+                    "rsi_at_trade": 25,
+                    "price_at_trade": 1850.0,
+                    "pair": f"{buy_token}/{sell_token}",
+                },
             }),
             _mock_tool_call("record_agent_decision", {
                 "strategy_id": strategy_id,
-                "decision_summary": f"Supplied {amount} {token} to Aave V3. USDC is a stablecoin with low risk. RSI neutral.",
+                "decision_summary": f"RSI=25 (oversold). Bought {config['trade_size_usd']} USD of {buy_token} at $1850.",
             }),
         ),
         # Round 4: final text response
-        _mock_response(content=f"Supplied {amount} {token} to Aave V3 on Avalanche. Will monitor rates and RSI."),
+        _mock_response(
+            content=f"Executed buy-the-dip: swapped {config['trade_size_usd']} {sell_token} -> {buy_token}. RSI was 25 (oversold). Will check again next cycle.",
+        ),
     ])
 
 
 async def run_once(config: dict, *, use_mock: bool = False) -> None:
-    """Run a single iteration of the yield agent."""
+    """Run a single iteration of the swap agent."""
     # 0. Validate LLM config before anything else (fail-fast)
     if not use_mock:
         llm_config = LLMConfig.from_env()
@@ -162,8 +172,8 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
             policy=policy,
             catalog=catalog,
             wallet_address=config.get("wallet_address", ""),
-            strategy_id=config.get("strategy_id", "agent-yield"),
-            default_chain=config.get("chain", "avalanche"),
+            strategy_id=config.get("strategy_id", "agent-swap-eth-usdc"),
+            default_chain=config.get("chain", "arbitrum"),
         )
 
         # 3. Get OpenAI tool definitions from catalog
@@ -178,7 +188,7 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
             logger.info("LLM: %s via %s", llm_config.model, llm_config.base_url)
 
         # 5. Build prompt
-        from agent_yield.prompts import USER_PROMPT, build_system_prompt  # noqa: E402
+        from agent_swap.prompts import USER_PROMPT, build_system_prompt  # noqa: E402
 
         system_prompt = build_system_prompt(config)
 
@@ -202,7 +212,7 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
 
 async def run_loop(config: dict, *, use_mock: bool = False) -> None:
     """Run the agent in a loop with configurable interval."""
-    interval = config.get("interval_seconds", 120)
+    interval = config.get("interval_seconds", 60)
     logger.info("Starting agent loop (interval=%ds, Ctrl+C to stop)", interval)
 
     while True:
@@ -215,13 +225,13 @@ async def run_loop(config: dict, *, use_mock: bool = False) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="AgentYield -- Autonomous yield agent")
+    parser = argparse.ArgumentParser(description="AgentSwap -- Buy-the-dip RSI agent")
     parser.add_argument("--once", action="store_true", help="Run a single iteration then exit")
     parser.add_argument("--mock", action="store_true", help="Use mock LLM (no API key needed)")
     args = parser.parse_args()
 
     config = load_config()
-    logger.info("AgentYield starting: chain=%s tokens=%s", config["chain"], config["supply_tokens"])
+    logger.info("AgentSwap starting: pair=%s/%s chain=%s", config["buy_token"], config["sell_token"], config["chain"])
 
     try:
         if args.once:

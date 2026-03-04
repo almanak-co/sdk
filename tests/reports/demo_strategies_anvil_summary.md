@@ -1,75 +1,62 @@
-# Demo Strategy Regression Report - Anvil (Iteration 28)
+# Demo Strategy Regression Report (Anvil)
 
-**Date:** 2026-02-28
+**Date:** 2026-03-03
 **Network:** Anvil (local fork)
-**Iteration:** Kitchen Loop #28
+**Iteration:** Kitchen Loop iter 29c regress
 **Total strategies tested:** 13
 
 ## Summary Table
 
-| # | Strategy | Chain | Status | Suspicious | TX Count | Notes |
-|---|----------|-------|--------|------------|----------|-------|
-| 1 | aave_borrow | arbitrum | PASS | 4 (0 err) | 3 | Supply WETH to Aave V3 (304K gas) |
-| 2 | aerodrome_lp | base | PASS | 7 (0 err) | 3 | LP_OPEN WETH/USDC (342K gas) |
-| 3 | almanak_rsi | base | PASS | 9 (0 err) | 2 | Swap USDC->ALMANAK (192K gas) |
-| 4 | copy_trader | arbitrum | PASS | 8 (0 err) | 2 | Swap USDC->WETH (181K gas) |
-| 5 | enso_rsi | base | FAIL | 5 (2 err) | 0 | Missing ENSO_API_KEY (pre-existing) |
-| 6 | ethena_yield | ethereum | PASS | 5 (1 err) | 2 | Stake USDe->sUSDe (135K gas). Swap path needs ENSO_API_KEY |
-| 7 | morpho_looping | ethereum | PASS | 5 (0 err) | 2 | Supply wstETH to Morpho (123K gas) |
-| 8 | pancakeswap_simple | arbitrum | PASS | 7 (0 err) | 2 | Swap WETH->USDC (227K gas) |
-| 9 | pendle_basics | arbitrum | FAIL | 8 (3 err) | 0 | VIB-297: Corrupt Chainlink wstETH/USD ($12.3B) |
-| 10 | spark_lender | ethereum | PASS | 4 (1 err) | 3 | Supply DAI (first TX reverted, retry OK) |
-| 11 | sushiswap_lp | arbitrum | PASS | 6 (0 err) | 3 | LP_OPEN WETH/USDC NFT#33897 (539K gas) |
-| 12 | traderjoe_lp | avalanche | PASS | 7 (0 err) | 3 | LP_OPEN WAVAX/USDC (700K gas) |
-| 13 | uniswap_lp | arbitrum | PASS | 4 (0 err) | 3 | LP_OPEN WETH/USDC NFT#5333197 (558K gas) |
-| 14 | uniswap_rsi | ethereum | PASS | 12 (0 err) | 2 | RSI=39.79 BUY, swap USDC->WETH (180K gas) |
+| # | Strategy | Chain | Status | Suspicious | TX Hash | Notes |
+|---|----------|-------|--------|------------|---------|-------|
+| 1 | aave_borrow | arbitrum | PASS | 5 (0 err) | `8ab7bec6...013ad` | Supply WETH, 3 TXs (approve+supply+setCollateral) |
+| 2 | aerodrome_lp | base | PASS | 4 (0 err) | `659a80...0a7f` | LP_OPEN, 3 TXs (2 approves + addLiquidity) |
+| 3 | almanak_rsi | base | PASS | 4 (0 err) | `87d4775f...e4505d` | Init swap 10 USDC -> ALMANAK, 2 TXs |
+| 4 | enso_rsi | base | PASS | 4 (0 err) | `ad5587fc...d7a0` | force_action=buy, $3 USDC -> WETH via Enso, 2 TXs |
+| 5 | ethena_yield | ethereum | PASS | 5 (0 err) | `51bc1c98...833de` | 5 USDC -> USDe via Enso, 2 TXs |
+| 6 | morpho_looping | ethereum | PASS | 5 (0 err) | `6080e74f...cbb4f` | Supply 0.1 wstETH collateral, 2 TXs |
+| 7 | pancakeswap_simple | arbitrum | PASS | 4 (0 err) | `50b4ed19...d958` | Swap 0.0051 WETH -> USDC, 2 TXs |
+| 8 | pendle_basics | arbitrum | FAIL | 5 (3 err) | - | Pre-existing VIB-297: wstETH Chainlink ~$12.3B |
+| 9 | spark_lender | ethereum | PASS | 5 (1 err) | `d01fdb78...` | Supply 5 DAI, first-TX revert then retry success |
+| 10 | sushiswap_lp | arbitrum | PASS | 3 (0 err) | `7692fe67...96eb` | LP_OPEN NFT #34626, 3 TXs |
+| 11 | traderjoe_lp | avalanche | PASS | 5 (0 err) | `625c887d...3ddb` | LP_OPEN, 3 TXs (2 approves + addLiquidity) |
+| 12 | uniswap_lp | arbitrum | PASS | 5 (0 err) | `4d1da7f8...55be` | LP_OPEN NFT #5341845, 3 TXs |
+| 13 | uniswap_rsi | ethereum | PASS(HOLD) | 4 (0 err) | - | RSI=44.98 in neutral zone [40-70], correct HOLD |
 
 ## Tally
 
-**11 PASS / 0 PASS(HOLD) / 0 PARTIAL / 2 FAIL** out of 13 total
+**11 PASS / 1 PASS(HOLD) / 0 PARTIAL / 1 FAIL** out of 13 total
 
-Note: 14 rows because uniswap_rsi is strategy #13 but numbered #14 due to the table layout. Actual unique strategies: 13.
+## Failures
 
-## Failure Analysis
+### pendle_basics (FAIL - pre-existing)
 
-### enso_rsi (FAIL) -- Pre-existing
-- **Root cause**: `ENSO_API_KEY` not set in `.env`
-- **Impact**: Enso Finance API required for swap routing; fails at compile time
-- **Regression**: No -- same failure in iterations 26, 27
+**Root cause:** VIB-297 (wstETH Chainlink oracle on Arbitrum returns ~$12.3B instead of ~$2.4K). The price aggregator detects 5,079,157x divergence between Chainlink ($12.3B) and CoinGecko ($2,418), rejects both as outliers, and raises `AllDataSourcesFailed`. The strategy catches the ValueError and returns HOLD with no transactions.
 
-### pendle_basics (FAIL) -- Pre-existing (VIB-297)
-- **Root cause**: Chainlink wstETH/USD aggregator on Arbitrum Anvil fork returns ~$12.3B instead of ~$2,379
-- **Impact**: Magnitude outlier guard correctly rejects all price sources; strategy HOLDs
-- **Regression**: No -- same failure since VIB-297 was opened
+**Status:** Pre-existing since iter 20+. Not a regression from iter 29c changes.
 
 ## Suspicious Behaviour Summary
 
 | Strategy | Findings | Errors | Top Issues |
 |----------|----------|--------|------------|
-| uniswap_rsi | 12 | 0 | 9 token resolution warnings on Ethereum |
-| almanak_rsi | 9 | 0 | 4 token resolution warnings + ALMANAK single-source price |
-| copy_trader | 8 | 0 | 5 token resolution warnings (Arbitrum) |
-| pendle_basics | 8 | 3 | Corrupt Chainlink price, all sources rejected |
-| aerodrome_lp | 7 | 0 | 4 token resolution warnings (Base) |
-| pancakeswap_simple | 7 | 0 | 5 token resolution warnings (Arbitrum) |
-| traderjoe_lp | 7 | 0 | JOE token missing from Avalanche registry |
-| sushiswap_lp | 6 | 0 | 5 token resolution warnings (Arbitrum) |
-| enso_rsi | 5 | 2 | Missing ENSO_API_KEY |
-| ethena_yield | 5 | 1 | Swap path needs ENSO_API_KEY |
-| morpho_looping | 5 | 0 | 9 Ethereum token warnings |
-| aave_borrow | 4 | 0 | Clean run |
-| spark_lender | 4 | 1 | First supply TX reverted (gas cap), retry OK |
-| uniswap_lp | 4 | 0 | Clean run |
+| pendle_basics | 5 | 3 | Chainlink wstETH ~$12.3B, price aggregator AllDataSourcesFailed |
+| spark_lender | 5 | 1 | First-TX revert (gas underestimation), retry recovers |
+| traderjoe_lp | 5 | 0 | LP TX mislabeled as swap, duplicate receipt parsing |
+| enso_rsi | 4 | 0 | Amount chaining gap (Enso extract_swap_amounts) |
 
 **Aggregate stats:**
-- Total suspicious findings: 91
-- Strategies with ERROR-level findings: 4 (enso_rsi, ethena_yield, pendle_basics, spark_lender)
-- Strategies with clean logs (0 errors): 9
-- Most common patterns:
-  1. Token resolution warnings during MarketService init (all chains)
-  2. Missing ENSO_API_KEY for Enso-dependent strategies
-  3. Anvil port cleanup timing (cosmetic)
+- Total suspicious findings across all strategies: 58
+- Strategies with ERROR-level findings: 2 (pendle_basics, spark_lender)
+- Most common patterns: (1) Port not freed after 5s (12/13), (2) No Alchemy/CoinGecko API keys (13/13), (3) Placeholder prices in Anvil mode (5/13)
 
-## Regression Assessment
+## Comparison to Previous Iterations
 
-**No regressions detected from iteration 28 changes.** All 4 PRs (BorrowIntent summary fix, Compound V3 borrow log alias, fail-fast perp errors, Compound V3 lending rate) did not break any existing demo strategy.
+| Metric | Iter 32 | Iter 29 (prev) | Iter 29c |
+|--------|---------|----------------|----------|
+| PASS | 10 | 12 | 11 |
+| PASS(HOLD) | 1 | 0 | 1 |
+| FAIL | 2 | 1 | 1 |
+| pendle_basics | FAIL | FAIL | FAIL |
+| traderjoe_lp | FAIL | PASS | PASS |
+
+traderjoe_lp improved from intermittent FAIL (Avalanche public RPC storage access limitation) to stable PASS.

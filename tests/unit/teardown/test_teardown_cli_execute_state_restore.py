@@ -181,3 +181,70 @@ def test_execute_teardown_restores_state_before_position_detection(
     assert instance.state_manager_strategy_ids == ["demo_aerodrome_lp"]
     assert instance.events.index("set_state_manager:demo_aerodrome_lp") < instance.events.index("load_state")
     assert instance.events.index("load_state") < instance.events.index("get_open_positions")
+
+
+def test_inject_balance_provider_sets_sync_callable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_inject_balance_provider should set _balance_provider on strategy."""
+    from unittest.mock import MagicMock
+
+    class FakeBalanceProvider:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def get_balance(self, token):
+            return SimpleNamespace(
+                balance=Decimal("100"),
+                address="0x1",
+                decimals=6,
+                raw_balance=100_000_000,
+                timestamp=0,
+                stale=False,
+            )
+
+    class FakePriceOracle:
+        async def get_aggregated_price(self, token, quote):
+            return SimpleNamespace(price=Decimal("1"))
+
+    class FakeStrategy:
+        _balance_provider = None
+
+    strategy = FakeStrategy()
+    gateway_client = MagicMock()
+
+    # Monkeypatch at the module level where the imports resolve
+    monkeypatch.setattr(
+        "almanak.framework.data.balance.gateway_provider.GatewayBalanceProvider",
+        FakeBalanceProvider,
+    )
+    monkeypatch.setattr(
+        "almanak.framework.data.price.gateway_oracle.GatewayPriceOracle",
+        lambda _client: FakePriceOracle(),
+    )
+
+    teardown_cli_module._inject_balance_provider(
+        strategy=strategy,
+        gateway_client=gateway_client,
+        chain="arbitrum",
+        wallet_address="0xtest",
+    )
+
+    # balance_provider should now be a callable (sync wrapper)
+    assert strategy._balance_provider is not None
+    assert callable(strategy._balance_provider)
+
+
+def test_inject_balance_provider_skips_if_no_attribute() -> None:
+    """_inject_balance_provider should be a no-op for strategies without _balance_provider."""
+
+    class BareStrategy:
+        pass
+
+    strategy = BareStrategy()
+    # Should not raise
+    teardown_cli_module._inject_balance_provider(
+        strategy=strategy,
+        gateway_client=None,
+        chain="arbitrum",
+        wallet_address="0xtest",
+    )
+    assert not hasattr(strategy, "_balance_provider")

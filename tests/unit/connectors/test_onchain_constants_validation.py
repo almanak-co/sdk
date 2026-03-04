@@ -538,39 +538,40 @@ class TestCurveEvents:
 # =============================================================================
 
 
-class TestGMXV2PlaceholderDetection:
-    """Detect and flag placeholder hashes in GMX V2 receipt parser.
+class TestGMXV2EventTopicHashes:
+    """Validate GMX V2 event topic hashes are proper hex strings.
 
     GMX V2 uses an EventStore architecture where events are emitted as raw
-    data through EventEmitter.emit(). The standard keccak256(signature)
-    approach may not apply to all GMX events. Only PositionIncrease appears
-    to use standard topic hashing.
+    data through EventEmitter.emit(). The event topics were corrected in
+    PR #423 from placeholder sequential hashes to real EventEmitter hashes.
 
-    These tests flag obviously placeholder hashes so they can be verified
-    and corrected when needed.
+    These tests validate the hashes are well-formed and unique.
     """
 
-    def test_order_events_are_sequential_placeholders(self):
-        """GMX V2 Order events use sequential placeholder hashes ending in ...0001, ...0002 etc."""
+    def test_order_events_are_valid_hashes(self):
+        """GMX V2 Order events should be valid 66-char hex topic hashes."""
         from almanak.framework.connectors.gmx_v2.receipt_parser import EVENT_TOPICS
 
         order_events = ["OrderCreated", "OrderExecuted", "OrderCancelled", "OrderFrozen", "OrderUpdated"]
+        seen = set()
         for event in order_events:
             topic = EVENT_TOPICS[event]
-            # All order events share the same prefix (obvious placeholder pattern)
-            assert topic.startswith("0x3a3c9eff40a8c51a3d8ccf8f9eb47e7c9a"), (
-                f"GMX V2 {event} placeholder pattern changed unexpectedly"
-            )
+            assert len(topic) == 66, f"GMX V2 {event} topic hash wrong length: {len(topic)}"
+            assert topic.startswith("0x"), f"GMX V2 {event} topic hash missing 0x prefix"
+            assert topic not in seen, f"GMX V2 {event} topic hash is duplicate"
+            seen.add(topic)
 
-    def test_position_decrease_is_placeholder(self):
-        """PositionDecrease and related events use sequential placeholder hashes."""
+    def test_position_events_are_valid_hashes(self):
+        """PositionDecrease and related events should be valid unique hashes."""
         from almanak.framework.connectors.gmx_v2.receipt_parser import EVENT_TOPICS
 
+        seen = set()
         for event in ["PositionDecrease", "PositionFeesInfo", "PositionFeesCollected"]:
             topic = EVENT_TOPICS[event]
-            assert topic.startswith("0x2e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f"), (
-                f"GMX V2 {event} placeholder pattern changed unexpectedly"
-            )
+            assert len(topic) == 66, f"GMX V2 {event} topic hash wrong length: {len(topic)}"
+            assert topic.startswith("0x"), f"GMX V2 {event} topic hash missing 0x prefix"
+            assert topic not in seen, f"GMX V2 {event} topic hash is duplicate"
+            seen.add(topic)
 
 
 # =============================================================================

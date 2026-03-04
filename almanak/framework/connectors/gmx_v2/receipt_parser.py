@@ -64,35 +64,44 @@ def _normalize_datetime_to_utc(dt: datetime) -> datetime:
 # Event Topic Signatures
 # =============================================================================
 
-# GMX v2 event topic signatures (keccak256 hashes of event signatures)
+# GMX v2 event name hashes (keccak256 of event name strings).
+#
+# GMX V2 uses a centralized EventEmitter contract that emits all protocol events
+# via EventLog/EventLog1/EventLog2 event types. The event structure is:
+#   topic[0] = keccak256 of EventLog/EventLog1/EventLog2 signature
+#   topic[1] = keccak256 of event name string (indexed string eventNameHash)
+#   topic[2+] = additional indexed parameters (for EventLog1/EventLog2)
+#
+# These hashes represent keccak256(eventName) and are matched against topic[1]
+# to identify the specific GMX V2 event type.
 EVENT_TOPICS: dict[str, str] = {
     # Order events
-    "OrderCreated": "0x3a3c9eff40a8c51a3d8ccf8f9eb47e7c9a0000000000000000000000000000001",
-    "OrderExecuted": "0x3a3c9eff40a8c51a3d8ccf8f9eb47e7c9a0000000000000000000000000000002",
-    "OrderCancelled": "0x3a3c9eff40a8c51a3d8ccf8f9eb47e7c9a0000000000000000000000000000003",
-    "OrderFrozen": "0x3a3c9eff40a8c51a3d8ccf8f9eb47e7c9a0000000000000000000000000000004",
-    "OrderUpdated": "0x3a3c9eff40a8c51a3d8ccf8f9eb47e7c9a0000000000000000000000000000005",
+    "OrderCreated": "0xa7427759bfd3b941f14e687e129519da3c9b0046c5b9aaa290bb1dede63753b3",
+    "OrderExecuted": "0x680f10f06595d3d707241f604672ec4b6ae50eb82728ec2f3c65f6789e897760",
+    "OrderCancelled": "0xc7bb288dfd646d5b6c69d5099dd75b72f9c8c09ec9d40984c8ad8182357ae4b2",
+    "OrderFrozen": "0x073fdba4e5f6b272d64068005c56e7adbaa6d8de035ca1f7b08422c6dc9fe606",
+    "OrderUpdated": "0x84b670ed7b7ee8ccb350963a7dea39493daff6e7a43ab021a0e4ac2d652d359e",
     # Position events
-    "PositionIncrease": "0x137a44067c8961cd7e1d876f4754a5a3a75989b4552f1843fc0a3ffa67d28dc3",
-    "PositionDecrease": "0x2e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000001",
-    "PositionFeesInfo": "0x2e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000002",
-    "PositionFeesCollected": "0x2e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000003",
+    "PositionIncrease": "0xf94196ccb31f81a3e67df18f2a62cbfb50009c80a7d3c728a3f542e3abc5cb63",
+    "PositionDecrease": "0x07d51b51b408d7c62dcc47cc558da5ce6a6e0fd129a427ebce150f52b0e5171a",
+    "PositionFeesInfo": "0x8655f9667b66fc9e7efb1b6d44319284e1d7cffbff9751f70e263723a7080b83",
+    "PositionFeesCollected": "0xe096982abd597114bdaa4a60612f87fabfcc7206aa12d61c50e7ba1e6c291100",
     # Deposit events
-    "DepositCreated": "0x4e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000001",
-    "DepositExecuted": "0x4e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000002",
-    "DepositCancelled": "0x4e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000003",
+    "DepositCreated": "0xccee02d31cafad9001fbdc4dd5cf4957e152a372530316a7d856401e4c5d74bd",
+    "DepositExecuted": "0x2856020a9644603d22d7b029b5649a55d708b88d9049150f146ac26c4107b880",
+    "DepositCancelled": "0x70056e709adf36c0cb909b41ebecb620a44a31b6dc3867b92c2acf971785cdb5",
     # Withdrawal events
-    "WithdrawalCreated": "0x5e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000001",
-    "WithdrawalExecuted": "0x5e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000002",
-    "WithdrawalCancelled": "0x5e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000003",
+    "WithdrawalCreated": "0xfe021e2242f6c652ae824bc1428ee0fe7e8771a27295b9450792445dc456e37d",
+    "WithdrawalExecuted": "0x7998e9258f1701223baddabfe884a5dc09ee23a6b31b57c9e8150d60c97707f8",
+    "WithdrawalCancelled": "0xd523e46ff00e99354cd600fed716e4d5ed6346a3b5ff71e771307cac571b479e",
     # Market events
-    "MarketCreated": "0x6e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000001",
-    "MarketPoolValueUpdated": "0x6e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000002",
+    "MarketCreated": "0xad5d762f1fc581b3e684cf095d93d3a2c10754f60124b09bec8bf3d76473baaf",
+    "MarketPoolValueUpdated": "0x86834cf1ac14941d42cff9b14d28a052d57693ca16f3c3fc8a22efc050f96d97",
     # Oracle events
-    "OraclePriceUpdated": "0x7e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000001",
+    "OraclePriceUpdated": "0xff32d64cc9a3a5a5937e62070e14f4cba3be96a7365d2d9e855df902f3c9c7f6",
     # Funding events
-    "ClaimableFundingUpdated": "0x8e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000001",
-    "FundingFeesClaimed": "0x8e1f85a64a2f22cf2f0c7e1c8f6a32b1b71d6f6c8f1d6b3c2d1e0f000000000002",
+    "ClaimableFundingUpdated": "0x915eebf8297cc3f559ded968b9b253a3f043b1e6da5075ac2111083dc2c456fe",
+    "FundingFeesClaimed": "0x7e7d869368a1c2fca23506342a50d40fcc45d39d44486d9319780252e3b66b2e",
 }
 
 # Reverse lookup: topic -> event name
@@ -699,16 +708,35 @@ class GMXv2ReceiptParser:
             if not topics:
                 return None
 
-            # Get the event signature (first topic)
-            first_topic = topics[0]
-            if isinstance(first_topic, bytes):
-                first_topic = "0x" + first_topic.hex()
-            else:
-                first_topic = str(first_topic)
-            first_topic = first_topic.lower()
+            # GMX V2 uses the EventEmitter contract which emits all protocol events
+            # via EventLog/EventLog1/EventLog2. The event structure is:
+            #   topic[0] = EventLog/EventLog1/EventLog2 signature (shared across all events)
+            #   topic[1] = keccak256 of event name string (indexed eventNameHash)
+            # We match on topic[1] to identify the specific GMX V2 event type.
+            # For non-EventEmitter logs (e.g., ERC20 Transfer), topic[1] won't match
+            # any known GMX event name hash, so they're correctly skipped.
+            event_name = None
 
-            # Look up event name using registry
-            event_name = self.registry.get_event_name(first_topic)
+            # Try topic[1] first (GMX V2 EventEmitter pattern)
+            if len(topics) >= 2:
+                second_topic = topics[1]
+                if isinstance(second_topic, bytes):
+                    second_topic = "0x" + second_topic.hex()
+                else:
+                    second_topic = str(second_topic)
+                second_topic = second_topic.lower()
+                event_name = self.registry.get_event_name(second_topic)
+
+            # Fall back to topic[0] for standard event matching
+            if event_name is None:
+                first_topic = topics[0]
+                if isinstance(first_topic, bytes):
+                    first_topic = "0x" + first_topic.hex()
+                else:
+                    first_topic = str(first_topic)
+                first_topic = first_topic.lower()
+                event_name = self.registry.get_event_name(first_topic)
+
             if event_name is None:
                 # Unknown event, skip
                 return None
@@ -802,8 +830,13 @@ class GMXv2ReceiptParser:
             # size_delta_usd, collateral_delta_amount, index_token_price_max,
             # index_token_price_min, collateral_token_price_max, collateral_token_price_min,
             # price_impact_usd, order_type, order_key
+            # EventEmitter pattern: topic[0]=EventLog sig, topic[1]=eventNameHash,
+            # topic[2]=indexed key. Fall back to topic[1] for legacy format.
+            key_topic = topics[2] if len(topics) > 2 else (topics[1] if len(topics) > 1 else None)
+            key_str = HexDecoder.topic_to_bytes32(key_topic) if key_topic else "0x" + "00" * 32
+
             result: dict[str, Any] = {
-                "key": HexDecoder.topic_to_bytes32(topics[1]) if len(topics) > 1 else "0x" + "00" * 32,
+                "key": key_str,
                 "account": HexDecoder.decode_address_from_data(data, 0),
                 "market": HexDecoder.decode_address_from_data(data, 32),
                 "collateral_token": HexDecoder.decode_address_from_data(data, 64),
@@ -845,8 +878,12 @@ class GMXv2ReceiptParser:
             # size_delta_usd, collateral_delta_amount, index_token_price_max,
             # index_token_price_min, collateral_token_price_max, collateral_token_price_min,
             # price_impact_usd, realized_pnl
+            # EventEmitter pattern: topic[2] has the indexed key
+            key_topic = topics[2] if len(topics) > 2 else (topics[1] if len(topics) > 1 else None)
+            key_str = HexDecoder.topic_to_bytes32(key_topic) if key_topic else "0x" + "00" * 32
+
             result: dict[str, Any] = {
-                "key": HexDecoder.topic_to_bytes32(topics[1]) if len(topics) > 1 else "0x" + "00" * 32,
+                "key": key_str,
                 "account": HexDecoder.decode_address_from_data(data, 0),
                 "market": HexDecoder.decode_address_from_data(data, 32),
                 "collateral_token": HexDecoder.decode_address_from_data(data, 64),
@@ -887,8 +924,12 @@ class GMXv2ReceiptParser:
             # order_type, decrease_position_swap_type, is_long, size_delta_usd,
             # initial_collateral_delta_amount, trigger_price, acceptable_price,
             # execution_fee, min_output_amount, updated_at_block
+            # EventEmitter pattern: topic[2] has the indexed key
+            key_topic = topics[2] if len(topics) > 2 else (topics[1] if len(topics) > 1 else None)
+            key_str = HexDecoder.topic_to_bytes32(key_topic) if key_topic else "0x" + "00" * 32
+
             result: dict[str, Any] = {
-                "key": HexDecoder.topic_to_bytes32(topics[1]) if len(topics) > 1 else "0x" + "00" * 32,
+                "key": key_str,
                 "account": HexDecoder.decode_address_from_data(data, 0),
                 "receiver": HexDecoder.decode_address_from_data(data, 32),
                 "market": HexDecoder.decode_address_from_data(data, 64),

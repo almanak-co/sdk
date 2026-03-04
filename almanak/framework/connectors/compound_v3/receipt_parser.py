@@ -247,11 +247,19 @@ class CompoundV3ReceiptParser:
             gas_fmt = format_gas_cost(gas_used)
 
             # Build summary of actions
+            # Compound V3 implements borrow via withdraw() and repay via supply().
+            # Detect borrow context: WITHDRAW + SUPPLY_COLLATERAL in same TX.
+            # Detect repay context: SUPPLY + WITHDRAW_COLLATERAL in same TX.
+            has_collateral_supply = any(v > 0 for v in collateral_supplied.values())
+            has_collateral_withdraw = any(v > 0 for v in collateral_withdrawn.values())
+
             actions = []
             if supply_amount > 0:
-                actions.append(f"SUPPLY {supply_amount:,.0f}")
+                context_alias = " (repay via Compound V3)" if has_collateral_withdraw else ""
+                actions.append(f"SUPPLY {supply_amount:,.0f}{context_alias}")
             if withdraw_amount > 0:
-                actions.append(f"WITHDRAW {withdraw_amount:,.0f}")
+                context_alias = " (borrow via Compound V3)" if has_collateral_supply else ""
+                actions.append(f"WITHDRAW {withdraw_amount:,.0f}{context_alias}")
             for asset, amount in collateral_supplied.items():
                 if amount > 0:
                     actions.append(f"SUPPLY_COLLATERAL {amount:,.0f} {format_address(asset)}")

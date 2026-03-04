@@ -1,9 +1,9 @@
 # E2E Strategy Test Report: spark_lender (Anvil)
 
-**Date:** 2026-02-27 23:32 UTC (re-run)
+**Date:** 2026-03-03 12:16 UTC
 **Result:** PASS
 **Mode:** Anvil
-**Duration:** ~3 minutes
+**Duration:** ~1 minute (38 seconds actual)
 
 ## Configuration
 
@@ -12,7 +12,8 @@
 | Strategy | demo_spark_lender |
 | Chain | ethereum |
 | Network | Anvil fork (publicnode.com -- no ALCHEMY_API_KEY set) |
-| Anvil Port | 59458 (managed, auto-assigned) |
+| Anvil Port | 55608 (assigned dynamically by managed gateway) |
+| Fork Block | 24576868 |
 | Supply Token | DAI |
 | Min Supply Amount | 5 DAI |
 | Force Action | supply (pre-configured) |
@@ -26,26 +27,26 @@
 ## Execution
 
 ### Setup
-- Anvil started on port 59458 (managed gateway auto-forked Ethereum mainnet at block 24549473, via publicnode.com)
-- Gateway started on port 50052
-- Wallet funded: 100 ETH, 10 DAI (slot 2), 1 WETH (managed gateway auto-funding from `anvil_funding` config)
+- [x] Anvil started on port 55608 forking Ethereum via https://ethereum-rpc.publicnode.com (block 24576868)
+- [x] Managed gateway auto-started by strategy runner on port 50051 (network=anvil)
+- [x] Wallet funded: 100 ETH + 10 DAI (slot 2) + 1 WETH (slot 3) via `anvil_funding` config
 
 ### Strategy Run
 
-Fresh start (no prior state). `force_action: "supply"` triggered immediate SUPPLY intent for 5 DAI.
+State restored from previous run (supplied=True). `force_action: "supply"` overrides state and triggered immediate SUPPLY intent for 5 DAI.
 
 **Execution sequence:**
 
 1. First attempt: 2-transaction bundle compiled (approve + supply, 230,000 gas estimate)
-   - TX 1 (approve DAI): `144843e2fd7eaea9401281014715511e85104d1e92da39aa7557436ab9b1a9f9` -- CONFIRMED (block 24549476, gas 46,146)
-   - TX 2 (supply): `14960c5918ba49e7fe38d7ead596733154a1d71935ff20ef34e51ada9d121452` -- REVERTED ("Invalid revert data (too short): 0x")
+   - TX 1 (approve DAI): `0b79a188083b7fd401d6e0363f7624297436fd3578826a0bfe6db523ca9ff17c` -- CONFIRMED (block 24576871, gas 46,146)
+   - TX 2 (supply): `d75ccf28933a693ab8306a7dc0e19359443065b17e3e626f8432338162f27918` -- REVERTED ("Invalid revert data (too short): 0x")
    - Framework triggered auto-retry (attempt 1/3)
 
-2. Retry: 1-transaction bundle (supply only, 150,000 static gas limit -- DAI already approved)
-   - TX: `7c1997275c14c8351adbbfdae63271e5d8680ee1b6e37512b45bddefde2476cf` -- CONFIRMED (block 24549478, gas 200,539)
+2. Retry: 1-transaction bundle (supply only, approval already granted)
+   - TX: `d01fdb78b71fdded41c15f6f845113868d37dd8c2c1c1fcc35f2fe0bd5cbf19a` -- CONFIRMED (block 24576873, gas 183,197)
    - SUPPLY completed successfully
 
-**Net outcome:** 5 DAI supplied to Spark. Receipt parsed: 1 supply event, 0 withdraws, 0 borrows, 0 repays. Result enriched with `supply_amount` and `a_token_received`.
+**Net outcome:** 5 DAI supplied to Spark. Receipt parsed: 1 supply event, 0 withdraws, 0 borrows, 0 repays. Result enriched with `supply_amount` and `a_token_received` (spDAI).
 
 ### Key Log Output
 
@@ -54,29 +55,29 @@ Fresh start (no prior state). `force_action: "supply"` triggered immediate SUPPL
 [info] SUPPLY intent: 5.0000 DAI -> Spark
 [info] Compiled SUPPLY: 5.0000 DAI to Spark (as collateral) | Txs: 2 | Gas: 230,000
 [info] Transaction 2/2: skipping estimation (multi-TX dependent), using compiler gas_limit=165000
-[info] Sequential submit: TX 1/2 confirmed (block=24547427, gas=46146)
-[warn] Transaction reverted: tx_hash=593b26...b3fc, reason=Invalid revert data (too short): 0x
-[error] FAILED: SUPPLY - Transaction reverted at 593b26...b3fc
-[info] Retrying intent 2ea66d60-... (attempt 1/3, delay=1.06s)
+[info] Sequential submit: TX 1/2 confirmed (block=24576871, gas=46146)
+[warn] Transaction reverted: tx_hash=d75ccf...7918, reason=Invalid revert data (too short): 0x
+[error] FAILED: SUPPLY - Transaction reverted at d75ccf...7918
+[info] Retrying intent 1dac8123 (attempt 1/3, delay=1.03s)
 [info] Compiled SUPPLY: 5.0000 DAI to Spark (as collateral) | Txs: 1 | Gas: 150,000
-[info] Gas estimate tx[0]: raw=205,938 buffered=226,531 (x1.1)
-[info] Transaction confirmed: f62d7e...ec0d, block=24547429, gas_used=200,539
+[info] Gas estimate tx[0]: raw=188,040 buffered=206,844 (x1.1)
+[info] Transaction confirmed: d01fdb78..., block=24576873, gas_used=183,197
 [info] EXECUTED: SUPPLY completed successfully
-[info] Txs: 1 (f62d7e...ec0d) | 200,539 gas
+[info] Txs: 1 (d01fdb...f19a) | 183,197 gas
 [info] Parsed Spark receipt: supplies=1, withdraws=0, borrows=0, repays=0
 [info] Enriched SUPPLY result with: supply_amount, a_token_received (protocol=spark, chain=ethereum)
 [info] Supply successful: 5 DAI -> Spark
 [info] Intent succeeded after 1 retries
-Status: SUCCESS | Intent: SUPPLY | Gas used: 200539 | Duration: 57269ms
+Status: SUCCESS | Intent: SUPPLY | Gas used: 183197 | Duration: 38405ms
 ```
 
 ## Transactions
 
 | Step | TX Hash | Block | Gas Used | Status |
 |------|---------|-------|----------|--------|
-| Approve DAI (attempt 1) | `144843e2...a9f9` | 24549476 | 46,146 | SUCCESS |
-| Supply (attempt 1) | `14960c59...1452` | - | - | REVERTED |
-| Supply (retry 1) | `7c199727...76cf` | 24549478 | 200,539 | SUCCESS |
+| Approve DAI (attempt 1) | `0b79a188...92266` | 24576871 | 46,146 | SUCCESS |
+| Supply (attempt 1) | `d75ccf28...7918` | - | - | REVERTED |
+| Supply (retry 1) | `d01fdb78...f19a` | 24576873 | 183,197 | SUCCESS |
 
 (All transactions on local Anvil fork - no block explorer links applicable)
 
@@ -98,9 +99,10 @@ Status: SUCCESS | Intent: SUPPLY | Gas used: 200539 | Duration: 57269ms
 
 ## Result
 
-**PASS** - The strategy successfully supplied 5 DAI to the Spark protocol on an Ethereum Anvil fork after one auto-retry. The first deposit attempt reverted because the static gas limit for the second TX in the multi-TX bundle (165,000) was insufficient for the actual Spark `supply()` execution (200,539 gas). The retry mechanism recovered correctly. The static gas cap for Spark supply in multi-TX bundles should be raised to at least 220,000 (current actual usage + 10% buffer).
+**PASS** - The strategy successfully supplied 5 DAI to the Spark protocol on an Ethereum Anvil fork after one auto-retry. The first deposit attempt reverted because the static gas limit for the second TX in the multi-TX bundle (165,000) was insufficient for the actual Spark `supply()` execution (183,197 gas). The retry mechanism recovered correctly. The static gas cap for Spark supply in multi-TX bundles should be raised to at least 220,000 (current actual usage + ~20% buffer). This is a recurring behavior confirmed across multiple test runs.
 
 ---
 
 SUSPICIOUS_BEHAVIOUR_COUNT: 4
 SUSPICIOUS_BEHAVIOUR_ERRORS: 1
+

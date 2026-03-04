@@ -103,3 +103,39 @@ class TestMultiChainMarketSnapshotSetPriceData:
             assert False, "Should have raised ValueError"
         except ValueError:
             pass
+
+
+class TestCollateralValueUsd:
+    """Tests for MarketSnapshot.collateral_value_usd() helper."""
+
+    def test_non_stablecoin_collateral(self):
+        """WETH collateral: amount * price."""
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
+        market.set_price("WETH", Decimal("2500"))
+
+        result = market.collateral_value_usd("WETH", Decimal("2"))
+        assert result == Decimal("5000")
+
+    def test_stablecoin_collateral(self):
+        """USDC collateral: amount * price (price ~1.0)."""
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
+        market.set_price("USDC", Decimal("1.00"))
+
+        result = market.collateral_value_usd("USDC", Decimal("5000"))
+        assert result == Decimal("5000.00")
+
+    def test_fractional_amount(self):
+        """Fractional token amounts should work correctly."""
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
+        market.set_price("WBTC", Decimal("60000"))
+
+        result = market.collateral_value_usd("WBTC", Decimal("0.05"))
+        assert result == Decimal("3000.00")
+
+    def test_zero_amount(self):
+        """Zero collateral should return zero USD."""
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
+        market.set_price("WETH", Decimal("2500"))
+
+        result = market.collateral_value_usd("WETH", Decimal("0"))
+        assert result == Decimal("0")

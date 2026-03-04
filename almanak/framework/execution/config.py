@@ -131,6 +131,7 @@ CHAIN_IDS: dict[str, int] = {
     "blast": 81457,
     "mantle": 5000,
     "berachain": 80094,
+    "sonic": 146,
 }
 
 # Supported protocols and which chains they are available on
@@ -163,6 +164,7 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
         "blast",
         "mantle",
         "berachain",
+        "sonic",
     },  # Aggregator
     "traderjoe_v2": {"avalanche"},  # TraderJoe Liquidity Book V2 on Avalanche
     "spark": {"ethereum"},  # Spark is an Aave V3 fork on Ethereum
