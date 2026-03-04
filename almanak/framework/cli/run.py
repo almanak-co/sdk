@@ -1139,15 +1139,23 @@ def run(
                     elif _chain_val:
                         gateway_chains = [_chain_val]
 
+        # Security: generate a random session token for the managed gateway so it
+        # is never running without authentication, even on mainnet (VIB-520).
+        # For anvil/sepolia we still use allow_insecure for convenience.
+        is_test_network = gateway_network in ("anvil", "sepolia")
+        session_auth_token = None if is_test_network else uuid.uuid4().hex
+
         gateway_kwargs: dict[str, Any] = {
             "grpc_host": effective_host,
             "grpc_port": gateway_port,
             "network": gateway_network,
-            "allow_insecure": True,
+            "allow_insecure": is_test_network,
             "metrics_enabled": False,
             "audit_enabled": False,
             "chains": gateway_chains,
         }
+        if session_auth_token:
+            gateway_kwargs["auth_token"] = session_auth_token
         if gateway_private_key:
             gateway_kwargs["private_key"] = gateway_private_key
         gateway_settings = GatewaySettings(**gateway_kwargs)
@@ -1182,8 +1190,8 @@ def run(
 
         click.secho(f"Managed gateway started on {effective_host}:{gateway_port}", fg="green")
 
-        # Connect client to the managed gateway
-        gateway_config = GatewayClientConfig(host=effective_host, port=gateway_port)
+        # Connect client to the managed gateway (use same session token)
+        gateway_config = GatewayClientConfig(host=effective_host, port=gateway_port, auth_token=session_auth_token)
         gateway_client = GatewayClient(gateway_config)
         gateway_client.connect()
 
