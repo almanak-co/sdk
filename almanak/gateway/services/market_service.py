@@ -61,25 +61,36 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         from almanak.gateway.data.price.coingecko import CoinGeckoPriceSource
         from almanak.gateway.data.price.onchain import OnChainPriceSource
 
-        # Determine primary chain for on-chain pricing
-        chain = self.settings.chains[0] if self.settings.chains else "arbitrum"
+        # Determine primary chain for on-chain pricing.
+        # IMPORTANT: Never default to a hardcoded chain -- that silently gives wrong
+        # Chainlink oracle data for strategies running on a different chain (QA #4/#7/#8).
+        chain = self.settings.chains[0] if self.settings.chains else None
 
         # Create price sources
         cg_source = CoinGeckoPriceSource(
             api_key=self.settings.coingecko_api_key if self.settings.coingecko_api_key is not None else "",
             cache_ttl=30,
         )
-        onchain_source = OnChainPriceSource(chain=chain, network=self.settings.network)
 
-        # Order sources by CoinGecko API key availability (settings is the single source of truth)
         has_cg_key = bool(self.settings.coingecko_api_key)
 
-        if has_cg_key:
-            sources = [cg_source, onchain_source]
-            logger.info("MarketService: CoinGecko (primary) + on-chain (fallback), chain=%s", chain)
+        if chain:
+            onchain_source = OnChainPriceSource(chain=chain, network=self.settings.network)
+            if has_cg_key:
+                sources = [cg_source, onchain_source]
+                logger.info("MarketService: CoinGecko (primary) + on-chain (fallback), chain=%s", chain)
+            else:
+                sources = [onchain_source, cg_source]
+                logger.info("MarketService: on-chain (primary) + CoinGecko free tier (fallback), chain=%s", chain)
         else:
-            sources = [onchain_source, cg_source]
-            logger.info("MarketService: on-chain (primary) + CoinGecko free tier (fallback), chain=%s", chain)
+            # No chain configured -- on-chain pricing unavailable.
+            # This can happen with standalone `almanak gateway` without --chains.
+            sources = [cg_source]
+            logger.warning(
+                "MarketService: No chain configured -- on-chain (Chainlink) pricing DISABLED. "
+                "Only CoinGecko is available. Pass --chains to the gateway or set ALMANAK_GATEWAY_CHAINS "
+                "for accurate on-chain pricing."
+            )
 
         self._price_aggregator = PriceAggregator(sources=sources)
 

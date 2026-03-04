@@ -162,7 +162,7 @@ class TestMarketServiceInitialization:
     @pytest.mark.asyncio
     async def test_no_cg_key_uses_onchain_primary(self):
         """Without CG key, on-chain source is first in aggregator."""
-        settings = GatewaySettings(coingecko_api_key=None)
+        settings = GatewaySettings(coingecko_api_key=None, chains=["arbitrum"])
         service = MarketServiceServicer(settings)
 
         try:
@@ -184,7 +184,7 @@ class TestMarketServiceInitialization:
     @pytest.mark.asyncio
     async def test_with_cg_key_uses_coingecko_primary(self):
         """With CG key, CoinGecko source is first in aggregator."""
-        settings = GatewaySettings(coingecko_api_key="test-key-123")
+        settings = GatewaySettings(coingecko_api_key="test-key-123", chains=["arbitrum"])
         service = MarketServiceServicer(settings)
 
         try:
@@ -200,10 +200,10 @@ class TestMarketServiceInitialization:
             await service.close()
 
     @pytest.mark.asyncio
-    async def test_both_sources_always_registered(self):
-        """Aggregator always has exactly 2 sources regardless of key."""
+    async def test_both_sources_registered_when_chain_configured(self):
+        """Aggregator has 2 sources when a chain is configured, regardless of CG key."""
         for cg_key in [None, "key-123"]:
-            settings = GatewaySettings(coingecko_api_key=cg_key)
+            settings = GatewaySettings(coingecko_api_key=cg_key, chains=["arbitrum"])
             service = MarketServiceServicer(settings)
 
             try:
@@ -232,17 +232,17 @@ class TestMarketServiceInitialization:
             await service.close()
 
     @pytest.mark.asyncio
-    async def test_defaults_to_arbitrum_when_no_chains(self):
-        """On-chain source defaults to arbitrum when no chains configured."""
+    async def test_no_chains_disables_onchain_pricing(self):
+        """Without chains configured, on-chain pricing is disabled (CoinGecko only)."""
         settings = GatewaySettings(chains=[])
         service = MarketServiceServicer(settings)
 
         try:
-            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
-                await service._ensure_initialized()
+            await service._ensure_initialized()
 
-            onchain_sources = [s for s in service._price_aggregator.sources if s.source_name == "onchain"]
-            assert onchain_sources[0]._chain == "arbitrum"
+            # Only CoinGecko source when no chain is configured
+            assert len(service._price_aggregator.sources) == 1
+            assert service._price_aggregator.sources[0].source_name == "coingecko"
         finally:
             await service.close()
 
