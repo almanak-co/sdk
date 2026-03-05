@@ -95,8 +95,8 @@ async def test_compile_with_price_map_uses_real_prices():
 
 @pytest.mark.asyncio
 async def test_compile_without_price_map_uses_placeholders():
-    """Empty price_map preserves placeholder state (backward compat)."""
-    settings = GatewaySettings()
+    """Empty price_map preserves placeholder state (on non-mainnet networks)."""
+    settings = GatewaySettings(network="anvil")
     service = ExecutionServiceServicer(settings)
     service._ensure_initialized = AsyncMock()
 
@@ -137,6 +137,76 @@ async def test_compile_without_price_map_uses_placeholders():
 
     # Should still be using placeholders
     assert seen_placeholders["value"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "intent_type",
+    ["swap", "lpopen", "lp_open", "lp-open", "lpclose", "supply", "repay", "borrow", "withdraw", "perpopen", "perpclose"],
+)
+async def test_mainnet_no_prices_fails_for_price_sensitive_intents(intent_type):
+    """On mainnet, price-sensitive intents MUST fail when no real prices available (VIB-523)."""
+    settings = GatewaySettings(network="mainnet")
+    service = ExecutionServiceServicer(settings)
+    service._ensure_initialized = AsyncMock()
+
+    compiler = MagicMock()
+    compiler.price_oracle = None
+    compiler._using_placeholders = True
+    service._get_compiler = MagicMock(return_value=compiler)
+    service._create_intent = MagicMock(return_value=MagicMock())
+
+    context = MagicMock()
+    intent_data = json.dumps({"token_in": "USDC", "token_out": "ETH", "amount": "100"}).encode("utf-8")
+    request = gateway_pb2.CompileIntentRequest(
+        intent_type=intent_type,
+        intent_data=intent_data,
+        chain="arbitrum",
+        wallet_address="0x1234567890123456789012345678901234567890",
+        price_map={},
+    )
+
+    result = await service.CompileIntent(request, context)
+
+    assert result.success is False
+    assert result.error_code == "NO_PRICES_AVAILABLE"
+    assert "mainnet" in result.error
+    compiler.compile.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mainnet_no_prices_allows_hold_intent():
+    """On mainnet, non-price-sensitive intents (HOLD) still compile without prices."""
+    settings = GatewaySettings(network="mainnet")
+    service = ExecutionServiceServicer(settings)
+    service._ensure_initialized = AsyncMock()
+
+    compiler = MagicMock()
+    compiler.price_oracle = None
+    compiler._using_placeholders = True
+    compiler.compile.return_value = _make_compilation_result()
+
+    def _restore_prices(oracle, placeholders):
+        compiler.price_oracle = oracle
+        compiler._using_placeholders = placeholders
+
+    compiler.restore_prices = _restore_prices
+    service._get_compiler = MagicMock(return_value=compiler)
+    service._create_intent = MagicMock(return_value=MagicMock())
+
+    context = MagicMock()
+    intent_data = json.dumps({"reason": "waiting"}).encode("utf-8")
+    request = gateway_pb2.CompileIntentRequest(
+        intent_type="hold",
+        intent_data=intent_data,
+        chain="arbitrum",
+        wallet_address="0x1234567890123456789012345678901234567890",
+        price_map={},
+    )
+
+    result = await service.CompileIntent(request, context)
+
+    assert result.success is True
 
 
 @pytest.mark.asyncio

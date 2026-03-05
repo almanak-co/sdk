@@ -28,6 +28,22 @@ logger = logging.getLogger(__name__)
 # TTL for cached compilers (5 minutes) - prevents stale price data in long-running services
 COMPILER_CACHE_TTL_SECONDS = 300
 
+# Intent types that require real prices on mainnet (VIB-523).
+# Normalized: uppercase, underscores stripped, so both "lp_open" and "lpopen" match.
+PRICE_SENSITIVE_INTENT_TYPES = frozenset(
+    {
+        "SWAP",
+        "LPOPEN",
+        "LPCLOSE",
+        "SUPPLY",
+        "REPAY",
+        "BORROW",
+        "WITHDRAW",
+        "PERPOPEN",
+        "PERPCLOSE",
+    }
+)
+
 
 class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
     """Implements ExecutionService gRPC interface.
@@ -294,6 +310,25 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                     compiler.update_prices(parsed_prices)
                     logger.debug(
                         f"Applied {len(parsed_prices)} real prices for compilation: {list(parsed_prices.keys())}"
+                    )
+                elif (
+                    self.settings.network == "mainnet"
+                    and self._normalize_intent_type(intent_type).upper() in PRICE_SENSITIVE_INTENT_TYPES
+                ):
+                    # VIB-523: On mainnet, fail compilation for price-sensitive intents
+                    # if no real prices are available, instead of silently using
+                    # placeholder prices with incorrect slippage calculations.
+                    error_msg = (
+                        f"No real prices available for {intent_type} compilation on mainnet. "
+                        f"Price oracle returned no data (CoinGecko rate-limited or Chainlink "
+                        f"unavailable). Refusing to compile with placeholder prices. "
+                        f"Retry after price sources recover."
+                    )
+                    logger.warning(error_msg)
+                    return gateway_pb2.CompilationResult(
+                        success=False,
+                        error=error_msg,
+                        error_code="NO_PRICES_AVAILABLE",
                     )
 
                 try:
