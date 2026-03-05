@@ -109,6 +109,8 @@ CONNECTION_ERROR_PATTERNS = [
     r"econnrefused",
     r"econnreset",
     r"etimedout",
+    r"header not found",  # RPC node sync issue, not a contract revert (VIB-525)
+    r"missing trie node",  # RPC node pruning issue
 ]
 
 
