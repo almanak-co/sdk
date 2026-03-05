@@ -1903,7 +1903,12 @@ class ToolExecutor:
         )
 
     async def _execute_get_risk_metrics(self, args: dict) -> ToolResponse:
-        """Get portfolio risk metrics from current wallet balances."""
+        """Get portfolio risk metrics from current wallet balances.
+
+        Fetches live portfolio value from gateway balances, records a snapshot
+        in the PolicyEngine, and computes rolling risk metrics (max drawdown,
+        volatility, Sharpe ratio, 95% VaR) from the snapshot history.
+        """
         from almanak.gateway.proto import gateway_pb2
 
         chain = args.get("chain", self._default_chain)
@@ -1958,20 +1963,42 @@ class ToolExecutor:
                 ),
             )
 
+        # Record this observation for rolling risk calculations
+        self._policy_engine.update_portfolio_value(total_value_usd)
+
+        # Compute risk metrics from snapshot history
+        metrics = self._policy_engine.get_risk_metrics()
+
+        n = metrics["data_points"]
+        warnings = metrics["warnings"]
+
+        # Build explanation based on data availability
+        if n < 3:
+            explanation = (
+                f"Portfolio value derived from on-chain balances ({n} snapshot(s) recorded). "
+                "Need at least 3 snapshots to compute volatility/Sharpe and 10 for VaR."
+            )
+        elif n < 10:
+            explanation = (
+                f"Portfolio value and partial risk metrics from {n} snapshots. "
+                "VaR requires at least 10 data points for a reliable estimate."
+            )
+        else:
+            explanation = f"Full risk metrics computed from {n} portfolio snapshots."
+
         return ToolResponse(
             status="success",
             data={
                 "portfolio_value_usd": str(total_value_usd),
-                "var_95": "",
-                "sharpe_ratio": "",
-                "volatility_annualized": "",
-                "max_drawdown_pct": "",
+                "var_95": metrics["var_95_pct"],
+                "sharpe_ratio": metrics["sharpe_ratio"],
+                "volatility_annualized": metrics["volatility_annualized"],
+                "max_drawdown_pct": metrics["max_drawdown_pct"],
+                "data_points": n,
+                "data_sufficient": metrics["data_sufficient"],
+                "warnings": warnings,
             },
-            explanation=(
-                "Portfolio value derived from on-chain balances. "
-                "Statistical metrics (VaR, Sharpe, volatility, drawdown) require "
-                "historical portfolio snapshots which are not yet tracked."
-            ),
+            explanation=explanation,
         )
 
     async def _execute_get_vault_state(self, args: dict) -> ToolResponse:

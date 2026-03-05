@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import statistics
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -50,6 +52,14 @@ TEARDOWN_REQUIRED_TOOLS = frozenset(
 # deposit_vault moves real funds (so it keeps spend limit checks) but should
 # not block the next operation in the vault setup sequence.
 _COOLDOWN_EXEMPT_TOOLS = _VAULT_LIFECYCLE_TOOLS | {"deposit_vault"}
+
+
+@dataclass
+class PortfolioSnapshot:
+    """A timestamped portfolio value observation for risk metric calculations."""
+
+    timestamp: datetime
+    value_usd: Decimal
 
 
 @dataclass
@@ -181,6 +191,11 @@ class PolicyEngine:
         self._peak_portfolio_usd: Decimal = Decimal("0")
         self._current_portfolio_usd: Decimal = Decimal("0")
 
+        # Portfolio snapshot history for risk metric calculations.
+        # Rolling window of (timestamp, value_usd) observations.
+        self._portfolio_snapshots: list[PortfolioSnapshot] = []
+        self._max_snapshots: int = 100
+
         # Rebalance viability gate
         self._rebalance_approved: bool = False
 
@@ -257,11 +272,21 @@ class PolicyEngine:
         self._save_state()
 
     def update_portfolio_value(self, usd_value: Decimal) -> None:
-        """Update portfolio value for stop-loss tracking (high-water mark)."""
+        """Update portfolio value for stop-loss tracking and risk metrics.
+
+        Records a timestamped snapshot for rolling risk calculations
+        (volatility, Sharpe, VaR, drawdown). Maintains a bounded window
+        of at most ``_max_snapshots`` observations.
+        """
         self._current_portfolio_usd = usd_value
         if usd_value > self._peak_portfolio_usd:
             self._peak_portfolio_usd = usd_value
         self._save_state()
+
+        # Record snapshot for risk metric calculations
+        self._portfolio_snapshots.append(PortfolioSnapshot(timestamp=datetime.now(UTC), value_usd=usd_value))
+        if len(self._portfolio_snapshots) > self._max_snapshots:
+            self._portfolio_snapshots = self._portfolio_snapshots[-self._max_snapshots :]
 
     def set_rebalance_approved(self, approved: bool) -> None:
         """Set rebalance viability gate (called after compute_rebalance_candidate)."""
@@ -277,6 +302,138 @@ class PolicyEngine:
     def is_circuit_breaker_tripped(self) -> bool:
         """True if consecutive failures have reached the circuit breaker threshold."""
         return self._consecutive_failures >= self.policy.max_consecutive_failures
+
+    @property
+    def portfolio_snapshots(self) -> list[PortfolioSnapshot]:
+        """Read-only access to portfolio snapshot history."""
+        return list(self._portfolio_snapshots)
+
+    # -- Risk metric calculations -------------------------------------------
+
+    def _compute_returns(self) -> list[float]:
+        """Compute period-over-period returns from portfolio snapshots.
+
+        Returns a list of fractional returns (e.g., 0.05 = 5% gain).
+        Skips any period where the previous value is zero to avoid division errors.
+        """
+        returns: list[float] = []
+        for i in range(1, len(self._portfolio_snapshots)):
+            prev = self._portfolio_snapshots[i - 1].value_usd
+            curr = self._portfolio_snapshots[i].value_usd
+            if prev > 0:
+                returns.append(float((curr - prev) / prev))
+        return returns
+
+    def calculate_max_drawdown(self) -> Decimal:
+        """Peak-to-trough decline as a decimal fraction (e.g., 0.05 = 5%).
+
+        Uses the full snapshot history to find the worst drawdown, not just
+        the current drawdown from the high-water mark.
+        """
+        if not self._portfolio_snapshots:
+            return Decimal("0")
+
+        peak = Decimal("0")
+        max_dd = Decimal("0")
+        for snap in self._portfolio_snapshots:
+            if snap.value_usd > peak:
+                peak = snap.value_usd
+            if peak > 0:
+                dd = (peak - snap.value_usd) / peak
+                if dd > max_dd:
+                    max_dd = dd
+        return max_dd
+
+    def calculate_volatility(self, annualization_factor: int = 252) -> Decimal:
+        """Annualized volatility from portfolio return observations.
+
+        Requires at least 3 snapshots (2 returns) to compute a meaningful
+        standard deviation. Returns ``Decimal("0")`` when insufficient data.
+
+        Args:
+            annualization_factor: Number of periods per year. Default 252
+                (trading days). Callers can override for different frequencies.
+        """
+        returns = self._compute_returns()
+        if len(returns) < 2:
+            return Decimal("0")
+
+        std_dev = statistics.stdev(returns)
+        annualized = std_dev * math.sqrt(annualization_factor)
+        return Decimal(str(round(annualized, 6)))
+
+    def calculate_sharpe(self, risk_free_rate: float = 0.04, annualization_factor: int = 252) -> Decimal:
+        """Sharpe ratio from portfolio return observations.
+
+        Requires at least 3 snapshots (2 returns). Returns ``Decimal("0")``
+        when insufficient data or when volatility is zero.
+
+        Args:
+            risk_free_rate: Annual risk-free rate (default 4%).
+            annualization_factor: Periods per year (default 252 trading days).
+        """
+        returns = self._compute_returns()
+        if len(returns) < 2:
+            return Decimal("0")
+
+        mean_return = statistics.mean(returns)
+        std_return = statistics.stdev(returns)
+        if std_return == 0:
+            return Decimal("0")
+
+        annual_return = mean_return * annualization_factor
+        annual_vol = std_return * math.sqrt(annualization_factor)
+        sharpe = (annual_return - risk_free_rate) / annual_vol
+        return Decimal(str(round(sharpe, 4)))
+
+    def calculate_var_95(self) -> Decimal:
+        """Historical 95% Value at Risk as a decimal fraction of portfolio.
+
+        Uses the empirical 5th-percentile of observed returns. Requires at
+        least 10 snapshots (9 returns) for a minimally reliable estimate.
+        Returns ``Decimal("0")`` with insufficient data.
+        """
+        returns = self._compute_returns()
+        if len(returns) < 9:
+            return Decimal("0")
+
+        sorted_returns = sorted(returns)
+        # 5th percentile index (floor)
+        index = int(len(sorted_returns) * 0.05)
+        # Clamp to valid range
+        index = max(0, min(index, len(sorted_returns) - 1))
+        var_95 = abs(sorted_returns[index])
+        return Decimal(str(round(var_95, 6)))
+
+    def get_risk_metrics(self) -> dict:
+        """Compute all risk metrics from portfolio snapshot history.
+
+        Returns a dict with calculated metrics and metadata about data quality.
+        """
+        n = len(self._portfolio_snapshots)
+        current_value = self._current_portfolio_usd
+
+        max_drawdown = self.calculate_max_drawdown()
+        volatility = self.calculate_volatility()
+        sharpe = self.calculate_sharpe()
+        var_95 = self.calculate_var_95()
+
+        warnings: list[str] = []
+        if n < 3:
+            warnings.append("Insufficient data for volatility and Sharpe ratio (need 3+ snapshots)")
+        if n < 10:
+            warnings.append("Insufficient data for reliable VaR estimate (need 10+ snapshots)")
+
+        return {
+            "portfolio_value_usd": str(current_value),
+            "max_drawdown_pct": str(max_drawdown),
+            "volatility_annualized": str(volatility),
+            "sharpe_ratio": str(sharpe),
+            "var_95_pct": str(var_95),
+            "data_points": n,
+            "data_sufficient": n >= 10,
+            "warnings": warnings,
+        }
 
     # -- State persistence --------------------------------------------------
 

@@ -193,10 +193,13 @@ class GetRiskMetricsRequest(BaseModel):
 
 class GetRiskMetricsResponse(BaseModel):
     portfolio_value_usd: str = ""
-    var_95: str = Field(default="", description="Value at Risk (95% confidence)")
+    var_95: str = Field(default="", description="Value at Risk (95% confidence) as decimal fraction")
     sharpe_ratio: str = ""
     volatility_annualized: str = ""
-    max_drawdown_pct: str = ""
+    max_drawdown_pct: str = Field(default="", description="Max peak-to-trough decline as decimal fraction")
+    data_points: int = Field(default=0, description="Number of portfolio snapshots used for calculations")
+    data_sufficient: bool = Field(default=False, description="True when enough snapshots exist for all metrics")
+    warnings: list[str] = Field(default_factory=list, description="Warnings about data quality or coverage")
 
 
 # =============================================================================
