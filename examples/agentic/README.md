@@ -176,10 +176,68 @@ All errors are wrapped in `ToolResponse` envelopes -- the LLM never sees raw exc
 
 For the full tool catalog and framework documentation, see [docs.almanak.co](https://docs.almanak.co/).
 
+## New Framework Features (March 2026)
+
+Recent audit-driven improvements to the agent tools framework:
+
+| Feature | How to use | PR |
+|---------|-----------|-----|
+| **Decision tracing** | Pass `trace_sink=callback` to `run_agent_loop()` for structured audit logs | #485 |
+| **Structured errors** | Typed `ToolError` subclasses with `recoverable` flag and `suggestion` hint | #483 |
+| **Human approval** | Set `require_human_approval_above_usd` threshold in `AgentPolicy` | #480 |
+| **Policy persistence** | Set `state_persistence_path` to survive restarts | #473 |
+| **Risk metrics** | `get_risk_metrics` returns portfolio value from on-chain balances | #481 |
+| **Pre-trade validation** | `validate_risk` returns structured risk assessment without executing | #482 |
+| **MCP server** | `almanak mcp serve` starts an MCP tool server for Claude Desktop | #484 |
+| **Mock LLM client** | `MockLLMClient` in `shared/llm_client.py` for testing agents without live LLM | #471 |
+
+### MCP Server (use with Claude Desktop)
+
+```bash
+# Schema-only mode (no gateway needed, for tool discovery)
+almanak mcp serve --schema-only
+
+# Full mode with gateway
+almanak gateway &
+almanak mcp serve --max-daily-spend-usd 5000 --allowed-chains arbitrum
+```
+
+Claude Desktop config (`~/.claude/claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "almanak": {
+      "command": "almanak",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+### Decision Tracing
+
+The shared `run_agent_loop()` now accepts an optional `trace_sink` callback:
+
+```python
+import json, pathlib
+
+def file_trace_sink(event: dict) -> None:
+    path = pathlib.Path("traces/agent_decisions.jsonl")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps(event, default=str) + "\n")
+
+result = await run_agent_loop(
+    llm_client, executor, tools,
+    system_prompt, user_prompt,
+    trace_sink=file_trace_sink,
+)
+```
+
 ## Tests
 
 ```bash
-# Framework unit tests (130 tests)
+# Framework unit tests (300+ tests)
 uv run pytest tests/unit/agent_tools/ -q
 
 # Consumer example tests (LLM client + agent loop)
