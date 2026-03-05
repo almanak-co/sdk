@@ -1,0 +1,110 @@
+language: "en-US"
+tone_instructions: "Be direct and specific. Focus on correctness, security, and test coverage."
+
+reviews:
+  profile: "assertive"
+  high_level_summary: true
+  collapse_walkthrough: true
+
+  # Exclude non-reviewable files
+  path_filters:
+    - "!*.png"
+    - "!*.lock"
+    - "!.mypy_cache/**"
+    - "!docs/internal/reports/**"
+    - "!notes/**"
+    - "!scripts/ai-discussion/**"
+
+  path_instructions:
+    # -- Global test coverage rule (applies to all Python source files) --
+    - path: "almanak/**/*.py"
+      instructions: |
+        CHECK TEST COVERAGE for every code change:
+
+        Intent tests (tests/intents/{chain}/test_{protocol}_{action}.py) are MANDATORY when:
+        - Protocol connector/adapter/SDK code changes (almanak/framework/connectors/)
+        - Receipt parser changes
+        - Intent compiler changes (almanak/framework/intents/compiler.py)
+        - Execution pipeline changes (almanak/framework/execution/)
+        - New protocol or new chain support is added
+
+        Intent tests MUST implement 4-layer verification:
+        1. Compilation: compiler.compile(intent) succeeds
+        2. Execution: orchestrator.execute(bundle) succeeds on Anvil fork
+        3. Receipt Parsing: protocol parser extracts correct event data
+        4. Balance Deltas: token balances before/after match expected changes
+
+        Unit tests (tests/unit/) are REQUIRED when:
+        - Any new class, function, or module is added
+        - State management or service logic changes
+        - CLI or validation logic changes
+        - Data provider or market snapshot changes
+        - Agent tools changes
+
+        If the PR modifies source code in almanak/ but adds no tests, flag it.
+        Exception: pure refactors with no behavior change, documentation-only, or config changes.
+
+    # -- Connector-specific: always require intent tests --
+    - path: "almanak/framework/connectors/**"
+      instructions: |
+        Protocol connector changes REQUIRE intent tests on all affected chains.
+        Verify the PR includes tests in tests/intents/{chain}/ with 4-layer verification.
+        Golden reference: tests/intents/base/test_aerodrome_swap.py
+
+    # -- Receipt parsers: require both unit + intent tests --
+    - path: "almanak/**/receipt_parser.py"
+      instructions: |
+        Receipt parser changes require BOTH:
+        1. Unit tests (mocked, in tests/unit/connectors/)
+        2. Intent tests (on-chain, in tests/intents/{chain}/) verifying real receipt parsing
+
+    # -- Intent compiler: require intent tests --
+    - path: "almanak/framework/intents/**"
+      instructions: |
+        Intent system changes require intent tests verifying the full compile-execute-parse-verify flow.
+        Check that existing intent tests still pass (no regressions).
+
+    # -- Execution pipeline --
+    - path: "almanak/framework/execution/**"
+      instructions: |
+        Execution pipeline changes require intent tests to verify end-to-end transaction flow.
+
+    # -- Gateway: security-critical --
+    - path: "almanak/gateway/**"
+      instructions: |
+        Gateway is the security boundary. Verify:
+        - Input validation on all service methods
+        - No secrets logged or exposed
+        - Proper error handling (no stack traces to clients)
+        Changes require gateway unit tests (tests/gateway/).
+
+    # -- Strategy layer --
+    - path: "almanak/framework/strategies/**"
+      instructions: |
+        Strategy changes require unit tests in tests/unit/strategies/.
+        Verify IntentStrategy subclasses implement: decide(), supports_teardown(),
+        get_open_positions(), generate_teardown_intents().
+
+    # -- Verify intent test quality when they ARE added --
+    - path: "tests/intents/**"
+      instructions: |
+        Verify this intent test implements ALL 4 layers:
+        1. Compilation: assert status.value == "SUCCESS" and ActionBundle is not None
+        2. Execution: assert execution_result.success is True
+        3. Receipt Parsing: import protocol parser, call parse_receipt(), assert amounts > 0
+        4. Balance Deltas: get_token_balance() BEFORE and AFTER, assert exact deltas
+        A test that only compiles is INCOMPLETE.
+        Reference: .claude/rules/intent-tests.md
+
+    # -- Verify unit test quality --
+    - path: "tests/unit/**"
+      instructions: |
+        Verify unit tests use mocks appropriately (no real network/blockchain calls).
+        Check assertions are specific (not just "no exception thrown").
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    base_branches:
+      - main
+    drafts: false
