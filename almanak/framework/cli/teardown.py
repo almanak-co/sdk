@@ -7,16 +7,16 @@ Usage:
     almanak strat teardown -d <strategy_dir> --mode emergency
 
     # Request a teardown (async, picked up by runner)
-    python -m src.cli.teardown request --strategy <name> --mode <graceful|emergency>
+    almanak strat teardown request --strategy <name> --mode <graceful|emergency>
 
     # Check teardown status
-    python -m src.cli.teardown status --strategy <name>
+    almanak strat teardown status --strategy <name>
 
     # Cancel a pending teardown
-    python -m src.cli.teardown cancel --strategy <name>
+    almanak strat teardown cancel --strategy <name>
 
     # List all active teardowns
-    python -m src.cli.teardown list
+    almanak strat teardown list
 
 Examples:
     # Direct execution (recommended)
@@ -24,11 +24,11 @@ Examples:
     almanak strat teardown -d strategies/demo/aave_borrow --mode graceful
 
     # Async request (picked up by strategy runner)
-    python -m src.cli.teardown request --strategy uniswap_lp --mode graceful
-    python -m src.cli.teardown request --strategy aave_leverage --mode emergency --reason "Market crash"
-    python -m src.cli.teardown status --strategy uniswap_lp
-    python -m src.cli.teardown cancel --strategy uniswap_lp
-    python -m src.cli.teardown list
+    almanak strat teardown request --strategy uniswap_lp --mode graceful
+    almanak strat teardown request --strategy aave_leverage --mode emergency --reason "Market crash"
+    almanak strat teardown status --strategy uniswap_lp
+    almanak strat teardown cancel --strategy uniswap_lp
+    almanak strat teardown list
 """
 
 import asyncio
@@ -767,13 +767,13 @@ def request(
 
     Examples:
         # Graceful teardown with default settings
-        python -m src.cli.teardown request --strategy uniswap_lp --mode graceful
+        almanak strat teardown request --strategy uniswap_lp --mode graceful
 
         # Emergency teardown keeping native tokens
-        python -m src.cli.teardown request --strategy aave_leverage --mode emergency --asset-policy keep
+        almanak strat teardown request --strategy aave_leverage --mode emergency --asset-policy keep
 
         # Teardown with reason
-        python -m src.cli.teardown request --strategy gmx_perp --mode graceful --reason "Rebalancing"
+        almanak strat teardown request --strategy gmx_perp --mode graceful --reason "Rebalancing"
     """
     # Map asset policy
     policy_map = {
@@ -835,7 +835,7 @@ def request(
     click.echo()
     click.echo(click.style("Teardown request created!", fg="green"))
     click.echo("The strategy will pick up this request on the next iteration.")
-    click.echo(f"Use 'python -m src.cli.teardown status --strategy {strategy}' to monitor progress.")
+    click.echo(f"Use 'almanak strat teardown status --strategy {strategy}' to monitor progress.")
 
 
 @teardown.command()
@@ -858,8 +858,8 @@ def status(strategy: str, as_json: bool):
     Shows the current state of any teardown request for the specified strategy.
 
     Examples:
-        python -m src.cli.teardown status --strategy uniswap_lp
-        python -m src.cli.teardown status --strategy aave_leverage --json
+        almanak strat teardown status --strategy uniswap_lp
+        almanak strat teardown status --strategy aave_leverage --json
     """
     manager = get_teardown_state_manager()
     request = manager.get_request(strategy)
@@ -899,7 +899,7 @@ def status(strategy: str, as_json: bool):
         if request.can_cancel:
             click.echo(
                 click.style(
-                    "Tip: Use 'python -m src.cli.teardown cancel --strategy " + strategy + "' to cancel",
+                    "Tip: Use 'almanak strat teardown cancel --strategy " + strategy + "' to cancel",
                     fg="yellow",
                 )
             )
@@ -925,8 +925,8 @@ def cancel(strategy: str, force: bool):
     For emergency mode: Only cancellable during the 10-second window.
 
     Examples:
-        python -m src.cli.teardown cancel --strategy uniswap_lp
-        python -m src.cli.teardown cancel --strategy aave_leverage --force
+        almanak strat teardown cancel --strategy uniswap_lp
+        almanak strat teardown cancel --strategy aave_leverage --force
     """
     manager = get_teardown_state_manager()
     request = manager.get_active_request(strategy)
@@ -988,20 +988,21 @@ def list_teardowns(show_all: bool, as_json: bool):
     completed and cancelled requests.
 
     Examples:
-        python -m src.cli.teardown list
-        python -m src.cli.teardown list --all
-        python -m src.cli.teardown list --json
+        almanak strat teardown list
+        almanak strat teardown list --all
+        almanak strat teardown list --json
     """
     manager = get_teardown_state_manager()
 
     if show_all:
-        # Need to query all requests - not just active
-        # For now, just get active ones
-        requests = manager.get_all_active_requests()
+        requests = manager.get_all_requests()
     else:
         requests = manager.get_all_active_requests()
 
     if not requests:
+        if as_json:
+            click.echo("[]")
+            return
         click.echo("No active teardown requests found.")
         return
 

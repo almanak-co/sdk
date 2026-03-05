@@ -291,103 +291,97 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
         Returns:
             Intent: LP_OPEN, LP_CLOSE, or HOLD
         """
+        # =================================================================
+        # STEP 1: Get current market price
+        # =================================================================
+        # Price is expressed as token1 per token0
+        # For WETH/USDC: price = USDC per WETH (e.g., 3400)
+
         try:
-            # =================================================================
-            # STEP 1: Get current market price
-            # =================================================================
-            # Price is expressed as token1 per token0
-            # For WETH/USDC: price = USDC per WETH (e.g., 3400)
+            token0_price_usd = market.price(self.token0_symbol)
+            token1_price_usd = market.price(self.token1_symbol)
+            current_price = token0_price_usd / token1_price_usd
+            logger.debug(f"Current price: {current_price:.2f} {self.token1_symbol}/{self.token0_symbol}")
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Could not get price: {e}")
+            # Use a reasonable default for testing
+            current_price = Decimal("3400")
 
-            try:
-                token0_price_usd = market.price(self.token0_symbol)
-                token1_price_usd = market.price(self.token1_symbol)
-                current_price = token0_price_usd / token1_price_usd
-                logger.debug(f"Current price: {current_price:.2f} {self.token1_symbol}/{self.token0_symbol}")
-            except (ValueError, KeyError) as e:
-                logger.warning(f"Could not get price: {e}")
-                # Use a reasonable default for testing
-                current_price = Decimal("3400")
+        # =================================================================
+        # STEP 2: Handle forced actions (for testing)
+        # =================================================================
 
-            # =================================================================
-            # STEP 2: Handle forced actions (for testing)
-            # =================================================================
-
-            if self.force_action == "open":
-                logger.info("Forced action: OPEN LP position")
-                return self._create_open_intent(current_price)
-
-            elif self.force_action == "close":
-                if not self.position_id:
-                    logger.warning("force_action=close but no position_id provided")
-                    return Intent.hold(reason="Close requested but no position_id")
-                logger.info(f"Forced action: CLOSE LP position {self.position_id}")
-                return self._create_close_intent(self.position_id)
-
-            # =================================================================
-            # STEP 3: Check current position status
-            # =================================================================
-            # In a real strategy, we would:
-            # 1. Query the NFT position manager for our positions
-            # 2. Check if current price is within position's range
-            # 3. Decide whether to rebalance
-            #
-            # For this demo, we use simplified logic:
-
-            # If we have a tracked position, check if it needs rebalancing
-            if self._current_position_id:
-                # In production, you would query the position's tick range
-                # and compare to current price
-                # Here we just hold and wait
-                return Intent.hold(reason=f"Position {self._current_position_id} exists - monitoring")
-
-            # =================================================================
-            # STEP 4: No position - decide whether to open one
-            # =================================================================
-
-            # Check we have sufficient balance
-            try:
-                token0_balance_result = market.balance(self.token0_symbol)
-                token1_balance_result = market.balance(self.token1_symbol)
-                
-                # Handle both TokenBalance and Decimal return types
-                if hasattr(token0_balance_result, 'balance'):
-                    # TokenBalance object - extract the balance Decimal
-                    token0_balance = token0_balance_result.balance
-                    token1_balance = token1_balance_result.balance
-                else:
-                    # Already a Decimal
-                    token0_balance = token0_balance_result
-                    token1_balance = token1_balance_result
-
-                if token0_balance < self.amount0:
-                    return Intent.hold(
-                        reason=f"Insufficient {self.token0_symbol}: {token0_balance} < {self.amount0}"
-                    )
-                if token1_balance < self.amount1:
-                    return Intent.hold(
-                        reason=f"Insufficient {self.token1_symbol}: {token1_balance} < {self.amount1}"
-                    )
-            except (ValueError, KeyError):
-                # Balance check failed, but we can still try to open
-                logger.warning("Could not verify balances, proceeding anyway")
-
-            # Open new position centered on current price
-            logger.info("No position found - opening new LP position")
-            add_event(
-                TimelineEvent(
-                    timestamp=datetime.now(UTC),
-                    event_type=TimelineEventType.STATE_CHANGE,
-                    description="No position found - opening new LP position",
-                    strategy_id=self.strategy_id,
-                    details={"action": "opening_new_position"},
-                )
-            )
+        if self.force_action == "open":
+            logger.info("Forced action: OPEN LP position")
             return self._create_open_intent(current_price)
 
-        except Exception as e:
-            # Always catch exceptions and return hold
-            logger.exception(f"Error in decide(): {e}")
-            return Intent.hold(reason=f"Error: {str(e)}")
+        elif self.force_action == "close":
+            if not self.position_id:
+                logger.warning("force_action=close but no position_id provided")
+                return Intent.hold(reason="Close requested but no position_id")
+            logger.info(f"Forced action: CLOSE LP position {self.position_id}")
+            return self._create_close_intent(self.position_id)
+
+        # =================================================================
+        # STEP 3: Check current position status
+        # =================================================================
+        # In a real strategy, we would:
+        # 1. Query the NFT position manager for our positions
+        # 2. Check if current price is within position's range
+        # 3. Decide whether to rebalance
+        #
+        # For this demo, we use simplified logic:
+
+        # If we have a tracked position, check if it needs rebalancing
+        if self._current_position_id:
+            # In production, you would query the position's tick range
+            # and compare to current price
+            # Here we just hold and wait
+            return Intent.hold(reason=f"Position {self._current_position_id} exists - monitoring")
+
+        # =================================================================
+        # STEP 4: No position - decide whether to open one
+        # =================================================================
+
+        # Check we have sufficient balance
+        try:
+            token0_balance_result = market.balance(self.token0_symbol)
+            token1_balance_result = market.balance(self.token1_symbol)
+            
+            # Handle both TokenBalance and Decimal return types
+            if hasattr(token0_balance_result, 'balance'):
+                # TokenBalance object - extract the balance Decimal
+                token0_balance = token0_balance_result.balance
+                token1_balance = token1_balance_result.balance
+            else:
+                # Already a Decimal
+                token0_balance = token0_balance_result
+                token1_balance = token1_balance_result
+
+            if token0_balance < self.amount0:
+                return Intent.hold(
+                    reason=f"Insufficient {self.token0_symbol}: {token0_balance} < {self.amount0}"
+                )
+            if token1_balance < self.amount1:
+                return Intent.hold(
+                    reason=f"Insufficient {self.token1_symbol}: {token1_balance} < {self.amount1}"
+                )
+        except (ValueError, KeyError):
+            # Balance check failed, but we can still try to open
+            logger.warning("Could not verify balances, proceeding anyway")
+
+        # Open new position centered on current price
+        logger.info("No position found - opening new LP position")
+        add_event(
+            TimelineEvent(
+                timestamp=datetime.now(UTC),
+                event_type=TimelineEventType.STATE_CHANGE,
+                description="No position found - opening new LP position",
+                strategy_id=self.strategy_id,
+                details={"action": "opening_new_position"},
+            )
+        )
+        return self._create_open_intent(current_price)
 
     # =========================================================================
     # INTENT CREATION HELPERS
@@ -496,14 +490,10 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
     
     def _load_position_from_state(self) -> None:
         """Load position ID from persistent state if available."""
-        try:
-            state = self.get_persistent_state()
-            if state and "current_position_id" in state:
-                self._current_position_id = str(state["current_position_id"])
-                logger.info(f"Loaded position ID from state: {self._current_position_id}")
-        except Exception as e:
-            logger.warning(f"Failed to load position from state: {e}")
-    
+        state = self.get_persistent_state()
+        if state and "current_position_id" in state:
+            self._current_position_id = str(state["current_position_id"])
+            logger.info(f"Loaded position ID from state: {self._current_position_id}")
     def _save_position_to_state(self, position_id: int) -> None:
         """Save position ID to strategy state so it persists across runs.
         

@@ -204,110 +204,105 @@ class AaveBorrowStrategy(IntentStrategy):
         Returns:
             Intent: SUPPLY, BORROW, SWAP, or HOLD
         """
+        # =================================================================
+        # STEP 1: Get current market prices
+        # =================================================================
+
         try:
-            # =================================================================
-            # STEP 1: Get current market prices
-            # =================================================================
+            collateral_price = market.price(self.collateral_token)
+            borrow_price = market.price(self.borrow_token)
+            logger.debug(
+                f"Prices: {self.collateral_token}=${collateral_price:.2f}, {self.borrow_token}=${borrow_price:.2f}"
+            )
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Could not get prices: {e}")
+            # Use reasonable defaults for testing
+            collateral_price = Decimal("3400")  # ETH price
+            borrow_price = Decimal("1")  # USDC price
 
-            try:
-                collateral_price = market.price(self.collateral_token)
-                borrow_price = market.price(self.borrow_token)
-                logger.debug(
-                    f"Prices: {self.collateral_token}=${collateral_price:.2f}, {self.borrow_token}=${borrow_price:.2f}"
+        # =================================================================
+        # STEP 2: Handle forced actions (for testing)
+        # =================================================================
+
+        if self.force_action == "supply":
+            logger.info("Forced action: SUPPLY collateral")
+            return self._create_supply_intent()
+
+        elif self.force_action == "borrow":
+            logger.info("Forced action: BORROW against collateral")
+            return self._create_borrow_intent(collateral_price, borrow_price)
+
+        # =================================================================
+        # STEP 3: Check balances
+        # =================================================================
+
+        try:
+            collateral_balance = market.balance(self.collateral_token)
+            logger.debug(f"Collateral balance: {collateral_balance} {self.collateral_token}")
+        except (ValueError, KeyError):
+            logger.warning("Could not verify balances")
+            collateral_balance = self.collateral_amount  # Assume we have it
+
+        # =================================================================
+        # STEP 4: State machine logic
+        # =================================================================
+
+        # State: IDLE - need to supply collateral
+        if self._loop_state == "idle":
+            # Check we have enough collateral
+            # collateral_balance is a TokenBalance object, extract the balance value
+            balance_value = (
+                collateral_balance.balance if hasattr(collateral_balance, "balance") else collateral_balance
+            )
+            if balance_value < self.collateral_amount:
+                return Intent.hold(
+                    reason=f"Insufficient {self.collateral_token}: {balance_value} < {self.collateral_amount}"
                 )
-            except (ValueError, KeyError) as e:
-                logger.warning(f"Could not get prices: {e}")
-                # Use reasonable defaults for testing
-                collateral_price = Decimal("3400")  # ETH price
-                borrow_price = Decimal("1")  # USDC price
 
-            # =================================================================
-            # STEP 2: Handle forced actions (for testing)
-            # =================================================================
-
-            if self.force_action == "supply":
-                logger.info("Forced action: SUPPLY collateral")
-                return self._create_supply_intent()
-
-            elif self.force_action == "borrow":
-                logger.info("Forced action: BORROW against collateral")
-                return self._create_borrow_intent(collateral_price, borrow_price)
-
-            # =================================================================
-            # STEP 3: Check balances
-            # =================================================================
-
-            try:
-                collateral_balance = market.balance(self.collateral_token)
-                logger.debug(f"Collateral balance: {collateral_balance} {self.collateral_token}")
-            except (ValueError, KeyError):
-                logger.warning("Could not verify balances")
-                collateral_balance = self.collateral_amount  # Assume we have it
-
-            # =================================================================
-            # STEP 4: State machine logic
-            # =================================================================
-
-            # State: IDLE - need to supply collateral
-            if self._loop_state == "idle":
-                # Check we have enough collateral
-                # collateral_balance is a TokenBalance object, extract the balance value
-                balance_value = (
-                    collateral_balance.balance if hasattr(collateral_balance, "balance") else collateral_balance
+            logger.info("State: IDLE -> Supplying collateral")
+            add_event(
+                TimelineEvent(
+                    timestamp=datetime.now(UTC),
+                    event_type=TimelineEventType.STATE_CHANGE,
+                    description="State: IDLE -> Supplying collateral",
+                    strategy_id=self.strategy_id,
+                    details={"old_state": "idle", "new_state": "supplying"},
                 )
-                if balance_value < self.collateral_amount:
-                    return Intent.hold(
-                        reason=f"Insufficient {self.collateral_token}: {balance_value} < {self.collateral_amount}"
-                    )
+            )
+            self._previous_stable_state = self._loop_state
+            self._loop_state = "supplying"
+            return self._create_supply_intent()
 
-                logger.info("State: IDLE -> Supplying collateral")
-                add_event(
-                    TimelineEvent(
-                        timestamp=datetime.now(UTC),
-                        event_type=TimelineEventType.STATE_CHANGE,
-                        description="State: IDLE -> Supplying collateral",
-                        strategy_id=self.strategy_id,
-                        details={"old_state": "idle", "new_state": "supplying"},
-                    )
+        # State: SUPPLIED - need to borrow
+        elif self._loop_state == "supplied":
+            logger.info("State: SUPPLIED -> Borrowing")
+            add_event(
+                TimelineEvent(
+                    timestamp=datetime.now(UTC),
+                    event_type=TimelineEventType.STATE_CHANGE,
+                    description="State: SUPPLIED -> Borrowing",
+                    strategy_id=self.strategy_id,
+                    details={"old_state": "supplied", "new_state": "borrowing"},
                 )
-                self._previous_stable_state = self._loop_state
-                self._loop_state = "supplying"
-                return self._create_supply_intent()
+            )
+            self._previous_stable_state = self._loop_state
+            self._loop_state = "borrowing"
+            return self._create_borrow_intent(collateral_price, borrow_price)
 
-            # State: SUPPLIED - need to borrow
-            elif self._loop_state == "supplied":
-                logger.info("State: SUPPLIED -> Borrowing")
-                add_event(
-                    TimelineEvent(
-                        timestamp=datetime.now(UTC),
-                        event_type=TimelineEventType.STATE_CHANGE,
-                        description="State: SUPPLIED -> Borrowing",
-                        strategy_id=self.strategy_id,
-                        details={"old_state": "supplied", "new_state": "borrowing"},
-                    )
+        # State: COMPLETE - done borrowing
+        elif self._loop_state == "complete":
+            return Intent.hold(reason="Loop complete - position established")
+
+        # Safety net: if we're in a transitional state (supplying, borrowing)
+        # it means the previous intent failed. Revert to last stable state.
+        else:
+            if self._loop_state in ("supplying", "borrowing"):
+                revert_to = self._previous_stable_state
+                logger.warning(
+                    f"Stuck in transitional state '{self._loop_state}' — reverting to '{revert_to}'"
                 )
-                self._previous_stable_state = self._loop_state
-                self._loop_state = "borrowing"
-                return self._create_borrow_intent(collateral_price, borrow_price)
-
-            # State: COMPLETE - done borrowing
-            elif self._loop_state == "complete":
-                return Intent.hold(reason="Loop complete - position established")
-
-            # Safety net: if we're in a transitional state (supplying, borrowing)
-            # it means the previous intent failed. Revert to last stable state.
-            else:
-                if self._loop_state in ("supplying", "borrowing"):
-                    revert_to = self._previous_stable_state
-                    logger.warning(
-                        f"Stuck in transitional state '{self._loop_state}' — reverting to '{revert_to}'"
-                    )
-                    self._loop_state = revert_to
-                return Intent.hold(reason=f"Waiting for state transition (current: {self._loop_state})")
-
-        except Exception as e:
-            logger.exception(f"Error in decide(): {e}")
-            return Intent.hold(reason=f"Error: {str(e)}")
+                self._loop_state = revert_to
+            return Intent.hold(reason=f"Waiting for state transition (current: {self._loop_state})")
 
     # =========================================================================
     # INTENT CREATION HELPERS

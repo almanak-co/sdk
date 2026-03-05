@@ -11,7 +11,7 @@ Flow:
 4. On completion, request is marked complete/failed
 
 This decoupled design allows multiple triggers:
-- CLI: `python -m src.cli.teardown --strategy <name> --mode graceful`
+- CLI: `almanak strat teardown request --strategy <name> --mode graceful`
 - Config: Set `teardown.request = true` in strategy config (hot-reload)
 - Dashboard: Click "Close Strategy" button
 - Risk Guards: Auto-protect triggers when health factor drops
@@ -200,6 +200,17 @@ class TeardownStateManager:
                 f"SELECT * FROM teardown_requests WHERE status NOT IN ({placeholders})",
                 terminal_statuses,
             )
+            return [self._row_to_request(row) for row in cursor.fetchall()]
+
+    def get_all_requests(self) -> list[TeardownRequest]:
+        """Get all teardown requests including completed and cancelled.
+
+        Returns:
+            List of all teardown requests regardless of status
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM teardown_requests ORDER BY requested_at DESC")
             return [self._row_to_request(row) for row in cursor.fetchall()]
 
     def update_request(self, request: TeardownRequest) -> None:

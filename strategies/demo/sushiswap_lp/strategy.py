@@ -286,92 +286,87 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
         Returns:
             Intent: LP_OPEN, LP_CLOSE, or HOLD
         """
+        # =================================================================
+        # STEP 1: Get current market price
+        # =================================================================
+        # Price is expressed as token1 per token0 (USDC per WETH for WETH/USDC pool)
+        # This gives us the ETH price in USD terms (e.g., ~3400)
+
         try:
-            # =================================================================
-            # STEP 1: Get current market price
-            # =================================================================
-            # Price is expressed as token1 per token0 (USDC per WETH for WETH/USDC pool)
-            # This gives us the ETH price in USD terms (e.g., ~3400)
-
-            try:
-                token0_price_usd = market.price(self.token0_symbol)
-                token1_price_usd = market.price(self.token1_symbol)
-                # Guard against division by zero
-                if token1_price_usd == Decimal("0"):
-                    logger.warning(f"Token1 price is zero for {self.token1_symbol}, using default price")
-                    current_price = Decimal("3400")
-                else:
-                    # V3 pool price = token1 per token0 (e.g., USDC per WETH)
-                    # To get this from USD prices: token0_usd / token1_usd
-                    current_price = token0_price_usd / token1_price_usd
-                logger.debug(f"Current price: {current_price:.4f} {self.token1_symbol}/{self.token0_symbol}")
-            except (ValueError, KeyError) as e:
-                logger.warning(f"Could not get price: {e}")
-                # Use a reasonable default for ETH/USDC testing (~$3400 per ETH)
+            token0_price_usd = market.price(self.token0_symbol)
+            token1_price_usd = market.price(self.token1_symbol)
+            # Guard against division by zero
+            if token1_price_usd == Decimal("0"):
+                logger.warning(f"Token1 price is zero for {self.token1_symbol}, using default price")
                 current_price = Decimal("3400")
+            else:
+                # V3 pool price = token1 per token0 (e.g., USDC per WETH)
+                # To get this from USD prices: token0_usd / token1_usd
+                current_price = token0_price_usd / token1_price_usd
+            logger.debug(f"Current price: {current_price:.4f} {self.token1_symbol}/{self.token0_symbol}")
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Could not get price: {e}")
+            # Use a reasonable default for ETH/USDC testing (~$3400 per ETH)
+            current_price = Decimal("3400")
 
-            # =================================================================
-            # STEP 2: Handle forced actions (for testing)
-            # =================================================================
+        # =================================================================
+        # STEP 2: Handle forced actions (for testing)
+        # =================================================================
 
-            if self.force_action == "open":
-                logger.info("Forced action: OPEN LP position")
-                return self._create_open_intent(current_price)
-
-            elif self.force_action == "close":
-                if not self._position_id:
-                    logger.warning("force_action=close but no position tracked")
-                    return Intent.hold(reason="Close requested but no position tracked")
-                logger.info("Forced action: CLOSE LP position")
-                return self._create_close_intent()
-
-            # =================================================================
-            # STEP 3: Check current position status
-            # =================================================================
-
-            if self._position_id:
-                # We have a position - check if it's still in range
-                # In production, you would query the pool's current tick
-                return Intent.hold(
-                    reason=f"Position {self._position_id} exists in range [{self._tick_lower}, {self._tick_upper}] - monitoring"
-                )
-
-            # =================================================================
-            # STEP 4: No position - decide whether to open one
-            # =================================================================
-
-            # Check we have sufficient balance
-            try:
-                token0_balance = market.balance(self.token0_symbol)
-                token1_balance = market.balance(self.token1_symbol)
-
-                if token0_balance.balance < self.amount0:
-                    return Intent.hold(
-                        reason=f"Insufficient {self.token0_symbol}: {token0_balance.balance} < {self.amount0}"
-                    )
-                if token1_balance.balance < self.amount1:
-                    return Intent.hold(
-                        reason=f"Insufficient {self.token1_symbol}: {token1_balance.balance} < {self.amount1}"
-                    )
-            except (ValueError, KeyError):
-                logger.warning("Could not verify balances, proceeding anyway")
-
-            # Open new position centered on current price
-            logger.info("No position found - opening new LP position")
-            add_event(
-                TimelineEvent(
-                    timestamp=datetime.now(UTC),
-                    event_type=TimelineEventType.STATE_CHANGE,
-                    description="No position found - opening new SushiSwap V3 LP position",
-                    strategy_id=self.strategy_id,
-                    details={"action": "opening_new_position", "pool": self.pool},
-                )
-            )
+        if self.force_action == "open":
+            logger.info("Forced action: OPEN LP position")
             return self._create_open_intent(current_price)
 
-        except Exception as e:
-            logger.exception("Error in decide()")
-            return Intent.hold(reason=f"Error: {e!s}")
+        elif self.force_action == "close":
+            if not self._position_id:
+                logger.warning("force_action=close but no position tracked")
+                return Intent.hold(reason="Close requested but no position tracked")
+            logger.info("Forced action: CLOSE LP position")
+            return self._create_close_intent()
+
+        # =================================================================
+        # STEP 3: Check current position status
+        # =================================================================
+
+        if self._position_id:
+            # We have a position - check if it's still in range
+            # In production, you would query the pool's current tick
+            return Intent.hold(
+                reason=f"Position {self._position_id} exists in range [{self._tick_lower}, {self._tick_upper}] - monitoring"
+            )
+
+        # =================================================================
+        # STEP 4: No position - decide whether to open one
+        # =================================================================
+
+        # Check we have sufficient balance
+        try:
+            token0_balance = market.balance(self.token0_symbol)
+            token1_balance = market.balance(self.token1_symbol)
+
+            if token0_balance.balance < self.amount0:
+                return Intent.hold(
+                    reason=f"Insufficient {self.token0_symbol}: {token0_balance.balance} < {self.amount0}"
+                )
+            if token1_balance.balance < self.amount1:
+                return Intent.hold(
+                    reason=f"Insufficient {self.token1_symbol}: {token1_balance.balance} < {self.amount1}"
+                )
+        except (ValueError, KeyError):
+            logger.warning("Could not verify balances, proceeding anyway")
+
+        # Open new position centered on current price
+        logger.info("No position found - opening new LP position")
+        add_event(
+            TimelineEvent(
+                timestamp=datetime.now(UTC),
+                event_type=TimelineEventType.STATE_CHANGE,
+                description="No position found - opening new SushiSwap V3 LP position",
+                strategy_id=self.strategy_id,
+                details={"action": "opening_new_position", "pool": self.pool},
+            )
+        )
+        return self._create_open_intent(current_price)
 
     # =========================================================================
     # INTENT CREATION HELPERS

@@ -155,91 +155,104 @@ class PendleBasicsStrategy(IntentStrategy):
         Returns:
             Intent: What action to take (SWAP or HOLD)
         """
+        # =================================================================
+        # STEP 1: Get current market data
+        # =================================================================
+        # For stablecoins (USDT0, USDC, etc), assume $1 if price not available
+        stablecoins = {"USDT0", "USDC", "USDT", "DAI", "FUSDT0"}
+        # Known stablecoin addresses (Plasma)
+        stablecoin_addresses = {
+            "0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb",  # USDT0
+            "0x1dd4b13fcae900c60a350589be8052959d2ed27b",  # fUSDT0
+        }
         try:
-            # =================================================================
-            # STEP 1: Get current market data
-            # =================================================================
             base_price = market.price(self.base_token)
             logger.debug(f"Current {self.base_token_symbol} price: ${base_price:,.2f}")
+        except ValueError:
+            is_stablecoin = (
+                self.base_token_symbol.upper() in stablecoins
+                or self.base_token.lower() in stablecoin_addresses
+            )
+            if is_stablecoin:
+                base_price = 1.0
+                logger.debug(f"Using $1.00 for stablecoin {self.base_token_symbol}")
+            else:
+                raise
 
-            # =================================================================
-            # STEP 2: Check balances
-            # =================================================================
-            try:
-                base_balance = market.balance(self.base_token)
-                logger.debug(
-                    f"Balance - {self.base_token}: {base_balance.balance:.4f} "
-                    f"(${base_balance.balance_usd:,.2f})"
-                )
-            except ValueError as e:
-                logger.warning(f"Could not get balance: {e}")
-                return Intent.hold(reason="Balance data unavailable")
+        # =================================================================
+        # STEP 2: Check balances
+        # =================================================================
+        try:
+            base_balance = market.balance(self.base_token)
+            logger.debug(
+                f"Balance - {self.base_token}: {base_balance.balance:.4f} "
+                f"(${base_balance.balance_usd:,.2f})"
+            )
+        except ValueError as e:
+            logger.warning(f"Could not get balance: {e}")
+            return Intent.hold(reason="Balance data unavailable")
 
-            # =================================================================
-            # STEP 3: Decision Logic
-            # =================================================================
+        # =================================================================
+        # STEP 3: Decision Logic
+        # =================================================================
 
-            # Check if we have enough balance to trade
-            if self.trade_size_token:
-                # Token-based check
-                if base_balance.balance < self.trade_size_token:
-                    self._consecutive_holds += 1
-                    return Intent.hold(
-                        reason=f"Insufficient {self.base_token} balance "
-                        f"({base_balance.balance:.6f} < {self.trade_size_token})"
-                    )
-            elif base_balance.balance_usd < self.trade_size_usd:
+        # Check if we have enough balance to trade
+        if self.trade_size_token:
+            # Token-based check
+            if base_balance.balance < self.trade_size_token:
                 self._consecutive_holds += 1
                 return Intent.hold(
                     reason=f"Insufficient {self.base_token} balance "
-                    f"(${base_balance.balance_usd:.2f} < ${self.trade_size_usd})"
+                    f"({base_balance.balance:.6f} < {self.trade_size_token})"
                 )
-
-            # If we haven't entered a position yet, buy PT
-            if not self._has_entered_position:
-                if self.trade_size_token:
-                    logger.info(
-                        f"Entering Pendle position: Swapping {self.trade_size_token} "
-                        f"{self.base_token} for {self.pt_token}"
-                    )
-                else:
-                    logger.info(
-                        f"Entering Pendle position: Swapping {format_usd(self.trade_size_usd)} "
-                        f"{self.base_token} for {self.pt_token}"
-                    )
-
-                self._has_entered_position = True
-                self._consecutive_holds = 0
-
-                # Use the standard swap intent with Pendle protocol
-                # The framework will route this through the Pendle adapter
-                if self.trade_size_token:
-                    return Intent.swap(
-                        from_token=self.base_token,
-                        to_token=self.pt_token,
-                        amount=self.trade_size_token,
-                        max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),
-                        protocol="pendle",
-                    )
-                else:
-                    return Intent.swap(
-                        from_token=self.base_token,
-                        to_token=self.pt_token,
-                        amount_usd=self.trade_size_usd,
-                        max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),
-                        protocol="pendle",
-                    )
-
-            # Already in position, hold
+        elif base_balance.balance_usd < self.trade_size_usd:
             self._consecutive_holds += 1
             return Intent.hold(
-                reason=f"Already holding {self.pt_token} position "
-                f"(hold #{self._consecutive_holds})"
+                reason=f"Insufficient {self.base_token} balance "
+                f"(${base_balance.balance_usd:.2f} < ${self.trade_size_usd})"
             )
 
-        except Exception as e:
-            logger.exception(f"Error in decide(): {e}")
-            return Intent.hold(reason=f"Error: {str(e)}")
+        # If we haven't entered a position yet, buy PT
+        if not self._has_entered_position:
+            if self.trade_size_token:
+                logger.info(
+                    f"Entering Pendle position: Swapping {self.trade_size_token} "
+                    f"{self.base_token} for {self.pt_token}"
+                )
+            else:
+                logger.info(
+                    f"Entering Pendle position: Swapping {format_usd(self.trade_size_usd)} "
+                    f"{self.base_token} for {self.pt_token}"
+                )
+
+            self._has_entered_position = True
+            self._consecutive_holds = 0
+
+            # Use the standard swap intent with Pendle protocol
+            # The framework will route this through the Pendle adapter
+            if self.trade_size_token:
+                return Intent.swap(
+                    from_token=self.base_token,
+                    to_token=self.pt_token,
+                    amount=self.trade_size_token,
+                    max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),
+                    protocol="pendle",
+                )
+            else:
+                return Intent.swap(
+                    from_token=self.base_token,
+                    to_token=self.pt_token,
+                    amount_usd=self.trade_size_usd,
+                    max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),
+                    protocol="pendle",
+                )
+
+        # Already in position, hold
+        self._consecutive_holds += 1
+        return Intent.hold(
+            reason=f"Already holding {self.pt_token} position "
+            f"(hold #{self._consecutive_holds})"
+        )
 
     def _get_tracked_tokens(self) -> list[str]:
         """Get list of tokens to track for wallet balance.

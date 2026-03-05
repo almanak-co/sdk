@@ -934,10 +934,6 @@ ALMANAK_PRIVATE_KEY=
 # RPC_URL=https://your-rpc-provider.com/v1/your-key
 # ALCHEMY_API_KEY=
 
-# RPC access (set one of these)
-# RPC_URL=https://your-rpc-provider.com/v1/your-key
-ALCHEMY_API_KEY=
-
 # Optional
 # ALMANAK_GATEWAY_PRIVATE_KEY=  # falls back to ALMANAK_PRIVATE_KEY if unset
 # ENSO_API_KEY=

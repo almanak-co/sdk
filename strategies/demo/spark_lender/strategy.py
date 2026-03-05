@@ -174,56 +174,51 @@ class SparkLenderStrategy(IntentStrategy):
         Returns:
             Intent: SUPPLY or HOLD
         """
+        # =================================================================
+        # STEP 1: Handle forced actions (for testing)
+        # =================================================================
+
+        if self.force_action == "supply":
+            logger.info(f"Forced action: SUPPLY {self.supply_token}")
+            return self._create_supply_intent(self.min_supply_amount)
+
+        # =================================================================
+        # STEP 2: Check if already supplied
+        # =================================================================
+
+        if self._supplied:
+            return Intent.hold(reason=f"Already supplied {self._supplied_amount} {self.supply_token} -> sp{self.supply_token}")
+
+        # =================================================================
+        # STEP 3: Check DAI balance
+        # =================================================================
+
         try:
-            # =================================================================
-            # STEP 1: Handle forced actions (for testing)
-            # =================================================================
+            token_balance = market.balance(self.supply_token)
+            # Extract balance value from TokenBalance object if needed
+            balance_value = token_balance.balance if hasattr(token_balance, "balance") else token_balance
+            logger.debug(f"{self.supply_token} balance: {balance_value}")
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Could not get {self.supply_token} balance: {e}")
+            return Intent.hold(reason=f"Could not fetch {self.supply_token} balance: {e}")
 
-            if self.force_action == "supply":
-                logger.info(f"Forced action: SUPPLY {self.supply_token}")
-                return self._create_supply_intent(self.min_supply_amount)
+        # =================================================================
+        # STEP 4: Supply if sufficient balance
+        # =================================================================
 
-            # =================================================================
-            # STEP 2: Check if already supplied
-            # =================================================================
-
-            if self._supplied:
-                return Intent.hold(reason=f"Already supplied {self._supplied_amount} {self.supply_token} -> sp{self.supply_token}")
-
-            # =================================================================
-            # STEP 3: Check DAI balance
-            # =================================================================
-
-            try:
-                token_balance = market.balance(self.supply_token)
-                # Extract balance value from TokenBalance object if needed
-                balance_value = token_balance.balance if hasattr(token_balance, "balance") else token_balance
-                logger.debug(f"{self.supply_token} balance: {balance_value}")
-            except (ValueError, KeyError) as e:
-                logger.warning(f"Could not get {self.supply_token} balance: {e}")
-                return Intent.hold(reason=f"Could not fetch {self.supply_token} balance: {e}")
-
-            # =================================================================
-            # STEP 4: Supply if sufficient balance
-            # =================================================================
-
-            if balance_value >= self.min_supply_amount:
-                logger.info(
-                    f"{self.supply_token} balance ({balance_value}) >= min_supply ({self.min_supply_amount}), supplying"
-                )
-                return self._create_supply_intent(balance_value)
-
-            # =================================================================
-            # STEP 5: Insufficient balance - hold
-            # =================================================================
-
-            return Intent.hold(
-                reason=f"Insufficient {self.supply_token} balance: {balance_value} < {self.min_supply_amount}"
+        if balance_value >= self.min_supply_amount:
+            logger.info(
+                f"{self.supply_token} balance ({balance_value}) >= min_supply ({self.min_supply_amount}), supplying"
             )
+            return self._create_supply_intent(balance_value)
 
-        except Exception as e:
-            logger.exception(f"Error in decide(): {e}")
-            return Intent.hold(reason=f"Error: {str(e)}")
+        # =================================================================
+        # STEP 5: Insufficient balance - hold
+        # =================================================================
+
+        return Intent.hold(
+            reason=f"Insufficient {self.supply_token} balance: {balance_value} < {self.min_supply_amount}"
+        )
 
     # =========================================================================
     # INTENT CREATION HELPERS
