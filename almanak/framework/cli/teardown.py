@@ -155,24 +155,6 @@ def load_strategy_from_file(file_path: Path) -> tuple[type | None, str | None]:
         return None, f"Error loading strategy: {str(e)}"
 
 
-class DictConfigWrapper:
-    """Wrapper for dict configs to provide required methods."""
-
-    _RESERVED_ATTRS = frozenset({"_data", "to_dict", "get"})
-
-    def __init__(self, data: dict[str, Any]):
-        self._data = data
-        for key, value in data.items():
-            if key not in self._RESERVED_ATTRS:
-                setattr(self, key, value)
-
-    def to_dict(self) -> dict[str, Any]:
-        return dict(self._data)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return self._data.get(key, default)
-
-
 def _build_strategy_id_candidates(strategy: Any, strategy_class: type, config_dict: dict[str, Any]) -> list[str]:
     """Build strategy_id candidates for state restore."""
     candidates: list[str] = []
@@ -550,7 +532,9 @@ def execute_teardown(
                 )
             wallet_address = Account.from_key(private_key).address
 
-        # Create config object
+        # Create config object -- deferred import to avoid heavy run.py import cascade (VIB-522)
+        from almanak.framework.cli.run import DictConfigWrapper
+
         config_obj = DictConfigWrapper(config_dict)
 
         # Instantiate strategy
