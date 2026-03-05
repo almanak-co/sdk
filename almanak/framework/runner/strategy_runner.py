@@ -1292,6 +1292,9 @@ class StrategyRunner:
                 # Run iteration
                 result = await self.run_iteration(strategy)
 
+                # Emit structured iteration summary for JSONL log analysis
+                self._emit_iteration_summary(result, chain=getattr(strategy, "chain", None))
+
                 # Update state
                 if self.config.enable_state_persistence:
                     await self._update_state(strategy_id, result)
@@ -2941,6 +2944,58 @@ class StrategyRunner:
         """Calculate duration in milliseconds since start_time."""
         elapsed = datetime.now(UTC) - start_time
         return elapsed.total_seconds() * 1000
+
+    def _emit_iteration_summary(self, result: IterationResult, chain: str | None = None) -> None:
+        """Emit a structured iteration_summary log record for JSONL analysis.
+
+        This provides a single, machine-readable record per iteration containing
+        all key fields needed for post-hoc analysis by AI agents or dashboards.
+        """
+        # Extract intent info
+        intent_type = None
+        intents_serialized: list[dict[str, Any]] = []
+        if result.intent:
+            intent_type = result.intent.intent_type.value if hasattr(result.intent, "intent_type") else None
+            try:
+                intents_serialized = [result.intent.serialize()] if hasattr(result.intent, "serialize") else []
+            except Exception:  # noqa: BLE001
+                logger.debug("Failed to serialize intent for iteration_summary", exc_info=True)
+
+        # Extract execution info
+        tx_hashes: list[str] = []
+        txs_planned = 0
+        txs_sent = 0
+        if result.execution_result:
+            er = result.execution_result
+            if hasattr(er, "transaction_results") and er.transaction_results:
+                tx_hashes = [tr.tx_hash for tr in er.transaction_results if hasattr(tr, "tx_hash") and tr.tx_hash]
+                txs_sent = len(tx_hashes)
+            if hasattr(er, "tx_hashes") and er.tx_hashes:
+                tx_hashes = tx_hashes or er.tx_hashes
+                txs_sent = txs_sent or len(er.tx_hashes)
+            # txs_planned: count from action bundle if available
+            if hasattr(er, "receipts"):
+                txs_planned = max(txs_planned, len(er.receipts))
+            txs_planned = max(txs_planned, txs_sent)
+
+        logger.info(
+            "iteration_summary",
+            extra={
+                "event_type": "iteration_summary",
+                "strategy_id": result.strategy_id,
+                "chain": chain,
+                "iteration": self._total_iterations,
+                "decision": intent_type,
+                "intents": intents_serialized,
+                "dry_run": self.config.dry_run,
+                "txs_planned": txs_planned,
+                "txs_sent": txs_sent,
+                "tx_hashes": tx_hashes,
+                "status": result.status.value,
+                "duration_ms": round(result.duration_ms, 1),
+                "error": result.error,
+            },
+        )
 
     async def _is_strategy_paused(self, strategy_id: str) -> tuple[bool, str | None]:
         """Check persisted control state to determine if strategy is paused."""

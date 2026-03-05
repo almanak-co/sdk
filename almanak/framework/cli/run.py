@@ -2166,6 +2166,9 @@ def run(
 
                 result = await runner.run_iteration(strategy_instance)
 
+                # Emit structured iteration summary for JSONL log analysis
+                runner._emit_iteration_summary(result, chain=getattr(strategy_instance, "chain", None))
+
                 # --- teardown-after: signal + second iteration ---
                 teardown_result = None
                 if (
@@ -2191,6 +2194,7 @@ def run(
                     )
 
                     teardown_result = await runner.run_iteration(strategy_instance)
+                    runner._emit_iteration_summary(teardown_result, chain=getattr(strategy_instance, "chain", None))
                     click.echo(format_iteration_result(teardown_result))
                 elif teardown_after:
                     teardown_result = IterationResult(
