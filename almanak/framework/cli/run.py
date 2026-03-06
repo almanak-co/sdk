@@ -432,6 +432,48 @@ def create_routing_ohlcv_provider(
     )
 
 
+def _validate_safe_mode_preflight(execution_address: str) -> str | None:
+    """Validate Safe mode environment consistency between framework and gateway.
+
+    Returns an error message string if validation fails, or None on success.
+    """
+    gw_safe_mode = (os.environ.get("ALMANAK_GATEWAY_SAFE_MODE") or "").lower()
+    gw_safe_address = os.environ.get("ALMANAK_GATEWAY_SAFE_ADDRESS")
+
+    # Guard 1: Gateway must also be in Safe mode
+    if gw_safe_mode not in ("direct", "zodiac"):
+        return (
+            f"Strategy is in Safe mode (ALMANAK_EXECUTION_MODE="
+            f"{os.environ.get('ALMANAK_EXECUTION_MODE')}) but gateway Safe mode "
+            "is not configured.\n"
+            "Set ALMANAK_GATEWAY_SAFE_MODE=direct|zodiac and "
+            "ALMANAK_GATEWAY_SAFE_ADDRESS to match."
+        )
+
+    # Guard 2: Gateway must have a Safe address
+    if not gw_safe_address:
+        return "ALMANAK_GATEWAY_SAFE_MODE is set but ALMANAK_GATEWAY_SAFE_ADDRESS is missing."
+
+    # Guard 3: Safe mode type must match (direct vs zodiac)
+    framework_exec_mode = (os.environ.get("ALMANAK_EXECUTION_MODE") or "").lower()
+    expected_gw_mode = "zodiac" if framework_exec_mode == "safe_zodiac" else "direct"
+    if gw_safe_mode != expected_gw_mode:
+        return (
+            f"Safe mode type mismatch -- framework execution mode is '{framework_exec_mode}' "
+            f"(expects gateway '{expected_gw_mode}') but gateway is '{gw_safe_mode}'."
+        )
+
+    # Guard 4: Addresses must match
+    if gw_safe_address.lower() != execution_address.lower():
+        return (
+            f"Safe address mismatch -- framework uses {execution_address} "
+            f"but gateway uses {gw_safe_address}. "
+            "These must be identical or the gateway will select the wrong signer."
+        )
+
+    return None
+
+
 def _wire_indicators(
     strategy_instance: Any,
     ohlcv_provider: RoutingOHLCVProvider,
@@ -1568,6 +1610,15 @@ def run(
             click.echo("  ALMANAK_SIMULATION_ENABLED - Enable simulation (default: false)")
             sys.exit(1)
 
+    # Preflight checks for Safe mode consistency between framework and gateway
+    # Only check when the CLI manages the gateway (env vars are local).
+    # With --no-gateway the env vars may live on a remote host.
+    if runtime_config.is_safe_mode and not no_gateway:
+        error = _validate_safe_mode_preflight(runtime_config.execution_address)
+        if error:
+            click.secho(f"ERROR: {error}", fg="red", err=True)
+            sys.exit(1)
+
     # Ensure chain and wallet_address are set in strategy config
     if "chain" not in strategy_config:
         if multi_chain:
@@ -1576,7 +1627,7 @@ def run(
             assert isinstance(runtime_config, LocalRuntimeConfig)
             strategy_config["chain"] = runtime_config.chain
     if "wallet_address" not in strategy_config:
-        strategy_config["wallet_address"] = runtime_config.wallet_address
+        strategy_config["wallet_address"] = runtime_config.execution_address
 
     # Handle --fresh flag: clear state for this strategy only
     strategy_id = strategy_config["strategy_id"]
@@ -1665,7 +1716,8 @@ def run(
         click.echo(f"Protocols: {strategy_protocols}")
     else:
         click.echo(f"Chain: {runtime_config.chain}")  # type: ignore[union-attr]
-    click.echo(f"Wallet: {runtime_config.wallet_address}")
+    safe_mode_str = " (Safe)" if runtime_config.is_safe_mode else ""
+    click.echo(f"Wallet: {runtime_config.execution_address}{safe_mode_str}")
     exec_desc = "Single run" if once else f"Continuous (every {interval}s)"
     if max_iterations and not once:
         exec_desc += f", max {max_iterations} iterations"
@@ -1754,7 +1806,7 @@ def run(
             strategy_instance = strategy_class(
                 config=config_instance,
                 chain=primary_chain,
-                wallet_address=runtime_config.wallet_address,
+                wallet_address=runtime_config.execution_address,
             )
         else:
             # Try dict config first, then no config
@@ -1806,20 +1858,20 @@ def run(
             price_oracle = GatewayPriceOracle(gateway_client)
             balance_provider = GatewayBalanceProvider(
                 client=gateway_client,
-                wallet_address=runtime_config.wallet_address,
+                wallet_address=runtime_config.execution_address,
                 chain=strategy_chains[0],
             )
             execution_orchestrator = MultiChainOrchestrator.from_gateway(
                 gateway_client=gateway_client,
                 chains=strategy_chains,
-                wallet_address=runtime_config.wallet_address,
+                wallet_address=runtime_config.execution_address,
                 max_gas_price_gwei=runtime_config.max_gas_price_gwei,
             )
 
             # Create multi-chain balance provider for the strategy
             multi_chain_balance_provider = MultiChainGatewayBalanceProvider(
                 client=gateway_client,
-                wallet_address=runtime_config.wallet_address,
+                wallet_address=runtime_config.execution_address,
                 chains=strategy_chains,
             )
 
@@ -1867,13 +1919,13 @@ def run(
             price_oracle = GatewayPriceOracle(gateway_client)
             balance_provider = GatewayBalanceProvider(
                 client=gateway_client,
-                wallet_address=runtime_config.wallet_address,
+                wallet_address=runtime_config.execution_address,
                 chain=runtime_config.chain,
             )
             execution_orchestrator = GatewayExecutionOrchestrator(
                 client=gateway_client,
                 chain=runtime_config.chain,
-                wallet_address=runtime_config.wallet_address,
+                wallet_address=runtime_config.execution_address,
                 max_gas_price_gwei=runtime_config.max_gas_price_gwei,
             )
             click.echo("  Gateway-backed providers created")

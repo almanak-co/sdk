@@ -326,6 +326,9 @@ class LocalRuntimeConfig:
     max_retry_delay: float = 32.0
     max_retries: int = 3
 
+    # Safe wallet signer (optional - mirrors MultiChainRuntimeConfig)
+    safe_signer: Optional["SafeSigner"] = None
+
     # Metadata
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -684,10 +687,22 @@ class LocalRuntimeConfig:
         else:
             default_gas_cap = CHAIN_GAS_PRICE_CAPS_GWEI.get(resolved_chain, DEFAULT_GAS_PRICE_CAP_GWEI)
 
+        # Get execution mode and create Safe signer if needed
+        private_key = get_required("PRIVATE_KEY")
+        mode_str = get_optional("EXECUTION_MODE", "eoa") or "eoa"
+        execution_mode = ExecutionMode.from_string(mode_str)
+        safe_signer = None
+        if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC):
+            safe_signer = _create_safe_signer_from_env(
+                execution_mode=execution_mode,
+                private_key=private_key,
+                prefix=prefix,
+            )
+
         return cls(
             chain=resolved_chain,
             rpc_url=rpc_url,
-            private_key=get_required("PRIVATE_KEY"),
+            private_key=private_key,
             max_gas_price_gwei=get_optional_int("MAX_GAS_PRICE_GWEI", default_gas_cap),
             max_gas_cost_native=get_optional_float("MAX_GAS_COST_NATIVE", 0.0),
             max_gas_cost_usd=get_optional_float("MAX_GAS_COST_USD", 0.0),
@@ -698,6 +713,7 @@ class LocalRuntimeConfig:
             base_retry_delay=get_optional_float("BASE_RETRY_DELAY", 1.0),
             max_retry_delay=get_optional_float("MAX_RETRY_DELAY", 32.0),
             max_retries=get_optional_int("MAX_RETRIES", 3),
+            safe_signer=safe_signer,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -793,12 +809,36 @@ class LocalRuntimeConfig:
         """
         return int(self.max_tx_value_eth * 10**18)
 
+    @property
+    def is_safe_mode(self) -> bool:
+        """Check if Safe wallet mode is enabled.
+
+        Returns:
+            True if a Safe signer is configured
+        """
+        return self.safe_signer is not None
+
+    @property
+    def execution_address(self) -> str:
+        """Get the address that will execute transactions.
+
+        In Safe mode, this returns the Safe wallet address.
+        Otherwise, returns the EOA wallet address.
+
+        Returns:
+            Address that will execute transactions
+        """
+        if self.safe_signer is not None:
+            return self.safe_signer.address
+        return self.wallet_address
+
     def __repr__(self) -> str:
         """Return string representation without exposing private key."""
         return (
             f"LocalRuntimeConfig("
             f"chain={self.chain!r}, "
             f"wallet_address={self.wallet_address!r}, "
+            f"safe_mode={self.is_safe_mode}, "
             f"simulation_enabled={self.simulation_enabled})"
         )
 
@@ -1762,6 +1802,7 @@ class MultiChainRuntimeConfig:
             base_retry_delay=self.base_retry_delay,
             max_retry_delay=self.max_retry_delay,
             max_retries=self.max_retries,
+            safe_signer=self.safe_signer,
         )
 
     @property

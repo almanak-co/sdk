@@ -69,14 +69,18 @@ class _RegisterChainsServicer(gateway_pb2_grpc.HealthServicer):
         chains = list(request.chains)
         wallet_address = request.wallet_address
 
-        # If no wallet_address provided, derive from gateway private key
-        if not wallet_address and self._settings.private_key:
-            from eth_account import Account
+        # If no wallet_address provided, use Safe address or derive from private key
+        if not wallet_address:
+            safe_mode_enabled = self._settings.safe_mode in ("direct", "zodiac")
+            if self._settings.safe_address and safe_mode_enabled:
+                wallet_address = self._settings.safe_address
+            elif self._settings.private_key:
+                from eth_account import Account
 
-            key = self._settings.private_key
-            if not key.startswith("0x"):
-                key = "0x" + key
-            wallet_address = Account.from_key(key).address
+                key = self._settings.private_key
+                if not key.startswith("0x"):
+                    key = "0x" + key
+                wallet_address = Account.from_key(key).address
 
         if not wallet_address:
             return gateway_pb2.RegisterChainsResponse(
@@ -324,10 +328,15 @@ class GatewayServer:
 
         from eth_account import Account
 
-        key = self.settings.private_key
-        if not key.startswith("0x"):
-            key = "0x" + key
-        wallet_address = Account.from_key(key).address
+        # Use Safe address when configured, otherwise derive from private key
+        safe_mode_enabled = self.settings.safe_mode in ("direct", "zodiac")
+        if self.settings.safe_address and safe_mode_enabled:
+            wallet_address = self.settings.safe_address
+        else:
+            key = self.settings.private_key
+            if not key.startswith("0x"):
+                key = "0x" + key
+            wallet_address = Account.from_key(key).address
 
         for chain in self.settings.chains:
             try:
