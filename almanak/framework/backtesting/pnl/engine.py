@@ -712,6 +712,13 @@ class PnLBacktester:
                 f"strict_historical_mode={self.data_config.strict_historical_mode}"
             )
 
+    async def close(self) -> None:
+        """Close data provider and gas provider HTTP sessions."""
+        if hasattr(self.data_provider, "close"):
+            await self.data_provider.close()
+        if self.gas_provider and hasattr(self.gas_provider, "close"):
+            await self.gas_provider.close()
+
     def _track_fallback(self, fallback_type: str) -> None:
         """Track usage of a fallback value.
 
@@ -1693,6 +1700,7 @@ class PnLBacktester:
             # On error, compliance is False and we add the error as a violation
             error_compliance_violations = compliance_violations + [f"Backtest failed with error: {e}"]
             error_fallback_usage = self._fallback_usage.copy() if self._fallback_usage else {}
+            await self.close()
             return BacktestResult(
                 engine=BacktestEngine.PNL,
                 strategy_id=strategy.strategy_id,
@@ -1810,6 +1818,7 @@ class PnLBacktester:
         # Compliance is True only if there are no violations
         institutional_compliance = len(compliance_violations) == 0
 
+        await self.close()
         return BacktestResult(
             engine=BacktestEngine.PNL,
             strategy_id=strategy.strategy_id,
@@ -3144,7 +3153,13 @@ class PnLBacktester:
                 if years > 0:
                     # Compound annual growth rate (CAGR)
                     # (1 + total_return) ^ (1/years) - 1
-                    annualized_return = (Decimal("1") + total_return) ** (Decimal("1") / years) - Decimal("1")
+                    if total_return <= Decimal("-1"):
+                        # Portfolio lost >= 100% (e.g. gas costs exceed principal).
+                        # The base (1 + total_return) is <= 0, so exponentiation is
+                        # undefined for non-integer exponents. Cap at -100%.
+                        annualized_return = Decimal("-1")
+                    else:
+                        annualized_return = (Decimal("1") + total_return) ** (Decimal("1") / years) - Decimal("1")
 
         # Calculate returns series for risk metrics
         returns = self._calculate_returns(equity_values)

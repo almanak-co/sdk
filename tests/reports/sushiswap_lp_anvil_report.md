@@ -1,100 +1,108 @@
 # E2E Strategy Test Report: sushiswap_lp (Anvil)
 
-**Date:** 2026-03-03 12:21
+**Date:** 2026-03-06 05:49
 **Result:** PASS
 **Mode:** Anvil
-**Duration:** ~2.5 minutes
+**Duration:** ~4 minutes
 
 ## Configuration
 
 | Field | Value |
 |-------|-------|
-| Strategy | SushiSwapLPStrategy |
+| Strategy | demo_sushiswap_lp |
 | Chain | arbitrum |
-| Network | Anvil fork (managed, via publicnode) |
-| Anvil Port | 56549 (auto-assigned by managed gateway) |
-| Fork Block | 437896065 |
+| Network | Anvil fork |
+| Anvil Port | 64412 (auto-managed by strategy runner) |
 | Pool | WETH/USDC/3000 |
+| Range Width | 10% |
 | amount0 | 0.001 WETH |
 | amount1 | 3 USDC |
 | force_action | open |
 
-**Config changes:** None. Amounts (0.001 WETH ~$2 at WETH=$1974, 3 USDC) are well under the $500 budget cap. `force_action` was already set to `"open"`.
+**Config changes made:** None. Amounts (0.001 WETH + 3 USDC, ~$5 total) are well within the $50
+budget cap. `force_action` was already set to `"open"` in config.json.
 
-Note: `ALCHEMY_API_KEY` is empty in `.env`; the framework automatically fell back to public Arbitrum RPC (arbitrum-one-rpc.publicnode.com). The strategy was run with the Anvil default private key (`0xac0974bec...ff80`) per standard Anvil workflow.
+**Note on ALCHEMY_API_KEY:** The `.env` at the repo root has `ALCHEMY_API_KEY=` (empty). The strategy
+runner automatically fell back to the public Arbitrum RPC (`https://arbitrum-one-rpc.publicnode.com`)
+which worked fine for this test.
 
 ## Execution
 
 ### Setup
-
-- [x] Managed gateway auto-started Anvil fork on port 56549 (arbitrum, block 437896065, chain_id=42161)
-- [x] Wallet (`0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`) funded by managed gateway: 100 ETH, 1 WETH (slot 51), 10,000 USDC (slot 9)
-- [x] Gateway started on 127.0.0.1:50051 (insecure/anvil mode, acceptable for local dev)
+- [x] Anvil fork auto-managed by CLI on port 64412 (Arbitrum block 438740334, via publicnode.com RPC)
+- [x] Gateway auto-started on port 50053 (insecure mode, acceptable for Anvil)
+- [x] Wallet 0xf39Fd6e5... funded automatically: 100 ETH, 1 WETH (slot 51), 10,000 USDC (slot 9)
+- [x] Prices fetched: WETH/USD = $2,082.35 (confidence 1.00, 2 sources), USDC/USD = $1.00
 
 ### Strategy Run
-
-- [x] Strategy executed: `uv run almanak strat run -d strategies/demo/sushiswap_lp --network anvil --once`
-- [x] Intent returned: LP_OPEN (triggered by `force_action=open`)
-- [x] WETH price fetched: $1973.98 (Chainlink on-chain primary, 2 sources, confidence 1.00)
-- [x] USDC price fetched: $0.999972 (2 sources, confidence 1.00)
-- [x] Tick range calculated: [-200940, -199980] (price range $1875.33 - $2072.74)
-- [x] Compiled: 3 transactions (approve WETH + approve USDC + lp_mint), estimated 660,000 gas
-- [x] Simulation successful: 3 transactions, 923,788 total gas
-- [x] All 3 transactions confirmed sequentially on-chain (Anvil fork)
-- [x] LP position opened: **position_id = 34626**, liquidity = 1,886,857,029,086
-- [x] Result enrichment: position_id, tick_lower, tick_upper, liquidity extracted from receipt
-
-### Transactions (Anvil fork - local only)
-
-| # | Purpose | TX Hash | Gas Used | Block |
-|---|---------|---------|----------|-------|
-| 1 | WETH approval (Permit2) | `3d17700db46cabe8ac9716a55f8d8667162e199ea523096822006c387df0bf7a` | 53,440 | 437896068 |
-| 2 | Permit2 internal approval | `9d9771b068ad2983ee440f8f90930b939b5df554c1896a55011709f180ea1f88` | 55,437 | 437896069 |
-| 3 | SushiSwap V3 mint (LP_OPEN) | `7692fe6752fb0ec43f8abab51f83ddaafa8950b3334977e67e7bf829a57296eb` | 506,675 | 437896070 |
-
-**Total gas used:** 615,552
+- [x] Strategy executed with `--network anvil --once`
+- [x] `force_action: "open"` triggered LP_OPEN intent immediately
+- [x] Price range computed: [1978.23 - 2186.47] USDC/WETH (ticks -200400 to -199440)
+- [x] Intent compiled: 3 transactions (WETH approve + USDC approve + lp_mint), 660,000 gas estimated
+- [x] Simulation passed via eth_estimateGas: 923,788 gas (multi-TX sequential)
+- [x] All 3 transactions submitted and confirmed on sequential blocks 438740337-439
+- [x] LP position ID extracted from SushiSwap V3 receipt: **34820**
+- [x] ResultEnricher populated: position_id, tick_lower, tick_upper, liquidity
+- [x] Liquidity: 2,000,918,325,713
 
 ### Key Log Output
 
 ```text
-info  Anvil fork started: port=56549, block=437896065, chain_id=42161
-info  Funded 0xf39Fd6e5... with 100 ETH
-info  Funded 0xf39Fd6e5... with WETH via known slot 51
-info  Funded 0xf39Fd6e5... with USDC via known slot 9
-info  Aggregated price for WETH/USD: 1973.98137486 (confidence: 1.00, sources: 2/2, outliers: 0)
-info  Aggregated price for USDC/USD: 0.9999720000000001 (confidence: 1.00, sources: 2/2, outliers: 0)
+info  Aggregated price for WETH/USD: 2082.34829 (confidence: 1.00, sources: 2/2, outliers: 0)
+warn  Rate limited by CoinGecko for USDC/USD, backoff: 1.00s
+info  Aggregated price for USDC/USD: 1.00 (confidence: 0.90, sources: 1/2, outliers: 0)
 info  Forced action: OPEN LP position
-info  LP_OPEN: 0.0010 WETH + 3.0000 USDC, price range [1875.3348 - 2072.7385], ticks [-200940 - -199980]
-info  Compiled LP_OPEN intent: WETH/USDC, range [1875.33-2072.74], 3 txs (approve + approve + lp_mint), 660000 gas
+info  LP_OPEN: 0.0010 WETH + 3.0000 USDC, price range [1978.2309 - 2186.4657], ticks [-200400 - -199440]
+info  Compiled LP_OPEN intent: WETH/USDC, range [1978.23-2186.47], 3 txs (approve + approve + lp_mint), 660000 gas
 info  Simulation successful: 3 transaction(s), total gas: 923788
-info  EXECUTED: LP_OPEN completed successfully
-info     Txs: 3 (3d1770...bf7a, 9d9771...1f88, 7692fe...96eb) | 615,552 gas
-info  Extracted LP position ID from receipt: 34626
+info  Sequential submit: TX 1/3 confirmed (block=438740337, gas=53440)
+info  Sequential submit: TX 2/3 confirmed (block=438740338, gas=55437)
+info  Sequential submit: TX 3/3 confirmed (block=438740339, gas=511475)
+info  EXECUTED: LP_OPEN completed successfully | Txs: 3 | 620,352 gas
+info  Extracted LP position ID from receipt: 34820
 info  Enriched LP_OPEN result with: position_id, tick_lower, tick_upper, liquidity (protocol=sushiswap_v3, chain=arbitrum)
-info  SushiSwap V3 LP position opened: position_id=34626, liquidity=1886857029086
-Status: SUCCESS | Intent: LP_OPEN | Gas used: 615552 | Duration: 37006ms
+info  SushiSwap V3 LP position opened: position_id=34820, liquidity=2000918325713
+Status: SUCCESS | Intent: LP_OPEN | Gas used: 620352 | Duration: 35808ms
 ```
+
+### Transaction Details
+
+| # | TX Hash | Type | Gas Used | Status |
+|---|---------|------|----------|--------|
+| 1 | `7a1f682d9fe9a1c47d250a1a21e02f826ca4bd0173251700e817fe0990cf7ae2` | WETH approve | 53,440 | SUCCESS |
+| 2 | `1807ca21a77e5ce51f73ae0e4c8a8803e7602feaf8151dc50ee3e9a0f5e65043` | USDC approve | 55,437 | SUCCESS |
+| 3 | `c4de4a368265ac9e7b6f5d9abe1fda0ad67b6fe09f5f060c945edf0d14bf906d` | lp_mint | 511,475 | SUCCESS |
+
+**Total gas:** 620,352 (Anvil transactions - no block explorer links)
 
 ## Suspicious Behaviour
 
 | # | Source | Severity | Pattern | Log Line |
 |---|--------|----------|---------|----------|
-| 1 | strategy | INFO | No Alchemy key; public RPC fallback (rate limits may apply) | `No API key configured -- using free public RPC for arbitrum (rate limits may apply)` |
-| 2 | strategy | INFO | No CoinGecko key; on-chain Chainlink pricing primary | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback` |
-| 3 | strategy | WARNING | Port not freed within 5s after Anvil shutdown | `Port 56549 not freed after 5.0s` |
+| 1 | strategy | WARNING | CoinGecko rate limited (no API key) | `Rate limited by CoinGecko for USDC/USD, backoff: 1.00s` |
+| 2 | strategy | INFO | Circular import in unrelated incubating strategy | `Failed to import strategy strategies.incubating.pendle_pt_swap_arbitrum.strategy (retry failed): cannot import name 'IntentStrategy' from partially initialized module 'almanak'` |
+| 3 | strategy | INFO | CoinGecko fallback mode active | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback` |
+| 4 | gateway | WARNING | Insecure mode (expected for Anvil) | `INSECURE MODE: Auth interceptor disabled - no auth_token configured. This is acceptable for local development on 'anvil'.` |
 
-**Analysis of findings:**
+**Notes:**
+- Finding #1: USDC price was fetched with only 0.90 confidence (1/2 sources) due to the rate limit.
+  The on-chain Chainlink oracle resolved it correctly ($1.00), so no impact this run. In high-frequency
+  production without `COINGECKO_API_KEY` this could cause transient price flapping.
+- Finding #2: Pre-existing circular import bug in the incubating `pendle_pt_swap_arbitrum` strategy.
+  Surfaces on every runner start but does not affect sushiswap_lp.
+- Finding #3: Expected operational fallback; on-chain Chainlink was primary source (confidence 1.00 for WETH).
+- Finding #4: Expected insecure-mode warning for local Anvil development. Not a security issue.
 
-- Findings 1-2 are informational configuration notices, not bugs. The strategy correctly fell back to public RPC and on-chain Chainlink pricing. Prices were healthy (WETH $1973.98, USDC $1.00) with full confidence (2/2 sources), no zero prices, no outliers.
-- Finding 3 (port not freed) is a minor cosmetic race condition in Anvil process shutdown cleanup. The Anvil process was successfully terminated shortly after; this does not affect results.
-- No zero prices, no token resolution failures, no API errors, no transaction reverts, and no NaN/None values were detected.
-- No ERROR-level log entries.
+No zero prices, token resolution errors, transaction reverts, timeouts, NaN/None values, or stale data detected.
 
 ## Result
 
-**PASS** - SushiSwapLPStrategy successfully opened a WETH/USDC concentrated liquidity position on SushiSwap V3 (Arbitrum Anvil fork). 3 transactions executed (2 approvals + LP mint). LP position NFT #34626 minted with 1,886,857,029,086 liquidity units in the [$1875 - $2073] price range.
+**PASS** - The `sushiswap_lp` strategy on Anvil (Arbitrum fork) successfully opened a SushiSwap V3
+concentrated liquidity position (NFT tokenId 34820) in 3 confirmed transactions with 620,352 total
+gas used. Receipt parsing and ResultEnricher extraction (position_id, tick bounds, liquidity) all
+succeeded.
 
 ---
 
-SUSPICIOUS_BEHAVIOUR_COUNT: 3
+SUSPICIOUS_BEHAVIOUR_COUNT: 4
 SUSPICIOUS_BEHAVIOUR_ERRORS: 0

@@ -69,6 +69,8 @@ class Chain(StrEnum):
     BNB = "bnb"
     LINEA = "linea"
     PLASMA = "plasma"
+    MANTLE = "mantle"
+    MONAD = "monad"
 
 
 # =============================================================================

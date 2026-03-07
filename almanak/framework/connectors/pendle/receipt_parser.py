@@ -23,6 +23,7 @@ from enum import Enum
 from typing import Any
 
 from almanak.framework.connectors.base import EventRegistry, HexDecoder
+from almanak.framework.execution.extracted_data import SwapAmounts
 
 logger = logging.getLogger(__name__)
 
@@ -857,7 +858,7 @@ class PendleReceiptParser:
     # Extraction Methods (for Result Enrichment)
     # =========================================================================
 
-    def extract_swap_amounts(self, receipt: dict[str, Any]) -> dict[str, Any] | None:
+    def extract_swap_amounts(self, receipt: dict[str, Any]) -> SwapAmounts | None:
         """
         Extract swap amounts from receipt for Result Enrichment.
 
@@ -865,7 +866,7 @@ class PendleReceiptParser:
         ExecutionResult.swap_amounts.
 
         Returns:
-            Dictionary with amount_in, amount_out, effective_price, slippage_bps
+            SwapAmounts dataclass or None if not found
         """
         try:
             result = self.parse_receipt(receipt)
@@ -873,16 +874,16 @@ class PendleReceiptParser:
                 return None
 
             sr = result.swap_result
-            return {
-                "amount_in": sr.amount_in,
-                "amount_out": sr.amount_out,
-                "amount_in_decimal": sr.amount_in_decimal,
-                "amount_out_decimal": sr.amount_out_decimal,
-                "effective_price": sr.effective_price,
-                "slippage_bps": sr.slippage_bps,
-                "token_in": sr.token_in,
-                "token_out": sr.token_out,
-            }
+            return SwapAmounts(
+                amount_in=sr.amount_in,
+                amount_out=sr.amount_out,
+                amount_in_decimal=sr.amount_in_decimal,
+                amount_out_decimal=sr.amount_out_decimal,
+                effective_price=sr.effective_price,
+                slippage_bps=sr.slippage_bps,
+                token_in=sr.token_in,
+                token_out=sr.token_out,
+            )
 
         except Exception as e:
             logger.warning(f"Failed to extract swap amounts: {e}")

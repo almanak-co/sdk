@@ -491,6 +491,7 @@ anvil_avalanche = _create_anvil_fixture("avalanche")
 anvil_bsc = _create_anvil_fixture("bsc")
 anvil_optimism = _create_anvil_fixture("optimism")
 anvil_polygon = _create_anvil_fixture("polygon")
+anvil_mantle = _create_anvil_fixture("mantle")
 
 
 # =============================================================================
@@ -643,6 +644,7 @@ CHAIN_ANVIL_PORTS = {
     "ethereum": 8549,
     "optimism": 8550,
     "polygon": 8551,
+    "mantle": 8556,
 }
 # Alias for internal use
 _DEFAULT_ANVIL_PORTS = CHAIN_ANVIL_PORTS

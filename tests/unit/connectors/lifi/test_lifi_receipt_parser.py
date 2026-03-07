@@ -360,10 +360,10 @@ class TestExtractionMethods:
         result = parser.extract_swap_amounts(receipt)
 
         assert result is not None
-        assert result["amount_in"] == 1000_000000
-        assert result["amount_out"] == 500000000000000000
-        assert result["token_in"] == USDC_ADDRESS.lower()
-        assert result["token_out"] == WETH_ADDRESS.lower()
+        assert result.amount_in == 1000_000000
+        assert result.amount_out == 500000000000000000
+        assert result.token_in == USDC_ADDRESS.lower()
+        assert result.token_out == WETH_ADDRESS.lower()
 
     def test_extract_swap_amounts_failed_receipt(self, parser):
         """Extract returns None for failed receipt."""

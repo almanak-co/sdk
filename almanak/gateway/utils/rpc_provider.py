@@ -99,6 +99,8 @@ ALCHEMY_CHAIN_KEYS: dict[str, str] = {
     "sonic": "sonic",
     "plasma": "plasma",
     "linea": "linea",
+    "mantle": "mantle",
+    "monad": "monad",
 }
 
 # Mapping of chain names to Tenderly subdomains
@@ -127,6 +129,8 @@ PUBLIC_RPC_URLS: dict[str, str] = {
     "sonic": "https://sonic-rpc.publicnode.com",
     "linea": "https://linea-rpc.publicnode.com",
     "plasma": "https://rpc.plasma.to",
+    "mantle": "https://rpc.mantle.xyz",
+    "monad": "https://rpc.monad.xyz",
 }
 
 # Chains that require POA middleware (geth_poa_middleware)
@@ -147,6 +151,8 @@ ANVIL_CHAIN_PORTS: dict[str, int] = {
     "linea": 8552,
     "sonic": 8553,
     "plasma": 8554,
+    "mantle": 8556,
+    "monad": 8555,
 }
 
 

@@ -17,15 +17,9 @@ from almanak.framework.intents.state_machine import (
 from almanak.framework.intents.vocabulary import IntentType
 
 # These IntentTypes intentionally bypass the standard state machine flow:
-# - BRIDGE: handled by cross-chain orchestrator, not single-intent state machine
 # - ENSURE_BALANCE: utility intent resolved before compilation
-# - FLASH_LOAN: wrapper intent that delegates to inner intent's state machine
-# - HOLD: no-op intent, no transaction to execute
 EXCLUDED_TYPES = {
-    IntentType.BRIDGE,
     IntentType.ENSURE_BALANCE,
-    IntentType.FLASH_LOAN,
-    IntentType.HOLD,
 }
 
 

@@ -1,113 +1,96 @@
 # E2E Strategy Test Report: almanak_rsi (Anvil)
 
-**Date:** 2026-03-03 11:37 (kitchen iter-29 re-run)
-**Result:** PASS
+**Date:** 2026-03-06 04:54
+**Result:** FAIL
 **Mode:** Anvil
-**Duration:** ~25 seconds (strategy run)
+**Duration:** ~3 minutes
 
 ## Configuration
 
 | Field | Value |
 |-------|-------|
 | Strategy | almanak_rsi |
-| Chain | base (Chain ID 8453) |
-| Network | Anvil fork (Base mainnet, public RPC fallback) |
-| Anvil Port | 65018/65150 (managed, auto-selected by CLI) |
-| Protocol | uniswap_v3 |
-| Trading Pair | ALMANAK/USDC |
-| Pool | 0xbDbC38652D78AF0383322bBc823E06FA108d0874 |
-| RSI Period | 14 |
-| RSI Oversold / Overbought | 30 / 70 |
-| Cooldown | 1 hour |
-| initial_capital_usdc | $20 (init swap = $10, well within $500 budget cap) |
-
-## Config Changes Made
-
-None. The `initial_capital_usdc` of $20 results in an initialization swap of $10 (half of
-capital), which is well within the $500 budget cap. The strategy has no `force_action` field;
-the initialization phase guarantees a trade on the first run when no prior state exists.
+| Chain | base |
+| Network | Anvil fork (auto-managed, fork of https://base-rpc.publicnode.com, block=42979143) |
+| Anvil Port | 51544 (auto-started by CLI managed gateway) |
+| Config Changes | None (initial_capital_usdc=20, under $50 cap; no force_action field in this strategy) |
 
 ## Execution
 
 ### Setup
-- Managed gateway auto-started on port 50052 (network=anvil)
-- Base mainnet fork created at block 42874218 (chain ID 8453)
-- Wallet auto-funded per `anvil_funding` config: 100 ETH, 10,000 USDC (slot 9), 1 WETH (slot 3)
-- No existing `almanak_rsi` strategy state found (fresh start)
-- Public RPC used: `https://base-rpc.publicnode.com` (no ALCHEMY_API_KEY configured in .env)
+- [x] Gateway auto-managed by CLI on port 50053 (anvil network)
+- [x] Anvil Base fork auto-started on port 51544 (public RPC -- ALCHEMY_API_KEY not set in .env)
+- [x] Wallet auto-funded via config `anvil_funding`: 100 ETH, 10000 USDC, 1 WETH
 
 ### Strategy Run
-- Strategy executed with `--network anvil --once`
-- Mode: FRESH START (no existing state)
-- Initialization phase triggered (`_initialized = False` on first run)
-- ALMANAK price fetched: $0.00207676 (GeckoTerminal, confidence 0.90, 1/2 sources)
-- USDC price fetched: $0.9999990 (confidence 1.00, 2/2 sources)
-- Initial buy: 10.000000 USDC -> ALMANAK (half of $20 initial capital)
-- Compiled: 10.0000 USDC -> 4800.7425 ALMANAK (min: 4752.7351 ALMANAK, 1% slippage)
-- 2 transactions submitted and confirmed on-chain
-- Strategy state saved: `initialized=True`, `trade_count=1`
+- [x] Strategy executed with `--network anvil --once`
+- Result: **HOLD** -- initialization swap was not attempted
 
-### Transactions
+The strategy's initialization phase (`_handle_initialization`) calls `market.price(ALMANAK)` to
+pre-populate the price cache for slippage protection before executing the initial buy. This call
+failed because:
 
-| Intent | TX Hash | Block | Gas Used | Status |
-|--------|---------|-------|----------|--------|
-| APPROVE (USDC) | `0x2afcac272eb1bb20426e346dd7c6744706a01f6527f6231bb60c7825e260b719` | 42874258 | 55,437 | SUCCESS |
-| SWAP (USDC->ALMANAK) | `0x87d4775f30806e0dd29e1f8af446621c3317bcb0002c74de7d3fdc7240e4505d` | 42874259 | 145,336 | SUCCESS |
-| **Total** | | | **200,773** | |
+1. ALMANAK has no Chainlink feed on Base (only ETH, BTC, LINK, USDC, DAI feeds exist)
+2. CoinGecko free-tier fallback was rate-limited immediately on cold start (no API key configured)
 
-*Note: These are Anvil local fork transactions, not mainnet.*
+The strategy correctly handled this failure by returning HOLD instead of executing an unpriced
+initialization swap. No on-chain transaction was submitted.
 
 ### Key Log Output
-
 ```text
-[info] Aggregated price for USDC/USD: 0.9999990000000001 (confidence: 1.00, sources: 2/2, outliers: 0)
-[info] Aggregated price for ALMANAK/USD: 0.00207676 (confidence: 0.90, sources: 1/2, outliers: 0)
-[info] INITIALIZATION: First run - buying ALMANAK for $10.00 (half of initial capital)
-[info] almanak_rsi intent: SWAP: 10.000000 0x833589fcd6...02913 -> 0xdefa1d21c5...cc3a3 (slippage: 1.00%) via uniswap_v3
-[info] Compiled SWAP: 10.0000 USDC -> 4800.7425 ALMANAK (min: 4752.7351 ALMANAK)
-[info]    Slippage: 1.00% | Txs: 2 | Gas: 280,000
-[info] Simulation successful: 2 transaction(s), total gas: 355,819
-[info] TX 1 confirmed: block=42874258, gas=55437
-[info] TX 2 confirmed: block=42874259, gas=145336
-[info] EXECUTED: SWAP completed successfully
-[info]    Txs: 2 (2afcac...b719, 87d477...505d) | 200,773 gas
-[info] Parsed Uniswap V3 swap: 0.0000 token0 -> 4829.7565 token1, slippage=N/A
-[info] Initialization swap succeeded - strategy is now initialized
-[info] Trade executed successfully (total trades: 1)
-Status: SUCCESS | Intent: SWAP | Gas used: 200773 | Duration: 24925ms
+[info]    No API key configured -- using free public RPC for base (rate limits may apply)
+[warning] Rate limited by CoinGecko for USDC/USD, backoff: 1.00s
+[warning] Rate limited by CoinGecko for ALMANAK/USD, backoff: 2.00s
+[error]   All data sources failed for ALMANAK/USD:
+          onchain: No Chainlink feed for ALMANAK on base. Available: [ETH/USD, BTC/USD, LINK/USD, USDC/USD, DAI/USD]
+          coingecko: Data source 'coingecko' rate limited. Retry after 2s
+[error]   GetPrice failed for ALMANAK/USD: All data sources failed
+[error]   Gateway price request failed for ALMANAK/USD: StatusCode.INTERNAL
+[warning] Price oracle failed for ALMANAK/USD: All data sources failed
+[warning] Could not pre-populate price data for initialization: Cannot determine price for ALMANAK/USD
+[info]    almanak_rsi HOLD: Price data unavailable for init swap: Cannot determine price for ALMANAK/USD
+Status: HOLD | Intent: HOLD | Duration: 1200ms
+Iteration completed successfully.
 ```
+
+## On-Chain Transactions
+
+None. No intent was compiled or submitted.
+
+## Root Cause Analysis
+
+The `almanak_rsi` strategy trades a custom token (ALMANAK) that has no Chainlink price feed
+on Base. The gateway's primary pricing source (on-chain Chainlink oracle) is unavailable for this
+token. The only remaining source is CoinGecko, which was rate-limited on the very first request
+because no `ALMANAK_GATEWAY_COINGECKO_API_KEY` is configured in `.env`.
+
+With a CoinGecko API key configured, the strategy is expected to resolve the price and execute the
+initialization SWAP successfully (as confirmed by the previous passing run from 2026-03-05).
 
 ## Suspicious Behaviour
 
 | # | Source | Severity | Pattern | Log Line |
 |---|--------|----------|---------|----------|
-| 1 | gateway | INFO | ALMANAK price: only 1 of 2 sources available (no Chainlink oracle) | `ALMANAK/USD: 0.00207019 (confidence: 0.90, sources: 1/2, outliers: 0)` |
-| 2 | gateway | INFO | No CoinGecko API key, using free tier as fallback | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback` |
-| 3 | gateway | INFO | No Alchemy API key, using public RPC (rate limits apply) | `No API key configured -- using free public RPC for base (rate limits may apply)` |
-| 4 | gateway | WARNING | Port 58000 not freed after 5.0s (cleanup timing) | `Port 58000 not freed after 5.0s` |
-| 5 | gateway | WARNING | Insecure mode active (expected for anvil) | `INSECURE MODE: Auth interceptor disabled -- acceptable for local development on 'anvil'` |
+| 1 | strategy | ERROR | All price sources failed for ALMANAK/USD | `All data sources failed for ALMANAK/USD: onchain: No Chainlink feed for ALMANAK on base; coingecko: rate limited. Retry after 2s` |
+| 2 | strategy | ERROR | Gateway gRPC call failed with INTERNAL status | `Gateway price request failed for ALMANAK/USD: StatusCode.INTERNAL ... All data sources failed` |
+| 3 | strategy | WARNING | CoinGecko rate-limited on USDC (cold start) | `Rate limited by CoinGecko for USDC/USD, backoff: 1.00s` |
+| 4 | strategy | WARNING | CoinGecko rate-limited on ALMANAK (cold start) | `Rate limited by CoinGecko for ALMANAK/USD, backoff: 2.00s` |
+| 5 | strategy | INFO | Circular import failure in unrelated incubating strategy | `Failed to import strategy strategies.incubating.pendle_pt_swap_arbitrum.strategy (retry failed): cannot import name 'IntentStrategy' from partially initialized module 'almanak'` |
 
-**Notes on findings:**
-
-- **Finding 1 (Price confidence 0.90):** ALMANAK has only 1/2 price sources; no Chainlink oracle
-  exists for this small-cap token. Price sourced solely via GeckoTerminal (CoinGecko free tier).
-  Non-blocking; strategy handled it correctly. Worth noting for production risk assessment.
-- **Findings 2-3 (Public RPC / CoinGecko fallback):** Expected in a dev/test environment
-  without `ALCHEMY_API_KEY` or `ALMANAK_GATEWAY_COINGECKO_API_KEY`. Both fallbacks worked correctly.
-- **Finding 4 (Port not freed):** Minor cleanup timing issue in Anvil fork manager after strategy
-  exit. Does not affect test correctness.
-- **Finding 5 (Insecure mode):** Expected and correct for local Anvil development mode.
-
-**No ERROR-severity findings. No zero prices. No transaction reverts. No token resolution failures.**
+**Notes:**
+- Findings #1-4 are causally linked: ALMANAK has no on-chain price feed and CoinGecko free tier
+  is rate-limited on cold start. Root fix: configure `ALMANAK_GATEWAY_COINGECKO_API_KEY` in `.env`.
+- Finding #5 is a pre-existing circular import bug in `pendle_pt_swap_arbitrum` (incubating),
+  unrelated to this strategy. Should be tracked as a separate issue.
 
 ## Result
 
-**PASS** - The `almanak_rsi` strategy on Base (Anvil fork) successfully executed its
-initialization swap, buying 4829.76 ALMANAK for $10.00 USDC via Uniswap V3. Both the USDC approval
-and swap transactions were confirmed on-chain (200,773 gas total). Strategy correctly transitioned
-from uninitialized to initialized state and persisted state to SQLite.
+**FAIL** - The `almanak_rsi` strategy returned HOLD on initialization because the ALMANAK/USD
+price could not be fetched: no Chainlink feed exists for ALMANAK on Base, and the free CoinGecko
+tier was rate-limited immediately on cold start (no `ALMANAK_GATEWAY_COINGECKO_API_KEY` set).
+No on-chain transaction was submitted. With a CoinGecko API key, the strategy is expected to pass.
 
 ---
 
-SUSPICIOUS_BEHAVIOUR_COUNT: 4
-SUSPICIOUS_BEHAVIOUR_ERRORS: 0
+SUSPICIOUS_BEHAVIOUR_COUNT: 5
+SUSPICIOUS_BEHAVIOUR_ERRORS: 2

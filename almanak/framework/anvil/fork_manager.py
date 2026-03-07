@@ -57,6 +57,7 @@ CHAIN_IDS: dict[str, int] = {
     "mantle": 5000,
     "berachain": 80094,
     "sonic": 146,
+    "monad": 143,
 }
 
 

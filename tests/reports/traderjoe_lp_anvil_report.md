@@ -1,9 +1,9 @@
 # E2E Strategy Test Report: traderjoe_lp (Anvil)
 
-**Date:** 2026-03-03 12:28
+**Date:** 2026-03-06 05:55
 **Result:** PASS
 **Mode:** Anvil
-**Duration:** ~5 minutes
+**Duration:** ~3 minutes
 
 ## Configuration
 
@@ -11,59 +11,67 @@
 |-------|-------|
 | Strategy | traderjoe_lp |
 | Chain | avalanche |
-| Network | Anvil fork |
-| Anvil Port | 8547 (auto-selected by managed gateway on ephemeral port 57787) |
+| Network | Anvil fork (publicnode.com, block 79660060) |
+| Anvil Port | 49341 (auto-assigned by managed gateway) |
 | Pool | WAVAX/USDC/20 |
 | amount_x | 0.001 WAVAX |
 | amount_y | 3 USDC |
 | num_bins | 11 |
 | range_width_pct | 10% |
+| Budget check | ~$2.94 total (0.001 WAVAX @ $9.43 + 3 USDC) -- well within $50 cap |
 
 ## Config Changes Made
 
-- Added `"force_action": "open"` temporarily to trigger an immediate LP_OPEN intent (restored after test)
-- Amounts (0.001 WAVAX + 3 USDC) were already within the $500 budget cap; no reduction needed
+- Added `"force_action": "open"` temporarily to trigger an immediate LP_OPEN intent (restored after test).
+- Amounts (0.001 WAVAX + 3 USDC) were already well within the $50 budget cap; no amount changes needed.
 
-## Execution
+## Setup
 
-### Setup
-- Anvil fork of Avalanche (chain ID 43114) started using public RPC `https://avalanche-c-chain-rpc.publicnode.com` (ALCHEMY_API_KEY not set in .env)
-- Note: The `--network anvil` managed gateway auto-starts its own Anvil fork; the manually started fork on port 8547 was superseded by the ephemeral fork on port 57787
-- Wallet funded by managed gateway: AVAX (native), WAVAX (slot 3), USDC (slot 9) per `anvil_funding` config
-- Gateway started on port 50052 (managed mode)
+- `uv run almanak strat run -d strategies/demo/traderjoe_lp --network anvil --once` auto-started the managed gateway and Anvil fork.
+- Forked Avalanche (chain ID 43114) from `https://avalanche-c-chain-rpc.publicnode.com` at block 79660060.
+  - Note: `ALCHEMY_API_KEY` is empty in `.env`; the framework correctly fell back to the public RPC.
+- Wallet funded by managed gateway from `anvil_funding` config: 100 AVAX, 100 WAVAX (slot 3), 10,000 USDC (slot 9).
+- Gateway started on 127.0.0.1:50053 (managed mode).
 
-### Strategy Run
-- Strategy executed with `uv run almanak strat run -d strategies/demo/traderjoe_lp --network anvil --once`
-- Price fetched: WAVAX = $9.07, USDC = $1.00 (2/2 sources, confidence 1.00)
-- LP range calculated: [8.6162, 9.5232] USDC/WAVAX (10% width, centered on market price)
-- Intent returned: LP_OPEN on WAVAX/USDC/20 via traderjoe_v2
-- Compilation: 3 transactions (2x approve + 1x add_liquidity), estimated 860,000 gas
-- Simulation: PASS (LocalSimulator via eth_estimateGas)
-- Execution: All 3 transactions confirmed
+## Strategy Execution
 
-| TX # | Hash | Block | Gas Used | Action |
-|------|------|-------|----------|--------|
-| 1/3 | `9e26c1bb...2341` | 79456699 | 46,123 | WAVAX approve |
-| 2/3 | `b4fa8569...c8fc` | 79456700 | 55,437 | USDC approve |
-| 3/3 | `625c887d...3ddb` | 79456701 | 598,366 | traderjoe_v2 add_liquidity |
+Strategy detected `force_action = "open"` and immediately returned an LP_OPEN intent.
 
-**Total gas used:** 699,926
+### Intent Flow
 
-- Result Enricher: bin_ids extracted successfully (`Enriched LP_OPEN result with: bin_ids`)
-- Strategy callback: `TraderJoe LP position opened successfully`
+| Step | Detail |
+|------|--------|
+| Price fetched | WAVAX/USD = $9.428 (sources: 2/2, confidence 1.00) |
+| Price fetched | USDC/USD = $1.00 (sources: 1/2, confidence 0.90 -- CoinGecko rate-limited, on-chain fallback) |
+| Computed price range | [8.9567 - 9.8995] USDC/WAVAX (10% width) |
+| Intent | LP_OPEN: WAVAX/USDC/20 (0.001, 3) [9 - 10] via traderjoe_v2 |
+| Compilation | 3 txs: approve WAVAX + approve USDC + traderjoe_v2_add_liquidity, 860,000 gas |
+| Simulation | PASS (LocalSimulator / eth_estimateGas), total gas 904,123 |
+
+### Transaction Results
+
+| TX # | Purpose | Hash | Block | Gas Used | Status |
+|------|---------|------|-------|----------|--------|
+| 1/3 | WAVAX approve | `72a2b9bb4f419562a2fda9276b13680af9748694c817d0cc76e1894131509232` | 79660063 | 46,123 | SUCCESS |
+| 2/3 | USDC approve | `ca3d8ab3d449f3f82eca300f840ff15144b3b27639bdbd84fd14dbb8d6eba34f` | 79660064 | 55,437 | SUCCESS |
+| 3/3 | add_liquidity | `56fef9282c2ff835214d9a2c93fcbb9df44a13e8938c74147d04c827546bba60` | 79660065 | 598,194 | SUCCESS |
+
+**Total gas used: 699,754 | Duration: 37,316ms**
 
 ### Key Log Output
+
 ```text
-Aggregated price for WAVAX/USD: 9.069546545000001 (confidence: 1.00, sources: 2/2, outliers: 0)
-Aggregated price for USDC/USD: 0.99998 (confidence: 1.00, sources: 2/2, outliers: 0)
+Aggregated price for WAVAX/USD: 9.428063915 (confidence: 1.00, sources: 2/2, outliers: 0)
+Aggregated price for USDC/USD: 1.00 (confidence: 0.90, sources: 1/2, outliers: 0)
 Forced action: OPEN LP position
-LP_OPEN: 0.0010 WAVAX + 3.0000 USDC, price range [8.6162 - 9.5232], bin_step=20
+LP_OPEN: 0.0010 WAVAX + 3.0000 USDC, price range [8.9567 - 9.8995], bin_step=20
 Compiled TraderJoe V2 LP_OPEN intent: WAVAX/USDC, bin_step=20, 3 txs (approve + approve + traderjoe_v2_add_liquidity), 860000 gas
+Simulation successful: 3 transaction(s), total gas: 904123
 EXECUTED: LP_OPEN completed successfully
-   Txs: 3 (9e26c1...2341, b4fa85...c8fc, 625c88...3ddb) | 699,926 gas
+   Txs: 3 (72a2b9...9232, ca3d8a...a34f, 56fef9...ba60) | 699,754 gas
 Enriched LP_OPEN result with: bin_ids (protocol=traderjoe_v2, chain=avalanche)
 TraderJoe LP position opened successfully
-Status: SUCCESS | Intent: LP_OPEN | Gas used: 699926 | Duration: 40398ms
+Status: SUCCESS | Intent: LP_OPEN | Gas used: 699754 | Duration: 37316ms
 Iteration completed successfully.
 ```
 
@@ -71,21 +79,35 @@ Iteration completed successfully.
 
 | # | Source | Severity | Pattern | Log Line |
 |---|--------|----------|---------|----------|
-| 1 | strategy | INFO | Insecure mode (expected for Anvil) | `INSECURE MODE: Auth interceptor disabled - no auth_token configured. This is acceptable for local development on 'anvil'.` |
-| 2 | strategy | WARNING | Port not freed cleanly | `Port 57787 not freed after 5.0s` |
-| 3 | strategy | INFO | No Alchemy key, using free public RPC | `No API key configured -- using free public RPC for avalanche (rate limits may apply)` |
-| 4 | strategy | WARNING | Receipt parsed twice per TX | Each of 3 txs parsed by TraderJoe V2 receipt parser exactly twice (lines 130-132 then 133-135). Double-parse bug in result enrichment pipeline. |
-| 5 | strategy | WARNING | LP add_liquidity TX logged as "swap" with near-zero output | `Parsed TraderJoe V2 swap: 1,000,000,000,000,000 to 5, tx=0x625c...3ddb` — the add_liquidity TX is labeled as a "swap" with raw amounts (0.001 WAVAX wei to 5 micro-USDC). Parser detects internal Swap event inside the add_liquidity call but labels it misleadingly, and shows raw wei values without decimal conversion. |
+| 1 | strategy | WARNING | CoinGecko rate limit on USDC price | `Rate limited by CoinGecko for USDC/USD, backoff: 1.00s` -- price fell back to on-chain; resolved correctly (confidence 0.90) |
+| 2 | strategy | INFO | Pendle incubating strategy circular import | `Failed to import strategy strategies.incubating.pendle_pt_swap_arbitrum.strategy (retry failed): cannot import name 'IntentStrategy' from partially initialized module 'almanak'` -- unrelated to traderjoe_lp, cosmetic |
+| 3 | strategy | WARNING | LP add_liquidity TX mislabeled as "swap" in receipt parser log | `Parsed TraderJoe V2 swap: 1,000,000,000,000,000 -> 5` -- raw wei shown without decimal conversion; underlying LP succeeded and bin_ids were correctly extracted |
+| 4 | strategy | INFO | Each receipt parsed twice by TraderJoe V2 parser | All 3 TX receipts appear in parser logs exactly twice -- ResultEnricher invokes parser twice per receipt; non-blocking but generates redundant log noise |
 
-**Finding 4 detail** - Duplicate receipt parsing: Each of the 3 transactions is parsed by the TraderJoe V2 receipt parser exactly twice. This is a double-parse bug in the result enrichment pipeline. It does not cause incorrect behavior but generates redundant log noise and indicates the enricher or orchestrator is calling the parser twice per receipt.
+**Finding 1**: CoinGecko free-tier rate limit caused a 1-second backoff for USDC/USD. Price was
+recovered from on-chain (Chainlink) successfully at confidence 0.90. Non-blocking but a known
+limitation of the free CoinGecko tier.
 
-**Finding 5 detail** - The receipt parser classifies the add_liquidity TX (0x625c) as "swap" with `amount_in=1,000,000,000,000,000` (= 0.001 WAVAX in wei) and `amount_out=5` (= 0.000005 USDC in raw units). While the LP operation succeeded (bin_ids were enriched correctly), the receipt log label is misleading. The `5` raw USDC output represents an internal routing swap within the add_liquidity call but is presented without decimal conversion. Should be labeled `LP_OPEN` not `swap`, and amounts should be shown in human-readable decimal form.
+**Finding 2**: The `pendle_pt_swap_arbitrum` incubating strategy has a circular import error at
+startup. This is pre-existing and unrelated to traderjoe_lp. Worth tracking as a separate ticket.
+
+**Finding 3**: TraderJoe V2 emits an internal Swap event during `add_liquidity` calls. The receipt
+parser detects this event and logs it as a "swap" with raw wei amounts (not human-readable decimals).
+The LP open operation succeeded and bin_ids were correctly enriched. The log label is misleading.
+This is a persisting issue across multiple test runs.
+
+**Finding 4**: All 3 TX receipts are passed to the TraderJoe V2 receipt parser twice each. This
+appears to be a double-invocation in the ResultEnricher/orchestrator path. Non-blocking but creates
+noise and slightly increases processing time.
 
 ## Result
 
-**PASS** - The traderjoe_lp strategy on Avalanche Anvil executed successfully: LP_OPEN intent compiled, simulated, and executed across 3 on-chain transactions with all receipts confirmed, bin_ids extracted, and the strategy callback invoked. Two WARNING-level suspicious findings (duplicate receipt parsing, misleading "swap" log for LP tx) are non-blocking but worth investigating.
+**PASS** - The traderjoe_lp strategy on Avalanche Anvil executed successfully. The LP_OPEN intent
+compiled to 3 transactions, all simulated and confirmed on the Anvil fork. bin_ids were correctly
+extracted by the ResultEnricher. No hard errors or reverts. The strategy completed with
+`Status: SUCCESS | Gas used: 699,754 | Duration: 37,316ms`.
 
 ---
 
-SUSPICIOUS_BEHAVIOUR_COUNT: 5
+SUSPICIOUS_BEHAVIOUR_COUNT: 4
 SUSPICIOUS_BEHAVIOUR_ERRORS: 0

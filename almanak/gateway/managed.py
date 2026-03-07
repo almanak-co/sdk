@@ -167,6 +167,41 @@ class ManagedGateway:
     def port(self) -> int:
         return self.settings.grpc_port
 
+    # Chains where free-tier public RPCs lack archive state, causing Anvil fork
+    # operations (eth_getStorageAt for ERC-20 approvals, etc.) to fail silently.
+    ARCHIVE_RPC_REQUIRED_CHAINS = frozenset({"polygon", "ethereum", "avalanche"})
+
+    def _check_archive_rpc_availability(self) -> None:
+        """Warn if any target chain needs archive RPC but only has public RPCs.
+
+        Checks whether ALCHEMY_API_KEY or a chain-specific RPC URL is set.
+        If not, emits a warning for each affected chain so users know the
+        fork will likely fail on contract storage access.
+        """
+        has_alchemy = bool(os.environ.get("ALCHEMY_API_KEY"))
+        has_generic_rpc = bool(os.environ.get("RPC_URL") or os.environ.get("ALMANAK_RPC_URL"))
+
+        for chain in self._anvil_chains:
+            if chain.lower() not in self.ARCHIVE_RPC_REQUIRED_CHAINS:
+                continue
+            # Skip if external Anvil is provided (user manages RPC)
+            if chain in self._external_anvil_ports:
+                continue
+            # Check chain-specific env vars
+            chain_upper = chain.upper()
+            has_chain_rpc = bool(
+                os.environ.get(f"{chain_upper}_RPC_URL") or os.environ.get(f"ALMANAK_{chain_upper}_RPC_URL")
+            )
+            if not has_alchemy and not has_generic_rpc and not has_chain_rpc:
+                logger.warning(
+                    "Chain '%s' requires an archive-capable RPC for Anvil fork testing. "
+                    "Set ALCHEMY_API_KEY in your .env file or provide a chain-specific RPC URL "
+                    "(%s_RPC_URL). Free-tier public RPCs will likely fail on contract storage access "
+                    "(eth_getStorageAt).",
+                    chain,
+                    chain_upper,
+                )
+
     async def _start_anvil_forks(self) -> None:
         """Start Anvil fork instances for each configured chain.
 
@@ -185,6 +220,9 @@ class ManagedGateway:
                 "  curl -L https://foundry.paradigm.xyz | bash && foundryup\n\n"
                 "See https://book.getfoundry.sh/getting-started/installation for details."
             )
+
+        # Pre-flight: warn if chains need archive RPC but no premium key is set
+        self._check_archive_rpc_availability()
 
         try:
             for chain in self._anvil_chains:
@@ -237,7 +275,7 @@ class ManagedGateway:
             raise
 
     # Native gas tokens that are funded via anvil_setBalance (not ERC-20 transfer)
-    NATIVE_TOKEN_SYMBOLS = frozenset({"ETH", "AVAX", "MATIC", "BNB", "S", "POL"})
+    NATIVE_TOKEN_SYMBOLS = frozenset({"ETH", "AVAX", "MATIC", "BNB", "S", "POL", "MNT", "MON"})
     CHAIN_NATIVE_SYMBOL: dict[str, str] = {
         "ethereum": "ETH",
         "arbitrum": "ETH",
@@ -246,8 +284,11 @@ class ManagedGateway:
         "polygon": "MATIC",
         "avalanche": "AVAX",
         "bsc": "BNB",
+        "bnb": "BNB",
         "sonic": "S",
         "plasma": "ETH",
+        "mantle": "MNT",
+        "monad": "MON",
     }
 
     async def _fund_anvil_wallets(self) -> None:

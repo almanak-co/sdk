@@ -106,10 +106,26 @@ def _parse_insufficient_funds_error(error_msg: str) -> tuple[int, int]:
     return 0, 0
 
 
-def _format_wei_as_eth(wei: int) -> str:
-    """Format wei amount as human-readable ETH string."""
-    eth = Decimal(wei) / Decimal(10**18)
-    return f"{eth:.6f}"
+_CHAIN_NATIVE_SYMBOL: dict[str, str] = {
+    "ethereum": "ETH",
+    "arbitrum": "ETH",
+    "optimism": "ETH",
+    "base": "ETH",
+    "polygon": "MATIC",
+    "avalanche": "AVAX",
+    "bsc": "BNB",
+    "sonic": "S",
+    "plasma": "XPL",
+    "mantle": "MNT",
+    "monad": "MON",
+}
+
+
+def _format_wei_as_native(wei: int, chain: str = "") -> str:
+    """Format wei amount as human-readable native token string."""
+    amount = Decimal(wei) / Decimal(10**18)
+    symbol = _CHAIN_NATIVE_SYMBOL.get(chain, "ETH")
+    return f"{amount:.6f} {symbol}"
 
 
 # =============================================================================
@@ -737,15 +753,16 @@ class ChainExecutor:
                 deficit = required - available if required > available else 0
 
                 # Log with human-readable values
+                native = _CHAIN_NATIVE_SYMBOL.get(self._chain, "ETH")
                 logger.error(
-                    f"Insufficient funds error: have {_format_wei_as_eth(available)} ETH, "
-                    f"need {_format_wei_as_eth(required)} ETH, "
-                    f"deficit {_format_wei_as_eth(deficit)} ETH"
+                    f"Insufficient funds error: have {_format_wei_as_native(available, self._chain)}, "
+                    f"need {_format_wei_as_native(required, self._chain)}, "
+                    f"deficit {_format_wei_as_native(deficit, self._chain)}"
                 )
                 raise InsufficientFundsError(
                     required=required,
                     available=available,
-                    token="ETH",
+                    token=native,
                 ) from None
             elif "gas" in error_message:
                 raise GasEstimationError(reason=original_error) from None

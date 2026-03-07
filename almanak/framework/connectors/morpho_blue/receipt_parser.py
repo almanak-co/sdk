@@ -1222,3 +1222,48 @@ class MorphoBlueReceiptParser:
         except Exception as e:
             logger.warning(f"Failed to extract shares burned: {e}")
             return None
+
+    def extract_a_token_received(self, receipt: dict[str, Any]) -> int | None:
+        """Extract shares received from SUPPLY event (Morpho equivalent of aTokens).
+
+        In Morpho Blue, supplying assets mints shares. This is the Morpho equivalent
+        of Aave's aToken minting, exposed under the standard enrichment field name
+        so ResultEnricher can call it for SUPPLY intents.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            Shares minted if found, None otherwise
+        """
+        return self.extract_shares_received(receipt)
+
+    def extract_supply_rate(self, _receipt: dict[str, Any]) -> None:
+        """Extract supply rate from receipt.
+
+        Morpho Blue events do not include rate information (rates are derived
+        from market utilization). Returns None; callers should query the market
+        state directly for current rates.
+        """
+        return None
+
+    def extract_supply_collateral_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Extract collateral supply amount from SUPPLY_COLLATERAL event.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            Collateral amount supplied in token units if found, None otherwise
+        """
+        try:
+            result = self.parse_receipt(receipt)
+            for event in result.events:
+                if event.event_type == MorphoBlueEventType.SUPPLY_COLLATERAL:
+                    assets = event.data.get("assets")
+                    if assets is not None:
+                        return int(Decimal(assets))
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to extract supply collateral amount: {e}")
+            return None

@@ -145,8 +145,7 @@ KNOWN_CUSTOM_ERRORS: dict[str, str] = {
     "0x0a061d77": "InsufficientOutputAmount()",
     "0x39d35496": "InvalidPool()",
     "0x4e487b71": "Panic(uint256)",
-    # ERC-20
-    "0xfb8f41b2": "InsufficientAllowance()",
+    # ERC-20 (legacy labels, superseded by OpenZeppelin entries below where applicable)
     "0xcf479181": "InsufficientBalance()",
     # Common DEX errors
     "0x8baa579f": "InvalidSignature()",
@@ -154,6 +153,19 @@ KNOWN_CUSTOM_ERRORS: dict[str, str] = {
     # PancakeSwap V3
     "0xce30421c": "TooLittleReceived()",
     "0x675cae38": "TooMuchRequested()",
+    # OpenZeppelin Address library
+    "0x1425ea42": "FailedInnerCall()",
+    "0xd6bda275": "FailedCall()",
+    "0xcd786059": "AddressInsufficientBalance(address account)",
+    "0x9996b315": "AddressEmptyCode(address target)",
+    # OpenZeppelin ERC-20
+    "0xe450d38c": "ERC20InsufficientBalance(address sender, uint256 balance, uint256 needed)",
+    "0xfb8f41b2": "ERC20InsufficientAllowance(address spender, uint256 allowance, uint256 needed)",
+    "0x96c6fd1e": "ERC20InvalidSender(address sender)",
+    "0xec442f05": "ERC20InvalidReceiver(address receiver)",
+    # OpenZeppelin Ownable / Access
+    "0x118cdaa7": "OwnableUnauthorizedAccount(address account)",
+    "0x1e4fbdf7": "OwnableInvalidOwner(address owner)",
     # General
     "0x": "EmptyRevertData()",
 }

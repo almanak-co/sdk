@@ -188,6 +188,11 @@ PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
         "supports_collateral_toggle": True,
         "operations": ["supply", "withdraw", "borrow", "repay"],
     },
+    "benqi": {
+        "supports_interest_rate_mode": False,
+        "supports_collateral_toggle": True,
+        "operations": ["supply", "withdraw", "borrow", "repay"],
+    },
     "gmx_v2": {
         "supports_leverage": True,
         "max_leverage": Decimal("100"),

@@ -494,6 +494,7 @@ def determine_likely_cause(
     raw_error: str | None,
     native_eth_check: NativeETHCheck | None = None,
     gas_warnings: list[str] | None = None,
+    chain: str = "",
 ) -> tuple[str, list[str]]:
     """Determine the likely cause of a revert and suggest fixes.
 
@@ -533,13 +534,16 @@ def determine_likely_cause(
         suggestions.append(f"Details: {raw_error[:200]}")
         return cause, suggestions
 
-    # PRIORITY 1: Check for insufficient native ETH (gas + execution fees)
+    # PRIORITY 1: Check for insufficient native token (gas + execution fees)
     # This is often the root cause for "insufficient funds" errors
     if native_eth_check and not native_eth_check.sufficient:
-        cause = "Insufficient native ETH for gas + execution fees"
-        suggestions.append(f"Send at least {native_eth_check.shortfall:.6f} ETH to your wallet on this chain")
-        suggestions.append(f"Required: {native_eth_check.required:.6f} ETH ({native_eth_check.breakdown})")
-        suggestions.append(f"Current balance: {native_eth_check.actual:.6f} ETH")
+        from almanak.framework.execution.chain_executor import _CHAIN_NATIVE_SYMBOL
+
+        native = _CHAIN_NATIVE_SYMBOL.get(chain, "ETH") if chain else "ETH"
+        cause = f"Insufficient native {native} for gas + execution fees"
+        suggestions.append(f"Send at least {native_eth_check.shortfall:.6f} {native} to your wallet on this chain")
+        suggestions.append(f"Required: {native_eth_check.required:.6f} {native} ({native_eth_check.breakdown})")
+        suggestions.append(f"Current balance: {native_eth_check.actual:.6f} {native}")
 
         # Check if this is a GMX-related issue
         if "gmx" in native_eth_check.breakdown.lower():
@@ -691,7 +695,7 @@ async def diagnose_revert(
         native_eth_check = await check_native_eth_balance(native_eth_req, wallet, chain, web3_provider)
 
     # Determine cause and suggestions (native ETH check has priority)
-    likely_cause, suggestions = determine_likely_cause(balance_checks, raw_error, native_eth_check, gas_warnings)
+    likely_cause, suggestions = determine_likely_cause(balance_checks, raw_error, native_eth_check, gas_warnings, chain)
 
     return RevertDiagnostic(
         intent_type=intent.intent_type,

@@ -99,6 +99,7 @@ from .framework import (
     MigrationNotFoundError,
     MigrationRegistry,
     MigrationResult,
+    MultiStepStrategy,
     NotificationCallback,
     OperatorCardGenerator,
     PauseStrategyCallback,
@@ -202,6 +203,7 @@ __all__ = [
     # V2 Framework - Strategy base classes
     "Strategy",  # Alias for IntentStrategy
     "IntentStrategy",
+    "MultiStepStrategy",
     "StrategyBase",
     "MarketSnapshot",
     "TokenBalance",

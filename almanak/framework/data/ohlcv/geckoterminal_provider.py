@@ -60,6 +60,7 @@ _CHAIN_TO_NETWORK: dict[str, str] = {
     "avalanche": "avax",
     "bsc": "bsc",
     "sonic": "sonic",
+    "mantle": "mantle",
 }
 
 # GeckoTerminal timeframe -> API parameter mapping

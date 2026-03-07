@@ -440,8 +440,8 @@ class TestExtractionMethods:
         swap_amounts = parser.extract_swap_amounts(receipt)
 
         assert swap_amounts is not None
-        assert swap_amounts["amount_in"] == 10**18
-        assert swap_amounts["amount_out"] == 10**18
+        assert swap_amounts.amount_in == 10**18
+        assert swap_amounts.amount_out == 10**18
 
     def test_extract_lp_minted(self, parser):
         """Test LP minted extraction."""
