@@ -170,13 +170,12 @@ class ResultEnricher:
         """
         # Don't enrich failed executions
         if not result.success:
-            logger.debug("Enrichment skipped: execution failed")
             return result
 
         # Get intent type
         intent_type = self._get_intent_type(intent)
         if intent_type not in self.EXTRACTION_SPECS:
-            logger.debug(f"Enrichment skipped: no extraction spec for intent type '{intent_type}'")
+            logger.debug(f"No extraction spec for intent type: {intent_type}")
             return result
 
         # Get extraction spec
@@ -185,17 +184,10 @@ class ResultEnricher:
             return result  # No fields to extract (e.g., HOLD)
 
         # Get protocol from intent, falling back to context (intent may be frozen with protocol=None)
-        intent_protocol = self._get_protocol(intent)
-        context_protocol = getattr(context, "protocol", None)
-        protocol = intent_protocol or context_protocol
+        protocol = self._get_protocol(intent) or getattr(context, "protocol", None)
         if not protocol:
-            logger.debug(f"Enrichment skipped: protocol=None on both intent and context (intent_type={intent_type})")
+            logger.debug(f"No protocol specified on intent or context: {intent_type}")
             return result
-        logger.debug(
-            f"Enrichment: intent_type={intent_type}, protocol={protocol} "
-            f"(from={'intent' if intent_protocol else 'context'}), "
-            f"chain={context.chain}, fields={spec}"
-        )
 
         # Get parser for protocol
         try:
@@ -205,38 +197,23 @@ class ResultEnricher:
             logger.info(warning)
             result.extraction_warnings.append(warning)
             return result
-        logger.debug(f"Enrichment: using parser {type(parser).__name__} for protocol={protocol}")
 
         # Collect receipts from successful transactions
         receipts = self._collect_receipts(result)
         if not receipts:
-            logger.debug(
-                f"Enrichment skipped: no receipts in execution result (intent_type={intent_type}, protocol={protocol})"
-            )
+            logger.debug("No receipts to extract from")
             return result
-        logger.debug(f"Enrichment: found {len(receipts)} receipt(s) to process")
 
         # Extract each field in the spec
         for field in spec:
             self._extract_field(result, parser, receipts, field, intent_type)
 
         # Log enrichment summary
-        extracted_fields = []
-        missing_fields = []
-        for f in spec:
-            if self._has_extracted(result, f):
-                extracted_fields.append(f)
-            else:
-                missing_fields.append(f)
+        extracted_fields = [f for f in spec if self._has_extracted(result, f)]
         if extracted_fields:
             logger.info(
                 f"Enriched {intent_type} result with: {', '.join(extracted_fields)} "
                 f"(protocol={protocol}, chain={context.chain})"
-            )
-        if missing_fields:
-            logger.debug(
-                f"Enrichment: fields not extracted for {intent_type}: {', '.join(missing_fields)} "
-                f"(protocol={protocol}, parser={type(parser).__name__})"
             )
 
         return result
@@ -272,10 +249,6 @@ class ResultEnricher:
 
         # Check if parser has this extraction method
         if not hasattr(parser, method_name):
-            logger.debug(
-                f"Enrichment: parser {type(parser).__name__} has no method '{method_name}' "
-                f"(field={field}, intent_type={intent_type})"
-            )
             return
 
         extract_method = getattr(parser, method_name)
@@ -286,18 +259,11 @@ class ResultEnricher:
                 value = extract_method(receipt)
                 if value is not None:
                     self._attach_to_result(result, field, value, intent_type)
-                    logger.debug(f"Enrichment: extracted {field}={type(value).__name__} from receipt")
                     return  # Found it, stop looking
             except Exception as e:
                 warning = f"Failed to extract {field}: {e}"
                 logger.info(warning)
                 result.extraction_warnings.append(warning)
-
-        # If we get here, no receipt yielded a value
-        logger.debug(
-            f"Enrichment: {field} returned None from all {len(receipts)} receipt(s) "
-            f"(parser={type(parser).__name__}, intent_type={intent_type})"
-        )
 
     def _attach_to_result(
         self,

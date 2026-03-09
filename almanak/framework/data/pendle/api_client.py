@@ -279,33 +279,13 @@ class PendleAPIClient:
         if "data" in data and isinstance(data["data"], dict):
             data = data["data"]
 
-        # Extract token info -- API may return nested objects or plain address strings
-        pt_address, pt_symbol, pt_decimals = self._extract_token_info(data, "pt", "ptAddress")
-        yt_address, yt_symbol, yt_decimals = self._extract_token_info(data, "yt", "ytAddress")
-        sy_address, _, _ = self._extract_token_info(data, "sy", "syAddress")
-
-        # Underlying asset
-        underlying_raw = data.get("underlyingAsset", data.get("accountingAsset", ""))
-        underlying_address = ""
-        underlying_symbol = ""
-        if isinstance(underlying_raw, dict):
-            underlying_address = str(underlying_raw.get("address", "")).lower()
-            underlying_symbol = str(underlying_raw.get("symbol", ""))
-        else:
-            underlying_address = str(underlying_raw).lower()
-
         return PendleMarketData(
             market_address=market_address.lower(),
             chain_id=self.chain_id,
-            pt_address=pt_address,
-            pt_symbol=pt_symbol,
-            pt_decimals=pt_decimals,
-            yt_address=yt_address,
-            yt_symbol=yt_symbol,
-            yt_decimals=yt_decimals,
-            sy_address=sy_address,
-            underlying_address=underlying_address,
-            underlying_symbol=underlying_symbol,
+            pt_address=str(data.get("pt", data.get("ptAddress", ""))).lower(),
+            yt_address=str(data.get("yt", data.get("ytAddress", ""))).lower(),
+            sy_address=str(data.get("sy", data.get("syAddress", ""))).lower(),
+            underlying_address=str(data.get("underlyingAsset", data.get("accountingAsset", ""))).lower(),
             expiry=int(data.get("expiry", 0)),
             implied_apy=Decimal(str(data.get("impliedApy", data.get("implied_apy", 0)))),
             underlying_apy=Decimal(str(data.get("underlyingApy", data.get("underlying_apy", 0)))),
@@ -316,39 +296,6 @@ class PendleAPIClient:
             pt_discount=Decimal(str(data.get("ptDiscount", 0))),
             is_expired=bool(data.get("isExpired", False)),
         )
-
-    @staticmethod
-    def _extract_token_info(data: dict, key: str, fallback_key: str) -> tuple[str, str, int]:
-        """Extract address, symbol, decimals from a token field.
-
-        The Pendle API may return a nested object or a plain address string.
-        Returns (address, symbol, decimals) with sensible defaults.
-
-        Handles nullable/malformed API fields:
-        - None address -> empty string (not "none")
-        - None or non-numeric decimals -> 18 (ERC-20 default)
-        """
-        raw = data.get(key, data.get(fallback_key, ""))
-        if isinstance(raw, dict):
-            # Guard against None address becoming "none" string
-            addr_raw = raw.get("address")
-            address = str(addr_raw).lower() if addr_raw is not None else ""
-
-            symbol = str(raw.get("symbol") or "")
-
-            # Guard against None or non-numeric decimals
-            decimals_raw = raw.get("decimals")
-            try:
-                decimals = int(decimals_raw) if decimals_raw is not None else 18
-            except (ValueError, TypeError):
-                logger.warning(f"Non-numeric decimals value for token '{key}': {decimals_raw!r}, defaulting to 18")
-                decimals = 18
-
-            return (address, symbol, decimals)
-
-        # Plain value: guard against None becoming "none"
-        address = str(raw).lower() if raw is not None else ""
-        return (address, "", 18)
 
     def _parse_swap_quote(
         self,

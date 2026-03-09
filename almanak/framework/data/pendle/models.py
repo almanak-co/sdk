@@ -74,14 +74,9 @@ class PendleMarketData:
     market_address: str
     chain_id: int
     pt_address: str = ""
-    pt_symbol: str = ""
-    pt_decimals: int = 18
     yt_address: str = ""
-    yt_symbol: str = ""
-    yt_decimals: int = 18
     sy_address: str = ""
     underlying_address: str = ""
-    underlying_symbol: str = ""
     expiry: int = 0
     implied_apy: Decimal = Decimal("0")
     underlying_apy: Decimal = Decimal("0")
@@ -97,14 +92,9 @@ class PendleMarketData:
             "market_address": self.market_address,
             "chain_id": self.chain_id,
             "pt_address": self.pt_address,
-            "pt_symbol": self.pt_symbol,
-            "pt_decimals": self.pt_decimals,
             "yt_address": self.yt_address,
-            "yt_symbol": self.yt_symbol,
-            "yt_decimals": self.yt_decimals,
             "sy_address": self.sy_address,
             "underlying_address": self.underlying_address,
-            "underlying_symbol": self.underlying_symbol,
             "expiry": self.expiry,
             "implied_apy": str(self.implied_apy),
             "underlying_apy": str(self.underlying_apy),

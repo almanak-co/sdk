@@ -83,20 +83,11 @@ UNISWAP_V3: dict[str, dict[str, str]] = {
         "quoter_v2": "0x6Cdcd65e03c1CEc3730AeeCd45bc140D57A25C77",
     },
     "mantle": {
-        # Agni Finance (Uniswap V3 fork) — the primary V3 DEX on Mantle
-        "swap_router": "0x319B69888b0d11cec22caA5034e25FfFBDc88421",  # Agni SwapRouter (V1 style, with deadline)
-        "swap_router_02": "0x319B69888b0d11cec22caA5034e25FfFBDc88421",
-        "factory": "0x25780dc8Fc3cfBD75F33bFDAB65e969b603b2035",  # Agni Factory
-        "position_manager": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni NonfungiblePositionManager
-        "quoter_v2": "0xc4aaDC921E1cdb66c5300Bc158a313292923C0cb",  # Agni QuoterV2
-    },
-    "monad": {
-        # Provisional — Monad testnet (chain 143) addresses; verify before mainnet launch
-        "swap_router": "0xfe31f71c1b106eac32f1a19239c9a9a72ddfb900",  # SwapRouter02
-        "swap_router_02": "0xfe31f71c1b106eac32f1a19239c9a9a72ddfb900",
-        "factory": "0x204faca1764b154221e35c0d20abb3c525710498",
-        "position_manager": "0x7197e214c0b767cfb76fb734ab638e2c192f4e53",
-        "quoter_v2": "0x661e93cca42afacb172121ef892830ca3b70f08d",
+        "swap_router": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",  # SwapRouter02
+        "swap_router_02": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
+        "factory": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+        "position_manager": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+        "quoter_v2": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
     },
 }
 
@@ -181,15 +172,6 @@ UNISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
         "USDC": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",
         "USDT": "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE",
     },
-    "monad": {
-        # Provisional — Monad testnet (chain 143) token addresses; verify before mainnet launch
-        "MON": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
-        "WMON": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
-        "WETH": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",  # WETH on Monad
-        "USDC": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
-        "USDT0": "0xe7cd86e13AC4309349F30B3435a9d337750fC82D",
-        "WBTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
-    },
 }
 
 # =============================================================================
@@ -209,11 +191,6 @@ PANCAKESWAP_V3: dict[str, dict[str, str]] = {
     },
     "arbitrum": {
         "swap_router": "0x32226588378236Fd0c7c4053999F88aC0e5cAc77",  # SmartRouter
-        "factory": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
-        "quoter": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
-    },
-    "base": {
-        "swap_router": "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86",  # SmartRouter
         "factory": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
         "quoter": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
     },

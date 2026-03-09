@@ -98,13 +98,11 @@ EMODE_CATEGORIES: dict[str, int] = {
 }
 
 # Gas estimates for Aave operations
-# Aave V3 supply() uses ~200k gas on Ethereum (measured via Spark fork).
-# Previous value of 150,000 caused TX reverts in multi-TX bundles.
 DEFAULT_GAS_ESTIMATES: dict[str, int] = {
-    "supply": 250000,
+    "supply": 150000,
     "borrow": 350000,
-    "repay": 250000,
-    "withdraw": 250000,
+    "repay": 150000,
+    "withdraw": 150000,
     "set_collateral": 80000,
     "set_emode": 100000,
     "flash_loan": 500000,

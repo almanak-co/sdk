@@ -34,7 +34,6 @@ CHAIN_GAS_BUFFERS: dict[str, float] = {
     "blast": 1.5,  # 50% buffer for L2 data cost
     "mantle": 1.5,  # 50% buffer for L2 data cost
     "berachain": 1.2,  # 20% buffer for L1
-    "monad": 1.1,  # 10% buffer for high-throughput L1
 }
 
 # =============================================================================
@@ -85,7 +84,6 @@ CHAIN_GAS_PRICE_CAPS_GWEI: dict[str, int] = {
     "mantle": 10,  # L2
     "berachain": 50,  # L1
     "sonic": 100,  # L1
-    "monad": 50,  # High-throughput L1
 }
 
 # =============================================================================
@@ -103,8 +101,6 @@ CHAIN_GAS_COST_CAPS_NATIVE: dict[str, float] = {
     "base": 0.01,  # 0.01 ETH (~$30)
     "avalanche": 1.0,  # 1 AVAX (~$30)
     "bnb": 0.05,  # 0.05 BNB (~$30)
-    "mantle": 50.0,  # 50 MNT (~$50 at ~$1/MNT)
-    "monad": 10.0,  # 10 MON
 }
 
 # =============================================================================
@@ -125,8 +121,6 @@ CHAIN_TX_TIMEOUTS: dict[str, int] = {
     "base": 120,  # 120s - L2 fast blocks (~2s)
     "avalanche": 120,  # 120s - 2s blocks
     "plasma": 120,  # 120s - fast finality
-    "mantle": 120,  # 120s - L2 fast blocks (~2s)
-    "monad": 60,  # 60s - 1s blocks, high throughput
 }
 
 # =============================================================================
@@ -151,8 +145,6 @@ CHAIN_GRPC_EXECUTE_TIMEOUTS: dict[str, int] = {
     "plasma": 300,  # 120s TX + 180s overhead
     "bnb": 300,  # BSC 3s blocks
     "sonic": 300,  # fast finality
-    "mantle": 300,  # 120s TX + 180s overhead
-    "monad": 240,  # 60s TX + 180s overhead
 }
 
 CHAIN_SIMULATION_BUFFERS: dict[str, float] = {
@@ -169,5 +161,4 @@ CHAIN_SIMULATION_BUFFERS: dict[str, float] = {
     "mantle": 0.5,  # 50% buffer for L2 data cost
     "berachain": 0.2,  # 20% buffer for L1
     "sonic": 0.1,  # 10% buffer (from gateway)
-    "monad": 0.1,  # 10% buffer for high-throughput L1
 }

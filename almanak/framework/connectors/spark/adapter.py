@@ -79,14 +79,12 @@ MAX_UINT256 = 2**256 - 1
 SPARK_STABLE_RATE_MODE = 1  # Being deprecated
 SPARK_VARIABLE_RATE_MODE = 2  # Most common
 
-# Gas estimates for Spark operations
-# Spark supply() uses ~200,539 gas on Ethereum (measured on-chain).
-# Previous value of 150,000 caused TX reverts in multi-TX bundles.
+# Gas estimates for Spark operations (same as Aave V3)
 DEFAULT_GAS_ESTIMATES: dict[str, int] = {
-    "supply": 250000,
+    "supply": 150000,
     "borrow": 350000,
-    "repay": 250000,
-    "withdraw": 250000,
+    "repay": 150000,
+    "withdraw": 150000,
 }
 
 

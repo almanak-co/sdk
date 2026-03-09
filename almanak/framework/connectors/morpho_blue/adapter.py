@@ -1189,24 +1189,6 @@ class MorphoBlueAdapter:
                 assets_wei = int(amount * Decimal(10**decimals))
                 shares_wei = 0
 
-                # Guard: Morpho Blue panics (0x11 underflow) if repay amount > actual debt.
-                # Unlike Aave V3/Compound V3, Morpho does NOT cap repay at outstanding debt.
-                # Query on-chain debt and cap the amount to prevent revert.
-                if self._sdk_enabled:
-                    try:
-                        actual_debt_wei = self.sdk.get_borrow_assets(market_id, owner)
-                        if assets_wei > actual_debt_wei:
-                            logger.info(
-                                "Morpho repay amount %d exceeds actual debt %d, capping to actual debt",
-                                assets_wei,
-                                actual_debt_wei,
-                            )
-                            assets_wei = actual_debt_wei
-                    except Exception as e:
-                        logger.warning(
-                            "Could not query on-chain debt for repay cap, proceeding with requested amount: %s", e
-                        )
-
             # Build calldata: repay(MarketParams,uint256,uint256,address,bytes)
             calldata = self._build_repay_calldata(market_params, assets_wei, shares_wei, owner, b"")
 

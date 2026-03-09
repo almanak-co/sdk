@@ -1,6 +1,6 @@
 # E2E Strategy Test Report: uniswap_lp (Anvil)
 
-**Date:** 2026-03-06 00:01
+**Date:** 2026-03-03 19:35
 **Result:** PASS
 **Mode:** Anvil
 **Duration:** ~4 minutes
@@ -9,62 +9,64 @@
 
 | Field | Value |
 |-------|-------|
-| Strategy | uniswap_lp |
+| Strategy | demo_uniswap_lp |
 | Chain | arbitrum |
-| Network | Anvil fork (managed, auto-started by CLI on port 50633) |
-| Fork Block | 438743117 |
+| Network | Anvil fork (publicnode.com, port auto-assigned by managed gateway) |
 | Pool | WETH/USDC/500 |
-| Amount WETH | 0.001 |
-| Amount USDC | 3 |
-| Range Width | 20% |
+| Amount0 | 0.001 WETH |
+| Amount1 | 3 USDC |
+| Range Width | 20% (±10% from current price) |
 
-**Config changes:** None. Trade sizes (0.001 WETH + 3 USDC, ~$5 total) are well within the $50 budget cap. No `force_action` needed - strategy opened an LP position immediately on a fresh state run.
+## Config Changes Made
+
+- Added `"force_action": "open"` temporarily to trigger an immediate LP_OPEN on first run.
+- **Restored** after test (field removed from config.json).
+- Trade size (0.001 WETH + 3 USDC) is well within the $500 budget cap.
 
 ## Execution
 
 ### Setup
-- Previous Anvil/Gateway processes killed
-- `--network anvil --once` CLI flag auto-started a managed Anvil fork on port 50633 (Arbitrum, publicnode.com free RPC) and gateway on port 50053
-- Wallet `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` auto-funded via config `anvil_funding`:
+- [x] Previous Anvil/Gateway processes killed
+- [x] Managed gateway auto-started with fresh Anvil fork on Arbitrum (publicnode.com)
+- [x] Wallet 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 auto-funded via config anvil_funding:
   - ETH: 100 ETH
   - WETH: 1 WETH (via storage slot 51)
   - USDC: 10,000 USDC (via storage slot 9)
 
 ### Strategy Run
-- Strategy executed with `--network anvil --once`
-- Fresh state - no existing LP position
-- Price fetched: WETH = $2,082.08 (confidence: 1.00, 2/2 sources), USDC = $1.00 (confidence: 0.90, 1/2 sources)
-- Range computed: [$1,873.87 - $2,290.29] (20% range around current ETH price)
-- 3 transactions compiled and executed sequentially: approve WETH, approve USDC, lp_mint
-- LP position opened: **position_id = 5347822**
-- ResultEnricher extracted: position_id, tick_lower, tick_upper, liquidity from IncreaseLiquidity event
+- [x] Strategy executed with `--network anvil --once`
+- [x] Intent: LP_OPEN on WETH/USDC/500
+- [x] Price fetched: WETH = $1,971.35, USDC = $0.9999 (Chainlink on-chain, confidence 1.00, 2/2 sources)
+- [x] Range calculated: [$1,774.28 - $2,168.56] (±10%)
+- [x] 3 transactions submitted sequentially and confirmed
+- [x] LP position opened: position_id = **5341845**
+- [x] ResultEnricher extracted: position_id, tick_lower, tick_upper, liquidity
 
-## Transactions (Anvil local fork - not on public chain)
+### Transactions (Anvil local fork - not on public chain)
 
 | # | Type | TX Hash | Block | Gas Used | Status |
 |---|------|---------|-------|----------|--------|
-| 1 | APPROVE (WETH) | `0x5b465b7d4e4ade4eb85baee03755b1f69c24feb8a8a20eade110d9fab9097166` | 438743120 | 53,440 | SUCCESS |
-| 2 | APPROVE (USDC) | `0x80ce71556b0912d344ff9144bae0445a4f9c25cad67df10f253abf2db79f2d01` | 438743121 | 55,437 | SUCCESS |
-| 3 | LP_MINT | `0x5397ab5c2765ad679b492069e00c038f2ed20615f7c131216596ea442036edf0` | 438743122 | 417,799 | SUCCESS |
+| 1 | APPROVE (WETH) | `37a373f99f0f2970d1979bfd3fb640cb18c1b79a4fd6c39d5be592fca9b86204` | 437899187 | 53,440 | SUCCESS |
+| 2 | APPROVE (USDC) | `e57e0c0cfe8e97f2cffca1f84ca58eeee9e3be351f93af6af53b56b6af0ade36` | 437899188 | 55,437 | SUCCESS |
+| 3 | LP_MINT | `4d1da7f8338698fe18a77f79fd9668dada2731c90b77af11e108256b9eef55be` | 437899189 | 414,829 | SUCCESS |
 
-**Total gas used: 526,676 | LP Position ID: 5347822 | Execution time: 39,076ms**
+**Total gas used: 523,706 | LP Position ID: 5341845**
 
 ### Key Log Output
 
 ```text
-UniswapLPStrategy initialized: pool=WETH/USDC/500, range_width=20.0%, amounts=0.001 WETH + 3 USDC
-Aggregated price for WETH/USD: 2082.0830427749997 (confidence: 1.00, sources: 2/2, outliers: 0)
-Aggregated price for USDC/USD: 1.00 (confidence: 0.90, sources: 1/2, outliers: 0)
-No position found - opening new LP position
-LP_OPEN: 0.0010 WETH + 3.0000 USDC, range [$1,873.87 - $2,290.29]
-Compiled LP_OPEN intent: WETH/USDC, range [1873.87-2290.29], 3 txs (approve + approve + lp_mint), 660000 gas
-Simulation successful: 3 transaction(s), total gas: 923788
-EXECUTED: LP_OPEN completed successfully
-   Txs: 3 (5b465b...7166, 80ce71...2d01, 5397ab...edf0) | 526,676 gas
-Extracted LP position ID from receipt: 5347822
-Enriched LP_OPEN result with: position_id, tick_lower, tick_upper, liquidity (protocol=uniswap_v3, chain=arbitrum)
-LP position opened successfully: position_id=5347822
-Status: SUCCESS | Intent: LP_OPEN | Gas used: 526676 | Duration: 39076ms
+2026-03-03T12:34:27.021114Z [info] Aggregated price for WETH/USD: 1971.3457285650002 (confidence: 1.00, sources: 2/2)
+2026-03-03T12:34:27.347227Z [info] Aggregated price for USDC/USD: 0.999962 (confidence: 1.00, sources: 2/2)
+2026-03-03T12:34:27.349025Z [info] Forced action: OPEN LP position
+2026-03-03T12:34:27.350646Z [info] LP_OPEN: 0.0010 WETH + 3.0000 USDC, range [$1,774.28 - $2,168.56]
+2026-03-03T12:34:28.543257Z [info] Compiled LP_OPEN intent: WETH/USDC, range [1774.28-2168.56], 3 txs (approve + approve + lp_mint), 660000 gas
+2026-03-03T12:34:32.911010Z [info] Simulation successful: 3 transaction(s), total gas: 923788
+2026-03-03T12:35:00.837155Z [info] EXECUTED: LP_OPEN completed successfully
+2026-03-03T12:35:00.837573Z [info]    Txs: 3 (37a373...6204, e57e0c...de36, 4d1da7...55be) | 523,706 gas
+2026-03-03T12:35:00.840192Z [info] Extracted LP position ID from receipt: 5341845
+2026-03-03T12:35:00.840597Z [info] Enriched LP_OPEN result with: position_id, tick_lower, tick_upper, liquidity (protocol=uniswap_v3, chain=arbitrum)
+2026-03-03T12:35:00.853011Z [info] LP position opened successfully: position_id=5341845
+Status: SUCCESS | Intent: LP_OPEN | Gas used: 523706 | Duration: 36150ms
 Iteration completed successfully.
 ```
 
@@ -72,23 +74,31 @@ Iteration completed successfully.
 
 | # | Source | Severity | Pattern | Log Line |
 |---|--------|----------|---------|----------|
-| 1 | strategy | WARNING | CoinGecko rate limited for USDC/USD (3 times, exponential backoff) | `Rate limited by CoinGecko for USDC/USD, backoff: 1.00s` / `2.00s` / `4.00s` |
-| 2 | strategy | INFO | USDC/USD price resolved with reduced confidence (1/2 sources due to rate limiting) | `Aggregated price for USDC/USD: 1.00 (confidence: 0.90, sources: 1/2, outliers: 0)` |
-| 3 | strategy | INFO | Circular import error for unrelated incubating strategy at startup | `Failed to import strategy strategies.incubating.pendle_pt_swap_arbitrum.strategy (retry failed): cannot import name 'IntentStrategy'` |
-| 4 | strategy | INFO | Parser capability gap: bin_ids not declared by UniswapV3ReceiptParser | `Parser UniswapV3ReceiptParser does not declare support for 'bin_ids' (expected by LP_OPEN)` |
-| 5 | gateway | INFO | Port conflict on 50051 (manually started gateway rejected; managed gateway used 50053) | `OSError: [Errno 48] Address already in use` |
+| 1 | strategy | WARNING | Insecure mode (expected for Anvil dev) | `INSECURE MODE: Auth interceptor disabled - no auth_token configured. This is acceptable for local development on 'anvil'.` |
+| 2 | strategy | INFO | No CoinGecko API key - on-chain Chainlink pricing active | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback.` |
+| 3 | strategy | INFO | Compiler using placeholder prices on initial compile | `IntentCompiler initialized for chain=arbitrum, ... using_placeholders=True` |
+| 4 | strategy | INFO | Parser capability mismatch (bin_ids field not declared) | `Parser UniswapV3ReceiptParser does not declare support for 'bin_ids' (expected by LP_OPEN)` |
+| 5 | strategy | WARNING | Anvil port not freed after 5s (cosmetic, fork shutdown race) | `Port 58935 not freed after 5.0s [almanak.framework.anvil.fork_manager]` |
 
 **Notes:**
-- Finding 1-2: CoinGecko free tier was rate-limited 3x while fetching USDC price. The system handled this gracefully with exponential backoff and fell back to on-chain Chainlink pricing (confidence 0.90 vs 1.00 with both sources). No zero prices. Non-blocking but worth noting for production environments without an API key.
-- Finding 3: `pendle_pt_swap_arbitrum` incubating strategy has a circular import bug. Logged as a startup warning only. Unrelated to this test.
-- Finding 4: `UniswapV3ReceiptParser` does not declare support for `bin_ids` (a TraderJoe V2 concept). ResultEnricher logged this as INFO but extracted all relevant LP fields correctly (position_id, tick_lower, tick_upper, liquidity). Benign.
-- Finding 5: The manually pre-started gateway on port 50051 conflicted with the CLI's auto-managed gateway. The CLI gateway ran correctly on port 50053. No test impact.
+- Finding 1: Expected and correct for Anvil dev mode. Not a bug.
+- Finding 2: Expected when `COINGECKO_API_KEY` is not configured. Both prices were fetched via
+  Chainlink on-chain oracles (2/2 sources, confidence 1.00). Acceptable for Anvil testing.
+- Finding 3: The compiler initializes with placeholders before gateway price data is available.
+  Second compilation (when run) used real prices (`using_placeholders=False`). Normal startup sequence.
+- Finding 4: `UniswapV3ReceiptParser` does not declare support for `bin_ids` (a TraderJoe V2 concept).
+  Benign parser metadata gap - all relevant fields (position_id, tick_lower, tick_upper, liquidity)
+  were enriched correctly. Noisy but harmless.
+- Finding 5: Cosmetic port-cleanup race condition on managed Anvil fork shutdown. Non-blocking.
 
-No zero prices, no failed API fetches, no ERROR-level log lines, no transaction reverts, no token resolution failures detected.
+No zero prices, no failed API fetches, no ERROR-level log lines, no transaction reverts,
+no timeouts, no token resolution failures detected.
 
 ## Result
 
-**PASS** - The uniswap_lp strategy successfully executed LP_OPEN on an Anvil fork of Arbitrum, minting Uniswap V3 position #5347822 (WETH/USDC 0.05% fee pool, 20% price range around WETH = $2,082) via 3 sequential on-chain transactions totalling 526,676 gas. All intents compiled, simulated, submitted, and confirmed without errors. Position ID was correctly extracted from the IncreaseLiquidity event and persisted to state.
+**PASS** - The uniswap_lp strategy successfully executed an LP_OPEN on an Anvil fork of Arbitrum,
+minting Uniswap V3 position #5341845 (WETH/USDC 0.05% pool, 20% range around $1,971 ETH price)
+via 3 on-chain transactions totaling 523,706 gas. No blocking errors encountered.
 
 ---
 

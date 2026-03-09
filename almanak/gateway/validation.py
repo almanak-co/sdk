@@ -25,7 +25,6 @@ ALLOWED_CHAINS = frozenset(
         "blast",
         "mantle",
         "berachain",
-        "monad",
     }
 )
 

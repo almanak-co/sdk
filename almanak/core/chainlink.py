@@ -64,8 +64,7 @@ ARBITRUM_PRICE_FEEDS: dict[str, str] = {
     "GMX/USD": "0xDB98056FecFff59D032aB628337A4887110df3dB",
     "UNI/USD": "0x9C917083fDb403ab5ADbEC26Ee294f6EcAda2720",
     "AAVE/USD": "0xaD1d5344AaDE45F43E596773Bcc4c423EAbdD034",
-    # Note: Arbitrum has no direct WSTETH/USD Chainlink feed.
-    # Use derived price (WSTETH/ETH * ETH/USD) via ETH_DENOMINATED_FEEDS below.
+    "WSTETH/USD": "0xB1552C5e96B312d0Bf8b554186F846C40614a540",
     "PENDLE/USD": "0x66853E19d73c0F9301fe099c324A1E9726953C89",
     "RDNT/USD": "0x20d0Fcab0ECFD078B036b6CAf1FaC69A6453b352",
     "MAGIC/USD": "0x47E55cCec6582838E173f252D08Afd8116c2202d",
@@ -208,23 +207,4 @@ CHAINLINK_CHAIN_IDS: dict[str, int] = {
     "optimism": 10,
     "polygon": 137,
     "avalanche": 43114,
-}
-
-# =============================================================================
-# ETH-denominated Chainlink feeds for derived USD pricing
-# =============================================================================
-# Some tokens only have TOKEN/ETH feeds (no TOKEN/USD). For these, the OnChain
-# price source computes TOKEN/USD = TOKEN/ETH * ETH/USD.
-#
-# Format: { chain: { "TOKEN/ETH": feed_address } }
-ETH_DENOMINATED_FEEDS: dict[str, dict[str, str]] = {
-    "arbitrum": {
-        "WSTETH/ETH": "0xb523AE262D20A936BC152e6023996e46FDC2A95D",
-    },
-}
-
-# Token symbol to ETH-denominated pair mapping
-TOKEN_TO_ETH_PAIR: dict[str, str] = {
-    "WSTETH": "WSTETH/ETH",
-    "STETH": "WSTETH/ETH",
 }

@@ -231,13 +231,11 @@ CHAIN_CONFIGS = {
         "chain_id": 5000,
         "alchemy_key": None,  # No Alchemy support, uses public RPC
         "tokens": {
-            "WMNT": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
-            "USDC": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",
+            "USDC": "0x09Bc4E0D10E52d8DA1060e8ef425f2dB24b36C7C",
             "WETH": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",
             "USDT": "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE",
         },
         "balance_slots": {
-            "WMNT": 0,
             "USDC": 0,
             "WETH": 0,
             "USDT": 0,

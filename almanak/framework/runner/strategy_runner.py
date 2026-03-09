@@ -1997,32 +1997,25 @@ class StrategyRunner:
             timeline_result = last_execution_result or SimpleNamespace(error=error_msg)
             self._emit_execution_timeline_event(strategy, intent, success=False, result=timeline_result)
 
-            # Run revert diagnostics only for on-chain execution failures.
-            # Skip for compilation/pre-execution failures (last_execution_result is None)
-            # where balance checks and approval suggestions are irrelevant.
-            if last_execution_result is None:
-                logger.error(
-                    f"COMPILATION FAILURE: {error_msg}\n"
-                    f"  Intent: {intent.intent_type.value} | Chain: {strategy.chain}\n"
-                    f"  This is a pre-execution error. No on-chain transaction was attempted."
-                )
-            else:
-                try:
-                    gas_warnings = None
-                    if hasattr(last_execution_result, "gas_warnings"):
-                        gas_warnings = last_execution_result.gas_warnings or None
+            # Run revert diagnostics to help identify the cause
+            try:
+                # Extract gas warnings from the last execution result if available
+                gas_warnings = None
+                if last_execution_result and hasattr(last_execution_result, "gas_warnings"):
+                    gas_warnings = last_execution_result.gas_warnings or None
 
-                    diagnostic = await diagnose_revert(
-                        intent=intent,
-                        chain=strategy.chain,
-                        wallet=strategy.wallet_address,
-                        web3_provider=self.balance_provider,
-                        raw_error=error_msg,
-                        gas_warnings=gas_warnings,
-                    )
-                    logger.error(diagnostic.format())
-                except Exception as diag_error:
-                    logger.warning(f"Revert diagnostic failed: {diag_error}", exc_info=True)
+                diagnostic = await diagnose_revert(
+                    intent=intent,
+                    chain=strategy.chain,
+                    wallet=strategy.wallet_address,
+                    web3_provider=self.balance_provider,
+                    raw_error=error_msg,
+                    gas_warnings=gas_warnings,
+                )
+                # Log the diagnostic in a user-friendly format
+                logger.error(diagnostic.format())
+            except Exception as diag_error:
+                logger.warning(f"Revert diagnostic failed: {diag_error}", exc_info=True)
 
             # Only alert/escalate after state machine has exhausted all retries
             if last_execution_result:
@@ -2750,27 +2743,21 @@ class StrategyRunner:
                             chain=failed_chain,
                         )
 
-                        # Skip revert diagnostics for compilation failures
-                        if failed_result is None:
-                            logger.error(
-                                f"COMPILATION FAILURE: {error_message}\n"
-                                f"  Intent: {failed_intent.intent_type.value} | Chain: {failed_chain}\n"
-                                f"  This is a pre-execution error. No on-chain transaction was attempted."
-                            )
-                        else:
-                            cross_chain_gas_warnings = None
-                            if hasattr(failed_result, "gas_warnings"):
-                                cross_chain_gas_warnings = failed_result.gas_warnings or None
+                        # Extract gas warnings from the failed execution result if available
+                        cross_chain_gas_warnings = None
+                        if failed_result and hasattr(failed_result, "gas_warnings"):
+                            cross_chain_gas_warnings = failed_result.gas_warnings or None
 
-                            diagnostic = await diagnose_revert(
-                                intent=failed_intent,
-                                chain=failed_chain,
-                                wallet=strategy.wallet_address,
-                                web3_provider=chain_balance_provider,
-                                raw_error=error_message,
-                                gas_warnings=cross_chain_gas_warnings,
-                            )
-                            logger.error(diagnostic.format())
+                        diagnostic = await diagnose_revert(
+                            intent=failed_intent,
+                            chain=failed_chain,
+                            wallet=strategy.wallet_address,
+                            web3_provider=chain_balance_provider,
+                            raw_error=error_message,
+                            gas_warnings=cross_chain_gas_warnings,
+                        )
+                        # Log the diagnostic in a user-friendly format
+                        logger.error(diagnostic.format())
             except Exception as diag_error:
                 logger.warning(f"Revert diagnostic failed: {diag_error}", exc_info=True)
 
@@ -2903,11 +2890,6 @@ class StrategyRunner:
         is called. During teardown, generate_teardown_intents() typically doesn't call
         market.price(), so get_price_oracle_dict() returns {} and the compiler falls
         back to placeholder prices. This method pre-populates the cache.
-
-        Teardown intents often reference tokens by address (e.g. 0xdefa1d...) rather
-        than symbol. market.price() expects a symbol, so we resolve addresses to
-        symbols first using the token resolver. Without this, tokens like ALMANAK
-        (not in CoinGecko/Chainlink) fail price resolution during teardown.
         """
         token_attrs = ("from_token", "to_token", "token", "collateral_token", "borrow_token", "token_in")
         tokens: set[str] = set()
@@ -2920,42 +2902,14 @@ class StrategyRunner:
         if not tokens:
             return
 
-        # Resolve addresses to symbols so market.price() can look them up.
-        # market.price() expects symbols (e.g. "ALMANAK"), not addresses.
-        chain = getattr(market, "_chain", None) or getattr(market, "chain", None)
-        address_to_symbol: dict[str, str] = {}
-        if chain:
-            try:
-                from almanak.framework.data.tokens import get_token_resolver
-
-                resolver = get_token_resolver()
-                for token in tokens:
-                    if token.startswith("0x") and len(token) == 42:
-                        try:
-                            resolved = resolver.resolve(token, chain, log_errors=False, skip_gateway=True)
-                            address_to_symbol[token] = resolved.symbol
-                        except Exception as e:
-                            logger.debug(f"Could not resolve teardown token address {token} to symbol: {e}")
-            except Exception as e:
-                logger.debug(f"Token resolver unavailable for teardown prefetch: {e}")
-
         fetched = []
         for token in sorted(tokens):
-            # Try the symbol if we resolved the address, otherwise try the raw value
-            symbol = address_to_symbol.get(token, token)
             try:
-                market.price(symbol)
-                fetched.append(symbol)
+                market.price(token)
+                fetched.append(token)
             except Exception:
-                # If symbol lookup failed and we have the original address, try that too
-                if symbol != token:
-                    try:
-                        market.price(token)
-                        fetched.append(token)
-                    except Exception:
-                        logger.debug(f"Could not pre-fetch price for teardown token {token} (symbol={symbol})")
-                else:
-                    logger.debug(f"Could not pre-fetch price for teardown token {token}")
+                # Non-fatal: teardown proceeds with placeholders for this token
+                logger.debug(f"Could not pre-fetch price for teardown token {token}")
 
         if fetched:
             logger.info(f"Pre-fetched {len(fetched)} teardown prices: {fetched}")

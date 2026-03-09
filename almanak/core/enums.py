@@ -68,7 +68,6 @@ class Chain(Enum):
     BLAST = "BLAST"
     MANTLE = "MANTLE"
     BERACHAIN = "BERACHAIN"
-    MONAD = "MONAD"
 
 
 class Protocol(Enum):

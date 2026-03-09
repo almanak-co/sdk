@@ -940,7 +940,6 @@ almanak docs agent-skill --dump       # Print agent skill content
 | Blast | `BLAST` | `blast` |
 | Mantle | `MANTLE` | `mantle` |
 | Berachain | `BERACHAIN` | `berachain` |
-| Monad | `MONAD` | `monad` |
 
 <!-- almanak-sdk-end: supported-chains -->
 

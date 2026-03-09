@@ -79,11 +79,6 @@ COMPOUND_V3_COMET_ADDRESSES: dict[str, dict[str, str]] = {
         "weth": "0x6f7D514bbD4aFf3BcD1140B7344b32f063dEe486",
         "usdt": "0xd98Be00b5D27fc98112BdE293e487f8D4cA57d07",
     },
-    "base": {
-        "usdc": "0xb125E6687d4313864e53df431d5425969c15Eb2F",
-        "weth": "0x46e6b214b524310239732D51387075E0e70970bf",
-        "aero": "0x784efeB622244d2348d4F2522f8860B96fbEcE89",
-    },
 }
 
 
@@ -286,59 +281,6 @@ COMPOUND_V3_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
                     "address": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
                     "borrow_collateral_factor": Decimal("0.70"),
                     "liquidation_collateral_factor": Decimal("0.77"),
-                    "liquidation_factor": Decimal("0.95"),
-                },
-            },
-        },
-    },
-    "base": {
-        "usdc": {
-            "name": "USDC Market",
-            "base_token": "USDC",
-            "base_token_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-            "collaterals": {
-                "WETH": {
-                    "address": "0x4200000000000000000000000000000000000006",
-                    "borrow_collateral_factor": Decimal("0.80"),
-                    "liquidation_collateral_factor": Decimal("0.85"),
-                    "liquidation_factor": Decimal("0.95"),
-                },
-                "cbETH": {
-                    "address": "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
-                    "borrow_collateral_factor": Decimal("0.80"),
-                    "liquidation_collateral_factor": Decimal("0.85"),
-                    "liquidation_factor": Decimal("0.95"),
-                },
-            },
-        },
-        "weth": {
-            "name": "WETH Market",
-            "base_token": "WETH",
-            "base_token_address": "0x4200000000000000000000000000000000000006",
-            "collaterals": {
-                "cbETH": {
-                    "address": "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
-                    "borrow_collateral_factor": Decimal("0.90"),
-                    "liquidation_collateral_factor": Decimal("0.93"),
-                    "liquidation_factor": Decimal("0.975"),
-                },
-                "wstETH": {
-                    "address": "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452",
-                    "borrow_collateral_factor": Decimal("0.90"),
-                    "liquidation_collateral_factor": Decimal("0.93"),
-                    "liquidation_factor": Decimal("0.975"),
-                },
-            },
-        },
-        "aero": {
-            "name": "AERO Market",
-            "base_token": "AERO",
-            "base_token_address": "0x940181a94A35A4569E4529A3CDfB74e38FD98631",
-            "collaterals": {
-                "WETH": {
-                    "address": "0x4200000000000000000000000000000000000006",
-                    "borrow_collateral_factor": Decimal("0.80"),
-                    "liquidation_collateral_factor": Decimal("0.85"),
                     "liquidation_factor": Decimal("0.95"),
                 },
             },

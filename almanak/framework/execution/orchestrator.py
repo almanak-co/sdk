@@ -1871,18 +1871,6 @@ class ExecutionOrchestrator:
         Returns:
             Transaction with buffered gas limit
         """
-        # Guard against zero/negative gas estimates (RPC error, rate limiting, timeout).
-        # Fall back to the compiler-provided gas limit instead of crashing.
-        if gas_estimate <= 0:
-            compiler_gas = tx.gas_limit or 0
-            if compiler_gas > 0:
-                logger.warning(f"Gas estimation returned {gas_estimate}, using compiler estimate: {compiler_gas:,}")
-                return tx
-            logger.warning(
-                f"Gas estimation returned {gas_estimate} and no compiler estimate available, using default 300,000"
-            )
-            gas_estimate = 300_000
-
         # Single point of gas buffer application -- simulators return raw gas_used
         buffered_gas = int(gas_estimate * self.gas_buffer_multiplier)
 

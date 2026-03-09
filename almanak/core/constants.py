@@ -16,7 +16,6 @@ CHAIN_IDS: dict[Chain, int] = {
     Chain.BLAST: 81457,
     Chain.MANTLE: 5000,
     Chain.BERACHAIN: 80094,
-    Chain.MONAD: 143,
 }
 
 # Common aliases mapping to Chain enum
@@ -42,7 +41,6 @@ _CHAIN_ALIASES: dict[str, Chain] = {
     "mantle": Chain.MANTLE,
     "berachain": Chain.BERACHAIN,
     "bera": Chain.BERACHAIN,
-    "monad": Chain.MONAD,
 }
 
 

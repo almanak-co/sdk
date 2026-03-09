@@ -2130,26 +2130,6 @@ def run(
             from ..vault.lifecycle import VAULT_STATE_KEY, VaultLifecycleManager
 
             vault_raw = strategy_config["vault"]
-
-            # Auto-deploy Lagoon vault on Anvil if placeholder address detected
-            if resolved_network == "anvil" and _has_placeholder_vault_address(vault_raw):
-                if effective_dry_run:
-                    click.secho(
-                        "  [DRY-RUN] Vault has placeholder address -- skipping auto-deploy",
-                        fg="yellow",
-                    )
-                    click.echo("  Deploy manually or run without --dry-run on Anvil")
-                    sys.exit(0)
-
-                click.echo("  Placeholder vault address detected -- auto-deploying on Anvil...")
-                vault_raw = _auto_deploy_lagoon_vault(
-                    vault_raw,
-                    strategy_config.get("chain") or config_chain or "ethereum",
-                    runtime_config,
-                    gateway_client,
-                    execution_orchestrator,
-                )
-
             vault_config = VaultConfig(**vault_raw)
             vault_chain = strategy_config.get("chain", "")
             vault_sdk = LagoonVaultSDK(gateway_client, chain=vault_chain)
@@ -2406,107 +2386,6 @@ def run(
             logger.exception("Run loop failed")
             stop_dashboard(dashboard_process)
             sys.exit(1)
-
-
-def _has_placeholder_vault_address(vault_raw: dict) -> bool:
-    """Check if the vault config has a placeholder address requiring auto-deploy."""
-    addr = vault_raw.get("vault_address") or ""
-    return addr.startswith("0x_") or "_DEPLOY_" in addr or "_SET_TO_" in addr
-
-
-def _auto_deploy_lagoon_vault(
-    vault_raw: dict,
-    chain: str,
-    runtime_config: Any,
-    gateway_client: Any,
-    execution_orchestrator: Any,
-) -> dict:
-    """Auto-deploy a Lagoon vault on Anvil and patch vault_raw with real addresses.
-
-    Returns the patched vault_raw dict with real vault_address and valuator_address.
-    Exits with sys.exit(1) on failure.
-    """
-    from ..connectors.lagoon.deployer import LagoonVaultDeployer, VaultDeployParams
-    from ..data.tokens import get_token_resolver
-
-    # Resolve underlying token symbol to address
-    underlying_symbol = vault_raw.get("underlying_token", "USDC")
-    try:
-        underlying_address = get_token_resolver().get_address(chain, underlying_symbol)
-    except Exception as e:
-        click.secho(f"  ERROR: Cannot resolve token '{underlying_symbol}' on {chain}: {e}", fg="red")
-        sys.exit(1)
-
-    wallet = runtime_config.wallet_address
-    deployer = LagoonVaultDeployer(gateway_client)
-
-    params = VaultDeployParams(
-        chain=chain,
-        underlying_token_address=underlying_address,
-        name="Almanak Anvil Vault",
-        symbol="aVLT",
-        safe_address=wallet,
-        admin_address=wallet,
-        fee_receiver_address=wallet,
-        deployer_address=wallet,
-    )
-
-    # Step 1: Build and execute deploy transaction
-    click.echo("  Building vault deploy transaction...")
-    try:
-        deploy_bundle = deployer.build_deploy_vault_bundle(params)
-    except Exception as e:
-        click.secho(f"  ERROR: Failed to build deploy transaction: {e}", fg="red")
-        sys.exit(1)
-
-    click.echo("  Executing vault deploy transaction...")
-    try:
-        deploy_result = asyncio.run(execution_orchestrator.execute(deploy_bundle))
-    except Exception as e:
-        click.secho(f"  ERROR: Vault deploy transaction failed: {e}", fg="red")
-        sys.exit(1)
-
-    if not deploy_result.success:
-        error_msg = getattr(deploy_result, "error", "Unknown error")
-        click.secho(f"  ERROR: Vault deploy transaction reverted: {error_msg}", fg="red")
-        sys.exit(1)
-
-    # Step 2: Parse receipt to extract vault address
-    receipt = None
-    for tx_result in deploy_result.transaction_results:
-        if tx_result.receipt:
-            receipt = tx_result.receipt
-            break
-
-    if receipt is None:
-        click.secho("  ERROR: No receipt found for vault deploy transaction", fg="red")
-        sys.exit(1)
-
-    parsed = deployer.parse_deploy_receipt(receipt)
-    if not parsed.success or not parsed.vault_address:
-        click.secho(f"  ERROR: Could not extract vault address: {parsed.error}", fg="red")
-        sys.exit(1)
-
-    vault_address = parsed.vault_address
-    click.secho(f"  Vault deployed at: {vault_address}", fg="green")
-
-    # Step 3: Approve underlying token for vault
-    click.echo("  Approving underlying token for vault...")
-    try:
-        approve_bundle = deployer.build_post_deploy_bundle(underlying_address, vault_address, wallet)
-        approve_result = asyncio.run(execution_orchestrator.execute(approve_bundle))
-        if not approve_result.success:
-            click.secho("  WARNING: Underlying approval failed (vault may still work)", fg="yellow")
-    except Exception as e:
-        click.secho(f"  WARNING: Underlying approval failed: {e}", fg="yellow")
-
-    # Patch vault_raw with real addresses
-    vault_raw = dict(vault_raw)  # shallow copy to avoid mutating original
-    vault_raw["vault_address"] = vault_address
-    vault_raw["valuator_address"] = wallet
-    click.secho("  Vault config patched with deployed addresses", fg="green")
-
-    return vault_raw
 
 
 if __name__ == "__main__":

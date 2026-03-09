@@ -1,9 +1,9 @@
 # E2E Strategy Test Report: ethena_yield (Anvil)
 
-**Date:** 2026-03-05 22:06 (re-run #2)
+**Date:** 2026-03-03 11:54
 **Result:** PASS
 **Mode:** Anvil
-**Duration:** ~4 minutes
+**Duration:** ~5 minutes
 
 ## Configuration
 
@@ -12,51 +12,51 @@
 | Strategy | EthenaYieldStrategy (demo_ethena_yield) |
 | Chain | ethereum |
 | Network | Anvil fork (public RPC: https://ethereum-rpc.publicnode.com) |
-| Anvil Port | 54362 (managed, auto-assigned) |
-| Fork Block | 24594143 |
+| Anvil Port | 51753 (managed, auto-assigned) |
+| Fork Block | 24576759 |
 | Force Action | swap (USDC -> USDe) |
 
 ## Config Changes Made
 
-None. The config already had `force_action: "swap"` and `min_usdc_amount: "5"`, well within the $50 budget cap.
+None. The config already had `force_action: "swap"` and `min_usdc_amount: "5"`, well within the $500 budget cap.
 
 ## Execution
 
 ### Setup
 
-- [x] Managed gateway auto-started on port 50051 (network=anvil)
-- [x] Anvil fork of Ethereum started on port 50155 (block 24591514, chain_id=1) using free public RPC (publicnode.com) -- no Alchemy key configured
+- [x] Managed gateway auto-started on port 50052 (network=anvil)
+- [x] Anvil fork of Ethereum started on port 51753 (block 24576759, chain_id=1) using free public RPC (publicnode.com) -- no Alchemy key configured
 - [x] Wallet auto-funded by managed gateway via `anvil_funding` config:
   - 100 ETH, 10,000 USDC (slot 9), 1 WETH (slot 3), 1,000 USDe (brute-force slot 2)
 - [x] Wallet: `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` (Anvil default)
+- Note: Strategy resumed from existing persisted state (prior run had `swapped: True`); `force_action` overrode this.
 
 ### Strategy Run
 
-- [x] Intent emitted: SWAP 5.0 USDC -> USDe via Enso aggregator (force_action="swap")
-- First attempt (2-TX Enso route):
-  - TX 1 (approve): `ad4450def5d5d82244095e4205c1b5287ae307026ff5f0b3921058da9290489a` (block 24594149, gas 55,558) -- SUCCESS
-  - TX 2 (swap): `6d18d859da338142900a29bb7a43435737e71b515a4e86b2f2a4c6977dbdbe9e` -- REVERTED (selector=0xef3dcb2f, unknown Enso router error)
-- Retry (attempt 1 of 3): Enso compiled a single-TX route
-  - TX (single-TX swap): `acb8d6ba4a893bb71de9aaf9dae5f1894d8c731d6d0f274d2bdb725a6b419eee` (block 24594151, gas 752,774) -- SUCCESS
-- [x] Final status: `SUCCESS | Intent: SWAP | Gas used: 752774 | Duration: 57847ms`
+- [x] Intent emitted: SWAP 5.0 USDC -> USDe via Enso aggregator
+- [x] Route found: 5.0 USDC -> 5.0038 USDe (min: 4.9788 USDe, price impact: 0bp)
+- [x] 2 transactions submitted and confirmed:
+  - TX 1 (approve): `0x680fd139af53fb0f941745ec283f59709151ff84c34cd3038e507d7a058bee1e` (block 24576765, gas 55,558)
+  - TX 2 (swap): `0x51bc1c98e523e32b04a7641da790cfec4f5c31a7bed6e2dba13179a8828833de` (block 24576766, gas 618,236)
+- [x] Total gas used: 673,794
+- [x] Final status: `SUCCESS | Intent: SWAP | Gas used: 673794 | Duration: 48114ms`
 
 ### Key Log Output
 
 ```text
-[info] Forced action: SWAP USDC -> USDe
-[info] SWAP intent: 5.0000 USDC -> USDe via Enso (slippage=0.5%)
-[info] Route found: 0xA0b86991... -> 0x4c9EDD58..., amount_out=5305518122932789214, price_impact=0bp
-[info] Compiled SWAP (Enso): 5.0000 USDC -> 5.3055 USDE (min: 5.2790 USDE)
-[warn] Transaction reverted: 2e66b1...caa3, reason=Unknown revert (selector=0xef3dcb2f)
-[error] FAILED: SWAP - Transaction reverted at 2e66b1...caa3
-[info] Retrying intent (attempt 1/3, delay=1.01s)
-[info] Route found (retry): amount_out=5305518122932789214 [1-TX path]
-[info] Compiled SWAP (Enso): 5.0000 USDC -> 5.3055 USDE (min: 5.2790 USDE)
-[info] Transaction confirmed: 26c539...6296, block=24591522, gas_used=453059
-[info] EXECUTED: SWAP completed successfully
-[info] Swap successful: 5 USDC -> USDe
-[info] Intent succeeded after 1 retries
-Status: SUCCESS | Intent: SWAP | Gas used: 453059 | Duration: 47268ms
+2026-03-03T11:54:05.864234Z [info] Forced action: SWAP USDC -> USDe
+2026-03-03T11:54:05.864268Z [info] SWAP intent: 5.0000 USDC -> USDe via Enso (slippage=0.5%)
+2026-03-03T11:54:08.562373Z [info] Route found: 0xA0b86991... -> 0x4c9EDD58..., amount_out=5003784052264016464, price_impact=0bp
+2026-03-03T11:54:08.928772Z [info] Compiled SWAP (Enso): 5.0000 USDC -> 5.0038 USDE (min: 4.9788 USDE)
+2026-03-03T11:54:08.929023Z [info] Slippage: 0.50% | Impact: N/A | Txs: 2 | Gas: 848,027
+2026-03-03T11:54:19.589710Z [info] Transaction submitted: tx_hash=680fd139...ee1e, latency=5.7ms
+2026-03-03T11:54:19.904261Z [info] Transaction confirmed: tx_hash=680fd139...ee1e, block=24576765, gas_used=55558
+2026-03-03T11:54:19.907124Z [info] Transaction submitted: tx_hash=51bc1c98...33de, latency=2.2ms
+2026-03-03T11:54:43.878880Z [info] Transaction confirmed: tx_hash=51bc1c98...33de, block=24576766, gas_used=618236
+2026-03-03T11:54:53.965248Z [info] EXECUTED: SWAP completed successfully
+2026-03-03T11:54:53.965429Z [info] Txs: 2 (680fd1...ee1e, 51bc1c...33de) | 673,794 gas
+2026-03-03T11:54:53.977143Z [info] Swap successful: 5 USDC -> USDe
+Status: SUCCESS | Intent: SWAP | Gas used: 673794 | Duration: 48114ms
 Iteration completed successfully.
 ```
 
@@ -64,9 +64,8 @@ Iteration completed successfully.
 
 | Step | TX Hash | Gas Used | Status |
 |------|---------|----------|--------|
-| TX 1: Approve USDC (attempt 1) | `ad4450def5d5d82244095e4205c1b5287ae307026ff5f0b3921058da9290489a` | 55,558 | SUCCESS |
-| TX 2: Swap USDC -> USDe (attempt 1) | `6d18d859da338142900a29bb7a43435737e71b515a4e86b2f2a4c6977dbdbe9e` | N/A | REVERTED |
-| TX 3: Swap USDC -> USDe (attempt 2, single-TX) | `acb8d6ba4a893bb71de9aaf9dae5f1894d8c731d6d0f274d2bdb725a6b419eee` | 752,774 | SUCCESS |
+| TX 1: Approve USDC | `0x680fd139af53fb0f941745ec283f59709151ff84c34cd3038e507d7a058bee1e` | 55,558 | SUCCESS |
+| TX 2: Swap USDC -> USDe | `0x51bc1c98e523e32b04a7641da790cfec4f5c31a7bed6e2dba13179a8828833de` | 618,236 | SUCCESS |
 
 *(Anvil local fork transactions -- no block explorer links)*
 
@@ -75,23 +74,26 @@ Iteration completed successfully.
 | # | Source | Severity | Pattern | Log Line |
 |---|--------|----------|---------|----------|
 | 1 | gateway | WARNING | Placeholder prices in IntentCompiler | `IntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT. This is only acceptable for unit tests.` |
-| 2 | strategy | WARNING | Transaction revert on first 2-TX Enso route | `Transaction reverted: tx_hash=2e66b1...caa3, reason=Unknown revert (selector=0xef3dcb2f)` |
-| 3 | strategy | ERROR | Execution failed (before retry) | `FAILED: SWAP - Transaction reverted at 2e66b1...caa3` |
-| 4 | strategy | WARNING | Circular import on incubating pendle strategy | `Failed to import strategy strategies.incubating.pendle_pt_swap_arbitrum.strategy: cannot import name 'IntentStrategy' from partially initialized module 'almanak'` |
+| 2 | gateway | INFO | No CoinGecko API key - on-chain pricing fallback | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback.` |
+| 3 | gateway | INFO | No API key / public RPC with rate limit risk | `No API key configured -- using free public RPC for ethereum (rate limits may apply)` |
+| 4 | strategy | INFO | Stale state on resume | `Mode: RESUME (existing state found)` with `swapped: True, swapped_amount: 5` -- `force_action` overrode this correctly |
+| 5 | strategy | WARNING | Port not freed within grace period | `Port 51753 not freed after 5.0s` |
 
 ### Analysis
 
 - **Finding 1 (Placeholder prices)**: Known Anvil mode limitation. The IntentCompiler does not receive live prices from the gateway when compiling on Anvil, so slippage calculations use placeholder values. The swap itself is protected by Enso's own min-output calculation, but the local slippage guard is ineffective. This is a data flow gap that affects all Anvil runs.
-- **Finding 2/3 (First-attempt Enso route revert)**: The initial Enso route was a 2-TX bundle (approve + swap); the swap TX reverted with custom error `0xef3dcb2f`. This appears to be an Enso router-level validation error (likely Permit2 forwarding issue specific to the 2-TX path on Anvil forks). The retry system correctly detected this, re-queried Enso (which returned a single-TX route), and the re-compiled transaction executed successfully. The strategy recovered autonomously within the retry budget. This same revert was observed in the prior run (02:21 UTC) confirming it is a reproducible Enso/Anvil interaction issue.
-- **Finding 4 (Pendle circular import)**: Pre-existing issue in the incubating pendle strategy discovered during strategy scanning. Does not affect ethena_yield.
+- **Finding 2 (CoinGecko fallback)**: Expected for this `.env` configuration. On-chain Chainlink pricing is used as primary; this is acceptable. INFO severity only.
+- **Finding 3 (Public RPC)**: No Alchemy key configured. Public RPC works but may have rate limits under load. Not an issue for single test runs.
+- **Finding 4 (Stale state)**: Strategy loaded prior run's state showing `swapped: True`. The `force_action` config flag correctly overrode this. In production without `force_action`, the strategy would return HOLD on first run due to stale state. Test harnesses should clear state between runs.
+- **Finding 5 (Port cleanup)**: Cosmetic -- Anvil stops correctly but the port linger check fires before the OS releases it. Non-blocking.
 
-No zero prices, token resolution errors, API timeouts, or persistent execution failures observed.
+No zero prices, transaction reverts, token resolution errors, or Enso API failures observed.
 
 ## Result
 
-**PASS** - The ethena_yield strategy successfully executed a USDC -> USDe swap via the Enso aggregator on an Ethereum Anvil fork. The first Enso route (2-TX) reverted with selector `0xef3dcb2f`, but the retry mechanism automatically compiled a single-TX route which confirmed successfully (TX: `acb8d6ba4a893bb71de9aaf9dae5f1894d8c731d6d0f274d2bdb725a6b419eee`, gas: 752,774). This is the second consecutive run confirming this behavior is reproducible.
+**PASS** - The ethena_yield strategy successfully executed a USDC -> USDe swap via the Enso aggregator on an Ethereum Anvil fork, confirming 2 on-chain transactions (673,794 gas total). The placeholder prices warning (Finding 1) is a pre-existing Anvil mode limitation; the swap executed correctly using Enso's real on-chain route and min-output protection.
 
 ---
 
-SUSPICIOUS_BEHAVIOUR_COUNT: 4
-SUSPICIOUS_BEHAVIOUR_ERRORS: 1
+SUSPICIOUS_BEHAVIOUR_COUNT: 5
+SUSPICIOUS_BEHAVIOUR_ERRORS: 0

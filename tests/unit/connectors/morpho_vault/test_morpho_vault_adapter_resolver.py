@@ -130,7 +130,7 @@ class TestDepositTokenResolution:
             "to": ASSET_ADDR, "data": "0x", "value": "0", "gas_estimate": 60000,
         }
         mock_sdk.build_deposit_tx.return_value = {
-            "to": VAULT_ADDR, "data": "0x", "value": "0", "gas_estimate": 450000,
+            "to": VAULT_ADDR, "data": "0x", "value": "0", "gas_estimate": 200000,
         }
         adapter._sdk = mock_sdk
 

@@ -115,7 +115,7 @@ class TestDeposit:
             "to": VAULT_ADDR,
             "data": "0xdeposit",
             "value": "0",
-            "gas_estimate": 450000,
+            "gas_estimate": 200000,
         }
         adapter._sdk = mock_sdk
 
@@ -129,7 +129,7 @@ class TestDeposit:
         assert result.tx_data is not None
         assert "approve" in result.tx_data
         assert "deposit" in result.tx_data
-        assert result.gas_estimate == 510000
+        assert result.gas_estimate == 260000
 
     def test_deposit_zero_amount(self):
         adapter, _ = self._make_adapter_with_mock_sdk()
@@ -178,7 +178,7 @@ class TestRedeem:
             "to": VAULT_ADDR,
             "data": "0xredeem",
             "value": "0",
-            "gas_estimate": 450000,
+            "gas_estimate": 250000,
         }
         adapter._sdk = mock_sdk
         return adapter, mock_sdk
@@ -190,7 +190,7 @@ class TestRedeem:
         assert result.success is True
         assert result.tx_data is not None
         assert "redeem" in result.tx_data
-        assert result.gas_estimate == 450000
+        assert result.gas_estimate == 250000
 
     def test_redeem_all(self):
         adapter, mock_sdk = self._make_adapter_with_mock_sdk()
@@ -308,12 +308,12 @@ class TestTransactionResult:
         result = TransactionResult(
             success=True,
             tx_data={"approve": {}, "deposit": {}},
-            gas_estimate=510000,
+            gas_estimate=260000,
             description="Deposit 1000 USDC",
         )
         d = result.to_dict()
         assert d["success"] is True
-        assert d["gas_estimate"] == 510000
+        assert d["gas_estimate"] == 260000
 
     def test_failed_result(self):
         result = TransactionResult(success=False, error="Something went wrong")

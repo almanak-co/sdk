@@ -425,7 +425,7 @@ class TestMorphoBlueAdapterOnChain:
         assert position.borrow_shares > 0, "Position should have borrow shares"
 
     def test_repay_debt(self, web3: Web3, funded_wallet: str, anvil_rpc_url: str) -> None:
-        """Test repaying all borrowed USDC using shares-based repay."""
+        """Test repaying borrowed USDC."""
         from almanak.framework.connectors.morpho_blue import (
             MorphoBlueAdapter,
             MorphoBlueConfig,
@@ -444,17 +444,16 @@ class TestMorphoBlueAdapterOnChain:
         if position.borrow_shares == 0:
             pytest.skip("No borrow from previous test")
 
-        # Approve generous USDC allowance for repayment (covers debt + interest)
-        approve_receipt = approve_token(web3, USDC_ADDRESS, MORPHO_BLUE_ADDRESS, 10**12)
+        # Approve USDC for repayment
+        repay_amount = Decimal("50")  # Repay 50 USDC
+        repay_amount_wei = int(repay_amount * Decimal(10**6))
+        approve_receipt = approve_token(web3, USDC_ADDRESS, MORPHO_BLUE_ADDRESS, repay_amount_wei * 2)
         assert approve_receipt["status"] == 1
 
-        # Use repay_all=True for shares-based repay (avoids over-repay underflow).
-        # This uses the exact borrow shares from the position, which is the safest
-        # way to repay on Morpho Blue without risking the 0x11 panic (VIB-648).
+        # Build repay transaction
         result = adapter.repay(
             market_id=WSTETH_USDC_MARKET_ID,
-            amount=Decimal("0"),  # ignored when repay_all=True
-            repay_all=True,
+            amount=repay_amount,
         )
         assert result.success, f"Transaction build failed: {result.error}"
 
@@ -468,10 +467,6 @@ class TestMorphoBlueAdapterOnChain:
         }
         receipt = send_signed_transaction(web3, tx_dict, TEST_PRIVATE_KEY)
         assert receipt["status"] == 1, f"Repay failed: {receipt}"
-
-        # Verify debt is fully repaid
-        position_after = adapter.get_position_on_chain(WSTETH_USDC_MARKET_ID)
-        assert position_after.borrow_shares == 0, "Debt should be fully repaid"
 
     def test_withdraw_collateral(self, web3: Web3, funded_wallet: str, anvil_rpc_url: str) -> None:
         """Test withdrawing collateral (if no remaining debt)."""

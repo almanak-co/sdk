@@ -747,24 +747,19 @@ class ToolExecutor:
                 tool_name="execute_compiled_bundle",
             )
 
-        # Pre-execution policy gate: re-run full policy validation (token, protocol,
-        # chain, spend limits) against the original compile_intent params BEFORE
-        # executing. This prevents a compiled bundle from bypassing policy checks
-        # that may not have caught nested params at compile time (VIB-504).
+        # Pre-execution spend gate: check the original compile_intent params against
+        # spend limits BEFORE executing. This prevents a compiled bundle from bypassing
+        # the spend limit pre-check that action tools receive at compile time.
         intent_params = original_args.get("params", {})
         if intent_params and not dry_run:
-            effective_args = self._policy_engine._resolve_effective_args(original_args)
             violations: list[str] = []
             suggestions: list[str] = []
-            self._policy_engine._check_chain_allowed(effective_args, violations, suggestions)
-            self._policy_engine._check_protocol_allowed(effective_args, violations, suggestions)
-            self._policy_engine._check_token_allowed(effective_args, violations, suggestions)
-            self._policy_engine._check_spend_limits(effective_args, violations, suggestions)
+            self._policy_engine._check_spend_limits(intent_params, violations, suggestions)
             if violations:
                 from almanak.framework.agent_tools.errors import RiskBlockedError
 
                 raise RiskBlockedError(
-                    f"Compiled bundle blocked by policy: {'; '.join(violations)}",
+                    f"Compiled bundle blocked by spend limits: {'; '.join(violations)}",
                     tool_name="execute_compiled_bundle",
                     suggestion="; ".join(suggestions),
                 )

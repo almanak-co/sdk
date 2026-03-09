@@ -174,16 +174,6 @@ class IntentState(Enum):
     VALIDATING_VAULT_MANAGE = auto()
     SADFLOW_VAULT_MANAGE = auto()
 
-    # FLASH_LOAN intent states
-    PREPARING_FLASH_LOAN = auto()
-    VALIDATING_FLASH_LOAN = auto()
-    SADFLOW_FLASH_LOAN = auto()
-
-    # BRIDGE intent states
-    PREPARING_BRIDGE = auto()
-    VALIDATING_BRIDGE = auto()
-    SADFLOW_BRIDGE = auto()
-
 
 def get_preparing_state(intent_type: IntentType) -> IntentState:
     """Get the PREPARING state for an intent type.
@@ -215,8 +205,6 @@ def get_preparing_state(intent_type: IntentType) -> IntentState:
         IntentType.VAULT_REDEEM: IntentState.PREPARING_VAULT_REDEEM,
         IntentType.VAULT_REALLOCATE: IntentState.PREPARING_VAULT_REALLOCATE,
         IntentType.VAULT_MANAGE: IntentState.PREPARING_VAULT_MANAGE,
-        IntentType.FLASH_LOAN: IntentState.PREPARING_FLASH_LOAN,
-        IntentType.BRIDGE: IntentState.PREPARING_BRIDGE,
     }
     return state_map.get(intent_type, IntentState.IDLE)
 
@@ -251,8 +239,6 @@ def get_validating_state(intent_type: IntentType) -> IntentState:
         IntentType.VAULT_REDEEM: IntentState.VALIDATING_VAULT_REDEEM,
         IntentType.VAULT_REALLOCATE: IntentState.VALIDATING_VAULT_REALLOCATE,
         IntentType.VAULT_MANAGE: IntentState.VALIDATING_VAULT_MANAGE,
-        IntentType.FLASH_LOAN: IntentState.VALIDATING_FLASH_LOAN,
-        IntentType.BRIDGE: IntentState.VALIDATING_BRIDGE,
     }
     return state_map.get(intent_type, IntentState.IDLE)
 
@@ -287,8 +273,6 @@ def get_sadflow_state(intent_type: IntentType) -> IntentState:
         IntentType.VAULT_REDEEM: IntentState.SADFLOW_VAULT_REDEEM,
         IntentType.VAULT_REALLOCATE: IntentState.SADFLOW_VAULT_REALLOCATE,
         IntentType.VAULT_MANAGE: IntentState.SADFLOW_VAULT_MANAGE,
-        IntentType.FLASH_LOAN: IntentState.SADFLOW_FLASH_LOAN,
-        IntentType.BRIDGE: IntentState.SADFLOW_BRIDGE,
     }
     return state_map.get(intent_type, IntentState.IDLE)
 
@@ -316,8 +300,6 @@ def is_preparing_state(state: IntentState) -> bool:
         IntentState.PREPARING_VAULT_REDEEM,
         IntentState.PREPARING_VAULT_REALLOCATE,
         IntentState.PREPARING_VAULT_MANAGE,
-        IntentState.PREPARING_FLASH_LOAN,
-        IntentState.PREPARING_BRIDGE,
     }
 
 
@@ -344,8 +326,6 @@ def is_validating_state(state: IntentState) -> bool:
         IntentState.VALIDATING_VAULT_REDEEM,
         IntentState.VALIDATING_VAULT_REALLOCATE,
         IntentState.VALIDATING_VAULT_MANAGE,
-        IntentState.VALIDATING_FLASH_LOAN,
-        IntentState.VALIDATING_BRIDGE,
     }
 
 
@@ -372,8 +352,6 @@ def is_sadflow_state(state: IntentState) -> bool:
         IntentState.SADFLOW_VAULT_REDEEM,
         IntentState.SADFLOW_VAULT_REALLOCATE,
         IntentState.SADFLOW_VAULT_MANAGE,
-        IntentState.SADFLOW_FLASH_LOAN,
-        IntentState.SADFLOW_BRIDGE,
     }
 
 

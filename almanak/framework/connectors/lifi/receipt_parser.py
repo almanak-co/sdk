@@ -14,11 +14,9 @@ parsed here. The destination chain delivery is tracked via the LiFi status API.
 
 import logging
 from dataclasses import dataclass
-from decimal import Decimal
 from typing import Any
 
 from almanak.framework.connectors.base.hex_utils import HexDecoder
-from almanak.framework.execution.extracted_data import SwapAmounts
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +196,7 @@ class LiFiReceiptParser:
             is_cross_chain=is_cross_chain,
         )
 
-    def extract_swap_amounts(self, receipt: dict[str, Any]) -> SwapAmounts | None:
+    def extract_swap_amounts(self, receipt: dict[str, Any]) -> dict[str, Any] | None:
         """Extract swap amounts for Result Enrichment system.
 
         Called by ResultEnricher after SWAP intent execution.
@@ -207,7 +205,7 @@ class LiFiReceiptParser:
             receipt: Transaction receipt
 
         Returns:
-            SwapAmounts dataclass or None if not found
+            Dict with amount_in, amount_out, or None if not found
         """
         if receipt.get("status", 0) != 1:
             return None
@@ -225,23 +223,12 @@ class LiFiReceiptParser:
         first = transfers[0]
         last = transfers[-1]
 
-        amount_in = first.get("amount", 0)
-        amount_out = last.get("amount", 0)
-        amount_in_decimal = Decimal(str(amount_in))
-        amount_out_decimal = Decimal(str(amount_out))
-
-        # NOTE: effective_price is set to None because the raw Transfer amounts
-        # are in different token units (potentially different decimals).
-        # Computing a ratio without decimal scaling would produce a misleading value.
-        return SwapAmounts(
-            amount_in=amount_in,
-            amount_out=amount_out,
-            amount_in_decimal=amount_in_decimal,
-            amount_out_decimal=amount_out_decimal,
-            effective_price=None,
-            token_in=first.get("token"),
-            token_out=last.get("token"),
-        )
+        return {
+            "amount_in": first.get("amount", 0),
+            "amount_out": last.get("amount", 0),
+            "token_in": first.get("token"),
+            "token_out": last.get("token"),
+        }
 
     def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
         """LiFi swaps do not create LP positions."""

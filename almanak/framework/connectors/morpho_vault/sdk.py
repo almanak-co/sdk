@@ -70,14 +70,9 @@ MAX_UINT256 = 2**256 - 1
 MAX_QUEUE_LENGTH = 100  # Safety bound for supply/withdraw queue iteration
 
 # Gas estimates
-# MetaMorpho deposit/redeem delegate to Morpho Blue's underlying markets for capital
-# reallocation, which adds ~150K gas on top of the base cost. Observed on-chain:
-# - deposit(): actual ~357K, simulation returns ~340-361K
-# - redeem(): actual ~341K, simulation returns ~309-344K
-# Set to 450K with headroom to avoid first-attempt FailedInnerCall reverts (VIB-512).
 DEFAULT_GAS_ESTIMATES: dict[str, int] = {
-    "deposit": 450000,
-    "redeem": 450000,
+    "deposit": 200000,
+    "redeem": 250000,
     "approve": 60000,
 }
 

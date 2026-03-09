@@ -82,39 +82,11 @@ from .intent_strategy import (
     TokenBalance,
     almanak_strategy,
 )
-from .multi_step_strategy import MultiStepStrategy, Step
 
 logger = logging.getLogger(__name__)
 
 # Strategy registry - maps strategy names to their classes
 STRATEGY_REGISTRY: dict[str, type[Any]] = {}
-
-
-def _try_import_strategy(module_name: str) -> None:
-    """Import a strategy module, retrying once on circular import errors.
-
-    Circular imports can occur during auto-discovery when large modules like
-    compiler.py create dependency chains that resolve on a second attempt.
-    This is benign -- Python's import machinery resolves the cycle.
-
-    Args:
-        module_name: Fully qualified module name to import
-    """
-    try:
-        importlib.import_module(module_name)
-        logger.debug(f"Imported strategy module: {module_name}")
-    except ImportError as e:
-        if "circular import" in str(e):
-            # Retry once -- Python's import machinery resolves the cycle
-            try:
-                importlib.import_module(module_name)
-                logger.debug(f"Imported strategy module on retry: {module_name}")
-            except Exception as retry_err:
-                logger.warning(f"Failed to import strategy {module_name} (retry failed): {retry_err}")
-        else:
-            logger.warning(f"Failed to import strategy {module_name}: {e}")
-    except Exception as e:
-        logger.warning(f"Failed to import strategy {module_name}: {e}")
 
 
 def _auto_discover_strategies() -> None:
@@ -168,7 +140,11 @@ def _auto_discover_strategies() -> None:
                 if strategy_file.exists():
                     # Direct nested strategy: tier/<strategy>/strategy.py
                     module_name = f"strategies.{strategy_folder.name}.{nested_folder.name}.strategy"
-                    _try_import_strategy(module_name)
+                    try:
+                        importlib.import_module(module_name)
+                        logger.debug(f"Imported strategy module: {module_name}")
+                    except Exception as e:
+                        logger.warning(f"Failed to import strategy {module_name}: {e}")
                 else:
                     # Check for sub-tier (e.g., tests/lp/<strategy>/strategy.py)
                     for sub_nested_folder in nested_folder.iterdir():
@@ -184,7 +160,11 @@ def _auto_discover_strategies() -> None:
                         module_name = (
                             f"strategies.{strategy_folder.name}.{nested_folder.name}.{sub_nested_folder.name}.strategy"
                         )
-                        _try_import_strategy(module_name)
+                        try:
+                            importlib.import_module(module_name)
+                            logger.debug(f"Imported strategy module: {module_name}")
+                        except Exception as e:
+                            logger.warning(f"Failed to import strategy {module_name}: {e}")
         else:
             # Top-level strategy (backward compatibility)
             strategy_file = strategy_folder / "strategy.py"
@@ -192,7 +172,11 @@ def _auto_discover_strategies() -> None:
                 continue
 
             module_name = f"strategies.{strategy_folder.name}.strategy"
-            _try_import_strategy(module_name)
+            try:
+                importlib.import_module(module_name)
+                logger.debug(f"Imported strategy module: {module_name}")
+            except Exception as e:
+                logger.warning(f"Failed to import strategy {module_name}: {e}")
 
 
 # Auto-discover strategies on module load
@@ -311,7 +295,4 @@ __all__ = [
     "AaveAvailableBorrowProvider",
     "GmxAvailableLiquidityProvider",
     "GmxFundingRateProvider",
-    # Multi-Step Strategy
-    "MultiStepStrategy",
-    "Step",
 ]

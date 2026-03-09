@@ -171,16 +171,6 @@ CHAIN_GAS_OVERRIDES: dict[str, dict[str, int]] = {
         "lp_collect": 300000,
         "lp_burn": 150000,
     },
-    "mantle": {
-        # Mantle uses modified gas metering where gas units are ~250-300x higher
-        # than standard EVM chains. Gas prices are proportionally lower, so actual
-        # cost in MNT is comparable to other L2s.
-        "approve": 30_000_000,
-        "swap_simple": 80_000_000,
-        "swap_multi_hop": 120_000_000,
-        "wrap_eth": 10_000_000,
-        "unwrap_eth": 10_000_000,
-    },
 }
 
 
@@ -209,13 +199,11 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
     "ethereum": {
         "uniswap_v3": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",  # SwapRouter02
         "uniswap_v2": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
-        "sushiswap_v3": "0x2E6cd2d30aa43f40aa81619ff4b6E0a41479B13F",  # SushiSwap V3 SwapRouter
         "pancakeswap_v3": "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",  # SmartRouter (7-param)
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
     },
     "arbitrum": {
         "uniswap_v3": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",  # SwapRouter02
-        "sushiswap_v3": "0x8A21F6768C1f8075791D08546Dadf6daA0bE820c",  # SushiSwap V3 SwapRouter
         "pancakeswap_v3": "0x32226588378236Fd0c7c4053999F88aC0e5cAc77",  # SmartRouter (7-param)
         "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
         "camelot": "0xc873fEcbd354f5A56E00E710B90EF4201db2448d",
@@ -228,20 +216,16 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
     },
     "polygon": {
         "uniswap_v3": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",  # SwapRouter02
-        "sushiswap_v3": "0x0aF89E1620b96170e2a9D0b68fEebb767eD044c3",  # SushiSwap V3 SwapRouter
         "quickswap": "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff",
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
     },
     "base": {
         "uniswap_v3": "0x2626664c2603336E57B271c5C0b26F421741e481",
-        "sushiswap_v3": "0xFB7eF66a7e61fF9e400671e4b5BfBaBE2ea025b4",  # SushiSwap V3 SwapRouter
         "aerodrome": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
-        "pancakeswap_v3": "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86",  # SmartRouter (7-param)
     },
     "avalanche": {
         "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter2
         "uniswap_v3": "0xbb00FF08d01D300023C629E8fFfFcb65A5a578cE",  # SwapRouter02
-        "sushiswap_v3": "0x717b7948AA264DeCf4D780aa6914482e5F46Da3e",  # SushiSwap V3 SwapRouter
     },
     "bsc": {
         "pancakeswap_v3": "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",  # SmartRouter (7-param)
@@ -255,10 +239,6 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "uniswap_v3": "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2",  # SwapRouter02
         "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
     },
-    "mantle": {
-        # Agni Finance (Uniswap V3 fork, same ABI) - the native V3 DEX on Mantle
-        "uniswap_v3": "0x319B69888b0d11cec22caA5034e25FfFBDc88421",  # Agni SwapRouter
-    },
 }
 
 # Uniswap V3 NonfungiblePositionManager addresses per chain
@@ -266,13 +246,11 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     "ethereum": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
         "sushiswap_v3": "0x2214A42d8e2A1d20635c2cb0664422c528B6A432",
-        "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
     },
     "arbitrum": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
         "sushiswap_v3": "0xF0cBce1942A68BEB3d1b73F0dd86C8DCc363eF49",
         "camelot": "0x00c7f3082833e796A5b3e4Bd59f6642FF44DCD15",
-        "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
     },
     "optimism": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
@@ -289,7 +267,6 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
         "sushiswap_v3": "0x80C7DD17B01855a6D2347444a0FCC36136a314de",
         # Aerodrome uses the Router for liquidity operations (fungible LP tokens)
         "aerodrome": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",  # Aerodrome Router
-        "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
     },
     "avalanche": {
         "uniswap_v3": "0x655C406EBFa14EE2006250925e54ec43AD184f8B",
@@ -306,9 +283,6 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
         "uniswap_v3": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
         "sushiswap_v3": "0xF70c086618dcf2b1A461311275e00D6B722ef914",
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
-    },
-    "mantle": {
-        "uniswap_v3": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni NFT Position Manager
     },
 }
 
@@ -360,47 +334,27 @@ CHAIN_TOKENS: dict[str, dict[str, str]] = {
         "wbnb": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
         "weth": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
     },
-    "mantle": {
-        "usdc": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",
-        "usdt": "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE",
-        "weth": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",
-        "wmnt": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
-    },
 }
 
 # Supported fee tiers by protocol for exactInputSingle-style swaps.
 SWAP_FEE_TIERS: dict[str, tuple[int, ...]] = {
     "uniswap_v3": (100, 500, 3000, 10000),
-    "sushiswap_v3": (100, 500, 3000, 10000),
     "pancakeswap_v3": (100, 500, 2500, 10000),
 }
 
 DEFAULT_SWAP_FEE_TIER: dict[str, int] = {
     "uniswap_v3": 3000,
-    "sushiswap_v3": 3000,
     "pancakeswap_v3": 2500,
-}
-
-# Protocols using the original SwapRouter interface (8-param exactInputSingle WITH deadline).
-# All other protocols use SwapRouter02 interface (7-param WITHOUT deadline).
-SWAP_ROUTER_V1_PROTOCOLS: frozenset[str] = frozenset({"sushiswap_v3"})
-
-# Chain-specific overrides: some chains use V3 forks with V1-style routers (e.g., Agni on Mantle).
-# Maps chain -> set of protocols that use the V1 router interface on that chain.
-SWAP_ROUTER_V1_CHAIN_OVERRIDES: dict[str, frozenset[str]] = {
-    "mantle": frozenset({"uniswap_v3"}),  # Agni Finance uses original SwapRouter (with deadline)
 }
 
 # Quoter addresses used for AUTO fee tier selection.
 SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
     "ethereum": {
         "uniswap_v3": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
-        "sushiswap_v3": "0x64e8802FE490fa7cc61d3463958199161Bb608A7",
         "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
     },
     "arbitrum": {
         "uniswap_v3": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
-        "sushiswap_v3": "0x0524E833cCD057e4d7A296e3aaAb9f7675964Ce1",
         "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
     },
     "optimism": {
@@ -408,19 +362,12 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
     },
     "polygon": {
         "uniswap_v3": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
-        "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
     },
     "base": {
         "uniswap_v3": "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
-        "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
-        "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
     },
     "avalanche": {
         "uniswap_v3": "0xbe0F5544EC67e9B3b2D979aaA43f18Fd87E6257F",
-        "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
-    },
-    "mantle": {
-        "uniswap_v3": "0xc4aaDC921E1cdb66c5300Bc158a313292923C0cb",  # Agni QuoterV2
     },
 }
 
@@ -797,7 +744,7 @@ class DefaultSwapAdapter:
         amount_in: int,
         min_amount_out: int,
         recipient: str,
-        deadline: int,  # used by SwapRouter V1; ignored by SwapRouter02
+        deadline: int,  # kept for API compatibility, not used in SwapRouter02
     ) -> bytes:
         """Generate calldata for exactInputSingle swap.
 
@@ -807,45 +754,44 @@ class DefaultSwapAdapter:
             amount_in: Amount of input tokens (in wei)
             min_amount_out: Minimum output amount (in wei)
             recipient: Address to receive output tokens
-            deadline: Transaction deadline (used by SwapRouter V1; ignored by SwapRouter02)
+            deadline: Transaction deadline (unused, kept for API compatibility)
 
         Returns:
             Encoded calldata for the swap
         """
+        # SwapRouter02 / IV3SwapRouter exactInputSingle selector (7-param, no deadline)
+        # See: https://github.com/Uniswap/swap-router-contracts/blob/main/contracts/interfaces/IV3SwapRouter.sol
+        selector = "0x04e45aaf"
+
+        # Encode params struct for SwapRouter02 exactInputSingle:
+        # struct ExactInputSingleParams {
+        #     address tokenIn;
+        #     address tokenOut;
+        #     uint24 fee;
+        #     address recipient;
+        #     uint256 amountIn;
+        #     uint256 amountOutMinimum;
+        #     uint160 sqrtPriceLimitX96;
+        # }
+        # Note: deadline is NOT in the struct for SwapRouter02
+
         fee = self._select_fee_tier(from_token, to_token, amount_in)
+
+        # No price limit (0 means no limit)
         sqrt_price_limit = 0
 
-        chain_v1_overrides = SWAP_ROUTER_V1_CHAIN_OVERRIDES.get(self.chain, frozenset())
-        if self.protocol in SWAP_ROUTER_V1_PROTOCOLS or self.protocol in chain_v1_overrides:
-            # Original SwapRouter (V1) exactInputSingle: 8-param WITH deadline
-            # selector: 0x414bf389
-            # Struct: tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMinimum, sqrtPriceLimitX96
-            selector = "0x414bf389"
-            swap_deadline = deadline
-            params = (
-                self._pad_address(from_token)
-                + self._pad_address(to_token)
-                + self._pad_uint24(fee)
-                + self._pad_address(recipient)
-                + self._pad_uint256(swap_deadline)
-                + self._pad_uint256(amount_in)
-                + self._pad_uint256(min_amount_out)
-                + self._pad_uint160(sqrt_price_limit)
-            )
-        else:
-            # SwapRouter02 / IV3SwapRouter exactInputSingle: 7-param WITHOUT deadline
-            # selector: 0x04e45aaf
-            # Struct: tokenIn, tokenOut, fee, recipient, amountIn, amountOutMinimum, sqrtPriceLimitX96
-            selector = "0x04e45aaf"
-            params = (
-                self._pad_address(from_token)
-                + self._pad_address(to_token)
-                + self._pad_uint24(fee)
-                + self._pad_address(recipient)
-                + self._pad_uint256(amount_in)
-                + self._pad_uint256(min_amount_out)
-                + self._pad_uint160(sqrt_price_limit)
-            )
+        # Both PancakeSwap V3 SmartRouter and Uniswap V3 SwapRouter02 use the same
+        # 7-param struct WITHOUT deadline for exactInputSingle (selector 0x04e45aaf)
+        # Struct: tokenIn, tokenOut, fee, recipient, amountIn, amountOutMinimum, sqrtPriceLimitX96
+        params = (
+            self._pad_address(from_token)
+            + self._pad_address(to_token)
+            + self._pad_uint24(fee)
+            + self._pad_address(recipient)
+            + self._pad_uint256(amount_in)
+            + self._pad_uint256(min_amount_out)
+            + self._pad_uint160(sqrt_price_limit)
+        )
 
         return bytes.fromhex(selector[2:] + params)
 
@@ -945,7 +891,6 @@ class DefaultSwapAdapter:
             "plasma": "WXPL",
             "bsc": "WBNB",
             "bnb": "WBNB",
-            "mantle": "WMNT",
         }
         _wn_symbol = _wrapped_symbols.get(self.chain)
         wrapped_native_addr = resolve_address(_wn_symbol) if _wn_symbol else None
@@ -2509,7 +2454,7 @@ class IntentCompiler:
                 protocol,
                 pool_selection_mode=self._config.swap_pool_selection_mode,
                 fixed_fee_tier=self._config.fixed_swap_fee_tier,
-                rpc_url=self._get_chain_rpc_url(),
+                rpc_url=self.rpc_url,
                 rpc_timeout=self.rpc_timeout,
             )
             router_address = adapter.get_router_address()
@@ -5307,145 +5252,14 @@ class IntentCompiler:
 
             slippage_bps = int(intent.max_slippage * Decimal("10000"))
 
-            # Pass raw 1:1 estimate as min_amount_out -- the Pendle SDK methods
-            # (build_swap_exact_token_for_pt, etc.) apply slippage_bps internally.
-            # Previously this line also reduced by slippage, causing double-count (VIB-576).
-            min_amount_out = amount_in
+            # Calculate min output (estimate 1:1 minus slippage for now)
+            # In production, this would call Pendle API for accurate quotes
+            min_amount_out = int(amount_in * (10000 - slippage_bps) // 10000)
 
             # Look up the token that mints SY for this market
             # For yield-bearing token markets (like fUSDT0), this is the yield-bearing token
             chain_mint_sy_map = MARKET_TOKEN_MINT_SY.get(self.chain, {})
             token_mint_sy = chain_mint_sy_map.get(market.lower())
-
-            # ================================================================
-            # Pre-swap routing: when tokenIn != tokenMintSy
-            # ================================================================
-            # When the input token differs from the token that mints SY
-            # (e.g., WETH as input but wstETH mints SY), the Pendle router
-            # cannot route internally. We insert a Uniswap V3 pre-swap step
-            # to convert tokenIn -> tokenMintSy before calling Pendle.
-            if token_mint_sy and (is_buying_pt or is_buying_yt) and from_token.address.lower() != token_mint_sy.lower():
-                # Resolve tokenMintSy to get its symbol and decimals
-                mint_sy_token = self._resolve_token(token_mint_sy)
-                if mint_sy_token is None:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Cannot resolve tokenMintSy address {token_mint_sy} for pre-swap routing on {self.chain}. "
-                        f"Use the SY-minting token directly as from_token instead.",
-                        intent_id=intent.intent_id,
-                    )
-
-                # Check if Uniswap V3 is available on this chain for the pre-swap
-                uniswap_router = PROTOCOL_ROUTERS.get(self.chain, {}).get("uniswap_v3")
-                if not uniswap_router:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Pre-swap routing from {from_token.symbol} to {mint_sy_token.symbol} requires "
-                        f"Uniswap V3, but no router is configured for {self.chain}. "
-                        f"Use {mint_sy_token.symbol} directly as from_token instead.",
-                        intent_id=intent.intent_id,
-                    )
-
-                # Estimate the pre-swap output using price oracle
-                try:
-                    estimated_mint_sy_output = self._calculate_expected_output(amount_in, from_token, mint_sy_token)
-                except (ValueError, KeyError, ZeroDivisionError):
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Cannot estimate pre-swap output for {from_token.symbol} -> {mint_sy_token.symbol}. "
-                        f"Price data unavailable. Use {mint_sy_token.symbol} directly as from_token.",
-                        intent_id=intent.intent_id,
-                    )
-
-                # Apply 2% safety buffer on the estimated output for the Pendle step.
-                # This ensures the Pendle transaction doesn't try to spend more
-                # tokenMintSy than the pre-swap actually produces.
-                pre_swap_buffer = Decimal("0.98")
-                buffered_mint_sy_amount = int(Decimal(str(estimated_mint_sy_output)) * pre_swap_buffer)
-
-                # Handle native ETH: the SwapRouter02 accepts msg.value for native swaps
-                actual_from_address = from_token.address
-                pre_swap_value = 0
-                if from_token.is_native:
-                    pre_swap_value = amount_in
-                    weth_address = self._get_wrapped_native_address()
-                    if not weth_address:
-                        return CompilationResult(
-                            status=CompilationStatus.FAILED,
-                            error=f"Cannot resolve wrapped native token address for {self.chain}. "
-                            f"Native ETH pre-swap routing requires a configured wrapped native address.",
-                            intent_id=intent.intent_id,
-                        )
-                    actual_from_address = weth_address
-
-                # Build approval for Uniswap V3 router (skip for native token)
-                if not from_token.is_native:
-                    approve_txs = self._build_approve_tx(
-                        from_token.address,
-                        uniswap_router,
-                        amount_in,
-                    )
-                    transactions.extend(approve_txs)
-
-                # Build pre-swap calldata via Uniswap V3
-                pre_swap_adapter = DefaultSwapAdapter(
-                    chain=self.chain,
-                    protocol="uniswap_v3",
-                    pool_selection_mode=self._config.swap_pool_selection_mode,
-                    fixed_fee_tier=self._config.fixed_swap_fee_tier,
-                    rpc_url=self._get_chain_rpc_url(),
-                    rpc_timeout=self.rpc_timeout,
-                )
-
-                pre_swap_min_out = int(Decimal(str(estimated_mint_sy_output)) * (Decimal("1") - intent.max_slippage))
-                # Cap Pendle input to the guaranteed pre-swap minimum.
-                # When max_slippage > 2%, the Uniswap swap may legally return
-                # less than the 2%-buffered estimate, so the Pendle step must
-                # not try to spend more than the swap guarantees.
-                buffered_mint_sy_amount = min(buffered_mint_sy_amount, pre_swap_min_out)
-
-                if buffered_mint_sy_amount <= 0:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Pre-swap routing failed: computed Pendle input amount is {buffered_mint_sy_amount} "
-                        f"(max_slippage={intent.max_slippage} too high for pre-swap path). "
-                        f"Use {mint_sy_token.symbol} directly as from_token or reduce max_slippage.",
-                        intent_id=intent.intent_id,
-                    )
-
-                deadline = int(datetime.now(UTC).timestamp()) + self.default_deadline_seconds
-
-                pre_swap_calldata = pre_swap_adapter.get_swap_calldata(
-                    from_token=actual_from_address,
-                    to_token=token_mint_sy,
-                    amount_in=amount_in,
-                    min_amount_out=pre_swap_min_out,
-                    recipient=self.wallet_address,
-                    deadline=deadline,
-                )
-
-                pre_swap_tx = TransactionData(
-                    to=uniswap_router,
-                    value=pre_swap_value,
-                    data="0x" + pre_swap_calldata.hex(),
-                    gas_estimate=200_000,
-                    description=f"Pre-swap: {from_token.symbol} -> {mint_sy_token.symbol} via Uniswap V3",
-                    tx_type="swap",
-                )
-                transactions.append(pre_swap_tx)
-
-                logger.info(
-                    f"Pendle pre-swap routing: {from_token.symbol} -> {mint_sy_token.symbol} -> {intent.to_token}, "
-                    f"estimated output={estimated_mint_sy_output}, using {buffered_mint_sy_amount} "
-                    f"(capped to min of 2% buffer and {intent.max_slippage:.1%} slippage floor)"
-                )
-
-                # Override from_token and amount for the Pendle step
-                from_token = mint_sy_token
-                amount_in = buffered_mint_sy_amount
-                token_mint_sy = None  # tokenIn now equals tokenMintSy
-                # Don't apply slippage here -- the SDK applies it internally (VIB-576).
-                min_amount_out = amount_in
 
             # Resolve token_out to an address
             # For buying PT/YT, token_out is the PT/YT (use PT_TOKEN_INFO/YT_TOKEN_INFO)
@@ -6549,171 +6363,12 @@ class IntentCompiler:
                 )
 
             # =================================================================
-            # BENQI PATH (Compound V2 fork on Avalanche)
-            # =================================================================
-            elif protocol_lower == "benqi":
-                from ..connectors.benqi.adapter import (
-                    BENQI_QI_TOKENS,
-                    BenqiAdapter,
-                    BenqiConfig,
-                )
-
-                if self.chain != "avalanche":
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"BENQI is only available on Avalanche, got: {self.chain}",
-                        intent_id=intent.intent_id,
-                    )
-
-                benqi_config = BenqiConfig(
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                )
-                benqi_adapter = BenqiAdapter(benqi_config)
-
-                # If collateral > 0, first supply collateral + enterMarkets
-                if collateral_amount_decimal > 0:
-                    collateral_symbol = collateral_token.symbol.upper()
-                    collateral_market = benqi_adapter.get_market_info(collateral_symbol)
-
-                    if not collateral_market:
-                        return CompilationResult(
-                            status=CompilationStatus.FAILED,
-                            error=f"BENQI does not support collateral asset: {collateral_symbol}. Supported: {list(BENQI_QI_TOKENS.keys())}",
-                            intent_id=intent.intent_id,
-                        )
-
-                    collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
-
-                    # Build approve TX for qiToken (skip for native AVAX)
-                    if not collateral_market.is_native:
-                        approve_txs = self._build_approve_tx(
-                            collateral_token.address,
-                            collateral_market.qi_token_address,
-                            collateral_amount_wei,
-                        )
-                        transactions.extend(approve_txs)
-
-                    # Build supply (mint) TX
-                    supply_result = benqi_adapter.supply(
-                        asset=collateral_symbol,
-                        amount=collateral_amount_decimal,
-                    )
-
-                    if not supply_result.success:
-                        return CompilationResult(
-                            status=CompilationStatus.FAILED,
-                            error=f"BENQI supply collateral failed: {supply_result.error}",
-                            intent_id=intent.intent_id,
-                        )
-
-                    assert supply_result.tx_data is not None
-                    supply_data = supply_result.tx_data["data"]
-                    if not supply_data.startswith("0x"):
-                        supply_data = "0x" + supply_data
-
-                    supply_tx = TransactionData(
-                        to=supply_result.tx_data["to"],
-                        value=int(supply_result.tx_data.get("value", 0)),
-                        data=supply_data,
-                        gas_estimate=supply_result.gas_estimate,
-                        description=supply_result.description,
-                        tx_type="lending_supply_collateral",
-                    )
-                    transactions.append(supply_tx)
-
-                    # Build enterMarkets TX to enable as collateral
-                    enter_result = benqi_adapter.enter_markets([collateral_symbol])
-                    if not enter_result.success:
-                        return CompilationResult(
-                            status=CompilationStatus.FAILED,
-                            error=f"BENQI enterMarkets failed: {enter_result.error}",
-                            intent_id=intent.intent_id,
-                        )
-                    assert enter_result.tx_data is not None
-                    enter_data = enter_result.tx_data["data"]
-                    if not enter_data.startswith("0x"):
-                        enter_data = "0x" + enter_data
-                    enter_tx = TransactionData(
-                        to=enter_result.tx_data["to"],
-                        value=0,
-                        data=enter_data,
-                        gas_estimate=enter_result.gas_estimate,
-                        description=enter_result.description,
-                        tx_type="lending_enter_markets",
-                    )
-                    transactions.append(enter_tx)
-                else:
-                    warnings.append("No collateral supplied - borrowing against existing collateral")
-
-                # Build borrow TX
-                borrow_symbol = borrow_token.symbol.upper()
-                borrow_result = benqi_adapter.borrow(asset=borrow_symbol, amount=intent.borrow_amount)
-
-                if not borrow_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"BENQI borrow failed: {borrow_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-
-                assert borrow_result.tx_data is not None
-                borrow_data = borrow_result.tx_data["data"]
-                if not borrow_data.startswith("0x"):
-                    borrow_data = "0x" + borrow_data
-
-                borrow_tx = TransactionData(
-                    to=borrow_result.tx_data["to"],
-                    value=int(borrow_result.tx_data.get("value", 0)),
-                    data=borrow_data,
-                    gas_estimate=borrow_result.gas_estimate,
-                    description=borrow_result.description,
-                    tx_type="lending_borrow",
-                )
-                transactions.append(borrow_tx)
-
-                # Build ActionBundle
-                total_gas = sum(tx.gas_estimate for tx in transactions)
-                action_bundle = ActionBundle(
-                    intent_type=IntentType.BORROW.value,
-                    transactions=[tx.to_dict() for tx in transactions],
-                    metadata={
-                        "protocol": intent.protocol,
-                        "comptroller_address": benqi_adapter.comptroller_address,
-                        "collateral_token": collateral_token.to_dict(),
-                        "borrow_token": borrow_token.to_dict(),
-                        "collateral_amount": str(collateral_amount_decimal),
-                        "borrow_amount": str(intent.borrow_amount),
-                        "chain": self.chain,
-                    },
-                )
-
-                result.action_bundle = action_bundle
-                result.transactions = transactions
-                result.total_gas_estimate = total_gas
-                result.warnings = warnings
-
-                collateral_fmt = format_token_amount(
-                    int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
-                    collateral_token.symbol,
-                    collateral_token.decimals,
-                )
-                borrow_fmt = format_token_amount(
-                    int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
-                    borrow_token.symbol,
-                    borrow_token.decimals,
-                )
-
-                logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
-                logger.info(f"   Protocol: BENQI | Txs: {len(transactions)} | Gas: {total_gas:,}")
-
-            # =================================================================
             # UNSUPPORTED PROTOCOL
             # =================================================================
             else:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi",
+                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3",
                     intent_id=intent.intent_id,
                 )
 
@@ -7162,126 +6817,12 @@ class IntentCompiler:
                 )
 
             # =================================================================
-            # BENQI PATH (Compound V2 fork on Avalanche)
-            # =================================================================
-            elif protocol_lower == "benqi":
-                from ..connectors.benqi.adapter import (
-                    BENQI_QI_TOKENS,
-                    BenqiAdapter,
-                    BenqiConfig,
-                )
-
-                if self.chain != "avalanche":
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"BENQI is only available on Avalanche, got: {self.chain}",
-                        intent_id=intent.intent_id,
-                    )
-
-                benqi_config = BenqiConfig(
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                )
-                benqi_adapter = BenqiAdapter(benqi_config)
-
-                repay_symbol = repay_token.symbol.upper()
-                repay_market = benqi_adapter.get_market_info(repay_symbol)
-
-                if not repay_market:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"BENQI does not support asset: {repay_symbol}. Supported: {list(BENQI_QI_TOKENS.keys())}",
-                        intent_id=intent.intent_id,
-                    )
-
-                # Build approve TX for qiToken (skip for native AVAX)
-                if not repay_market.is_native and not intent.repay_full:
-                    if repay_amount_decimal is None:
-                        return CompilationResult(
-                            status=CompilationStatus.FAILED,
-                            error="BENQI repay requires an explicit amount (or use repay_full=True)",
-                            intent_id=intent.intent_id,
-                        )
-                    repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
-                    approve_txs = self._build_approve_tx(
-                        repay_token.address,
-                        repay_market.qi_token_address,
-                        repay_amount_wei,
-                    )
-                    transactions.extend(approve_txs)
-                elif not repay_market.is_native and intent.repay_full:
-                    # For repay_full, approve MAX_UINT256
-                    from ..connectors.benqi.adapter import MAX_UINT256 as BENQI_MAX_UINT256
-
-                    approve_txs = self._build_approve_tx(
-                        repay_token.address,
-                        repay_market.qi_token_address,
-                        BENQI_MAX_UINT256,
-                    )
-                    transactions.extend(approve_txs)
-
-                # Build repay TX
-                repay_result = benqi_adapter.repay(
-                    asset=repay_symbol,
-                    amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
-                    repay_all=intent.repay_full,
-                )
-
-                if not repay_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"BENQI repay failed: {repay_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-
-                assert repay_result.tx_data is not None
-                repay_data = repay_result.tx_data["data"]
-                if not repay_data.startswith("0x"):
-                    repay_data = "0x" + repay_data
-
-                amount_description = "all" if intent.repay_full else str(repay_amount_decimal)
-
-                repay_tx = TransactionData(
-                    to=repay_result.tx_data["to"],
-                    value=int(repay_result.tx_data.get("value", 0)),
-                    data=repay_data,
-                    gas_estimate=repay_result.gas_estimate,
-                    description=repay_result.description,
-                    tx_type="lending_repay",
-                )
-                transactions.append(repay_tx)
-
-                total_gas = sum(tx.gas_estimate for tx in transactions)
-                action_bundle = ActionBundle(
-                    intent_type=IntentType.REPAY.value,
-                    transactions=[tx.to_dict() for tx in transactions],
-                    metadata={
-                        "protocol": intent.protocol,
-                        "comptroller_address": benqi_adapter.comptroller_address,
-                        "repay_token": repay_token.to_dict(),
-                        "repay_amount": amount_description,
-                        "repay_full": intent.repay_full,
-                        "chain": self.chain,
-                    },
-                )
-
-                result.action_bundle = action_bundle
-                result.transactions = transactions
-                result.total_gas_estimate = total_gas
-                result.warnings = warnings
-
-                logger.info(
-                    f"Compiled REPAY: {amount_description} {repay_token.symbol} to BENQI, "
-                    f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
-                )
-
-            # =================================================================
             # UNSUPPORTED PROTOCOL
             # =================================================================
             else:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi",
+                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3",
                     intent_id=intent.intent_id,
                 )
 
@@ -7743,134 +7284,12 @@ class IntentCompiler:
                 logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
 
             # =================================================================
-            # BENQI PATH (Compound V2 fork on Avalanche)
-            # =================================================================
-            elif protocol_lower == "benqi":
-                from ..connectors.benqi.adapter import (
-                    BENQI_QI_TOKENS,
-                    BenqiAdapter,
-                    BenqiConfig,
-                )
-
-                if self.chain != "avalanche":
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"BENQI is only available on Avalanche, got: {self.chain}",
-                        intent_id=intent.intent_id,
-                    )
-
-                benqi_config = BenqiConfig(
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                )
-                benqi_adapter = BenqiAdapter(benqi_config)
-
-                supply_symbol = supply_token.symbol.upper()
-                supply_market = benqi_adapter.get_market_info(supply_symbol)
-
-                if not supply_market:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"BENQI does not support asset: {supply_symbol}. Supported: {list(BENQI_QI_TOKENS.keys())}",
-                        intent_id=intent.intent_id,
-                    )
-
-                supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
-
-                # Build approve TX for qiToken (skip for native AVAX)
-                if not supply_market.is_native:
-                    approve_txs = self._build_approve_tx(
-                        supply_token.address,
-                        supply_market.qi_token_address,
-                        supply_amount_wei,
-                    )
-                    transactions.extend(approve_txs)
-
-                # Build supply (mint) TX
-                supply_result = benqi_adapter.supply(
-                    asset=supply_symbol,
-                    amount=amount_decimal,
-                )
-
-                if not supply_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"BENQI supply failed: {supply_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-
-                assert supply_result.tx_data is not None
-                supply_data = supply_result.tx_data["data"]
-                if not supply_data.startswith("0x"):
-                    supply_data = "0x" + supply_data
-
-                supply_tx = TransactionData(
-                    to=supply_result.tx_data["to"],
-                    value=int(supply_result.tx_data.get("value", 0)),
-                    data=supply_data,
-                    gas_estimate=supply_result.gas_estimate,
-                    description=supply_result.description or f"Supply {amount_decimal} {supply_token.symbol} to BENQI",
-                    tx_type="lending_supply",
-                )
-                transactions.append(supply_tx)
-
-                # Optionally enable as collateral via enterMarkets
-                if intent.use_as_collateral:
-                    enter_result = benqi_adapter.enter_markets([supply_symbol])
-                    if not enter_result.success:
-                        return CompilationResult(
-                            status=CompilationStatus.FAILED,
-                            error=f"BENQI enterMarkets failed: {enter_result.error}",
-                            intent_id=intent.intent_id,
-                        )
-                    assert enter_result.tx_data is not None
-                    enter_data = enter_result.tx_data["data"]
-                    if not enter_data.startswith("0x"):
-                        enter_data = "0x" + enter_data
-                    enter_tx = TransactionData(
-                        to=enter_result.tx_data["to"],
-                        value=0,
-                        data=enter_data,
-                        gas_estimate=enter_result.gas_estimate,
-                        description=enter_result.description,
-                        tx_type="lending_enter_markets",
-                    )
-                    transactions.append(enter_tx)
-
-                # Build ActionBundle
-                total_gas = sum(tx.gas_estimate for tx in transactions)
-
-                action_bundle = ActionBundle(
-                    intent_type=IntentType.SUPPLY.value,
-                    transactions=[tx.to_dict() for tx in transactions],
-                    metadata={
-                        "protocol": intent.protocol,
-                        "comptroller_address": benqi_adapter.comptroller_address,
-                        "qi_token_address": supply_market.qi_token_address,
-                        "supply_token": supply_token.to_dict(),
-                        "supply_amount": str(amount_decimal),
-                        "use_as_collateral": intent.use_as_collateral,
-                        "chain": self.chain,
-                    },
-                )
-
-                result.action_bundle = action_bundle
-                result.transactions = transactions
-                result.total_gas_estimate = total_gas
-                result.warnings = warnings
-
-                supply_fmt = format_token_amount(supply_amount_wei, supply_token.symbol, supply_token.decimals)
-                collateral_str = " (as collateral)" if intent.use_as_collateral else ""
-                logger.info(f"Compiled SUPPLY: {supply_fmt} to BENQI{collateral_str}")
-                logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
-
-            # =================================================================
             # UNSUPPORTED PROTOCOL
             # =================================================================
             else:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi",
+                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3",
                     intent_id=intent.intent_id,
                 )
 
@@ -8279,102 +7698,12 @@ class IntentCompiler:
                 )
 
             # =================================================================
-            # BENQI PATH (Compound V2 fork on Avalanche)
-            # =================================================================
-            elif protocol_lower == "benqi":
-                from ..connectors.benqi.adapter import (
-                    BENQI_QI_TOKENS,
-                    BenqiAdapter,
-                    BenqiConfig,
-                )
-
-                if self.chain != "avalanche":
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"BENQI is only available on Avalanche, got: {self.chain}",
-                        intent_id=intent.intent_id,
-                    )
-
-                benqi_config = BenqiConfig(
-                    chain=self.chain,
-                    wallet_address=self.wallet_address,
-                )
-                benqi_adapter = BenqiAdapter(benqi_config)
-
-                withdraw_symbol = withdraw_token.symbol.upper()
-                withdraw_market = benqi_adapter.get_market_info(withdraw_symbol)
-
-                if not withdraw_market:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"BENQI does not support asset: {withdraw_symbol}. Supported: {list(BENQI_QI_TOKENS.keys())}",
-                        intent_id=intent.intent_id,
-                    )
-
-                # Build withdraw (redeem) TX
-                withdraw_result = benqi_adapter.withdraw(
-                    asset=withdraw_symbol,
-                    amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
-                    withdraw_all=intent.withdraw_all,
-                )
-
-                if not withdraw_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"BENQI withdraw failed: {withdraw_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-
-                amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
-
-                assert withdraw_result.tx_data is not None
-                withdraw_data = withdraw_result.tx_data["data"]
-                if not withdraw_data.startswith("0x"):
-                    withdraw_data = "0x" + withdraw_data
-
-                withdraw_tx = TransactionData(
-                    to=withdraw_result.tx_data["to"],
-                    value=int(withdraw_result.tx_data.get("value", 0)),
-                    data=withdraw_data,
-                    gas_estimate=withdraw_result.gas_estimate,
-                    description=withdraw_result.description
-                    or f"Withdraw {amount_display} {withdraw_token.symbol} from BENQI",
-                    tx_type="lending_withdraw",
-                )
-                transactions.append(withdraw_tx)
-
-                total_gas = sum(tx.gas_estimate for tx in transactions)
-
-                action_bundle = ActionBundle(
-                    intent_type=IntentType.WITHDRAW.value,
-                    transactions=[tx.to_dict() for tx in transactions],
-                    metadata={
-                        "protocol": intent.protocol,
-                        "comptroller_address": benqi_adapter.comptroller_address,
-                        "qi_token_address": withdraw_market.qi_token_address,
-                        "withdraw_token": withdraw_token.to_dict(),
-                        "withdraw_amount": amount_display,
-                        "withdraw_all": intent.withdraw_all,
-                        "chain": self.chain,
-                    },
-                )
-
-                result.action_bundle = action_bundle
-                result.transactions = transactions
-                result.total_gas_estimate = total_gas
-                result.warnings = warnings
-
-                logger.info(
-                    f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (BENQI)"
-                )
-
-            # =================================================================
             # UNSUPPORTED PROTOCOL
             # =================================================================
             else:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, pendle, compound_v3, benqi",
+                    error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, pendle, compound_v3",
                     intent_id=intent.intent_id,
                 )
 
@@ -10362,12 +9691,6 @@ class IntentCompiler:
             "WMATIC": Decimal("0.80"),
             "ARB": Decimal("1.20"),
             "OP": Decimal("2.50"),
-            "AVAX": Decimal("35"),
-            "WAVAX": Decimal("35"),
-            "BNB": Decimal("600"),
-            "WBNB": Decimal("600"),
-            "S": Decimal("0.50"),
-            "WS": Decimal("0.50"),
         }
 
     @staticmethod

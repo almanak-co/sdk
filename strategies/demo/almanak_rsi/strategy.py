@@ -515,19 +515,13 @@ class AlmanakRSIStrategy(IntentStrategy):
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode, market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode) -> list[Intent]:
         """Generate intents to close all positions.
 
         Sells all ALMANAK back to USDC.
 
-        Uses protocol="enso" because ALMANAK has no CoinGecko/Chainlink price
-        feed, so the standard uniswap_v3 compilation path cannot calculate
-        slippage protection. Enso handles routing and slippage via on-chain
-        pool data, bypassing the price oracle requirement.
-
         Args:
             mode: TeardownMode (SOFT or HARD) - affects slippage tolerance
-            market: Optional MarketSnapshot (passed by StrategyRunner)
 
         Returns:
             List of SWAP intents to convert to USDC
@@ -553,7 +547,7 @@ class AlmanakRSIStrategy(IntentStrategy):
                 to_token=self.quote_token_address,
                 amount="all",
                 max_slippage=max_slippage,
-                protocol="enso",
+                protocol="uniswap_v3",
             )
         )
 

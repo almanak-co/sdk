@@ -111,9 +111,9 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
         "2pool": {
             "address": "0x7f90122BF0700F9E7e1F688fe926940E8839F353",
             "lp_token": "0x7f90122BF0700F9E7e1F688fe926940E8839F353",
-            "coins": ["USDC.e", "USDT"],
+            "coins": ["USDC", "USDT"],
             "coin_addresses": [
-                "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",  # USDC.e (bridged), NOT native USDC
+                "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
                 "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
             ],
             "pool_type": "stableswap",
