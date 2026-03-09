@@ -90,18 +90,22 @@ class SafeSigner(Signer):
         self._gas_buffer_multiplier = config.gas_buffer_multiplier
 
         # Initialize account from private key
-        try:
-            self._account: LocalAccount = Account.from_key(config.private_key)
-            # Verify EOA address matches
-            if self._account.address.lower() != self._eoa_address.lower():
-                raise SigningError(
-                    reason=f"Private key does not match configured EOA address. "
-                    f"Expected {self._eoa_address}, got {self._account.address}"
-                )
-        except SigningError:
-            raise
-        except Exception as e:
-            raise SigningError(reason=f"Invalid private key format: {type(e).__name__}") from None
+        if config.mode == "zodiac":
+            # Zodiac mode: key held by remote signer, skip local key validation
+            self._account: LocalAccount | None = None
+        else:
+            try:
+                self._account = Account.from_key(config.private_key)
+                # Verify EOA address matches
+                if self._account.address.lower() != self._eoa_address.lower():
+                    raise SigningError(
+                        reason=f"Private key does not match configured EOA address. "
+                        f"Expected {self._eoa_address}, got {self._account.address}"
+                    )
+            except SigningError:
+                raise
+            except Exception as e:
+                raise SigningError(reason=f"Invalid private key format: {type(e).__name__}") from None
 
         # Safe nonce cache for bundle execution
         # Cleared at the start of each bundle

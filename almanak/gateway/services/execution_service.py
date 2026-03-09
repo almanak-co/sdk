@@ -154,7 +154,12 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             from almanak.framework.execution.signer.safe.config import SafeSignerConfig, SafeWalletConfig
 
             safe_mode = self.settings.safe_mode or "direct"
-            eoa_address = Account.from_key(private_key).address
+            if safe_mode == "zodiac":
+                if not self.settings.eoa_address:
+                    raise ValueError("EOA_ADDRESS must be configured when ALMANAK_GATEWAY_SAFE_MODE=zodiac")
+                eoa_address = self.settings.eoa_address
+            else:
+                eoa_address = Account.from_key(private_key).address
             assert self.settings.safe_address is not None  # guarded by _is_safe_address
             wallet_config = SafeWalletConfig(
                 safe_address=self.settings.safe_address,

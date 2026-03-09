@@ -218,6 +218,7 @@ class DirectSafeSigner(SafeSigner):
         from eth_keys import keys
 
         # Get the private key bytes from the account
+        assert self._account is not None  # guaranteed for direct mode
         private_key_bytes = self._account.key
 
         # Create an eth_keys PrivateKey object for signing
@@ -372,6 +373,7 @@ class DirectSafeSigner(SafeSigner):
         wrapper_tx["gas"] = await self._estimate_wrapper_gas(web3, wrapper_tx, tx.gas_limit)
 
         # Sign the wrapper transaction
+        assert self._account is not None  # guaranteed for direct mode
         try:
             signed = self._account.sign_transaction(cast(dict[str, Any], wrapper_tx))
 
@@ -573,6 +575,7 @@ class DirectSafeSigner(SafeSigner):
         wrapper_tx["gas"] = buffered_gas
 
         # Sign
+        assert self._account is not None  # guaranteed for direct mode
         try:
             signed = self._account.sign_transaction(cast(dict[str, Any], wrapper_tx))
 

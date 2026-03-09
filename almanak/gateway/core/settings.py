@@ -61,6 +61,7 @@ class GatewaySettings(BaseSettings):
     # Set ALMANAK_GATEWAY_SAFE_ADDRESS and ALMANAK_GATEWAY_SAFE_MODE env vars
     safe_address: str | None = None  # Safe wallet address
     safe_mode: str | None = None  # "direct" (Anvil/threshold-1) or "zodiac" (production)
+    eoa_address: str | None = None  # EOA address (zodiac mode, key held by signer service)
     zodiac_roles_address: str | None = None  # Zodiac Roles module address (zodiac mode)
     signer_service_url: str | None = None  # Remote signer service URL (zodiac mode)
     signer_service_jwt: str | None = None  # Remote signer service JWT (zodiac mode)
@@ -96,16 +97,42 @@ class GatewaySettings(BaseSettings):
     }
 
     @model_validator(mode="after")
-    def _fallback_private_key(self) -> "GatewaySettings":
-        """Fall back to ALMANAK_PRIVATE_KEY if ALMANAK_GATEWAY_PRIVATE_KEY is not set."""
-        if not self.private_key:
-            # Ensure .env values are loaded into os.environ (idempotent)
-            from dotenv import load_dotenv
+    def _fallback_env_vars(self) -> "GatewaySettings":
+        """Fall back to ALMANAK_* env vars if ALMANAK_GATEWAY_* variants are not set."""
+        from dotenv import load_dotenv
 
-            load_dotenv()
+        load_dotenv()
+
+        if not self.private_key:
             fallback = os.environ.get("ALMANAK_PRIVATE_KEY")
             if fallback:
                 self.private_key = fallback
+
+        if not self.eoa_address:
+            fallback = os.environ.get("ALMANAK_EOA_ADDRESS")
+            if fallback:
+                self.eoa_address = fallback
+
+        if not self.safe_address:
+            fallback = os.environ.get("ALMANAK_SAFE_ADDRESS")
+            if fallback:
+                self.safe_address = fallback
+
+        if not self.zodiac_roles_address:
+            fallback = os.environ.get("ALMANAK_ZODIAC_ADDRESS")
+            if fallback:
+                self.zodiac_roles_address = fallback
+
+        if not self.signer_service_url:
+            fallback = os.environ.get("ALMANAK_SIGNER_SERVICE_URL")
+            if fallback:
+                self.signer_service_url = fallback
+
+        if not self.signer_service_jwt:
+            fallback = os.environ.get("ALMANAK_SIGNER_SERVICE_JWT")
+            if fallback:
+                self.signer_service_jwt = fallback
+
         return self
 
 

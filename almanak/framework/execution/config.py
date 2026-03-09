@@ -207,7 +207,8 @@ class ExecutionMode(StrEnum):
         production where the private key is held by a secure signer service.
 
         Required env vars:
-            - ALMANAK_PRIVATE_KEY (for EOA that has the role)
+            - ALMANAK_PRIVATE_KEY (dummy value, key held by signer service)
+            - ALMANAK_EOA_ADDRESS (EOA address that has the Zodiac role)
             - ALMANAK_SAFE_ADDRESS
             - ALMANAK_ZODIAC_ADDRESS
             - ALMANAK_SIGNER_SERVICE_URL
@@ -1325,6 +1326,7 @@ class MultiChainRuntimeConfig:
         private_key: str,
         execution_mode: str = "eoa",
         safe_address: str | None = None,
+        eoa_address: str | None = None,
         zodiac_address: str | None = None,
         signer_service_url: str | None = None,
         signer_service_jwt: str | None = None,
@@ -1341,6 +1343,7 @@ class MultiChainRuntimeConfig:
             private_key: Hex-encoded private key
             execution_mode: "eoa", "safe_direct", or "safe_zodiac"
             safe_address: Safe wallet address (required for safe_* modes)
+            eoa_address: EOA address (required for safe_zodiac, derived from private_key for safe_direct)
             zodiac_address: Zodiac Roles address (required for safe_zodiac)
             signer_service_url: Remote signer URL (required for safe_zodiac)
             signer_service_jwt: JWT for signer (required for safe_zodiac)
@@ -1377,6 +1380,7 @@ class MultiChainRuntimeConfig:
                 private_key="0x...",
                 execution_mode="safe_zodiac",
                 safe_address="0x...",
+                eoa_address="0x...",
                 zodiac_address="0x...",
                 signer_service_url="https://...",
                 signer_service_jwt="...",
@@ -1434,11 +1438,15 @@ class MultiChainRuntimeConfig:
                     field="signer_service_jwt",
                     reason="signer_service_jwt is required for safe_zodiac mode",
                 )
+            if not eoa_address:
+                raise ConfigurationError(
+                    field="eoa_address",
+                    reason="eoa_address is required for safe_zodiac mode",
+                )
 
-            account = Account.from_key(private_key)
             wallet_config = SafeWalletConfig(
                 safe_address=safe_address,
-                eoa_address=account.address,
+                eoa_address=eoa_address,
                 zodiac_roles_address=zodiac_address,
             )
             signer_config = SafeSignerConfig(
@@ -1912,9 +1920,13 @@ def _create_safe_signer_from_env(
     # Get Safe address (required for all Safe modes)
     safe_address = get_required("SAFE_ADDRESS")
 
-    # Derive EOA address from private key
-    account = Account.from_key(private_key)
-    eoa_address = account.address
+    if execution_mode == ExecutionMode.SAFE_ZODIAC:
+        # Zodiac mode: EOA address provided directly (key held by signer service)
+        eoa_address = get_required("EOA_ADDRESS")
+    else:
+        # Direct mode: derive EOA from private key
+        account = Account.from_key(private_key)
+        eoa_address = account.address
 
     if execution_mode == ExecutionMode.SAFE_DIRECT:
         # Direct mode - local signing for Anvil testing

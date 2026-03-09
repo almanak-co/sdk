@@ -438,7 +438,7 @@ def _validate_safe_mode_preflight(execution_address: str) -> str | None:
     Returns an error message string if validation fails, or None on success.
     """
     gw_safe_mode = (os.environ.get("ALMANAK_GATEWAY_SAFE_MODE") or "").lower()
-    gw_safe_address = os.environ.get("ALMANAK_GATEWAY_SAFE_ADDRESS")
+    gw_safe_address = os.environ.get("ALMANAK_GATEWAY_SAFE_ADDRESS") or os.environ.get("ALMANAK_SAFE_ADDRESS")
 
     # Guard 1: Gateway must also be in Safe mode
     if gw_safe_mode not in ("direct", "zodiac"):
