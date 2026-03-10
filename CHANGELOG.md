@@ -6,6 +6,75 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-03-10
+
+### Added
+- `almanak ax` CLI for direct DeFi actions from the command line (#583)
+- MultiStepStrategy base class for declarative state-machine strategies (#517)
+- BENQI lending connector for Avalanche (#528)
+- Monad chain support (#515)
+- MCP stdio transport server for agent tools (#484)
+- Real risk metrics: VaR, Sharpe ratio, volatility, max drawdown (#481)
+- Real pre-trade risk validation via `validate_risk` (#482)
+- Structured decision tracing for agent tool executions (#485)
+- Standardized agent tools error taxonomy with typed enums (#483)
+- PendleMarketResolver for dynamic market discovery (#458)
+- PolicyEngine runtime state persistence across restarts (#473)
+- MockGatewayClient test fixture for agent E2E testing (#471)
+- Shared IntentExecutionService converging ToolExecutor and StrategyRunner (#479)
+- Structured `iteration_summary` log record (#503)
+- `lending_rate()` added to canonical MarketSnapshot (#461)
+- Pre-flight ALCHEMY_API_KEY check for archive-RPC chains (#556)
+- Nightly market data validation and enhanced Slack reporting (#493)
+- 8 new demo strategies: Morpho Blue paper trade (#578), Aave V3 PnL lending (#577), RSI+MACD confluence LP (#576), PancakeSwap V3 LP lifecycle (#575), Balancer flash loan arbitrage (#567), Compound V3 paper trade (#568), TraderJoe V2 ATR-adaptive LP (#551), Aerodrome paper trade (#518)
+
+### Changed
+- Strategy metadata (description, chain, strategy_id) moved from config.json to `@almanak_strategy` decorator; config.json now contains only tunable runtime parameters (#591)
+
+### Fixed
+- Use ALMANAK_EOA_ADDRESS for safe_zodiac mode instead of derived address (#585)
+- Guard Morpho Blue repay against over-repay underflow (#580)
+- BENQI receipt parser handles malformed event data gracefully (#571)
+- Skip revert diagnostic for compilation failures (#570)
+- Guard against zero gas estimate from eth_estimateGas (#569)
+- Close data provider sessions after PnL backtest completes (#562)
+- Guard CAGR calculation against portfolios losing >100% (#561)
+- Use Enso for almanak_rsi teardown to bypass missing price oracle (#553)
+- Bump Spark, Aave V3, and BENQI gas estimates to prevent TX reverts (#552, #544)
+- Suppress circular import warning on strategy auto-discovery (#543)
+- Add OpenZeppelin error selectors to revert decoder (#542)
+- Resolve swap_amounts enrichment for Enso and gateway path (#541)
+- Correct Arbitrum Curve 2pool USDC address (native -> USDC.e) (#533)
+- LiFi and Pendle receipt parsers return SwapAmounts dataclass (#532)
+- Add PancakeSwap V3 LP_POSITION_MANAGERS for Arbitrum and Ethereum (#531)
+- Add state machine wiring for FlashLoan and Bridge intents (#530)
+- Fix Safe wallet address propagation in strategy runner (#529)
+- Resolve token addresses to symbols in teardown price prefetch (#526)
+- Emit ERROR timeline event on MultiStepStrategy decide() exceptions (#522)
+- Remove double slippage in Pendle swap compilation (#521)
+- Morpho quick wins: improved error handling (#520)
+- Pendle pre-swap routing when tokenIn != tokenMintSy (#516)
+- wstETH price resolution on Arbitrum via derived pricing (#514)
+- Clean up expired Pendle market in demo strategy (#513)
+- Chain-aware native token in errors and placeholder prices (#511)
+- QA fixes: teardown CLI, .env template, catch-all anti-pattern (#504)
+- Fail compilation on mainnet when no real prices available (#502)
+- Classify RPC 'header not found' as connection error (#501)
+- Reuse full DictConfigWrapper in teardown CLI (#500)
+- Auto-generate session auth token for managed gateway on mainnet (#498)
+- Remove hardcoded arbitrum fallback in MarketService (#497)
+- Fix dry-run status and backtest CLI command (#496)
+- Suppress port-not-freed warning on Anvil shutdown (#491)
+- Actionable error for missing state machine wiring (#488)
+- Add Sonic chain to framework execution layer (#486)
+- Use actual token decimals in Curve extract_swap_amounts() (#466)
+- Fix intent state machine gaps (#465)
+- Lido stETH approve gas fix and compile_stake_intent tests (#460)
+- Lido improvements: gas estimates, error messages (#459)
+
+### Security
+- Close compile_intent nested-params policy bypass (#550)
+
 ## [2.2.1] - 2026-03-03
 
 ### Changed
