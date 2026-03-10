@@ -1,12 +1,8 @@
 {
-    "strategy_id": "demo_uniswap_lp",
-    "strategy_name": "demo_uniswap_lp",
-    "description": "Tutorial Uniswap V3 LP strategy",
     "pool": "WETH/USDC/500",
     "range_width_pct": 0.2,
     "amount0": "0.001",
     "amount1": "3",
-    "chain": "arbitrum",
     "anvil_funding": {
         "ETH": 100,
         "WETH": 1,

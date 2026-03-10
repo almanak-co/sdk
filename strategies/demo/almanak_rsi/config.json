@@ -1,9 +1,4 @@
 {
-    "strategy_id": "almanak_rsi",
-    "strategy_name": "almanak_rsi",
-    "description": "RSI Mean Reversion Strategy for ALMANAK/USDC on Base (Uniswap V3)",
-    "chain": "base",
-    "protocol": "uniswap_v3",
     "base_token": "ALMANAK",
     "base_token_address": "0xdefa1d21c5f1cbeac00eeb54b44c7d86467cc3a3",
     "quote_token": "USDC",

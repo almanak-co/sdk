@@ -171,9 +171,11 @@ def _interactive_select(strategies: list[dict]) -> str | None:
 
 
 def _rewrite_config(target: Path, strategy_name: str) -> None:
-    """Update strategy_id and strategy_name in the copied config.json.
+    """Clean up the copied config.json.
 
-    Strips the 'demo_' prefix if present so the user gets a clean config.
+    Structural metadata (strategy_id, strategy_name, chain, etc.) now lives
+    in the @almanak_strategy decorator, so this only strips leftover metadata
+    fields for a clean user experience.
     """
     config_path = target / "config.json"
     if not config_path.is_file():
@@ -186,18 +188,13 @@ def _rewrite_config(target: Path, strategy_name: str) -> None:
             click.echo(f"Warning: could not parse config.json ({e}); skipping config rewrite.", err=True)
             return
 
-    # Strip demo_ prefix for a cleaner user experience
-    clean_name = strategy_name.removeprefix("demo_")
+    # Remove any leftover metadata fields (these belong in the decorator now)
+    metadata_keys = {"strategy_id", "strategy_name", "description", "protocol", "network", "chain"}
+    removed = {k for k in metadata_keys if k in config}
+    for k in removed:
+        del config[k]
 
-    changed = False
-    if "strategy_id" in config:
-        config["strategy_id"] = clean_name
-        changed = True
-    if "strategy_name" in config:
-        config["strategy_name"] = clean_name
-        changed = True
-
-    if changed:
+    if removed:
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4)
             f.write("\n")

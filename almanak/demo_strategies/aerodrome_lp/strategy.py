@@ -136,6 +136,7 @@ class AerodromeLPConfig:
     supported_protocols=["aerodrome"],
     # Types of intents this strategy may return
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
+    default_chain="base",
 )
 class AerodromeLPStrategy(IntentStrategy[AerodromeLPConfig]):
     """
@@ -552,10 +553,10 @@ if __name__ == "__main__":
     print("AerodromeLPStrategy - Demo Strategy")
     print("=" * 60)
     print(f"\nStrategy Name: {AerodromeLPStrategy.STRATEGY_NAME}")
-    print(f"Version: {AerodromeLPStrategy.STRATEGY_METADATA.get('version', 'N/A')}")
+    print(f"Version: {AerodromeLPStrategy.STRATEGY_METADATA.version}")
     print(f"Supported Chains: {AerodromeLPStrategy.SUPPORTED_CHAINS}")
     print(f"Supported Protocols: {AerodromeLPStrategy.SUPPORTED_PROTOCOLS}")
     print(f"Intent Types: {AerodromeLPStrategy.INTENT_TYPES}")
-    print(f"\nDescription: {AerodromeLPStrategy.STRATEGY_METADATA.get('description', 'N/A')}")
+    print(f"\nDescription: {AerodromeLPStrategy.STRATEGY_METADATA.description}")
     print("\nTo test on Anvil:")
     print("  python strategies/demo/aerodrome_lp/run_anvil.py")

@@ -171,6 +171,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=["traderjoe_v2"],
     # Types of intents this strategy may return
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
+    default_chain="avalanche",
 )
 class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
     """
@@ -607,10 +608,10 @@ if __name__ == "__main__":
     print("TraderJoeLPStrategy - Demo Strategy")
     print("=" * 60)
     print(f"\nStrategy Name: {TraderJoeLPStrategy.STRATEGY_NAME}")
-    print(f"Version: {TraderJoeLPStrategy.STRATEGY_METADATA.get('version', 'N/A')}")
+    print(f"Version: {TraderJoeLPStrategy.STRATEGY_METADATA.version}")
     print(f"Supported Chains: {TraderJoeLPStrategy.SUPPORTED_CHAINS}")
     print(f"Supported Protocols: {TraderJoeLPStrategy.SUPPORTED_PROTOCOLS}")
     print(f"Intent Types: {TraderJoeLPStrategy.INTENT_TYPES}")
-    print(f"\nDescription: {TraderJoeLPStrategy.STRATEGY_METADATA.get('description', 'N/A')}")
+    print(f"\nDescription: {TraderJoeLPStrategy.STRATEGY_METADATA.description}")
     print("\nTo test on Anvil:")
     print("  python strategies/demo/traderjoe_lp/run_anvil.py")

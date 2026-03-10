@@ -176,6 +176,7 @@ class UniswapLPConfig:
     # LP_CLOSE: Close existing position and collect fees
     # HOLD: No action needed
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
+    default_chain="arbitrum",
 )
 class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
     """
@@ -699,11 +700,11 @@ if __name__ == "__main__":
     print("UniswapLPStrategy - Demo Strategy")
     print("=" * 60)
     print(f"\nStrategy Name: {UniswapLPStrategy.STRATEGY_NAME}")
-    print(f"Version: {UniswapLPStrategy.STRATEGY_METADATA.get('version', 'N/A')}")
+    print(f"Version: {UniswapLPStrategy.STRATEGY_METADATA.version}")
     print(f"Supported Chains: {UniswapLPStrategy.SUPPORTED_CHAINS}")
     print(f"Supported Protocols: {UniswapLPStrategy.SUPPORTED_PROTOCOLS}")
     print(f"Intent Types: {UniswapLPStrategy.INTENT_TYPES}")
-    print(f"\nDescription: {UniswapLPStrategy.STRATEGY_METADATA.get('description', 'N/A')}")
+    print(f"\nDescription: {UniswapLPStrategy.STRATEGY_METADATA.description}")
     print("\nTo run this strategy:")
     print("  python -m src.cli.run --strategy demo_uniswap_lp --once")
     print("\nTo test on Anvil:")

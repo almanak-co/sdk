@@ -3337,6 +3337,7 @@ class StrategyMetadata:
         supported_chains: List of supported chains
         supported_protocols: List of supported protocols
         intent_types: List of intent types this strategy may use
+        default_chain: Default chain for single-chain execution (falls back to supported_chains[0])
     """
 
     name: str
@@ -3347,6 +3348,7 @@ class StrategyMetadata:
     supported_chains: list[str] = field(default_factory=list)
     supported_protocols: list[str] = field(default_factory=list)
     intent_types: list[str] = field(default_factory=list)
+    default_chain: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -3359,6 +3361,7 @@ class StrategyMetadata:
             "supported_chains": self.supported_chains,
             "supported_protocols": self.supported_protocols,
             "intent_types": self.intent_types,
+            "default_chain": self.default_chain,
         }
 
 
@@ -3375,6 +3378,7 @@ def almanak_strategy(
     supported_chains: list[str] | None = None,
     supported_protocols: list[str] | None = None,
     intent_types: list[str] | None = None,
+    default_chain: str = "",
 ) -> Callable[[StrategyClassT], StrategyClassT]:
     """Decorator to add metadata to an IntentStrategy class.
 
@@ -3391,6 +3395,7 @@ def almanak_strategy(
         supported_chains: List of supported chains
         supported_protocols: List of supported protocols
         intent_types: List of intent types used
+        default_chain: Default chain for single-chain execution (falls back to supported_chains[0])
 
     Returns:
         Decorated class with STRATEGY_METADATA attribute
@@ -3404,6 +3409,7 @@ def almanak_strategy(
             tags=["trading", "rsi", "mean-reversion"],
             supported_chains=["arbitrum", "ethereum"],
             intent_types=["SWAP"],
+            default_chain="arbitrum",
         )
         class MeanReversionStrategy(IntentStrategy):
             pass
@@ -3412,15 +3418,22 @@ def almanak_strategy(
     from . import STRATEGY_REGISTRY
 
     def decorator(cls: StrategyClassT) -> StrategyClassT:
+        resolved_supported_chains = supported_chains or []
+        resolved_default_chain = default_chain or (resolved_supported_chains[0] if resolved_supported_chains else "")
+        if default_chain and resolved_supported_chains and default_chain not in resolved_supported_chains:
+            raise ValueError(
+                f"default_chain '{default_chain}' must be one of supported_chains: {resolved_supported_chains}"
+            )
         metadata = StrategyMetadata(
             name=name,
             description=description,
             version=version,
             author=author,
             tags=tags or [],
-            supported_chains=supported_chains or [],
+            supported_chains=resolved_supported_chains,
             supported_protocols=supported_protocols or [],
             intent_types=intent_types or [],
+            default_chain=resolved_default_chain,
         )
 
         # Attach metadata to class

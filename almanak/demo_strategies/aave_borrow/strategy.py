@@ -104,6 +104,7 @@ if TYPE_CHECKING:
     # BORROW: Borrow tokens from Aave
     # HOLD: No action
     intent_types=["SUPPLY", "BORROW", "HOLD"],
+    default_chain="arbitrum",
 )
 class AaveBorrowStrategy(IntentStrategy):
     """
@@ -821,11 +822,11 @@ if __name__ == "__main__":
     print("AaveBorrowStrategy - Demo Strategy")
     print("=" * 60)
     print(f"\nStrategy Name: {AaveBorrowStrategy.STRATEGY_NAME}")
-    print(f"Version: {AaveBorrowStrategy.STRATEGY_METADATA.get('version', 'N/A')}")
+    print(f"Version: {AaveBorrowStrategy.STRATEGY_METADATA.version}")
     print(f"Supported Chains: {AaveBorrowStrategy.SUPPORTED_CHAINS}")
     print(f"Supported Protocols: {AaveBorrowStrategy.SUPPORTED_PROTOCOLS}")
     print(f"Intent Types: {AaveBorrowStrategy.INTENT_TYPES}")
-    print(f"\nDescription: {AaveBorrowStrategy.STRATEGY_METADATA.get('description', 'N/A')}")
+    print(f"\nDescription: {AaveBorrowStrategy.STRATEGY_METADATA.description}")
     print("\nTo run this strategy:")
     print("  python -m src.cli.run --strategy demo_aave_borrow --once")
     print("\nTo test on Anvil:")

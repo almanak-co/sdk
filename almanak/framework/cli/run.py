@@ -277,8 +277,26 @@ def load_strategy_config(
     # Return minimal default config with generated UUID
     return {
         "strategy_id": f"{strategy_name}:{uuid.uuid4().hex[:12]}",
-        "chain": "arbitrum",
     }
+
+
+def get_default_chain(strategy_class: type) -> str:
+    """Get the default chain for a strategy from decorator metadata.
+
+    Reads STRATEGY_METADATA.default_chain, falling back to supported_chains[0],
+    then to "arbitrum" as a last resort.
+    """
+    metadata = getattr(strategy_class, "STRATEGY_METADATA", None)
+    if metadata:
+        if metadata.default_chain:
+            return metadata.default_chain
+        if metadata.supported_chains:
+            return metadata.supported_chains[0]
+    # Legacy fallback
+    supported = getattr(strategy_class, "SUPPORTED_CHAINS", None)
+    if supported:
+        return supported[0]
+    return "arbitrum"
 
 
 def create_price_oracle(
@@ -995,6 +1013,7 @@ def run(
     effective_host = "127.0.0.1" if gateway_host == "localhost" else gateway_host
 
     managed_gateway: ManagedGateway | None = None
+    _early_strategy_class: type[IntentStrategy[Any]] | None = None
 
     # --wallet isolated requires a managed gateway (derives wallet + funds Anvil fork)
     if wallet == "isolated" and no_gateway:
@@ -1082,11 +1101,19 @@ def run(
         if keep_anvil and gateway_network != "anvil":
             click.echo("Warning: --keep-anvil has no effect without --network anvil or --anvil-port.")
 
+        # Early-load strategy class so decorator metadata is available for chain detection.
+        # This must happen before gateway startup so Anvil forks target the correct chain.
+        _early_strategy_file = Path(working_dir) / "strategy.py"
+        if _early_strategy_file.exists():
+            _early_strategy_class, _early_err = load_strategy_from_file(_early_strategy_file)
+            if _early_err:
+                logger.debug(f"Early strategy load failed (will retry later): {_early_err}")
+
         # Determine which chains need Anvil forks
         anvil_chains: list[str] = []
         anvil_funding: dict[str, float | int | str] = {}
         if gateway_network == "anvil":
-            # Quick-read config for chain info (before gateway starts)
+            # Quick-read config for chain info and anvil_funding
             resolved_config_path: Path | None = Path(config_file) if config_file else None
             if resolved_config_path is None:
                 for name in ["config.json", "config.yaml", "config.yml"]:
@@ -1109,6 +1136,13 @@ def run(
                 elif chain_val:
                     anvil_chains = [chain_val]
                 anvil_funding = quick_config.get("anvil_funding", {})
+
+            # Fall back to decorator metadata if config.json has no chain
+            if not anvil_chains and _early_strategy_class:
+                decorator_chain = get_default_chain(_early_strategy_class)
+                if decorator_chain:
+                    anvil_chains = [decorator_chain]
+
             # Add externally-specified chains to anvil_chains if not already present
             for ext_chain in external_anvil_ports:
                 if ext_chain not in anvil_chains:
@@ -1116,7 +1150,7 @@ def run(
 
             if not anvil_chains:
                 click.echo(
-                    "Warning: --network anvil specified but no chain found in config. "
+                    "Warning: --network anvil specified but no chain found in config or decorator. "
                     "Gateway will start without Anvil forks."
                 )
 
@@ -1152,8 +1186,8 @@ def run(
         gateway_private_key = os.environ.get("ALMANAK_PRIVATE_KEY") if isolated_wallet_address else None
 
         # Ensure gateway knows the strategy's chain for on-chain pricing.
-        # For anvil mode, anvil_chains is already populated from config.
-        # For mainnet, we need to read the chain from config so the MarketService
+        # For anvil mode, anvil_chains is already populated above.
+        # For mainnet, read chain from config or decorator metadata so the MarketService
         # uses the correct Chainlink oracle chain instead of defaulting to arbitrum.
         gateway_chains = anvil_chains
         if not gateway_chains:
@@ -1180,6 +1214,12 @@ def run(
                         gateway_chains = [_chains_val] if isinstance(_chains_val, str) else list(_chains_val)
                     elif _chain_val:
                         gateway_chains = [_chain_val]
+
+            # Fall back to decorator metadata if config has no chain
+            if not gateway_chains and _early_strategy_class:
+                decorator_chain = get_default_chain(_early_strategy_class)
+                if decorator_chain:
+                    gateway_chains = [decorator_chain]
 
         # Security: generate a random session token for the managed gateway so it
         # is never running without authentication, even on mainnet (VIB-520).
@@ -1387,7 +1427,7 @@ def run(
         if dashboard_process is not None:
             atexit.register(stop_dashboard, dashboard_process)
 
-    # Load strategy from working directory
+    # Load strategy from working directory (reuse early-loaded class if available)
     strategy_file = Path(working_dir) / "strategy.py"
     if not strategy_file.exists():
         click.echo(f"Error: No strategy.py found in {working_dir}", err=True)
@@ -1396,12 +1436,16 @@ def run(
         click.echo("  almanak strat run -d strategies/demo/uniswap_rsi --once")
         sys.exit(1)
 
-    loaded_class, error = load_strategy_from_file(strategy_file)
-    if not loaded_class:
-        click.echo(f"Error loading strategy from {strategy_file}: {error}", err=True)
-        sys.exit(1)
+    if _early_strategy_class is not None:
+        loaded_class: type[IntentStrategy[Any]] = _early_strategy_class
+    else:
+        _loaded, error = load_strategy_from_file(strategy_file)
+        if not _loaded:
+            click.echo(f"Error loading strategy from {strategy_file}: {error}", err=True)
+            sys.exit(1)
+        loaded_class = _loaded
 
-    strategy_class = loaded_class
+    strategy_class: type[IntentStrategy[Any]] = loaded_class
     strategy_name = loaded_class.__name__
     click.echo(f"Loaded strategy: {strategy_name}")
 
@@ -1482,12 +1526,11 @@ def run(
             strategy_id_generated = True
         strategy_config["strategy_display_name"] = config_display_name
 
-    # Determine chain from strategy config or strategy class
-    # Priority: strategy config > strategy class > env var (legacy)
+    # Determine chain: config.json (explicit override) > decorator default_chain > supported_chains[0]
+    # Config.json chain wins when present so users can override without editing code.
     config_chain = strategy_config.get("chain")
     if not config_chain and not multi_chain:
-        # For single-chain, use first supported chain from strategy class
-        config_chain = strategy_chains[0] if strategy_chains else None
+        config_chain = get_default_chain(strategy_class)
 
     # Determine network: CLI flag > config.json > default "mainnet"
     # Priority: --network flag (highest) > config "network" field > "mainnet" (default)

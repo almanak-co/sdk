@@ -117,6 +117,7 @@ logger = logging.getLogger(__name__)
     # SWAP: Exchange one token for another
     # HOLD: No action (wait for better conditions)
     intent_types=["SWAP", "HOLD"],
+    default_chain="ethereum",
 )
 class UniswapRSIStrategy(IntentStrategy):
     """
@@ -537,11 +538,11 @@ if __name__ == "__main__":
     print("UniswapRSIStrategy - Demo Strategy")
     print("=" * 60)
     print(f"\nStrategy Name: {UniswapRSIStrategy.STRATEGY_NAME}")
-    print(f"Version: {UniswapRSIStrategy.STRATEGY_METADATA.get('version', 'N/A')}")
+    print(f"Version: {UniswapRSIStrategy.STRATEGY_METADATA.version}")
     print(f"Supported Chains: {UniswapRSIStrategy.SUPPORTED_CHAINS}")
     print(f"Supported Protocols: {UniswapRSIStrategy.SUPPORTED_PROTOCOLS}")
     print(f"Intent Types: {UniswapRSIStrategy.INTENT_TYPES}")
-    print(f"\nDescription: {UniswapRSIStrategy.STRATEGY_METADATA.get('description', 'N/A')}")
+    print(f"\nDescription: {UniswapRSIStrategy.STRATEGY_METADATA.description}")
     print("\nTo run this strategy:")
     print("  python -m src.cli.run --strategy demo_uniswap_rsi --once --dry-run")
     print("\nTo test on Anvil:")

@@ -1,5 +1,4 @@
 {
-    "chain": "avalanche",
     "pool": "WAVAX/USDC/20",
     "range_width_pct": "0.10",
     "amount_x": "0.001",

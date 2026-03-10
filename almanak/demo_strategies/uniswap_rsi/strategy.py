@@ -119,6 +119,7 @@ logger = logging.getLogger(__name__)
     # SWAP: Exchange one token for another
     # HOLD: No action (wait for better conditions)
     intent_types=["SWAP", "HOLD"],
+    default_chain="ethereum",
 )
 class UniswapRSIStrategy(IntentStrategy):
     """

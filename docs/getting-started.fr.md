@@ -83,8 +83,6 @@ Ajoutez un bloc `anvil_funding` à votre `config.json` pour financer automatique
 
 ```json
 {
-    "strategy_id": "my_strategy",
-    "chain": "arbitrum",
     "anvil_funding": {
         "ETH": 10,
         "USDC": 10000,

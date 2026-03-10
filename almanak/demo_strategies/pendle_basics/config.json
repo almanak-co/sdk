@@ -1,7 +1,4 @@
 {
-    "strategy_id": "demo_pendle_basics",
-    "strategy_name": "demo_pendle_basics",
-    "description": "Demo strategy for Pendle Protocol - yield tokenization and PT trading",
     "market": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
     "market_name": "PT-wstETH-25JUN2026",
     "trade_size_token": 0.01,
@@ -11,7 +8,6 @@
     "base_token_decimals": 18,
     "pt_token": "PT-wstETH",
     "pt_token_symbol": "PT-wstETH",
-    "chain": "arbitrum",
     "anvil_funding": {
         "ETH": 10,
         "WSTETH": 1

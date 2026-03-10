@@ -550,6 +550,7 @@ logger = logging.getLogger(__name__)
     supported_chains=["{chain.value}"],
     supported_protocols=["{config.default_protocol}"],
     intent_types={intent_types[template]},
+    default_chain="{chain.value}",
 )
 class {class_name}(IntentStrategy):
     """
@@ -713,16 +714,13 @@ def generate_config_json(
     """Generate config.json content for the strategy.
 
     This produces the runtime config file that load_strategy_config() reads.
+    Structural metadata (strategy_id, chain) lives in the @almanak_strategy decorator,
+    not here. Config.json is for tunable parameters only.
     """
     import json
 
-    snake_name = to_snake_case(name)
-
-    # Base config present in all templates
-    data: dict[str, object] = {
-        "strategy_id": snake_name,
-        "chain": chain.value,
-    }
+    # Tunable parameters only - no structural metadata
+    data: dict[str, object] = {}
 
     # Template-specific parameters (matching what __init__ reads via get_config)
     if template == StrategyTemplate.MEAN_REVERSION:

@@ -77,6 +77,7 @@ POOL_ADDRESS = "0xbDbC38652D78AF0383322bBc823E06FA108d0874"
     supported_chains=["base"],
     supported_protocols=["uniswap_v3"],
     intent_types=["SWAP", "HOLD"],
+    default_chain="base",
 )
 class AlmanakRSIStrategy(IntentStrategy):
     """RSI-based mean reversion strategy for ALMANAK/USDC.

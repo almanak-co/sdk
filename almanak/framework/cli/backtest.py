@@ -365,7 +365,6 @@ def load_strategy_config(strategy_name: str, chain: str) -> dict[str, Any]:
     # Return default minimal config
     return {
         "strategy_id": f"backtest-{strategy_name}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-        "chain": chain,
         "wallet_address": "0x" + "0" * 40,  # Placeholder
     }
 
@@ -1642,8 +1641,12 @@ def _run_sweep_task_worker(task: _SweepTask) -> SweepResult:
         except ValueError:
             strategy_config[name] = value
 
-    # Create strategy instance
-    worker_chain = task.base_config.get("chain", "arbitrum")
+    # Create strategy instance - resolve chain from config override, then decorator metadata
+    from .run import get_default_chain
+
+    worker_chain = (
+        task.base_config.get("chain") or task.pnl_config_dict.get("chain") or get_default_chain(strategy_class)
+    )
     strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, worker_chain)
     # Set params as attributes for strategies that don't read config dict
     if not hasattr(strategy_instance, "config") or not isinstance(getattr(strategy_instance, "config", None), dict):

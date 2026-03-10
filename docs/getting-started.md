@@ -55,7 +55,7 @@ almanak strat new
 Follow the interactive prompts to pick a template, chain, and name. This creates a strategy directory with:
 
 - `strategy.py` - Your strategy implementation with `decide()` method
-- `config.json` - Chain, protocol, and parameter configuration
+- `config.json` - Runtime parameters (tokens, thresholds, funding)
 - `.env` - Environment variables (fill in your keys later)
 - `__init__.py` - Package exports
 - `tests/` - Test scaffolding
@@ -71,7 +71,7 @@ almanak strat run --network anvil --once
 
 This command automatically:
 
-1. **Starts an Anvil fork** of the chain specified in your `config.json` (free public RPCs are used by default)
+1. **Starts an Anvil fork** of the chain specified in your `@almanak_strategy` decorator (free public RPCs are used by default)
 2. **Uses a default Anvil wallet** -- no `ALMANAK_PRIVATE_KEY` needed
 3. **Starts the gateway** sidecar in the background
 4. **Funds your wallet** with tokens listed in `anvil_funding` (see below)
@@ -83,8 +83,6 @@ Add an `anvil_funding` block to your `config.json` to automatically fund your wa
 
 ```json
 {
-    "strategy_id": "my_strategy",
-    "chain": "arbitrum",
     "anvil_funding": {
         "ETH": 10,
         "USDC": 10000,

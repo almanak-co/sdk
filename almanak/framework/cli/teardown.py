@@ -425,7 +425,10 @@ def execute_teardown(
     else:
         config_dict = {}
 
-    chain = config_dict.get("chain", "arbitrum")
+    # Resolve chain: config.json override first, then decorator metadata
+    from .run import get_default_chain
+
+    chain = config_dict.get("chain") or get_default_chain(strategy_class)
 
     # Gateway setup: auto-start a managed gateway or connect to an existing one
     import atexit

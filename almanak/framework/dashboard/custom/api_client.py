@@ -175,7 +175,10 @@ class DashboardAPIClient:
             # Get wallet address from strategy config
             config = self.get_config()
             wallet = config.get("wallet_address", "")
-            chain = chain or config.get("chain", "arbitrum")
+            chain = chain or config.get("default_chain") or config.get("chain")
+            if not chain:
+                logger.debug("No chain specified and none found in config")
+                return None
 
             from almanak.gateway.proto import gateway_pb2
 

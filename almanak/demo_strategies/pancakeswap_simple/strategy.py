@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
     supported_chains=["arbitrum"],
     supported_protocols=["pancakeswap_v3"],
     intent_types=["SWAP"],
+    default_chain="arbitrum",
 )
 class PancakeSwapSimpleStrategy(IntentStrategy):
     """Simple PancakeSwap V3 swap strategy for testing."""

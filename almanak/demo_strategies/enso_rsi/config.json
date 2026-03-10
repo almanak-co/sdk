@@ -1,12 +1,10 @@
 {
-    "description": "RSI mean reversion strategy using Enso DEX aggregator on Base",
     "trade_size_usd": "3",
     "rsi_oversold": 30,
     "rsi_overbought": 70,
     "max_slippage_pct": 1.0,
     "base_token": "WETH",
     "quote_token": "USDC",
-    "chain": "base",
     "anvil_funding": {
         "ETH": 100,
         "WETH": 1,

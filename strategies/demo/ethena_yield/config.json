@@ -3,7 +3,6 @@
     "min_usdc_amount": "5",
     "swap_usdc_to_usde": true,
     "force_action": "swap",
-    "chain": "ethereum",
     "anvil_funding": {
         "ETH": 100,
         "USDC": 10000,

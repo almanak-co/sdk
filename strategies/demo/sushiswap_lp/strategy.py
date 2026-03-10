@@ -181,6 +181,7 @@ class SushiSwapLPConfig:
     supported_protocols=["sushiswap_v3"],
     # Types of intents this strategy may return
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
+    default_chain="arbitrum",
 )
 class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
     """
@@ -665,10 +666,10 @@ if __name__ == "__main__":
     print("SushiSwapLPStrategy - Demo Strategy")
     print("=" * 60)
     print(f"\nStrategy Name: {SushiSwapLPStrategy.STRATEGY_NAME}")
-    print(f"Version: {SushiSwapLPStrategy.STRATEGY_METADATA.get('version', 'N/A')}")
+    print(f"Version: {SushiSwapLPStrategy.STRATEGY_METADATA.version}")
     print(f"Supported Chains: {SushiSwapLPStrategy.SUPPORTED_CHAINS}")
     print(f"Supported Protocols: {SushiSwapLPStrategy.SUPPORTED_PROTOCOLS}")
     print(f"Intent Types: {SushiSwapLPStrategy.INTENT_TYPES}")
-    print(f"\nDescription: {SushiSwapLPStrategy.STRATEGY_METADATA.get('description', 'N/A')}")
+    print(f"\nDescription: {SushiSwapLPStrategy.STRATEGY_METADATA.description}")
     print("\nTo test on Anvil:")
     print("  python strategies/demo/sushiswap_lp/run_anvil.py")

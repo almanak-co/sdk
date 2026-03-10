@@ -153,7 +153,7 @@ See: https://docs.almanak.co/agentic/
 ## Building Your Own Agent
 
 1. **Copy a template** -- Start from `examples/agentic/agent_swap/` (simplest) or `agent_lp/` (LP management) or `defai_vault_lp/` (vault + LP)
-2. **Edit `config.json`** -- Set chain, tokens, amounts, strategy parameters
+2. **Edit `config.json`** -- Set tokens, amounts, strategy parameters (chain is set via the `@almanak_strategy` decorator)
 3. **Write prompts** -- `prompts.py` defines the system prompt with available tools and decision rules
 4. **Configure policy** -- `create_policy()` in `run.py` sets spend limits, allowed tools/tokens/chains
 5. **Create a mock LLM** -- Script a realistic tool-call sequence for testing without an API key

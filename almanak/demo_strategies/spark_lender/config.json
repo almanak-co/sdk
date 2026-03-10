@@ -1,9 +1,7 @@
 {
-    "description": "Tutorial Spark lending strategy - supply DAI to earn yield",
     "min_supply_amount": "5",
     "supply_token": "DAI",
     "force_action": "supply",
-    "chain": "ethereum",
     "anvil_funding": {
         "ETH": 100,
         "DAI": 10,

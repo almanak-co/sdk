@@ -90,6 +90,7 @@ TOKEN_ADDRESSES = {
     supported_chains=["arbitrum", "plasma"],
     supported_protocols=["pendle"],
     intent_types=["SWAP", "HOLD"],
+    default_chain="arbitrum",
 )
 class PendleBasicsStrategy(IntentStrategy):
     """
@@ -382,11 +383,11 @@ if __name__ == "__main__":
     print("PendleBasicsStrategy - Demo Strategy")
     print("=" * 60)
     print(f"\nStrategy Name: {PendleBasicsStrategy.STRATEGY_NAME}")
-    print(f"Version: {PendleBasicsStrategy.STRATEGY_METADATA.get('version', 'N/A')}")
+    print(f"Version: {PendleBasicsStrategy.STRATEGY_METADATA.version}")
     print(f"Supported Chains: {PendleBasicsStrategy.SUPPORTED_CHAINS}")
     print(f"Supported Protocols: {PendleBasicsStrategy.SUPPORTED_PROTOCOLS}")
     print(f"Intent Types: {PendleBasicsStrategy.INTENT_TYPES}")
-    print(f"\nDescription: {PendleBasicsStrategy.STRATEGY_METADATA.get('description', 'N/A')}")
+    print(f"\nDescription: {PendleBasicsStrategy.STRATEGY_METADATA.description}")
     print("\nTo run this strategy:")
     print("  1. Start gateway: almanak gateway --network anvil")
     print("  2. Run strategy: almanak strat run -d strategies/demo/pendle_basics --once")

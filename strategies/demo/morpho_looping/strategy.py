@@ -118,6 +118,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=["morpho_blue", "uniswap_v3"],
     # Intent types this strategy may emit
     intent_types=["SUPPLY", "BORROW", "SWAP", "REPAY", "WITHDRAW", "HOLD"],
+    default_chain="ethereum",
 )
 class MorphoLoopingStrategy(IntentStrategy):
     """
@@ -918,11 +919,11 @@ if __name__ == "__main__":
     print("MorphoLoopingStrategy - Leveraged Yield Farming Demo")
     print("=" * 70)
     print(f"\nStrategy Name: {MorphoLoopingStrategy.STRATEGY_NAME}")
-    print(f"Version: {MorphoLoopingStrategy.STRATEGY_METADATA.get('version', 'N/A')}")
+    print(f"Version: {MorphoLoopingStrategy.STRATEGY_METADATA.version}")
     print(f"Supported Chains: {MorphoLoopingStrategy.SUPPORTED_CHAINS}")
     print(f"Supported Protocols: {MorphoLoopingStrategy.SUPPORTED_PROTOCOLS}")
     print(f"Intent Types: {MorphoLoopingStrategy.INTENT_TYPES}")
-    print(f"\nDescription: {MorphoLoopingStrategy.STRATEGY_METADATA.get('description', 'N/A')}")
+    print(f"\nDescription: {MorphoLoopingStrategy.STRATEGY_METADATA.description}")
     print("\nTo run this strategy:")
     print("  uv run almanak strat run --strategy demo_morpho_looping --once")
     print("\nTo test on Anvil:")

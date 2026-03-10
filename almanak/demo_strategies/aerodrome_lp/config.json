@@ -1,10 +1,8 @@
 {
-    "description": "Tutorial Aerodrome LP strategy - Solidly-based AMM liquidity on Base",
     "pool": "WETH/USDC",
     "stable": false,
     "amount0": "0.001",
     "amount1": "0.04",
-    "chain": "base",
     "anvil_funding": {
         "ETH": 100,
         "WETH": 1,

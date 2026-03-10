@@ -50,7 +50,7 @@ almanak strat demo
 ```
 my_strategy/
   strategy.py    # IntentStrategy subclass with decide() method
-  config.json    # Runtime parameters (chain, tokens, thresholds)
+  config.json    # Runtime parameters (tokens, thresholds, funding)
   .env           # Secrets (ALMANAK_PRIVATE_KEY, ALCHEMY_API_KEY)
 ```
 
@@ -69,6 +69,7 @@ from almanak.framework.intents import Intent
     supported_chains=["arbitrum"],
     supported_protocols=["uniswap_v3"],
     intent_types=["SWAP", "HOLD"],
+    default_chain="arbitrum",
 )
 class MyStrategy(IntentStrategy):
     def __init__(self, *args, **kwargs):
@@ -128,6 +129,7 @@ Attaches metadata used by the framework and CLI:
     supported_chains=["arbitrum"],   # Which chains this runs on
     supported_protocols=["uniswap_v3"],  # Which protocols it uses
     intent_types=["SWAP", "HOLD"],   # Intent types it may return
+    default_chain="arbitrum",        # Default chain for execution
 )
 ```
 
@@ -708,10 +710,11 @@ def on_intent_executed(self, intent, success: bool, result):
 
 ### config.json
 
+Contains only tunable runtime parameters. Structural metadata (name, description, default execution chain) lives in
+the `@almanak_strategy` decorator on your strategy class.
+
 ```json
 {
-    "strategy_id": "my_rsi_strategy",
-    "chain": "arbitrum",
     "base_token": "WETH",
     "quote_token": "USDC",
     "rsi_period": 14,
@@ -726,8 +729,9 @@ def on_intent_executed(self, intent, success: bool, result):
 }
 ```
 
-Required fields: `strategy_id`, `chain`.
-All other fields are strategy-specific and accessed via `self.config.get(key, default)`.
+No required fields - all fields are strategy-specific and accessed via `self.config.get(key, default)`.
+The default execution chain comes from `default_chain` in the `@almanak_strategy` decorator
+(falls back to `supported_chains[0]` if omitted).
 
 ### .env
 

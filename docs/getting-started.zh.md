@@ -83,8 +83,6 @@ almanak strat run --network anvil --once
 
 ```json
 {
-    "strategy_id": "my_strategy",
-    "chain": "arbitrum",
     "anvil_funding": {
         "ETH": 10,
         "USDC": 10000,

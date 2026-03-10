@@ -1,12 +1,8 @@
 {
-    "strategy_id": "demo_pancakeswap_simple",
-    "strategy_name": "demo_pancakeswap_simple",
-    "description": "Simple WETH->USDC swap on PancakeSwap V3 for testing",
     "swap_amount_usd": 10,
     "max_slippage": 0.01,
     "from_token": "WETH",
     "to_token": "USDC",
-    "chain": "arbitrum",
     "anvil_funding": {
         "ETH": 100,
         "WETH": 10,

@@ -1,7 +1,4 @@
 {
-    "strategy_id": "demo_morpho_looping",
-    "strategy_name": "demo_morpho_looping",
-    "description": "Tutorial Morpho Blue looping strategy - leveraged yield farming via recursive borrowing",
     "market_id": "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
     "collateral_token": "wstETH",
     "borrow_token": "USDC",
@@ -11,7 +8,6 @@
     "min_health_factor": "1.5",
     "swap_slippage": "0.005",
     "force_action": "",
-    "chain": "ethereum",
     "anvil_funding": {
         "ETH": 100,
         "wstETH": 1,

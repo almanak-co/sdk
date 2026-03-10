@@ -1,14 +1,10 @@
 {
-    "strategy_id": "demo_aave_borrow",
-    "strategy_name": "demo_aave_borrow",
-    "description": "Tutorial Aave V3 borrow strategy - supply collateral and borrow",
     "collateral_token": "WETH",
     "collateral_amount": "0.002",
     "borrow_token": "USDC",
     "ltv_target": 0.5,
     "min_health_factor": 2.0,
     "interest_rate_mode": "variable",
-    "chain": "arbitrum",
     "anvil_funding": {
         "ETH": 100,
         "WETH": 1,

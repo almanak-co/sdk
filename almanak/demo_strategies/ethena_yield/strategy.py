@@ -103,6 +103,7 @@ logger = logging.getLogger(__name__)
     # STAKE: Stake USDe to receive sUSDe
     # HOLD: No action
     intent_types=["SWAP", "STAKE", "HOLD"],
+    default_chain="ethereum",
 )
 class EthenaYieldStrategy(IntentStrategy):
     """
@@ -430,10 +431,10 @@ if __name__ == "__main__":
     print("EthenaYieldStrategy - Demo Strategy")
     print("=" * 60)
     print(f"\nStrategy Name: {EthenaYieldStrategy.STRATEGY_NAME}")
-    print(f"Version: {EthenaYieldStrategy.STRATEGY_METADATA.get('version', 'N/A')}")
+    print(f"Version: {EthenaYieldStrategy.STRATEGY_METADATA.version}")
     print(f"Supported Chains: {EthenaYieldStrategy.SUPPORTED_CHAINS}")
     print(f"Supported Protocols: {EthenaYieldStrategy.SUPPORTED_PROTOCOLS}")
     print(f"Intent Types: {EthenaYieldStrategy.INTENT_TYPES}")
-    print(f"\nDescription: {EthenaYieldStrategy.STRATEGY_METADATA.get('description', 'N/A')}")
+    print(f"\nDescription: {EthenaYieldStrategy.STRATEGY_METADATA.description}")
     print("\nTo run this strategy:")
     print("  python -m src.cli.run --strategy demo_ethena_yield --once")

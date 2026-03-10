@@ -65,7 +65,8 @@ class TestLoadStrategyConfigPaths:
         result = load_strategy_config("nonexistent_strategy", "arbitrum")
 
         assert "strategy_id" in result
-        assert result["chain"] == "arbitrum"
+        # Chain is no longer in default config - it comes from decorator metadata
+        assert "chain" not in result
 
     def test_configs_dir_takes_precedence(self, tmp_path, monkeypatch):
         """configs/ directory should be searched before strategies/."""
