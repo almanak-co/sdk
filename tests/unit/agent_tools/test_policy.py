@@ -89,6 +89,60 @@ class TestPolicyEngineChainAllowed:
         decision = engine.check(tool, {"token": "ETH"})
         assert decision.allowed is True  # No chain = no chain check
 
+    def test_destination_chain_allowed(self):
+        engine = PolicyEngine(AgentPolicy(allowed_chains={"arbitrum", "base"}))
+        tool = _make_tool("get_price")
+        decision = engine.check(tool, {"token": "ETH", "chain": "base", "destination_chain": "arbitrum"})
+        assert decision.allowed is True
+
+    def test_destination_chain_disallowed(self):
+        engine = PolicyEngine(AgentPolicy(allowed_chains={"arbitrum"}))
+        tool = _make_tool("get_price")
+        decision = engine.check(tool, {"token": "ETH", "chain": "arbitrum", "destination_chain": "ethereum"})
+        assert decision.allowed is False
+        assert "Destination chain 'ethereum' is not allowed" in decision.violations[0]
+
+    def test_destination_chain_case_insensitive(self):
+        engine = PolicyEngine(AgentPolicy(allowed_chains={"arbitrum", "base"}))
+        tool = _make_tool("get_price")
+        decision = engine.check(tool, {"token": "ETH", "chain": "Base", "destination_chain": "Arbitrum"})
+        assert decision.allowed is True
+
+    def test_source_allowed_destination_disallowed(self):
+        """Source chain OK but destination chain not in allowed set."""
+        engine = PolicyEngine(AgentPolicy(allowed_chains={"arbitrum"}))
+        tool = _make_tool("get_price")
+        decision = engine.check(tool, {"token": "ETH", "chain": "arbitrum", "destination_chain": "optimism"})
+        assert decision.allowed is False
+        assert any("Destination chain" in v for v in decision.violations)
+
+    def test_no_destination_chain_skips_check(self):
+        engine = PolicyEngine(AgentPolicy(allowed_chains={"arbitrum"}))
+        tool = _make_tool("get_price")
+        decision = engine.check(tool, {"token": "ETH", "chain": "arbitrum"})
+        assert decision.allowed is True
+
+    def test_bridge_from_chain_allowed(self):
+        """bridge_tokens uses from_chain/to_chain; both must be in allowed_chains."""
+        engine = PolicyEngine(AgentPolicy(allowed_chains={"arbitrum", "base"}))
+        tool = _make_tool("bridge_tokens", category=ToolCategory.ACTION, risk_tier=RiskTier.MEDIUM)
+        decision = engine.check(tool, {"token": "USDC", "from_chain": "base", "to_chain": "arbitrum"})
+        assert decision.allowed is True
+
+    def test_bridge_from_chain_disallowed(self):
+        engine = PolicyEngine(AgentPolicy(allowed_chains={"arbitrum"}))
+        tool = _make_tool("bridge_tokens", category=ToolCategory.ACTION, risk_tier=RiskTier.MEDIUM)
+        decision = engine.check(tool, {"token": "USDC", "from_chain": "ethereum", "to_chain": "arbitrum"})
+        assert decision.allowed is False
+        assert any("'ethereum' is not allowed" in v for v in decision.violations)
+
+    def test_bridge_to_chain_disallowed(self):
+        engine = PolicyEngine(AgentPolicy(allowed_chains={"arbitrum"}))
+        tool = _make_tool("bridge_tokens", category=ToolCategory.ACTION, risk_tier=RiskTier.MEDIUM)
+        decision = engine.check(tool, {"token": "USDC", "from_chain": "arbitrum", "to_chain": "optimism"})
+        assert decision.allowed is False
+        assert any("'optimism' is not allowed" in v for v in decision.violations)
+
 
 class TestPolicyEngineTokenAllowed:
     def test_tokens_none_allows_all(self):
@@ -872,3 +926,186 @@ class TestPolicyEnginePersistence:
         # NaN/Infinity should be rejected, engine starts fresh
         assert engine._peak_portfolio_usd == Decimal("0")
         assert engine._current_portfolio_usd == Decimal("0")
+
+
+class TestSwapTokensDestinationChainSchema:
+    """VIB-840: SwapTokensRequest has optional destination_chain field."""
+
+    def test_swap_without_destination_chain(self):
+        req = SwapTokensRequest(token_in="USDC", token_out="ETH", amount="100")
+        assert req.destination_chain is None
+
+    def test_swap_with_destination_chain(self):
+        req = SwapTokensRequest(
+            token_in="USDC", token_out="ETH", amount="100",
+            chain="base", destination_chain="arbitrum",
+        )
+        assert req.destination_chain == "arbitrum"
+        assert req.chain == "base"
+
+    def test_swap_destination_chain_in_model_dump(self):
+        req = SwapTokensRequest(
+            token_in="USDC", token_out="ETH", amount="100",
+            chain="base", destination_chain="arbitrum",
+        )
+        data = req.model_dump()
+        assert data["destination_chain"] == "arbitrum"
+
+
+class TestBridgeTokensSchema:
+    """VIB-842: BridgeTokensRequest schema validation."""
+
+    def test_valid_bridge_request(self):
+        from almanak.framework.agent_tools.schemas import BridgeTokensRequest
+        req = BridgeTokensRequest(token="USDC", amount="100", from_chain="base", to_chain="arbitrum")
+        assert req.from_chain == "base"
+        assert req.to_chain == "arbitrum"
+
+    def test_bridge_same_chain_rejected(self):
+        from almanak.framework.agent_tools.schemas import BridgeTokensRequest
+        with pytest.raises(ValueError, match="must be different"):
+            BridgeTokensRequest(token="USDC", amount="100", from_chain="arbitrum", to_chain="arbitrum")
+
+    def test_bridge_negative_amount_rejected(self):
+        from almanak.framework.agent_tools.schemas import BridgeTokensRequest
+        with pytest.raises(ValueError, match="must be positive"):
+            BridgeTokensRequest(token="USDC", amount="-10", from_chain="base", to_chain="arbitrum")
+
+    def test_bridge_in_catalog(self):
+        catalog = get_default_catalog()
+        tool = catalog.get("bridge_tokens")
+        assert tool is not None
+        assert tool.risk_tier == RiskTier.MEDIUM
+        assert tool.category == ToolCategory.ACTION
+
+
+# =============================================================================
+# Nested params policy bypass tests (VIB-504)
+# =============================================================================
+
+
+class TestNestedParamsTokenBypass:
+    """Verify token allowlist catches tokens inside nested params dict."""
+
+    def test_blocked_token_in_nested_params(self):
+        """Token inside params.token_in must be checked against allowlist."""
+        policy = AgentPolicy(allowed_tokens={"USDC", "WETH"}, cooldown_seconds=0)
+        engine = PolicyEngine(policy)
+        tool = _make_tool("compile_intent", ToolCategory.PLANNING)
+        args = {"intent_type": "SWAP", "chain": "arbitrum", "params": {"token_in": "BADTOKEN", "token_out": "USDC"}}
+        decision = engine.check(tool, args)
+        assert not decision.allowed
+        assert any("BADTOKEN" in v for v in decision.violations)
+
+    def test_blocked_token_out_in_nested_params(self):
+        policy = AgentPolicy(allowed_tokens={"USDC", "WETH"}, cooldown_seconds=0)
+        engine = PolicyEngine(policy)
+        tool = _make_tool("compile_intent", ToolCategory.PLANNING)
+        args = {"intent_type": "SWAP", "chain": "arbitrum", "params": {"token_in": "USDC", "token_out": "EVIL"}}
+        decision = engine.check(tool, args)
+        assert not decision.allowed
+        assert any("EVIL" in v for v in decision.violations)
+
+    def test_allowed_tokens_in_nested_params_pass(self):
+        policy = AgentPolicy(allowed_tokens={"USDC", "WETH"}, cooldown_seconds=0)
+        engine = PolicyEngine(policy)
+        tool = _make_tool("compile_intent", ToolCategory.PLANNING)
+        args = {"intent_type": "SWAP", "chain": "arbitrum", "params": {"token_in": "USDC", "token_out": "WETH"}}
+        decision = engine.check(tool, args)
+        assert decision.allowed
+
+    def test_from_token_mapped_to_token_in(self):
+        """Intent vocabulary 'from_token' must be mapped to 'token_in' for policy."""
+        policy = AgentPolicy(allowed_tokens={"USDC", "WETH"}, cooldown_seconds=0)
+        engine = PolicyEngine(policy)
+        tool = _make_tool("compile_intent", ToolCategory.PLANNING)
+        args = {"intent_type": "SWAP", "chain": "arbitrum", "params": {"from_token": "BADTOKEN", "to_token": "USDC"}}
+        decision = engine.check(tool, args)
+        assert not decision.allowed
+        assert any("BADTOKEN" in v for v in decision.violations)
+
+    def test_to_token_mapped_to_token_out(self):
+        """Intent vocabulary 'to_token' must be mapped to 'token_out' for policy."""
+        policy = AgentPolicy(allowed_tokens={"USDC", "WETH"}, cooldown_seconds=0)
+        engine = PolicyEngine(policy)
+        tool = _make_tool("compile_intent", ToolCategory.PLANNING)
+        args = {"intent_type": "SWAP", "chain": "arbitrum", "params": {"from_token": "USDC", "to_token": "EVIL"}}
+        decision = engine.check(tool, args)
+        assert not decision.allowed
+        assert any("EVIL" in v for v in decision.violations)
+
+
+class TestNestedParamsProtocolBypass:
+    """Verify protocol allowlist catches protocol inside nested params dict."""
+
+    def test_blocked_protocol_in_nested_params(self):
+        policy = AgentPolicy(allowed_protocols={"uniswap_v3"}, cooldown_seconds=0)
+        engine = PolicyEngine(policy)
+        tool = _make_tool("compile_intent", ToolCategory.PLANNING)
+        args = {"intent_type": "SWAP", "chain": "arbitrum", "params": {"protocol": "sushiswap", "token_in": "USDC"}}
+        decision = engine.check(tool, args)
+        assert not decision.allowed
+        assert any("sushiswap" in v.lower() for v in decision.violations)
+
+    def test_allowed_protocol_in_nested_params_passes(self):
+        policy = AgentPolicy(allowed_protocols={"uniswap_v3"}, cooldown_seconds=0)
+        engine = PolicyEngine(policy)
+        tool = _make_tool("compile_intent", ToolCategory.PLANNING)
+        args = {"intent_type": "SWAP", "chain": "arbitrum", "params": {"protocol": "uniswap_v3", "token_in": "USDC"}}
+        decision = engine.check(tool, args)
+        assert decision.allowed
+
+
+class TestNestedParamsChainBypass:
+    """Verify chain allowlist catches chain inside nested params dict."""
+
+    def test_blocked_chain_in_nested_params(self):
+        """If chain is only in params (not top-level), it must still be checked."""
+        policy = AgentPolicy(allowed_chains={"arbitrum"}, cooldown_seconds=0)
+        engine = PolicyEngine(policy)
+        tool = _make_tool("compile_intent", ToolCategory.PLANNING)
+        args = {"intent_type": "SWAP", "params": {"chain": "ethereum", "token_in": "USDC"}}
+        decision = engine.check(tool, args)
+        assert not decision.allowed
+        assert any("ethereum" in v.lower() for v in decision.violations)
+
+
+class TestResolveEffectiveArgs:
+    """Unit tests for _resolve_effective_args static method."""
+
+    def test_no_params_returns_original(self):
+        args = {"chain": "arbitrum", "token_in": "USDC"}
+        assert PolicyEngine._resolve_effective_args(args) == args
+
+    def test_merges_params_fields(self):
+        args = {"intent_type": "SWAP", "params": {"token_in": "USDC", "protocol": "uniswap_v3"}}
+        result = PolicyEngine._resolve_effective_args(args)
+        assert result["token_in"] == "USDC"
+        assert result["protocol"] == "uniswap_v3"
+
+    def test_top_level_takes_precedence(self):
+        """Top-level args should not be overwritten by params."""
+        args = {"chain": "arbitrum", "params": {"chain": "ethereum"}}
+        result = PolicyEngine._resolve_effective_args(args)
+        assert result["chain"] == "arbitrum"
+
+    def test_from_token_mapped(self):
+        args = {"params": {"from_token": "USDC", "to_token": "WETH"}}
+        result = PolicyEngine._resolve_effective_args(args)
+        assert result["token_in"] == "USDC"
+        assert result["token_out"] == "WETH"
+
+    def test_borrow_token_mapped(self):
+        args = {"params": {"borrow_token": "USDC"}}
+        result = PolicyEngine._resolve_effective_args(args)
+        assert result["token"] == "USDC"
+
+    def test_borrow_amount_mapped(self):
+        args = {"params": {"borrow_token": "USDC", "borrow_amount": "500"}}
+        result = PolicyEngine._resolve_effective_args(args)
+        assert result["token"] == "USDC"
+        assert result["amount"] == "500"
+
+    def test_non_dict_params_ignored(self):
+        args = {"params": "not_a_dict"}
+        assert PolicyEngine._resolve_effective_args(args) == args

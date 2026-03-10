@@ -198,6 +198,38 @@ class IntentExecutionService:
         self._retry_policy = retry_policy or RetryPolicy()
         self._on_sadflow = on_sadflow
 
+    def _fetch_prices_for_intent(self, intent_type: str, intent_params: dict[str, Any]) -> dict[str, str]:
+        """Fetch token prices from the gateway for intent compilation.
+
+        The execution service requires real prices on mainnet (VIB-523) to
+        compute accurate slippage amounts. This extracts token symbols from
+        the intent params and queries the gateway MarketService.
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        # Extract token symbols from intent params
+        symbols: set[str] = set()
+        for key in ("from_token", "to_token", "token", "token_a", "token_b", "borrow_token", "collateral_token"):
+            val = intent_params.get(key)
+            if val and not val.startswith("0x"):
+                symbols.add(val)
+
+        price_map: dict[str, str] = {}
+        for symbol in symbols:
+            try:
+                resp = self._client.market.GetPrice(gateway_pb2.PriceRequest(token=symbol, quote="USD"))
+                price_val = float(resp.price)
+                if price_val > 0:
+                    price_map[symbol] = str(resp.price)
+            except Exception as exc:
+                logger.debug("Could not fetch price for %s: %s", symbol, exc)
+
+        if price_map:
+            logger.debug(
+                "Fetched %d prices for %s compilation: %s", len(price_map), intent_type, list(price_map.keys())
+            )
+        return price_map
+
     async def execute_intent(
         self,
         intent_type: str,
@@ -232,6 +264,10 @@ class IntentExecutionService:
         effective_chain = chain or self._chain
         effective_wallet = wallet_address or self._wallet_address
 
+        # Fetch real prices for compilation (required on mainnet to avoid
+        # placeholder-price rejections -- VIB-523).
+        price_map = self._fetch_prices_for_intent(intent_type, intent_params)
+
         last_error: str | None = None
         max_retries = self._retry_policy.max_retries
         attempts = 0
@@ -247,6 +283,7 @@ class IntentExecutionService:
                         intent_data=json.dumps(intent_params).encode(),
                         chain=effective_chain,
                         wallet_address=effective_wallet,
+                        price_map=price_map,
                     )
                 )
             except Exception as e:

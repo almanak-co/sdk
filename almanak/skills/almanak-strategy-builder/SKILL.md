@@ -397,6 +397,21 @@ resolved = intent.resolve(market)
 return resolved
 ```
 
+### Token Utilities
+
+**UnwrapNativeIntent** - Unwrap wrapped native tokens (WETH -> ETH, WMATIC -> MATIC, etc.)
+
+```python
+from almanak.framework.intents import UnwrapNativeIntent
+from decimal import Decimal
+
+UnwrapNativeIntent(
+    token="WETH",              # Wrapped token symbol
+    amount=Decimal("0.5"),     # Amount to unwrap (or "all")
+    chain="arbitrum",          # Target chain
+)
+```
+
 ### Control Flow
 
 **Intent.hold** - Do nothing this iteration
@@ -944,6 +959,7 @@ almanak docs agent-skill --dump       # Print agent skill content
 | Blast | `BLAST` | `blast` |
 | Mantle | `MANTLE` | `mantle` |
 | Berachain | `BERACHAIN` | `berachain` |
+| Monad | `MONAD` | `monad` |
 
 <!-- almanak-sdk-end: supported-chains -->
 

@@ -17,15 +17,19 @@ Available Strategies:
 - pancakeswap_simple: Simple swap on PancakeSwap V3
 - pendle_basics: Pendle PT trading basics
 - sushiswap_lp: SushiSwap V3 LP position management
+- aave_pnl_lending: Aave V3 lending for PnL backtesting
+- morpho_paper_trade: Morpho Blue lending for paper trading
 """
 
 # Import strategies so they get registered
 from .aave_borrow import AaveBorrowStrategy
+from .aave_pnl_lending import AavePnLLendingStrategy
 from .aerodrome_lp import AerodromeLPStrategy
 from .almanak_rsi import AlmanakRSIStrategy
 from .enso_rsi import EnsoRSIStrategy
 from .ethena_yield import EthenaYieldStrategy
 from .morpho_looping import MorphoLoopingStrategy
+from .morpho_paper_trade import MorphoPaperTradeStrategy
 from .pancakeswap_simple import PancakeSwapSimpleStrategy
 from .pendle_basics import PendleBasicsStrategy
 from .spark_lender import SparkLenderStrategy
@@ -36,11 +40,13 @@ from .uniswap_rsi import UniswapRSIStrategy
 
 __all__ = [
     "AaveBorrowStrategy",
+    "AavePnLLendingStrategy",
     "AerodromeLPStrategy",
     "AlmanakRSIStrategy",
     "EnsoRSIStrategy",
     "EthenaYieldStrategy",
     "MorphoLoopingStrategy",
+    "MorphoPaperTradeStrategy",
     "PancakeSwapSimpleStrategy",
     "PendleBasicsStrategy",
     "SparkLenderStrategy",

@@ -128,6 +128,13 @@ class MyStrategy(IntentStrategy):
 almanak gateway                # Start standalone gateway server
 almanak gateway --network anvil  # Start standalone for local Anvil testing
 
+# Direct DeFi actions (no strategy files needed)
+almanak ax price ETH                           # Get token price
+almanak ax balance USDC --chain base           # Check wallet balance
+almanak ax swap USDC ETH 100 --dry-run         # Simulate a swap
+almanak ax swap USDC ETH 100                   # Execute after confirmation
+almanak ax -n "swap 5 USDC to WETH on base"   # Natural language mode
+
 # Strategy development
 almanak strat new              # Create new strategy from template
 almanak strat run --once       # Run single iteration (auto-starts gateway)
@@ -344,6 +351,14 @@ python examples/agentic/agent_swap/run.py --once --mock
 
 # Run with real LLM
 AGENT_LLM_API_KEY=sk-... python examples/agentic/agent_swap/run.py --once
+```
+
+The `almanak ax` CLI also supports a **natural language mode** that uses the same LLM infrastructure
+for one-shot DeFi actions without writing strategy files:
+
+```bash
+AGENT_LLM_API_KEY=sk-... almanak ax -n "swap 5 USDC to WETH on base"
+AGENT_LLM_API_KEY=sk-... almanak ax -n "what's the price of ETH?"
 ```
 
 See [Agentic Trading docs](https://docs.almanak.co/agentic/) for the full guide, or browse

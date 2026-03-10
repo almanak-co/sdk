@@ -69,6 +69,11 @@ class Chain(StrEnum):
     BNB = "bnb"
     LINEA = "linea"
     PLASMA = "plasma"
+    SONIC = "sonic"
+    BLAST = "blast"
+    MANTLE = "mantle"
+    BERACHAIN = "berachain"
+    MONAD = "monad"
 
 
 # =============================================================================

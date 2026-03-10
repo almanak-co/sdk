@@ -188,6 +188,11 @@ PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
         "supports_collateral_toggle": True,
         "operations": ["supply", "withdraw", "borrow", "repay"],
     },
+    "benqi": {
+        "supports_interest_rate_mode": False,
+        "supports_collateral_toggle": True,
+        "operations": ["supply", "withdraw", "borrow", "repay"],
+    },
     "gmx_v2": {
         "supports_leverage": True,
         "max_leverage": Decimal("100"),
@@ -255,6 +260,8 @@ class IntentType(Enum):
     VAULT_MANAGE = "VAULT_MANAGE"  # Phase 4
     # LP fee collection (without removing liquidity)
     LP_COLLECT_FEES = "LP_COLLECT_FEES"
+    # Native token wrap/unwrap (ETH↔WETH, MATIC↔WMATIC, etc.)
+    UNWRAP_NATIVE = "UNWRAP_NATIVE"
 
 
 # =============================================================================
@@ -1905,6 +1912,66 @@ class VaultRedeemIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
+class UnwrapNativeIntent(AlmanakImmutableModel):
+    """Intent to unwrap a wrapped native token (e.g. WETH -> ETH).
+
+    Calls the wrapped token's ``withdraw(uint256)`` function to convert
+    wrapped native tokens back to the chain's native currency.
+
+    Attributes:
+        token: Wrapped token symbol (e.g. "WETH", "WMATIC", "WAVAX")
+        amount: Amount to unwrap in token units (Decimal or "all")
+        chain: Target chain for execution
+        intent_id: Unique identifier for this intent
+        created_at: Timestamp when the intent was created
+
+    Example:
+        intent = UnwrapNativeIntent(
+            token="WETH",
+            amount=Decimal("0.5"),
+            chain="arbitrum",
+        )
+    """
+
+    token: str
+    amount: PydanticChainedAmount
+    chain: str | None = None
+    intent_id: str = Field(default_factory=default_intent_id)
+    created_at: datetime = Field(default_factory=default_timestamp)
+
+    @model_validator(mode="after")
+    def validate_unwrap_intent(self) -> "UnwrapNativeIntent":
+        """Validate unwrap parameters."""
+        if isinstance(self.amount, Decimal) and self.amount <= 0:
+            raise ValueError("amount must be positive")
+        elif not isinstance(self.amount, Decimal) and self.amount != "all":
+            raise ValueError("amount must be a positive Decimal or 'all'")
+        return self
+
+    @property
+    def is_chained_amount(self) -> bool:
+        """Return True when amount depends on a prior step's output."""
+        return self.amount == "all"
+
+    @property
+    def intent_type(self) -> IntentType:
+        return IntentType.UNWRAP_NATIVE
+
+    def serialize(self) -> dict[str, Any]:
+        data = self.model_dump(mode="json")
+        data["type"] = self.intent_type.value
+        if self.amount == "all":
+            data["amount"] = "all"
+        return data
+
+    @classmethod
+    def deserialize(cls, data: dict[str, Any]) -> "UnwrapNativeIntent":
+        clean_data = {k: v for k, v in data.items() if k != "type"}
+        if "created_at" in clean_data and isinstance(clean_data["created_at"], str):
+            clean_data["created_at"] = datetime.fromisoformat(clean_data["created_at"])
+        return cls.model_validate(clean_data)
+
+
 # =============================================================================
 # Union Type for All Intents
 # =============================================================================
@@ -1932,6 +1999,7 @@ AnyIntent = (
     | PredictionRedeemIntent
     | VaultDepositIntent
     | VaultRedeemIntent
+    | UnwrapNativeIntent
 )
 
 
@@ -3224,6 +3292,7 @@ class Intent:
             IntentType.PREDICTION_REDEEM.value: PredictionRedeemIntent,
             IntentType.VAULT_DEPOSIT.value: VaultDepositIntent,
             IntentType.VAULT_REDEEM.value: VaultRedeemIntent,
+            IntentType.UNWRAP_NATIVE.value: UnwrapNativeIntent,
         }
 
         deserializer = deserializers.get(intent_type)

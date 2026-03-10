@@ -47,6 +47,9 @@ WRAPPED_NATIVE: dict[str, str] = {
     "bsc": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
     "sonic": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",  # wS (Wrapped Sonic)
     "plasma": "0x6100e367285b01f48d07953803a2d8dca5d19873",  # WXPL
+    "mantle": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",  # WMNT
+    "berachain": "0x6969696969696969696969696969696969696969",  # WBERA
+    "monad": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",  # WMON
 }
 
 # Set of stablecoin symbols for quick identification
@@ -85,6 +88,9 @@ SYMBOL_ALIASES: dict[tuple[str, str], str] = {
     ("avalanche", "USDC.E"): "0xa7d7079b0fead91f3e65f86e8915cb59c1a4c664",  # Bridged USDC
     ("avalanche", "USDT.E"): "0xc7198437980c041c805a1edcba50c1ce5db95118",  # Bridged USDT
     ("avalanche", "WETH.E"): "0x49d5c2bdffac6ce2bfdb6640f4f80f226bc10bab",  # Bridged WETH
+    # Berachain bridged tokens
+    ("berachain", "USDC.E"): "0x549943e04f40284185054145c6e4e9568c1d3241",  # Bridged USDC (Stargate)
+    ("berachain", "USDC"): "0x549943e04f40284185054145c6e4e9568c1d3241",  # USDC -> bridged USDC on Berachain
 }
 
 # =============================================================================
@@ -160,6 +166,9 @@ WETH = Token(
         "polygon": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",  # Bridged WETH on Polygon
         "avalanche": "0x49D5c2BdFfac6CE2BFDb6640F4F80f226bc10bAB",  # WETH.e on Avalanche
         "bsc": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",  # Binance-Peg ETH
+        "mantle": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",  # Bridged WETH on Mantle
+        "berachain": "0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590",  # Bridged WETH on Berachain
+        "monad": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",  # WETH on Monad
     },
     coingecko_id="weth",
     is_stablecoin=False,
@@ -218,6 +227,8 @@ USDC = Token(
         "polygon": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",  # Native USDC on Polygon
         "avalanche": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",  # Native USDC on Avalanche
         "bsc": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",  # Binance-Peg USDC (18 decimals on BSC)
+        "mantle": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",  # Bridged USDC on Mantle
+        "monad": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",  # Native USDC on Monad
     },
     coingecko_id="usd-coin",
     is_stablecoin=True,
@@ -243,6 +254,7 @@ USDT = Token(
         "polygon": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
         "avalanche": "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7",  # USDT on Avalanche
         "bsc": "0x55d398326f99059fF775485246999027B3197955",  # Binance-Peg USDT (18 decimals on BSC)
+        "mantle": "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE",  # Bridged USDT on Mantle
     },
     coingecko_id="tether",
     is_stablecoin=True,
@@ -437,6 +449,8 @@ WBTC = Token(
         "polygon": "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",
         "avalanche": "0x50b7545627a5162F82A992c33b87aDc75187B218",  # WBTC.e on Avalanche
         "bsc": "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c",  # Binance-Peg BTCB
+        "berachain": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",  # WBTC on Berachain
+        "monad": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",  # WBTC on Monad
     },
     coingecko_id="wrapped-bitcoin",
     is_stablecoin=False,
@@ -717,6 +731,146 @@ PENDLE_PLASMA = Token(
 )
 
 # =============================================================================
+# MANTLE CHAIN TOKENS
+# =============================================================================
+
+# MNT (native gas token on Mantle)
+MNT = Token(
+    symbol="MNT",
+    name="Mantle",
+    decimals=18,
+    addresses={
+        "mantle": NATIVE_SENTINEL,
+    },
+    coingecko_id="mantle",
+    is_stablecoin=False,
+)
+
+# Wrapped MNT
+WMNT = Token(
+    symbol="WMNT",
+    name="Wrapped MNT",
+    decimals=18,
+    addresses={
+        "mantle": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
+    },
+    coingecko_id="wrapped-mantle",
+    is_stablecoin=False,
+)
+
+# =============================================================================
+# MONAD CHAIN TOKENS
+# =============================================================================
+
+# MON (native gas token on Monad)
+MON = Token(
+    symbol="MON",
+    name="Monad",
+    decimals=18,
+    addresses={
+        "monad": NATIVE_SENTINEL,
+    },
+    coingecko_id="monad",
+    is_stablecoin=False,
+)
+
+# Wrapped MON
+WMON = Token(
+    symbol="WMON",
+    name="Wrapped MON",
+    decimals=18,
+    addresses={
+        "monad": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
+# USDT0 on Monad (LayerZero bridged USDT)
+USDT0_MONAD = Token(
+    symbol="USDT0",
+    name="USDT Zero (Monad)",
+    decimals=6,
+    addresses={
+        "monad": "0xe7cd86e13AC4309349F30B3435a9d337750fC82D",
+    },
+    coingecko_id=None,
+    is_stablecoin=True,
+)
+
+# =============================================================================
+# BERACHAIN TOKENS
+# =============================================================================
+
+# BERA (native gas token on Berachain)
+BERA = Token(
+    symbol="BERA",
+    name="Berachain",
+    decimals=18,
+    addresses={
+        "berachain": NATIVE_SENTINEL,
+    },
+    coingecko_id="berachain-bera",
+    is_stablecoin=False,
+)
+
+# Wrapped BERA
+WBERA = Token(
+    symbol="WBERA",
+    name="Wrapped BERA",
+    decimals=18,
+    addresses={
+        "berachain": "0x6969696969696969696969696969696969696969",
+    },
+    coingecko_id="wrapped-bera",
+    is_stablecoin=False,
+)
+
+# HONEY (Berachain native stablecoin - 18 decimals, not 6)
+HONEY = Token(
+    symbol="HONEY",
+    name="Honey",
+    decimals=18,
+    addresses={
+        "berachain": "0xFCBD14DC51f0A4d49d5E53C2E0950e0bC26d0Dce",
+    },
+    coingecko_id="honey-berachain",
+    is_stablecoin=True,
+)
+
+# Bridged USDC on Berachain (USDC.e via Stargate)
+USDC_E_BERACHAIN = Token(
+    symbol="USDC.E",
+    name="Bridged USDC (Berachain)",
+    decimals=6,
+    addresses={
+        "berachain": "0x549943e04f40284185054145c6E4e9568C1D3241",
+    },
+    coingecko_id="usd-coin",
+    is_stablecoin=True,
+    chain_overrides={
+        "berachain": ChainTokenConfig(
+            address="0x549943e04f40284185054145c6E4e9568C1D3241",
+            decimals=6,
+            is_native=False,
+            bridge_type=BridgeType.BRIDGED,
+        ),
+    },
+)
+
+# USDT0 on Berachain (LayerZero bridged USDT)
+USDT0_BERACHAIN = Token(
+    symbol="USDT0",
+    name="USDT Zero (Berachain)",
+    decimals=6,
+    addresses={
+        "berachain": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+    },
+    coingecko_id=None,
+    is_stablecoin=True,
+)
+
+# =============================================================================
 # PENDLE PT TOKENS (used as collateral on Morpho Blue)
 # WARNING: PT tokens are maturity-bound. These addresses expire and new ones
 # are deployed. Check Pendle app for current PT addresses before using.
@@ -823,6 +977,19 @@ DEFAULT_TOKENS: list[Token] = [
     USDT0,
     FUSDT0,
     PENDLE_PLASMA,
+    # Mantle chain tokens
+    MNT,
+    WMNT,
+    # Berachain tokens
+    BERA,
+    WBERA,
+    HONEY,
+    USDC_E_BERACHAIN,
+    USDT0_BERACHAIN,
+    # Monad chain tokens
+    MON,
+    WMON,
+    USDT0_MONAD,
     # Pendle PT tokens (used as collateral)
     PT_sUSDe,
     PT_eUSDe,
@@ -935,6 +1102,19 @@ __all__ = [
     "USDT0",
     "FUSDT0",
     "PENDLE_PLASMA",
+    # Mantle chain tokens
+    "MNT",
+    "WMNT",
+    # Berachain tokens
+    "BERA",
+    "WBERA",
+    "HONEY",
+    "USDC_E_BERACHAIN",
+    "USDT0_BERACHAIN",
+    # Monad chain tokens
+    "MON",
+    "WMON",
+    "USDT0_MONAD",
     # Pendle PT tokens
     "PT_sUSDe",
     "PT_eUSDe",

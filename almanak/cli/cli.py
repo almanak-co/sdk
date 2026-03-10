@@ -17,6 +17,7 @@ from almanak.core.redaction import install_redaction
 # V2 Framework CLI commands
 from almanak.framework.cli import backtest as framework_backtest_group
 from almanak.framework.cli import new_strategy as framework_new_strategy_cmd
+from almanak.framework.cli.ax import ax as framework_ax_group
 from almanak.framework.cli.demo import demo as framework_demo_cmd
 from almanak.framework.cli.run import run as framework_run_cmd
 from almanak.framework.cli.teardown import teardown as framework_teardown_group
@@ -265,6 +266,7 @@ def copy_report(ledger_db: str, since_hours: int | None, json_output: bool) -> N
 
 
 almanak.add_command(agent_group, name="agent")
+almanak.add_command(framework_ax_group, name="ax")
 
 
 @almanak.group()

@@ -459,3 +459,108 @@ class TestSourceProperties:
     def test_cache_ttl(self):
         source = OnChainPriceSource(chain="arbitrum", cache_ttl=15.0)
         assert source.cache_ttl_seconds == 15
+
+
+class TestDerivedPricing:
+    """Derived pricing: TOKEN/ETH × ETH/USD for tokens without direct USD feeds."""
+
+    @pytest.mark.asyncio
+    async def test_wsteth_derived_price_on_arbitrum(self):
+        """wstETH uses WSTETH/ETH × ETH/USD when no direct WSTETH/USD feed exists."""
+        source = OnChainPriceSource(chain="arbitrum")
+
+        now = int(time.time())
+        # WSTETH/ETH = 1.18 (18 decimals) -> 1180000000000000000
+        wsteth_eth_response = _build_chainlink_response(1180000000000000000, now)
+        # ETH/USD = $2500 (8 decimals) -> 250000000000
+        eth_usd_response = _build_chainlink_response(250000000000, now)
+
+        call_count = 0
+
+        async def mock_eth_call(to: str, data: str) -> str:
+            nonlocal call_count
+            call_count += 1
+            # First call is WSTETH/ETH, second is ETH/USD
+            if call_count == 1:
+                return wsteth_eth_response
+            return eth_usd_response
+
+        with patch.object(source, "_eth_call", side_effect=mock_eth_call):
+            result = await source.get_price("WSTETH", "USD")
+
+        # 1.18 * 2500 = 2950
+        expected = Decimal("1.180000000000000000") * Decimal("2500.00000000")
+        assert result.price == expected
+        assert result.source == "onchain_derived"
+        # Confidence: min(0.95, 0.95) * 0.95 = 0.9025
+        assert result.confidence == pytest.approx(0.9025, abs=0.001)
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_steth_derived_price_uses_wsteth_feed(self):
+        """stETH maps to WSTETH/ETH feed for derived pricing."""
+        source = OnChainPriceSource(chain="arbitrum")
+
+        now = int(time.time())
+        wsteth_eth_response = _build_chainlink_response(1180000000000000000, now)
+        eth_usd_response = _build_chainlink_response(250000000000, now)
+
+        call_count = 0
+
+        async def mock_eth_call(to: str, data: str) -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return wsteth_eth_response
+            return eth_usd_response
+
+        with patch.object(source, "_eth_call", side_effect=mock_eth_call):
+            result = await source.get_price("STETH", "USD")
+
+        assert result.price > Decimal("0")
+        assert result.source == "onchain_derived"
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_derived_price_not_available_on_ethereum(self):
+        """Derived pricing not configured for ethereum -- falls through to error."""
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
+        source = OnChainPriceSource(chain="ethereum")
+
+        # Ethereum has WSTETH/USD in the main feeds dict, so it uses the direct feed.
+        # But if we remove it to test derived fallback, there's no ETH-denominated config.
+        # This test verifies no crash when derived config is absent.
+        with patch.dict(source._feeds, {"WSTETH/USD": None}, clear=False):
+            # Remove WSTETH/USD from feeds to force derived path
+            del source._feeds["WSTETH/USD"]
+            with pytest.raises(DataSourceUnavailable, match="No Chainlink feed"):
+                await source.get_price("WSTETH", "USD")
+
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_derived_price_caches_result(self):
+        """Derived price is cached, second call doesn't make RPC calls."""
+        source = OnChainPriceSource(chain="arbitrum", cache_ttl=60.0)
+
+        now = int(time.time())
+        wsteth_eth_response = _build_chainlink_response(1180000000000000000, now)
+        eth_usd_response = _build_chainlink_response(250000000000, now)
+
+        call_count = 0
+
+        async def mock_eth_call(to: str, data: str) -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 1:
+                return wsteth_eth_response
+            return eth_usd_response
+
+        with patch.object(source, "_eth_call", side_effect=mock_eth_call):
+            result1 = await source.get_price("WSTETH", "USD")
+            result2 = await source.get_price("WSTETH", "USD")
+
+        assert result1.price == result2.price
+        assert call_count == 2  # Only 2 RPC calls (WSTETH/ETH + ETH/USD), second get_price cached
+        await source.close()

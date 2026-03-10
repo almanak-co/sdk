@@ -290,7 +290,7 @@ class ComputeRebalanceCandidateResponse(BaseModel):
 
 
 class SwapTokensRequest(BaseModel):
-    """Execute a token swap on a DEX."""
+    """Execute a token swap on a DEX. Supports cross-chain swaps via destination_chain."""
 
     token_in: str = Field(description="Token to sell (symbol or address)")
     token_out: str = Field(description="Token to buy (symbol or address)")
@@ -299,6 +299,10 @@ class SwapTokensRequest(BaseModel):
         default=50, ge=1, le=1000, description="Max slippage in basis points (1-1000, i.e. 0.01%-10%)"
     )
     chain: str = Field(default="arbitrum")
+    destination_chain: str | None = Field(
+        default=None,
+        description="Destination chain for cross-chain swaps (None for same-chain). Falls back to default aggregator if protocol is not specified.",
+    )
     protocol: str | None = Field(default=None, description="Specific DEX; None = best available")
     dry_run: bool = Field(default=False, description="If true, simulate only -- do not execute on-chain")
     execution_wallet: str | None = Field(
@@ -451,6 +455,69 @@ class RepayLendingRequest(BaseModel):
 class RepayLendingResponse(BaseModel):
     tx_hash: str | None = None
     amount_repaid: str = ""
+    gas_usd: str = ""
+
+
+class BridgeTokensRequest(BaseModel):
+    """Bridge tokens from one chain to another."""
+
+    token: str = Field(description="Token to bridge (symbol or address)")
+    amount: str = Field(description="Amount to bridge as a decimal string (in token units)")
+    from_chain: str = Field(description="Source chain (e.g. 'base', 'arbitrum')")
+    to_chain: str = Field(description="Destination chain (e.g. 'arbitrum', 'ethereum')")
+    slippage_bps: int = Field(
+        default=50, ge=1, le=1000, description="Max slippage in basis points (1-1000, i.e. 0.01%-10%)"
+    )
+    preferred_bridge: str | None = Field(
+        default=None, description="Preferred bridge adapter (e.g. 'across', 'stargate')"
+    )
+    dry_run: bool = Field(default=False, description="If true, simulate only -- do not execute on-chain")
+    execution_wallet: str | None = Field(
+        default=None, description="Override wallet for execution (e.g. Safe address for vault funds)"
+    )
+
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_positive(cls, v: str) -> str:
+        return _validate_positive_decimal(v, "amount")
+
+    @model_validator(mode="after")
+    def chains_must_differ(self) -> BridgeTokensRequest:
+        if self.from_chain.lower() == self.to_chain.lower():
+            raise ValueError(f"from_chain and to_chain must be different, got '{self.from_chain}'")
+        return self
+
+
+class BridgeTokensResponse(BaseModel):
+    tx_hash: str | None = None
+    amount_bridged: str = ""
+    from_chain: str = ""
+    to_chain: str = ""
+    bridge_used: str = ""
+    estimated_arrival_seconds: int | None = None
+    gas_usd: str = ""
+
+
+class UnwrapNativeRequest(BaseModel):
+    """Unwrap wrapped native tokens (e.g. WETH -> ETH, WMATIC -> MATIC)."""
+
+    token: str = Field(description="Wrapped token symbol (e.g. 'WETH', 'WMATIC', 'WAVAX')")
+    amount: str = Field(description="Amount to unwrap as a decimal string, or 'all'")
+    chain: str = Field(default="arbitrum", description="Blockchain name")
+    dry_run: bool = Field(default=False, description="If true, simulate only")
+    execution_wallet: str | None = Field(default=None, description="Override wallet for execution")
+
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_positive_or_all(cls, v: str) -> str:
+        return _validate_positive_or_all(v, "amount")
+
+
+class UnwrapNativeResponse(BaseModel):
+    tx_hash: str | None = None
+    amount_unwrapped: str = ""
+    token: str = ""
+    chain: str = ""
     gas_usd: str = ""
 
 

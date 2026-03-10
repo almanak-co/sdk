@@ -159,6 +159,20 @@ See: https://docs.almanak.co/agentic/
 5. **Create a mock LLM** -- Script a realistic tool-call sequence for testing without an API key
 6. **Run** -- `AGENT_LLM_API_KEY=... python your_agent/run.py --once`
 
+## Quick CLI Access
+
+Don't want to write a full agent? Use `almanak ax` with natural language mode for one-shot DeFi actions:
+
+```bash
+almanak ax -n "swap 5 USDC to WETH on base"
+almanak ax -n "what's the price of ETH?"
+almanak ax -n "check my USDC balance"
+```
+
+This uses the same `AGENT_LLM_*` env vars, tool catalog, and safety pipeline. The LLM interprets your text into exactly one tool call (single-shot, not an agent loop), shows what it understood, and executes after confirmation.
+
+See [almanak ax CLI reference](../cli/almanak-ax.md) for full documentation.
+
 ## Next Steps
 
 - [Agent Tools API Reference](agent-tools.md) -- All 29 tools, ToolExecutor, PolicyEngine, error types

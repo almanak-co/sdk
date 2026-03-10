@@ -635,7 +635,15 @@ class ToolExecutor:
         # Build intent params from the tool-specific arguments
         intent_type, intent_params = self._action_to_intent(tool_name, args)
         dry_run = args.get("dry_run", False)
-        chain = args.get("chain", self._default_chain)
+        # Bridge tools use from_chain as the execution chain
+        chain: str = (
+            (args.get("from_chain") or self._default_chain)
+            if tool_name == "bridge_tokens"
+            else args.get("chain", self._default_chain)
+        )
+        # Normalize chain into args so downstream accounting (_estimate_usd_spend) uses the right network
+        if tool_name == "bridge_tokens":
+            args["chain"] = chain
 
         # Use execution_wallet override if provided (e.g. Safe address for vault fund management)
         wallet = args.get("execution_wallet") or self._wallet_address
@@ -810,13 +818,17 @@ class ToolExecutor:
     def _action_to_intent(self, tool_name: str, args: dict) -> tuple[str, dict]:
         """Map action tool arguments to intent type + params."""
         if tool_name == "swap_tokens":
-            return "swap", {
+            params: dict = {
                 "from_token": args["token_in"],
                 "to_token": args["token_out"],
                 "amount": args["amount"],
-                "max_slippage": args.get("slippage_bps", 50) / 10000,
+                "max_slippage": str(Decimal(args.get("slippage_bps", 50)) / Decimal(10000)),
                 "protocol": args.get("protocol"),
             }
+            dest = args.get("destination_chain")
+            if dest:
+                params["destination_chain"] = dest
+            return "swap", params
 
         if tool_name == "open_lp_position":
             # Build pool identifier: "TOKEN_A/TOKEN_B/FEE"
@@ -904,6 +916,25 @@ class ToolExecutor:
                 "protocol": args.get("protocol", "aave_v3"),
             }
 
+        if tool_name == "bridge_tokens":
+            bridge_params: dict = {
+                "token": args["token"],
+                "amount": args["amount"],
+                "from_chain": args["from_chain"],
+                "to_chain": args["to_chain"],
+                "max_slippage": str(Decimal(args.get("slippage_bps", 50)) / Decimal(10000)),
+            }
+            preferred = args.get("preferred_bridge")
+            if preferred:
+                bridge_params["preferred_bridge"] = preferred
+            return "bridge", bridge_params
+
+        if tool_name == "unwrap_native":
+            return "unwrap_native", {
+                "token": args["token"],
+                "amount": args["amount"],
+            }
+
         raise ToolValidationError(f"Unknown action tool: {tool_name}", tool_name=tool_name)
 
     def _build_action_response(self, tool_name: str, exec_resp: Any, args: dict) -> dict:
@@ -941,6 +972,25 @@ class ToolExecutor:
             return {**base, "amount_borrowed": args.get("amount", "")}
         if tool_name == "repay_lending":
             return {**base, "amount_repaid": args.get("amount", "")}
+
+        if tool_name == "bridge_tokens":
+            return {
+                **base,
+                "amount_bridged": args.get("amount", ""),
+                "from_chain": args.get("from_chain", ""),
+                "to_chain": args.get("to_chain", ""),
+                "bridge_used": args.get("preferred_bridge", ""),
+                "estimated_arrival_seconds": None,
+                "gas_usd": "",
+            }
+
+        if tool_name == "unwrap_native":
+            return {
+                **base,
+                "amount_unwrapped": args.get("amount", ""),
+                "token": args.get("token", ""),
+                "chain": args.get("chain", self._default_chain),
+            }
 
         return base
 
@@ -1002,6 +1052,26 @@ class ToolExecutor:
             return {**base, "amount_borrowed": args.get("amount", "")}
         if tool_name == "repay_lending":
             return {**base, "amount_repaid": args.get("amount", "")}
+
+        if tool_name == "bridge_tokens":
+            metadata = enriched.extracted_data or {}
+            return {
+                **base,
+                "amount_bridged": str(metadata.get("amount", args.get("amount", ""))),
+                "from_chain": metadata.get("from_chain", args.get("from_chain", "")),
+                "to_chain": metadata.get("to_chain", args.get("to_chain", "")),
+                "bridge_used": metadata.get("bridge", args.get("preferred_bridge", "")),
+                "estimated_arrival_seconds": metadata.get("estimated_time"),
+                "gas_usd": "",
+            }
+
+        if tool_name == "unwrap_native":
+            return {
+                **base,
+                "amount_unwrapped": args.get("amount", ""),
+                "token": args.get("token", ""),
+                "chain": args.get("chain", self._default_chain),
+            }
 
         return base
 

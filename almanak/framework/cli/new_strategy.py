@@ -25,6 +25,7 @@ class StrategyTemplate(StrEnum):
     BASIS_TRADE = "basis_trade"
     LENDING_LOOP = "lending_loop"
     COPY_TRADER = "copy_trader"
+    VAULT_YIELD = "vault_yield"
     BLANK = "blank"
 
 
@@ -115,6 +116,18 @@ TEMPLATE_CONFIGS: dict[StrategyTemplate, TemplateConfig] = {
             "fixed_usd": "100",
             "max_trade_usd": "1000",
             "max_slippage": "0.01",
+        },
+    ),
+    StrategyTemplate.VAULT_YIELD: TemplateConfig(
+        name="Vault Yield",
+        description="ERC-4626 vault deposit/redeem strategy for optimized DeFi lending yield",
+        default_protocol="metamorpho",
+        config_params={
+            "vault_address": "0x_SET_VAULT_ADDRESS",
+            "deposit_token": "USDC",
+            "deposit_amount": "1000",
+            "min_deposit_usd": "100",
+            "max_vault_allocation_pct": "80",
         },
     ),
     StrategyTemplate.BLANK: TemplateConfig(
@@ -345,6 +358,41 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
 
             return Intent.hold(reason="No actionable signals")"""
 
+    elif template == StrategyTemplate.VAULT_YIELD:
+        return """
+            # Check available balance for deposit
+            try:
+                balance_info = market.balance(self.deposit_token)
+                available = balance_info.balance
+                available_usd = balance_info.balance_usd
+            except (ValueError, KeyError) as e:
+                logger.warning(f"Could not check {self.deposit_token} balance: {e}")
+                return Intent.hold(reason=f"Balance unavailable: {e}")
+
+            if self._state == "idle":
+                if available_usd < self.min_deposit_usd:
+                    return Intent.hold(
+                        reason=f"Insufficient {self.deposit_token}: ${available_usd:.2f} < ${self.min_deposit_usd}"
+                    )
+                # Deposit into vault
+                pct = max(0, min(self.max_vault_allocation_pct, 100))
+                max_deposit = available * Decimal(str(pct)) / Decimal("100")
+                deposit_amount = min(self.deposit_amount, max_deposit)
+                logger.info(f"DEPOSIT: {deposit_amount} {self.deposit_token} into vault")
+                return Intent.vault_deposit(
+                    protocol="metamorpho",
+                    vault_address=self.vault_address,
+                    amount=deposit_amount,
+                    chain=self.chain,
+                )
+
+            elif self._state == "deposited":
+                # Hold position -- yield accrues passively in the vault
+                return Intent.hold(reason="Vault position active, earning yield")
+
+            else:
+                return Intent.hold(reason=f"Unknown state: {self._state}")"""
+
     else:  # BLANK template
         return """
             # Get market price
@@ -374,6 +422,7 @@ def _get_teardown_comment(template: StrategyTemplate) -> str:
         StrategyTemplate.BASIS_TRADE: "Close perp position, then swap to quote",
         StrategyTemplate.LENDING_LOOP: "Repay borrows, withdraw collateral, swap to quote",
         StrategyTemplate.COPY_TRADER: "Close all positions in order: perps -> borrows -> supplies -> LPs -> swaps",
+        StrategyTemplate.VAULT_YIELD: "Redeem all vault shares back to underlying token",
         StrategyTemplate.BLANK: "Swap all holdings back to quote token",
     }
     return hints.get(template, "Close all positions and convert to stable")
@@ -469,6 +518,18 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self.policy_engine = CopyPolicyEngine(config=self.copy_config)
         self.intent_builder = CopyIntentBuilder(config=self.copy_config, sizer=self.sizer)"""
 
+    elif template == StrategyTemplate.VAULT_YIELD:
+        return """
+        # Vault parameters
+        self.vault_address = get_config("vault_address", "0x_SET_VAULT_ADDRESS")
+        self.deposit_token = get_config("deposit_token", "USDC")
+        self.deposit_amount = Decimal(str(get_config("deposit_amount", "1000")))
+        self.min_deposit_usd = Decimal(str(get_config("min_deposit_usd", "100")))
+        self.max_vault_allocation_pct = int(get_config("max_vault_allocation_pct", 80))
+
+        # State
+        self._state = "idle"  # idle -> deposited"""
+
     else:  # BLANK template
         return """
         # Add your configuration parameters here
@@ -503,6 +564,7 @@ def generate_strategy_file(
             '["SWAP", "LP_OPEN", "LP_CLOSE", "SUPPLY", "WITHDRAW", '
             '"BORROW", "REPAY", "PERP_OPEN", "PERP_CLOSE", "HOLD"]'
         ),
+        StrategyTemplate.VAULT_YIELD: '["VAULT_DEPOSIT", "VAULT_REDEEM", "HOLD"]',
         StrategyTemplate.BLANK: '["SWAP", "HOLD"]',
     }
 
@@ -619,7 +681,19 @@ class {class_name}(IntentStrategy):
             "wallet": self.wallet_address[:10] + "..." if self.wallet_address else None,
         }}
 
-    # -------------------------------------------------------------------------
+{
+        ""
+        if template != StrategyTemplate.VAULT_YIELD
+        else """    def on_intent_executed(self, intent, success: bool, result):
+        \"\"\"Update state after intent execution.\"\"\"
+        if success and hasattr(intent, "intent_type") and intent.intent_type.value == "VAULT_DEPOSIT":
+            self._state = "deposited"
+            logger.info("Vault deposit confirmed -- state set to deposited")
+        elif not success and hasattr(intent, "intent_type") and intent.intent_type.value == "VAULT_DEPOSIT":
+            logger.warning("Vault deposit failed -- staying in idle state")
+
+"""
+    }    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
     # See: blueprints/14-teardown-system.md
@@ -790,6 +864,16 @@ def generate_config_json(
                     "risk": {"max_slippage": 0.01},
                     "monitoring": {"poll_interval_seconds": 12, "lookback_blocks": 50},
                 },
+            }
+        )
+    elif template == StrategyTemplate.VAULT_YIELD:
+        data.update(
+            {
+                "vault_address": "0x_SET_VAULT_ADDRESS",
+                "deposit_token": "USDC",
+                "deposit_amount": 1000,
+                "min_deposit_usd": 100,
+                "max_vault_allocation_pct": 80,
             }
         )
     # BLANK template: just strategy_id + chain (no extra params)

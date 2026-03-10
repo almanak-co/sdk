@@ -51,6 +51,7 @@ POSITION_MANAGER_ADDRESSES: dict[str, str] = {
     "avalanche": "0x655C406EBFa14EE2006250925e54ec43AD184f8B",
     "bnb": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
     "bsc": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
+    "monad": "0x7197e214c0b767cfb76fb734ab638e2c192f4e53",
 }
 
 # Zero address for detecting mints

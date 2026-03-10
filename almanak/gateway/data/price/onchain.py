@@ -27,7 +27,9 @@ import aiohttp
 from almanak.core.chainlink import (
     CHAINLINK_CHAIN_IDS,
     CHAINLINK_PRICE_FEEDS,
+    ETH_DENOMINATED_FEEDS,
     LATEST_ROUND_DATA_SELECTOR,
+    TOKEN_TO_ETH_PAIR,
     TOKEN_TO_PAIR,
 )
 from almanak.framework.data.interfaces import (
@@ -43,7 +45,10 @@ logger = logging.getLogger(__name__)
 
 # Chainlink feed decimals -- most USD feeds use 8 decimals.
 # Override here for any feeds that differ.
-_FEED_DECIMALS: dict[str, int] = {}  # pair -> decimals override
+_FEED_DECIMALS: dict[str, int] = {
+    # ETH-denominated Chainlink feeds use 18 decimals (not the standard 8 for USD feeds)
+    "WSTETH/ETH": 18,
+}
 _DEFAULT_FEED_DECIMALS = 8
 
 # Staleness threshold: warn if Chainlink updatedAt is older than this (seconds).
@@ -121,9 +126,13 @@ class OnChainPriceSource(BasePriceSource):
         # Chain-specific Chainlink feeds
         self._feeds = CHAINLINK_PRICE_FEEDS.get(self._chain, {})
 
+        # ETH-denominated feeds for derived pricing (TOKEN/ETH × ETH/USD)
+        self._eth_feeds = ETH_DENOMINATED_FEEDS.get(self._chain, {})
+
         # Build per-instance token->pair lookup with resolver canonicalization.
         self._token_resolver = get_token_resolver()
         self._token_to_pair = self._build_token_pair_map()
+        self._token_to_eth_pair = self._build_token_eth_pair_map()
 
         # Monotonic JSON-RPC request id for easier correlation.
         self._rpc_request_id = 0
@@ -249,7 +258,7 @@ class OnChainPriceSource(BasePriceSource):
                 reason=f"No RPC URL available for chain={self._chain}",
             )
 
-        # Tier 1: Chainlink
+        # Tier 1: Direct Chainlink USD feed
         pair = self._resolve_pair(token)
         if pair and pair in self._feeds:
             feed_address = self._feeds[pair]
@@ -263,6 +272,24 @@ class OnChainPriceSource(BasePriceSource):
             )
             self._cache[cache_key] = (result, time.time())
             return result
+
+        # Tier 2: Derived price via TOKEN/ETH × ETH/USD
+        # Resolve canonical symbol first so address-based lookups can match
+        # ETH-denominated feeds (e.g., passing an address should resolve to
+        # "WSTETH" which then matches the WSTETH/ETH feed).
+        if pair:
+            resolved_symbol = pair.split("/")[0]
+        else:
+            # No direct feed found -- try to resolve the canonical symbol via
+            # the token resolver before falling back to the raw input.
+            try:
+                resolved_token = self._token_resolver.resolve(token, self._chain, log_errors=False)
+                resolved_symbol = resolved_token.symbol.upper()
+            except TokenResolutionError:
+                resolved_symbol = token_upper
+        derived = await self._try_derived_price(resolved_symbol, cache_key)
+        if derived is not None:
+            return derived
 
         raise DataSourceUnavailable(
             source=self.source_name,
@@ -291,6 +318,59 @@ class OnChainPriceSource(BasePriceSource):
             token_to_pair[resolved.symbol.upper()] = pair
 
         return token_to_pair
+
+    def _build_token_eth_pair_map(self) -> dict[str, str]:
+        """Build token->ETH-denominated pair map for derived pricing."""
+        token_to_eth_pair: dict[str, str] = {}
+        for token, pair in TOKEN_TO_ETH_PAIR.items():
+            if pair not in self._eth_feeds:
+                continue
+            token_to_eth_pair[token.upper()] = pair
+        return token_to_eth_pair
+
+    async def _try_derived_price(self, token_upper: str, cache_key: str) -> PriceResult | None:
+        """Try to compute TOKEN/USD = TOKEN/ETH × ETH/USD.
+
+        Returns None if no ETH-denominated feed exists or if fetching fails.
+        """
+        eth_pair = self._token_to_eth_pair.get(token_upper)
+        if not eth_pair or eth_pair not in self._eth_feeds:
+            return None
+
+        # Need ETH/USD feed on this chain
+        eth_usd_feed = self._feeds.get("ETH/USD")
+        if not eth_usd_feed:
+            return None
+
+        try:
+            token_eth_price, token_eth_conf = await self._fetch_chainlink(self._eth_feeds[eth_pair], eth_pair)
+            eth_usd_price, eth_usd_conf = await self._fetch_chainlink(eth_usd_feed, "ETH/USD")
+        except DataSourceUnavailable as e:
+            logger.debug("Derived price failed for %s: %s", token_upper, e)
+            return None
+
+        derived_price = token_eth_price * eth_usd_price
+        # Confidence is the minimum of both feeds, slightly penalized for composition
+        confidence = min(token_eth_conf, eth_usd_conf) * 0.95
+
+        logger.info(
+            "Derived %s/USD: %s (= %s × %s, confidence=%.2f)",
+            token_upper,
+            derived_price,
+            token_eth_price,
+            eth_usd_price,
+            confidence,
+        )
+
+        result = PriceResult(
+            price=derived_price,
+            source=f"{self.source_name}_derived",
+            timestamp=datetime.now(UTC),
+            confidence=confidence,
+            stale=confidence < 0.90,
+        )
+        self._cache[cache_key] = (result, time.time())
+        return result
 
     def _resolve_pair(self, token: str) -> str | None:
         """Resolve symbol/address input to a Chainlink pair in this source."""

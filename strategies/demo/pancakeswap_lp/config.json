@@ -1,0 +1,15 @@
+{
+    "strategy_id": "demo_pancakeswap_lp",
+    "strategy_name": "demo_pancakeswap_lp",
+    "description": "PancakeSwap V3 LP lifecycle strategy on Arbitrum",
+    "pool": "WETH/USDC/500",
+    "range_width_pct": 0.20,
+    "amount0": "0.001",
+    "amount1": "3",
+    "chain": "arbitrum",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

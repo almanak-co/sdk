@@ -57,6 +57,7 @@ CHAIN_IDS: dict[str, int] = {
     "mantle": 5000,
     "berachain": 80094,
     "sonic": 146,
+    "monad": 143,
 }
 
 
@@ -128,6 +129,14 @@ TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
         "FUSDT0": "0x1DD4b13fcAE900C60a350589BE8052959D2Ed27B",
         "PENDLE": "0x17Bac5F906c9A0282aC06a59958D85796c831f24",
     },
+    "berachain": {
+        "WBERA": "0x6969696969696969696969696969696969696969",
+        "HONEY": "0xFCBD14DC51f0A4d49d5E53C2E0950e0bC26d0Dce",
+        "USDC.e": "0x549943e04f40284185054145c6E4e9568C1D3241",
+        "WETH": "0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590",
+        "WBTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
+        "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+    },
 }
 
 
@@ -154,6 +163,8 @@ TOKEN_DECIMALS: dict[str, int] = {
     "USDT0": 6,
     "FUSDT0": 6,
     "PENDLE": 18,
+    "WBERA": 18,
+    "HONEY": 18,
 }
 
 

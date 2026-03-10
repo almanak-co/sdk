@@ -213,12 +213,17 @@ class PolicyEngine:
         violations: list[str] = []
         suggestions: list[str] = []
 
+        # Resolve effective args: for tools like compile_intent that nest
+        # token/protocol/chain inside a "params" dict, merge those fields
+        # into the effective arguments so scope checks can find them.
+        effective_args = self._resolve_effective_args(arguments)
+
         self._check_tool_allowed(tool_def, violations, suggestions)
-        self._check_chain_allowed(arguments, violations, suggestions)
-        self._check_execution_wallet(arguments, violations, suggestions)
-        self._check_protocol_allowed(arguments, violations, suggestions)
-        self._check_token_allowed(arguments, violations, suggestions)
-        self._check_intent_type_allowed(arguments, violations, suggestions)
+        self._check_chain_allowed(effective_args, violations, suggestions)
+        self._check_execution_wallet(effective_args, violations, suggestions)
+        self._check_protocol_allowed(effective_args, violations, suggestions)
+        self._check_token_allowed(effective_args, violations, suggestions)
+        self._check_intent_type_allowed(effective_args, violations, suggestions)
         self._check_rate_limits(tool_def, violations, suggestions)
         self._check_circuit_breaker(violations, suggestions)
 
@@ -227,9 +232,9 @@ class PolicyEngine:
             # Vault lifecycle tools use raw token amounts (e.g. 10000000 = 10 USDC),
             # not USD values. Skip spend limit checks for these tools.
             if tool_def.name not in _VAULT_LIFECYCLE_TOOLS:
-                self._check_spend_limits(arguments, violations, suggestions)
-                self._check_position_size(arguments, violations, suggestions)
-                self._check_approval_gate(tool_def, arguments, violations, suggestions)
+                self._check_spend_limits(effective_args, violations, suggestions)
+                self._check_position_size(effective_args, violations, suggestions)
+                self._check_approval_gate(tool_def, effective_args, violations, suggestions)
             # Cooldown exemption is broader: deposit_vault also skips cooldown
             # so the vault setup sequence (deposit → open_lp) isn't blocked.
             if tool_def.name not in _COOLDOWN_EXEMPT_TOOLS:
@@ -534,6 +539,69 @@ class PolicyEngine:
         if self._state_store:
             self._state_store.save(self._get_state_dict())
 
+    # -- Argument resolution -------------------------------------------------
+
+    @staticmethod
+    def _resolve_effective_args(args: dict) -> dict:
+        """Merge nested ``params`` into top-level args for scope checks.
+
+        Tools like ``compile_intent`` nest token/protocol/chain fields inside
+        a ``params`` dict. This method surfaces those fields so that scope
+        checks (token allowlist, protocol allowlist, etc.) can find them.
+
+        Intent field names are mapped to the canonical names used by policy
+        checks: ``from_token`` -> ``token_in``, ``to_token`` -> ``token_out``,
+        ``borrow_token`` -> ``token``.
+        """
+        params = args.get("params")
+        if not params or not isinstance(params, dict):
+            return args
+
+        # Start with top-level args, then fill in missing fields from params
+        effective = dict(args)
+
+        # Direct field mappings: intent vocabulary -> policy vocabulary
+        _INTENT_FIELD_MAP = {
+            "from_token": "token_in",
+            "to_token": "token_out",
+            "borrow_token": "token",
+            "borrow_amount": "amount",
+        }
+
+        # Fields that policy checks look for
+        _POLICY_FIELDS = (
+            "chain",
+            "protocol",
+            "intent_type",
+            "token",
+            "token_in",
+            "token_out",
+            "token_a",
+            "token_b",
+            "amount",
+            "amount_a",
+            "amount_b",
+            "amount_usd",
+            "collateral_token",
+            "collateral_amount",
+            "execution_wallet",
+            "destination_chain",
+            "from_chain",
+            "to_chain",
+        )
+
+        # Map intent field names to policy field names
+        for intent_key, policy_key in _INTENT_FIELD_MAP.items():
+            if intent_key in params and policy_key not in effective:
+                effective[policy_key] = params[intent_key]
+
+        # Surface params fields that policy checks look for
+        for key in _POLICY_FIELDS:
+            if key not in effective and key in params:
+                effective[key] = params[key]
+
+        return effective
+
     # -- Private checks -----------------------------------------------------
 
     def _check_tool_allowed(self, tool_def: ToolDefinition, violations: list[str], suggestions: list[str]) -> None:
@@ -542,10 +610,21 @@ class PolicyEngine:
             suggestions.append(f"Allowed tools: {sorted(self.policy.allowed_tools)}")
 
     def _check_chain_allowed(self, args: dict, violations: list[str], suggestions: list[str]) -> None:
-        chain = args.get("chain")
-        if chain and chain.lower() not in {c.lower() for c in self.policy.allowed_chains}:
-            violations.append(f"Chain '{chain}' is not allowed.")
-            suggestions.append(f"Allowed chains: {sorted(self.policy.allowed_chains)}")
+        if self.policy.allowed_chains is None:
+            return
+        allowed_lower = {c.lower() for c in self.policy.allowed_chains}
+        sorted_allowed = sorted(self.policy.allowed_chains)
+        # Check all chain-like fields: chain, destination_chain, from_chain, to_chain
+        for key, label in [
+            ("chain", "Chain"),
+            ("destination_chain", "Destination chain"),
+            ("from_chain", "Source chain"),
+            ("to_chain", "Destination chain"),
+        ]:
+            value = args.get(key)
+            if value and value.lower() not in allowed_lower:
+                violations.append(f"{label} '{value}' is not allowed.")
+                suggestions.append(f"Allowed chains: {sorted_allowed}")
 
     def _check_protocol_allowed(self, args: dict, violations: list[str], suggestions: list[str]) -> None:
         protocol = args.get("protocol")

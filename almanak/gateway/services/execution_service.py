@@ -405,6 +405,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             SupplyIntent,
             SwapIntent,
             UnstakeIntent,
+            UnwrapNativeIntent,
             WithdrawIntent,
         )
 
@@ -429,6 +430,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             "predictionsell": PredictionSellIntent,
             "predictionredeem": PredictionRedeemIntent,
             "bridge": BridgeIntent,
+            "unwrapnative": UnwrapNativeIntent,
         }
 
         normalized_intent_type = self._normalize_intent_type(intent_type)

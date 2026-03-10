@@ -132,6 +132,7 @@ CHAIN_IDS: dict[str, int] = {
     "mantle": 5000,
     "berachain": 80094,
     "sonic": 146,
+    "monad": 143,
 }
 
 # Supported protocols and which chains they are available on
@@ -148,6 +149,7 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
         "linea",
         "blast",
         "mantle",
+        "monad",
     },
     "gmx_v2": {"arbitrum", "avalanche"},
     "hyperliquid": {"arbitrum"},  # Hyperliquid is on its own L1 but accessed via Arbitrum

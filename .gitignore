@@ -3,6 +3,7 @@
 /docs_output
 /almanak/sdk/dist/
 .env
+.power-env
 
 /marcia-test-folder/
 /almanak-test-folder/
@@ -45,7 +46,7 @@ test-results.xml
 
 # Automation scripts runtime artifacts
 logs/
-scripts/yailoop/yailoop.log
+scripts/kitchenloop/kitchenloop.log
 scripts/pr-manager/pr-manager.log
 scripts/pr-manager/state.json
 notes/.tmp/

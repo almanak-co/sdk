@@ -1,62 +1,88 @@
-# Demo Strategy Regression Report (Anvil)
+# Demo Strategy Regression Report
 
-**Date:** 2026-03-03
+**Date:** 2026-03-06
 **Network:** Anvil (local fork)
-**Iteration:** Kitchen Loop iter 29c regress
-**Total strategies tested:** 13
+**Iteration:** 52 (BenQi lending lifecycle)
+**Total strategies tested:** 17 demo + 2 incubating = 19 runs
+**Note:** ALCHEMY_API_KEY was empty; all strategies used public RPCs for forking
 
 ## Summary Table
 
 | # | Strategy | Chain | Status | Suspicious | TX Hash | Notes |
 |---|----------|-------|--------|------------|---------|-------|
-| 1 | aave_borrow | arbitrum | PASS | 5 (0 err) | `8ab7bec6...013ad` | Supply WETH, 3 TXs (approve+supply+setCollateral) |
-| 2 | aerodrome_lp | base | PASS | 4 (0 err) | `659a80...0a7f` | LP_OPEN, 3 TXs (2 approves + addLiquidity) |
-| 3 | almanak_rsi | base | PASS | 4 (0 err) | `87d4775f...e4505d` | Init swap 10 USDC -> ALMANAK, 2 TXs |
-| 4 | enso_rsi | base | PASS | 4 (0 err) | `ad5587fc...d7a0` | force_action=buy, $3 USDC -> WETH via Enso, 2 TXs |
-| 5 | ethena_yield | ethereum | PASS | 5 (0 err) | `51bc1c98...833de` | 5 USDC -> USDe via Enso, 2 TXs |
-| 6 | morpho_looping | ethereum | PASS | 5 (0 err) | `6080e74f...cbb4f` | Supply 0.1 wstETH collateral, 2 TXs |
-| 7 | pancakeswap_simple | arbitrum | PASS | 4 (0 err) | `50b4ed19...d958` | Swap 0.0051 WETH -> USDC, 2 TXs |
-| 8 | pendle_basics | arbitrum | FAIL | 5 (3 err) | - | Pre-existing VIB-297: wstETH Chainlink ~$12.3B |
-| 9 | spark_lender | ethereum | PASS | 5 (1 err) | `d01fdb78...` | Supply 5 DAI, first-TX revert then retry success |
-| 10 | sushiswap_lp | arbitrum | PASS | 3 (0 err) | `7692fe67...96eb` | LP_OPEN NFT #34626, 3 TXs |
-| 11 | traderjoe_lp | avalanche | PASS | 5 (0 err) | `625c887d...3ddb` | LP_OPEN, 3 TXs (2 approves + addLiquidity) |
-| 12 | uniswap_lp | arbitrum | PASS | 5 (0 err) | `4d1da7f8...55be` | LP_OPEN NFT #5341845, 3 TXs |
-| 13 | uniswap_rsi | ethereum | PASS(HOLD) | 4 (0 err) | - | RSI=44.98 in neutral zone [40-70], correct HOLD |
+| 1 | aave_borrow | arbitrum | PASS | 3 (0 err) | f577687f...f4f0 | Supply + set collateral (3 TXs) |
+| 2 | aerodrome_lp | base | PASS | 5 (0 err) | 74986ac5...6e07 | LP addLiquidity (3 TXs) |
+| 3 | aerodrome_paper_trade | base | PASS | 3 (0 err) | b0a99de6...1d2e | LP via RSI trigger (3 TXs) |
+| 4 | almanak_rsi | base | FAIL | 5 (2 err) | - | No CoinGecko key for ALMANAK token |
+| 5 | copy_trader | arbitrum | PASS (HOLD) | 5 (2 err) | - | No leader activity on fork |
+| 6 | enso_rsi | base | PASS | 4 (0 err) | b8ef26...f829 | USDC->WETH swap via Enso (2 TXs) |
+| 7 | enso_uniswap_arbitrage | base | PASS | 5 (0 err) | multiple | 4-TX arb round-trip |
+| 8 | ethena_yield | ethereum | PASS | 4 (1 err) | acb8d6ba...9eee | Swap succeeded on retry |
+| 9 | mantle_swap | mantle | FAIL | 4 (3 err) | - | No Chainlink feeds + CoinGecko rate limit |
+| 10 | metamorpho_base_yield | base | PASS | 4 (0 err) | e70eddf7...c6c4 | 50 USDC vault deposit (2 TXs) |
+| 11 | metamorpho_eth_yield | ethereum | PASS | 4 (1 err) | 06d78d53...f299 | 40 USDC vault deposit (2 TXs) |
+| 12 | morpho_looping | ethereum | PASS | 5 (2 err) | 89dfc184...1548 | wstETH supply collateral (2 TXs) |
+| 13 | pancakeswap_simple | arbitrum | PASS | 2 (1 err) | 45b07098...5976 | WETH->USDC swap (2 TXs) |
+| 14 | pendle_basics | arbitrum | PASS | 4 (0 err) | 7b3e0562...c78c7 | wstETH->PT swap (2 TXs) |
+| 15 | spark_lender | ethereum | PASS | 4 (1 err) | 7677afda...119f | DAI supply, retry after gas cap |
+| 16 | sushiswap_lp | arbitrum | PASS | 4 (0 err) | multiple | LP #34820 minted (3 TXs) |
+| 17 | traderjoe_lp | avalanche | PASS | 4 (0 err) | 56fef928...bba60 | LP addLiquidity (3 TXs) |
+| 18 | uniswap_lp | arbitrum | PASS | 5 (0 err) | 5397ab5c...edf0 | LP #5347822 minted (3 TXs) |
+| 19 | uniswap_rsi | ethereum | PASS | 5 (0 err) | fdecee56...0bb3 | USDC->WETH swap (2 TXs) |
 
 ## Tally
 
-**11 PASS / 1 PASS(HOLD) / 0 PARTIAL / 1 FAIL** out of 13 total
+**15 PASS / 1 PASS(HOLD) / 0 PARTIAL / 2 FAIL out of 17 demo strategies**
 
-## Failures
+(Plus 2 incubating strategies tested: enso_uniswap_arbitrage PASS, copy_trader PASS(HOLD))
 
-### pendle_basics (FAIL - pre-existing)
+## Status Definitions
 
-**Root cause:** VIB-297 (wstETH Chainlink oracle on Arbitrum returns ~$12.3B instead of ~$2.4K). The price aggregator detects 5,079,157x divergence between Chainlink ($12.3B) and CoinGecko ($2,418), rejects both as outliers, and raises `AllDataSourcesFailed`. The strategy catches the ValueError and returns HOLD with no transactions.
+- **PASS**: Strategy ran, produced at least 1 on-chain transaction
+- **PASS (HOLD)**: Strategy ran successfully but decided to HOLD (no trade signal)
+- **PARTIAL**: Strategy started but encountered a non-fatal issue
+- **FAIL**: Strategy could not run
 
-**Status:** Pre-existing since iter 20+. Not a regression from iter 29c changes.
+## Failure Analysis
+
+### almanak_rsi (FAIL)
+ALMANAK token has no Chainlink price feed on Base. CoinGecko free tier was rate-limited. The strategy correctly returned HOLD rather than executing an unpriced swap. Fix: set `ALMANAK_GATEWAY_COINGECKO_API_KEY`.
+
+### mantle_swap (FAIL)
+Mantle chain has zero Chainlink feeds registered. CoinGecko free tier was simultaneously rate-limited. Strategy returned HOLD correctly. Fix: set `ALMANAK_GATEWAY_COINGECKO_API_KEY` or register Chainlink feeds for Mantle.
 
 ## Suspicious Behaviour Summary
 
-| Strategy | Findings | Errors | Top Issues |
-|----------|----------|--------|------------|
-| pendle_basics | 5 | 3 | Chainlink wstETH ~$12.3B, price aggregator AllDataSourcesFailed |
-| spark_lender | 5 | 1 | First-TX revert (gas underestimation), retry recovers |
-| traderjoe_lp | 5 | 0 | LP TX mislabeled as swap, duplicate receipt parsing |
-| enso_rsi | 4 | 0 | Amount chaining gap (Enso extract_swap_amounts) |
+### Most common patterns
 
-**Aggregate stats:**
-- Total suspicious findings across all strategies: 58
-- Strategies with ERROR-level findings: 2 (pendle_basics, spark_lender)
-- Most common patterns: (1) Port not freed after 5s (12/13), (2) No Alchemy/CoinGecko API keys (13/13), (3) Placeholder prices in Anvil mode (5/13)
+| Pattern | Count | Severity | Assessment |
+|---------|-------|----------|------------|
+| CoinGecko rate limiting (free tier) | 15/17 | WARNING | Expected without API key |
+| Pendle circular import at startup | 17/17 | WARNING | Pre-existing bug in incubating strategy |
+| Placeholder prices in IntentCompiler | 12/17 | WARNING | Expected in Anvil mode |
+| No Alchemy/CoinGecko API key | 10/17 | INFO | Expected in dev environment |
 
-## Comparison to Previous Iterations
+### Aggregate stats
 
-| Metric | Iter 32 | Iter 29 (prev) | Iter 29c |
-|--------|---------|----------------|----------|
-| PASS | 10 | 12 | 11 |
-| PASS(HOLD) | 1 | 0 | 1 |
-| FAIL | 2 | 1 | 1 |
-| pendle_basics | FAIL | FAIL | FAIL |
-| traderjoe_lp | FAIL | PASS | PASS |
+- Total suspicious findings: ~78
+- Strategies with ERROR-level findings: 7
+- Strategies with clean logs (0 findings): 0
+- Most common: CoinGecko rate limiting, pendle circular import, placeholder prices
 
-traderjoe_lp improved from intermittent FAIL (Avalanche public RPC storage access limitation) to stable PASS.
+## Notable Issues (recurring)
+
+1. **Spark gas cap**: Static 165K gas cap too low for Spark supply (~200K); always requires retry
+2. **Ethena 2-TX route**: Enso 2-TX route consistently reverts (selector 0xef3dcb2f); 1-TX retry succeeds
+3. **Pendle circular import**: Every strategy logs this error from `pendle_pt_swap_arbitrum`
+4. **Mantle pricing**: No Chainlink feeds registered for Mantle chain
+
+## Comparison with Iteration 51
+
+| Metric | Iter 51 | Iter 52 | Delta |
+|--------|---------|---------|-------|
+| PASS | 8 | 15 | +7 |
+| PASS (HOLD) | 1 | 1 | 0 |
+| FAIL | 1 | 2 | +1 |
+| Total tested | 10 | 19 | +9 |
+
+Key changes: ethena_yield recovered (now PASS via retry), almanak_rsi regressed (CoinGecko dependency). Full coverage run (all 17 demo + 2 incubating) vs selective in iter 51.

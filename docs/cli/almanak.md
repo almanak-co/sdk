@@ -38,6 +38,7 @@ Options:
 
 Commands:
   auth       Authenticate the Almanak CLI
+  ax         Execute DeFi actions directly (swap, balance, price, etc.)
   dashboard  Start the Almanak Operator Dashboard.
   gateway    Start the Almanak Gateway gRPC server.
   strat      Commands for managing strategies.

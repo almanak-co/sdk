@@ -35,6 +35,13 @@ from almanak.framework.agent_tools.errors import (  # noqa: F401
     get_error_category,
 )
 from almanak.framework.agent_tools.executor import ToolExecutor  # noqa: F401
+from almanak.framework.agent_tools.llm_client import (  # noqa: F401
+    LLMClient,
+    LLMClientProtocol,
+    LLMConfig,
+    LLMConfigError,
+    validate_llm_config,
+)
 from almanak.framework.agent_tools.policy import (  # noqa: F401
     AgentPolicy,
     PolicyDecision,

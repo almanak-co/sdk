@@ -117,6 +117,7 @@ from .vocabulary import (
     SupplyIntent,
     SwapIntent,
     UnstakeIntent,
+    UnwrapNativeIntent,
     VaultDepositIntent,
     VaultRedeemIntent,
     WithdrawIntent,
@@ -162,6 +163,8 @@ __all__ = [
     "PredictionTimeInForce",
     "PredictionShareAmount",
     "PredictionExitConditions",
+    # Unwrap Native Intent
+    "UnwrapNativeIntent",
     # Bridge Intent
     "BridgeIntent",
     "BridgeIntentType",

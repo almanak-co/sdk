@@ -14,9 +14,11 @@ parsed here. The destination chain delivery is tracked via the LiFi status API.
 
 import logging
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from almanak.framework.connectors.base.hex_utils import HexDecoder
+from almanak.framework.execution.extracted_data import SwapAmounts
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +101,11 @@ class LiFiReceiptParser:
     def __init__(self, **kwargs: Any) -> None:
         """Initialize LiFiReceiptParser.
 
-        Accepts and ignores keyword arguments (e.g. chain=) passed by
-        the receipt_registry when instantiating parsers dynamically.
+        Args:
+            **kwargs: Keyword arguments passed by the receipt_registry.
+                chain: Chain name for token decimal resolution.
         """
+        self._chain: str | None = kwargs.get("chain")
 
     def parse_swap_receipt(
         self,
@@ -196,7 +200,7 @@ class LiFiReceiptParser:
             is_cross_chain=is_cross_chain,
         )
 
-    def extract_swap_amounts(self, receipt: dict[str, Any]) -> dict[str, Any] | None:
+    def extract_swap_amounts(self, receipt: dict[str, Any]) -> SwapAmounts | None:
         """Extract swap amounts for Result Enrichment system.
 
         Called by ResultEnricher after SWAP intent execution.
@@ -205,7 +209,7 @@ class LiFiReceiptParser:
             receipt: Transaction receipt
 
         Returns:
-            Dict with amount_in, amount_out, or None if not found
+            SwapAmounts dataclass or None if not found
         """
         if receipt.get("status", 0) != 1:
             return None
@@ -223,12 +227,33 @@ class LiFiReceiptParser:
         first = transfers[0]
         last = transfers[-1]
 
-        return {
-            "amount_in": first.get("amount", 0),
-            "amount_out": last.get("amount", 0),
-            "token_in": first.get("token"),
-            "token_out": last.get("token"),
-        }
+        amount_in = first.get("amount", 0)
+        amount_out = last.get("amount", 0)
+
+        token_in_addr = first.get("token")
+        token_out_addr = last.get("token")
+
+        decimals_in = self._get_decimals(token_in_addr)
+        decimals_out = self._get_decimals(token_out_addr)
+
+        amount_in_decimal = (
+            Decimal(amount_in) / Decimal(10**decimals_in) if decimals_in is not None else Decimal(str(amount_in))
+        )
+        amount_out_decimal = (
+            Decimal(amount_out) / Decimal(10**decimals_out) if decimals_out is not None else Decimal(str(amount_out))
+        )
+
+        effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal else None
+
+        return SwapAmounts(
+            amount_in=amount_in,
+            amount_out=amount_out,
+            amount_in_decimal=amount_in_decimal,
+            amount_out_decimal=amount_out_decimal,
+            effective_price=effective_price,
+            token_in=token_in_addr,
+            token_out=token_out_addr,
+        )
 
     def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
         """LiFi swaps do not create LP positions."""
@@ -380,6 +405,27 @@ class LiFiReceiptParser:
             )
 
         return transfers
+
+    def _get_decimals(self, token_address: str | None) -> int | None:
+        """Look up token decimals via the token resolver.
+
+        Args:
+            token_address: Token contract address.
+
+        Returns:
+            Decimals if resolvable, None otherwise.
+        """
+        if not token_address:
+            return None
+        try:
+            from almanak.framework.data.tokens import get_token_resolver
+
+            resolver = get_token_resolver()
+            token = resolver.resolve(token_address, self._chain or "ethereum")
+            return token.decimals
+        except Exception:
+            logger.debug(f"Could not resolve decimals for {token_address}")
+            return None
 
     @staticmethod
     def _normalize_tx_hash(tx_hash: Any) -> str:

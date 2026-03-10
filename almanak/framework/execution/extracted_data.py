@@ -47,7 +47,7 @@ class SwapAmounts:
     amount_out: int
     amount_in_decimal: Decimal
     amount_out_decimal: Decimal
-    effective_price: Decimal
+    effective_price: Decimal | None = None
     slippage_bps: int | None = None
     token_in: str | None = None
     token_out: str | None = None
@@ -59,7 +59,7 @@ class SwapAmounts:
             "amount_out": str(self.amount_out),
             "amount_in_decimal": str(self.amount_in_decimal),
             "amount_out_decimal": str(self.amount_out_decimal),
-            "effective_price": str(self.effective_price),
+            "effective_price": str(self.effective_price) if self.effective_price is not None else None,
             "slippage_bps": self.slippage_bps,
             "token_in": self.token_in,
             "token_out": self.token_out,

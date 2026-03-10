@@ -128,6 +128,8 @@ class GatewayExecutionResult:
                     effective_gas_price=receipt_data.get("effective_gas_price", 0),
                     status=status,
                     logs=logs,
+                    from_address=receipt_data.get("from_address"),
+                    to_address=receipt_data.get("to_address"),
                 )
 
             results.append(

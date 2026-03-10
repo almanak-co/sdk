@@ -1,6 +1,6 @@
 # E2E Strategy Test Report: copy_trader (Anvil)
 
-**Date:** 2026-02-27 17:05
+**Date:** 2026-03-06 06:13
 **Result:** PASS
 **Mode:** Anvil
 **Duration:** ~4 minutes
@@ -9,97 +9,98 @@
 
 | Field | Value |
 |-------|-------|
-| Strategy | demo_copy_trader (new demo strategy) |
+| Strategy | copy_trader (incubating) |
+| Location | strategies/incubating/copy_trader |
 | Strategy ID | demo_copy_trader |
 | Chain | arbitrum |
-| Network | Anvil fork (Arbitrum mainnet fork, managed gateway) |
-| Managed Anvil Port | 55649 (auto-assigned by managed gateway) |
+| Network | Anvil fork (managed gateway) |
+| Managed Anvil Port | 64974 (auto-assigned) |
 | Gateway Port | 50052 (managed gateway) |
 | Wallet | 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 (Anvil default) |
 
 ## Config Changes Made
 
-The `copy_trader` strategy was created new for this kitchen loop iteration (did not previously
-exist as a demo strategy). Files created:
+No config changes were required. All fields were already within the $50 budget cap:
 
-- `strategies/demo/copy_trader/strategy.py` - CopyTraderStrategy class
-- `strategies/demo/copy_trader/config.json` - Config with `force_action: "buy"`, `trade_size_usd: 50`, `max_trade_size_usd: 500`
-- `strategies/demo/copy_trader/__init__.py` - Package init
+| Field | Value | Within Budget? |
+|-------|-------|---------------|
+| `risk.max_trade_usd` | "50" | Yes |
+| `global_policy.max_usd_value` | "50" | Yes |
+| `sizing.fixed_usd` | "50" | Yes |
+| `leaders[0].max_notional_usd` | "50" | Yes |
 
-Budget cap was set to 500 USD (`max_trade_size_usd: 500`) with `trade_size_usd: 50` —
-well within the $500 USD per-trade budget cap requirement.
-
-## force_action
-
-The strategy supports `force_action: "buy"` in config, which was used to trigger an immediate
-COPY BUY trade on the first iteration. This is the standard testing pattern for Anvil runs.
+`force_action` is not supported by this strategy. It relies on on-chain wallet activity signals
+via `market.wallet_activity()`. No simulated signals exist in a fresh Anvil fork, so HOLD
+is the expected outcome.
 
 ## Execution
 
 ### Setup
-- [x] Anvil fork started (managed, port 55649, forked Arbitrum mainnet via public RPC)
-- [x] Gateway started on port 50052 (managed gateway, insecure mode)
-- [x] Wallet auto-funded: 100 ETH, 1 WETH, 10,000 USDC (via `anvil_funding` in config.json)
+- Anvil fork started (managed, port 53605, forked Arbitrum mainnet via public RPC: arb1.arbitrum.io/rpc)
+- Gateway started on port 50053 (managed gateway, insecure mode for Anvil)
+- Wallet auto-funded: 100 ETH, 1 WETH, 10,000 USDC (via `anvil_funding` in config.json)
 
 ### Strategy Run
-- [x] Strategy executed with `--network anvil --once`
-- [x] `force_action: "buy"` triggered a COPY BUY signal immediately
-- [x] WETH price fetched: $1,928.87 (Chainlink on-chain primary, CoinGecko free fallback)
-- [x] Compiled: SWAP 50.00 USDC -> 0.0258 WETH (min: 0.0256 WETH), 1.00% slippage, 2 txs
-- [x] TX 1: USDC approval — `0x4f41602e01fb51316e2e008c0d283936144476827d70328678e7ac45b5b7a620` (55,449 gas)
-- [x] TX 2: Uniswap V3 swap — `0xc0452e25751176811f903ece5f67d40b61b4bd54f1041336760dc367bbb9e722` (125,624 gas)
-- [x] Total gas: 181,073 | Duration: 23,785ms
-- [x] Status: `SUCCESS | Intent: SWAP | Gas used: 181073`
+
+```
+uv run almanak strat run -d strategies/incubating/copy_trader --network anvil --once
+```
+
+- Strategy initialized: CopyTraderStrategy, mode=live, submission_mode=auto, strict=False
+- 1 leader monitored: `0x489ee077994B6658eFaCA1507F1FBB620B9308aa` (wintermute, arbitrum)
+- WalletMonitor polled blocks 438746232-438746282 (50-block lookback window)
+- Result: 0 copy signals detected in monitored range
+- Intent returned: HOLD -- "No new leader activity"
+- Exit code: 0
 
 ### Key Log Output
 
 ```text
-CopyTraderStrategy initialized: tracking=0xd8dA6BF2..., trade_size=$50.00, max_trade_size=$500.00, copy_ratio=1.0, pair=WETH/USDC
-Force action triggered: buy | Simulating detected whale trade from 0xd8dA6BF2...
-Aggregated price for WETH/USD: 1928.869068385 (confidence: 1.00, sources: 2/2, outliers: 0)
-COPY BUY: $50.00 of WETH (whale=0xd8dA6BF2..., ratio=1.0, price=$1,928.87)
-demo_copy_trader intent: SWAP: $50.00 USDC -> WETH (slippage: 1.00%) via uniswap_v3
-Compiled SWAP: 50.0000 USDC -> 0.0258 WETH (min: 0.0256 WETH) | Slippage: 1.00% | Txs: 2 | Gas: 280,000
-Transaction confirmed: tx=0x4f41602e..., block=436578642, gas_used=55449
-Transaction confirmed: tx=0xc0452e25..., block=436578643, gas_used=125624
-EXECUTED: SWAP completed successfully | Txs: 2 | 181,073 gas
-Parsed Uniswap V3 swap: 0.0259 WETH received
-Status: SUCCESS | Intent: SWAP | Gas used: 181073 | Duration: 23785ms
+CopyTraderStrategy initialized: mode=live, submission_mode=auto, strict=False
+Copy trading initialized: monitoring 1 leader(s) on arbitrum
+WalletMonitor polled blocks 438746232-438746282: 0 events
+demo_copy_trader HOLD: No new leader activity
+Status: HOLD | Intent: HOLD | Duration: 14218ms
+Iteration completed successfully.
 ```
 
-## On-Chain Transactions (Anvil fork)
+## On-Chain Transaction
 
-| Intent | TX Hash | Gas Used | Status |
-|--------|---------|----------|--------|
-| APPROVE (USDC) | `0x4f41602e01fb51316e2e008c0d283936144476827d70328678e7ac45b5b7a620` | 55,449 | SUCCESS |
-| SWAP (USDC->WETH) | `0xc0452e25751176811f903ece5f67d40b61b4bd54f1041336760dc367bbb9e722` | 125,624 | SUCCESS |
+None -- strategy returned HOLD. This is expected behavior when the leader wallet has no
+activity in the monitored block range. In a live Anvil fork (a snapshot), the WalletMonitor
+polls a historical window that may not contain leader activity.
 
 ## Suspicious Behaviour
 
 | # | Source | Severity | Pattern | Log Line |
 |---|--------|----------|---------|----------|
-| 1 | strategy | WARNING | Token resolution failure: BTC | `token_resolution_error token=BTC chain=arbitrum error_type=TokenNotFoundError...Did you mean 'WBTC'?` |
-| 2 | strategy | WARNING | Token resolution failure: STETH | `token_resolution_error token=STETH chain=arbitrum...Did you mean 'WSTETH'?` |
-| 3 | strategy | WARNING | Token resolution failure: RDNT | `token_resolution_error token=RDNT chain=arbitrum...Symbol 'RDNT' not found in registry` |
-| 4 | strategy | WARNING | Token resolution failure: MAGIC | `token_resolution_error token=MAGIC chain=arbitrum...Symbol 'MAGIC' not found in registry` |
-| 5 | strategy | WARNING | Token resolution failure: WOO | `token_resolution_error token=WOO chain=arbitrum...Symbol 'WOO' not found in registry` |
-| 6 | strategy | INFO | No CoinGecko API key — fallback to free tier | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback` |
-| 7 | strategy | INFO | USDC stablecoin price fallback | `Price for 'USDC' not in oracle cache, using stablecoin fallback ($1.00)` |
-| 8 | strategy | WARNING | Anvil port not freed after 5s | `Port 55649 not freed after 5.0s` |
+| 1 | strategy | ERROR | Circular import in pendle_pt_swap_arbitrum strategy | `Failed to import strategy strategies.incubating.pendle_pt_swap_arbitrum.strategy: cannot import name 'IntentStrategy' from partially initialized module 'almanak'` |
+| 2 | gateway | ERROR | Metrics HTTP port 9090 already in use | `OSError: [Errno 48] Address already in use` (metrics server, pre-existing gateway held port) |
+| 3 | gateway | INFO | No CoinGecko API key, using Chainlink + free fallback | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback.` |
+| 4 | strategy | INFO | IntentCompiler using placeholder prices | `IntentCompiler initialized for chain=arbitrum ... using_placeholders=True` |
+| 5 | strategy | INFO | No Alchemy API key, using free public RPC | `No API key configured -- using free public RPC for arbitrum (rate limits may apply)` |
 
 **Notes:**
-
-- **Findings 1-5 (Token resolution warnings)**: BTC, STETH, RDNT, MAGIC, WOO fail resolution on Arbitrum. These are emitted by the `CoinGeckoPriceSource` warm-up routine, which pre-fetches prices for a fixed list of common tokens. The list uses canonical names (BTC, STETH) that don't match Arbitrum's on-chain aliases (WBTC, WSTETH). These warnings are benign for this strategy run — WETH and USDC resolved correctly — but represent a data layer issue in the gateway's price warmup list. Real copy-trading strategies monitoring other token pairs could fail silently if the token they want to price falls in this resolution gap.
-- **Findings 6-7**: Informational — acceptable for Anvil testing. Chainlink on-chain pricing (primary) worked correctly for WETH.
-- **Finding 8**: Minor cosmetic warning about port cleanup timing.
+- **Finding 1**: A circular import error surfaced in `pendle_pt_swap_arbitrum.strategy` during
+  strategy discovery. This is unrelated to copy_trader but is a real bug that should be
+  ticketed separately. Severity is ERROR because it silently prevents that strategy from loading.
+- **Finding 2**: Port 9090 collision occurred because a pre-existing standalone gateway from the
+  test setup was still holding the metrics port. The strategy's auto-managed gateway started
+  cleanly on port 50053 instead. Non-blocking to this test, but indicates test isolation
+  needs improvement when running manual gateway alongside auto-managed gateway.
+- **Findings 3-5**: Informational only. Expected for Anvil testing without API keys configured.
+  No pricing was actually needed since the strategy returned HOLD without any intent compilation.
 
 ## Result
 
-**PASS** - The copy_trader strategy executed a $50.00 USDC->WETH copy-buy on Uniswap V3 via an
-Anvil fork of Arbitrum. Both transactions confirmed. Budget cap enforcement, force_action trigger,
-and copy_ratio scaling all behaved correctly. 0 ERROR-severity findings.
+**PASS** -- The copy_trader strategy initialized cleanly, started a WalletMonitor for the
+Wintermute leader on Arbitrum, found no copy signals in the 50-block lookback window (blocks
+438746232-438746282), and correctly returned HOLD in 14,218ms. No on-chain transaction was
+submitted. Two ERROR-class findings were detected: a pre-existing circular import bug in
+`pendle_pt_swap_arbitrum` (unrelated to copy_trader) and a metrics port collision from the test
+setup. Neither blocked the copy_trader run.
 
 ---
 
-SUSPICIOUS_BEHAVIOUR_COUNT: 8
-SUSPICIOUS_BEHAVIOUR_ERRORS: 0
+SUSPICIOUS_BEHAVIOUR_COUNT: 5
+SUSPICIOUS_BEHAVIOUR_ERRORS: 2

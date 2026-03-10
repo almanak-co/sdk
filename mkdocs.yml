@@ -155,6 +155,7 @@ nav:
     - agentic/adapters.md
   - CLI Reference:
     - cli/almanak.md
+    - cli/almanak-ax.md
     - cli/almanak-strat.md
     - cli/strat-run.md
     - cli/strat-teardown.md
