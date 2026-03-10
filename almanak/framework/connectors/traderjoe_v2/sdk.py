@@ -207,6 +207,20 @@ class TraderJoeV2SDK:
         if not self.web3.is_connected():
             raise TraderJoeV2SDKError(f"Failed to connect to RPC: {rpc_url}")
 
+        # Inject POA middleware for chains with non-standard extraData (Avalanche, BSC, Polygon)
+        from almanak.gateway.utils.rpc_provider import is_poa_chain
+
+        if is_poa_chain(self.chain):
+            try:
+                from web3.middleware import ExtraDataToPOAMiddleware
+
+                poa_mw = ExtraDataToPOAMiddleware
+            except ImportError:
+                from web3.middleware import geth_poa_middleware  # type: ignore[attr-defined]
+
+                poa_mw = geth_poa_middleware
+            self.web3.middleware_onion.inject(poa_mw, layer=0)
+
         # Get contract addresses
         addresses = TRADERJOE_V2_ADDRESSES[self.chain]
         self.factory_address = Web3.to_checksum_address(addresses["factory"])
