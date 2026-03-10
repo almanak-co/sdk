@@ -3671,3 +3671,308 @@ class TokenService(object):
             timeout,
             metadata,
             _registered_method=True)
+
+
+class LifecycleServiceStub(object):
+    """=============================================================================
+    LifecycleService - agent state and command management (V2 deployment)
+    =============================================================================
+
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.WriteState = channel.unary_unary(
+                '/almanak.gateway.proto.LifecycleService/WriteState',
+                request_serializer=gateway__pb2.WriteAgentStateRequest.SerializeToString,
+                response_deserializer=gateway__pb2.WriteAgentStateResponse.FromString,
+                _registered_method=True)
+        self.ReadState = channel.unary_unary(
+                '/almanak.gateway.proto.LifecycleService/ReadState',
+                request_serializer=gateway__pb2.ReadAgentStateRequest.SerializeToString,
+                response_deserializer=gateway__pb2.ReadAgentStateResponse.FromString,
+                _registered_method=True)
+        self.Heartbeat = channel.unary_unary(
+                '/almanak.gateway.proto.LifecycleService/Heartbeat',
+                request_serializer=gateway__pb2.HeartbeatRequest.SerializeToString,
+                response_deserializer=gateway__pb2.HeartbeatResponse.FromString,
+                _registered_method=True)
+        self.ReadCommand = channel.unary_unary(
+                '/almanak.gateway.proto.LifecycleService/ReadCommand',
+                request_serializer=gateway__pb2.ReadAgentCommandRequest.SerializeToString,
+                response_deserializer=gateway__pb2.ReadAgentCommandResponse.FromString,
+                _registered_method=True)
+        self.AckCommand = channel.unary_unary(
+                '/almanak.gateway.proto.LifecycleService/AckCommand',
+                request_serializer=gateway__pb2.AckAgentCommandRequest.SerializeToString,
+                response_deserializer=gateway__pb2.AckAgentCommandResponse.FromString,
+                _registered_method=True)
+        self.WriteCommand = channel.unary_unary(
+                '/almanak.gateway.proto.LifecycleService/WriteCommand',
+                request_serializer=gateway__pb2.WriteAgentCommandRequest.SerializeToString,
+                response_deserializer=gateway__pb2.WriteAgentCommandResponse.FromString,
+                _registered_method=True)
+
+
+class LifecycleServiceServicer(object):
+    """=============================================================================
+    LifecycleService - agent state and command management (V2 deployment)
+    =============================================================================
+
+    """
+
+    def WriteState(self, request, context):
+        """Write agent state (INITIALIZING, RUNNING, PAUSED, ERROR, STOPPING, TERMINATED).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ReadState(self, request, context):
+        """Read current agent state.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Heartbeat(self, request, context):
+        """Send heartbeat (updates last_heartbeat_at and increments iteration_count).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ReadCommand(self, request, context):
+        """Read the most recent unprocessed command for an agent.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AckCommand(self, request, context):
+        """Acknowledge (mark processed) a command.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def WriteCommand(self, request, context):
+        """Write a command to an agent (PAUSE, RESUME, STOP).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_LifecycleServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'WriteState': grpc.unary_unary_rpc_method_handler(
+                    servicer.WriteState,
+                    request_deserializer=gateway__pb2.WriteAgentStateRequest.FromString,
+                    response_serializer=gateway__pb2.WriteAgentStateResponse.SerializeToString,
+            ),
+            'ReadState': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReadState,
+                    request_deserializer=gateway__pb2.ReadAgentStateRequest.FromString,
+                    response_serializer=gateway__pb2.ReadAgentStateResponse.SerializeToString,
+            ),
+            'Heartbeat': grpc.unary_unary_rpc_method_handler(
+                    servicer.Heartbeat,
+                    request_deserializer=gateway__pb2.HeartbeatRequest.FromString,
+                    response_serializer=gateway__pb2.HeartbeatResponse.SerializeToString,
+            ),
+            'ReadCommand': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReadCommand,
+                    request_deserializer=gateway__pb2.ReadAgentCommandRequest.FromString,
+                    response_serializer=gateway__pb2.ReadAgentCommandResponse.SerializeToString,
+            ),
+            'AckCommand': grpc.unary_unary_rpc_method_handler(
+                    servicer.AckCommand,
+                    request_deserializer=gateway__pb2.AckAgentCommandRequest.FromString,
+                    response_serializer=gateway__pb2.AckAgentCommandResponse.SerializeToString,
+            ),
+            'WriteCommand': grpc.unary_unary_rpc_method_handler(
+                    servicer.WriteCommand,
+                    request_deserializer=gateway__pb2.WriteAgentCommandRequest.FromString,
+                    response_serializer=gateway__pb2.WriteAgentCommandResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'almanak.gateway.proto.LifecycleService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('almanak.gateway.proto.LifecycleService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class LifecycleService(object):
+    """=============================================================================
+    LifecycleService - agent state and command management (V2 deployment)
+    =============================================================================
+
+    """
+
+    @staticmethod
+    def WriteState(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.LifecycleService/WriteState',
+            gateway__pb2.WriteAgentStateRequest.SerializeToString,
+            gateway__pb2.WriteAgentStateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReadState(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.LifecycleService/ReadState',
+            gateway__pb2.ReadAgentStateRequest.SerializeToString,
+            gateway__pb2.ReadAgentStateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Heartbeat(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.LifecycleService/Heartbeat',
+            gateway__pb2.HeartbeatRequest.SerializeToString,
+            gateway__pb2.HeartbeatResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReadCommand(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.LifecycleService/ReadCommand',
+            gateway__pb2.ReadAgentCommandRequest.SerializeToString,
+            gateway__pb2.ReadAgentCommandResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AckCommand(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.LifecycleService/AckCommand',
+            gateway__pb2.AckAgentCommandRequest.SerializeToString,
+            gateway__pb2.AckAgentCommandResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WriteCommand(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.LifecycleService/WriteCommand',
+            gateway__pb2.WriteAgentCommandRequest.SerializeToString,
+            gateway__pb2.WriteAgentCommandResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)

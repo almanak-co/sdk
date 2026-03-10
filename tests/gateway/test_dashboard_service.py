@@ -599,56 +599,47 @@ class TestExecuteAction:
         """Test pausing a strategy successfully."""
         dashboard_service._initialized = True
 
-        # Mock state manager
-        mock_state_manager = AsyncMock()
-        mock_state = MagicMock()
-        mock_state.state = {"is_running": True}
-        mock_state.version = 1
-        mock_state_manager.load_state = AsyncMock(return_value=mock_state)
-        mock_state_manager.save_state = AsyncMock()
-        dashboard_service._state_manager = mock_state_manager
+        mock_store = MagicMock()
 
-        request = gateway_pb2.ExecuteActionRequest(
-            strategy_id="test_strategy",
-            action="PAUSE",
-            reason="Maintenance",
-        )
-        response = await dashboard_service.ExecuteAction(request, mock_context)
+        with patch("almanak.gateway.lifecycle.get_lifecycle_store", return_value=mock_store):
+            request = gateway_pb2.ExecuteActionRequest(
+                strategy_id="test_strategy",
+                action="PAUSE",
+                reason="Maintenance",
+            )
+            response = await dashboard_service.ExecuteAction(request, mock_context)
 
         assert response.success is True
         assert response.action_id  # Should have an action ID
 
-        # Verify state was updated
-        mock_state_manager.save_state.assert_called_once()
-        assert mock_state.state["is_paused"] is True
-        assert mock_state.state["is_running"] is False
+        mock_store.write_command.assert_called_once_with(
+            agent_id="test_strategy",
+            command="PAUSE",
+            issued_by="dashboard:Maintenance",
+        )
 
     @pytest.mark.asyncio
     async def test_execute_resume_success(self, dashboard_service, mock_context):
         """Test resuming a strategy successfully."""
         dashboard_service._initialized = True
 
-        # Mock state manager
-        mock_state_manager = AsyncMock()
-        mock_state = MagicMock()
-        mock_state.state = {"is_paused": True}
-        mock_state.version = 1
-        mock_state_manager.load_state = AsyncMock(return_value=mock_state)
-        mock_state_manager.save_state = AsyncMock()
-        dashboard_service._state_manager = mock_state_manager
+        mock_store = MagicMock()
 
-        request = gateway_pb2.ExecuteActionRequest(
-            strategy_id="test_strategy",
-            action="RESUME",
-            reason="Ready to continue",
-        )
-        response = await dashboard_service.ExecuteAction(request, mock_context)
+        with patch("almanak.gateway.lifecycle.get_lifecycle_store", return_value=mock_store):
+            request = gateway_pb2.ExecuteActionRequest(
+                strategy_id="test_strategy",
+                action="RESUME",
+                reason="Ready to continue",
+            )
+            response = await dashboard_service.ExecuteAction(request, mock_context)
 
         assert response.success is True
 
-        # Verify state was updated
-        mock_state_manager.save_state.assert_called_once()
-        assert mock_state.state["is_paused"] is False
+        mock_store.write_command.assert_called_once_with(
+            agent_id="test_strategy",
+            command="RESUME",
+            issued_by="dashboard:Ready to continue",
+        )
 
     @pytest.mark.asyncio
     async def test_execute_unknown_action(self, dashboard_service, mock_context):

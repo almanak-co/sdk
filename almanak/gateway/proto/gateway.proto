@@ -1451,3 +1451,96 @@ message TokenMetadataResponse {
   bool is_verified = 7;       // True if from static registry, false if on-chain lookup
   string source = 8;          // Resolution source: "cache", "static", "on_chain"
 }
+
+// =============================================================================
+// LifecycleService - agent state and command management (V2 deployment)
+// =============================================================================
+
+service LifecycleService {
+  // Write agent state (INITIALIZING, RUNNING, PAUSED, ERROR, STOPPING, TERMINATED).
+  rpc WriteState(WriteAgentStateRequest) returns (WriteAgentStateResponse);
+
+  // Read current agent state.
+  rpc ReadState(ReadAgentStateRequest) returns (ReadAgentStateResponse);
+
+  // Send heartbeat (updates last_heartbeat_at and increments iteration_count).
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Read the most recent unprocessed command for an agent.
+  rpc ReadCommand(ReadAgentCommandRequest) returns (ReadAgentCommandResponse);
+
+  // Acknowledge (mark processed) a command.
+  rpc AckCommand(AckAgentCommandRequest) returns (AckAgentCommandResponse);
+
+  // Write a command to an agent (PAUSE, RESUME, STOP).
+  rpc WriteCommand(WriteAgentCommandRequest) returns (WriteAgentCommandResponse);
+}
+
+// --- LifecycleService Messages ---
+
+message WriteAgentStateRequest {
+  string agent_id = 1;
+  string state = 2;             // INITIALIZING, RUNNING, PAUSED, ERROR, STOPPING, TERMINATED
+  string error_message = 3;     // Optional: error details when state=ERROR
+}
+
+message WriteAgentStateResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message ReadAgentStateRequest {
+  string agent_id = 1;
+}
+
+message ReadAgentStateResponse {
+  bool found = 1;
+  string agent_id = 2;
+  string state = 3;
+  string state_changed_at = 4;  // ISO 8601
+  string last_heartbeat_at = 5; // ISO 8601
+  string error_message = 6;
+  int64 iteration_count = 7;
+}
+
+message HeartbeatRequest {
+  string agent_id = 1;
+}
+
+message HeartbeatResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message ReadAgentCommandRequest {
+  string agent_id = 1;
+}
+
+message ReadAgentCommandResponse {
+  bool found = 1;
+  int64 command_id = 2;
+  string agent_id = 3;
+  string command = 4;           // PAUSE, RESUME, STOP
+  string issued_at = 5;         // ISO 8601
+  string issued_by = 6;
+}
+
+message AckAgentCommandRequest {
+  int64 command_id = 1;
+}
+
+message AckAgentCommandResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message WriteAgentCommandRequest {
+  string agent_id = 1;
+  string command = 2;           // PAUSE, RESUME, STOP
+  string issued_by = 3;
+}
+
+message WriteAgentCommandResponse {
+  bool success = 1;
+  string error = 2;
+}

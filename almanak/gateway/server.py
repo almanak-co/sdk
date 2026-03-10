@@ -19,6 +19,7 @@ from almanak.core.redaction import install_redaction
 from almanak.gateway.audit import AuditInterceptor, configure_structlog
 from almanak.gateway.auth import AuthInterceptor
 from almanak.gateway.core.settings import GatewaySettings, get_settings
+from almanak.gateway.lifecycle import get_lifecycle_store, reset_lifecycle_store
 from almanak.gateway.metrics import MetricsInterceptor, MetricsServer
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.services import (
@@ -27,6 +28,7 @@ from almanak.gateway.services import (
     ExecutionServiceServicer,
     FundingRateServiceServicer,
     IntegrationServiceServicer,
+    LifecycleServiceServicer,
     MarketServiceServicer,
     ObserveServiceServicer,
     PolymarketServiceServicer,
@@ -151,6 +153,7 @@ class GatewayServer:
         self._polymarket_servicer: PolymarketServiceServicer | None = None
         self._enso_servicer: EnsoServiceServicer | None = None
         self._token_servicer: TokenServiceServicer | None = None
+        self._lifecycle_servicer: LifecycleServiceServicer | None = None
 
     async def start(self) -> None:
         """Start the gRPC server."""
@@ -213,6 +216,20 @@ class GatewayServer:
 
         get_instance_registry(db_path=self.settings.gateway_db_path)
         logger.info(f"InstanceRegistry initialized with persistent storage: {self.settings.gateway_db_path}")
+
+        # Ensure PostgreSQL schema is up-to-date (idempotent, runs once)
+        if self.settings.database_url:
+            from almanak.gateway.database import ensure_schema
+
+            await ensure_schema(self.settings.database_url)
+            logger.info("PostgreSQL schema initialized")
+
+        # Initialize LifecycleStore (uses same gateway DB or database_url for platform)
+        lifecycle_store = get_lifecycle_store(
+            database_url=self.settings.database_url,
+            sqlite_path=self.settings.gateway_db_path,
+        )
+        logger.info("LifecycleStore initialized")
 
         # Log pricing source configuration
         if not self.settings.coingecko_api_key:
@@ -277,9 +294,13 @@ class GatewayServer:
         self._token_servicer = TokenServiceServicer(self.settings)
         gateway_pb2_grpc.add_TokenServiceServicer_to_server(self._token_servicer, self.server)
 
+        # Add Lifecycle service
+        self._lifecycle_servicer = LifecycleServiceServicer(store=lifecycle_store)
+        gateway_pb2_grpc.add_LifecycleServiceServicer_to_server(self._lifecycle_servicer, self.server)
+
         logger.info("Registered Phase 2 services: Market, State, Execution, Observe")
         logger.info("Registered Phase 3 services: Rpc, Integration, FundingRate, Simulation, Polymarket, Enso")
-        logger.info("Registered Dashboard and Token services")
+        logger.info("Registered Dashboard, Token, and Lifecycle services")
 
         # Enable reflection for debugging and development
         # Service names must match the proto package (almanak.gateway.proto)
@@ -297,6 +318,7 @@ class GatewayServer:
             "almanak.gateway.proto.PolymarketService",
             "almanak.gateway.proto.EnsoService",
             "almanak.gateway.proto.TokenService",
+            "almanak.gateway.proto.LifecycleService",
             reflection.SERVICE_NAME,
         )
         reflection.enable_server_reflection(service_names, self.server)
@@ -362,6 +384,9 @@ class GatewayServer:
         if self._executor:
             self._executor.shutdown(wait=True)
         # Close servicer resources (HTTP sessions, etc.)
+        # Note: _lifecycle_servicer is excluded -- it delegates to the
+        # LifecycleStore singleton whose lifecycle is managed via
+        # reset_lifecycle_store() and owns no HTTP sessions.
         for servicer in (
             self._market_servicer,
             self._rpc_servicer,
@@ -375,6 +400,8 @@ class GatewayServer:
         ):
             if servicer:
                 await servicer.close()
+        # Reset LifecycleStore singleton so a subsequent start() gets a fresh instance
+        reset_lifecycle_store()
 
     async def wait_for_termination(self) -> None:
         """Wait until server is terminated."""

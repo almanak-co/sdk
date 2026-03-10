@@ -451,6 +451,7 @@ class RunnerConfig:
     max_retries: int = 3
     initial_retry_delay: float = 1.0
     max_retry_delay: float = 60.0
+    lifecycle_poll_interval: float = 2.0
 
 
 # =============================================================================
@@ -713,6 +714,100 @@ class StrategyRunner:
         except Exception as e:
             logger.debug(f"Failed to send heartbeat to gateway (non-fatal): {e}")
 
+    def _lifecycle_write_state(self, agent_id: str, state: str, error_message: str | None = None) -> None:
+        """Write agent state to LifecycleStore via gateway.
+
+        Non-fatal: catches all exceptions.
+        """
+        client = self._get_gateway_client()
+        if client is None:
+            return
+        try:
+            from almanak.gateway.proto import gateway_pb2
+
+            request = gateway_pb2.WriteAgentStateRequest(
+                agent_id=agent_id,
+                state=state,
+                error_message=error_message or "",
+            )
+            client.lifecycle.WriteState(request)
+        except Exception as e:
+            logger.debug(f"Failed to write lifecycle state (non-fatal): {e}")
+
+    def _lifecycle_heartbeat(self, agent_id: str) -> None:
+        """Send lifecycle heartbeat via gateway.
+
+        Non-fatal: catches all exceptions.
+        """
+        client = self._get_gateway_client()
+        if client is None:
+            return
+        try:
+            from almanak.gateway.proto import gateway_pb2
+
+            request = gateway_pb2.HeartbeatRequest(agent_id=agent_id)
+            client.lifecycle.Heartbeat(request)
+        except Exception as e:
+            logger.debug(f"Failed to send lifecycle heartbeat (non-fatal): {e}")
+
+    def _lifecycle_poll_command(self, agent_id: str) -> str | None:
+        """Poll for pending command from LifecycleStore.
+
+        Returns command string (PAUSE, RESUME, STOP) or None.
+        The command is acknowledged only after it is returned so that callers
+        can apply side-effects before the ack.  If the process crashes between
+        read and ack the command will be re-delivered on the next poll.
+        Non-fatal: catches all exceptions.
+        """
+        client = self._get_gateway_client()
+        if client is None:
+            return None
+        try:
+            from almanak.gateway.proto import gateway_pb2
+
+            request = gateway_pb2.ReadAgentCommandRequest(agent_id=agent_id)
+            response = client.lifecycle.ReadCommand(request)
+            if response.found:
+                command = response.command
+                logger.info("Received lifecycle command: %s (from %s)", command, response.issued_by)
+                # Acknowledge after reading so the command is re-delivered if we crash
+                try:
+                    ack_request = gateway_pb2.AckAgentCommandRequest(command_id=response.command_id)
+                    client.lifecycle.AckCommand(ack_request)
+                except Exception:
+                    logger.warning("Failed to ack lifecycle command %s (will be re-delivered)", response.command_id)
+                return command
+            return None
+        except Exception as e:
+            logger.debug("Failed to poll lifecycle command (non-fatal): %s", e)
+            return None
+
+    def _lifecycle_handle_stop(self, strategy_id: str, strategy: Any) -> None:
+        """Handle STOP command: bridge into teardown or hard-stop.
+
+        Shared by both the normal STOP path and the STOP-while-paused path.
+        """
+        self._lifecycle_write_state(strategy_id, "STOPPING")
+        if hasattr(strategy, "supports_teardown") and strategy.supports_teardown():
+            from almanak.framework.teardown import TeardownMode, TeardownRequest, get_teardown_state_manager
+
+            manager = get_teardown_state_manager()
+            teardown_request = TeardownRequest(
+                strategy_id=strategy_id,
+                mode=TeardownMode.SOFT,
+                reason="Lifecycle STOP command",
+                requested_by="lifecycle",
+            )
+            manager.create_request(teardown_request)
+            logger.info("Created teardown request for %s from STOP command", strategy_id)
+            # Don't break -- let the next iteration pick up the teardown request
+            # via _check_teardown_requested(), which will execute teardown intents
+            # and then call request_shutdown()
+        else:
+            # Strategy doesn't support teardown -- hard stop
+            logger.info("Strategy %s doesn't support teardown, stopping immediately", strategy_id)
+            self._shutdown_requested = True
+
     def set_gateway_client(self, client: Any) -> None:
         """Explicitly set the gateway client for instance registration.
 
@@ -908,6 +1003,22 @@ class StrategyRunner:
                                     logger.warning(f"Could not resolve amount='all' for {amount_token}: {e}")
                         resolved_intents.append(intent)
                     teardown_intents = resolved_intents
+
+                # Step T2.7: If all intents were resolved away (e.g. all balances are 0),
+                # treat as "teardown complete" — nothing left to close.
+                if not teardown_intents:
+                    logger.info(f"🛑 {strategy_id} teardown complete (all positions already closed)")
+                    if request:
+                        manager.mark_completed(strategy_id, result={"reason": "all_balances_zero"})
+                    self.request_shutdown()
+                    self._lifecycle_write_state(strategy_id, "TERMINATED")
+                    self._record_success()
+                    return IterationResult(
+                        status=IterationStatus.TEARDOWN,
+                        intent=None,
+                        strategy_id=strategy_id,
+                        duration_ms=self._calculate_duration_ms(start_time),
+                    )
 
                 # Step T3: Execute (SAME as normal path)
                 if self._is_multi_chain:
@@ -1261,6 +1372,9 @@ class StrategyRunner:
         # Register this strategy instance with the gateway
         self._register_with_gateway(strategy)
 
+        # Write RUNNING state to LifecycleStore
+        self._lifecycle_write_state(strategy_id, "RUNNING")
+
         # Emit strategy started event
         start_event = TimelineEvent(
             timestamp=datetime.now(UTC),
@@ -1325,11 +1439,39 @@ class StrategyRunner:
                     self._consecutive_errors += 1
                     if self._consecutive_errors >= self.config.max_consecutive_errors:
                         await self._alert_consecutive_errors(strategy, result)
+                        self._lifecycle_write_state(
+                            strategy_id, "ERROR", error_message=str(result.error) if result.error else None
+                        )
                 else:
                     self._consecutive_errors = 0
 
                 # Send heartbeat to gateway after each iteration
                 self._gateway_heartbeat(strategy_id)
+
+                # Send lifecycle heartbeat
+                self._lifecycle_heartbeat(strategy_id)
+
+                # Poll for lifecycle commands (PAUSE, RESUME, STOP)
+                command = self._lifecycle_poll_command(strategy_id)
+                if command == "STOP":
+                    logger.info("Received STOP command for %s", strategy_id)
+                    self._lifecycle_handle_stop(strategy_id, strategy)
+                elif command == "PAUSE":
+                    logger.info("Received PAUSE command for %s", strategy_id)
+                    self._lifecycle_write_state(strategy_id, "PAUSED")
+                    # Wait for RESUME command (send heartbeats so operator sees liveness)
+                    while not self._shutdown_requested:
+                        self._lifecycle_heartbeat(strategy_id)
+                        resume_cmd = self._lifecycle_poll_command(strategy_id)
+                        if resume_cmd == "RESUME":
+                            logger.info("Received RESUME command for %s", strategy_id)
+                            self._lifecycle_write_state(strategy_id, "RUNNING")
+                            break
+                        elif resume_cmd == "STOP":
+                            logger.info("Received STOP command while paused for %s", strategy_id)
+                            self._lifecycle_handle_stop(strategy_id, strategy)
+                            break
+                        await asyncio.sleep(self.config.lifecycle_poll_interval)
 
                 # Check max iterations limit
                 loop_iteration_count += 1
@@ -1353,6 +1495,9 @@ class StrategyRunner:
                 self._consecutive_errors += 1
                 if not self._shutdown_requested:
                     await asyncio.sleep(interval)
+
+        # Write TERMINATED state to LifecycleStore
+        self._lifecycle_write_state(strategy_id, "TERMINATED")
 
         # Deregister from gateway (mark as INACTIVE)
         self._deregister_from_gateway(strategy_id)

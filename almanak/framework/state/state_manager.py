@@ -4,7 +4,12 @@ Implements two-tier state storage:
 - HOT: In-memory cache (<1ms access)
 - WARM: PostgreSQL or SQLite (<10ms access)
 
-Uses CAS (Compare-And-Swap) semantics for safe concurrent updates.
+Uses CAS (Compare-And-Swap) semantics via a version field for safe
+concurrent updates.  Each agent has exactly one row in the WARM tier
+(single-row-per-agent model).
+
+Important: Each strategy uses exactly one gateway and vice versa.
+No two strategies share a gateway.
 """
 
 import hashlib
@@ -344,6 +349,7 @@ class StateManagerConfig:
     warm_backend: WarmBackendType = WarmBackendType.POSTGRESQL
     hot_cache_ttl_seconds: int = 0  # 0 = no expiry
     hot_cache_max_size: int = 1000
+    database_url: str | None = None  # Direct URL (overrides postgres_config)
     postgres_config: PostgresConfig = field(default_factory=PostgresConfig)
     sqlite_config: SQLiteConfigLight = field(default_factory=SQLiteConfigLight)
     metrics_callback: Callable[[TierMetrics], None] | None = None
@@ -440,10 +446,27 @@ class PostgresStore:
     """PostgreSQL state storage.
 
     Provides <10ms access with full ACID guarantees and CAS support.
+    Uses plain SQL (no stored functions) so it works against any
+    PostgreSQL-compatible database without pre-applied migrations.
+
+    Can be initialised with either a ``PostgresConfig`` or a raw
+    ``database_url`` string.  When a URL is given the ``?schema=``
+    query parameter (if present) is stripped and applied as
+    ``search_path`` on every connection.
     """
 
-    def __init__(self, config: PostgresConfig) -> None:
-        self._config = config
+    def __init__(self, config: PostgresConfig | None = None, *, database_url: str | None = None) -> None:
+        self._schema: str | None = None
+        if database_url:
+            from almanak.gateway.database import _strip_schema_param
+
+            self._dsn, self._schema = _strip_schema_param(database_url)
+        elif config:
+            self._dsn = config.dsn
+        else:
+            raise ValueError("PostgresStore requires either config or database_url")
+        self._pool_min = config.pool_min_size if config else 2
+        self._pool_max = config.pool_max_size if config else 10
         self._pool: Any = None  # asyncpg.Pool
         self._initialized = False
 
@@ -455,10 +478,19 @@ class PostgresStore:
         try:
             import asyncpg
 
+            async def _init_connection(conn):
+                if self._schema:
+                    await conn.fetchval(
+                        "SELECT pg_catalog.set_config('search_path', $1, false)",
+                        self._schema,
+                    )
+
             self._pool = await asyncpg.create_pool(
-                dsn=self._config.dsn,
-                min_size=self._config.pool_min_size,
-                max_size=self._config.pool_max_size,
+                dsn=self._dsn,
+                min_size=self._pool_min,
+                max_size=self._pool_max,
+                init=_init_connection,
+                statement_cache_size=0,
             )
             self._initialized = True
             logger.info("PostgreSQL connection pool initialized")
@@ -476,21 +508,17 @@ class PostgresStore:
             self._initialized = False
 
     async def get(self, strategy_id: str) -> StateData | None:
-        """Get state from PostgreSQL.
-
-        Uses the get_latest_state function from schema.sql.
-        """
+        """Get state from PostgreSQL (single row per agent)."""
         if not self._initialized:
             await self.initialize()
 
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT ss.id, ss.version, ss.state_json, ss.schema_version,
-                       ss.checksum, ss.created_at
-                FROM strategy_state ss
-                WHERE ss.strategy_id = $1::uuid
-                  AND ss.is_active = TRUE
+                SELECT version, state_data, schema_version,
+                       checksum, created_at
+                FROM v2_strategy_state
+                WHERE agent_id = $1
                 """,
                 strategy_id,
             )
@@ -501,7 +529,7 @@ class PostgresStore:
             return StateData(
                 strategy_id=strategy_id,
                 version=row["version"],
-                state=json.loads(row["state_json"]) if isinstance(row["state_json"], str) else row["state_json"],
+                state=json.loads(row["state_data"]) if isinstance(row["state_data"], str) else row["state_data"],
                 schema_version=row["schema_version"],
                 checksum=row["checksum"] or "",
                 created_at=row["created_at"],
@@ -509,16 +537,13 @@ class PostgresStore:
             )
 
     async def save(self, state: StateData, expected_version: int | None = None) -> bool:
-        """Save state to PostgreSQL with CAS semantics.
+        """Save state to PostgreSQL with optional CAS semantics.
 
-        Args:
-            state: State data to save
-            expected_version: Expected current version for CAS update.
-                            If None, creates new state (INSERT).
-                            If provided, updates only if version matches (UPDATE).
+        Single-row-per-agent model: uses UPSERT when *expected_version* is
+        ``None``, or a version-guarded UPDATE for CAS.
 
         Returns:
-            True if save succeeded, False if CAS failed.
+            True if save succeeded.
 
         Raises:
             StateConflictError: If expected_version doesn't match current version.
@@ -530,34 +555,51 @@ class PostgresStore:
 
         async with self._pool.acquire() as conn:
             if expected_version is None:
-                # New state - use archive_state function to handle history
-                result = await conn.fetchval(
+                # UPSERT: insert new or overwrite existing (version increments)
+                await conn.execute(
                     """
-                    SELECT archive_state($1::uuid, $2::jsonb, $3)
+                    INSERT INTO v2_strategy_state
+                        (agent_id, version, state_data, schema_version, checksum,
+                         created_at, updated_at)
+                    VALUES ($1, $2, $3::jsonb, $4, $5, now(), now())
+                    ON CONFLICT (agent_id) DO UPDATE SET
+                        version = v2_strategy_state.version + 1,
+                        state_data = EXCLUDED.state_data,
+                        schema_version = EXCLUDED.schema_version,
+                        checksum = EXCLUDED.checksum,
+                        updated_at = now()
                     """,
                     state.strategy_id,
+                    state.version,
                     state_json,
                     state.schema_version,
+                    state.checksum,
                 )
-                return result is not None
+                return True
             else:
-                # CAS update - check version before updating
-                result = await conn.fetchval(
+                # CAS update -- inline version check
+                result = await conn.execute(
                     """
-                    SELECT cas_update_state($1::uuid, $2, $3::jsonb)
+                    UPDATE v2_strategy_state
+                    SET version = version + 1,
+                        state_data = $3::jsonb,
+                        schema_version = $4,
+                        checksum = $5,
+                        updated_at = now()
+                    WHERE agent_id = $1
+                      AND version = $2
                     """,
                     state.strategy_id,
                     expected_version,
                     state_json,
+                    state.schema_version,
+                    state.checksum,
                 )
 
-                if not result:
-                    # Get actual version for error message
+                if result == "UPDATE 0":
+                    # Version mismatch -- get actual version for the error
                     actual = await conn.fetchval(
-                        """
-                        SELECT version FROM strategy_state
-                        WHERE strategy_id = $1::uuid AND is_active = TRUE
-                        """,
+                        "SELECT version FROM v2_strategy_state WHERE agent_id = $1",
                         state.strategy_id,
                     )
                     raise StateConflictError(
@@ -569,7 +611,7 @@ class PostgresStore:
                 return True
 
     async def delete(self, strategy_id: str) -> bool:
-        """Delete state from PostgreSQL (mark as inactive).
+        """Delete state row for a strategy.
 
         Returns True if state was deleted.
         """
@@ -578,14 +620,19 @@ class PostgresStore:
 
         async with self._pool.acquire() as conn:
             result = await conn.execute(
-                """
-                UPDATE strategy_state
-                SET is_active = FALSE
-                WHERE strategy_id = $1::uuid AND is_active = TRUE
-                """,
+                "DELETE FROM v2_strategy_state WHERE agent_id = $1",
                 strategy_id,
             )
-            return "UPDATE 1" in result
+            return result != "DELETE 0"
+
+    async def get_all_strategy_ids(self) -> list[str]:
+        """Return all strategy IDs (for HOT cache warm-up)."""
+        if not self._initialized:
+            await self.initialize()
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("SELECT agent_id FROM v2_strategy_state")
+            return [row["agent_id"] for row in rows]
 
 
 # =============================================================================
@@ -735,10 +782,16 @@ class StateManager:
     async def _create_postgres_backend(self) -> WarmStore | None:
         """Create and initialize PostgreSQL backend.
 
+        Uses ``database_url`` when available (gateway-provided), otherwise
+        falls back to ``PostgresConfig``.
+
         Returns:
             Initialized PostgresStore instance.
         """
-        store = PostgresStore(self._config.postgres_config)
+        if self._config.database_url:
+            store = PostgresStore(database_url=self._config.database_url)
+        else:
+            store = PostgresStore(self._config.postgres_config)
         await store.initialize()
         logger.info("WARM tier (PostgreSQL) initialized")
         return store

@@ -348,54 +348,6 @@ class TestCASOperations:
 
 
 # =============================================================================
-# VERSION HISTORY TESTS
-# =============================================================================
-
-
-class TestVersionHistory:
-    """Tests for version history operations."""
-
-    async def test_get_version_history(self, memory_store, sample_state):
-        """Test retrieving version history."""
-        # Create multiple versions
-        for i in range(1, 6):
-            sample_state.state["version"] = i
-            sample_state.version = i
-            await memory_store.save(sample_state, expected_version=i - 1 if i > 1 else None)
-
-        history = await memory_store.get_version_history(sample_state.strategy_id, limit=10)
-        assert len(history) == 5
-        # Newest first
-        assert history[0].version == 5
-        assert history[4].version == 1
-
-    async def test_version_history_limit(self, memory_store, sample_state):
-        """Test version history respects limit."""
-        for i in range(1, 11):
-            sample_state.state["version"] = i
-            sample_state.version = i
-            await memory_store.save(sample_state, expected_version=i - 1 if i > 1 else None)
-
-        history = await memory_store.get_version_history(sample_state.strategy_id, limit=3)
-        assert len(history) == 3
-        assert history[0].version == 10
-        assert history[2].version == 8
-
-    async def test_cleanup_old_versions(self, memory_store, sample_state):
-        """Test cleaning up old versions."""
-        for i in range(1, 11):
-            sample_state.state["version"] = i
-            sample_state.version = i
-            await memory_store.save(sample_state, expected_version=i - 1 if i > 1 else None)
-
-        deleted = await memory_store.cleanup_old_versions(sample_state.strategy_id, keep_versions=3)
-        assert deleted == 7
-
-        history = await memory_store.get_version_history(sample_state.strategy_id, limit=20)
-        assert len(history) == 3
-
-
-# =============================================================================
 # TIMELINE EVENT TESTS
 # =============================================================================
 

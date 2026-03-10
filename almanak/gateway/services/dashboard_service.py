@@ -13,7 +13,6 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
 from uuid import uuid4
 
 import grpc
@@ -28,25 +27,6 @@ from almanak.gateway.timeline.store import get_timeline_store
 from almanak.gateway.validation import ValidationError, validate_strategy_id
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_database_url(database_url: str) -> dict[str, str | int]:
-    """Parse a database URL into connection parameters.
-
-    Args:
-        database_url: PostgreSQL connection URL (e.g., postgresql://user:pass@host:port/dbname)
-
-    Returns:
-        Dictionary with host, port, database, user, password keys.
-    """
-    parsed = urlparse(database_url)
-    return {
-        "host": parsed.hostname or "localhost",
-        "port": parsed.port or 5432,
-        "database": parsed.path.lstrip("/") or "almanak",
-        "user": parsed.username or "almanak",
-        "password": parsed.password or "",
-    }
 
 
 # Strategy categories in the filesystem
@@ -101,7 +81,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # Initialize state manager for reading strategy state
         try:
             from almanak.framework.state.state_manager import (
-                PostgresConfig,
                 StateManager,
                 StateManagerConfig,
                 WarmBackendType,
@@ -109,17 +88,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
             if self.settings.database_url:
                 backend_type = WarmBackendType.POSTGRESQL
-                # Parse database URL into PostgresConfig
-                db_params = _parse_database_url(self.settings.database_url)
                 config = StateManagerConfig(
                     warm_backend=backend_type,
-                    postgres_config=PostgresConfig(
-                        host=str(db_params["host"]),
-                        port=int(db_params["port"]),
-                        database=str(db_params["database"]),
-                        user=str(db_params["user"]),
-                        password=str(db_params["password"]),
-                    ),
+                    database_url=self.settings.database_url,
                 )
             else:
                 backend_type = WarmBackendType.SQLITE
@@ -127,7 +98,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
             self._state_manager = StateManager(config)
             await self._state_manager.initialize()
-            logger.info(f"DashboardService: StateManager initialized with {backend_type.value}")
+            logger.info(f"DashboardService: StateManager initialized with {backend_type.name}")
         except Exception as e:
             logger.warning(f"DashboardService: Failed to initialize StateManager: {e}")
             self._state_manager = None
@@ -896,12 +867,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # Log the action for audit
         logger.info(f"Dashboard action: {action} on {strategy_id}, reason: {reason}, action_id: {action_id}")
 
-        # Execute based on action type
-        if action == "PAUSE":
-            return await self._execute_pause(strategy_id, reason, action_id, context)
-        elif action == "RESUME":
-            return await self._execute_resume(strategy_id, reason, action_id, context)
-        else:
+        # Map dashboard actions to lifecycle commands.
+        # Instead of mutating state flags directly, we write a command to the
+        # LifecycleStore. The strategy runner's poll loop picks it up and
+        # transitions state atomically.
+        _ACTION_TO_COMMAND = {"PAUSE": "PAUSE", "RESUME": "RESUME", "STOP": "STOP"}
+        command = _ACTION_TO_COMMAND.get(action)
+        if command is None:
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
             context.set_details(f"Action not implemented: {action}")
             return gateway_pb2.ExecuteActionResponse(
@@ -910,108 +882,22 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 action_id=action_id,
             )
 
-    async def _execute_pause(
-        self,
-        strategy_id: str,
-        reason: str,
-        action_id: str,
-        context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.ExecuteActionResponse:
-        """Execute pause action on a strategy."""
-        if self._state_manager is None:
-            return gateway_pb2.ExecuteActionResponse(
-                success=False,
-                error="State manager not available",
-                action_id=action_id,
-            )
-
         try:
-            # Load current state
-            state_obj = await self._state_manager.load_state(strategy_id)
-            if state_obj is None:
-                return gateway_pb2.ExecuteActionResponse(
-                    success=False,
-                    error=f"Strategy state not found: {strategy_id}",
-                    action_id=action_id,
-                )
+            from almanak.gateway.lifecycle import get_lifecycle_store
 
-            # Update state to paused
-            state = state_obj.state
-            state["is_paused"] = True
-            state["is_running"] = False
-            state["pause_reason"] = reason
-            state["paused_at"] = datetime.now(UTC).isoformat()
-            state_obj.state = state
-
-            await self._state_manager.save_state(state_obj, state_obj.version)
-            # Keep registry status in sync with persisted control state.
-            try:
-                if not get_instance_registry().update_status(strategy_id, "PAUSED", reason):
-                    logger.warning(f"Registry instance not found while pausing {strategy_id}")
-            except Exception as reg_err:  # noqa: BLE001
-                logger.debug(f"Failed to update registry status to PAUSED for {strategy_id}: {reg_err}")
-
-            logger.info(f"Paused strategy {strategy_id}: {reason}")
+            store = get_lifecycle_store()
+            store.write_command(
+                agent_id=strategy_id,
+                command=command,
+                issued_by=f"dashboard:{reason}",
+            )
+            logger.info(f"Issued {command} command to {strategy_id} via lifecycle store: {reason}")
             return gateway_pb2.ExecuteActionResponse(
                 success=True,
                 action_id=action_id,
             )
         except Exception as e:
-            logger.error(f"Failed to pause strategy {strategy_id}: {e}")
-            return gateway_pb2.ExecuteActionResponse(
-                success=False,
-                error=str(e),
-                action_id=action_id,
-            )
-
-    async def _execute_resume(
-        self,
-        strategy_id: str,
-        reason: str,
-        action_id: str,
-        context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.ExecuteActionResponse:
-        """Execute resume action on a strategy."""
-        if self._state_manager is None:
-            return gateway_pb2.ExecuteActionResponse(
-                success=False,
-                error="State manager not available",
-                action_id=action_id,
-            )
-
-        try:
-            # Load current state
-            state_obj = await self._state_manager.load_state(strategy_id)
-            if state_obj is None:
-                return gateway_pb2.ExecuteActionResponse(
-                    success=False,
-                    error=f"Strategy state not found: {strategy_id}",
-                    action_id=action_id,
-                )
-
-            # Update state to resumed
-            state = state_obj.state
-            state["is_paused"] = False
-            state["is_running"] = True
-            state["pause_reason"] = None
-            state["resumed_at"] = datetime.now(UTC).isoformat()
-            state_obj.state = state
-
-            await self._state_manager.save_state(state_obj, state_obj.version)
-            # Keep registry status in sync with persisted control state.
-            try:
-                if not get_instance_registry().update_status(strategy_id, "RUNNING", reason):
-                    logger.warning(f"Registry instance not found while resuming {strategy_id}")
-            except Exception as reg_err:  # noqa: BLE001
-                logger.debug(f"Failed to update registry status to RUNNING for {strategy_id}: {reg_err}")
-
-            logger.info(f"Resumed strategy {strategy_id}: {reason}")
-            return gateway_pb2.ExecuteActionResponse(
-                success=True,
-                action_id=action_id,
-            )
-        except Exception as e:
-            logger.error(f"Failed to resume strategy {strategy_id}: {e}")
+            logger.error(f"Failed to issue {command} command to {strategy_id}: {e}")
             return gateway_pb2.ExecuteActionResponse(
                 success=False,
                 error=str(e),

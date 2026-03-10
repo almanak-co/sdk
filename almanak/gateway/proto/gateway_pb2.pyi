@@ -4636,3 +4636,261 @@ class TokenMetadataResponse(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___TokenMetadataResponse: _TypeAlias = TokenMetadataResponse  # noqa: Y015
+
+@_typing.final
+class WriteAgentStateRequest(_message.Message):
+    """--- LifecycleService Messages ---"""
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    AGENT_ID_FIELD_NUMBER: _builtins.int
+    STATE_FIELD_NUMBER: _builtins.int
+    ERROR_MESSAGE_FIELD_NUMBER: _builtins.int
+    agent_id: _builtins.str
+    state: _builtins.str
+    """INITIALIZING, RUNNING, PAUSED, ERROR, STOPPING, TERMINATED"""
+    error_message: _builtins.str
+    """Optional: error details when state=ERROR"""
+    def __init__(
+        self,
+        *,
+        agent_id: _builtins.str = ...,
+        state: _builtins.str = ...,
+        error_message: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id", "error_message", b"error_message", "state", b"state"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___WriteAgentStateRequest: _TypeAlias = WriteAgentStateRequest  # noqa: Y015
+
+@_typing.final
+class WriteAgentStateResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___WriteAgentStateResponse: _TypeAlias = WriteAgentStateResponse  # noqa: Y015
+
+@_typing.final
+class ReadAgentStateRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    AGENT_ID_FIELD_NUMBER: _builtins.int
+    agent_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        agent_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ReadAgentStateRequest: _TypeAlias = ReadAgentStateRequest  # noqa: Y015
+
+@_typing.final
+class ReadAgentStateResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    FOUND_FIELD_NUMBER: _builtins.int
+    AGENT_ID_FIELD_NUMBER: _builtins.int
+    STATE_FIELD_NUMBER: _builtins.int
+    STATE_CHANGED_AT_FIELD_NUMBER: _builtins.int
+    LAST_HEARTBEAT_AT_FIELD_NUMBER: _builtins.int
+    ERROR_MESSAGE_FIELD_NUMBER: _builtins.int
+    ITERATION_COUNT_FIELD_NUMBER: _builtins.int
+    found: _builtins.bool
+    agent_id: _builtins.str
+    state: _builtins.str
+    state_changed_at: _builtins.str
+    """ISO 8601"""
+    last_heartbeat_at: _builtins.str
+    """ISO 8601"""
+    error_message: _builtins.str
+    iteration_count: _builtins.int
+    def __init__(
+        self,
+        *,
+        found: _builtins.bool = ...,
+        agent_id: _builtins.str = ...,
+        state: _builtins.str = ...,
+        state_changed_at: _builtins.str = ...,
+        last_heartbeat_at: _builtins.str = ...,
+        error_message: _builtins.str = ...,
+        iteration_count: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id", "error_message", b"error_message", "found", b"found", "iteration_count", b"iteration_count", "last_heartbeat_at", b"last_heartbeat_at", "state", b"state", "state_changed_at", b"state_changed_at"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ReadAgentStateResponse: _TypeAlias = ReadAgentStateResponse  # noqa: Y015
+
+@_typing.final
+class HeartbeatRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    AGENT_ID_FIELD_NUMBER: _builtins.int
+    agent_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        agent_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___HeartbeatRequest: _TypeAlias = HeartbeatRequest  # noqa: Y015
+
+@_typing.final
+class HeartbeatResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___HeartbeatResponse: _TypeAlias = HeartbeatResponse  # noqa: Y015
+
+@_typing.final
+class ReadAgentCommandRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    AGENT_ID_FIELD_NUMBER: _builtins.int
+    agent_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        agent_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ReadAgentCommandRequest: _TypeAlias = ReadAgentCommandRequest  # noqa: Y015
+
+@_typing.final
+class ReadAgentCommandResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    FOUND_FIELD_NUMBER: _builtins.int
+    COMMAND_ID_FIELD_NUMBER: _builtins.int
+    AGENT_ID_FIELD_NUMBER: _builtins.int
+    COMMAND_FIELD_NUMBER: _builtins.int
+    ISSUED_AT_FIELD_NUMBER: _builtins.int
+    ISSUED_BY_FIELD_NUMBER: _builtins.int
+    found: _builtins.bool
+    command_id: _builtins.int
+    agent_id: _builtins.str
+    command: _builtins.str
+    """PAUSE, RESUME, STOP"""
+    issued_at: _builtins.str
+    """ISO 8601"""
+    issued_by: _builtins.str
+    def __init__(
+        self,
+        *,
+        found: _builtins.bool = ...,
+        command_id: _builtins.int = ...,
+        agent_id: _builtins.str = ...,
+        command: _builtins.str = ...,
+        issued_at: _builtins.str = ...,
+        issued_by: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id", "command", b"command", "command_id", b"command_id", "found", b"found", "issued_at", b"issued_at", "issued_by", b"issued_by"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ReadAgentCommandResponse: _TypeAlias = ReadAgentCommandResponse  # noqa: Y015
+
+@_typing.final
+class AckAgentCommandRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    COMMAND_ID_FIELD_NUMBER: _builtins.int
+    command_id: _builtins.int
+    def __init__(
+        self,
+        *,
+        command_id: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["command_id", b"command_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___AckAgentCommandRequest: _TypeAlias = AckAgentCommandRequest  # noqa: Y015
+
+@_typing.final
+class AckAgentCommandResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___AckAgentCommandResponse: _TypeAlias = AckAgentCommandResponse  # noqa: Y015
+
+@_typing.final
+class WriteAgentCommandRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    AGENT_ID_FIELD_NUMBER: _builtins.int
+    COMMAND_FIELD_NUMBER: _builtins.int
+    ISSUED_BY_FIELD_NUMBER: _builtins.int
+    agent_id: _builtins.str
+    command: _builtins.str
+    """PAUSE, RESUME, STOP"""
+    issued_by: _builtins.str
+    def __init__(
+        self,
+        *,
+        agent_id: _builtins.str = ...,
+        command: _builtins.str = ...,
+        issued_by: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id", "command", b"command", "issued_by", b"issued_by"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___WriteAgentCommandRequest: _TypeAlias = WriteAgentCommandRequest  # noqa: Y015
+
+@_typing.final
+class WriteAgentCommandResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___WriteAgentCommandResponse: _TypeAlias = WriteAgentCommandResponse  # noqa: Y015

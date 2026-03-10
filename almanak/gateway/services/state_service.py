@@ -11,7 +11,6 @@ import json
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
 
 import grpc
 
@@ -28,25 +27,6 @@ from almanak.gateway.validation import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_database_url(database_url: str) -> dict[str, str | int]:
-    """Parse a database URL into connection parameters.
-
-    Args:
-        database_url: PostgreSQL connection URL (e.g., postgresql://user:pass@host:port/dbname)
-
-    Returns:
-        Dictionary with host, port, database, user, password keys.
-    """
-    parsed = urlparse(database_url)
-    return {
-        "host": parsed.hostname or "localhost",
-        "port": parsed.port or 5432,
-        "database": parsed.path.lstrip("/") or "almanak",
-        "user": parsed.username or "almanak",
-        "password": parsed.password or "",
-    }
 
 
 class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
@@ -74,7 +54,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             return
 
         from almanak.framework.state.state_manager import (
-            PostgresConfig,
             StateManager,
             StateManagerConfig,
             WarmBackendType,
@@ -83,17 +62,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         # Use SQLite for local development, PostgreSQL for production
         if self.settings.database_url:
             backend_type = WarmBackendType.POSTGRESQL
-            # Parse database URL into PostgresConfig
-            db_params = _parse_database_url(self.settings.database_url)
             config = StateManagerConfig(
                 warm_backend=backend_type,
-                postgres_config=PostgresConfig(
-                    host=str(db_params["host"]),
-                    port=int(db_params["port"]),
-                    database=str(db_params["database"]),
-                    user=str(db_params["user"]),
-                    password=str(db_params["password"]),
-                ),
+                database_url=self.settings.database_url,
             )
         else:
             backend_type = WarmBackendType.SQLITE
@@ -103,7 +74,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         await self._state_manager.initialize()
 
         self._initialized = True
-        logger.info(f"StateService initialized with {backend_type.value} backend")
+        logger.info(f"StateService initialized with {backend_type.name} backend")
 
     async def LoadState(
         self,

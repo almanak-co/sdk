@@ -5,11 +5,14 @@ and lightweight deployments. Implements the same interface as PostgresStore
 for consistent behavior across backends.
 
 Features:
+- Single row per agent (matches PostgreSQL model)
 - CAS (Compare-And-Swap) via optimistic locking with version field
 - WAL mode for better concurrent read performance
-- Schema matches PostgreSQL for easy migration
 - Timeline events storage for execution audit trail
 - Checksum integrity verification
+
+Important: Each strategy uses exactly one gateway and vice versa.
+No two strategies share a gateway.
 
 Usage:
     config = SQLiteConfig(db_path="./state.db")
@@ -184,28 +187,19 @@ class TimelineEvent:
 
 SCHEMA_SQL = """
 -- Strategy state table (matches PostgreSQL schema)
-CREATE TABLE IF NOT EXISTS strategy_state (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    strategy_id TEXT NOT NULL,
+-- Single row per agent with CAS via version field.
+CREATE TABLE IF NOT EXISTS v2_strategy_state (
+    strategy_id TEXT PRIMARY KEY,
     version INTEGER NOT NULL DEFAULT 1,
     state_data TEXT NOT NULL,  -- JSON string
     schema_version INTEGER NOT NULL DEFAULT 1,
     checksum TEXT NOT NULL,
-    is_active INTEGER NOT NULL DEFAULT 1,  -- SQLite uses INTEGER for boolean
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
--- Unique constraint: only one active state per strategy
-CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_state_active
-ON strategy_state (strategy_id) WHERE is_active = 1;
-
--- Index for strategy lookups
-CREATE INDEX IF NOT EXISTS idx_strategy_state_strategy_id
-ON strategy_state (strategy_id);
-
 -- Timeline events table (matches PostgreSQL schema)
-CREATE TABLE IF NOT EXISTS timeline_events (
+CREATE TABLE IF NOT EXISTS v2_timeline_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy_id TEXT NOT NULL,
     event_type TEXT NOT NULL,
@@ -215,23 +209,23 @@ CREATE TABLE IF NOT EXISTS timeline_events (
 );
 
 -- Index for strategy event queries
-CREATE INDEX IF NOT EXISTS idx_timeline_events_strategy_id
-ON timeline_events (strategy_id);
+CREATE INDEX IF NOT EXISTS idx_v2_timeline_events_strategy_id
+ON v2_timeline_events (strategy_id);
 
 -- Index for correlation ID queries
-CREATE INDEX IF NOT EXISTS idx_timeline_events_correlation_id
-ON timeline_events (correlation_id);
+CREATE INDEX IF NOT EXISTS idx_v2_timeline_events_correlation_id
+ON v2_timeline_events (correlation_id);
 
 -- Index for event type queries
-CREATE INDEX IF NOT EXISTS idx_timeline_events_event_type
-ON timeline_events (event_type);
+CREATE INDEX IF NOT EXISTS idx_v2_timeline_events_event_type
+ON v2_timeline_events (event_type);
 
 -- Index for time-ordered queries
-CREATE INDEX IF NOT EXISTS idx_timeline_events_created_at
-ON timeline_events (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_v2_timeline_events_created_at
+ON v2_timeline_events (created_at DESC);
 
 -- CLOB orders table for Polymarket order tracking
-CREATE TABLE IF NOT EXISTS clob_orders (
+CREATE TABLE IF NOT EXISTS v2_clob_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id TEXT NOT NULL UNIQUE,
     market_id TEXT NOT NULL,
@@ -252,27 +246,27 @@ CREATE TABLE IF NOT EXISTS clob_orders (
 );
 
 -- Index for order_id lookups
-CREATE INDEX IF NOT EXISTS idx_clob_orders_order_id
-ON clob_orders (order_id);
+CREATE INDEX IF NOT EXISTS idx_v2_clob_orders_order_id
+ON v2_clob_orders (order_id);
 
 -- Index for market_id queries (open orders by market)
-CREATE INDEX IF NOT EXISTS idx_clob_orders_market_id
-ON clob_orders (market_id);
+CREATE INDEX IF NOT EXISTS idx_v2_clob_orders_market_id
+ON v2_clob_orders (market_id);
 
 -- Index for status queries (finding open orders)
-CREATE INDEX IF NOT EXISTS idx_clob_orders_status
-ON clob_orders (status);
+CREATE INDEX IF NOT EXISTS idx_v2_clob_orders_status
+ON v2_clob_orders (status);
 
 -- Index for intent_id queries (tracing orders to intents)
-CREATE INDEX IF NOT EXISTS idx_clob_orders_intent_id
-ON clob_orders (intent_id);
+CREATE INDEX IF NOT EXISTS idx_v2_clob_orders_intent_id
+ON v2_clob_orders (intent_id);
 
 -- Composite index for open orders by market
-CREATE INDEX IF NOT EXISTS idx_clob_orders_market_status
-ON clob_orders (market_id, status);
+CREATE INDEX IF NOT EXISTS idx_v2_clob_orders_market_status
+ON v2_clob_orders (market_id, status);
 
 -- Portfolio snapshots table for value tracking and PnL charts
-CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+CREATE TABLE IF NOT EXISTS v2_portfolio_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy_id TEXT NOT NULL,
     timestamp TEXT NOT NULL,
@@ -286,20 +280,20 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
 );
 
 -- Index for strategy + time queries (dashboard charts)
-CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_strategy_time
-ON portfolio_snapshots (strategy_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_v2_portfolio_snapshots_strategy_time
+ON v2_portfolio_snapshots (strategy_id, timestamp DESC);
 
 -- Index for cleanup queries
-CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_created_at
-ON portfolio_snapshots (created_at);
+CREATE INDEX IF NOT EXISTS idx_v2_portfolio_snapshots_created_at
+ON v2_portfolio_snapshots (created_at);
 
 -- Unique constraint to prevent duplicate timestamps per strategy
-CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolio_snapshots_unique
-ON portfolio_snapshots (strategy_id, timestamp);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_portfolio_snapshots_unique
+ON v2_portfolio_snapshots (strategy_id, timestamp);
 
 -- Portfolio metrics table for PnL baseline tracking
 -- Stores values that survive strategy restarts
-CREATE TABLE IF NOT EXISTS portfolio_metrics (
+CREATE TABLE IF NOT EXISTS v2_portfolio_metrics (
     strategy_id TEXT PRIMARY KEY,
     initial_value_usd TEXT NOT NULL,  -- Decimal as string, set on first run
     initial_timestamp TEXT NOT NULL,
@@ -320,7 +314,7 @@ class SQLiteStore:
     """SQLite state storage backend.
 
     Provides <5ms access for local state storage with full CAS support.
-    Schema matches PostgreSQL for easy migration between backends.
+    Single row per agent -- schema matches PostgreSQL for easy migration.
 
     Thread Safety:
         Uses check_same_thread=False to allow async access from different threads.
@@ -456,7 +450,7 @@ class SQLiteStore:
     # -------------------------------------------------------------------------
 
     async def get(self, strategy_id: str) -> StateData | None:
-        """Get active state for a strategy.
+        """Get state for a strategy (single row per agent).
 
         Args:
             strategy_id: Strategy identifier.
@@ -470,10 +464,10 @@ class SQLiteStore:
         def _sync_get() -> StateData | None:
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
-                SELECT id, strategy_id, version, state_data, schema_version,
+                SELECT strategy_id, version, state_data, schema_version,
                        checksum, created_at
-                FROM strategy_state
-                WHERE strategy_id = ? AND is_active = 1
+                FROM v2_strategy_state
+                WHERE strategy_id = ?
                 """,
                 (strategy_id,),
             )
@@ -504,12 +498,12 @@ class SQLiteStore:
         return await loop.run_in_executor(None, _sync_get)
 
     async def save(self, state: StateData, expected_version: int | None = None) -> bool:
-        """Save state with optional CAS semantics.
+        """Save state with optional CAS semantics (single row per agent).
 
         Args:
             state: State data to save.
             expected_version: Expected current version for CAS update.
-                If None, creates new state or updates without version check.
+                If None, upserts without version check.
                 If provided, updates only if current version matches.
 
         Returns:
@@ -527,28 +521,47 @@ class SQLiteStore:
         now = datetime.now(UTC).isoformat()
 
         def _sync_save() -> bool:
-            # Check for existing active state
-            cursor = self._conn.execute(  # type: ignore[union-attr]
-                """
-                SELECT id, version FROM strategy_state
-                WHERE strategy_id = ? AND is_active = 1
-                """,
-                (state.strategy_id,),
-            )
-            existing = cursor.fetchone()
-
-            if existing is None:
-                # Insert new state - use ON CONFLICT to handle race conditions
-                # where multiple concurrent saves try to insert for the same strategy_id
+            if expected_version is not None:
+                # CAS update -- version must match
+                cursor = self._conn.execute(  # type: ignore[union-attr]
+                    """
+                    UPDATE v2_strategy_state
+                    SET version = version + 1,
+                        state_data = ?,
+                        schema_version = ?,
+                        checksum = ?,
+                        updated_at = ?
+                    WHERE strategy_id = ? AND version = ?
+                    """,
+                    (state_json, state.schema_version, checksum, now, state.strategy_id, expected_version),
+                )
+                if cursor.rowcount == 0:
+                    # Check actual version for error message
+                    cursor2 = self._conn.execute(  # type: ignore[union-attr]
+                        "SELECT version FROM v2_strategy_state WHERE strategy_id = ?",
+                        (state.strategy_id,),
+                    )
+                    row = cursor2.fetchone()
+                    raise StateConflictError(
+                        strategy_id=state.strategy_id,
+                        expected_version=expected_version,
+                        actual_version=row["version"] if row else 0,
+                    )
+                self._conn.commit()  # type: ignore[union-attr]
+                return True
+            else:
+                # UPSERT: insert or update with version increment
                 self._conn.execute(  # type: ignore[union-attr]
                     """
-                    INSERT INTO strategy_state
+                    INSERT INTO v2_strategy_state
                     (strategy_id, version, state_data, schema_version, checksum,
-                     is_active, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-                    ON CONFLICT (strategy_id) WHERE is_active = 1
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (strategy_id)
                     DO UPDATE SET
+                        version = v2_strategy_state.version + 1,
                         state_data = excluded.state_data,
+                        schema_version = excluded.schema_version,
                         checksum = excluded.checksum,
                         updated_at = excluded.updated_at
                     """,
@@ -565,53 +578,11 @@ class SQLiteStore:
                 self._conn.commit()  # type: ignore[union-attr]
                 return True
 
-            # Existing state found - check CAS if expected_version provided
-            current_version = existing["version"]
-
-            if expected_version is not None and current_version != expected_version:
-                raise StateConflictError(
-                    strategy_id=state.strategy_id,
-                    expected_version=expected_version,
-                    actual_version=current_version,
-                )
-
-            # Archive old state (mark inactive) and insert new version
-            self._conn.execute(  # type: ignore[union-attr]
-                """
-                UPDATE strategy_state
-                SET is_active = 0, updated_at = ?
-                WHERE strategy_id = ? AND is_active = 1
-                """,
-                (now, state.strategy_id),
-            )
-
-            # Insert new version
-            new_version = current_version + 1
-            self._conn.execute(  # type: ignore[union-attr]
-                """
-                INSERT INTO strategy_state
-                (strategy_id, version, state_data, schema_version, checksum,
-                 is_active, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-                """,
-                (
-                    state.strategy_id,
-                    new_version,
-                    state_json,
-                    state.schema_version,
-                    checksum,
-                    now,
-                    now,
-                ),
-            )
-            self._conn.commit()  # type: ignore[union-attr]
-            return True
-
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_save)
 
     async def delete(self, strategy_id: str) -> bool:
-        """Delete state for a strategy (mark as inactive).
+        """Delete state row for a strategy.
 
         Args:
             strategy_id: Strategy identifier.
@@ -623,14 +594,9 @@ class SQLiteStore:
             await self.initialize()
 
         def _sync_delete() -> bool:
-            now = datetime.now(UTC).isoformat()
             cursor = self._conn.execute(  # type: ignore[union-attr]
-                """
-                UPDATE strategy_state
-                SET is_active = 0, updated_at = ?
-                WHERE strategy_id = ? AND is_active = 1
-                """,
-                (now, strategy_id),
+                "DELETE FROM v2_strategy_state WHERE strategy_id = ?",
+                (strategy_id,),
             )
             self._conn.commit()  # type: ignore[union-attr]
             return cursor.rowcount > 0
@@ -638,61 +604,8 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_delete)
 
-    async def get_version_history(self, strategy_id: str, limit: int = 10) -> list[StateData]:
-        """Get version history for a strategy.
-
-        Args:
-            strategy_id: Strategy identifier.
-            limit: Maximum number of versions to return.
-
-        Returns:
-            List of StateData, newest first.
-        """
-        if not self._initialized:
-            await self.initialize()
-
-        def _sync_get_history() -> list[StateData]:
-            cursor = self._conn.execute(  # type: ignore[union-attr]
-                """
-                SELECT id, strategy_id, version, state_data, schema_version,
-                       checksum, created_at, is_active
-                FROM strategy_state
-                WHERE strategy_id = ?
-                ORDER BY version DESC
-                LIMIT ?
-                """,
-                (strategy_id, limit),
-            )
-
-            results = []
-            for row in cursor.fetchall():
-                state_data = row["state_data"]
-                if isinstance(state_data, str):
-                    state_data = json.loads(state_data)
-
-                created_at = row["created_at"]
-                if isinstance(created_at, str):
-                    created_at = datetime.fromisoformat(created_at)
-
-                results.append(
-                    StateData(
-                        strategy_id=row["strategy_id"],
-                        version=row["version"],
-                        state=state_data,
-                        schema_version=row["schema_version"],
-                        checksum=row["checksum"] or "",
-                        created_at=created_at,
-                        loaded_from=StateTier.WARM,
-                    )
-                )
-
-            return results
-
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _sync_get_history)
-
     async def get_all_strategy_ids(self) -> list[str]:
-        """Get all strategy IDs with active state.
+        """Get all strategy IDs.
 
         Returns:
             List of strategy IDs.
@@ -702,11 +615,7 @@ class SQLiteStore:
 
         def _sync_get_ids() -> list[str]:
             cursor = self._conn.execute(  # type: ignore[union-attr]
-                """
-                SELECT DISTINCT strategy_id FROM strategy_state
-                WHERE is_active = 1
-                ORDER BY strategy_id
-                """
+                "SELECT strategy_id FROM v2_strategy_state ORDER BY strategy_id"
             )
             return [row["strategy_id"] for row in cursor.fetchall()]
 
@@ -735,7 +644,7 @@ class SQLiteStore:
         def _sync_save_event() -> int:
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
-                INSERT INTO timeline_events
+                INSERT INTO v2_timeline_events
                 (strategy_id, event_type, event_data, correlation_id, created_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
@@ -780,7 +689,7 @@ class SQLiteStore:
             query = """
                 SELECT id, strategy_id, event_type, event_data,
                        correlation_id, created_at
-                FROM timeline_events
+                FROM v2_timeline_events
                 WHERE strategy_id = ?
             """
             params: list[Any] = [strategy_id]
@@ -820,7 +729,7 @@ class SQLiteStore:
                 """
                 SELECT id, strategy_id, event_type, event_data,
                        correlation_id, created_at
-                FROM timeline_events
+                FROM v2_timeline_events
                 WHERE id = ?
                 """,
                 (event_id,),
@@ -848,7 +757,7 @@ class SQLiteStore:
                 """
                 SELECT id, strategy_id, event_type, event_data,
                        correlation_id, created_at
-                FROM timeline_events
+                FROM v2_timeline_events
                 WHERE correlation_id = ?
                 ORDER BY created_at DESC
                 """,
@@ -877,7 +786,7 @@ class SQLiteStore:
             await self.initialize()
 
         def _sync_count() -> int:
-            query = "SELECT COUNT(*) as count FROM timeline_events WHERE 1=1"
+            query = "SELECT COUNT(*) as count FROM v2_timeline_events WHERE 1=1"
             params: list[Any] = []
 
             if strategy_id:
@@ -916,7 +825,7 @@ class SQLiteStore:
             if before:
                 cursor = self._conn.execute(  # type: ignore[union-attr]
                     """
-                    DELETE FROM timeline_events
+                    DELETE FROM v2_timeline_events
                     WHERE strategy_id = ? AND created_at < ?
                     """,
                     (strategy_id, before.isoformat()),
@@ -924,7 +833,7 @@ class SQLiteStore:
             else:
                 cursor = self._conn.execute(  # type: ignore[union-attr]
                     """
-                    DELETE FROM timeline_events
+                    DELETE FROM v2_timeline_events
                     WHERE strategy_id = ?
                     """,
                     (strategy_id,),
@@ -984,23 +893,16 @@ class SQLiteStore:
                 "wal_mode": self._config.wal_mode,
             }
 
-            # Count active states
+            # Count states (single row per agent)
             cursor = self._conn.execute(  # type: ignore[union-attr]
-                "SELECT COUNT(*) as count FROM strategy_state WHERE is_active = 1"
+                "SELECT COUNT(*) as count FROM v2_strategy_state"
             )
             row = cursor.fetchone()
             stats["active_states"] = row["count"] if row else 0
 
-            # Count total state versions
-            cursor = self._conn.execute(  # type: ignore[union-attr]
-                "SELECT COUNT(*) as count FROM strategy_state"
-            )
-            row = cursor.fetchone()
-            stats["total_state_versions"] = row["count"] if row else 0
-
             # Count timeline events
             cursor = self._conn.execute(  # type: ignore[union-attr]
-                "SELECT COUNT(*) as count FROM timeline_events"
+                "SELECT COUNT(*) as count FROM v2_timeline_events"
             )
             row = cursor.fetchone()
             stats["total_events"] = row["count"] if row else 0
@@ -1022,50 +924,6 @@ class SQLiteStore:
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get_stats)
-
-    async def cleanup_old_versions(
-        self,
-        strategy_id: str,
-        keep_versions: int = 10,
-    ) -> int:
-        """Clean up old inactive state versions.
-
-        Args:
-            strategy_id: Strategy identifier.
-            keep_versions: Number of recent versions to keep.
-
-        Returns:
-            Number of versions deleted.
-        """
-        if not self._initialized:
-            await self.initialize()
-
-        def _sync_cleanup() -> int:
-            # Get versions to delete (all but the most recent N)
-            cursor = self._conn.execute(  # type: ignore[union-attr]
-                """
-                SELECT id FROM strategy_state
-                WHERE strategy_id = ?
-                ORDER BY version DESC
-                LIMIT -1 OFFSET ?
-                """,
-                (strategy_id, keep_versions),
-            )
-            ids_to_delete = [row["id"] for row in cursor.fetchall()]
-
-            if not ids_to_delete:
-                return 0
-
-            placeholders = ",".join("?" * len(ids_to_delete))
-            cursor = self._conn.execute(  # type: ignore[union-attr]
-                f"DELETE FROM strategy_state WHERE id IN ({placeholders})",
-                ids_to_delete,
-            )
-            self._conn.commit()  # type: ignore[union-attr]
-            return cursor.rowcount
-
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _sync_cleanup)
 
     # -------------------------------------------------------------------------
     # CLOB Order Operations
@@ -1093,7 +951,7 @@ class SQLiteStore:
         def _sync_save() -> bool:
             # Check if order already exists
             cursor = self._conn.execute(  # type: ignore[union-attr]
-                "SELECT id FROM clob_orders WHERE order_id = ?",
+                "SELECT id FROM v2_clob_orders WHERE order_id = ?",
                 (order.order_id,),
             )
             existing = cursor.fetchone()
@@ -1102,7 +960,7 @@ class SQLiteStore:
                 # Update existing order
                 self._conn.execute(  # type: ignore[union-attr]
                     """
-                    UPDATE clob_orders
+                    UPDATE v2_clob_orders
                     SET market_id = ?, token_id = ?, side = ?, status = ?,
                         price = ?, size = ?, filled_size = ?, average_fill_price = ?,
                         fills = ?, order_type = ?, intent_id = ?, error = ?,
@@ -1131,7 +989,7 @@ class SQLiteStore:
                 # Insert new order
                 self._conn.execute(  # type: ignore[union-attr]
                     """
-                    INSERT INTO clob_orders
+                    INSERT INTO v2_clob_orders
                     (order_id, market_id, token_id, side, status, price, size,
                      filled_size, average_fill_price, fills, order_type, intent_id,
                      error, metadata, submitted_at, updated_at)
@@ -1181,7 +1039,7 @@ class SQLiteStore:
                 SELECT order_id, market_id, token_id, side, status, price, size,
                        filled_size, average_fill_price, fills, order_type, intent_id,
                        error, metadata, submitted_at, updated_at
-                FROM clob_orders
+                FROM v2_clob_orders
                 WHERE order_id = ?
                 """,
                 (order_id,),
@@ -1196,7 +1054,7 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get)
 
-    async def get_open_clob_orders(self, market_id: str | None = None) -> list["ClobOrderState"]:
+    async def get_open_v2_clob_orders(self, market_id: str | None = None) -> list["ClobOrderState"]:
         """Get all open CLOB orders, optionally filtered by market.
 
         Open orders are those with status: pending, submitted, live, partially_filled.
@@ -1220,7 +1078,7 @@ class SQLiteStore:
                     SELECT order_id, market_id, token_id, side, status, price, size,
                            filled_size, average_fill_price, fills, order_type, intent_id,
                            error, metadata, submitted_at, updated_at
-                    FROM clob_orders
+                    FROM v2_clob_orders
                     WHERE market_id = ? AND status IN ({placeholders})
                     ORDER BY submitted_at DESC
                     """,
@@ -1233,7 +1091,7 @@ class SQLiteStore:
                     SELECT order_id, market_id, token_id, side, status, price, size,
                            filled_size, average_fill_price, fills, order_type, intent_id,
                            error, metadata, submitted_at, updated_at
-                    FROM clob_orders
+                    FROM v2_clob_orders
                     WHERE status IN ({placeholders})
                     ORDER BY submitted_at DESC
                     """,
@@ -1296,7 +1154,7 @@ class SQLiteStore:
 
             params.append(order_id)
 
-            query = f"UPDATE clob_orders SET {', '.join(updates)} WHERE order_id = ?"
+            query = f"UPDATE v2_clob_orders SET {', '.join(updates)} WHERE order_id = ?"
             cursor = self._conn.execute(query, params)  # type: ignore[union-attr]
             self._conn.commit()  # type: ignore[union-attr]
             return cursor.rowcount > 0
@@ -1318,7 +1176,7 @@ class SQLiteStore:
 
         def _sync_delete() -> bool:
             cursor = self._conn.execute(  # type: ignore[union-attr]
-                "DELETE FROM clob_orders WHERE order_id = ?",
+                "DELETE FROM v2_clob_orders WHERE order_id = ?",
                 (order_id,),
             )
             self._conn.commit()  # type: ignore[union-attr]
@@ -1327,7 +1185,7 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_delete)
 
-    async def get_clob_orders_by_intent(self, intent_id: str) -> list["ClobOrderState"]:
+    async def get_v2_clob_orders_by_intent(self, intent_id: str) -> list["ClobOrderState"]:
         """Get all CLOB orders associated with an intent.
 
         Args:
@@ -1345,7 +1203,7 @@ class SQLiteStore:
                 SELECT order_id, market_id, token_id, side, status, price, size,
                        filled_size, average_fill_price, fills, order_type, intent_id,
                        error, metadata, submitted_at, updated_at
-                FROM clob_orders
+                FROM v2_clob_orders
                 WHERE intent_id = ?
                 ORDER BY submitted_at DESC
                 """,
@@ -1360,7 +1218,7 @@ class SQLiteStore:
         """Convert a SQLite row to ClobOrderState.
 
         Args:
-            row: SQLite row from clob_orders table.
+            row: SQLite row from v2_clob_orders table.
 
         Returns:
             ClobOrderState instance.
@@ -1449,7 +1307,7 @@ class SQLiteStore:
 
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
-                INSERT OR REPLACE INTO portfolio_snapshots (
+                INSERT OR REPLACE INTO v2_portfolio_snapshots (
                     strategy_id, timestamp, iteration_number, total_value_usd,
                     available_cash_usd, value_confidence, positions_json, chain, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1490,7 +1348,7 @@ class SQLiteStore:
                 """
                 SELECT strategy_id, timestamp, iteration_number, total_value_usd,
                        available_cash_usd, value_confidence, positions_json, chain
-                FROM portfolio_snapshots
+                FROM v2_portfolio_snapshots
                 WHERE strategy_id = ?
                 ORDER BY timestamp DESC
                 LIMIT 1
@@ -1532,7 +1390,7 @@ class SQLiteStore:
                 """
                 SELECT strategy_id, timestamp, iteration_number, total_value_usd,
                        available_cash_usd, value_confidence, positions_json, chain
-                FROM portfolio_snapshots
+                FROM v2_portfolio_snapshots
                 WHERE strategy_id = ? AND timestamp >= ?
                 ORDER BY timestamp ASC
                 LIMIT ?
@@ -1570,7 +1428,7 @@ class SQLiteStore:
                 """
                 SELECT strategy_id, timestamp, iteration_number, total_value_usd,
                        available_cash_usd, value_confidence, positions_json, chain
-                FROM portfolio_snapshots
+                FROM v2_portfolio_snapshots
                 WHERE strategy_id = ? AND timestamp <= ?
                 ORDER BY timestamp DESC
                 LIMIT 1
@@ -1589,7 +1447,7 @@ class SQLiteStore:
         """Convert a SQLite row to PortfolioSnapshot.
 
         Args:
-            row: SQLite row from portfolio_snapshots table.
+            row: SQLite row from v2_portfolio_snapshots table.
 
         Returns:
             PortfolioSnapshot instance.
@@ -1643,7 +1501,7 @@ class SQLiteStore:
     # Portfolio Metrics Methods (PnL Baseline)
     # =========================================================================
 
-    async def save_portfolio_metrics(self, metrics: "PortfolioMetrics") -> bool:
+    async def save_v2_portfolio_metrics(self, metrics: "PortfolioMetrics") -> bool:
         """Save or update portfolio metrics for a strategy.
 
         Args:
@@ -1661,7 +1519,7 @@ class SQLiteStore:
 
             self._conn.execute(  # type: ignore[union-attr]
                 """
-                INSERT OR REPLACE INTO portfolio_metrics (
+                INSERT OR REPLACE INTO v2_portfolio_metrics (
                     strategy_id, initial_value_usd, initial_timestamp,
                     deposits_usd, withdrawals_usd, gas_spent_usd, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1682,7 +1540,7 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_save)
 
-    async def get_portfolio_metrics(self, strategy_id: str) -> "PortfolioMetrics | None":
+    async def get_v2_portfolio_metrics(self, strategy_id: str) -> "PortfolioMetrics | None":
         """Get portfolio metrics for a strategy.
 
         Args:
@@ -1703,7 +1561,7 @@ class SQLiteStore:
                 """
                 SELECT strategy_id, initial_value_usd, initial_timestamp,
                        deposits_usd, withdrawals_usd, gas_spent_usd, updated_at
-                FROM portfolio_metrics
+                FROM v2_portfolio_metrics
                 WHERE strategy_id = ?
                 """,
                 (strategy_id,),
@@ -1751,7 +1609,7 @@ class SQLiteStore:
 
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
-                DELETE FROM portfolio_snapshots
+                DELETE FROM v2_portfolio_snapshots
                 WHERE created_at < ?
                 """,
                 (cutoff,),

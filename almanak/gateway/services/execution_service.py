@@ -140,26 +140,30 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         """Create the appropriate signer based on wallet address.
 
         If wallet_address matches the configured Safe address, creates a
-        DirectSafeSigner. Otherwise creates a LocalKeySigner.
+        ZodiacRolesSigner (zodiac mode) or DirectSafeSigner (direct mode).
+        Otherwise creates a LocalKeySigner.
         """
         from almanak.framework.execution.signer import LocalKeySigner
 
-        private_key = self.settings.private_key
-        if not private_key:
-            raise ValueError("PRIVATE_KEY not configured in gateway settings")
-
         if self._is_safe_address(wallet_address):
-            from eth_account import Account
-
             from almanak.framework.execution.signer.safe.config import SafeSignerConfig, SafeWalletConfig
 
             safe_mode = self.settings.safe_mode or "direct"
+
             if safe_mode == "zodiac":
                 if not self.settings.eoa_address:
                     raise ValueError("EOA_ADDRESS must be configured when ALMANAK_GATEWAY_SAFE_MODE=zodiac")
+                if not self.settings.signer_service_url:
+                    raise ValueError("SIGNER_SERVICE_URL must be configured when ALMANAK_GATEWAY_SAFE_MODE=zodiac")
                 eoa_address = self.settings.eoa_address
             else:
+                private_key = self.settings.private_key
+                if not private_key:
+                    raise ValueError("PRIVATE_KEY not configured in gateway settings")
+                from eth_account import Account
+
                 eoa_address = Account.from_key(private_key).address
+
             assert self.settings.safe_address is not None  # guarded by _is_safe_address
             wallet_config = SafeWalletConfig(
                 safe_address=self.settings.safe_address,
@@ -169,7 +173,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             safe_config = SafeSignerConfig(
                 mode=safe_mode,
                 wallet_config=wallet_config,
-                private_key=private_key,
+                private_key=self.settings.private_key if safe_mode != "zodiac" else None,
                 signer_service_url=self.settings.signer_service_url if safe_mode == "zodiac" else None,
                 signer_service_jwt=self.settings.signer_service_jwt if safe_mode == "zodiac" else None,
             )
@@ -185,6 +189,10 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             logger.info("Using DirectSafeSigner for wallet %s", wallet_address[:10])
             return DirectSafeSigner(safe_config)
 
+        # Non-Safe EOA wallet
+        private_key = self.settings.private_key
+        if not private_key:
+            raise ValueError("PRIVATE_KEY not configured in gateway settings")
         return LocalKeySigner(private_key=private_key)
 
     async def _get_orchestrator(self, chain: str, wallet_address: str):

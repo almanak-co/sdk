@@ -13,6 +13,7 @@ This package contains the gRPC service implementations for the gateway:
 - PolymarketService: Polymarket CLOB API proxy
 - EnsoService: Enso Finance routing API proxy
 - TokenService: Unified token resolution and on-chain metadata discovery
+- LifecycleService: Agent state and command management (V2 deployment)
 """
 
 from almanak.gateway.services.dashboard_service import DashboardServiceServicer
@@ -20,6 +21,7 @@ from almanak.gateway.services.enso_service import EnsoServiceServicer
 from almanak.gateway.services.execution_service import ExecutionServiceServicer
 from almanak.gateway.services.funding_rate_service import FundingRateServiceServicer
 from almanak.gateway.services.integration_service import IntegrationServiceServicer
+from almanak.gateway.services.lifecycle_service import LifecycleServiceServicer
 from almanak.gateway.services.market_service import MarketServiceServicer
 from almanak.gateway.services.observe_service import ObserveServiceServicer
 from almanak.gateway.services.polymarket_service import PolymarketServiceServicer
@@ -34,6 +36,7 @@ __all__ = [
     "MarketServiceServicer",
     "StateServiceServicer",
     "ExecutionServiceServicer",
+    "LifecycleServiceServicer",
     "ObserveServiceServicer",
     "RpcServiceServicer",
     "IntegrationServiceServicer",

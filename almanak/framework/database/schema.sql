@@ -179,37 +179,30 @@ CREATE TABLE IF NOT EXISTS strategies (
 );
 
 -- --------------------------------------------------------------------------
--- strategy_state: Versioned state storage with CAS (Compare-And-Swap) support
+-- v2_strategy_state: Single row per agent with CAS (Compare-And-Swap) via version
 -- --------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS strategy_state (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    strategy_id UUID NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+-- Each gateway serves exactly one strategy; no two strategies share a gateway.
+CREATE TABLE IF NOT EXISTS v2_strategy_state (
+    strategy_id UUID PRIMARY KEY REFERENCES strategies(id) ON DELETE CASCADE,
 
     -- Version for CAS semantics - incremented on each update
     version BIGINT NOT NULL DEFAULT 1,
 
     -- State data
-    state_json JSONB NOT NULL,
+    state_data JSONB NOT NULL,
 
     -- State metadata
     schema_version INTEGER NOT NULL DEFAULT 1,
-    checksum VARCHAR(64),  -- SHA-256 of state_json for integrity verification
+    checksum VARCHAR(64),  -- SHA-256 of state_data for integrity verification
 
     -- Timestamps
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-
-    -- Active state indicator (only one active state per strategy)
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
 
     -- Constraints
-    CONSTRAINT strategy_state_version_positive CHECK (version > 0),
-    CONSTRAINT strategy_state_schema_version_positive CHECK (schema_version > 0)
+    CONSTRAINT v2_strategy_state_version_positive CHECK (version > 0),
+    CONSTRAINT v2_strategy_state_schema_version_positive CHECK (schema_version > 0)
 );
-
--- Unique partial index for active state per strategy
-CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_state_active
-    ON strategy_state (strategy_id)
-    WHERE is_active = TRUE;
 
 -- --------------------------------------------------------------------------
 -- strategy_events: Chronological event timeline for strategies
@@ -393,10 +386,8 @@ CREATE INDEX IF NOT EXISTS idx_strategies_owner ON strategies (owner_id);
 CREATE INDEX IF NOT EXISTS idx_strategies_updated_at ON strategies (updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_strategies_tags ON strategies USING GIN (tags);
 
--- strategy_state indexes
-CREATE INDEX IF NOT EXISTS idx_strategy_state_strategy_id ON strategy_state (strategy_id);
-CREATE INDEX IF NOT EXISTS idx_strategy_state_version ON strategy_state (strategy_id, version DESC);
-CREATE INDEX IF NOT EXISTS idx_strategy_state_created_at ON strategy_state (created_at DESC);
+-- v2_strategy_state indexes (strategy_id is PK, no extra index needed)
+CREATE INDEX IF NOT EXISTS idx_v2_strategy_state_created_at ON v2_strategy_state (created_at DESC);
 
 -- strategy_events indexes
 CREATE INDEX IF NOT EXISTS idx_strategy_events_strategy_id ON strategy_events (strategy_id);
@@ -473,43 +464,25 @@ CREATE TRIGGER trigger_operator_cards_updated_at
 CREATE OR REPLACE FUNCTION calculate_state_checksum()
 RETURNS TRIGGER AS $$
 BEGIN
-    NEW.checksum = encode(digest(NEW.state_json::text, 'sha256'), 'hex');
+    NEW.checksum = encode(digest(NEW.state_data::text, 'sha256'), 'hex');
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
 -- Trigger for state checksum
-DROP TRIGGER IF EXISTS trigger_strategy_state_checksum ON strategy_state;
-CREATE TRIGGER trigger_strategy_state_checksum
-    BEFORE INSERT OR UPDATE OF state_json ON strategy_state
+DROP TRIGGER IF EXISTS trigger_v2_strategy_state_checksum ON v2_strategy_state;
+CREATE TRIGGER trigger_v2_strategy_state_checksum
+    BEFORE INSERT OR UPDATE OF state_data ON v2_strategy_state
     FOR EACH ROW
     EXECUTE FUNCTION calculate_state_checksum();
-
--- Function to increment version on state update
-CREATE OR REPLACE FUNCTION increment_state_version()
-RETURNS TRIGGER AS $$
-BEGIN
-    -- Only increment if updating existing row
-    IF TG_OP = 'UPDATE' THEN
-        NEW.version = OLD.version + 1;
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- Trigger for version increment
-DROP TRIGGER IF EXISTS trigger_strategy_state_version ON strategy_state;
-CREATE TRIGGER trigger_strategy_state_version
-    BEFORE UPDATE ON strategy_state
-    FOR EACH ROW
-    EXECUTE FUNCTION increment_state_version();
 
 -- ============================================================================
 -- FUNCTIONS
 -- ============================================================================
 
 -- Function for CAS (Compare-And-Swap) state update
--- Returns true if update succeeded, false if version conflict
+-- Single-row-per-agent model: updates only if version matches.
+-- Returns true if update succeeded, false if version conflict.
 CREATE OR REPLACE FUNCTION cas_update_state(
     p_strategy_id UUID,
     p_expected_version BIGINT,
@@ -519,57 +492,31 @@ RETURNS BOOLEAN AS $$
 DECLARE
     v_updated INTEGER;
 BEGIN
-    UPDATE strategy_state
-    SET state_json = p_new_state
+    UPDATE v2_strategy_state
+    SET state_data = p_new_state,
+        version = version + 1,
+        updated_at = NOW()
     WHERE strategy_id = p_strategy_id
-      AND version = p_expected_version
-      AND is_active = TRUE;
+      AND version = p_expected_version;
 
     GET DIAGNOSTICS v_updated = ROW_COUNT;
     RETURN v_updated > 0;
 END;
 $$ LANGUAGE plpgsql;
 
--- Function to get latest state with version
+-- Function to get state with version
 CREATE OR REPLACE FUNCTION get_latest_state(p_strategy_id UUID)
 RETURNS TABLE (
-    state_id UUID,
     version BIGINT,
-    state_json JSONB,
+    state_data JSONB,
     schema_version INTEGER,
     created_at TIMESTAMP WITH TIME ZONE
 ) AS $$
 BEGIN
     RETURN QUERY
-    SELECT ss.id, ss.version, ss.state_json, ss.schema_version, ss.created_at
-    FROM strategy_state ss
-    WHERE ss.strategy_id = p_strategy_id
-      AND ss.is_active = TRUE;
-END;
-$$ LANGUAGE plpgsql;
-
--- Function to archive old state (for history)
-CREATE OR REPLACE FUNCTION archive_state(
-    p_strategy_id UUID,
-    p_new_state JSONB,
-    p_schema_version INTEGER DEFAULT 1
-)
-RETURNS UUID AS $$
-DECLARE
-    v_new_state_id UUID;
-BEGIN
-    -- Deactivate current active state
-    UPDATE strategy_state
-    SET is_active = FALSE
-    WHERE strategy_id = p_strategy_id
-      AND is_active = TRUE;
-
-    -- Insert new active state
-    INSERT INTO strategy_state (strategy_id, state_json, schema_version, is_active)
-    VALUES (p_strategy_id, p_new_state, p_schema_version, TRUE)
-    RETURNING id INTO v_new_state_id;
-
-    RETURN v_new_state_id;
+    SELECT ss.version, ss.state_data, ss.schema_version, ss.created_at
+    FROM v2_strategy_state ss
+    WHERE ss.strategy_id = p_strategy_id;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -679,30 +626,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Function to cleanup old state versions (keep last N per strategy)
-CREATE OR REPLACE FUNCTION cleanup_old_states(
-    p_keep_versions INTEGER DEFAULT 100
-)
-RETURNS INTEGER AS $$
-DECLARE
-    v_deleted INTEGER;
-BEGIN
-    WITH ranked_states AS (
-        SELECT id,
-               ROW_NUMBER() OVER (PARTITION BY strategy_id ORDER BY created_at DESC) as rn
-        FROM strategy_state
-        WHERE is_active = FALSE
-    )
-    DELETE FROM strategy_state
-    WHERE id IN (
-        SELECT id FROM ranked_states WHERE rn > p_keep_versions
-    );
-
-    GET DIAGNOSTICS v_deleted = ROW_COUNT;
-    RETURN v_deleted;
-END;
-$$ LANGUAGE plpgsql;
-
 -- ============================================================================
 -- VIEWS
 -- ============================================================================
@@ -727,7 +650,7 @@ SELECT
     (SELECT COUNT(*) FROM alerts a WHERE a.strategy_id = s.id AND a.status = 'PENDING') as pending_alerts,
     CASE WHEN oc.id IS NOT NULL THEN TRUE ELSE FALSE END as has_active_card
 FROM strategies s
-LEFT JOIN strategy_state ss ON s.id = ss.strategy_id AND ss.is_active = TRUE
+LEFT JOIN v2_strategy_state ss ON s.id = ss.strategy_id
 LEFT JOIN operator_cards oc ON s.id = oc.strategy_id AND oc.is_active = TRUE;
 
 -- View for recent events across all strategies
@@ -803,17 +726,15 @@ ORDER BY
 -- ============================================================================
 
 COMMENT ON TABLE strategies IS 'Core strategy metadata including name, chain, protocol, and operational status';
-COMMENT ON TABLE strategy_state IS 'Versioned state storage with CAS semantics for safe concurrent updates';
+COMMENT ON TABLE v2_strategy_state IS 'Single row per agent state storage with CAS semantics via version field';
 COMMENT ON TABLE strategy_events IS 'Chronological event timeline for audit and debugging';
 COMMENT ON TABLE strategy_versions IS 'Code and configuration version tracking for deployments and rollbacks';
 COMMENT ON TABLE alerts IS 'Alert instances with status tracking and escalation support';
 COMMENT ON TABLE operator_cards IS 'Operator action cards providing structured, actionable information for strategy issues';
 
 COMMENT ON FUNCTION cas_update_state IS 'Atomic Compare-And-Swap state update - returns false if version conflict';
-COMMENT ON FUNCTION get_latest_state IS 'Get the current active state for a strategy';
-COMMENT ON FUNCTION archive_state IS 'Create new active state while preserving history';
+COMMENT ON FUNCTION get_latest_state IS 'Get state for a strategy';
 COMMENT ON FUNCTION get_event_timeline IS 'Get paginated event timeline with optional type filtering';
 COMMENT ON FUNCTION get_active_operator_card IS 'Get the active operator card for a strategy if one exists';
 COMMENT ON FUNCTION resolve_operator_card IS 'Mark an operator card as resolved with action details';
 COMMENT ON FUNCTION cleanup_old_events IS 'Remove events older than retention period (default 90 days)';
-COMMENT ON FUNCTION cleanup_old_states IS 'Remove old inactive states, keeping last N versions per strategy';

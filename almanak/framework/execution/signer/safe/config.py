@@ -24,7 +24,7 @@ Example:
     signer_config = SafeSignerConfig(
         mode="direct",
         wallet_config=wallet_config,
-        private_key="0x...",
+        private_key="0x...",  # Required for direct mode, optional for zodiac mode
     )
 """
 
@@ -110,7 +110,9 @@ class SafeSignerConfig:
     Attributes:
         mode: Signing mode - "zodiac" for production, "direct" for testing
         wallet_config: Safe wallet configuration
-        private_key: EOA private key (never logged or included in repr)
+        private_key: EOA private key (never logged or included in repr).
+            Required for "direct" mode, optional for "zodiac" mode (which uses
+            a remote signer service instead).
         signer_service_url: URL for remote signer service (Zodiac mode only)
         signer_service_jwt: JWT token for signer service (Zodiac mode only)
         gas_buffer_multiplier: Multiplier for gas estimates (default: 2.0)
@@ -126,7 +128,7 @@ class SafeSignerConfig:
 
     mode: str
     wallet_config: SafeWalletConfig
-    private_key: str = field(repr=False)  # Never include in repr
+    private_key: str | None = field(default=None, repr=False)  # Never include in repr
     signer_service_url: str | None = None
     signer_service_jwt: str | None = field(default=None, repr=False)
     gas_buffer_multiplier: float = DEFAULT_GAS_BUFFER_MULTIPLIER
@@ -144,9 +146,9 @@ class SafeSignerConfig:
                 raise SafeConfigError("signer_service_url is required for Zodiac mode")
             if not self.signer_service_jwt:
                 raise SafeConfigError("signer_service_jwt is required for Zodiac mode")
-
-        if not self.private_key:
-            raise SafeConfigError("private_key is required")
+        else:
+            if not self.private_key:
+                raise SafeConfigError("private_key is required for direct mode")
 
         if self.gas_buffer_multiplier <= 0:
             raise SafeConfigError(f"gas_buffer_multiplier must be positive, got {self.gas_buffer_multiplier}")

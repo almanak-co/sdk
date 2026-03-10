@@ -4,6 +4,7 @@ import platform
 import stat
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import click
@@ -21,6 +22,10 @@ from almanak.framework.cli.ax import ax as framework_ax_group
 from almanak.framework.cli.demo import demo as framework_demo_cmd
 from almanak.framework.cli.run import run as framework_run_cmd
 from almanak.framework.cli.teardown import teardown as framework_teardown_group
+
+DEFAULT_STRAT_RUN_INTERVAL = 60
+MIN_STRAT_RUN_INTERVAL = 5
+MAX_STRAT_RUN_INTERVAL = 3600
 
 
 def format_output(status: str | None = None, title=None, key_value_pairs=None, items=None, delimiter=True):
@@ -121,6 +126,40 @@ def _load_cli_config(path: str) -> dict:
 
     with open(config_path) as f:
         return json.load(f)
+
+
+def _load_pyproject_run_config(working_dir: str) -> dict:
+    pyproject_path = Path(working_dir) / "pyproject.toml"
+    if not pyproject_path.exists():
+        return {}
+
+    try:
+        with open(pyproject_path, "rb") as f:
+            parsed = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise click.ClickException(f"Failed to read {pyproject_path}: {exc}") from exc
+
+    run_config = parsed.get("tool", {}).get("almanak", {}).get("run")
+    if run_config is None:
+        return {}
+    if not isinstance(run_config, dict):
+        raise click.ClickException("[tool.almanak.run] must be a table in pyproject.toml")
+
+    unknown_keys = sorted(set(run_config) - {"interval"})
+    if unknown_keys:
+        raise click.ClickException(f"[tool.almanak.run] contains unsupported keys: {', '.join(unknown_keys)}")
+
+    interval = run_config.get("interval")
+    if interval is None:
+        return {}
+    if not isinstance(interval, int) or isinstance(interval, bool):
+        raise click.ClickException("[tool.almanak.run].interval must be an integer")
+    if interval < MIN_STRAT_RUN_INTERVAL or interval > MAX_STRAT_RUN_INTERVAL:
+        raise click.ClickException(
+            f"[tool.almanak.run].interval must be between {MIN_STRAT_RUN_INTERVAL} and {MAX_STRAT_RUN_INTERVAL} seconds"
+        )
+
+    return {"interval": interval}
 
 
 @copy.command("validate")
@@ -932,8 +971,8 @@ def new(ctx, name, working_dir, template, chain):
     "--interval",
     "-i",
     type=int,
-    default=60,
-    help="Loop interval in seconds (default: 60).",
+    default=None,
+    help="Loop interval in seconds. Defaults to [tool.almanak.run].interval or 60.",
 )
 @click.option(
     "--dry-run",
@@ -1132,6 +1171,16 @@ def strategy_run(
     if env_file.exists():
         load_dotenv(env_file)
         click.echo(f"Loaded environment from: {env_file}")
+
+    run_config = _load_pyproject_run_config(working_dir)
+    if interval is None:
+        interval = run_config.get("interval", DEFAULT_STRAT_RUN_INTERVAL)
+        if "interval" in run_config:
+            click.echo(f"Using interval from pyproject.toml: {interval}s")
+    elif interval < MIN_STRAT_RUN_INTERVAL or interval > MAX_STRAT_RUN_INTERVAL:
+        raise click.ClickException(
+            f"--interval must be between {MIN_STRAT_RUN_INTERVAL} and {MAX_STRAT_RUN_INTERVAL} seconds"
+        )
 
     # Install secret redaction after env is loaded so all secrets are registered.
     # (The managed gateway also calls install_redaction(), but strat run may log

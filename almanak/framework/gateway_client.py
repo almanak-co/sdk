@@ -194,6 +194,7 @@ class GatewayClient:
         self._simulation_stub: gateway_pb2_grpc.SimulationServiceStub | None = None
         self._polymarket_stub: gateway_pb2_grpc.PolymarketServiceStub | None = None
         self._enso_stub: gateway_pb2_grpc.EnsoServiceStub | None = None
+        self._lifecycle_stub: gateway_pb2_grpc.LifecycleServiceStub | None = None
 
     @property
     def target(self) -> str:
@@ -287,6 +288,13 @@ class GatewayClient:
             raise RuntimeError("Gateway client not connected")
         return self._enso_stub
 
+    @property
+    def lifecycle(self) -> gateway_pb2_grpc.LifecycleServiceStub:
+        """Get LifecycleService stub. Raises if not connected."""
+        if self._lifecycle_stub is None:
+            raise RuntimeError("Gateway client not connected")
+        return self._lifecycle_stub
+
     def connect(self) -> None:
         """Establish connection to gateway.
 
@@ -334,6 +342,9 @@ class GatewayClient:
         # Initialize Enso service stub
         self._enso_stub = gateway_pb2_grpc.EnsoServiceStub(self._channel)
 
+        # Initialize Lifecycle service stub
+        self._lifecycle_stub = gateway_pb2_grpc.LifecycleServiceStub(self._channel)
+
         logger.info(f"Connected to gateway at {self.target}")
 
     def disconnect(self) -> None:
@@ -356,6 +367,7 @@ class GatewayClient:
             self._simulation_stub = None
             self._polymarket_stub = None
             self._enso_stub = None
+            self._lifecycle_stub = None
             logger.info("Disconnected from gateway")
 
     def health_check(self, service: str = "") -> bool:

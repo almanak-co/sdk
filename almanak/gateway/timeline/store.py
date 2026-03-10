@@ -131,7 +131,7 @@ class TimelineStore:
 
         with sqlite3.connect(str(self._db_path)) as conn:
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS timeline_events (
+                CREATE TABLE IF NOT EXISTS v2_timeline_events (
                     event_id TEXT PRIMARY KEY,
                     strategy_id TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
@@ -145,15 +145,15 @@ class TimelineStore:
             """)
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_timeline_strategy_id
-                ON timeline_events(strategy_id)
+                ON v2_timeline_events(strategy_id)
             """)
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_timeline_timestamp
-                ON timeline_events(timestamp DESC)
+                ON v2_timeline_events(timestamp DESC)
             """)
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_timeline_event_type
-                ON timeline_events(event_type)
+                ON v2_timeline_events(event_type)
             """)
             conn.commit()
 
@@ -167,7 +167,7 @@ class TimelineStore:
             cursor = conn.execute("""
                 SELECT event_id, strategy_id, timestamp, event_type,
                        description, tx_hash, chain, details_json
-                FROM timeline_events
+                FROM v2_timeline_events
                 ORDER BY timestamp DESC
             """)
 
@@ -227,7 +227,7 @@ class TimelineStore:
         with sqlite3.connect(str(self._db_path)) as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO timeline_events
+                INSERT OR REPLACE INTO v2_timeline_events
                 (event_id, strategy_id, timestamp, event_type, description,
                  tx_hash, chain, details_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -330,7 +330,7 @@ class TimelineStore:
                 if self._db_path:
                     with sqlite3.connect(str(self._db_path)) as conn:
                         conn.execute(
-                            "DELETE FROM timeline_events WHERE strategy_id = ?",
+                            "DELETE FROM v2_timeline_events WHERE strategy_id = ?",
                             (strategy_id,),
                         )
                         conn.commit()
@@ -338,7 +338,7 @@ class TimelineStore:
                 self._cache.clear()
                 if self._db_path:
                     with sqlite3.connect(str(self._db_path)) as conn:
-                        conn.execute("DELETE FROM timeline_events")
+                        conn.execute("DELETE FROM v2_timeline_events")
                         conn.commit()
 
     def close(self) -> None:
