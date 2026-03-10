@@ -783,7 +783,6 @@ class TestExecutionWalletValidation:
         assert decision.allowed
 
 
-
 class TestPolicyStateStore:
     def test_save_and_load(self, tmp_path):
         store = PolicyStateStore(tmp_path / "state.json")
@@ -1109,3 +1108,76 @@ class TestResolveEffectiveArgs:
     def test_non_dict_params_ignored(self):
         args = {"params": "not_a_dict"}
         assert PolicyEngine._resolve_effective_args(args) == args
+
+
+class TestNestedParamsPolicyBypass:
+    """VIB-504: Additional edge-case tests for nested params policy bypass.
+
+    compile_intent sends token/protocol/chain inside a nested 'params' dict.
+    These tests cover edge cases like non-string values, truthy non-string
+    top-level fields, and additional token field names.
+    """
+
+    def test_non_string_nested_values_no_crash(self):
+        """Non-string protocol/chain/token in nested params must not crash."""
+        engine = PolicyEngine(AgentPolicy(
+            allowed_tokens={"ETH", "USDC"},
+            allowed_protocols={"uniswap_v3"},
+            allowed_chains={"arbitrum"},
+        ))
+        tool = _make_tool("compile_intent", category=ToolCategory.PLANNING, risk_tier=RiskTier.MEDIUM)
+        # Non-string values in nested params should be silently ignored, not crash
+        decision = engine.check(tool, {
+            "intent_type": "swap",
+            "params": {"protocol": 123, "chain": 456, "token_in": 789},
+        })
+        # Should not raise AttributeError; non-string values are skipped
+        assert decision is not None
+
+    def test_truthy_non_string_top_level_falls_through_to_nested(self):
+        """Truthy non-string top-level chain/protocol must not suppress nested check."""
+        engine = PolicyEngine(AgentPolicy(
+            allowed_chains={"arbitrum"},
+            allowed_protocols={"uniswap_v3"},
+        ))
+        tool = _make_tool("compile_intent", category=ToolCategory.PLANNING, risk_tier=RiskTier.MEDIUM)
+        # Non-string truthy top-level values should fall through to nested params
+        decision = engine.check(tool, {
+            "intent_type": "swap",
+            "chain": 123,
+            "protocol": 456,
+            "params": {"chain": "bsc", "protocol": "evil_dex"},
+        })
+        assert not decision.allowed
+        assert any("bsc" in v for v in decision.violations)
+        assert any("evil_dex" in v for v in decision.violations)
+
+    def test_borrow_and_collateral_tokens_in_nested_params_blocked(self):
+        """borrow_token and collateral_token inside params must be caught."""
+        engine = PolicyEngine(AgentPolicy(allowed_tokens={"ETH", "USDC"}))
+        tool = _make_tool("compile_intent", category=ToolCategory.PLANNING, risk_tier=RiskTier.MEDIUM)
+        decision = engine.check(tool, {
+            "intent_type": "borrow",
+            "params": {
+                "borrow_token": "WBTC",
+                "collateral_token": "RUGPULL",
+                "borrow_amount": "1",
+                "collateral_amount": "100",
+            },
+            "chain": "arbitrum",
+        })
+        assert not decision.allowed
+        assert any("WBTC" in v for v in decision.violations)
+        assert any("RUGPULL" in v for v in decision.violations)
+
+    def test_underlying_token_in_nested_params_blocked(self):
+        """underlying_token inside params must be caught."""
+        engine = PolicyEngine(AgentPolicy(allowed_tokens={"USDC"}))
+        tool = _make_tool("compile_intent", category=ToolCategory.PLANNING, risk_tier=RiskTier.MEDIUM)
+        decision = engine.check(tool, {
+            "intent_type": "deposit_vault",
+            "params": {"underlying_token": "SCAMCOIN", "amount": "1000000"},
+            "chain": "arbitrum",
+        })
+        assert not decision.allowed
+        assert any("SCAMCOIN" in v for v in decision.violations)

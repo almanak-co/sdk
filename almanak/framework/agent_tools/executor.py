@@ -755,19 +755,34 @@ class ToolExecutor:
                 tool_name="execute_compiled_bundle",
             )
 
-        # Pre-execution spend gate: check the original compile_intent params against
-        # spend limits BEFORE executing. This prevents a compiled bundle from bypassing
-        # the spend limit pre-check that action tools receive at compile time.
-        intent_params = original_args.get("params", {})
-        if intent_params and not dry_run:
+        # Pre-execution policy gate: re-validate the original compile_intent args
+        # against the full policy chain (token/protocol/chain allowlists + spend limits).
+        # This closes the gap where compile_intent policy checks only inspected top-level
+        # args while actual trade semantics were buried in nested params (VIB-504).
+        if not dry_run:
             violations: list[str] = []
             suggestions: list[str] = []
-            self._policy_engine._check_spend_limits(intent_params, violations, suggestions)
+            # Run allowlist checks against the original args (which contain nested params)
+            self._policy_engine._check_chain_allowed(original_args, violations, suggestions)
+            self._policy_engine._check_protocol_allowed(original_args, violations, suggestions)
+            self._policy_engine._check_token_allowed(original_args, violations, suggestions)
+            # Spend limits and position size use the nested params for amount/token fields,
+            # but chain must be preserved so _estimate_usd_value can normalize raw amounts.
+            intent_params = original_args.get("params", {})
+            if isinstance(intent_params, dict):
+                policy_args = {**intent_params}
+                # Carry over chain from top-level args so raw-amount normalization works
+                if "chain" not in policy_args and "chain" in original_args:
+                    policy_args["chain"] = original_args["chain"]
+            else:
+                policy_args = original_args
+            self._policy_engine._check_spend_limits(policy_args, violations, suggestions)
+            self._policy_engine._check_position_size(policy_args, violations, suggestions)
             if violations:
                 from almanak.framework.agent_tools.errors import RiskBlockedError
 
                 raise RiskBlockedError(
-                    f"Compiled bundle blocked by spend limits: {'; '.join(violations)}",
+                    f"Compiled bundle blocked by policy: {'; '.join(violations)}",
                     tool_name="execute_compiled_bundle",
                     suggestion="; ".join(suggestions),
                 )
@@ -788,9 +803,17 @@ class ToolExecutor:
             )
         )
 
-        # Track trade result using the original compile_intent args for USD estimation
+        # Track trade result using the original compile_intent args for USD estimation.
+        # Carry chain from top-level args so _estimate_usd_spend resolves decimals correctly.
         if not dry_run:
-            usd_amount = await self._estimate_usd_spend(original_args.get("params", {}))
+            spend_args = original_args.get("params", {})
+            if isinstance(spend_args, dict):
+                spend_args = {**spend_args}
+                if "chain" not in spend_args and "chain" in original_args:
+                    spend_args["chain"] = original_args["chain"]
+            else:
+                spend_args = original_args
+            usd_amount = await self._estimate_usd_spend(spend_args)
             self._policy_engine.record_trade(usd_amount, success=exec_resp.success, tool_name="execute_compiled_bundle")
 
         if not exec_resp.success and not dry_run:

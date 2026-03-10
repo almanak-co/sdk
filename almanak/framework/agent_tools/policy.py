@@ -604,6 +604,17 @@ class PolicyEngine:
 
     # -- Private checks -----------------------------------------------------
 
+    @staticmethod
+    def _get_nested_params(args: dict) -> dict:
+        """Return nested params dict if present, for compile_intent deep inspection.
+
+        compile_intent buries trade semantics (token_in, protocol, chain, etc.)
+        inside a nested ``params`` dict. Policy checks must inspect these fields
+        to prevent allowlist bypasses (VIB-504).
+        """
+        params = args.get("params")
+        return params if isinstance(params, dict) else {}
+
     def _check_tool_allowed(self, tool_def: ToolDefinition, violations: list[str], suggestions: list[str]) -> None:
         if self.policy.allowed_tools is not None and tool_def.name not in self.policy.allowed_tools:
             violations.append(f"Tool '{tool_def.name}' is not in the allowed set.")
@@ -614,6 +625,7 @@ class PolicyEngine:
             return
         allowed_lower = {c.lower() for c in self.policy.allowed_chains}
         sorted_allowed = sorted(self.policy.allowed_chains)
+        nested = self._get_nested_params(args)
         # Check all chain-like fields: chain, destination_chain, from_chain, to_chain
         for key, label in [
             ("chain", "Chain"),
@@ -622,14 +634,21 @@ class PolicyEngine:
             ("to_chain", "Destination chain"),
         ]:
             value = args.get(key)
-            if value and value.lower() not in allowed_lower:
+            # Fallback on missing OR invalid top-level type (compile_intent buries fields inside params)
+            if not isinstance(value, str) or not value:
+                value = nested.get(key)
+            if isinstance(value, str) and value and value.lower() not in allowed_lower:
                 violations.append(f"{label} '{value}' is not allowed.")
                 suggestions.append(f"Allowed chains: {sorted_allowed}")
 
     def _check_protocol_allowed(self, args: dict, violations: list[str], suggestions: list[str]) -> None:
         protocol = args.get("protocol")
+        # Fallback on missing OR invalid top-level type (compile_intent buries fields inside params)
+        if not isinstance(protocol, str) or not protocol:
+            protocol = self._get_nested_params(args).get("protocol")
         if (
-            protocol
+            isinstance(protocol, str)
+            and protocol
             and self.policy.allowed_protocols is not None
             and protocol.lower() not in {p.lower() for p in self.policy.allowed_protocols}
         ):
@@ -641,19 +660,40 @@ class PolicyEngine:
             return
         allowed_lower = {t.lower() for t in self.policy.allowed_tokens}
         chain = args.get("chain", "")
-        for key in ("token", "token_in", "token_out", "token_a", "token_b"):
-            token = args.get(key)
-            if not token:
-                continue
-            if token.lower() in allowed_lower:
-                continue
-            # If token looks like an address, try to resolve it to a symbol
-            if token.startswith("0x") and len(token) == 42 and chain:
-                resolved_symbol = self._resolve_token_symbol(token, chain)
-                if resolved_symbol and resolved_symbol.lower() in allowed_lower:
+        nested = self._get_nested_params(args)
+        if not isinstance(chain, str) or not chain:
+            chain = nested.get("chain", "")
+        if not isinstance(chain, str):
+            chain = ""
+        # Check both top-level args and nested params for token fields
+        token_keys = (
+            "token",
+            "token_in",
+            "token_out",
+            "token_a",
+            "token_b",
+            "from_token",
+            "to_token",
+            "borrow_token",
+            "collateral_token",
+            "underlying_token",
+        )
+        seen: set[str] = set()
+        for source in (args, nested):
+            for key in token_keys:
+                token = source.get(key)
+                if not token or not isinstance(token, str) or token in seen:
                     continue
-            violations.append(f"Token '{token}' is not in the allowed set.")
-            suggestions.append(f"Allowed tokens: {sorted(self.policy.allowed_tokens)}")
+                seen.add(token)
+                if token.lower() in allowed_lower:
+                    continue
+                # If token looks like an address, try to resolve it to a symbol
+                if token.startswith("0x") and len(token) == 42 and chain:
+                    resolved_symbol = self._resolve_token_symbol(token, chain)
+                    if resolved_symbol and resolved_symbol.lower() in allowed_lower:
+                        continue
+                violations.append(f"Token '{token}' is not in the allowed set.")
+                suggestions.append(f"Allowed tokens: {sorted(self.policy.allowed_tokens)}")
 
     @staticmethod
     def _resolve_token_symbol(address: str, chain: str) -> str | None:
