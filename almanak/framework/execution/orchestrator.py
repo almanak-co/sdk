@@ -1091,6 +1091,22 @@ class ExecutionOrchestrator:
                 )
                 return result
 
+            # Step 2.5: Pre-flight balance check (VIB-521)
+            # Prevents wasting gas on approvals when the wallet can't cover the
+            # final action (e.g., LP mint). Extracts required token amounts from
+            # the ActionBundle metadata and checks on-chain balances.
+            preflight_error = await self._preflight_balance_check(action_bundle, context)
+            if preflight_error:
+                result.error = preflight_error
+                result.error_phase = ExecutionPhase.VALIDATION
+                self._complete_session(session, success=False, error=result.error)
+                self._emit_event(
+                    ExecutionEventType.RISK_BLOCKED,
+                    context,
+                    {"violations": [preflight_error]},
+                )
+                return result
+
             result.phase = ExecutionPhase.SIMULATION
 
             # Step 3: Simulate (if enabled)
@@ -1764,6 +1780,182 @@ class ExecutionOrchestrator:
             passed=len(violations) == 0,
             violations=violations,
         )
+
+    async def _preflight_balance_check(
+        self,
+        action_bundle: ActionBundle,
+        context: ExecutionContext,
+    ) -> str | None:
+        """Check wallet has sufficient token balances before submitting any transactions.
+
+        Prevents wasting gas on approval txs when the final action (mint, swap)
+        will revert due to insufficient balance. Extracts required amounts from
+        the ActionBundle metadata and checks on-chain balances.
+
+        This is a best-effort optimisation -- balances can change between this check
+        and actual submission (MEV, concurrent strategies, etc.). It is NOT a
+        substitute for on-chain revert protection.
+
+        Args:
+            action_bundle: The bundle with metadata containing token amounts.
+            context: Execution context with wallet address.
+
+        Returns:
+            Error message string if balance is insufficient, None if OK.
+        """
+        if not self.rpc_url:
+            return None  # Can't check without RPC
+
+        metadata = action_bundle.metadata or {}
+        intent_type = (action_bundle.intent_type or "").upper()
+        protocol = (metadata.get("protocol") or "").lower()
+        wallet = context.wallet_address or self.signer.address
+
+        # Protocols that store lending amounts as wei in metadata.
+        # All others (morpho, morpho_blue, compound_v3) use human-readable.
+        _WEI_LENDING_PROTOCOLS = {"aave_v3", "spark"}
+
+        # Extract required tokens and amounts from metadata based on intent type
+        # Each requirement: (symbol, address, amount_wei, decimals or None, is_native)
+        requirements: list[tuple[str, str, int, int | None, bool]] = []
+
+        def _parse_amount_wei(raw_amount: str, token_info: dict, is_wei: bool = True) -> int | None:
+            """Parse a metadata amount string to wei. Returns None if unparseable.
+
+            Args:
+                raw_amount: The raw amount string from metadata.
+                token_info: Token dict with optional 'decimals' key.
+                is_wei: If True, the value is already in wei (SWAP/LP and Aave/Spark lending).
+                    If False, the value is human-readable and needs conversion (Morpho/Compound).
+            """
+            try:
+                val = Decimal(raw_amount)
+                if val <= 0:
+                    return None
+                token_decimals = token_info.get("decimals")
+                if is_wei:
+                    if val != int(val):
+                        # Fractional values are invalid on wei-coded paths.
+                        # Return None to fail open rather than guess the format.
+                        return None
+                    return int(val)
+                else:
+                    # Human-readable -> convert to wei
+                    if token_decimals is not None and token_decimals >= 0:
+                        return int(val * Decimal(10**token_decimals))
+                    return None  # Can't convert without decimals
+            except Exception:
+                return None
+
+        def _add_requirement(token_info: dict, raw_amount: str | None, is_wei: bool = True) -> None:
+            if not token_info or not raw_amount:
+                return
+            amount_wei = _parse_amount_wei(raw_amount, token_info, is_wei=is_wei)
+            if amount_wei is not None and amount_wei > 0:
+                requirements.append(
+                    (
+                        token_info.get("symbol", "?"),
+                        token_info.get("address", ""),
+                        amount_wei,
+                        token_info.get("decimals"),
+                        bool(token_info.get("is_native")),
+                    )
+                )
+
+        try:
+            if intent_type == "SWAP":
+                _add_requirement(metadata.get("from_token", {}), metadata.get("amount_in"))
+
+            elif intent_type == "LP_OPEN":
+                token0 = metadata.get("token0") or metadata.get("token_x") or {}
+                token1 = metadata.get("token1") or metadata.get("token_y") or {}
+                amount0 = metadata.get("amount0_desired") or metadata.get("amount_x")
+                amount1 = metadata.get("amount1_desired") or metadata.get("amount_y")
+                _add_requirement(token0, amount0)
+                _add_requirement(token1, amount1)
+
+            elif intent_type == "SUPPLY":
+                is_wei = protocol in _WEI_LENDING_PROTOCOLS
+                _add_requirement(metadata.get("supply_token", {}), metadata.get("supply_amount"), is_wei=is_wei)
+
+            elif intent_type == "REPAY":
+                # Skip full-repay (MAX_UINT256 sentinel) -- wallet can't hold 2^256 tokens
+                if not metadata.get("repay_full"):
+                    is_wei = protocol in _WEI_LENDING_PROTOCOLS
+                    _add_requirement(metadata.get("repay_token", {}), metadata.get("repay_amount"), is_wei=is_wei)
+
+            elif intent_type == "BORROW":
+                # Check collateral token balance for borrow intents
+                is_wei = protocol in _WEI_LENDING_PROTOCOLS
+                _add_requirement(metadata.get("collateral_token", {}), metadata.get("collateral_amount"), is_wei=is_wei)
+
+        except (ValueError, TypeError) as e:
+            logger.debug(f"Pre-flight balance check: could not parse metadata: {e}")
+            return None  # Don't block on parse errors
+
+        if not requirements:
+            return None  # Nothing to check (HOLD, LP_CLOSE, etc.)
+
+        # Check on-chain balances
+        # balanceOf(address) selector = 0x70a08231
+        erc20_balance_of = bytes.fromhex("70a08231")
+
+        try:
+            web3 = await self._get_web3()
+
+            shortfalls: list[str] = []
+            check_failures = 0
+            for symbol, address, required_wei, decimals, is_native in requirements:
+                if not address and not is_native:
+                    continue
+                try:
+                    if is_native:
+                        balance_wei = int(
+                            await asyncio.wait_for(
+                                web3.eth.get_balance(web3.to_checksum_address(wallet)),
+                                timeout=5.0,
+                            )
+                        )
+                    else:
+                        data = erc20_balance_of + bytes.fromhex(wallet[2:].lower().zfill(64))
+                        raw = await asyncio.wait_for(
+                            web3.eth.call({"to": web3.to_checksum_address(address), "data": data}),
+                            timeout=5.0,
+                        )
+                        balance_wei = int(raw.hex(), 16)
+
+                    if balance_wei < required_wei:
+                        if decimals is not None:
+                            required_human = Decimal(required_wei) / Decimal(10**decimals)
+                            actual_human = Decimal(balance_wei) / Decimal(10**decimals)
+                            shortfalls.append(
+                                f"Insufficient {symbol}: have {actual_human:.6f}, need {required_human:.6f}"
+                            )
+                        else:
+                            shortfalls.append(f"Insufficient {symbol}: have {balance_wei} wei, need {required_wei} wei")
+                except Exception as e:
+                    check_failures += 1
+                    logger.debug(f"Pre-flight: could not check {symbol} balance: {e}")
+                    # Don't block on individual check failures
+
+            if check_failures > 0:
+                logger.warning(
+                    f"Pre-flight balance check: could not verify {check_failures} of "
+                    f"{len(requirements)} token balance(s)"
+                )
+
+            if shortfalls:
+                msg = (
+                    f"Pre-flight balance check failed: {'; '.join(shortfalls)}. "
+                    f"No transactions submitted (saved gas on approvals)."
+                )
+                logger.warning(msg)
+                return msg
+
+        except Exception as e:
+            logger.debug(f"Pre-flight balance check skipped: {e}")
+
+        return None
 
     async def _sign_safe_batch(
         self,
