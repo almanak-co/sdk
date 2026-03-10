@@ -19,9 +19,9 @@ from almanak.framework.data.tokens.models import ResolvedToken
 
 @pytest.fixture
 def config_bnb():
-    """Create a PancakeSwapV3Config for BNB chain testing."""
+    """Create a PancakeSwapV3Config for BSC chain testing."""
     return PancakeSwapV3Config(
-        chain="bnb",
+        chain="bsc",
         wallet_address="0x1234567890123456789012345678901234567890",
         allow_placeholder_prices=True,
     )
@@ -90,14 +90,14 @@ class TestResolveTokenWithResolver:
             symbol="USDT",
             address="0x55d398326f99059fF775485246999027B3197955",
             decimals=18,
-            chain="bnb",
+            chain="bsc",
             chain_id=56,
         )
         adapter = PancakeSwapV3Adapter(config_bnb, token_resolver=mock_resolver)
 
         result = adapter._resolve_token("USDT")
         assert result == "0x55d398326f99059fF775485246999027B3197955"
-        mock_resolver.resolve.assert_called_once_with("USDT", "bnb")
+        mock_resolver.resolve.assert_called_once_with("USDT", "bsc")
 
     def test_resolve_address_passthrough(self, config_bnb, mock_resolver):
         """Test that address input bypasses resolver and returns directly."""
@@ -111,7 +111,7 @@ class TestResolveTokenWithResolver:
     def test_resolve_unknown_token_raises_error(self, config_bnb, mock_resolver):
         """Test unknown token raises TokenResolutionError."""
         mock_resolver.resolve.side_effect = TokenResolutionError(
-            token="UNKNOWN_TOKEN", chain="bnb", reason="Not found"
+            token="UNKNOWN_TOKEN", chain="bsc", reason="Not found"
         )
         adapter = PancakeSwapV3Adapter(config_bnb, token_resolver=mock_resolver)
         with pytest.raises(TokenResolutionError):
@@ -127,7 +127,7 @@ class TestGetDecimalsWithResolver:
             symbol="USDT",
             address="0x55d398326f99059fF775485246999027B3197955",
             decimals=18,
-            chain="bnb",
+            chain="bsc",
             chain_id=56,
         )
         adapter = PancakeSwapV3Adapter(config_bnb, token_resolver=mock_resolver)
@@ -166,7 +166,7 @@ class TestGetDecimalsWithResolver:
     def test_get_decimals_unknown_raises_error(self, config_bnb, mock_resolver):
         """Test unknown token raises TokenResolutionError instead of defaulting to 18."""
         mock_resolver.resolve.side_effect = TokenResolutionError(
-            token="UNKNOWN_TOKEN", chain="bnb", reason="Not found"
+            token="UNKNOWN_TOKEN", chain="bsc", reason="Not found"
         )
         adapter = PancakeSwapV3Adapter(config_bnb, token_resolver=mock_resolver)
         with pytest.raises(TokenResolutionError):
@@ -212,7 +212,7 @@ class TestMultiChainResolution:
             symbol="USDT",
             address="0x55d398326f99059fF775485246999027B3197955",
             decimals=18,
-            chain="bnb",
+            chain="bsc",
             chain_id=56,
         )
         adapter = PancakeSwapV3Adapter(config_bnb, token_resolver=mock_resolver)
@@ -246,7 +246,7 @@ class TestSwapWithResolver:
                 symbol="USDT",
                 address="0x55d398326f99059fF775485246999027B3197955",
                 decimals=18,
-                chain="bnb",
+                chain="bsc",
                 chain_id=56,
             ),
             # Second call: token_out (WBNB) in _resolve_token
@@ -254,7 +254,7 @@ class TestSwapWithResolver:
                 symbol="WBNB",
                 address="0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
                 decimals=18,
-                chain="bnb",
+                chain="bsc",
                 chain_id=56,
             ),
             # Third call: token_in decimals in _get_decimals
@@ -262,7 +262,7 @@ class TestSwapWithResolver:
                 symbol="USDT",
                 address="0x55d398326f99059fF775485246999027B3197955",
                 decimals=18,
-                chain="bnb",
+                chain="bsc",
                 chain_id=56,
             ),
             # Fourth+ calls: for slippage calculation decimals
@@ -270,7 +270,7 @@ class TestSwapWithResolver:
                 symbol="WBNB",
                 address="0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
                 decimals=18,
-                chain="bnb",
+                chain="bsc",
                 chain_id=56,
             ),
         ]

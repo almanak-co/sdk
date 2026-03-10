@@ -66,7 +66,7 @@ class Chain(StrEnum):
     POLYGON = "polygon"
     BASE = "base"
     AVALANCHE = "avalanche"
-    BNB = "bnb"
+    BNB = "bsc"
     LINEA = "linea"
     PLASMA = "plasma"
     SONIC = "sonic"

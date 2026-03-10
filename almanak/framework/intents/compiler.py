@@ -162,13 +162,8 @@ CHAIN_GAS_OVERRIDES: dict[str, dict[str, int]] = {
     "avalanche": {
         "swap_simple": 180000,  # Native USDC is also a proxy
     },
-    "bnb": {
+    "bsc": {
         "lp_decrease_liquidity": 400000,  # BNB Uniswap V3 uses more gas for LP ops
-        "lp_collect": 300000,
-        "lp_burn": 150000,
-    },
-    "bsc": {  # Alias for bnb
-        "lp_decrease_liquidity": 400000,
         "lp_collect": 300000,
         "lp_burn": 150000,
     },
@@ -189,12 +184,20 @@ def get_gas_estimate(chain: str, operation: str) -> int:
     """Get gas estimate for an operation, with chain-specific overrides.
 
     Args:
-        chain: Target blockchain (ethereum, arbitrum, etc.)
+        chain: Target blockchain (ethereum, arbitrum, bsc, etc.)
         operation: Operation type (swap_simple, approve, etc.)
 
     Returns:
         Gas estimate in units
     """
+    # Normalize chain name (e.g., "bnb" -> "bsc")
+    try:
+        from almanak.core.constants import resolve_chain_name
+
+        chain = resolve_chain_name(chain)
+    except (ValueError, ImportError):
+        pass
+
     # Check chain-specific override first
     if chain in CHAIN_GAS_OVERRIDES:
         if operation in CHAIN_GAS_OVERRIDES[chain]:
@@ -250,12 +253,6 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "uniswap_v3": "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2",  # SwapRouter02
         "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
     },
-    "bnb": {  # Alias for bsc
-        "pancakeswap_v3": "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",
-        "pancakeswap_v2": "0x10ED43C718714eb63d5aA57B78B54704E256024E",
-        "uniswap_v3": "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2",  # SwapRouter02
-        "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
-    },
     "mantle": {
         # Agni Finance (Uniswap V3 fork, same ABI) - the native V3 DEX on Mantle
         "uniswap_v3": "0x319B69888b0d11cec22caA5034e25FfFBDc88421",  # Agni SwapRouter
@@ -303,11 +300,6 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
         "sushiswap_v3": "0xF70c086618dcf2b1A461311275e00D6B722ef914",
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
     },
-    "bnb": {  # Alias for bsc
-        "uniswap_v3": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
-        "sushiswap_v3": "0xF70c086618dcf2b1A461311275e00D6B722ef914",
-        "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
-    },
     "mantle": {
         "uniswap_v3": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni NFT Position Manager
     },
@@ -350,12 +342,6 @@ CHAIN_TOKENS: dict[str, dict[str, str]] = {
         "wavax": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
     },
     "bsc": {
-        "usdc": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
-        "usdt": "0x55d398326f99059fF775485246999027B3197955",
-        "wbnb": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
-        "weth": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
-    },
-    "bnb": {  # Alias for bsc
         "usdc": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
         "usdt": "0x55d398326f99059fF775485246999027B3197955",
         "wbnb": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
@@ -446,9 +432,6 @@ LENDING_POOL_ADDRESSES: dict[str, dict[str, str]] = {
         "aave_v3": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
     },
     "bsc": {
-        "aave_v3": "0x6807dc923806fE8Fd134338EABCA509979a7e0cB",
-    },
-    "bnb": {  # Alias for bsc
         "aave_v3": "0x6807dc923806fE8Fd134338EABCA509979a7e0cB",
     },
 }
@@ -945,7 +928,6 @@ class DefaultSwapAdapter:
             "avalanche": "WAVAX",
             "plasma": "WXPL",
             "bsc": "WBNB",
-            "bnb": "WBNB",
             "mantle": "WMNT",
         }
         _wn_symbol = _wrapped_symbols.get(self.chain)
@@ -1977,7 +1959,13 @@ class IntentCompiler:
                 "Using placeholder prices will cause incorrect slippage calculations and swap reverts."
             )
 
-        self.chain = chain
+        # Normalize chain name (e.g., "bnb" -> "bsc") via central resolver
+        try:
+            from almanak.core.constants import resolve_chain_name
+
+            self.chain = resolve_chain_name(chain)
+        except (ValueError, ImportError):
+            self.chain = chain
         self.wallet_address = wallet_address
         self.default_protocol = default_protocol
         self.default_deadline_seconds = default_deadline_seconds
@@ -10128,7 +10116,6 @@ class IntentCompiler:
             "avalanche": "WAVAX",
             "plasma": "WXPL",
             "bsc": "WBNB",
-            "bnb": "WBNB",
             "mantle": "WMNT",
             "sonic": "WS",
         }

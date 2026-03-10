@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from almanak.core.constants import resolve_chain_name
 from almanak.core.contracts import (
     AAVE_V3,
     AERODROME,
@@ -20,15 +21,12 @@ from almanak.core.contracts import (
     UNISWAP_V3,
 )
 
-_CHAIN_ALIASES: dict[str, str] = {
-    "bsc": "bnb",
-    "bnb": "bnb",
-}
-
 
 def _normalize_chain(chain: str) -> str:
-    value = chain.strip().lower()
-    return _CHAIN_ALIASES.get(value, value)
+    try:
+        return resolve_chain_name(chain)
+    except ValueError:
+        return chain.strip().lower()
 
 
 @dataclass

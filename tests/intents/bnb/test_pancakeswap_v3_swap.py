@@ -33,7 +33,7 @@ from tests.intents.pool_helpers import fail_if_v3_pool_missing
 # Test Configuration
 # =============================================================================
 
-CHAIN_NAME = "bnb"
+CHAIN_NAME = "bsc"
 
 
 # =============================================================================

@@ -145,10 +145,31 @@ class ManagedGateway:
         keep_anvil: bool = False,
     ):
         self.settings = settings
-        self._anvil_chains = anvil_chains or []
+        # Normalize chain names (e.g., "bnb" -> "bsc") via central resolver
+        raw_chains = anvil_chains or []
+        raw_ports = external_anvil_ports or {}
+        normalized: list[str] = []
+        normalized_ports: dict[str, int] = {}
+        try:
+            from almanak.core.constants import resolve_chain_name
+
+            for c in raw_chains:
+                try:
+                    normalized.append(resolve_chain_name(c))
+                except ValueError:
+                    normalized.append(c.strip().lower())
+            for chain_key, port in raw_ports.items():
+                try:
+                    normalized_ports[resolve_chain_name(chain_key)] = port
+                except ValueError:
+                    normalized_ports[chain_key.strip().lower()] = port
+        except ImportError:
+            normalized = raw_chains
+            normalized_ports = raw_ports
+        self._anvil_chains = normalized
         self._wallet_address = wallet_address
         self._anvil_funding = anvil_funding or {}
-        self._external_anvil_ports = external_anvil_ports or {}
+        self._external_anvil_ports = normalized_ports
         self._keep_anvil = keep_anvil
         self._anvil_managers: dict[str, RollingForkManager] = {}
         self._original_env: dict[str, str | None] = {}
@@ -284,7 +305,6 @@ class ManagedGateway:
         "polygon": "MATIC",
         "avalanche": "AVAX",
         "bsc": "BNB",
-        "bnb": "BNB",
         "sonic": "S",
         "plasma": "ETH",
         "mantle": "MNT",

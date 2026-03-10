@@ -60,7 +60,7 @@ class TestChainConstants:
 
     def test_chain_ids_contains_major_chains(self) -> None:
         """Test that CHAIN_IDS contains all major chains."""
-        expected_chains = ["ethereum", "arbitrum", "optimism", "base", "polygon", "avalanche", "bnb"]
+        expected_chains = ["ethereum", "arbitrum", "optimism", "base", "polygon", "avalanche", "bsc"]
         for chain in expected_chains:
             assert chain in CHAIN_IDS
 
@@ -408,7 +408,7 @@ class TestKnownBalanceSlots:
 
     def test_known_slots_covers_major_chains(self) -> None:
         """Test that KNOWN_BALANCE_SLOTS covers all major chains."""
-        expected_chains = ["arbitrum", "ethereum", "base", "avalanche", "optimism", "polygon", "bnb"]
+        expected_chains = ["arbitrum", "ethereum", "base", "avalanche", "optimism", "polygon", "bsc"]
         for chain in expected_chains:
             assert chain in KNOWN_BALANCE_SLOTS, f"Missing known slots for chain: {chain}"
 

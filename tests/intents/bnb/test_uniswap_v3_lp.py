@@ -46,7 +46,7 @@ from tests.intents.conftest import (
 # Test Configuration
 # =============================================================================
 
-CHAIN_NAME = "bnb"
+CHAIN_NAME = "bsc"
 POSITION_MANAGER = "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613"
 MAX_UINT128 = 2**128 - 1
 

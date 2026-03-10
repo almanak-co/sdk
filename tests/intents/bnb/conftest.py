@@ -26,7 +26,7 @@ from tests.intents.conftest import (
     seed_wallet_state_with_recovery,
 )
 
-CHAIN_NAME = "bnb"
+CHAIN_NAME = "bsc"
 REQUIRED_CHAIN_ID = 56
 
 

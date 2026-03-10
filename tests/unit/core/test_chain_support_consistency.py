@@ -17,9 +17,10 @@ from almanak.framework.anvil.fork_manager import CHAIN_IDS as FORK_MANAGER_CHAIN
 from almanak.framework.execution.config import CHAIN_IDS as EXECUTION_CHAIN_IDS
 
 
-# BSC uses "bnb" as the config key in CHAIN_IDS dicts; add future aliases here.
-CHAIN_ENUM_TO_CONFIG_NAME: dict[str, str] = {"bsc": "bnb"}
-CONFIG_NAME_TO_ENUM_NAME: dict[str, str] = {"bnb": "bsc"}
+# After VIB-708, all config dicts use canonical names matching Chain enum.
+# No aliases needed - "bsc" is used everywhere (not "bnb").
+CHAIN_ENUM_TO_CONFIG_NAME: dict[str, str] = {}
+CONFIG_NAME_TO_ENUM_NAME: dict[str, str] = {}
 
 # Chains excluded from fork_manager checks (no Anvil fork support yet).
 # Each exclusion MUST have a documented reason. Remove entries as support is added.

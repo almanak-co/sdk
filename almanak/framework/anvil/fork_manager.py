@@ -50,7 +50,7 @@ CHAIN_IDS: dict[str, int] = {
     "polygon": 137,
     "base": 8453,
     "avalanche": 43114,
-    "bnb": 56,
+    "bsc": 56,
     "linea": 59144,
     "plasma": 9745,
     "blast": 81457,
@@ -112,7 +112,7 @@ TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
         "USDC.e": "0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664",
         "USDT": "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7",
     },
-    "bnb": {
+    "bsc": {
         "WBNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
         "BUSD": "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56",
         "USDC": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
@@ -178,7 +178,7 @@ KNOWN_BALANCE_SLOTS: dict[str, dict[str, int]] = {
     "avalanche": {"USDC": 9, "WAVAX": 3, "USDT": 2, "USDC.e": 0},
     "optimism": {"USDC": 9, "WETH": 3, "USDT": 2, "USDC.e": 0, "OP": 0},
     "polygon": {"USDC": 9, "WETH": 3, "USDT": 2, "WMATIC": 3, "USDC.e": 0},
-    "bnb": {"USDC": 1, "WBNB": 3, "USDT": 1, "BUSD": 0},
+    "bsc": {"USDC": 1, "WBNB": 3, "USDT": 1, "BUSD": 0},
     "linea": {"USDC": 0, "WETH": 0, "USDT": 0},
 }
 

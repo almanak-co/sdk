@@ -125,7 +125,7 @@ CHAIN_IDS: dict[str, int] = {
     "polygon": 137,
     "base": 8453,
     "avalanche": 43114,
-    "bnb": 56,
+    "bsc": 56,
     "linea": 59144,
     "plasma": 9745,
     "blast": 81457,
@@ -137,7 +137,7 @@ CHAIN_IDS: dict[str, int] = {
 
 # Supported protocols and which chains they are available on
 SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
-    "aave_v3": {"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "linea", "plasma", "blast"},
+    "aave_v3": {"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "linea", "plasma", "blast"},
     "uniswap_v3": {
         "ethereum",
         "arbitrum",
@@ -145,7 +145,7 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
         "polygon",
         "base",
         "avalanche",
-        "bnb",
+        "bsc",
         "linea",
         "blast",
         "mantle",
@@ -160,7 +160,7 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
         "polygon",
         "base",
         "avalanche",
-        "bnb",
+        "bsc",
         "linea",
         "plasma",
         "blast",
@@ -170,7 +170,7 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
     },  # Aggregator
     "traderjoe_v2": {"avalanche"},  # TraderJoe Liquidity Book V2 on Avalanche
     "spark": {"ethereum"},  # Spark is an Aave V3 fork on Ethereum
-    "pancakeswap_v3": {"bnb", "ethereum", "arbitrum"},  # PancakeSwap V3 DEX
+    "pancakeswap_v3": {"bsc", "ethereum", "arbitrum"},  # PancakeSwap V3 DEX
     "lido": {"ethereum", "arbitrum", "optimism", "polygon"},  # Lido liquid staking
     "ethena": {"ethereum"},  # Ethena synthetic dollar (USDe/sUSDe)
 }
@@ -363,7 +363,13 @@ class LocalRuntimeConfig:
         if not self.chain:
             raise ConfigurationError(field="chain", reason="Chain cannot be empty")
 
-        chain_lower = self.chain.lower()
+        # Normalize chain alias (e.g., "bnb" -> "bsc") via central resolver
+        try:
+            from almanak.core.constants import resolve_chain_name
+
+            chain_lower = resolve_chain_name(self.chain)
+        except (ValueError, ImportError):
+            chain_lower = self.chain.lower()
         if chain_lower not in CHAIN_IDS:
             valid_chains = ", ".join(sorted(CHAIN_IDS.keys()))
             raise ConfigurationError(
@@ -994,7 +1000,13 @@ class MultiChainRuntimeConfig:
                     reason="Chain name cannot be empty",
                 )
 
-            chain_lower = chain.lower()
+            # Normalize chain alias (e.g., "bnb" -> "bsc") via central resolver
+            try:
+                from almanak.core.constants import resolve_chain_name
+
+                chain_lower = resolve_chain_name(chain)
+            except (ValueError, ImportError):
+                chain_lower = chain.lower()
             if chain_lower not in CHAIN_IDS:
                 valid_chains = ", ".join(sorted(CHAIN_IDS.keys()))
                 raise ConfigurationError(

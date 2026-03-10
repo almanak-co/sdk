@@ -46,6 +46,28 @@ _CHAIN_ALIASES: dict[str, Chain] = {
 }
 
 
+def resolve_chain_name(chain: str) -> str:
+    """Resolve any chain alias to its canonical lowercase name.
+
+    The canonical name is derived from the Chain enum value (e.g., Chain.BSC -> "bsc").
+    This normalizes aliases like "bnb" -> "bsc", "eth" -> "ethereum", "avax" -> "avalanche".
+
+    Args:
+        chain: Chain name string (e.g., "bsc", "bnb", "eth", "arbitrum")
+
+    Returns:
+        Canonical lowercase chain name
+
+    Raises:
+        ValueError: If chain name is not recognized
+    """
+    chain_lower = chain.lower().strip()
+    chain_enum = _CHAIN_ALIASES.get(chain_lower)
+    if chain_enum is None:
+        raise ValueError(f"Unknown chain: {chain!r}")
+    return chain_enum.value.lower()
+
+
 def get_chain_id(chain: Chain | str | int) -> int:
     """Get the numeric chain ID (EIP-155) for a Chain enum, string name, or int.
 

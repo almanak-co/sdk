@@ -138,6 +138,8 @@ def _validate_address(address: str, chain: str) -> None:
 def _normalize_chain(chain: str | Chain) -> tuple[str, Chain]:
     """Normalize chain input to both string and Chain enum.
 
+    Uses the central resolve_chain_name() for alias resolution.
+
     Args:
         chain: Chain as string or Chain enum
 
@@ -150,13 +152,12 @@ def _normalize_chain(chain: str | Chain) -> tuple[str, Chain]:
     if isinstance(chain, Chain):
         return chain.value.lower(), chain
 
-    chain_lower = chain.lower()
+    try:
+        from almanak.core.constants import resolve_chain_name
 
-    # Chain aliases (common alternative names)
-    _CHAIN_ALIASES: dict[str, str] = {
-        "bnb": "bsc",
-    }
-    chain_lower = _CHAIN_ALIASES.get(chain_lower, chain_lower)
+        chain_lower = resolve_chain_name(chain)
+    except (ValueError, ImportError):
+        chain_lower = chain.lower()
 
     # Try to find matching Chain enum
     for c in Chain:

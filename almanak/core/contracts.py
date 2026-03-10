@@ -61,7 +61,7 @@ UNISWAP_V3: dict[str, dict[str, str]] = {
         "position_manager": "0x655C406EBFa14EE2006250925e54ec43AD184f8B",
         "quoter_v2": "0xbe0F5544EC67e9B3b2D979aaA43f18Fd87E6257F",
     },
-    "bnb": {
+    "bsc": {
         "swap_router": "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2",
         "swap_router_02": "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2",
         "factory": "0xdB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7",
@@ -152,7 +152,7 @@ UNISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
         "DAI.e": "0xd586E7F844cEa2F87f50152665BCbc2C279D8d70",
         "WBTC.e": "0x50b7545627a5162F82A992c33b87aDc75187B218",
     },
-    "bnb": {
+    "bsc": {
         "BNB": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
         "WBNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
         "WETH": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
@@ -197,7 +197,7 @@ UNISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
 # =============================================================================
 
 PANCAKESWAP_V3: dict[str, dict[str, str]] = {
-    "bnb": {
+    "bsc": {
         "swap_router": "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",  # SmartRouter
         "factory": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
         "quoter": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
@@ -220,7 +220,7 @@ PANCAKESWAP_V3: dict[str, dict[str, str]] = {
 }
 
 PANCAKESWAP_V3_TOKENS: dict[str, dict[str, str]] = {
-    "bnb": {
+    "bsc": {
         "WBNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
         "USDT": "0x55d398326f99059fF775485246999027B3197955",
         "USDC": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
@@ -280,7 +280,7 @@ AAVE_V3: dict[str, dict[str, str]] = {
         "pool_data_provider": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
         "oracle": "0xEBd36016B3eD09D4693Ed4251c67Bd858c3c7C9C",
     },
-    "bnb": {
+    "bsc": {
         "pool": "0x6807dc923806fE8Fd134338EABCA509979a7e0cB",
         "pool_data_provider": "0x41585C50524fb8c3899B43D7D797d9486AAc94DB",
         "oracle": "0x39bc1bfDa2130d6Bb6DBEfd366939b4c7aa7C697",
@@ -359,7 +359,7 @@ AAVE_V3_TOKENS: dict[str, dict[str, str]] = {
         "LINK.e": "0x5947BB275c521040051D82396192181b413227A3",
         "sAVAX": "0x2b2C81e08f1Af8835a78Bb2A90AE924ACE0eA4bE",
     },
-    "bnb": {
+    "bsc": {
         "WBNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
         "WETH": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
         "USDC": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
@@ -413,7 +413,7 @@ SUSHISWAP_V3: dict[str, dict[str, str]] = {
         "position_manager": "0x18350b048AB366ed601fFDbC669110Ecb36016f3",
         "quoter_v2": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
     },
-    "bnb": {
+    "bsc": {
         "swap_router": "0xB45e53277a7e0F1D35f2a77160e91e25507f1763",
         "factory": "0x126555dd55a39328F69400d6aE4F782Bd4C34ABb",
         "position_manager": "0xF70c086618dcf2b1A461311275e00D6B722ef914",
@@ -473,7 +473,7 @@ SUSHISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
         "DAI.e": "0xd586E7F844cEa2F87f50152665BCbc2C279D8d70",
         "SUSHI": "0x37B608519F91f70F2EeB0e5Ed9AF4061722e4F76",
     },
-    "bnb": {
+    "bsc": {
         "BNB": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
         "WBNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
         "WETH": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
@@ -717,7 +717,13 @@ def get_address(protocol_addresses: dict[str, dict[str, str]], chain: str, contr
     Raises:
         KeyError: If chain or contract_type not found.
     """
-    chain_lower = chain.lower()
+    # Normalize chain alias (e.g., "bnb" -> "bsc") via central resolver
+    try:
+        from almanak.core.constants import resolve_chain_name
+
+        chain_lower = resolve_chain_name(chain)
+    except (ValueError, ImportError):
+        chain_lower = chain.lower()
     if chain_lower not in protocol_addresses:
         available = ", ".join(sorted(protocol_addresses.keys()))
         raise KeyError(f"Chain '{chain}' not found. Available chains: {available}")

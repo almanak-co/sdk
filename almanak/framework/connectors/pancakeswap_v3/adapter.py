@@ -101,6 +101,13 @@ class PancakeSwapV3Config:
 
     def __post_init__(self) -> None:
         """Validate configuration."""
+        # Normalize chain alias (e.g., "bnb" -> "bsc") via central resolver
+        try:
+            from almanak.core.constants import resolve_chain_name
+
+            self.chain = resolve_chain_name(self.chain)
+        except (ValueError, ImportError):
+            pass
         valid_chains = set(PANCAKESWAP_V3_ADDRESSES.keys())
         if self.chain not in valid_chains:
             raise ValueError(f"Invalid chain: {self.chain}. Valid chains: {valid_chains}")

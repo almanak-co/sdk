@@ -47,8 +47,8 @@ from tests.intents.conftest import (
 # Test Configuration
 # =============================================================================
 
-CHAIN_NAME = "bnb"
-POSITION_MANAGER = get_address(SUSHISWAP_V3, "bnb", "position_manager")
+CHAIN_NAME = "bsc"
+POSITION_MANAGER = get_address(SUSHISWAP_V3, "bsc", "position_manager")
 MAX_UINT128 = 2**128 - 1
 
 # Pool: USDT/WBNB 0.3% fee tier

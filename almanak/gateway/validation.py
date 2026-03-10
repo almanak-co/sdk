@@ -18,7 +18,6 @@ ALLOWED_CHAINS = frozenset(
         "polygon",
         "avalanche",
         "bsc",
-        "bnb",
         "sonic",
         "plasma",
         "linea",
@@ -115,6 +114,13 @@ def validate_chain(chain: str, field: str = "chain") -> str:
         raise ValidationError(field, "required")
 
     chain = chain.lower().strip()
+    # Normalize chain alias (e.g., "bnb" -> "bsc")
+    try:
+        from almanak.core.constants import resolve_chain_name
+
+        chain = resolve_chain_name(chain)
+    except (ValueError, ImportError):
+        pass
     if chain not in ALLOWED_CHAINS:
         allowed = ", ".join(sorted(ALLOWED_CHAINS))
         raise ValidationError(field, f"'{chain}' not allowed. Valid: {allowed}")

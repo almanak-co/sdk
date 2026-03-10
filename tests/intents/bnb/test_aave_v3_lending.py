@@ -36,7 +36,7 @@ from tests.intents.conftest import (
 # Test Configuration
 # =============================================================================
 
-CHAIN_NAME = "bnb"
+CHAIN_NAME = "bsc"
 
 # Aave V3 Pool ABI (minimal - just what we need for getUserAccountData)
 AAVE_POOL_ABI = [

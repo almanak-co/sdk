@@ -94,8 +94,7 @@ ALCHEMY_CHAIN_KEYS: dict[str, str] = {
     "base": "base",
     "avalanche": "avax",
     "polygon": "polygon",
-    "bnb": "bnb",
-    "bsc": "bnb",  # Alias: BSC is the common name for BNB Smart Chain
+    "bsc": "bnb",  # Alchemy uses "bnb" in their URL
     "sonic": "sonic",
     "plasma": "plasma",
     "linea": "linea",
@@ -124,7 +123,6 @@ PUBLIC_RPC_URLS: dict[str, str] = {
     "base": "https://base-rpc.publicnode.com",
     "avalanche": "https://avalanche-c-chain-rpc.publicnode.com",
     "polygon": "https://polygon-bor-rpc.publicnode.com",
-    "bnb": "https://bsc-rpc.publicnode.com",
     "bsc": "https://bsc-rpc.publicnode.com",
     "sonic": "https://sonic-rpc.publicnode.com",
     "linea": "https://linea-rpc.publicnode.com",
@@ -134,7 +132,7 @@ PUBLIC_RPC_URLS: dict[str, str] = {
 }
 
 # Chains that require POA middleware (geth_poa_middleware)
-POA_CHAINS: set[str] = {"avalanche", "bnb", "bsc", "polygon"}
+POA_CHAINS: set[str] = {"avalanche", "bsc", "polygon"}
 
 # Default Anvil port mapping for multi-chain local development
 # When running multiple Anvil instances, use ANVIL_{CHAIN}_PORT env vars
@@ -142,7 +140,6 @@ POA_CHAINS: set[str] = {"avalanche", "bnb", "bsc", "polygon"}
 ANVIL_CHAIN_PORTS: dict[str, int] = {
     "arbitrum": 8545,
     "bsc": 8546,
-    "bnb": 8546,  # Alias for bsc
     "avalanche": 8547,
     "base": 8548,
     "ethereum": 8549,
@@ -300,6 +297,13 @@ def get_rpc_url(
                           custom_url="https://my-rpc.example.com")
     """
     chain_lower = chain.lower()
+    # Normalize chain alias (e.g., "bnb" -> "bsc")
+    try:
+        from almanak.core.constants import resolve_chain_name
+
+        chain_lower = resolve_chain_name(chain_lower)
+    except (ValueError, ImportError):
+        pass
     network_lower = network.lower()
 
     # Normalize testnet to sepolia (Ethereum's primary testnet)
@@ -525,7 +529,14 @@ def is_poa_chain(chain: str) -> bool:
     Returns:
         True if chain requires POA middleware
     """
-    return chain.lower() in POA_CHAINS
+    # Normalize chain alias (e.g., "bnb" -> "bsc")
+    try:
+        from almanak.core.constants import resolve_chain_name
+
+        chain_lower = resolve_chain_name(chain)
+    except (ValueError, ImportError):
+        chain_lower = chain.lower()
+    return chain_lower in POA_CHAINS
 
 
 def is_local_rpc(rpc_url: str) -> bool:

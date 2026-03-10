@@ -129,7 +129,7 @@ TENDERLY_NETWORK_IDS: dict[str, str] = {
     "polygon": "137",
     "base": "8453",
     "avalanche": "43114",
-    "bnb": "56",
+    "bsc": "56",
     "linea": "59144",
     "plasma": "9745",
 }
@@ -249,7 +249,13 @@ class SimulationConfig:
         Returns:
             True if simulation is available for this chain
         """
-        chain_lower = chain.lower()
+        # Normalize chain alias (e.g., "bnb" -> "bsc")
+        try:
+            from almanak.core.constants import resolve_chain_name
+
+            chain_lower = resolve_chain_name(chain)
+        except (ValueError, ImportError):
+            chain_lower = chain.lower()
 
         # Check Tenderly support
         if self.has_tenderly() and chain_lower in TENDERLY_SUPPORTED_CHAINS:

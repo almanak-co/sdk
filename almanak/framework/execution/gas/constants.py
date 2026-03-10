@@ -28,7 +28,7 @@ CHAIN_GAS_BUFFERS: dict[str, float] = {
     "polygon": 1.2,  # 20% buffer
     "base": 1.5,  # 50% buffer for L1 data cost
     "avalanche": 1.1,  # 10% buffer
-    "bnb": 1.2,  # 20% buffer for BSC
+    "bsc": 1.2,  # 20% buffer for BSC
     "linea": 1.5,  # 50% buffer for zkEVM L1 data cost
     "plasma": 1.1,  # 10% buffer for L1
     "blast": 1.5,  # 50% buffer for L2 data cost
@@ -78,7 +78,7 @@ CHAIN_GAS_PRICE_CAPS_GWEI: dict[str, int] = {
     "polygon": 500,  # Can spike during congestion
     "base": 10,  # L2: normally <1 gwei
     "avalanche": 100,  # C-Chain: normally 25-50 gwei
-    "bnb": 20,  # BSC: normally 3-5 gwei
+    "bsc": 20,  # BSC: normally 3-5 gwei
     "linea": 10,  # zkEVM L2
     "plasma": 50,  # L1
     "blast": 10,  # L2
@@ -102,7 +102,7 @@ CHAIN_GAS_COST_CAPS_NATIVE: dict[str, float] = {
     "polygon": 50.0,  # 50 MATIC (~$50 at $1/MATIC)
     "base": 0.01,  # 0.01 ETH (~$30)
     "avalanche": 1.0,  # 1 AVAX (~$30)
-    "bnb": 0.05,  # 0.05 BNB (~$30)
+    "bsc": 0.05,  # 0.05 BNB (~$30)
     "mantle": 50.0,  # 50 MNT (~$50 at ~$1/MNT)
     "berachain": 10.0,  # 10 BERA
     "monad": 10.0,  # 10 MON
@@ -151,7 +151,7 @@ CHAIN_GRPC_EXECUTE_TIMEOUTS: dict[str, int] = {
     "base": 300,  # 120s TX + 180s overhead
     "avalanche": 300,  # 120s TX + 180s overhead (was 120s; LP_CLOSE hit DEADLINE_EXCEEDED)
     "plasma": 300,  # 120s TX + 180s overhead
-    "bnb": 300,  # BSC 3s blocks
+    "bsc": 300,  # BSC 3s blocks
     "sonic": 300,  # fast finality
     "mantle": 300,  # 120s TX + 180s overhead
     "berachain": 300,  # 120s TX + 180s overhead
@@ -165,7 +165,7 @@ CHAIN_SIMULATION_BUFFERS: dict[str, float] = {
     "polygon": 0.2,  # 20% buffer
     "base": 0.5,  # 50% buffer for L1 data cost
     "avalanche": 0.1,  # 10% buffer
-    "bnb": 0.1,  # 10% buffer
+    "bsc": 0.1,  # 10% buffer
     "linea": 0.3,  # 30% buffer
     "plasma": 0.1,  # 10% buffer
     "blast": 0.5,  # 50% buffer for L2 data cost
