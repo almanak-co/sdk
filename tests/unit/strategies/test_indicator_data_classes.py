@@ -90,6 +90,16 @@ class TestRSIDataNumericOps:
         b = RSIData(value=Decimal("70"))
         assert len({a, b}) == 2
 
+    def test_round_with_ndigits(self):
+        rsi = RSIData(value=Decimal("45.678"))
+        assert round(rsi, 2) == pytest.approx(45.68)
+
+    def test_round_no_ndigits(self):
+        rsi = RSIData(value=Decimal("45.678"))
+        rounded = round(rsi)
+        assert rounded == 46
+        assert isinstance(rounded, int)
+
 
 # ---------------------------------------------------------------------------
 # BollingerBandsData

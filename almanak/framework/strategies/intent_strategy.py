@@ -197,6 +197,7 @@ class RSIData:
     Supports numeric operations so strategy authors can write:
         rsi = market.rsi("ETH")
         if rsi > 70: ...          # comparison against int/float
+        round(rsi, 2)             # rounding
         f"{rsi:.2f}"              # f-string formatting
         float(rsi)                # explicit float conversion
 
@@ -215,6 +216,11 @@ class RSIData:
 
     def __float__(self) -> float:
         return float(self.value)
+
+    def __round__(self, ndigits: int | None = None) -> int | float:
+        if ndigits is None:
+            return round(float(self.value))
+        return round(float(self.value), ndigits)
 
     def __format__(self, format_spec: str) -> str:
         return format(float(self.value), format_spec) if format_spec else str(self.value)
