@@ -3,9 +3,14 @@
 
 Create a new v2 IntentStrategy from template.
 
-This creates a strategy using the v2 intent-based framework with:
+This creates a self-contained Python project using the v2 intent-based framework with:
+- pyproject.toml: Dependencies + [tool.almanak] metadata
 - strategy.py: Main strategy with decide() method
-- config.py: Configuration dataclass
+- config.json: Runtime configuration
+- .venv/ and uv.lock: Per-strategy virtual environment (created by uv sync)
+- .gitignore: Git ignore rules
+- .python-version: Python version pin (3.12)
+- AGENTS.md: Per-strategy AI agent guide
 - tests/: Test scaffolding
 
 ## Usage
@@ -65,9 +70,14 @@ Usage: almanak strat new [OPTIONS]
 
   Create a new v2 IntentStrategy from template.
 
-  This creates a strategy using the v2 intent-based framework with:
+  This creates a self-contained Python project with:
+  - pyproject.toml: Dependencies + [tool.almanak] metadata
   - strategy.py: Main strategy with decide() method
-  - config.py: Configuration dataclass
+  - config.json: Runtime configuration
+  - .venv/ and uv.lock: Virtual environment (via uv sync)
+  - .gitignore: Git ignore rules
+  - .python-version: Python version pin (3.12)
+  - AGENTS.md: Per-strategy AI agent guide
   - tests/: Test scaffolding
 
   Templates:

@@ -250,9 +250,11 @@ almanak agent install -d /path/to/my-project -p claude
 
 使用 `almanak strat new` 创建新策略时，会在策略目录内自动生成 `AGENTS.md` 文件。这个轻量级指南针对您选择的模板进行了定制 -- 它只列出与该特定策略相关的意图类型和模式。
 
+每个创建的策略都是一个独立的 Python 项目，包含 `pyproject.toml`、`.venv/` 和 `uv.lock`，因此每个策略的 `AGENTS.md` 也会说明如何添加依赖（`uv add`）和运行测试（`uv run pytest`）。
+
 ```bash
 almanak strat new --template mean_reversion --name my_rsi --chain arbitrum
-# 在 strategy.py 和 config.json 旁边创建 my_rsi/AGENTS.md
+# 在 strategy.py、config.json、pyproject.toml 等旁边创建 my_rsi/AGENTS.md
 ```
 
 ## 技能教授内容

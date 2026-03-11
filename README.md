@@ -50,7 +50,7 @@ Almanak is an intent-based Python framework for developing, testing, and deployi
 ## Installation
 
 ```bash
-pip install almanak
+pipx install almanak
 ```
 
 **Using an AI coding agent?** Teach it the SDK in one command:
@@ -63,7 +63,7 @@ This auto-detects your platform (Claude Code, Codex, Cursor, Copilot, and [6 mor
 
 ## Quick Start
 
-1. **Create a New Strategy**
+1. **Create a New Strategy** (scaffolds a self-contained Python project with `pyproject.toml`, `.venv/`, `uv.lock`)
    ```bash
    almanak strat new
    ```

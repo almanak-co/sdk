@@ -4,7 +4,13 @@ This guide walks you through installing the Almanak SDK, scaffolding your first 
 
 ## Prerequisites
 
-- **Python 3.11+**
+- **Python 3.12+**
+- **uv** (Python package manager):
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
 - **Foundry** (provides Anvil for local fork testing):
 
 ```bash
@@ -15,14 +21,16 @@ foundryup
 ## Installation
 
 ```bash
-pip install almanak
+pipx install almanak
 ```
 
 Or with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv pip install almanak
+uv tool install almanak
 ```
+
+This installs the `almanak` CLI globally. Each scaffolded strategy also has `almanak` as a local dependency in its own `.venv/` -- this two-install pattern is standard (same as CrewAI, Dagster, etc.).
 
 **Using an AI coding agent?** Teach it the SDK in one command:
 
@@ -52,13 +60,26 @@ almanak strat demo --name uniswap_rsi
 almanak strat new
 ```
 
-Follow the interactive prompts to pick a template, chain, and name. This creates a strategy directory with:
+Follow the interactive prompts to pick a template, chain, and name. This creates a **self-contained Python project** with:
 
 - `strategy.py` - Your strategy implementation with `decide()` method
 - `config.json` - Runtime parameters (tokens, thresholds, funding)
+- `pyproject.toml` - Dependencies and `[tool.almanak]` metadata
+- `uv.lock` - Locked dependencies (created by `uv sync`)
+- `.venv/` - Per-strategy virtual environment (created by `uv sync`)
 - `.env` - Environment variables (fill in your keys later)
+- `.gitignore` - Git ignore rules
+- `.python-version` - Python version pin (3.12)
 - `__init__.py` - Package exports
 - `tests/` - Test scaffolding
+- `AGENTS.md` - AI agent guide
+
+The scaffold runs `uv sync` automatically to install dependencies. To add extra packages later:
+
+```bash
+uv add pandas-ta          # Updates pyproject.toml + uv.lock + .venv/
+uv run pytest tests/ -v   # Run tests in the strategy's venv
+```
 
 ## 2. Run on a Local Anvil Fork
 
@@ -71,7 +92,7 @@ almanak strat run --network anvil --once
 
 This command automatically:
 
-1. **Starts an Anvil fork** of the chain specified in your `@almanak_strategy` decorator (free public RPCs are used by default)
+1. **Starts an Anvil fork** of the chain specified in your strategy (free public RPCs are used by default)
 2. **Uses a default Anvil wallet** -- no `ALMANAK_PRIVATE_KEY` needed
 3. **Starts the gateway** sidecar in the background
 4. **Funds your wallet** with tokens listed in `anvil_funding` (see below)

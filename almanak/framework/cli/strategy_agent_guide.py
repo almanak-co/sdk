@@ -85,13 +85,21 @@ def generate_strategy_agents_md(config: StrategyGuideConfig) -> str:
 - **Class:** `{config.class_name}` in `strategy.py`
 - **Config:** `config.json`
 
+This is a self-contained Python project with its own `pyproject.toml`, `.venv/`, and `uv.lock`.
+The same `pyproject.toml` + `uv.lock` drive both local development and cloud deployment.
+
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `strategy.py` | Main strategy - edit `decide()` to change trading logic |
 | `config.json` | Runtime parameters (tokens, thresholds, chain) |
+| `pyproject.toml` | Dependencies plus metadata (`framework`, `version`, `run.interval`) |
+| `uv.lock` | Locked dependencies for reproducible builds |
+| `.venv/` | Per-strategy virtual environment (created by `uv sync`) |
 | `.env` | Secrets (private key, API keys) - never commit this |
+| `.gitignore` | Git ignore rules (excludes `.venv/`, `.env`, etc.) |
+| `.python-version` | Python version pin (3.12) |
 | `tests/test_strategy.py` | Unit tests for the strategy |
 
 ## How to Run
@@ -108,6 +116,16 @@ almanak strat run --network anvil --interval 30
 
 # Dry run (no transactions)
 almanak strat run --dry-run --once
+```
+
+## Adding Dependencies
+
+```bash
+# Add a package (updates pyproject.toml + uv.lock + .venv/)
+uv add pandas-ta
+
+# Run tests via uv
+uv run pytest tests/ -v
 ```
 
 ## Intent Types Used

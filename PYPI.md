@@ -17,7 +17,7 @@ The Almanak SDK is a powerful Python library for developing, testing, and deploy
 ## Installation
 
 ```bash
-pip install almanak
+pipx install almanak
 ```
 
 **Using an AI coding agent?** Teach it the SDK in one command:
@@ -30,19 +30,15 @@ Auto-detects your platform (Claude Code, Codex, Cursor, Copilot, and 6 more) and
 
 ## Quick Start
 
-1. **Create a New Strategy**
+1. **Create a New Strategy** (scaffolds a self-contained Python project with `pyproject.toml`, `.venv/`, `uv.lock`)
    ```bash
    almanak strat new
    ```
 
-2. **Start the Gateway and Test**
+2. **Test on a Local Anvil Fork**
    ```bash
-   # Terminal 1: Start gateway
-   almanak gateway
-
-   # Terminal 2: Run strategy
    cd my_strategy
-   almanak strat run --once
+   uv run almanak strat run --network anvil --once
    ```
 
 ## Writing a Strategy

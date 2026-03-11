@@ -4,7 +4,13 @@
 
 ## 前提条件
 
-- **Python 3.11+**
+- **Python 3.12+**
+- **uv**（Python 包管理器）：
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
 - **Foundry**（提供用于本地分叉测试的 Anvil）：
 
 ```bash
@@ -15,14 +21,16 @@ foundryup
 ## 安装
 
 ```bash
-pip install almanak
+pipx install almanak
 ```
 
 或者使用 [uv](https://docs.astral.sh/uv/)：
 
 ```bash
-uv pip install almanak
+uv tool install almanak
 ```
+
+这会全局安装 `almanak` CLI。每个创建的策略也会在自己的 `.venv/` 中将 `almanak` 作为本地依赖 -- 这种双重安装模式是标准做法（与 CrewAI、Dagster 等相同）。
 
 **使用 AI 编程代理？** 一个命令即可让它学会 SDK：
 
@@ -52,13 +60,26 @@ almanak strat demo --name uniswap_rsi
 almanak strat new
 ```
 
-按照交互式提示选择模板、链和名称。这将创建一个策略目录，包含：
+按照交互式提示选择模板、链和名称。这将创建一个**独立的 Python 项目**，包含：
 
 - `strategy.py` - 您的策略实现，包含 `decide()` 方法
 - `config.json` - 链、协议和参数配置
+- `pyproject.toml` - 依赖和 `[tool.almanak]` 元数据
+- `uv.lock` - 锁定的依赖（由 `uv sync` 创建）
+- `.venv/` - 每个策略的虚拟环境（由 `uv sync` 创建）
 - `.env` - 环境变量（稍后填入您的密钥）
+- `.gitignore` - Git 忽略规则
+- `.python-version` - Python 版本固定（3.12）
 - `__init__.py` - 包导出
 - `tests/` - 测试脚手架
+- `AGENTS.md` - AI 代理指南
+
+脚手架会自动运行 `uv sync` 来安装依赖。要添加额外的包：
+
+```bash
+uv add pandas-ta          # 更新 pyproject.toml + uv.lock + .venv/
+uv run pytest tests/ -v   # 在策略的 venv 中运行测试
+```
 
 ## 2. 在本地 Anvil 分叉上运行
 

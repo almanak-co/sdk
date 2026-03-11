@@ -39,7 +39,7 @@ The Almanak SDK provides a comprehensive framework for developing, testing, and 
 ## Installation
 
 ```bash
-pip install almanak
+pipx install almanak
 ```
 
 Anvil fork testing (below) requires [Foundry](https://book.getfoundry.sh/getting-started/installation):
@@ -52,13 +52,15 @@ foundryup
 ## Quick Start
 
 ```bash
-# Scaffold a new strategy from a template
+# Scaffold a new strategy (creates a self-contained Python project with pyproject.toml, .venv/, uv.lock)
 almanak strat new
 
 # Run it on a local Anvil fork -- no wallet or API keys required
 cd my_strategy
 almanak strat run --network anvil --once
 ```
+
+Each scaffolded strategy is a self-contained Python project with its own `pyproject.toml`, `.venv/`, and `uv.lock`. The same files drive both local development and the platform's cloud Docker build.
 
 Anvil fork testing is the recommended starting point. The SDK auto-starts a local fork, uses a default funded wallet, and runs your strategy with zero configuration. See [Getting Started](getting-started.md) for the full walkthrough.
 

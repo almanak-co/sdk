@@ -28,10 +28,10 @@ compilation to transactions, execution, and state management.
 ## Quick Start
 
 ```bash
-# Install
-pip install almanak
+# Install the CLI globally
+pipx install almanak
 
-# Scaffold a new strategy
+# Scaffold a new strategy (creates a self-contained Python project)
 almanak strat new --template mean_reversion --name my_rsi --chain arbitrum
 
 # Run on local Anvil fork (auto-starts gateway + Anvil)
@@ -45,13 +45,32 @@ almanak strat run --once
 almanak strat demo
 ```
 
-**Minimal strategy (3 files):**
+Each scaffolded strategy is a **self-contained Python project** with its own
+`pyproject.toml`, `.venv/`, and `uv.lock`. The same files drive both local
+development and the platform's cloud Docker build.
+
+**Strategy project structure:**
 
 ```
 my_strategy/
-  strategy.py    # IntentStrategy subclass with decide() method
-  config.json    # Runtime parameters (tokens, thresholds, funding)
-  .env           # Secrets (ALMANAK_PRIVATE_KEY, ALCHEMY_API_KEY)
+  strategy.py        # IntentStrategy subclass with decide() method
+  config.json        # Runtime parameters (tokens, thresholds, funding)
+  pyproject.toml     # Dependencies + [tool.almanak] metadata
+  uv.lock            # Locked dependencies (created by uv sync)
+  .venv/             # Per-strategy virtual environment
+  .env               # Secrets (ALMANAK_PRIVATE_KEY, ALCHEMY_API_KEY)
+  .gitignore         # Git ignore rules
+  .python-version    # Python version pin (3.12)
+  __init__.py        # Package exports
+  tests/             # Test scaffold
+  AGENTS.md          # AI agent guide
+```
+
+**Adding dependencies:**
+
+```bash
+uv add pandas-ta          # Updates pyproject.toml + uv.lock + .venv/
+uv run pytest tests/ -v   # Run tests in the strategy's venv
 ```
 
 For Anvil testing, add `anvil_funding` to `config.json` so your wallet is auto-funded on fork start
@@ -883,12 +902,15 @@ results.plot()  # Matplotlib equity curve
 ### Strategy Management
 
 ```bash
-almanak strat new                     # Interactive strategy scaffolding
+almanak strat new                     # Interactive scaffolding (creates pyproject.toml, .venv/, uv.lock)
 almanak strat new -t mean_reversion -n my_rsi -c arbitrum  # Non-interactive
 almanak strat demo                    # Browse and copy a working demo strategy
 ```
 
 **Templates:** `blank`, `dynamic_lp`, `mean_reversion`, `bollinger`, `basis_trade`, `lending_loop`, `copy_trader`
+
+Each scaffolded strategy is a self-contained Python project. After scaffolding, `uv sync` runs
+automatically to create `.venv/` and `uv.lock`. Add dependencies with `uv add <package>`.
 
 ### Running Strategies
 

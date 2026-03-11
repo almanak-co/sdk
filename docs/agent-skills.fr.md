@@ -250,9 +250,11 @@ almanak agent install -d /path/to/my-project -p claude
 
 Lorsque vous créez une nouvelle stratégie avec `almanak strat new`, un fichier `AGENTS.md` est automatiquement généré dans le répertoire de la stratégie. Ce guide léger est adapté au modèle que vous avez choisi -- il ne liste que les types d'intentions et les patterns pertinents pour cette stratégie spécifique.
 
+Chaque stratégie créée est un projet Python autonome avec `pyproject.toml`, `.venv/` et `uv.lock`, le `AGENTS.md` par stratégie documente donc aussi l'ajout de dépendances (`uv add`) et l'exécution de tests (`uv run pytest`).
+
 ```bash
 almanak strat new --template mean_reversion --name my_rsi --chain arbitrum
-# Crée my_rsi/AGENTS.md aux côtés de strategy.py et config.json
+# Crée my_rsi/AGENTS.md aux côtés de strategy.py, config.json, pyproject.toml, etc.
 ```
 
 ## Ce que la compétence enseigne

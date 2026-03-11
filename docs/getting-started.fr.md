@@ -4,7 +4,13 @@ Ce guide vous accompagne dans l'installation du SDK Almanak, la création de vot
 
 ## Prérequis
 
-- **Python 3.11+**
+- **Python 3.12+**
+- **uv** (gestionnaire de paquets Python) :
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
 - **Foundry** (fournit Anvil pour les tests sur fork local) :
 
 ```bash
@@ -15,14 +21,16 @@ foundryup
 ## Installation
 
 ```bash
-pip install almanak
+pipx install almanak
 ```
 
 Ou avec [uv](https://docs.astral.sh/uv/) :
 
 ```bash
-uv pip install almanak
+uv tool install almanak
 ```
+
+Cela installe le CLI `almanak` globalement. Chaque stratégie créée a aussi `almanak` comme dépendance locale dans son propre `.venv/` -- ce modèle à double installation est standard (comme CrewAI, Dagster, etc.).
 
 **Vous utilisez un agent de codage IA ?** Enseignez-lui le SDK en une commande :
 
@@ -52,13 +60,26 @@ almanak strat demo --name uniswap_rsi
 almanak strat new
 ```
 
-Suivez les invites interactives pour choisir un modèle, une chaîne et un nom. Cela crée un répertoire de stratégie contenant :
+Suivez les invites interactives pour choisir un modèle, une chaîne et un nom. Cela crée un **projet Python autonome** contenant :
 
 - `strategy.py` - Votre implémentation de stratégie avec la méthode `decide()`
 - `config.json` - Configuration de la chaîne, du protocole et des paramètres
+- `pyproject.toml` - Dépendances et métadonnées `[tool.almanak]`
+- `uv.lock` - Dépendances verrouillées (créé par `uv sync`)
+- `.venv/` - Environnement virtuel par stratégie (créé par `uv sync`)
 - `.env` - Variables d'environnement (remplissez vos clés plus tard)
+- `.gitignore` - Règles d'exclusion Git
+- `.python-version` - Version Python épinglée (3.12)
 - `__init__.py` - Exports du package
 - `tests/` - Échafaudage de tests
+- `AGENTS.md` - Guide pour agents IA
+
+Le scaffold exécute `uv sync` automatiquement pour installer les dépendances. Pour ajouter des paquets supplémentaires :
+
+```bash
+uv add pandas-ta          # Met à jour pyproject.toml + uv.lock + .venv/
+uv run pytest tests/ -v   # Exécuter les tests dans le venv de la stratégie
+```
 
 ## 2. Exécuter sur un fork Anvil local
 

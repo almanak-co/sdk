@@ -4,7 +4,13 @@ Esta guía te acompaña en la instalación del SDK de Almanak, la creación de t
 
 ## Requisitos previos
 
-- **Python 3.11+**
+- **Python 3.12+**
+- **uv** (gestor de paquetes Python):
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
 - **Foundry** (proporciona Anvil para pruebas en fork local):
 
 ```bash
@@ -15,14 +21,16 @@ foundryup
 ## Instalación
 
 ```bash
-pip install almanak
+pipx install almanak
 ```
 
 O con [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv pip install almanak
+uv tool install almanak
 ```
+
+Esto instala el CLI `almanak` globalmente. Cada estrategia creada también tiene `almanak` como dependencia local en su propio `.venv/` -- este patrón de doble instalación es estándar (igual que CrewAI, Dagster, etc.).
 
 **¿Usas un agente de codificación IA?** Enséñale el SDK con un solo comando:
 
@@ -52,13 +60,26 @@ almanak strat demo --name uniswap_rsi
 almanak strat new
 ```
 
-Sigue las indicaciones interactivas para elegir una plantilla, cadena y nombre. Esto crea un directorio de estrategia con:
+Sigue las indicaciones interactivas para elegir una plantilla, cadena y nombre. Esto crea un **proyecto Python autónomo** con:
 
 - `strategy.py` - Tu implementación de estrategia con el método `decide()`
 - `config.json` - Configuración de cadena, protocolo y parámetros
+- `pyproject.toml` - Dependencias y metadatos `[tool.almanak]`
+- `uv.lock` - Dependencias bloqueadas (creado por `uv sync`)
+- `.venv/` - Entorno virtual por estrategia (creado por `uv sync`)
 - `.env` - Variables de entorno (completa tus claves después)
+- `.gitignore` - Reglas de ignorar Git
+- `.python-version` - Pin de versión de Python (3.12)
 - `__init__.py` - Exportaciones del paquete
 - `tests/` - Estructura de pruebas
+- `AGENTS.md` - Guía para agentes IA
+
+El scaffold ejecuta `uv sync` automáticamente para instalar dependencias. Para añadir paquetes adicionales:
+
+```bash
+uv add pandas-ta          # Actualiza pyproject.toml + uv.lock + .venv/
+uv run pytest tests/ -v   # Ejecutar tests en el venv de la estrategia
+```
 
 ## 2. Ejecutar en un fork local de Anvil
 

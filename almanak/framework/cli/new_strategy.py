@@ -1007,6 +1007,53 @@ __all__ = [
     return content
 
 
+def generate_pyproject_toml(
+    name: str,
+) -> str:
+    """Generate pyproject.toml for a self-contained strategy Python project.
+
+    The generated file is a lean manifest for the hosted platform.
+    The platform handles lockfile generation during cloud Docker builds.
+    """
+    from almanak._version import __version__
+
+    snake_name = to_snake_case(name)
+
+    return f"""[project]
+name = "{snake_name}"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "almanak>={__version__}",
+]
+
+[tool.almanak.run]
+interval = 60
+"""
+
+
+def generate_gitignore() -> str:
+    """Generate .gitignore for a strategy directory."""
+    return """.venv/
+__pycache__/
+*.pyc
+.env
+*.db
+*.db-journal
+.pytest_cache/
+.coverage
+dist/
+build/
+*.egg-info/
+.DS_Store
+"""
+
+
+def generate_python_version() -> str:
+    """Generate .python-version file matching the Dockerfile base image."""
+    return "3.12\n"
+
+
 def generate_env_file() -> str:
     """Generate the .env file with required environment variables."""
     return """# Required
@@ -1215,6 +1262,19 @@ def new_strategy(
             fh.write(config_json_content)
         files_created.append("config.json")
 
+        # pyproject.toml
+        pyproject_file = strategy_dir / "pyproject.toml"
+        pyproject_content = generate_pyproject_toml(name)
+        with open(pyproject_file, "w") as fh:
+            fh.write(pyproject_content)
+        files_created.append("pyproject.toml")
+
+        # .python-version
+        python_version_file = strategy_dir / ".python-version"
+        with open(python_version_file, "w") as fh:
+            fh.write(generate_python_version())
+        files_created.append(".python-version")
+
         # __init__.py
         init_file = strategy_dir / "__init__.py"
         init_content = generate_init_file(name)
@@ -1242,6 +1302,12 @@ def new_strategy(
             fh.write(env_content)
         files_created.append(".env")
 
+        # .gitignore
+        gitignore_file = strategy_dir / ".gitignore"
+        with open(gitignore_file, "w") as fh:
+            fh.write(generate_gitignore())
+        files_created.append(".gitignore")
+
         # AGENTS.md (per-strategy agent guide)
         from almanak.framework.cli.strategy_agent_guide import (
             StrategyGuideConfig,
@@ -1261,25 +1327,21 @@ def new_strategy(
         files_created.append("AGENTS.md")
 
         # Print success message
-        click.echo("Files created:")
-        for file_path in files_created:
-            click.echo(f"  - {snake_name}/{file_path}")
-
+        click.echo()
+        click.echo(f"Created strategy '{snake_name}' in {strategy_dir}")
+        click.echo()
+        click.echo("Files:")
+        click.echo("  strategy.py          - Strategy implementation")
+        click.echo("  config.json          - Runtime configuration")
+        click.echo("  pyproject.toml       - Dependencies and metadata")
+        click.echo("  .env                 - Environment variables (edit this)")
+        click.echo("  .gitignore           - Git ignore rules")
+        click.echo("  AGENTS.md            - AI agent guide")
+        click.echo("  tests/               - Test scaffold")
         click.echo()
         click.echo("Next steps:")
-        click.echo(f"  1. cd {snake_name}")
-        click.echo("  2. Edit config.json to tune parameters")
-        click.echo("  3. Implement your decide() method in strategy.py")
-        click.echo("  4. Test locally: almanak strat run --once")
-        click.echo("  5. Run tests: uv run pytest tests/")
-        click.echo()
-        click.echo("Backtesting:")
-        click.echo("  almanak backtest pnl -s <name> --start 2024-01-01 --end 2024-06-01")
-        click.echo("  almanak backtest sweep -s <name> --start ... --end ... --param 'key:v1,v2,v3'")
-        click.echo("  almanak backtest optimize -s <name> --start ... --end ... --config-file cfg.json")
-        click.echo()
-        click.echo("AI agent support:")
-        click.echo("  almanak agent install    # Teach your AI agent this SDK")
+        click.echo(f"  cd {strategy_dir}")
+        click.echo("  almanak strat run --once --dry-run")
 
     except Exception as e:
         click.echo(f"Error creating strategy: {e}", err=True)
