@@ -400,6 +400,12 @@ class LocalRuntimeConfig:
 
     def _validate_and_derive_wallet(self) -> None:
         """Validate private key and derive wallet address."""
+        # Zodiac mode: private key is held by remote signer, wallet_address
+        # comes from the Safe signer's EOA address instead.
+        if not self.private_key and self.safe_signer is not None and self.safe_signer.mode == "zodiac":
+            self.wallet_address = self.safe_signer.eoa_address
+            return
+
         if not self.private_key:
             raise ConfigurationError(field="private_key", reason="Private key cannot be empty")
 
@@ -697,9 +703,14 @@ class LocalRuntimeConfig:
             default_gas_cap = CHAIN_GAS_PRICE_CAPS_GWEI.get(resolved_chain, DEFAULT_GAS_PRICE_CAP_GWEI)
 
         # Get execution mode and create Safe signer if needed
-        private_key = get_required("PRIVATE_KEY")
         mode_str = get_optional("EXECUTION_MODE", "eoa") or "eoa"
         execution_mode = ExecutionMode.from_string(mode_str)
+
+        # Zodiac mode: private key is held by remote signer service, not needed locally
+        if execution_mode == ExecutionMode.SAFE_ZODIAC:
+            private_key = get_optional("PRIVATE_KEY", "") or ""
+        else:
+            private_key = get_required("PRIVATE_KEY")
         safe_signer = None
         if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC):
             safe_signer = _create_safe_signer_from_env(
@@ -1099,6 +1110,12 @@ class MultiChainRuntimeConfig:
 
     def _validate_and_derive_wallet(self) -> None:
         """Validate private key and derive wallet address."""
+        # Zodiac mode: private key is held by remote signer, wallet_address
+        # comes from the Safe signer's EOA address instead.
+        if not self.private_key and self.safe_signer is not None and self.safe_signer.mode == "zodiac":
+            self.wallet_address = self.safe_signer.eoa_address
+            return
+
         if not self.private_key:
             raise ConfigurationError(
                 field="private_key",
@@ -1597,12 +1614,15 @@ class MultiChainRuntimeConfig:
         # VIB-308: Warn when unprefixed env vars are set -- silently ignored without prefix.
         _warn_unprefixed_env_vars(prefix)
 
-        # Get private key (always required)
-        private_key = get_required("PRIVATE_KEY")
-
         # Get execution mode (default: EOA)
         mode_str = get_optional("EXECUTION_MODE", "eoa") or "eoa"
         execution_mode = ExecutionMode.from_string(mode_str)
+
+        # Zodiac mode: private key is held by remote signer service, not needed locally
+        if execution_mode == ExecutionMode.SAFE_ZODIAC:
+            private_key = get_optional("PRIVATE_KEY", "") or ""
+        else:
+            private_key = get_required("PRIVATE_KEY")
 
         # Create Safe signer if needed
         safe_signer = None
