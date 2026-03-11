@@ -53,6 +53,9 @@ notes/.tmp/
 
 # Local Claude artifacts
 .claude/worktrees/
+
+# KitchenLoop runtime artifacts
+.kitchenloop/
 # any files containing secrets
 secrets.yaml
 .env.nightly
