@@ -13,6 +13,18 @@ Quick start::
     result = await executor.execute("get_price", {"token": "ETH", "chain": "arbitrum"})
 """
 
+from almanak.framework.agent_tools.approval import (  # noqa: F401
+    ApprovalChannel,
+    ApprovalConfig,
+    ApprovalDecision,
+    ApprovalNotifier,
+    ApprovalRequest,
+    ApprovalStatus,
+    ConsoleApprovalNotifier,
+    FileApprovalNotifier,
+    HumanApprovalActuator,
+    WebhookApprovalNotifier,
+)
 from almanak.framework.agent_tools.catalog import (  # noqa: F401
     LatencyClass,
     RiskTier,

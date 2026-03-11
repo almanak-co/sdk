@@ -103,11 +103,26 @@ class AgentPolicy:
 
 @dataclass
 class PolicyDecision:
-    """Result of a policy check."""
+    """Result of a policy check.
+
+    Attributes:
+        allowed: Whether the tool call passes all hard policy checks.
+        violations: List of hard violations that block execution.
+        suggestions: Remediation hints for the agent.
+        requires_approval: True when the trade exceeds the human-approval
+            threshold. When set, ``allowed`` is still True (other checks
+            passed), but the executor must obtain human approval before
+            dispatching to the gateway.
+        approval_estimated_usd: Estimated USD value that triggered approval.
+        approval_threshold_usd: The effective threshold that was exceeded.
+    """
 
     allowed: bool
     violations: list[str] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
+    requires_approval: bool = False
+    approval_estimated_usd: Decimal = Decimal("0")
+    approval_threshold_usd: Decimal = Decimal("0")
 
     def raise_if_denied(self, tool_name: str) -> None:
         """Raise ``RiskBlockedError`` if the decision is denied."""
@@ -212,6 +227,9 @@ class PolicyEngine:
         """Run all policy checks for a tool call. Returns a decision."""
         violations: list[str] = []
         suggestions: list[str] = []
+        requires_approval = False
+        approval_estimated_usd = Decimal("0")
+        approval_threshold_usd = Decimal("0")
 
         # Resolve effective args: for tools like compile_intent that nest
         # token/protocol/chain inside a "params" dict, merge those fields
@@ -234,7 +252,14 @@ class PolicyEngine:
             if tool_def.name not in _VAULT_LIFECYCLE_TOOLS:
                 self._check_spend_limits(effective_args, violations, suggestions)
                 self._check_position_size(effective_args, violations, suggestions)
-                self._check_approval_gate(tool_def, effective_args, violations, suggestions)
+                approval_result = self._check_approval_gate(tool_def, effective_args) if not violations else None
+                if approval_result is not None:
+                    requires_approval = True
+                    approval_estimated_usd, approval_threshold_usd = approval_result
+                    suggestions.append(
+                        f"Estimated value ${approval_estimated_usd:.2f} exceeds approval threshold "
+                        f"${approval_threshold_usd:.2f}; human approval required before execution."
+                    )
             # Cooldown exemption is broader: deposit_vault also skips cooldown
             # so the vault setup sequence (deposit → open_lp) isn't blocked.
             if tool_def.name not in _COOLDOWN_EXEMPT_TOOLS:
@@ -245,6 +270,9 @@ class PolicyEngine:
             allowed=len(violations) == 0,
             violations=violations,
             suggestions=suggestions,
+            requires_approval=requires_approval,
+            approval_estimated_usd=approval_estimated_usd,
+            approval_threshold_usd=approval_threshold_usd,
         )
 
     def record_trade(self, usd_amount: Decimal, *, success: bool, tool_name: str = "") -> None:
@@ -297,6 +325,10 @@ class PolicyEngine:
         """Set rebalance viability gate (called after compute_rebalance_candidate)."""
         self._rebalance_approved = approved
         self._save_state()
+
+    def estimate_usd_value(self, args: dict) -> Decimal:
+        """Public accessor for USD value estimation (used by approval actuator)."""
+        return self._estimate_usd_value(args)
 
     @property
     def consecutive_failures(self) -> int:
@@ -807,10 +839,16 @@ class PolicyEngine:
             )
             suggestions.append(f"Reduce position to at most ${self.policy.max_position_size_usd}.")
 
-    def _check_approval_gate(
-        self, tool_def: ToolDefinition, args: dict, violations: list[str], suggestions: list[str]
-    ) -> None:
-        """Block trades exceeding the approval threshold (hard block for autonomous agents)."""
+    def _check_approval_gate(self, tool_def: ToolDefinition, args: dict) -> tuple[Decimal, Decimal] | None:
+        """Check whether a trade exceeds the human-approval threshold.
+
+        Returns ``(estimated_usd, effective_threshold)`` if approval is
+        required, or ``None`` if the trade is below the threshold.
+
+        This no longer adds a hard violation. Instead the caller sets
+        ``requires_approval`` on the ``PolicyDecision``, and the executor
+        is responsible for orchestrating the human-approval flow.
+        """
         policy_threshold = self.policy.require_human_approval_above_usd
         per_tool_threshold = (
             Decimal(str(tool_def.requires_approval_above_usd))
@@ -825,8 +863,8 @@ class PolicyEngine:
 
         total_usd = self._estimate_usd_value(args)
         if total_usd > 0 and total_usd > effective:
-            violations.append(f"Estimated value ${total_usd:.2f} exceeds approval threshold ${effective}.")
-            suggestions.append(f"Reduce trade size to at most ${effective}.")
+            return (total_usd, effective)
+        return None
 
     def _check_rebalance_gate(self, tool_def: ToolDefinition, violations: list[str], suggestions: list[str]) -> None:
         """Check LP open/close has verified economic viability first."""

@@ -17,6 +17,11 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import ValidationError
 
+from almanak.framework.agent_tools.approval import (
+    ApprovalConfig,
+    ApprovalStatus,
+    HumanApprovalActuator,
+)
 from almanak.framework.agent_tools.catalog import (
     RiskTier,
     ToolCatalog,
@@ -38,6 +43,7 @@ from almanak.framework.agent_tools.schemas import ToolResponse
 from almanak.framework.agent_tools.tracing import DecisionTracer, sanitize_args
 
 if TYPE_CHECKING:
+    from almanak.framework.agent_tools.approval import ApprovalNotifier
     from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
@@ -93,6 +99,8 @@ class ToolExecutor:
         max_retries: int = 3,
         initial_retry_delay: float = 1.0,
         max_retry_delay: float = 60.0,
+        approval_config: ApprovalConfig | None = None,
+        approval_notifier: ApprovalNotifier | None = None,
     ) -> None:
         self._client = gateway_client
         self._catalog = catalog or get_default_catalog()
@@ -120,6 +128,16 @@ class ToolExecutor:
             initial_delay_seconds=initial_retry_delay,
             max_delay_seconds=max_retry_delay,
         )
+
+        # Human-approval actuator for high-value trades.
+        # Only created when approval_config is provided; otherwise the old
+        # hard-block behaviour applies (requires_approval triggers a rejection).
+        self._approval_actuator: HumanApprovalActuator | None = None
+        if approval_config is not None:
+            self._approval_actuator = HumanApprovalActuator(
+                approval_config,
+                notifier=approval_notifier,
+            )
 
         # Bundle cache for compile -> execute flow
         # Each entry stores (chain, bundle_bytes, original_args) to prevent cross-chain
@@ -218,6 +236,91 @@ class ToolExecutor:
             )
             return False
         return policy_requires
+
+    async def _handle_approval(
+        self,
+        tool_name: str,
+        arguments: dict,
+        estimated_usd: Decimal,
+        threshold_usd: Decimal,
+    ) -> ToolResponse | None:
+        """Orchestrate the human-approval flow for a high-value trade.
+
+        Returns a ``ToolResponse`` with status ``"rejected"`` if approval
+        is denied or expired, or ``None`` if approved (execution proceeds).
+
+        When no ``approval_actuator`` is configured, falls back to the
+        legacy hard-block behaviour.
+        """
+        if self._approval_actuator is None:
+            # No actuator configured -- fall back to hard rejection (legacy behaviour)
+            raise RiskBlockedError(
+                f"Estimated value ${estimated_usd:.2f} exceeds approval threshold "
+                f"${threshold_usd} and no approval channel is configured.",
+                suggestion=f"Reduce trade size to at most ${threshold_usd}, "
+                "or configure an approval channel (approval_config).",
+                tool_name=tool_name,
+            )
+
+        # Create and send the approval request
+        request = self._approval_actuator.request_approval(
+            tool_name=tool_name,
+            args=arguments,
+            estimated_value_usd=estimated_usd,
+            threshold_usd=threshold_usd,
+        )
+
+        # Alert the operator via the alert manager as well (fire-and-forget)
+        self._fire_alert(
+            f"Human approval requested for {tool_name}: "
+            f"${estimated_usd:.2f} exceeds ${threshold_usd} threshold "
+            f"(request_id={request.request_id})",
+            severity="warning",
+        )
+
+        # Wait for the decision (async -- does not block the event loop)
+        poll_interval = float(self._approval_actuator._config.webhook_poll_interval_seconds)
+        decision = await self._approval_actuator.wait_for_decision(
+            request,
+            poll_interval=poll_interval,
+        )
+
+        if decision.status == ApprovalStatus.APPROVED:
+            logger.info(
+                "Trade approved: tool=%s request_id=%s decided_by=%s",
+                tool_name,
+                request.request_id,
+                decision.decided_by,
+            )
+            return None  # Proceed with execution
+
+        # Rejected or expired
+        status_label = "expired" if decision.status == ApprovalStatus.EXPIRED else "rejected"
+        reason = decision.reason or f"Approval {status_label}"
+        logger.warning(
+            "Trade %s: tool=%s request_id=%s reason=%s",
+            status_label,
+            tool_name,
+            request.request_id,
+            reason,
+        )
+
+        return ToolResponse(
+            status="rejected",
+            data={
+                "request_id": request.request_id,
+                "approval_status": decision.status.value,
+                "estimated_value_usd": str(estimated_usd),
+                "threshold_usd": str(threshold_usd),
+                "decided_by": decision.decided_by,
+                "reason": reason,
+            },
+            explanation=f"Trade {status_label}: {reason}",
+            decision_hints={
+                "action": "reduce_size_or_wait",
+                "threshold_usd": str(threshold_usd),
+            },
+        )
 
     # -- Public API ---------------------------------------------------------
 
@@ -348,6 +451,17 @@ class ToolExecutor:
                 )
                 err.policy_result = policy_result_dict  # type: ignore[attr-defined]
                 raise err
+
+            # 3b. Human-approval gate for high-value trades
+            if decision.requires_approval:
+                approval_result = await self._handle_approval(
+                    tool_name,
+                    sanitize_args(request.model_dump()),
+                    decision.approval_estimated_usd,
+                    decision.approval_threshold_usd,
+                )
+                if approval_result is not None:
+                    return approval_result, policy_result_dict
 
         # 4. Dispatch by category
         request_dict = request.model_dump()

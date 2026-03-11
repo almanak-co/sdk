@@ -609,9 +609,11 @@ class TestPolicyEngineApprovalGate:
         ))
         tool = _make_tool("swap_tokens", category=ToolCategory.ACTION, risk_tier=RiskTier.MEDIUM)
         decision = engine.check(tool, {"amount": "15000", "chain": "arbitrum"})
-        assert decision.allowed is False
-        approval_violations = [v for v in decision.violations if "approval threshold" in v.lower()]
-        assert len(approval_violations) == 1
+        # No longer a hard block -- instead flags requires_approval
+        assert decision.allowed is True
+        assert decision.requires_approval is True
+        assert decision.approval_estimated_usd == Decimal("15000")
+        assert decision.approval_threshold_usd == Decimal("10000")
 
     def test_per_tool_threshold_is_more_restrictive(self):
         """When per-tool threshold is lower than policy threshold, use per-tool."""
@@ -632,9 +634,10 @@ class TestPolicyEngineApprovalGate:
             requires_approval_above_usd=5000.0,
         )
         decision = engine.check(tool, {"amount": "7000", "chain": "arbitrum"})
-        assert decision.allowed is False
-        approval_violations = [v for v in decision.violations if "approval threshold" in v.lower()]
-        assert len(approval_violations) == 1
+        # No longer a hard block -- instead flags requires_approval with per-tool threshold
+        assert decision.allowed is True
+        assert decision.requires_approval is True
+        assert decision.approval_threshold_usd == Decimal("5000.0")
 
     def test_data_tools_skip_approval_gate(self):
         engine = PolicyEngine(AgentPolicy(require_human_approval_above_usd=Decimal("100")))
