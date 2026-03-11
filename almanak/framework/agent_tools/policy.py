@@ -77,7 +77,7 @@ class AgentPolicy:
 
     # ── Scope constraints ───────────────────────────────────────────────
     allowed_tools: set[str] | None = None  # None = all tools allowed
-    allowed_chains: set[str] = field(default_factory=lambda: {"arbitrum"})
+    allowed_chains: set[str] | None = field(default_factory=lambda: {"arbitrum"})
     allowed_protocols: set[str] | None = None  # None = all protocols
     allowed_tokens: set[str] | None = None  # None = all tokens
     allowed_intent_types: set[str] | None = None  # None = all intent types

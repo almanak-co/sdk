@@ -63,7 +63,8 @@ def create_cli_executor(
         wallet_address: Wallet address (auto-derived from ALMANAK_PRIVATE_KEY if empty).
         max_single_trade_usd: Max single trade size in USD.
         max_daily_spend_usd: Max daily spend in USD.
-        allowed_chains: Restrict to specific chains. Defaults to {"arbitrum"} if None.
+        allowed_chains: Restrict to specific chains. Defaults to None (all chains)
+            so cross-chain operations like bridge work without extra config.
         allowed_tokens: Restrict to specific tokens. None = all.
         allowed_protocols: Restrict to specific protocols. None = all.
         connect_timeout: Seconds to wait for gateway connection.
@@ -98,9 +99,10 @@ def create_cli_executor(
     policy = AgentPolicy(
         max_single_trade_usd=Decimal(str(max_single_trade_usd)),
         max_daily_spend_usd=Decimal(str(max_daily_spend_usd)),
-        # Default to the caller-selected chain so policy and default_chain agree.
-        # CLI users can pass --chain per-command; safety is enforced by the confirmation gate.
-        allowed_chains=set(allowed_chains) if allowed_chains else {chain},
+        # CLI users explicitly choose actions and confirm via the safety gate.
+        # Default to None (all chains allowed) so cross-chain operations like
+        # bridge work without extra config. Users can still restrict via allowed_chains.
+        allowed_chains=set(allowed_chains) if allowed_chains else None,
         allowed_tokens=set(allowed_tokens) if allowed_tokens else None,
         allowed_protocols=set(allowed_protocols) if allowed_protocols else None,
         # CLI users explicitly request actions — no autonomous agent loop

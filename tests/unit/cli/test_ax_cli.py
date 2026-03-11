@@ -124,6 +124,20 @@ class TestCreateCliExecutor:
         assert policy.require_rebalance_check is False
 
     @patch("almanak.framework.agent_tools.cli_executor.GatewayClient")
+    def test_default_allowed_chains_is_none(self, mock_client_cls):
+        """Default allowed_chains should be None (all chains) so bridge works out of the box."""
+        mock_client = MagicMock()
+        mock_client.wait_for_ready.return_value = True
+        mock_client_cls.return_value = mock_client
+
+        executor, _ = create_cli_executor(chain="arbitrum")
+
+        policy = executor._policy_engine.policy
+        assert policy.allowed_chains is None, (
+            "CLI default should allow all chains so cross-chain operations like bridge work"
+        )
+
+    @patch("almanak.framework.agent_tools.cli_executor.GatewayClient")
     def test_wallet_from_env(self, mock_client_cls):
         """Wallet address should be derived from ALMANAK_PRIVATE_KEY."""
         mock_client = MagicMock()
