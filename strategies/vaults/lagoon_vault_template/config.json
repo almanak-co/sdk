@@ -1,0 +1,27 @@
+{
+    "strategy_id": "lagoon_vault_template",
+    "strategy_name": "lagoon_vault_template",
+    "description": "Template: Lagoon ERC-7540 vault-wrapped momentum strategy on Base using Aerodrome swaps. Requires a deployed Lagoon vault -- see README.",
+    "trade_size_usd": 500,
+    "momentum_window": 24,
+    "momentum_threshold_pct": 2.0,
+    "max_slippage_bps": 100,
+    "base_token": "WETH",
+    "quote_token": "USDC",
+    "chain": "base",
+    "vault": {
+        "vault_address": "0x_DEPLOY_LAGOON_VAULT_FIRST",
+        "valuator_address": "0x_SET_TO_SAFE_ADDRESS",
+        "underlying_token": "USDC",
+        "version": "0.5.0",
+        "settlement_interval_minutes": 60,
+        "min_valuation_change_down_bps": 500,
+        "max_valuation_change_up_bps": 1000,
+        "auto_settle_redeems": true
+    },
+    "anvil_funding": {
+        "ETH": 10,
+        "WETH": 5,
+        "USDC": 50000
+    }
+}
