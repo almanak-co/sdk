@@ -191,6 +191,43 @@ class MyStrategy(IntentStrategy):
 | `BridgeIntent` | Bridge tokens cross-chain |
 | `EnsureBalanceIntent` | Meta-intent that resolves to a `BridgeIntent` or `HoldIntent` to ensure minimum token balance on a target chain |
 
+## State Persistence (Required for Stateful Strategies)
+
+The framework automatically persists runner-level metadata (iteration counts, error counters) after each iteration. However, **strategy-specific state** -- position IDs, trade counts, phase tracking, cooldown timers -- is only saved if you implement two hooks:
+
+```python
+from typing import Any
+from decimal import Decimal
+
+class MyStrategy(IntentStrategy):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._position_id: int | None = None
+        self._trades_today: int = 0
+
+    def get_persistent_state(self) -> dict[str, Any]:
+        """Return state to save. Called after each iteration."""
+        return {
+            "position_id": self._position_id,
+            "trades_today": self._trades_today,
+        }
+
+    def load_persistent_state(self, state: dict[str, Any]) -> None:
+        """Restore state on startup. Called when resuming a run."""
+        self._position_id = state.get("position_id")
+        self._trades_today = state.get("trades_today", 0)
+```
+
+Without these hooks, your strategy will lose all internal state on restart. This is especially dangerous for LP strategies where losing the `position_id` means the strategy cannot close its own positions.
+
+!!! warning "What gets lost without persistence"
+    If you store state in instance variables (e.g., `self._position_id`) but don't implement `get_persistent_state()` and `load_persistent_state()`, that state is lost when the process stops. On restart, your strategy starts from scratch with no memory of open positions, completed trades, or internal phase.
+
+!!! tip "Tips"
+    - Use defensive `.get()` with defaults in `load_persistent_state()` so older state dicts don't crash on missing keys.
+    - Store `Decimal` values as strings (`str(amount)`) and parse them back (`Decimal(state["amount"])`) for safe JSON round-tripping.
+    - The `on_intent_executed()` callback is the natural place to update state after a trade (e.g., storing a new position ID), and `get_persistent_state()` then picks it up for saving.
+
 ## Strategy Teardown (Required)
 
 Every strategy must implement teardown so operators can safely close positions. Without teardown, close-requests are silently ignored and positions remain open. The `almanak strat new` templates include stubs -- fill them in as you build your strategy.

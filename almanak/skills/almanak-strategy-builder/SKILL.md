@@ -640,42 +640,49 @@ market.timestamp        # datetime - snapshot timestamp
 
 ## State Management
 
-`self.state` is a dict that persists across iterations **and restarts**. The runner calls
-`load_state()` on startup, restoring previously saved state from the StateManager (SQLite locally,
-gateway when deployed). Write to `self.state` during `decide()` or `on_intent_executed()` and
-changes are automatically persisted after each iteration.
+The framework automatically persists runner-level metadata (iteration counts, error counters,
+multi-step execution progress) after each iteration. However, **strategy-specific state** --
+position IDs, trade counts, phase tracking, cooldown timers -- is only persisted if you implement
+two hooks: `get_persistent_state()` and `load_persistent_state()`.
+
+Without these hooks, all instance variables are lost on restart. This is especially dangerous for
+LP and lending strategies where losing a position ID means the strategy cannot close its own
+positions.
+
+**Required for any stateful strategy:**
 
 ```python
-def decide(self, market):
-    # Read state (survives restarts)
-    last_trade = self.state.get("last_trade_time")
-    position_id = self.state.get("lp_position_id")
+def __init__(self, **kwargs):
+    super().__init__(**kwargs)
+    self._position_id: int | None = None
+    self._phase: str = "idle"
+    self._entry_price: Decimal = Decimal("0")
 
-    # Write state (persisted automatically after each iteration)
-    self.state["last_trade_time"] = datetime.now().isoformat()
-    self.state["consecutive_holds"] = self.state.get("consecutive_holds", 0) + 1
-```
-
-Use `--fresh` to clear saved state when starting over: `almanak strat run --fresh --once`.
-
-For strategies that need custom serialization (e.g., Decimal fields, complex objects), override
-`get_persistent_state()` and `load_persistent_state()`:
-
-```python
 def get_persistent_state(self) -> dict:
-    """Called by framework to serialize state for persistence."""
+    """Called by framework after each iteration to serialize state for persistence."""
     return {
-        "phase": self.state.get("phase", "idle"),
-        "position_id": self.state.get("position_id"),
-        "entry_price": str(self.state.get("entry_price", "0")),
+        "position_id": self._position_id,
+        "phase": self._phase,
+        "entry_price": str(self._entry_price),  # Decimal -> str for JSON
     }
 
 def load_persistent_state(self, saved: dict) -> None:
-    """Called by framework on startup to restore state."""
-    self.state["phase"] = saved.get("phase", "idle")
-    self.state["position_id"] = saved.get("position_id")
-    self.state["entry_price"] = Decimal(saved.get("entry_price", "0"))
+    """Called by framework on startup to restore state from previous run."""
+    self._position_id = saved.get("position_id")
+    self._phase = saved.get("phase", "idle")
+    self._entry_price = Decimal(saved.get("entry_price", "0"))
 ```
+
+**Guidelines:**
+
+- Use defensive `.get()` with defaults in `load_persistent_state()` so older saved state doesn't
+  crash when you add new fields.
+- Store `Decimal` values as strings (`str(amount)`) and parse back (`Decimal(state["amount"])`)
+  for safe JSON round-tripping. All values must be JSON-serializable.
+- The `on_intent_executed()` callback is the natural place to update state after a trade (e.g.,
+  storing a new position ID), and `get_persistent_state()` then picks it up for saving.
+
+Use `--fresh` to clear saved state when starting over: `almanak strat run --fresh --once`.
 
 ### on_intent_executed Callback
 
@@ -694,8 +701,9 @@ def on_intent_executed(self, intent, success: bool, result):
         return
 
     # Capture LP position ID (enriched automatically by ResultEnricher)
+    # Store in instance variables -- persisted via get_persistent_state()
     if result.position_id is not None:
-        self.state["lp_position_id"] = result.position_id
+        self._lp_position_id = result.position_id
         logger.info(f"Opened LP position {result.position_id}")
 
         # Store range bounds for rebalancing strategies (keep as Decimal)
@@ -703,12 +711,12 @@ def on_intent_executed(self, intent, success: bool, result):
             hasattr(intent, "range_lower") and intent.range_lower is not None
             and hasattr(intent, "range_upper") and intent.range_upper is not None
         ):
-            self.state["range_lower"] = intent.range_lower
-            self.state["range_upper"] = intent.range_upper
+            self._range_lower = intent.range_lower
+            self._range_upper = intent.range_upper
 
     # Capture swap amounts
     if result.swap_amounts:
-        self.state["last_swap"] = {
+        self._last_swap = {
             "amount_in": str(result.swap_amounts.amount_in),
             "amount_out": str(result.swap_amounts.amount_out),
         }
@@ -1045,11 +1053,11 @@ def decide(self, market):
 ```python
 def decide(self, market):
     price = market.price(self.base_token)
-    position_id = self.state.get("lp_position_id")
+    position_id = self._lp_position_id
 
     if position_id:
         # Check if price is out of range - close and reopen
-        if price < self.state.get("range_lower") or price > self.state.get("range_upper"):
+        if price < self._range_lower or price > self._range_upper:
             return Intent.lp_close(position_id=position_id, protocol="uniswap_v3")
 
     # Open new position centered on current price
@@ -1108,7 +1116,7 @@ def supports_teardown(self) -> bool:
 
 def generate_teardown_intents(self, mode, market=None) -> list[Intent]:
     intents = []
-    position_id = self.state.get("lp_position_id")
+    position_id = self._lp_position_id
     if position_id:
         intents.append(Intent.lp_close(position_id=position_id))
     # Swap all base token back to quote
