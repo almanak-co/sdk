@@ -605,7 +605,6 @@ class TestEventDataClasses:
         """Test SetAuthorizationEventData.to_dict()."""
         data = SetAuthorizationEventData(
             caller=CALLER_ADDRESS,
-            authorizer=ON_BEHALF_OF_ADDRESS,
             authorized=RECEIVER_ADDRESS,
             is_authorized=True,
         )

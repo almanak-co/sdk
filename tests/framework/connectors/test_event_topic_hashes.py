@@ -75,7 +75,7 @@ class TestMorphoBlueTopics:
     def test_set_authorization(self):
         from almanak.framework.connectors.morpho_blue.receipt_parser import EVENT_TOPICS
 
-        assert EVENT_TOPICS["SetAuthorization"] == _keccak("SetAuthorization(address,address,address,bool)")
+        assert EVENT_TOPICS["SetAuthorization"] == _keccak("SetAuthorization(address,address,bool)")
 
     def test_accrue_interest(self):
         from almanak.framework.connectors.morpho_blue.receipt_parser import EVENT_TOPICS

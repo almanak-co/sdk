@@ -162,15 +162,17 @@ def create_create_market_log(market_id, loan_token, collateral_token, oracle, ir
     }
 
 
-def create_set_authorization_log(caller, authorizer, authorized, is_authorized):
-    """Create SetAuthorization log."""
+def create_set_authorization_log(caller, authorized, is_authorized):
+    """Create SetAuthorization log.
+
+    Morpho Blue signature: SetAuthorization(address indexed caller, address indexed authorized, bool isAuthorized)
+    """
     data = f"0x{1 if is_authorized else 0:064x}"
     return {
         "address": MORPHO_ADDRESS,
         "topics": [
-            "0xd5e969f01efe921d3f766bdebad25f0a05e3f237311f56482bf132d0326309c0",
+            "0x536fbf298df21953aa2d4dcf413275ef35de20bc0e6716be5e3b15be977b2a6e",
             f"0x000000000000000000000000{caller[2:].lower()}",
-            f"0x000000000000000000000000{authorizer[2:].lower()}",
             f"0x000000000000000000000000{authorized[2:].lower()}",
         ],
         "data": data,
@@ -460,7 +462,7 @@ class TestMorphoBlueReceiptParser:
             "transactionHash": "0x555",
             "blockNumber": 12354,
             "status": 1,
-            "logs": [create_set_authorization_log(USER_ADDRESS, USER_ADDRESS, authorized, True)],
+            "logs": [create_set_authorization_log(USER_ADDRESS, authorized, True)],
             "gasUsed": 50000,
         }
 

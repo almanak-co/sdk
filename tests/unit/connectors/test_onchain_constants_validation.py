@@ -380,7 +380,7 @@ class TestMorphoBlueEvents:
         "WithdrawCollateral": "WithdrawCollateral(bytes32,address,address,address,uint256)",
         "Liquidate": "Liquidate(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)",
         "FlashLoan": "FlashLoan(address,address,uint256)",
-        "SetAuthorization": "SetAuthorization(address,address,address,bool)",
+        "SetAuthorization": "SetAuthorization(address,address,bool)",
         "AccrueInterest": "AccrueInterest(bytes32,uint256,uint256,uint256)",
     }
 

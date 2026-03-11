@@ -99,7 +99,7 @@ EVENT_TOPICS: dict[str, str] = {
     "Liquidate": "0xa4946ede45d0c6f06a0f5ce92c9ad3b4751452d2fe0e25010783bcab57a67e41",
     "FlashLoan": "0xc76f1b4fe4396ac07a9fa55a415d4ca430e72651d37d3401f3bed7cb13fc4f12",
     "CreateMarket": "0xac4b2400f169220b0c0afdde7a0b32e775ba727ea1cb30b35f935cdaab8683ac",
-    "SetAuthorization": "0xd5e969f01efe921d3f766bdebad25f0a05e3f237311f56482bf132d0326309c0",
+    "SetAuthorization": "0x536fbf298df21953aa2d4dcf413275ef35de20bc0e6716be5e3b15be977b2a6e",
     "AccrueInterest": "0x9d9bd501d0657d7dfe415f779a620a62b78bc508ddc0891fbbd8b7ac0f8fce87",
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
@@ -468,15 +468,15 @@ class CreateMarketEventData:
 class SetAuthorizationEventData:
     """Parsed data from SetAuthorization event.
 
+    Morpho Blue signature: SetAuthorization(address indexed caller, address indexed authorized, bool isAuthorized)
+
     Attributes:
-        caller: Address that set the authorization
-        authorizer: Address that granted the authorization
-        authorized: Address that received the authorization
+        caller: Address that called setAuthorization
+        authorized: Address whose authorization status was changed
         is_authorized: Whether authorization was granted or revoked
     """
 
     caller: str
-    authorizer: str
     authorized: str
     is_authorized: bool
 
@@ -484,7 +484,6 @@ class SetAuthorizationEventData:
         """Convert to dictionary."""
         return {
             "caller": self.caller,
-            "authorizer": self.authorizer,
             "authorized": self.authorized,
             "is_authorized": self.is_authorized,
         }
@@ -973,18 +972,16 @@ class MorphoBlueReceiptParser:
     def _parse_set_authorization(self, topics: list[str], data: str) -> dict[str, Any]:
         """Parse SetAuthorization event.
 
-        event SetAuthorization(address indexed caller, address indexed authorizer, address indexed authorized, bool isAuthorized)
+        event SetAuthorization(address indexed caller, address indexed authorized, bool isAuthorized)
         """
         caller = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
-        authorizer = HexDecoder.topic_to_address(topics[2]) if len(topics) > 2 else ""
-        authorized = HexDecoder.topic_to_address(topics[3]) if len(topics) > 3 else ""
+        authorized = HexDecoder.topic_to_address(topics[2]) if len(topics) > 2 else ""
 
         # Data: isAuthorized (bool as uint256)
         is_authorized = HexDecoder.decode_uint256(data, 0) != 0 if data else False
 
         return SetAuthorizationEventData(
             caller=caller,
-            authorizer=authorizer,
             authorized=authorized,
             is_authorized=is_authorized,
         ).to_dict()
