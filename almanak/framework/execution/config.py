@@ -894,6 +894,36 @@ class LocalRuntimeConfig:
 
 
 # =============================================================================
+# Gateway (Sidecar) Configuration
+# =============================================================================
+
+
+@dataclass
+class GatewayRuntimeConfig:
+    """Lightweight runtime config for sidecar deployments.
+
+    Used when --no-gateway is set and ALMANAK_PRIVATE_KEY is absent.
+    The gateway container handles all signing and RPC access; the strategy
+    only needs chain info and the wallet address for balance queries.
+    """
+
+    chain: str
+    wallet_address: str
+    is_safe: bool = False
+    max_gas_price_gwei: int = 100
+
+    @property
+    def execution_address(self) -> str:
+        """Wallet address that executes transactions (via gateway)."""
+        return self.wallet_address
+
+    @property
+    def is_safe_mode(self) -> bool:
+        """Whether the wallet is a Safe."""
+        return self.is_safe
+
+
+# =============================================================================
 # Multi-Chain Configuration
 # =============================================================================
 
@@ -2038,6 +2068,7 @@ def _create_safe_signer_from_env(
 __all__ = [
     "LocalRuntimeConfig",
     "MultiChainRuntimeConfig",
+    "GatewayRuntimeConfig",
     "ConfigurationError",
     "MissingEnvironmentVariableError",
     "ExecutionMode",

@@ -61,7 +61,13 @@ from ..data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
 from ..data.ohlcv.ohlcv_router import OHLCVRouter
 from ..data.ohlcv.routing_provider import RoutingOHLCVProvider
 from ..data.price.gateway_oracle import GatewayPriceOracle
-from ..execution.config import LocalRuntimeConfig, MissingEnvironmentVariableError, MultiChainRuntimeConfig
+from ..execution.config import (
+    GatewayRuntimeConfig,
+    LocalRuntimeConfig,
+    MissingEnvironmentVariableError,
+    MultiChainRuntimeConfig,
+)
+from ..execution.gas.constants import CHAIN_GAS_PRICE_CAPS_GWEI, DEFAULT_GAS_PRICE_CAP_GWEI
 from ..execution.multichain import MultiChainOrchestrator
 from ..execution.orchestrator import ExecutionOrchestrator
 from ..execution.signer.local import LocalKeySigner
@@ -1525,8 +1531,39 @@ def run(
         click.echo(f"Network: ANVIL (local fork at http://127.0.0.1:{anvil_port})")
 
     # Load runtime configuration from environment
-    runtime_config: LocalRuntimeConfig | MultiChainRuntimeConfig
-    if multi_chain:
+    runtime_config: LocalRuntimeConfig | MultiChainRuntimeConfig | GatewayRuntimeConfig
+
+    # Sidecar deployment mode: --no-gateway without a local private key.
+    # The gateway handles all signing and RPC; we only need chain + wallet address.
+    if no_gateway and not os.environ.get("ALMANAK_PRIVATE_KEY"):
+        if multi_chain:
+            raise click.ClickException(
+                "Multi-chain sidecar mode is not supported yet; set ALMANAK_PRIVATE_KEY or run a single-chain strategy."
+            )
+        resolved_chain = config_chain or None
+        if not resolved_chain:
+            raise click.ClickException(
+                "Chain must be specified in config.json or strategy decorator for sidecar deployment mode."
+            )
+
+        safe_address = os.environ.get("ALMANAK_SAFE_ADDRESS")
+        wallet_address = safe_address or os.environ.get("ALMANAK_EOA_ADDRESS")
+        if not wallet_address:
+            raise click.ClickException(
+                "Sidecar mode (--no-gateway without ALMANAK_PRIVATE_KEY) requires "
+                "ALMANAK_SAFE_ADDRESS or ALMANAK_EOA_ADDRESS to be set."
+            )
+
+        default_gas_cap = CHAIN_GAS_PRICE_CAPS_GWEI.get(resolved_chain, DEFAULT_GAS_PRICE_CAP_GWEI)
+        runtime_config = GatewayRuntimeConfig(
+            chain=resolved_chain,
+            wallet_address=wallet_address,
+            is_safe=bool(safe_address),
+            max_gas_price_gwei=default_gas_cap,
+        )
+        click.echo(f"Sidecar deployment mode: chain={resolved_chain}, wallet={wallet_address}")
+
+    elif multi_chain:
         try:
             runtime_config = MultiChainRuntimeConfig.from_env(
                 chains=strategy_chains,
@@ -1652,7 +1689,7 @@ def run(
         if multi_chain:
             strategy_config["chain"] = strategy_chains[0]
         else:
-            assert isinstance(runtime_config, LocalRuntimeConfig)
+            assert isinstance(runtime_config, LocalRuntimeConfig | GatewayRuntimeConfig)
             strategy_config["chain"] = runtime_config.chain
     if "wallet_address" not in strategy_config:
         strategy_config["wallet_address"] = runtime_config.execution_address
@@ -1946,7 +1983,7 @@ def run(
             click.echo(f"  Multi-chain orchestrator created for {len(strategy_chains)} chains")
         else:
             # Single-chain setup - always use gateway-backed providers
-            assert isinstance(runtime_config, LocalRuntimeConfig)
+            assert isinstance(runtime_config, LocalRuntimeConfig | GatewayRuntimeConfig)
 
             from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
 
