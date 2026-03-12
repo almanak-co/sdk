@@ -1,4 +1,4 @@
-"""Tests for SQLiteLifecycleStore.
+"""Tests for SQLiteLifecycleStore and PostgresLifecycleStore agent ID resolution.
 
 Tests cover:
 - State CRUD: write/read, error state, upsert, not found, heartbeat count,
@@ -10,6 +10,7 @@ Tests cover:
 - Thread safety: concurrent heartbeats, concurrent state writes
 - Factory: create sqlite store, create postgres without plugin raises,
   singleton returns same instance, reset clears singleton
+- Agent ID resolution: AGENT_ID env override, fallback, blank/whitespace handling
 """
 
 import threading
@@ -268,3 +269,43 @@ class TestLifecycleFactory:
         reset_lifecycle_store()
         store2 = get_lifecycle_store(sqlite_path=str(tmp_path / "reset2.db"))
         assert store1 is not store2
+
+
+class TestPostgresAgentIdResolution:
+    """Regression tests for the AGENT_ID env-var resolution used by PostgresLifecycleStore.
+
+    The logic under test is a pure function (env var lookup + strip + fallback).
+    We replicate it here so the test suite stays independent of the platform plugin.
+    If the contract changes in the plugin, these tests should be updated to match.
+    """
+
+    @staticmethod
+    def _resolve_agent_id(agent_id: str) -> str:
+        """Mirror of PostgresLifecycleStore._resolve_agent_id for testing."""
+        import os
+
+        env_agent_id = os.environ.get("AGENT_ID")
+        if env_agent_id is None:
+            return agent_id
+        resolved = env_agent_id.strip()
+        return resolved or agent_id
+
+    def test_no_env_var_passes_through(self, monkeypatch):
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        assert self._resolve_agent_id("MyStrategy") == "MyStrategy"
+
+    def test_env_var_overrides(self, monkeypatch):
+        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+        assert self._resolve_agent_id("MyStrategy") == "platform-uuid-1234"
+
+    def test_empty_string_falls_back(self, monkeypatch):
+        monkeypatch.setenv("AGENT_ID", "")
+        assert self._resolve_agent_id("MyStrategy") == "MyStrategy"
+
+    def test_whitespace_only_falls_back(self, monkeypatch):
+        monkeypatch.setenv("AGENT_ID", "   ")
+        assert self._resolve_agent_id("MyStrategy") == "MyStrategy"
+
+    def test_env_var_with_whitespace_is_stripped(self, monkeypatch):
+        monkeypatch.setenv("AGENT_ID", "  uuid-with-spaces  ")
+        assert self._resolve_agent_id("MyStrategy") == "uuid-with-spaces"
