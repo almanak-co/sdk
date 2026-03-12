@@ -722,6 +722,53 @@ def gateway(port, network, metrics, metrics_port, log_level, chains):
         click.echo("Gateway stopped.")
 
 
+@almanak.command("backtest-service")
+@click.option(
+    "--host",
+    default=None,
+    type=str,
+    help="Host to bind to (default: 0.0.0.0).",
+)
+@click.option(
+    "--port",
+    default=None,
+    type=int,
+    help="Port to listen on (default: 8000).",
+)
+@click.option(
+    "--workers",
+    default=None,
+    type=int,
+    help="Number of uvicorn workers (default: 1).",
+)
+@click.option(
+    "--log-level",
+    default=None,
+    type=click.Choice(["debug", "info", "warning", "error"]),
+    help="Log level (default: info).",
+)
+def backtest_service(host, port, workers, log_level):
+    """Start the BacktestService HTTP API.
+
+    Provides HTTP endpoints for backtesting, paper trading, and fee model
+    queries. Designed as a standalone service for Edge integration.
+
+    Examples:
+
+    \b
+        # Start with defaults (0.0.0.0:8000)
+        almanak backtest-service
+
+    \b
+        # Start on custom port
+        almanak backtest-service --port 9000
+    """
+    from almanak.services.backtest.server import run_server
+
+    click.echo(f"Starting BacktestService on {host or '0.0.0.0'}:{port or 8000}")
+    run_server(host=host, port=port, workers=workers, log_level=log_level)
+
+
 @almanak.command()
 @click.option(
     "--port",
