@@ -20,6 +20,7 @@ import pytest
 import pytest_asyncio
 import requests
 from web3 import Web3
+from web3.exceptions import TimeExhausted
 from web3.providers.rpc.async_rpc import AsyncHTTPProvider
 
 # =============================================================================
@@ -41,6 +42,17 @@ TEST_SUBMITTER_MAX_RETRIES = int(os.environ.get("ALMANAK_TEST_SUBMITTER_MAX_RETR
 
 # requests-style (connect, read) timeouts for sync Web3 HTTPProvider
 TEST_WEB3_REQUEST_TIMEOUT = (TEST_RPC_CONNECT_TIMEOUT_SECONDS, TEST_RPC_READ_TIMEOUT_SECONDS)
+
+# Retry config for Anvil RPC calls during wallet funding.
+# Only applies to setup-time RPC calls (anvil_setBalance, anvil_setStorageAt, evm_mine),
+# NOT to test-time execution. Zero overhead on happy path.
+TEST_FUNDING_RPC_MAX_RETRIES = int(os.environ.get("ALMANAK_TEST_FUNDING_RPC_MAX_RETRIES", "3"))
+TEST_FUNDING_RPC_BACKOFF_SECONDS = float(os.environ.get("ALMANAK_TEST_FUNDING_RPC_BACKOFF_SECONDS", "2.0"))
+
+# Health check timeout for recovery path (generous, since the fork is already degraded).
+TEST_RECOVERY_HEALTH_TIMEOUT_SECONDS = float(
+    os.environ.get("ALMANAK_TEST_RECOVERY_HEALTH_TIMEOUT_SECONDS", "15.0")
+)
 
 # Fixed Anvil recovery policy for intent tests
 TEST_ANVIL_RECOVERY_MAX_RESTARTS = 2
@@ -438,7 +450,7 @@ def _force_restart_anvil(anvil_instance: Any, chain_name: str, attempt: int) -> 
         return (False, "")
 
     print(f"WARNING: {chain_name} recovery attempt {attempt}/{TEST_ANVIL_RECOVERY_MAX_RESTARTS}: forcing Anvil restart")
-    restarted = restart(health_timeout_seconds=TEST_RPC_CONNECT_TIMEOUT_SECONDS)
+    restarted = restart(health_timeout_seconds=TEST_RECOVERY_HEALTH_TIMEOUT_SECONDS)
     if not restarted:
         print(f"WARNING: {chain_name} recovery attempt {attempt}: Anvil restart failed")
         return (False, "")
@@ -518,10 +530,96 @@ def is_anvil_running(rpc_url: str = ANVIL_URL) -> bool:
         return False
 
 
+def _retry_on_network_error(
+    func: Callable[..., Any],
+    description: str,
+    max_retries: int = TEST_FUNDING_RPC_MAX_RETRIES,
+    backoff_seconds: float = TEST_FUNDING_RPC_BACKOFF_SECONDS,
+) -> Any:
+    """Retry a callable on transient network errors with linear backoff.
+
+    Catches ReadTimeout, ConnectionError, and web3 TimeExhausted.
+    Zero overhead on happy path - returns immediately on first success.
+
+    Args:
+        func: Zero-argument callable to retry
+        description: Human-readable label for log messages
+        max_retries: Maximum number of attempts (0 treated as 1)
+        backoff_seconds: Base backoff between retries (multiplied by attempt number)
+
+    Returns:
+        Return value of func()
+
+    Raises:
+        Last caught exception if all retries exhausted
+    """
+    attempts = max(1, max_retries)
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return func()
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError, TimeExhausted) as e:
+            last_error = e
+            if attempt < attempts:
+                delay = backoff_seconds * attempt
+                print(
+                    f"  [retry] {description} attempt {attempt}/{attempts} failed "
+                    f"({type(e).__name__}), retrying in {delay:.0f}s..."
+                )
+                time.sleep(delay)
+            else:
+                print(
+                    f"  [retry] {description} failed after {attempts} attempts "
+                    f"({type(e).__name__}: {e})"
+                )
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"{description} failed without a captured retryable exception")
+
+
+def _retry_rpc_call(
+    w3: Web3,
+    method: str,
+    params: list,
+    max_retries: int = TEST_FUNDING_RPC_MAX_RETRIES,
+    backoff_seconds: float = TEST_FUNDING_RPC_BACKOFF_SECONDS,
+) -> Any:
+    """Retry an Anvil RPC call with linear backoff and error checking.
+
+    Delegates to _retry_on_network_error for transient failures.
+    Additionally checks for JSON-RPC error payloads and raises on failure.
+
+    Args:
+        w3: Web3 instance connected to Anvil
+        method: RPC method name
+        params: RPC parameters
+        max_retries: Maximum number of attempts
+        backoff_seconds: Base backoff between retries (multiplied by attempt number)
+
+    Returns:
+        RPC response
+
+    Raises:
+        RuntimeError: If the RPC response contains an error field
+        Last caught network exception if all retries exhausted
+    """
+    response = _retry_on_network_error(
+        lambda: w3.provider.make_request(method, params),
+        description=method,
+        max_retries=max_retries,
+        backoff_seconds=backoff_seconds,
+    )
+    if not _rpc_response_success(response):
+        error_payload = response.get("error") if isinstance(response, dict) else response
+        raise RuntimeError(f"{method} returned RPC error: {error_payload}")
+    return response
+
+
 def fund_native_token(wallet: str, amount_wei: int, rpc_url: str) -> None:
     """Fund a wallet with native token (ETH/AVAX/etc).
 
     Uses in-process Web3 provider RPC instead of subprocess (cast).
+    Retries on transient network errors (ReadTimeout, ConnectionError).
     """
     w3 = make_intent_test_web3(rpc_url)
     checksum_wallet = Web3.to_checksum_address(wallet)
@@ -530,7 +628,7 @@ def fund_native_token(wallet: str, amount_wei: int, rpc_url: str) -> None:
         return
 
     amount_hex = hex(amount_wei)
-    w3.provider.make_request("anvil_setBalance", [wallet, amount_hex])
+    _retry_rpc_call(w3, "anvil_setBalance", [wallet, amount_hex])
 
 
 def _calculate_mapping_slot(wallet: str, balance_slot: int) -> str:
@@ -570,11 +668,11 @@ def fund_erc20_token(
     # Format amount as 32-byte hex
     amount_hex = f"0x{amount:064x}"
 
-    # Set storage via Anvil RPC
-    w3.provider.make_request("anvil_setStorageAt", [token_address, storage_slot, amount_hex])
+    # Set storage via Anvil RPC (with retry for transient failures)
+    _retry_rpc_call(w3, "anvil_setStorageAt", [token_address, storage_slot, amount_hex])
 
     # Mine a block to apply changes
-    w3.provider.make_request("evm_mine", [])
+    _retry_rpc_call(w3, "evm_mine", [])
 
 
 def get_token_balance(web3: Web3, token_address: str, wallet: str) -> int:
@@ -638,13 +736,15 @@ def _wrap_native_token(wallet: str, weth_address: str, amount: int, rpc_url: str
     checksum_wallet = Web3.to_checksum_address(wallet)
     checksum_weth = Web3.to_checksum_address(weth_address)
 
-    # Send ETH to WETH contract (calls deposit() via fallback)
-    tx_hash = w3.eth.send_transaction({
-        "from": checksum_wallet,
-        "to": checksum_weth,
-        "value": amount,
-    })
-    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=TEST_RPC_READ_TIMEOUT_SECONDS)
+    def _wrap_call() -> None:
+        tx_hash = w3.eth.send_transaction({
+            "from": checksum_wallet,
+            "to": checksum_weth,
+            "value": amount,
+        })
+        w3.eth.wait_for_transaction_receipt(tx_hash, timeout=TEST_RPC_READ_TIMEOUT_SECONDS)
+
+    _retry_on_network_error(_wrap_call, description="wrap_native_token")
 
 
 # =============================================================================
