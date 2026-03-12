@@ -18,7 +18,6 @@ from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.validation import (
     ValidationError,
-    validate_address,
     validate_chain,
     validate_tx_hash,
 )
@@ -68,6 +67,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         # Format: {cache_key: (compiler, created_timestamp)}
         self._compiler_cache: dict[str, tuple[object, float]] = {}
         self._compiler_locks: dict[str, asyncio.Lock] = {}
+        self._solana_rpc_cache: dict[str, object] = {}
         self._initialized = False
 
     async def _ensure_initialized(self) -> None:
@@ -237,6 +237,43 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         self._orchestrator_default_gas_caps[cache_key] = orchestrator.tx_risk_config.max_gas_price_gwei
         return orchestrator
 
+    async def _get_solana_planner(self, chain: str, wallet_address: str):
+        """Get or create SolanaExecutionPlanner for a Solana chain.
+
+        Args:
+            chain: Chain name (e.g., "solana")
+            wallet_address: Solana wallet address (base58)
+
+        Returns:
+            SolanaExecutionPlanner instance
+        """
+        from almanak.framework.execution.solana.planner import SolanaExecutionPlanner
+        from almanak.gateway.utils import get_rpc_url
+
+        cache_key = f"solana:{chain}:{wallet_address}"
+        if cache_key in self._orchestrator_cache:
+            return self._orchestrator_cache[cache_key]
+
+        network = self.settings.network
+        rpc_url = get_rpc_url(chain, network=network)
+
+        private_key = self.settings.solana_private_key
+        if not private_key:
+            raise ValueError(
+                "SOLANA_PRIVATE_KEY not configured. "
+                "Set ALMANAK_GATEWAY_SOLANA_PRIVATE_KEY or SOLANA_PRIVATE_KEY env var."
+            )
+
+        planner = SolanaExecutionPlanner(
+            wallet_address=wallet_address,
+            rpc_url=rpc_url,
+            private_key=private_key,
+        )
+
+        self._orchestrator_cache[cache_key] = planner
+        logger.info(f"Created SolanaExecutionPlanner for chain={chain}, wallet={wallet_address[:8]}...")
+        return planner
+
     async def CompileIntent(
         self,
         request: gateway_pb2.CompileIntentRequest,
@@ -268,7 +305,9 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         wallet_address = request.wallet_address
         if wallet_address:
             try:
-                wallet_address = validate_address(wallet_address, "wallet_address")
+                from almanak.gateway.validation import validate_address_for_chain
+
+                wallet_address = validate_address_for_chain(wallet_address, chain, "wallet_address")
             except ValidationError as e:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details(str(e))
@@ -367,8 +406,12 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                     error_code="NO_ACTION_BUNDLE",
                 )
 
-            # Serialize action bundle
-            bundle_bytes = json.dumps(compilation_result.action_bundle.to_dict()).encode("utf-8")
+            # Serialize action bundle (include sensitive_data for gateway roundtrip,
+            # e.g. Raydium NFT mint keypair needed for co-signing during Execute)
+            bundle_dict = compilation_result.action_bundle.to_dict()
+            if compilation_result.action_bundle.sensitive_data:
+                bundle_dict["_sensitive_data"] = compilation_result.action_bundle.sensitive_data
+            bundle_bytes = json.dumps(bundle_dict).encode("utf-8")
 
             return gateway_pb2.CompilationResult(
                 success=True,
@@ -487,7 +530,9 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             return gateway_pb2.ExecutionResult(success=False, error=str(e))
 
         try:
-            wallet_address = validate_address(request.wallet_address, "wallet_address")
+            from almanak.gateway.validation import validate_address_for_chain
+
+            wallet_address = validate_address_for_chain(request.wallet_address, chain, "wallet_address")
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
@@ -495,8 +540,77 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
 
         await self._ensure_initialized()
 
+        # Route to chain-family-specific execution
+        if chain.lower() == "solana":
+            return await self._execute_solana(request, context, chain, wallet_address)
+
+        return await self._execute_evm(request, context, chain, wallet_address)
+
+    async def _execute_solana(
+        self,
+        request: gateway_pb2.ExecuteRequest,
+        context: grpc.aio.ServicerContext,
+        chain: str,
+        wallet_address: str,
+    ) -> gateway_pb2.ExecutionResult:
+        """Execute a Solana action bundle via SolanaExecutionPlanner."""
         try:
-            # Deserialize action bundle (uses the framework ActionBundle dataclass)
+            from almanak.framework.models.reproduction_bundle import ActionBundle
+
+            bundle_data = json.loads(request.action_bundle.decode("utf-8"))
+            # Restore sensitive_data (e.g. additional_signers) from the gateway roundtrip
+            sensitive_data = bundle_data.pop("_sensitive_data", {})
+            action_bundle = ActionBundle.from_dict(bundle_data)
+            if sensitive_data:
+                action_bundle.sensitive_data = sensitive_data
+
+            planner = await self._get_solana_planner(chain, wallet_address)
+
+            exec_context = {
+                "strategy_id": request.strategy_id,
+                "intent_id": request.intent_id,
+                "chain": chain,
+                "wallet_address": wallet_address,
+                "dry_run": request.dry_run,
+            }
+
+            outcome = await planner.execute_actions([action_bundle], exec_context)
+
+            receipts_bytes = json.dumps(outcome.receipts).encode("utf-8")
+
+            # Propagate actual fees from the planner result.
+            # total_fee_native is in SOL; convert to lamports for the proto field.
+            fee_lamports = int(outcome.total_fee_native * 1_000_000_000)
+
+            return gateway_pb2.ExecutionResult(
+                success=outcome.success,
+                tx_hashes=outcome.tx_ids,
+                total_gas_used=fee_lamports,
+                receipts=receipts_bytes,
+                execution_id="",
+                error=outcome.error or "",
+            )
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Solana Execute failed: {error_msg}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(error_msg)
+            return gateway_pb2.ExecutionResult(
+                success=False,
+                error=error_msg,
+                error_code="EXECUTION_FAILED",
+            )
+
+    async def _execute_evm(
+        self,
+        request: gateway_pb2.ExecuteRequest,
+        context: grpc.aio.ServicerContext,
+        chain: str,
+        wallet_address: str,
+    ) -> gateway_pb2.ExecutionResult:
+        """Execute an EVM action bundle via ExecutionOrchestrator."""
+        try:
             from almanak.framework.models.reproduction_bundle import ActionBundle
 
             bundle_data = json.loads(request.action_bundle.decode("utf-8"))
@@ -610,6 +724,8 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
     ) -> gateway_pb2.TxStatus:
         """Get transaction status.
 
+        Routes to Solana or EVM status lookup based on chain family.
+
         Args:
             request: Status request with tx_hash and chain
             context: gRPC context
@@ -617,15 +733,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         Returns:
             TxStatus with confirmation status
         """
-        # Validate tx_hash format
-        try:
-            tx_hash = validate_tx_hash(request.tx_hash)
-        except ValidationError as e:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(e))
-            return gateway_pb2.TxStatus(status="invalid", error=str(e))
-
-        # Validate chain
+        # Validate chain first (needed for chain-aware tx_hash validation)
         try:
             chain = validate_chain(request.chain or "arbitrum")
         except ValidationError as e:
@@ -633,6 +741,95 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.TxStatus(status="invalid", error=str(e))
 
+        # Validate tx_hash format (chain-aware: base58 for Solana, hex for EVM)
+        try:
+            tx_hash = validate_tx_hash(request.tx_hash, chain=chain)
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.TxStatus(status="invalid", error=str(e))
+
+        # Route to chain-family-specific status lookup
+        from almanak.gateway.validation import is_solana_chain
+
+        if is_solana_chain(chain):
+            return await self._get_solana_tx_status(tx_hash, chain, context)
+
+        return await self._get_evm_tx_status(tx_hash, chain, context)
+
+    def _get_solana_rpc_client(self, chain: str):
+        """Get or create a cached SolanaRpcClient for a Solana chain."""
+        if chain in self._solana_rpc_cache:
+            return self._solana_rpc_cache[chain]
+
+        from almanak.framework.execution.solana.rpc import SolanaRpcClient, SolanaRpcConfig
+        from almanak.gateway.utils import get_rpc_url
+
+        rpc_url = get_rpc_url(chain, network=self.settings.network)
+        rpc_client = SolanaRpcClient(SolanaRpcConfig(rpc_url=rpc_url))
+        self._solana_rpc_cache[chain] = rpc_client
+        return rpc_client
+
+    async def _get_solana_tx_status(
+        self,
+        signature: str,
+        chain: str,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.TxStatus:
+        """Get Solana transaction status via getSignatureStatuses."""
+        try:
+            rpc_client = self._get_solana_rpc_client(chain)
+
+            statuses = await rpc_client.get_signature_statuses([signature], search_transaction_history=True)
+            status = statuses[0] if statuses else None
+
+            if status is None:
+                return gateway_pb2.TxStatus(status="pending")
+
+            err = status.get("err")
+            confirmation_status = status.get("confirmationStatus", "")
+            slot = status.get("slot", 0)
+
+            if err is not None:
+                return gateway_pb2.TxStatus(
+                    status="reverted",
+                    block_number=slot,
+                    error=f"Transaction failed: {err}",
+                )
+
+            # Map Solana commitment levels to status
+            if confirmation_status in ("confirmed", "finalized"):
+                return gateway_pb2.TxStatus(
+                    status="confirmed",
+                    confirmations=1 if confirmation_status == "confirmed" else 32,
+                    block_number=slot,
+                )
+            elif confirmation_status == "processed":
+                return gateway_pb2.TxStatus(
+                    status="pending",
+                    block_number=slot,
+                )
+            else:
+                return gateway_pb2.TxStatus(status="pending")
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Solana GetTransactionStatus failed for {signature}: {error_msg}")
+
+            if "not found" in error_msg.lower():
+                return gateway_pb2.TxStatus(status="pending")
+
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(error_msg)
+            return gateway_pb2.TxStatus(status="unknown", error=error_msg)
+
+    async def _get_evm_tx_status(
+        self,
+        tx_hash: str,
+        chain: str,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.TxStatus:
+        """Get EVM transaction status via eth_getTransactionReceipt."""
         try:
             from web3 import AsyncHTTPProvider, AsyncWeb3
 

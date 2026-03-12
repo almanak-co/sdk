@@ -24,7 +24,9 @@ CONFIG_NAME_TO_ENUM_NAME: dict[str, str] = {}
 
 # Chains excluded from fork_manager checks (no Anvil fork support yet).
 # Each exclusion MUST have a documented reason. Remove entries as support is added.
-FORK_MANAGER_EXCLUSIONS: set[Chain] = set()
+FORK_MANAGER_EXCLUSIONS: set[Chain] = {
+    Chain.SOLANA,  # Non-EVM chain, Anvil cannot fork Solana
+}
 
 # Chains excluded from execution config checks.
 # Each exclusion MUST have a documented reason.

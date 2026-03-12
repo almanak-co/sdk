@@ -38,25 +38,17 @@ from almanak.gateway.data.balance import Web3BalanceProvider
 from almanak.gateway.data.price import CoinGeckoPriceSource, PriceAggregator
 
 from ..data.balance.gateway_provider import GatewayBalanceProvider
-from ..data.indicators.adx import ADXCalculator
 from ..data.indicators.atr import ATRCalculator
 from ..data.indicators.bollinger_bands import BollingerBandsCalculator
-from ..data.indicators.cci import CCICalculator
-from ..data.indicators.ichimoku import IchimokuCalculator
 from ..data.indicators.macd import MACDCalculator
 from ..data.indicators.moving_averages import MovingAverageCalculator
-from ..data.indicators.obv import OBVCalculator
 from ..data.indicators.rsi import RSICalculator
 from ..data.indicators.stochastic import StochasticCalculator
 from ..data.indicators.sync_wrappers import (
-    create_sync_adx_func,
     create_sync_atr_func,
     create_sync_bollinger_func,
-    create_sync_cci_func,
     create_sync_ema_func,
-    create_sync_ichimoku_func,
     create_sync_macd_func,
-    create_sync_obv_func,
     create_sync_rsi_func,
     create_sync_sma_func,
     create_sync_stochastic_func,
@@ -505,10 +497,6 @@ def _wire_indicators(
     stoch_calculator = StochasticCalculator(ohlcv_provider=ohlcv_provider)
     atr_calculator = ATRCalculator(ohlcv_provider=ohlcv_provider)
     ma_calculator = MovingAverageCalculator(ohlcv_provider=ohlcv_provider)
-    adx_calculator = ADXCalculator(ohlcv_provider=ohlcv_provider)
-    obv_calculator = OBVCalculator(ohlcv_provider=ohlcv_provider)
-    cci_calculator = CCICalculator(ohlcv_provider=ohlcv_provider)
-    ichimoku_calculator = IchimokuCalculator(ohlcv_provider=ohlcv_provider)
 
     if hasattr(strategy_instance, "_price_oracle"):
         sync_price_oracle = create_sync_price_oracle_func(price_oracle)
@@ -522,12 +510,8 @@ def _wire_indicators(
             atr=create_sync_atr_func(atr_calculator, sync_price_oracle),
             sma=create_sync_sma_func(ma_calculator, sync_price_oracle),
             ema=create_sync_ema_func(ma_calculator, sync_price_oracle),
-            adx=create_sync_adx_func(adx_calculator),
-            obv=create_sync_obv_func(obv_calculator),
-            cci=create_sync_cci_func(cci_calculator),
-            ichimoku=create_sync_ichimoku_func(ichimoku_calculator),
         )
-        click.echo("  Providers injected into strategy (RSI + full indicator suite incl. ADX/OBV/CCI/Ichimoku)")
+        click.echo("  Providers injected into strategy (RSI + MACD/Bollinger/Stochastic/ATR/SMA/EMA)")
 
 
 def create_balance_provider(
@@ -1868,16 +1852,23 @@ def run(
     # Track resources that need cleanup
     ohlcv_provider: RoutingOHLCVProvider | None = None
     price_oracle: PriceOracle | None = None
+    solana_fork_mgr_ref: Any = None  # Track Solana fork manager for cleanup
 
     async def cleanup_resources() -> None:
         """Close all resources that have async cleanup methods."""
-        nonlocal ohlcv_provider, price_oracle, gateway_client
+        nonlocal ohlcv_provider, price_oracle, gateway_client, solana_fork_mgr_ref
         if ohlcv_provider is not None:
             await ohlcv_provider.close()
         if price_oracle is not None and hasattr(price_oracle, "close"):
             await price_oracle.close()
         if gateway_client is not None:
             gateway_client.disconnect()
+        if solana_fork_mgr_ref is not None:
+            try:
+                await solana_fork_mgr_ref.stop()
+                click.echo("  Stopped solana-test-validator")
+            except Exception as e:
+                logger.debug(f"Failed to stop solana-test-validator: {e}")
         if managed_gateway is not None:
             if keep_anvil and managed_gateway._anvil_managers:
                 for chain, mgr in managed_gateway._anvil_managers.items():
@@ -1966,6 +1957,42 @@ def run(
                 wallet_address=runtime_config.execution_address,
                 chain=runtime_config.chain,
             )
+
+            # For Solana + --network anvil, start local solana-test-validator
+            if runtime_config.chain.lower() == "solana" and resolved_network == "anvil":
+                from ..anvil.solana_fork_manager import SolanaForkManager
+
+                solana_rpc_url = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+                solana_fork_mgr = SolanaForkManager(
+                    rpc_url=solana_rpc_url,
+                    validator_port=int(os.environ.get("SOLANA_VALIDATOR_PORT", "8899")),
+                )
+                click.echo("  Starting local solana-test-validator...")
+                import asyncio as _aio
+
+                started = _aio.get_event_loop().run_until_complete(solana_fork_mgr.start())
+                if not started:
+                    raise click.ClickException(
+                        "Failed to start solana-test-validator. "
+                        "Ensure Solana CLI tools are installed: "
+                        'sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"'
+                    )
+                click.echo(f"  solana-test-validator running at {solana_fork_mgr.get_rpc_url()}")
+
+                # Fund the wallet
+                _aio.get_event_loop().run_until_complete(
+                    solana_fork_mgr.fund_wallet(runtime_config.wallet_address, Decimal("100"))
+                )
+                _aio.get_event_loop().run_until_complete(
+                    solana_fork_mgr.fund_tokens(
+                        runtime_config.wallet_address,
+                        {"USDC": Decimal("10000"), "USDT": Decimal("10000")},
+                    )
+                )
+                click.echo("  Wallet funded with 100 SOL + 10K USDC + 10K USDT")
+                solana_fork_mgr_ref = solana_fork_mgr
+
+            # All chains (including Solana) use GatewayExecutionOrchestrator
             execution_orchestrator = GatewayExecutionOrchestrator(
                 client=gateway_client,
                 chain=runtime_config.chain,

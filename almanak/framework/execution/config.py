@@ -131,6 +131,7 @@ CHAIN_IDS: dict[str, int] = {
     "blast": 81457,
     "mantle": 5000,
     "berachain": 80094,
+    "solana": 0,  # Non-EVM chain, no EVM chain ID
     "sonic": 146,
     "monad": 143,
 }
@@ -409,7 +410,10 @@ class LocalRuntimeConfig:
         if not self.private_key:
             raise ConfigurationError(field="private_key", reason="Private key cannot be empty")
 
-        # Normalize private key format
+        if self._is_solana():
+            return self._validate_solana_wallet()
+
+        # EVM: normalize private key format
         key = self.private_key
         if not key.startswith("0x"):
             key = "0x" + key
@@ -429,19 +433,38 @@ class LocalRuntimeConfig:
             # Never expose key material in error messages
             raise ConfigurationError(field="private_key", reason="Invalid private key format") from None
 
+    def _validate_solana_wallet(self) -> None:
+        """Validate Solana base58 private key and derive wallet address."""
+        try:
+            from almanak.framework.execution.solana.signer import SolanaSigner
+
+            signer = SolanaSigner.from_base58(self.private_key)
+            self.wallet_address = signer.wallet_address
+        except Exception:
+            raise ConfigurationError(
+                field="private_key",
+                reason="Invalid Solana private key (expected base58 Ed25519 keypair)",
+            ) from None
+
+    def _is_solana(self) -> bool:
+        """Check if this config is for a Solana chain."""
+        return self.chain.lower() == "solana"
+
     def _validate_optional_fields(self) -> None:
         """Validate optional fields with defaults."""
-        if self.max_gas_price_gwei <= 0:
-            raise ConfigurationError(
-                field="max_gas_price_gwei",
-                reason=f"Must be positive, got {self.max_gas_price_gwei}",
-            )
+        # Gas price checks are EVM-only (Solana uses lamports, not gwei)
+        if not self._is_solana():
+            if self.max_gas_price_gwei <= 0:
+                raise ConfigurationError(
+                    field="max_gas_price_gwei",
+                    reason=f"Must be positive, got {self.max_gas_price_gwei}",
+                )
 
-        if self.max_gas_price_gwei > 10000:
-            raise ConfigurationError(
-                field="max_gas_price_gwei",
-                reason=f"Exceeds maximum (10000 gwei), got {self.max_gas_price_gwei}",
-            )
+            if self.max_gas_price_gwei > 10000:
+                raise ConfigurationError(
+                    field="max_gas_price_gwei",
+                    reason=f"Exceeds maximum (10000 gwei), got {self.max_gas_price_gwei}",
+                )
 
         if self.tx_timeout_seconds <= 0:
             raise ConfigurationError(
@@ -706,8 +729,11 @@ class LocalRuntimeConfig:
         mode_str = get_optional("EXECUTION_MODE", "eoa") or "eoa"
         execution_mode = ExecutionMode.from_string(mode_str)
 
-        # Zodiac mode: private key is held by remote signer service, not needed locally
-        if execution_mode == ExecutionMode.SAFE_ZODIAC:
+        # Solana uses a separate key env var (base58 Ed25519 instead of hex secp256k1)
+        if resolved_chain == "solana":
+            private_key = os.environ.get("SOLANA_PRIVATE_KEY") or get_required("PRIVATE_KEY")
+        elif execution_mode == ExecutionMode.SAFE_ZODIAC:
+            # Zodiac mode: private key is held by remote signer service, not needed locally
             private_key = get_optional("PRIVATE_KEY", "") or ""
         else:
             private_key = get_required("PRIVATE_KEY")

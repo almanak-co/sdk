@@ -190,72 +190,6 @@ class StochasticResult:
         }
 
 
-@dataclass(frozen=True)
-class ADXResult:
-    """Result from ADX calculation.
-
-    Attributes:
-        adx: Average Directional Index (trend strength, 0-100)
-        plus_di: Positive directional indicator (+DI)
-        minus_di: Negative directional indicator (-DI)
-    """
-
-    adx: float
-    plus_di: float
-    minus_di: float
-
-    def to_dict(self) -> dict[str, float]:
-        """Convert to dictionary format."""
-        return {
-            "adx": self.adx,
-            "plus_di": self.plus_di,
-            "minus_di": self.minus_di,
-        }
-
-
-@dataclass(frozen=True)
-class OBVResult:
-    """Result from OBV calculation.
-
-    Attributes:
-        obv: Current On-Balance Volume value
-        signal_line: SMA signal line computed from OBV history
-    """
-
-    obv: float
-    signal_line: float
-
-    def to_dict(self) -> dict[str, float]:
-        """Convert to dictionary format."""
-        return {
-            "obv": self.obv,
-            "signal_line": self.signal_line,
-        }
-
-
-@dataclass(frozen=True)
-class IchimokuResult:
-    """Result from Ichimoku Cloud calculation."""
-
-    tenkan_sen: float
-    kijun_sen: float
-    senkou_span_a: float
-    senkou_span_b: float
-    chikou_span: float
-    current_price: float
-
-    def to_dict(self) -> dict[str, float]:
-        """Convert to dictionary format."""
-        return {
-            "tenkan_sen": self.tenkan_sen,
-            "kijun_sen": self.kijun_sen,
-            "senkou_span_a": self.senkou_span_a,
-            "senkou_span_b": self.senkou_span_b,
-            "chikou_span": self.chikou_span,
-            "current_price": self.current_price,
-        }
-
-
 # =============================================================================
 # Exports
 # =============================================================================
@@ -265,7 +199,4 @@ __all__ = [
     "BollingerBandsResult",
     "MACDResult",
     "StochasticResult",
-    "ADXResult",
-    "OBVResult",
-    "IchimokuResult",
 ]

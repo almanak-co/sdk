@@ -107,7 +107,7 @@ Si vous avez besoin d'une méthode bloquée, contactez le support pour discuter 
 
 **Solution :**
 
-Chaînes autorisées : `ethereum`, `arbitrum`, `base`, `optimism`, `polygon`, `avalanche`, `bsc`, `sonic`, `plasma`, `blast`, `mantle`, `berachain`
+Chaînes autorisées : `ethereum`, `arbitrum`, `base`, `optimism`, `polygon`, `avalanche`, `bsc`, `sonic`, `plasma`
 
 ```bash
 # Vérifier que la source RPC est configurée dans la passerelle

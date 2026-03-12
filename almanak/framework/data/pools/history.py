@@ -111,6 +111,7 @@ _CHAIN_TO_GECKO_NETWORK: dict[str, str] = {
     "avalanche": "avax",
     "bsc": "bsc",
     "sonic": "sonic",
+    "solana": "solana",
 }
 
 # Resolution to seconds mapping

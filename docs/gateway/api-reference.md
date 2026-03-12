@@ -342,6 +342,14 @@ message RecordTimelineEventResponse {
 }
 ```
 
+### RecordTimelineEvent
+
+Record a timeline event for strategy execution history.
+
+```protobuf
+rpc RecordTimelineEvent(RecordTimelineEventRequest) returns (RecordTimelineEventResponse)
+```
+
 ## RpcService
 
 ### Call
@@ -373,22 +381,16 @@ message RpcResponse {
 ```
 
 **Allowed Chains:**
-- ethereum
-- arbitrum
-- base
-- optimism
-- polygon
-- avalanche
-- bsc
-- bnb
-- sonic
-- plasma
-- linea
-- blast
-- mantle
-- berachain
 
-**Allowed Methods:**
+EVM chains:
+
+- ethereum, arbitrum, base, optimism, polygon, avalanche, bsc, bnb, sonic, plasma, linea, blast, mantle, berachain
+
+Non-EVM chains:
+
+- solana
+
+**Allowed Methods (EVM):**
 - `eth_call`
 - `eth_getBalance`
 - `eth_getTransactionCount`
@@ -404,6 +406,24 @@ message RpcResponse {
 - `eth_getStorageAt`
 - `eth_sendRawTransaction`
 - `net_version`
+
+**Allowed Methods (Solana):**
+- `getBalance`
+- `getTokenAccountsByOwner`
+- `getTokenAccountBalance`
+- `getTransaction`
+- `getSignaturesForAddress`
+- `getAccountInfo`
+- `getMultipleAccounts`
+- `getLatestBlockhash`
+- `getSlot`
+- `getBlockHeight`
+- `getEpochInfo`
+- `getMinimumBalanceForRentExemption`
+- `sendTransaction`
+- `simulateTransaction`
+- `getRecentPrioritizationFees`
+- `isBlockhashValid`
 
 **Blocked Methods:**
 - `debug_*` - Debugging methods
@@ -436,6 +456,8 @@ Query ERC-20 token allowance (typed convenience method).
 rpc QueryAllowance(AllowanceRequest) returns (AllowanceResponse)
 ```
 
+**Solana:** Returns `allowance = MAX_UINT64` and `success = true`. SPL tokens don't use ERC-20-style allowances.
+
 ### QueryBalance
 
 Query token balance (typed convenience method).
@@ -443,6 +465,8 @@ Query token balance (typed convenience method).
 ```protobuf
 rpc QueryBalance(BalanceQueryRequest) returns (BalanceQueryResponse)
 ```
+
+**Solana:** Returns an error directing callers to use `MarketService.GetBalance()` instead, which routes to the Solana-native balance provider.
 
 ### QueryPositionLiquidity
 
@@ -452,6 +476,8 @@ Query LP position liquidity (typed convenience method).
 rpc QueryPositionLiquidity(PositionLiquidityRequest) returns (PositionLiquidityResponse)
 ```
 
+**Solana:** Returns "not applicable for Solana". Solana LP positions use different on-chain structures.
+
 ### QueryPositionTokensOwed
 
 Query tokens owed to an LP position (typed convenience method).
@@ -459,6 +485,8 @@ Query tokens owed to an LP position (typed convenience method).
 ```protobuf
 rpc QueryPositionTokensOwed(PositionTokensOwedRequest) returns (PositionTokensOwedResponse)
 ```
+
+**Solana:** Returns "not applicable for Solana".
 
 ## IntegrationService
 
@@ -933,7 +961,8 @@ rpc BatchResolveTokens(BatchResolveTokensRequest) returns (BatchResolveTokensRes
 
 | Service | Limit |
 |---------|-------|
-| RpcService | 300 req/min per chain |
+| RpcService (EVM chains) | 300 req/min per chain |
+| RpcService (Solana) | 100 req/min |
 | IntegrationService.Binance | 1200 req/min |
 | IntegrationService.CoinGecko | 50 req/min (free tier) |
 | IntegrationService.TheGraph | 100 req/min |

@@ -608,6 +608,7 @@ twap = market.twap("WETH/USDC", window_seconds=300)       # DataEnvelope[Aggrega
 lwap = market.lwap("WETH/USDC")                           # DataEnvelope[AggregatedPrice]
 depth = market.liquidity_depth("0x...")                    # DataEnvelope[LiquidityDepth]
 slip = market.estimate_slippage("WETH", "USDC", Decimal("10000"))  # DataEnvelope[SlippageEstimate]
+prices = market.price_across_dexs("WETH", "USDC", Decimal("1"))   # list[DexQuote]
 best_dex = market.best_dex_price("WETH", "USDC", Decimal("1"))    # BestDexResult
 ```
 
@@ -990,6 +991,7 @@ almanak docs agent-skill --dump       # Print agent skill content
 | Mantle | `MANTLE` | `mantle` |
 | Berachain | `BERACHAIN` | `berachain` |
 | Monad | `MONAD` | `monad` |
+| Solana | `SOLANA` | `solana` |
 
 <!-- almanak-sdk-end: supported-chains -->
 

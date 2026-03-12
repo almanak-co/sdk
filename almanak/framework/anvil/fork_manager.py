@@ -26,7 +26,6 @@ Usage:
 
 import asyncio
 import logging
-import os
 import socket
 import subprocess
 import time
@@ -307,12 +306,6 @@ class RollingForkManager:
     block_time: int | None = None
     fork_block_number: int | None = None
 
-    # Timeout defaults (env-overridable)
-    rpc_timeout_seconds: float = field(default_factory=lambda: float(os.environ.get("ALMANAK_FORK_RPC_TIMEOUT", "8.0")))
-    health_timeout_seconds: float = field(
-        default_factory=lambda: float(os.environ.get("ALMANAK_FORK_HEALTH_TIMEOUT", "5.0"))
-    )
-
     # Internal state (not initialized in __init__)
     _process: subprocess.Popen[bytes] | None = field(default=None, repr=False, init=False)
     _is_running: bool = field(default=False, repr=False, init=False)
@@ -332,11 +325,6 @@ class RollingForkManager:
 
         if self.anvil_port <= 0 or self.anvil_port > 65535:
             raise ValueError(f"Invalid port: {self.anvil_port}")
-
-        if self.rpc_timeout_seconds <= 0:
-            raise ValueError(f"rpc_timeout_seconds must be positive: {self.rpc_timeout_seconds}")
-        if self.health_timeout_seconds <= 0:
-            raise ValueError(f"health_timeout_seconds must be positive: {self.health_timeout_seconds}")
 
     @property
     def chain_id(self) -> int:
@@ -374,7 +362,7 @@ class RollingForkManager:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    self.rpc_url, json=payload, timeout=aiohttp.ClientTimeout(total=self.rpc_timeout_seconds)
+                    self.rpc_url, json=payload, timeout=aiohttp.ClientTimeout(total=10)
                 ) as response:
                     result_data: dict[str, Any] = await response.json()
                     if "error" in result_data:
@@ -916,9 +904,7 @@ class RollingForkManager:
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url, json=payload, timeout=aiohttp.ClientTimeout(total=self.rpc_timeout_seconds)
-                ) as response:
+                async with session.post(url, json=payload) as response:
                     result_data: dict[str, Any] = await response.json()
                     if "error" in result_data:
                         logger.debug(f"RPC error for {method}: {result_data['error']}")

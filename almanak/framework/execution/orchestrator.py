@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from web3 import AsyncHTTPProvider, AsyncWeb3
 from web3.types import TxParams
@@ -52,6 +52,10 @@ from ..models.reproduction_bundle import ActionBundle
 from ..strategies.base import RiskGuard, RiskGuardResult
 from ..utils.log_formatters import format_gas_cost, format_tx_hash
 from .extracted_data import LPCloseData, SwapAmounts
+
+if TYPE_CHECKING:
+    from .outcome import ExecutionOutcome
+
 from .interfaces import (
     ExecutionError,
     GasEstimationError,
@@ -236,6 +240,28 @@ class ExecutionResult:
         if expected_type is not None and not isinstance(value, expected_type):
             return default
         return value
+
+    def to_outcome(self) -> "ExecutionOutcome":
+        """Convert to chain-agnostic ExecutionOutcome.
+
+        Returns:
+            ExecutionOutcome with EVM-specific fields mapped to common shape.
+        """
+        from almanak.framework.execution.outcome import ExecutionOutcome
+
+        return ExecutionOutcome(
+            success=self.success,
+            tx_ids=[tr.tx_hash for tr in self.transaction_results if tr.tx_hash],
+            receipts=[tr.receipt.to_dict() if tr.receipt else {} for tr in self.transaction_results],
+            total_fee_native=Decimal(self.total_gas_cost_wei),
+            error=self.error,
+            chain_family="EVM",
+            position_id=self.position_id,
+            swap_amounts=self.swap_amounts,
+            lp_close_data=self.lp_close_data,
+            extracted_data=self.extracted_data,
+            extraction_warnings=self.extraction_warnings,
+        )
 
     @property
     def effective_price(self) -> Decimal | None:

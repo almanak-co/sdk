@@ -6,6 +6,7 @@ These are only available in the gateway, not in the framework.
 
 from .aggregator import PriceAggregator
 from .coingecko import CoinGeckoPriceSource
+from .dexscreener import DexScreenerPriceSource
 from .multi_dex import (
     DEX_CHAINS,
     SUPPORTED_DEXS,
@@ -25,11 +26,14 @@ from .multi_dex import (
     TokenNotSupportedError as DexTokenNotSupportedError,
 )
 from .onchain import OnChainPriceSource
+from .pyth import PythPriceSource
 
 __all__ = [
     "CoinGeckoPriceSource",
+    "DexScreenerPriceSource",
     "OnChainPriceSource",
     "PriceAggregator",
+    "PythPriceSource",
     # Multi-DEX exports
     "MultiDexPriceService",
     "DexQuote",

@@ -55,6 +55,7 @@ _CHAIN_TO_GT_NETWORK: dict[str, str] = {
     "avalanche": "avax",
     "bsc": "bsc",
     "sonic": "sonic",
+    "solana": "solana",
 }
 
 # Chain -> DeFi Llama chain name mapping (DeFi Llama uses capitalized names)
@@ -67,6 +68,7 @@ _CHAIN_TO_LLAMA_DISPLAY: dict[str, str] = {
     "avalanche": "Avalanche",
     "bsc": "BSC",
     "sonic": "Sonic",
+    "solana": "Solana",
 }
 
 # Protocol -> DeFi Llama project slug

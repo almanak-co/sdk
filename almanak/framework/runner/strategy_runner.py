@@ -116,8 +116,23 @@ class CriticalCallbackError(Exception):
 
 
 # =============================================================================
-# Intent Formatting for Logs
+# Intent Helpers
 # =============================================================================
+
+
+def _extract_tokens_from_intent(intent: "AnyIntent") -> list[str]:
+    """Extract token symbols from an intent for price pre-fetching.
+
+    Returns a list of token symbols mentioned in the intent. Used to
+    pre-populate the price cache when decide() doesn't call market.price().
+    """
+    tokens: list[str] = []
+    # SwapIntent
+    for attr in ("from_token", "to_token", "token_in", "token_out", "token"):
+        val = getattr(intent, attr, None)
+        if val and isinstance(val, str) and len(val) < 20:  # symbols only, not addresses
+            tokens.append(val)
+    return list(dict.fromkeys(tokens))  # dedupe preserving order
 
 
 def _format_intent_for_log(intent: "AnyIntent") -> str:
@@ -1711,7 +1726,20 @@ class StrategyRunner:
         price_oracle = None
         if market is not None and hasattr(market, "get_price_oracle_dict"):
             price_oracle = market.get_price_oracle_dict()
-            # If the price oracle dict is empty, treat it as None so compiler uses placeholders
+            # If empty (e.g. strategy didn't call market.price() in decide()),
+            # try to pre-fetch prices for the intent's tokens so the compiler
+            # gets real prices instead of placeholders.
+            if not price_oracle and hasattr(market, "price"):
+                intent_tokens = _extract_tokens_from_intent(intent)
+                if intent_tokens:
+                    for token in intent_tokens:
+                        try:
+                            market.price(token)
+                        except Exception:
+                            pass  # Token price unavailable, compiler will use placeholder
+                    price_oracle = market.get_price_oracle_dict()
+                    if price_oracle:
+                        logger.debug(f"Pre-fetched prices for intent tokens: {list(price_oracle.keys())}")
             if not price_oracle:
                 price_oracle = None
             else:
@@ -2424,6 +2452,17 @@ class StrategyRunner:
         price_map = None
         if market is not None and hasattr(market, "get_price_oracle_dict"):
             price_oracle = market.get_price_oracle_dict()
+            # Pre-fetch prices for intent tokens if cache is empty
+            if not price_oracle and hasattr(market, "price"):
+                all_tokens: set[str] = set()
+                for i in intents:
+                    all_tokens.update(_extract_tokens_from_intent(i))
+                for token in all_tokens:
+                    try:
+                        market.price(token)
+                    except Exception:
+                        pass
+                price_oracle = market.get_price_oracle_dict()
             if price_oracle:
                 price_map = {k: str(v) for k, v in price_oracle.items()}
                 logger.debug(f"Multi-chain: using real prices for {list(price_oracle.keys())}")

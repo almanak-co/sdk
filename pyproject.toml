@@ -31,6 +31,8 @@ dependencies = [
     # V2 Framework dependencies
     "eth-account>=0.10.0",
     "eth-abi>=5.0.0",
+    # Solana dependencies (Ed25519 keypairs, transaction serialization)
+    "solders>=0.21.0",
     "structlog>=24.1.0",
     "nest_asyncio>=1.6.0",
     "matplotlib>=3.7.0",

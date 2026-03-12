@@ -98,6 +98,7 @@ ALCHEMY_CHAIN_KEYS: dict[str, str] = {
     "sonic": "sonic",
     "plasma": "plasma",
     "linea": "linea",
+    "solana": "solana",
     "mantle": "mantle",
     "monad": "monad",
 }
@@ -127,8 +128,16 @@ PUBLIC_RPC_URLS: dict[str, str] = {
     "sonic": "https://sonic-rpc.publicnode.com",
     "linea": "https://linea-rpc.publicnode.com",
     "plasma": "https://rpc.plasma.to",
+    "solana": "https://api.mainnet-beta.solana.com",
     "mantle": "https://rpc.mantle.xyz",
     "monad": "https://rpc.monad.xyz",
+}
+
+# Solana cluster URLs (Solana uses cluster names instead of chain IDs)
+SOLANA_CLUSTER_URLS: dict[str, str] = {
+    "mainnet-beta": "https://api.mainnet-beta.solana.com",
+    "devnet": "https://api.devnet.solana.com",
+    "testnet": "https://api.testnet.solana.com",
 }
 
 # Chains that require POA middleware (geth_poa_middleware)
@@ -148,6 +157,7 @@ ANVIL_CHAIN_PORTS: dict[str, int] = {
     "linea": 8552,
     "sonic": 8553,
     "plasma": 8554,
+    "solana": 8899,  # solana-test-validator default port
     "mantle": 8556,
     "monad": 8555,
 }

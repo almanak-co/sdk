@@ -16,25 +16,17 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ...strategies.intent_strategy import (
-        ADXData,
         ATRData,
         BollingerBandsData,
-        CCIData,
-        IchimokuData,
         MACDData,
         MAData,
-        OBVData,
         RSIData,
         StochasticData,
     )
-    from .adx import ADXCalculator
     from .atr import ATRCalculator
     from .bollinger_bands import BollingerBandsCalculator
-    from .cci import CCICalculator
-    from .ichimoku import IchimokuCalculator
     from .macd import MACDCalculator
     from .moving_averages import MovingAverageCalculator
-    from .obv import OBVCalculator
     from .rsi import RSICalculator
     from .stochastic import StochasticCalculator
 
@@ -289,128 +281,3 @@ def create_sync_ema_func(
         )
 
     return sync_ema
-
-
-def create_sync_adx_func(
-    adx_calculator: "ADXCalculator",
-) -> Callable[..., "ADXData"]:
-    """Create a sync callable wrapper for ADX calculator.
-
-    Args:
-        adx_calculator: ADX calculator instance
-
-    Returns:
-        Sync callable (token, period, timeframe=) -> ADXData
-    """
-    from ...strategies.intent_strategy import ADXData
-
-    def sync_adx(
-        token: str,
-        period: int = 14,
-        timeframe: str = "4h",
-    ) -> ADXData:
-        result = _run_async(adx_calculator.calculate_adx(token, period=period, timeframe=timeframe))
-        return ADXData(
-            adx=Decimal(str(result.adx)),
-            plus_di=Decimal(str(result.plus_di)),
-            minus_di=Decimal(str(result.minus_di)),
-            period=period,
-        )
-
-    return sync_adx
-
-
-def create_sync_obv_func(
-    obv_calculator: "OBVCalculator",
-) -> Callable[..., "OBVData"]:
-    """Create a sync callable wrapper for OBV calculator.
-
-    Args:
-        obv_calculator: OBV calculator instance
-
-    Returns:
-        Sync callable (token, signal_period, timeframe=) -> OBVData
-    """
-    from ...strategies.intent_strategy import OBVData
-
-    def sync_obv(
-        token: str,
-        signal_period: int = 21,
-        timeframe: str = "4h",
-    ) -> OBVData:
-        result = _run_async(obv_calculator.calculate_obv(token, signal_period=signal_period, timeframe=timeframe))
-        return OBVData(
-            obv=Decimal(str(result.obv)),
-            signal_line=Decimal(str(result.signal_line)),
-            signal_period=signal_period,
-        )
-
-    return sync_obv
-
-
-def create_sync_cci_func(
-    cci_calculator: "CCICalculator",
-) -> Callable[..., "CCIData"]:
-    """Create a sync callable wrapper for CCI calculator.
-
-    Args:
-        cci_calculator: CCI calculator instance
-
-    Returns:
-        Sync callable (token, period, timeframe=) -> CCIData
-    """
-    from ...strategies.intent_strategy import CCIData
-
-    def sync_cci(
-        token: str,
-        period: int = 20,
-        timeframe: str = "4h",
-    ) -> CCIData:
-        cci_value = _run_async(cci_calculator.calculate_cci(token, period=period, timeframe=timeframe))
-        return CCIData(value=Decimal(str(cci_value)), period=period)
-
-    return sync_cci
-
-
-def create_sync_ichimoku_func(
-    ichimoku_calculator: "IchimokuCalculator",
-) -> Callable[..., "IchimokuData"]:
-    """Create a sync callable wrapper for Ichimoku calculator.
-
-    Args:
-        ichimoku_calculator: Ichimoku calculator instance
-
-    Returns:
-        Sync callable (token, tenkan_period, kijun_period, senkou_b_period, timeframe=) -> IchimokuData
-    """
-    from ...strategies.intent_strategy import IchimokuData
-
-    def sync_ichimoku(
-        token: str,
-        tenkan_period: int = 9,
-        kijun_period: int = 26,
-        senkou_b_period: int = 52,
-        timeframe: str = "4h",
-    ) -> IchimokuData:
-        result = _run_async(
-            ichimoku_calculator.calculate_ichimoku(
-                token,
-                tenkan_period=tenkan_period,
-                kijun_period=kijun_period,
-                senkou_b_period=senkou_b_period,
-                timeframe=timeframe,
-            )
-        )
-        return IchimokuData(
-            tenkan_sen=Decimal(str(result.tenkan_sen)),
-            kijun_sen=Decimal(str(result.kijun_sen)),
-            senkou_span_a=Decimal(str(result.senkou_span_a)),
-            senkou_span_b=Decimal(str(result.senkou_span_b)),
-            chikou_span=Decimal(str(result.chikou_span)),
-            current_price=Decimal(str(result.current_price)),
-            tenkan_period=tenkan_period,
-            kijun_period=kijun_period,
-            senkou_b_period=senkou_b_period,
-        )
-
-    return sync_ichimoku

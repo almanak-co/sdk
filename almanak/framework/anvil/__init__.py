@@ -1,13 +1,11 @@
-"""Anvil fork management infrastructure.
+"""Fork management infrastructure for local testing.
 
-This package provides Anvil fork lifecycle management used by:
+This package provides fork lifecycle management used by:
 - ``almanak strat run --network anvil`` (live strategy runs on forks)
 - Paper trading (``almanak strat backtest paper``)
 - Intent tests and integration tests
 
-Moved from ``almanak.framework.backtesting.paper.fork_manager`` to
-correctly reflect that Anvil fork management is infrastructure, not
-a backtesting concern.
+Supports both EVM (Anvil) and Solana (solana-test-validator) chains.
 """
 
 from almanak.framework.anvil.fork_manager import (
@@ -18,12 +16,20 @@ from almanak.framework.anvil.fork_manager import (
     ForkManagerConfig,
     RollingForkManager,
 )
+from almanak.framework.anvil.solana_fork_manager import (
+    SOLANA_TOKEN_DECIMALS,
+    SOLANA_TOKEN_MINTS,
+    SolanaForkManager,
+)
 
 __all__ = [
     "RollingForkManager",
     "ForkManagerConfig",
+    "SolanaForkManager",
     "CHAIN_IDS",
     "TOKEN_ADDRESSES",
     "TOKEN_DECIMALS",
     "KNOWN_BALANCE_SLOTS",
+    "SOLANA_TOKEN_MINTS",
+    "SOLANA_TOKEN_DECIMALS",
 ]

@@ -1,6 +1,9 @@
-"""Tests for MarketSnapshot.set_price_data() (VIB-121)."""
+"""Tests for MarketSnapshot facade methods."""
 
 from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from almanak.framework.strategies.intent_strategy import MarketSnapshot, MultiChainMarketSnapshot, PriceData
 
@@ -103,6 +106,74 @@ class TestMultiChainMarketSnapshotSetPriceData:
             assert False, "Should have raised ValueError"
         except ValueError:
             pass
+
+
+class TestMultiDexFacadeMethods:
+    """Tests for price_across_dexs() and best_dex_price() facade methods (VIB-292)."""
+
+    def test_price_across_dexs_raises_when_no_service(self):
+        """price_across_dexs() raises NotImplementedError when multi_dex_service is None."""
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
+        with pytest.raises(NotImplementedError, match="Multi-DEX price comparison is not available"):
+            market.price_across_dexs("USDC", "WETH", Decimal("1000"))
+
+    def test_best_dex_price_raises_when_no_service(self):
+        """best_dex_price() raises NotImplementedError when multi_dex_service is None."""
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
+        with pytest.raises(NotImplementedError, match="Multi-DEX price comparison is not available"):
+            market.best_dex_price("USDC", "WETH", Decimal("1000"))
+
+    def test_price_across_dexs_delegates_to_service(self):
+        """price_across_dexs() delegates to multi_dex_service.get_prices_across_dexs()."""
+        mock_result = MagicMock()
+        mock_service = MagicMock()
+        mock_service.get_prices_across_dexs = AsyncMock(return_value=mock_result)
+
+        market = MarketSnapshot(
+            chain="arbitrum",
+            wallet_address="0xtest",
+            multi_dex_service=mock_service,
+        )
+        result = market.price_across_dexs("USDC", "WETH", Decimal("1000"), dexs=["uniswap_v3"])
+
+        assert result is mock_result
+        mock_service.get_prices_across_dexs.assert_awaited_once_with(
+            "USDC", "WETH", Decimal("1000"), ["uniswap_v3"]
+        )
+
+    def test_best_dex_price_delegates_to_service(self):
+        """best_dex_price() delegates to multi_dex_service.get_best_dex_price()."""
+        mock_result = MagicMock()
+        mock_service = MagicMock()
+        mock_service.get_best_dex_price = AsyncMock(return_value=mock_result)
+
+        market = MarketSnapshot(
+            chain="arbitrum",
+            wallet_address="0xtest",
+            multi_dex_service=mock_service,
+        )
+        result = market.best_dex_price("USDC", "WETH", Decimal("500"))
+
+        assert result is mock_result
+        mock_service.get_best_dex_price.assert_awaited_once_with(
+            "USDC", "WETH", Decimal("500"), None
+        )
+
+    def test_price_across_dexs_default_dexs_is_none(self):
+        """price_across_dexs() passes None for dexs when not specified."""
+        mock_service = MagicMock()
+        mock_service.get_prices_across_dexs = AsyncMock(return_value=MagicMock())
+
+        market = MarketSnapshot(
+            chain="arbitrum",
+            wallet_address="0xtest",
+            multi_dex_service=mock_service,
+        )
+        market.price_across_dexs("WETH", "USDC", Decimal("1"))
+
+        mock_service.get_prices_across_dexs.assert_awaited_once_with(
+            "WETH", "USDC", Decimal("1"), None
+        )
 
 
 class TestCollateralValueUsd:

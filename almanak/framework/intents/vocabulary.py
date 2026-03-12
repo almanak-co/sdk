@@ -205,6 +205,12 @@ PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
         "min_leverage": Decimal("1"),
         "operations": ["perp_open", "perp_close"],
     },
+    "drift": {
+        "supports_leverage": True,
+        "max_leverage": Decimal("20"),
+        "min_leverage": Decimal("1"),
+        "operations": ["perp_open", "perp_close"],
+    },
     "uniswap_v3": {
         "operations": ["swap", "lp_open", "lp_close"],
     },
@@ -227,6 +233,23 @@ PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
     "metamorpho": {
         "operations": ["vault_deposit", "vault_redeem"],
         "supports_erc4626": True,
+    },
+    "kamino": {
+        "supports_interest_rate_mode": False,
+        "supports_collateral_toggle": False,
+        "operations": ["supply", "withdraw", "borrow", "repay"],
+    },
+    "raydium_clmm": {
+        "type": "clmm",
+        "operations": ["lp_open", "lp_close"],
+    },
+    "meteora_dlmm": {
+        "type": "dlmm",
+        "operations": ["lp_open", "lp_close"],
+    },
+    "orca_whirlpools": {
+        "type": "clmm",
+        "operations": ["lp_open", "lp_close"],
     },
 }
 
@@ -281,6 +304,10 @@ class SwapIntent(AlmanakImmutableModel):
         protocol: Preferred protocol for the swap (e.g., "uniswap_v3", "enso")
         chain: Source chain for execution (defaults to strategy's primary chain)
         destination_chain: Destination chain for cross-chain swaps (None for same-chain)
+        priority_fee_level: Solana priority fee level for Jupiter swaps.
+            Valid values: "low", "medium", "high", "veryHigh". Defaults to "veryHigh".
+        priority_fee_max_lamports: Maximum priority fee in lamports for Jupiter swaps.
+            Defaults to 1_000_000 (0.001 SOL).
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
 
@@ -309,6 +336,15 @@ class SwapIntent(AlmanakImmutableModel):
     protocol: str | None = None
     chain: str | None = None
     destination_chain: str | None = None
+    priority_fee_level: str | None = Field(
+        default=None,
+        description="Solana priority fee level for Jupiter swaps: 'low', 'medium', 'high', 'veryHigh'. "
+        "Defaults to 'veryHigh' when None.",
+    )
+    priority_fee_max_lamports: int | None = Field(
+        default=None,
+        description="Maximum priority fee in lamports for Jupiter swaps. Defaults to 1_000_000 when None.",
+    )
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
 

@@ -50,7 +50,6 @@ from pathlib import Path
 from typing import Any
 
 import click
-from dotenv import load_dotenv
 
 from almanak.framework.anvil.fork_manager import CHAIN_IDS
 
@@ -424,12 +423,7 @@ def backtest() -> None:
       # List available strategies
       almanak backtest pnl --list-strategies
     """
-    # Load .env from current directory so backtest commands pick up
-    # API keys (COINGECKO_API_KEY, THEGRAPH_API_KEY, ALCHEMY_API_KEY, etc.)
-    # the same way 'almanak strat run' does from its working directory.
-    env_file = Path.cwd() / ".env"
-    if load_dotenv(dotenv_path=env_file):
-        click.echo(f"Loaded environment from: {env_file}")
+    pass
 
 
 # Alias to avoid conflict with --list-strategies option
@@ -4809,6 +4803,7 @@ def paper_start(
             pid = bg_trader.start(
                 strategy_module=strategy_cls.__module__,
                 strategy_class=strategy_cls.__name__,
+                strategy_config=strategy_config,
             )
         except RuntimeError as e:
             click.echo(f"Error: {e}", err=True)

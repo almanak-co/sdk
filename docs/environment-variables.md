@@ -74,6 +74,14 @@ Only needed if your strategy uses these specific protocols.
 |----------|-------------|
 | `ALMANAK_GATEWAY_PENDLE_API_KEY` | Pendle protocol API key |
 
+### Solana
+
+| Variable | Description |
+|----------|-------------|
+| `SOLANA_PRIVATE_KEY` | Ed25519 keypair in base58 format (or 64-char hex seed). Required for Solana strategies. |
+| `SOLANA_RPC_URL` | Solana RPC endpoint. Defaults to `https://api.mainnet-beta.solana.com` (rate-limited). Use Helius, QuickNode, or Triton for production. |
+| `JUPITER_API_KEY` | Jupiter aggregator API key. Free tier is used if unset. |
+
 ---
 
 ## Safe Wallet
@@ -129,4 +137,4 @@ ENSO_API_KEY=your_enso_key
 COINGECKO_API_KEY=your_coingecko_key
 ```
 
-All other gateway and framework settings have sensible defaults and do not need to be set. See [`.env.example`](https://github.com/almanak-co/sdk/blob/main/.env.example) for the full list of advanced options.
+All other gateway and framework settings have sensible defaults and do not need to be set. See [`.env.example`](https://github.com/almanak-co/almanak-sdk/blob/main/.env.example) for the full list of advanced options.

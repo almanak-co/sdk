@@ -30,6 +30,7 @@ from almanak.gateway.proto import gateway_pb2
 
 if TYPE_CHECKING:
     from .extracted_data import LPCloseData, SwapAmounts
+    from .outcome import ExecutionOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,30 @@ class GatewayExecutionResult:
                 )
             )
         return results
+
+    def to_outcome(self) -> "ExecutionOutcome":
+        """Convert to chain-agnostic ExecutionOutcome.
+
+        Returns:
+            ExecutionOutcome with gateway result fields mapped to common shape.
+        """
+        from decimal import Decimal
+
+        from almanak.framework.execution.outcome import ExecutionOutcome
+
+        return ExecutionOutcome(
+            success=self.success,
+            tx_ids=list(self.tx_hashes),
+            receipts=list(self.receipts),
+            total_fee_native=Decimal(self.total_gas_used),
+            error=self.error,
+            chain_family="EVM",
+            position_id=self.position_id,
+            swap_amounts=self.swap_amounts,
+            lp_close_data=self.lp_close_data,
+            extracted_data=self.extracted_data,
+            extraction_warnings=self.extraction_warnings,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -352,6 +377,13 @@ class GatewayExecutionOrchestrator:
             else:
                 bundle_dict = action_bundle
 
+            # Include sensitive_data (e.g. Raydium NFT mint keypair) for the
+            # gateway roundtrip. The gateway extracts it on the Execute side
+            # to pass to SolanaExecutionPlanner for co-signing.
+            sensitive = getattr(action_bundle, "sensitive_data", None)
+            if sensitive:
+                bundle_dict["_sensitive_data"] = sensitive
+
             bundle_bytes = json.dumps(bundle_dict).encode("utf-8")
 
             request = gateway_pb2.ExecuteRequest(
@@ -374,8 +406,11 @@ class GatewayExecutionOrchestrator:
             # Extract warnings if available (future-proofing for proto additions)
             extraction_warnings = list(getattr(response, "extraction_warnings", []))
 
-            # Normalize tx_hashes to include 0x prefix
-            tx_hashes = [h if h.startswith("0x") else f"0x{h}" for h in response.tx_hashes]
+            # Normalize tx_hashes: add 0x prefix for EVM, preserve base58 for Solana
+            if self._chain and self._chain.lower() == "solana":
+                tx_hashes = list(response.tx_hashes)
+            else:
+                tx_hashes = [h if h.startswith("0x") else f"0x{h}" for h in response.tx_hashes]
 
             return GatewayExecutionResult(
                 success=response.success,

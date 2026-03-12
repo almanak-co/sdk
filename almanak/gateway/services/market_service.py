@@ -16,7 +16,8 @@ from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.validation import (
     ValidationError,
-    validate_address,
+    is_solana_chain,
+    validate_address_for_chain,
     validate_chain,
 )
 
@@ -57,9 +58,11 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         if self._initialized:
             return
 
+        from almanak.framework.data.interfaces import BasePriceSource
         from almanak.gateway.data.price.aggregator import PriceAggregator
         from almanak.gateway.data.price.coingecko import CoinGeckoPriceSource
         from almanak.gateway.data.price.onchain import OnChainPriceSource
+        from almanak.gateway.validation import is_solana_chain
 
         # Determine primary chain for on-chain pricing.
         # IMPORTANT: Never default to a hardcoded chain -- that silently gives wrong
@@ -74,15 +77,8 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
 
         has_cg_key = bool(self.settings.coingecko_api_key)
 
-        if chain:
-            onchain_source = OnChainPriceSource(chain=chain, network=self.settings.network)
-            if has_cg_key:
-                sources = [cg_source, onchain_source]
-                logger.info("MarketService: CoinGecko (primary) + on-chain (fallback), chain=%s", chain)
-            else:
-                sources = [onchain_source, cg_source]
-                logger.info("MarketService: on-chain (primary) + CoinGecko free tier (fallback), chain=%s", chain)
-        else:
+        sources: list[BasePriceSource]
+        if not chain:
             # No chain configured -- on-chain pricing unavailable.
             # This can happen with standalone `almanak gateway` without --chains.
             sources = [cg_source]
@@ -91,6 +87,25 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 "Only CoinGecko is available. Pass --chains to the gateway or set ALMANAK_GATEWAY_CHAINS "
                 "for accurate on-chain pricing."
             )
+        elif is_solana_chain(chain):
+            # Solana: Pyth (primary) + DexScreener (secondary) + CoinGecko (fallback)
+            # OnChainPriceSource is EVM-only (Chainlink), skip it for Solana
+            from almanak.gateway.data.price.dexscreener import DexScreenerPriceSource
+            from almanak.gateway.data.price.pyth import PythPriceSource
+
+            pyth_source = PythPriceSource(cache_ttl=15)
+            dexscreener_source = DexScreenerPriceSource(chain_id="solana", cache_ttl=30)
+            sources = [pyth_source, dexscreener_source, cg_source]
+            logger.info("MarketService: Pyth (primary) + DexScreener + CoinGecko (fallback), chain=%s", chain)
+        else:
+            # EVM: CoinGecko + Chainlink on-chain
+            onchain_source = OnChainPriceSource(chain=chain, network=self.settings.network)
+            if has_cg_key:
+                sources = [cg_source, onchain_source]
+                logger.info("MarketService: CoinGecko (primary) + on-chain (fallback), chain=%s", chain)
+            else:
+                sources = [onchain_source, cg_source]
+                logger.info("MarketService: on-chain (primary) + CoinGecko free tier (fallback), chain=%s", chain)
 
         self._price_aggregator = PriceAggregator(sources=sources)
 
@@ -100,25 +115,35 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         """Get or create balance provider for a chain.
 
         Args:
-            chain: Chain name (e.g., "arbitrum", "base")
+            chain: Chain name (e.g., "arbitrum", "base", "solana")
             wallet_address: Wallet address to query
 
         Returns:
-            Web3BalanceProvider for the specified chain
+            Balance provider for the specified chain (Web3 for EVM, Solana for Solana)
         """
-        from almanak.gateway.data.balance import Web3BalanceProvider
         from almanak.gateway.utils import get_rpc_url
 
         cache_key = f"{chain}:{wallet_address}"
         if cache_key not in self._balance_providers:
-            # Use network from settings (default: mainnet, can be set to anvil for testing)
             network = self.settings.network
             rpc_url = get_rpc_url(chain, network=network)
-            self._balance_providers[cache_key] = Web3BalanceProvider(
-                rpc_url=rpc_url,
-                wallet_address=wallet_address,
-                chain=chain,
-            )
+
+            if is_solana_chain(chain):
+                from almanak.gateway.data.balance.solana_provider import SolanaBalanceProvider
+
+                self._balance_providers[cache_key] = SolanaBalanceProvider(
+                    rpc_url=rpc_url,
+                    wallet_address=wallet_address,
+                    chain=chain,
+                )
+            else:
+                from almanak.gateway.data.balance import Web3BalanceProvider
+
+                self._balance_providers[cache_key] = Web3BalanceProvider(
+                    rpc_url=rpc_url,
+                    wallet_address=wallet_address,
+                    chain=chain,
+                )
 
         return self._balance_providers[cache_key]
 
@@ -190,9 +215,9 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.BalanceResponse()
 
-        # Validate wallet address format
+        # Validate wallet address format (chain-aware: EVM hex or Solana base58)
         try:
-            wallet_address = validate_address(request.wallet_address, "wallet_address")
+            wallet_address = validate_address_for_chain(request.wallet_address, chain, "wallet_address")
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
@@ -201,7 +226,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         try:
             provider = await self._get_balance_provider(chain, wallet_address)
 
-            if token.upper() in ("ETH", "AVAX", "MATIC"):
+            if token.upper() in ("ETH", "AVAX", "MATIC", "SOL"):
                 result = await provider.get_native_balance()
             else:
                 result = await provider.get_balance(token)
@@ -256,7 +281,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 return gateway_pb2.BalanceResponse(error=str(e))
 
             try:
-                wallet_address = validate_address(req.wallet_address, "wallet_address")
+                wallet_address = validate_address_for_chain(req.wallet_address, chain, "wallet_address")
             except ValidationError as e:
                 return gateway_pb2.BalanceResponse(error=str(e))
 
@@ -264,7 +289,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             try:
                 provider = await self._get_balance_provider(chain, wallet_address)
 
-                if token.upper() in ("ETH", "AVAX", "MATIC"):
+                if token.upper() in ("ETH", "AVAX", "MATIC", "SOL"):
                     result = await provider.get_native_balance()
                 else:
                     result = await provider.get_balance(token)

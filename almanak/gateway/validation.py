@@ -24,6 +24,7 @@ ALLOWED_CHAINS = frozenset(
         "blast",
         "mantle",
         "berachain",
+        "solana",
         "monad",
     }
 )
@@ -71,6 +72,43 @@ ALLOWED_RPC_METHODS = frozenset(
     }
 )
 
+# Solana RPC methods that are safe to expose
+ALLOWED_SOLANA_RPC_METHODS = frozenset(
+    {
+        # Account queries
+        "getAccountInfo",
+        "getBalance",
+        "getMultipleAccounts",
+        "getProgramAccounts",
+        "getTokenAccountBalance",
+        "getTokenAccountsByOwner",
+        "getTokenLargestAccounts",
+        "getTokenSupply",
+        # Transaction queries
+        "getTransaction",
+        "getSignaturesForAddress",
+        "getSignatureStatuses",
+        # Block queries
+        "getBlock",
+        "getBlockHeight",
+        "getBlockTime",
+        "getSlot",
+        "getEpochInfo",
+        # Fees and pricing
+        "getFeeForMessage",
+        "getRecentPrioritizationFees",
+        "getMinimumBalanceForRentExemption",
+        # Simulation
+        "simulateTransaction",
+        # Health
+        "getHealth",
+        "getVersion",
+        "getLatestBlockhash",
+        # Transaction submission (signing happens in gateway)
+        "sendTransaction",
+    }
+)
+
 # Maximum sizes
 MAX_STRATEGY_ID_LENGTH = 128
 MAX_SYMBOL_LENGTH = 20
@@ -82,6 +120,10 @@ MAX_GRAPHQL_DEPTH = 10
 
 # Validation patterns
 ADDRESS_PATTERN = re.compile(r"^0x[a-fA-F0-9]{40}$")
+SOLANA_ADDRESS_PATTERN = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+
+# Chains that use the Solana address format (base58)
+_SOLANA_FAMILY_CHAINS = frozenset({"solana"})
 STRATEGY_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_:-]{1,128}$")
 SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]{1,20}$")
 TOKEN_ID_PATTERN = re.compile(r"^[a-z0-9-]{1,64}$")
@@ -150,6 +192,37 @@ def validate_address(address: str, field: str = "address") -> str:
     return address
 
 
+def validate_address_for_chain(address: str, chain: str, field: str = "address") -> str:
+    """Validate address format based on chain family.
+
+    Dispatches to EVM (hex) or Solana (base58) validation based on chain.
+
+    Args:
+        address: Address to validate
+        chain: Chain name (e.g., "solana", "arbitrum")
+        field: Field name for error messages
+
+    Returns:
+        Address (unchanged)
+
+    Raises:
+        ValidationError: If address format is invalid for the chain
+    """
+    if not address:
+        raise ValidationError(field, "required")
+
+    chain_lower = chain.lower().strip()
+
+    if chain_lower in _SOLANA_FAMILY_CHAINS:
+        if not SOLANA_ADDRESS_PATTERN.match(address):
+            raise ValidationError(field, "invalid Solana address format (expected 32-44 base58 chars)")
+    else:
+        if not ADDRESS_PATTERN.match(address):
+            raise ValidationError(field, "invalid address format (expected 0x + 40 hex chars)")
+
+    return address
+
+
 def validate_strategy_id(strategy_id: str, field: str = "strategy_id") -> str:
     """Validate strategy ID format.
 
@@ -177,15 +250,34 @@ def validate_strategy_id(strategy_id: str, field: str = "strategy_id") -> str:
     return strategy_id
 
 
-def validate_rpc_method(method: str, field: str = "method") -> str:
+def is_solana_chain(chain: str) -> bool:
+    """Check if a chain belongs to the Solana family.
+
+    Args:
+        chain: Chain name (case-insensitive)
+
+    Returns:
+        True if chain is in the Solana family
+    """
+    return chain.lower().strip() in _SOLANA_FAMILY_CHAINS
+
+
+# Solana transaction signature pattern (base58, 87-88 chars)
+SOLANA_TX_SIGNATURE_PATTERN = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{87,88}$")
+
+
+def validate_rpc_method(method: str, field: str = "method", chain: str | None = None) -> str:
     """Validate RPC method against allowlist.
 
     Only safe read methods and transaction submission are allowed.
     Dangerous methods (debug_*, admin_*, personal_*) are blocked.
 
+    Dispatches to the Solana allowlist when chain is a Solana-family chain.
+
     Args:
         method: RPC method name to validate
         field: Field name for error messages
+        chain: Optional chain name for chain-aware dispatch
 
     Returns:
         Method name (unchanged)
@@ -196,8 +288,12 @@ def validate_rpc_method(method: str, field: str = "method") -> str:
     if not method:
         raise ValidationError(field, "required")
 
-    if method not in ALLOWED_RPC_METHODS:
-        raise ValidationError(field, f"'{method}' is not allowed")
+    if chain and is_solana_chain(chain):
+        if method not in ALLOWED_SOLANA_RPC_METHODS:
+            raise ValidationError(field, f"'{method}' is not allowed for Solana")
+    else:
+        if method not in ALLOWED_RPC_METHODS:
+            raise ValidationError(field, f"'{method}' is not allowed")
 
     return method
 
@@ -256,12 +352,15 @@ def validate_token_id(token_id: str, field: str = "token_id") -> str:
     return token_id
 
 
-def validate_tx_hash(tx_hash: str, field: str = "tx_hash") -> str:
+def validate_tx_hash(tx_hash: str, field: str = "tx_hash", chain: str | None = None) -> str:
     """Validate transaction hash format.
+
+    Dispatches to Solana base58 signature validation when chain is Solana.
 
     Args:
         tx_hash: Transaction hash to validate
         field: Field name for error messages
+        chain: Optional chain name for chain-aware dispatch
 
     Returns:
         Transaction hash (unchanged)
@@ -272,8 +371,12 @@ def validate_tx_hash(tx_hash: str, field: str = "tx_hash") -> str:
     if not tx_hash:
         raise ValidationError(field, "required")
 
-    if not TX_HASH_PATTERN.match(tx_hash):
-        raise ValidationError(field, "invalid format (expected 0x + 64 hex chars)")
+    if chain and is_solana_chain(chain):
+        if not SOLANA_TX_SIGNATURE_PATTERN.match(tx_hash):
+            raise ValidationError(field, "invalid Solana signature format (expected 87-88 base58 chars)")
+    else:
+        if not TX_HASH_PATTERN.match(tx_hash):
+            raise ValidationError(field, "invalid format (expected 0x + 64 hex chars)")
 
     return tx_hash
 

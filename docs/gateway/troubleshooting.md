@@ -107,7 +107,7 @@ If you need a blocked method, contact support to discuss alternatives.
 
 **Solution:**
 
-Allowed chains: `ethereum`, `arbitrum`, `base`, `optimism`, `polygon`, `avalanche`, `bsc`, `bnb`, `sonic`, `plasma`, `linea`, `blast`, `mantle`, `berachain`
+Allowed chains: `ethereum`, `arbitrum`, `base`, `optimism`, `polygon`, `avalanche`, `bsc`, `bnb`, `sonic`, `plasma`, `linea`, `blast`, `mantle`, `berachain`, `solana`
 
 ```bash
 # Verify RPC source is configured in gateway

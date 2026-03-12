@@ -42,14 +42,31 @@ class TransactionReceipt:
 
 @dataclass
 class ActionBundle:
-    """Represents a bundle of actions/transactions to execute."""
+    """Represents a bundle of actions/transactions to execute.
+
+    Attributes:
+        intent_type: Intent type string (e.g., "SWAP", "LP_OPEN").
+        transactions: List of transaction data dicts.
+        metadata: Public metadata (safe for logging/serialization).
+        sensitive_data: Private data excluded from standard serialization (e.g.,
+            additional signer keypairs for Solana multi-sign transactions).
+            NOTE: When execution goes through the gateway, sensitive_data transits
+            over gRPC (see _sensitive_data handling in execution_service.py).
+            It is stripped from to_dict() and must never appear in logs, metrics,
+            or persistent storage. All logging paths must guard against leaking
+            this field.
+    """
 
     intent_type: str  # e.g., "SWAP", "LP_OPEN", "BORROW"
     transactions: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    sensitive_data: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for serialization."""
+        """Convert to dictionary for serialization.
+
+        Note: sensitive_data is intentionally excluded.
+        """
         return {
             "intent_type": self.intent_type,
             "transactions": self.transactions,

@@ -107,7 +107,7 @@ Si necesitas un método bloqueado, contacta a soporte para discutir alternativas
 
 **Solución:**
 
-Cadenas permitidas: `ethereum`, `arbitrum`, `base`, `optimism`, `polygon`, `avalanche`, `bsc`, `sonic`, `plasma`, `blast`, `mantle`, `berachain`
+Cadenas permitidas: `ethereum`, `arbitrum`, `base`, `optimism`, `polygon`, `avalanche`, `bsc`, `sonic`, `plasma`
 
 ```bash
 # Verificar que la fuente RPC está configurada en la pasarela

@@ -80,7 +80,7 @@ Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Plasma, Blas
 
 ## Contributing
 
-See the [Contributing Guide](https://github.com/almanak-co/sdk/blob/main/CONTRIBUTING.md) to get started.
+See the [Contributing Guide](https://github.com/almanak-co/almanak-sdk/blob/main/CONTRIBUTING.md) to get started.
 
 ## Documentation
 

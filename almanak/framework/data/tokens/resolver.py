@@ -90,11 +90,24 @@ def _try_record_metric(func_name: str, *args: Any, **kwargs: Any) -> None:
 ADDRESS_PATTERN = re.compile(r"^0x[a-fA-F0-9]{40}$")
 # Pattern to detect strings that look like addresses (start with 0x and are ~42 chars)
 ADDRESS_LIKE_PATTERN = re.compile(r"^0x[a-zA-Z0-9]{38,42}$")
+# Solana base58 address pattern (32-44 chars, base58 alphabet: no 0, O, I, l)
+SOLANA_ADDRESS_PATTERN = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
-def _is_address(token: str) -> bool:
-    """Check if a token string is a valid Ethereum address."""
-    return bool(ADDRESS_PATTERN.match(token))
+def _is_address(token: str, chain: str | None = None) -> bool:
+    """Check if a token string is a valid address.
+
+    If chain is provided, checks format for that chain's family.
+    If chain is None, checks if it matches ANY known address format.
+    """
+    if chain and chain.lower() == "solana":
+        return bool(SOLANA_ADDRESS_PATTERN.match(token))
+    if ADDRESS_PATTERN.match(token):
+        return True
+    # When chain is unspecified, also accept Solana addresses
+    if chain is None and SOLANA_ADDRESS_PATTERN.match(token):
+        return True
+    return False
 
 
 def _looks_like_address(token: str) -> bool:
@@ -106,7 +119,10 @@ def _looks_like_address(token: str) -> bool:
 
 
 def _validate_address(address: str, chain: str) -> None:
-    """Validate an Ethereum address format.
+    """Validate an address format for the given chain.
+
+    For EVM chains: must be 0x-prefixed, 42-char hex.
+    For Solana: must be 32-44 char base58 (no 0, O, I, l).
 
     Args:
         address: The address to validate
@@ -115,6 +131,16 @@ def _validate_address(address: str, chain: str) -> None:
     Raises:
         InvalidTokenAddressError: If address format is invalid
     """
+    if chain.lower() == "solana":
+        if not SOLANA_ADDRESS_PATTERN.match(address):
+            raise InvalidTokenAddressError(
+                token=address,
+                chain=chain,
+                reason="Solana address must be 32-44 base58 characters",
+            )
+        return
+
+    # EVM validation
     if not address.startswith("0x"):
         raise InvalidTokenAddressError(
             token=address,
@@ -133,6 +159,17 @@ def _validate_address(address: str, chain: str) -> None:
             chain=chain,
             reason="Address contains invalid hex characters",
         )
+
+
+def _normalize_address_for_chain(address: str, chain: str) -> str:
+    """Normalize an address for comparison/indexing.
+
+    EVM addresses are case-insensitive -> lowercase.
+    Solana base58 addresses are case-sensitive -> preserve case.
+    """
+    if chain.lower() == "solana":
+        return address
+    return address.lower()
 
 
 def _normalize_chain(chain: str | Chain) -> tuple[str, Chain]:
@@ -262,13 +299,13 @@ class TokenResolver:
                     self._static_registry[chain_lower] = {}
                 self._static_registry[chain_lower][token.symbol.upper()] = token
 
-                # Index by address
+                # Index by address (case-insensitive for EVM, case-sensitive for Solana)
                 address = token.get_address(chain_name)
                 if address:
-                    address_lower = address.lower()
+                    addr_key = _normalize_address_for_chain(address, chain_lower)
                     if chain_lower not in self._static_address_index:
                         self._static_address_index[chain_lower] = {}
-                    self._static_address_index[chain_lower][address_lower] = token
+                    self._static_address_index[chain_lower][addr_key] = token
 
     @classmethod
     def get_instance(
@@ -359,7 +396,7 @@ class TokenResolver:
 
         try:
             # Determine if input is address or symbol (pure functions, no lock needed)
-            is_address = _is_address(token)
+            is_address = _is_address(token, chain_lower)
 
             if is_address:
                 _validate_address(token, chain_lower)
@@ -438,10 +475,10 @@ class TokenResolver:
         Returns:
             ResolvedToken if found in cache or static, None if gateway lookup needed.
         """
-        address_lower = address.lower()
+        addr_key = _normalize_address_for_chain(address, chain_lower)
 
         # 1. Check cache (memory + disk)
-        cached = self._cache.get(chain_lower, address=address_lower)
+        cached = self._cache.get(chain_lower, address=addr_key)
         if cached:
             self._stats["cache_hits"] += 1
             logger.debug(
@@ -453,7 +490,7 @@ class TokenResolver:
 
         # 2. Check static registry address index
         chain_index = self._static_address_index.get(chain_lower, {})
-        static_token = chain_index.get(address_lower)
+        static_token = chain_index.get(addr_key)
 
         if static_token:
             self._stats["static_hits"] += 1
@@ -837,7 +874,8 @@ class TokenResolver:
         chain_config = token.get_chain_config(chain_lower)
 
         # Determine if native token
-        is_native = address.lower() == NATIVE_SENTINEL.lower()
+        addr_norm = _normalize_address_for_chain(address, chain_lower)
+        is_native = addr_norm == _normalize_address_for_chain(NATIVE_SENTINEL, chain_lower)
         if chain_config:
             is_native = chain_config.is_native
 
@@ -848,7 +886,7 @@ class TokenResolver:
 
         # Check if wrapped native by comparing address to WRAPPED_NATIVE registry
         wrapped_addr = WRAPPED_NATIVE.get(chain_lower, "")
-        is_wrapped_native = bool(wrapped_addr and address.lower() == wrapped_addr.lower())
+        is_wrapped_native = bool(wrapped_addr and addr_norm == _normalize_address_for_chain(wrapped_addr, chain_lower))
 
         return ResolvedToken(
             symbol=token.symbol,

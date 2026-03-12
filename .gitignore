@@ -1,5 +1,6 @@
 *__pycache__/
 .DS_Store
+node_modules/
 /docs_output
 /almanak/sdk/dist/
 .env
@@ -50,6 +51,9 @@ scripts/kitchenloop/kitchenloop.log
 scripts/pr-manager/pr-manager.log
 scripts/pr-manager/state.json
 notes/.tmp/
+
+# Solana test-validator ledger
+test-ledger/
 
 # Local Claude artifacts
 .claude/worktrees/

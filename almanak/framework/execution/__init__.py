@@ -42,12 +42,14 @@ Example (Strategy Container):
         result = await orchestrator.execute(action_bundle)
 """
 
+# Chain-family execution strategy (EVM / Solana abstraction)
 # Chain Executor (multi-chain support)
 from almanak.framework.execution.chain_executor import (
     ChainExecutor,
     ChainExecutorConfig,
     TransactionExecutionResult,
 )
+from almanak.framework.execution.chain_strategy import ChainExecutionStrategy
 
 # CLOB Handler for off-chain order execution (Polymarket)
 from almanak.framework.execution.clob_handler import (
@@ -81,6 +83,7 @@ from almanak.framework.execution.events import (
     TransactionSentPayload,
     get_recovery_info,
 )
+from almanak.framework.execution.evm_strategy import EvmExecutionStrategy
 
 # Extracted Data Models (for Result Enrichment)
 from almanak.framework.execution.extracted_data import (
@@ -148,6 +151,7 @@ from almanak.framework.execution.orchestrator import (
     ExecutionResult,
     TransactionResult,
 )
+from almanak.framework.execution.outcome import ExecutionOutcome
 
 # Plan structures for cross-chain execution
 from almanak.framework.execution.plan import (
@@ -245,6 +249,14 @@ from almanak.framework.execution.simulator import (
     TenderlySimulator,
     create_simulator,
     is_local_rpc,
+)
+from almanak.framework.execution.solana import (
+    AccountMeta,
+    SignedSolanaTransaction,
+    SolanaExecutionPlanner,
+    SolanaInstruction,
+    SolanaTransaction,
+    SolanaTransactionReceipt,
 )
 
 # Submitter implementations
@@ -404,4 +416,15 @@ __all__ = [
     "ActionDetails",
     "build_verbose_revert_report",
     "decode_calldata_selector",
+    # Chain-family execution strategy (EVM / Solana)
+    "ChainExecutionStrategy",
+    "EvmExecutionStrategy",
+    "ExecutionOutcome",
+    # Solana types and planner
+    "SolanaExecutionPlanner",
+    "AccountMeta",
+    "SolanaInstruction",
+    "SolanaTransaction",
+    "SignedSolanaTransaction",
+    "SolanaTransactionReceipt",
 ]

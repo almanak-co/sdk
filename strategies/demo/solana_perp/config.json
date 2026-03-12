@@ -1,0 +1,8 @@
+{
+    "market": "SOL-PERP",
+    "collateral_token": "USDC",
+    "collateral_amount": "100.0",
+    "leverage": "5.0",
+    "funding_rate_threshold": "0.01",
+    "chain": "solana"
+}

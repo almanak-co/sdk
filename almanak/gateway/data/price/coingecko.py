@@ -117,6 +117,23 @@ BSC_TOKEN_IDS: dict[str, str] = {
     "BUSD": "binance-usd",
 }
 
+# Token ID mappings for Solana tokens
+SOLANA_TOKEN_IDS: dict[str, str] = {
+    "SOL": "solana",
+    "WSOL": "solana",  # Wrapped SOL uses same price as SOL
+    "USDC": "usd-coin",
+    "USDT": "tether",
+    "JUP": "jupiter-exchange-solana",
+    "RAY": "raydium",
+    "ORCA": "orca",
+    "BONK": "bonk",
+    "WIF": "dogwifcoin",
+    "JTO": "jito-governance-token",
+    "PYTH": "pyth-network",
+    "MSOL": "msol",
+    "JITOSOL": "jito-staked-sol",
+}
+
 # Combined token mappings (chain-agnostic fallback)
 # Used when chain-specific mapping not found
 GLOBAL_TOKEN_IDS: dict[str, str] = {
@@ -124,6 +141,7 @@ GLOBAL_TOKEN_IDS: dict[str, str] = {
     **AVALANCHE_TOKEN_IDS,
     **BASE_TOKEN_IDS,
     **BSC_TOKEN_IDS,
+    **SOLANA_TOKEN_IDS,
     # Ethena tokens (available on multiple chains)
     "USDE": "ethena-usde",
     "SUSDE": "ethena-staked-usde",

@@ -55,7 +55,8 @@ class GatewaySettings(BaseSettings):
     pendle_api_cache_ttl: float = 15.0  # seconds
 
     # Execution secrets
-    private_key: str | None = None
+    private_key: str | None = None  # EVM (hex secp256k1)
+    solana_private_key: str | None = None  # Solana (base58 Ed25519)
 
     # Safe wallet integration (for vault operations requiring Safe signing)
     # Set ALMANAK_GATEWAY_SAFE_ADDRESS and ALMANAK_GATEWAY_SAFE_MODE env vars
@@ -107,6 +108,10 @@ class GatewaySettings(BaseSettings):
             fallback = os.environ.get("ALMANAK_PRIVATE_KEY")
             if fallback:
                 self.private_key = fallback
+        if not self.solana_private_key:
+            fallback = os.environ.get("SOLANA_PRIVATE_KEY")
+            if fallback:
+                self.solana_private_key = fallback
 
         if not self.eoa_address:
             fallback = os.environ.get("ALMANAK_EOA_ADDRESS")

@@ -173,6 +173,13 @@ class ResultEnricher:
             logger.debug("Enrichment skipped: execution failed")
             return result
 
+        # Skip EVM receipt parsing for Solana chains — Solana logs are
+        # program log strings, not EVM-structured dicts with topics/data.
+        chain = getattr(context, "chain", None)
+        if chain and chain.lower() == "solana":
+            logger.debug("Skipping EVM receipt parsing for Solana chain")
+            return result
+
         # Get intent type
         intent_type = self._get_intent_type(intent)
         if intent_type not in self.EXTRACTION_SPECS:

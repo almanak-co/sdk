@@ -107,7 +107,7 @@ docker-compose exec strategy \
 
 **解决方案：**
 
-允许的链：`ethereum`、`arbitrum`、`base`、`optimism`、`polygon`、`avalanche`、`bsc`、`sonic`、`plasma`、`blast`、`mantle`、`berachain`
+允许的链：`ethereum`、`arbitrum`、`base`、`optimism`、`polygon`、`avalanche`、`bsc`、`sonic`、`plasma`
 
 ```bash
 # 验证网关中配置了 RPC 源

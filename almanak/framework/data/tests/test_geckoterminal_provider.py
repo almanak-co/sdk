@@ -207,7 +207,7 @@ class TestGetOHLCV:
     async def test_unsupported_chain_raises(self, provider: GeckoTerminalOHLCVProvider) -> None:
         """Unsupported chain raises DataSourceUnavailable."""
         with pytest.raises(DataSourceUnavailable, match="Unsupported chain"):
-            await provider.get_ohlcv("WETH", chain="solana")
+            await provider.get_ohlcv("WETH", chain="fantom")
 
     @pytest.mark.asyncio
     async def test_http_error_raises(self, provider: GeckoTerminalOHLCVProvider) -> None:
@@ -479,7 +479,7 @@ class TestMappings:
 
     def test_chain_to_network_coverage(self) -> None:
         """All expected chains are mapped."""
-        expected = {"ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc", "sonic"}
+        expected = {"ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc", "sonic", "solana"}
         assert expected == set(_CHAIN_TO_NETWORK.keys())
 
     def test_chain_network_values(self) -> None:
@@ -593,7 +593,7 @@ class TestMetrics:
     @pytest.mark.asyncio
     async def test_error_increments_error_count(self, provider: GeckoTerminalOHLCVProvider) -> None:
         with pytest.raises(DataSourceUnavailable):
-            await provider.get_ohlcv("WETH", timeframe="1h", chain="solana")
+            await provider.get_ohlcv("WETH", timeframe="1h", chain="fantom")
 
         assert provider._metrics.total_requests == 1
         assert provider._metrics.errors == 1

@@ -17,6 +17,7 @@ CHAIN_IDS: dict[Chain, int] = {
     Chain.MANTLE: 5000,
     Chain.BERACHAIN: 80094,
     Chain.MONAD: 143,
+    Chain.SOLANA: 0,  # Non-EVM chain, no EIP-155 chain ID
 }
 
 # Common aliases mapping to Chain enum

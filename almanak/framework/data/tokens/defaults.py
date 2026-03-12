@@ -47,6 +47,7 @@ WRAPPED_NATIVE: dict[str, str] = {
     "bsc": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
     "sonic": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",  # wS (Wrapped Sonic)
     "plasma": "0x6100e367285b01f48d07953803a2d8dca5d19873",  # WXPL
+    "solana": "So11111111111111111111111111111111111111112",  # WSOL
     "mantle": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",  # WMNT
     "berachain": "0x6969696969696969696969696969696969696969",  # WBERA
     "monad": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",  # WMON
@@ -227,6 +228,7 @@ USDC = Token(
         "polygon": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",  # Native USDC on Polygon
         "avalanche": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",  # Native USDC on Avalanche
         "bsc": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",  # Binance-Peg USDC (18 decimals on BSC)
+        "solana": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # Native USDC on Solana
         "mantle": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",  # Bridged USDC on Mantle
         "monad": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",  # Native USDC on Monad
     },
@@ -254,6 +256,7 @@ USDT = Token(
         "polygon": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
         "avalanche": "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7",  # USDT on Avalanche
         "bsc": "0x55d398326f99059fF775485246999027B3197955",  # Binance-Peg USDT (18 decimals on BSC)
+        "solana": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT on Solana
         "mantle": "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE",  # Bridged USDT on Mantle
     },
     coingecko_id="tether",
@@ -731,6 +734,70 @@ PENDLE_PLASMA = Token(
 )
 
 # =============================================================================
+# SOLANA CHAIN TOKENS
+# =============================================================================
+
+# SOL (native gas token on Solana, 9 decimals)
+SOL = Token(
+    symbol="SOL",
+    name="Solana",
+    decimals=9,
+    addresses={
+        "solana": NATIVE_SENTINEL,
+    },
+    coingecko_id="solana",
+    is_stablecoin=False,
+)
+
+# Wrapped SOL (SPL token representation of native SOL)
+WSOL = Token(
+    symbol="WSOL",
+    name="Wrapped SOL",
+    decimals=9,
+    addresses={
+        "solana": "So11111111111111111111111111111111111111112",
+    },
+    coingecko_id="wrapped-solana",
+    is_stablecoin=False,
+)
+
+# Jupiter governance token
+JUP = Token(
+    symbol="JUP",
+    name="Jupiter",
+    decimals=6,
+    addresses={
+        "solana": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+    },
+    coingecko_id="jupiter-exchange-solana",
+    is_stablecoin=False,
+)
+
+# USDC on Solana (SPL token, 6 decimals)
+USDC_SOL = Token(
+    symbol="USDC",
+    name="USD Coin (Solana)",
+    decimals=6,
+    addresses={
+        "solana": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    },
+    coingecko_id="usd-coin",
+    is_stablecoin=True,
+)
+
+# USDT on Solana (SPL token, 6 decimals)
+USDT_SOL = Token(
+    symbol="USDT",
+    name="Tether USD (Solana)",
+    decimals=6,
+    addresses={
+        "solana": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+    },
+    coingecko_id="tether",
+    is_stablecoin=True,
+)
+
+# =============================================================================
 # MANTLE CHAIN TOKENS
 # =============================================================================
 
@@ -977,6 +1044,14 @@ DEFAULT_TOKENS: list[Token] = [
     USDT0,
     FUSDT0,
     PENDLE_PLASMA,
+    # Solana chain tokens
+    SOL,
+    WSOL,
+    JUP,
+    # NOTE: USDC_SOL and USDT_SOL are intentionally excluded from DEFAULT_TOKENS.
+    # The main USDC and USDT Token definitions already include "solana" addresses,
+    # so registering USDC_SOL/USDT_SOL would create duplicates. The variables are
+    # kept above for backward-compatibility imports.
     # Mantle chain tokens
     MNT,
     WMNT,
@@ -1102,6 +1177,10 @@ __all__ = [
     "USDT0",
     "FUSDT0",
     "PENDLE_PLASMA",
+    # Solana chain tokens
+    "SOL",
+    "WSOL",
+    "JUP",
     # Mantle chain tokens
     "MNT",
     "WMNT",

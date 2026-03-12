@@ -200,8 +200,6 @@ class MyStrategy(IntentStrategy):
 | `PredictionRedeemIntent` | Racheter les gains de marché prédictif |
 | `VaultDepositIntent` | Déposer dans un coffre |
 | `VaultRedeemIntent` | Racheter depuis un coffre |
-| `BridgeIntent` | Transférer des tokens entre chaînes |
-| `EnsureBalanceIntent` | Meta-intent qui se résout en `BridgeIntent` ou `HoldIntent` pour assurer un solde minimum de tokens sur la chaîne cible |
 
 ## Prochaines étapes
 

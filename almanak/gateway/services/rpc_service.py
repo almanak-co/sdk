@@ -26,6 +26,7 @@ from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.validation import (
     ALLOWED_CHAINS,
     ValidationError,
+    is_solana_chain,
     validate_address,
     validate_batch_size,
     validate_chain,
@@ -46,6 +47,7 @@ CHAIN_RATE_LIMITS = {
     "bsc": 300,
     "sonic": 300,
     "plasma": 300,
+    "solana": 300,
 }
 
 
@@ -272,9 +274,9 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                 id=request.id,
             )
 
-        # Validate RPC method against allowlist
+        # Validate RPC method against allowlist (chain-aware: Solana vs EVM)
         try:
-            validate_rpc_method(request.method)
+            validate_rpc_method(request.method, chain=chain)
         except ValidationError as e:
             self._metrics.failed_requests += 1
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -391,10 +393,10 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.RpcBatchResponse(responses=[])
 
-        # Validate all RPC methods in batch
+        # Validate all RPC methods in batch (chain-aware: Solana vs EVM)
         for rpc_request in request.requests:
             try:
-                validate_rpc_method(rpc_request.method)
+                validate_rpc_method(rpc_request.method, chain=chain)
             except ValidationError as e:
                 self._metrics.failed_requests += num_requests
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -495,6 +497,9 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
     ) -> gateway_pb2.AllowanceResponse:
         """Query ERC-20 allowance for a token/owner/spender.
 
+        For Solana chains, returns max allowance since SPL tokens don't use
+        the ERC-20 approve/allowance pattern.
+
         Args:
             request: Allowance query with chain, token, owner, spender
             context: gRPC context
@@ -512,6 +517,11 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.AllowanceResponse(success=False, error=str(e))
+
+        # Solana SPL tokens don't use ERC-20 allowances — return max (always approved)
+        if is_solana_chain(chain):
+            self._metrics.successful_requests += 1
+            return gateway_pb2.AllowanceResponse(success=True, allowance=str(2**64 - 1))
 
         # Validate addresses
         try:
@@ -586,6 +596,9 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
     ) -> gateway_pb2.BalanceQueryResponse:
         """Query ERC-20 balance for a token/wallet.
 
+        This is an EVM-only convenience method using eth_call. For Solana,
+        use MarketService.GetBalance() instead which routes to SolanaBalanceProvider.
+
         Args:
             request: Balance query with chain, token, wallet
             context: gRPC context
@@ -603,6 +616,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.BalanceQueryResponse(success=False, error=str(e))
+
+        # Solana doesn't support ERC-20 eth_call queries — use MarketService.GetBalance()
+        if is_solana_chain(chain):
+            self._metrics.successful_requests += 1
+            return gateway_pb2.BalanceQueryResponse(
+                success=False, error="Use MarketService.GetBalance() for Solana token balances"
+            )
 
         # Validate addresses
         try:
@@ -675,6 +695,8 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
     ) -> gateway_pb2.PositionLiquidityResponse:
         """Query Uniswap V3 position liquidity.
 
+        EVM-only: Solana LP positions use program-specific queries, not eth_call.
+
         Args:
             request: Position query with chain, position_manager, token_id
             context: gRPC context
@@ -692,6 +714,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.PositionLiquidityResponse(success=False, error=str(e))
+
+        # Solana LP positions don't use Uniswap V3 position manager
+        if is_solana_chain(chain):
+            self._metrics.successful_requests += 1
+            return gateway_pb2.PositionLiquidityResponse(
+                success=False, error="Position liquidity queries not applicable for Solana"
+            )
 
         # Validate address
         try:
@@ -788,6 +817,8 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
     ) -> gateway_pb2.PositionTokensOwedResponse:
         """Query Uniswap V3 position tokens owed (fees + withdrawn liquidity).
 
+        EVM-only: Solana LP positions use program-specific queries.
+
         Args:
             request: Position query with chain, position_manager, token_id
             context: gRPC context
@@ -805,6 +836,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.PositionTokensOwedResponse(success=False, error=str(e))
+
+        # Solana LP positions don't use Uniswap V3 position manager
+        if is_solana_chain(chain):
+            self._metrics.successful_requests += 1
+            return gateway_pb2.PositionTokensOwedResponse(
+                success=False, error="Position tokens owed queries not applicable for Solana"
+            )
 
         # Validate address
         try:

@@ -43,6 +43,12 @@ Registered Protocols:
     Aggregators:
     - enso: EnsoReceiptParser (Enso intent-based routing)
 
+    Solana Lending:
+    - kamino: KaminoReceiptParser (Kamino Finance lending)
+
+    Solana LP:
+    - raydium_clmm / raydium: RaydiumReceiptParser (Raydium CLMM LP)
+
     Yield / Structured Products:
     - pendle: PendleReceiptParser (Pendle yield trading)
 
@@ -166,6 +172,10 @@ class ReceiptParserRegistry:
             "CompoundV3ReceiptParser",
         ),
         # Perpetuals
+        "drift": (
+            "almanak.framework.connectors.drift.receipt_parser",
+            "DriftReceiptParser",
+        ),
         "gmx_v2": (
             "almanak.framework.connectors.gmx_v2.receipt_parser",
             "GMXv2ReceiptParser",
@@ -207,6 +217,47 @@ class ReceiptParserRegistry:
             "almanak.framework.connectors.morpho_vault.receipt_parser",
             "MetaMorphoReceiptParser",
         ),
+        # Solana Aggregators
+        "jupiter": (
+            "almanak.framework.connectors.jupiter.receipt_parser",
+            "JupiterReceiptParser",
+        ),
+        # Solana Lending
+        "kamino": (
+            "almanak.framework.connectors.kamino.receipt_parser",
+            "KaminoReceiptParser",
+        ),
+        "kamino_klend": (
+            "almanak.framework.connectors.kamino.receipt_parser",
+            "KaminoReceiptParser",
+        ),  # Alias for kamino
+        # Solana LP
+        "raydium_clmm": (
+            "almanak.framework.connectors.raydium.receipt_parser",
+            "RaydiumReceiptParser",
+        ),
+        "raydium": (
+            "almanak.framework.connectors.raydium.receipt_parser",
+            "RaydiumReceiptParser",
+        ),  # Alias for raydium_clmm
+        # Solana DLMM LP
+        "meteora_dlmm": (
+            "almanak.framework.connectors.meteora.receipt_parser",
+            "MeteoraReceiptParser",
+        ),
+        "meteora": (
+            "almanak.framework.connectors.meteora.receipt_parser",
+            "MeteoraReceiptParser",
+        ),  # Alias for meteora_dlmm
+        # Solana CLMM LP (Orca Whirlpools)
+        "orca_whirlpools": (
+            "almanak.framework.connectors.orca.receipt_parser",
+            "OrcaReceiptParser",
+        ),
+        "orca": (
+            "almanak.framework.connectors.orca.receipt_parser",
+            "OrcaReceiptParser",
+        ),  # Alias for orca_whirlpools
     }
 
     def __init__(self) -> None:

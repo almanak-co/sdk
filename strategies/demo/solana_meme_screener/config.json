@@ -1,0 +1,14 @@
+{
+    "chain": "solana",
+    "base_token": "USDC",
+    "swap_amount": "1.0",
+    "max_slippage_pct": 5.0,
+    "min_liquidity_usd": 100000,
+    "min_volume_h24": 200000,
+    "min_h1_change_pct": 3.0,
+    "min_buy_ratio": 0.55,
+    "min_age_hours": 2,
+    "max_age_hours": 168,
+    "take_profit_pct": 15.0,
+    "stop_loss_pct": -10.0
+}

@@ -706,12 +706,15 @@ class BackgroundPaperTrader:
         self,
         strategy_module: str,
         strategy_class: str = "Strategy",
+        strategy_config: dict[str, Any] | None = None,
     ) -> int:
         """Start Paper Trader as a background process.
 
         Args:
             strategy_module: Module path to import strategy from
             strategy_class: Class name of the strategy (default: "Strategy")
+            strategy_config: Strategy configuration dict (from config.json).
+                Required for IntentStrategy subclasses that need (config, chain, wallet_address).
 
         Returns:
             Process ID of the background process
@@ -739,6 +742,7 @@ class BackgroundPaperTrader:
                 str(self.state_dir),
                 self.save_interval_seconds,
             ),
+            kwargs={"strategy_config": strategy_config},
             daemon=False,  # Not daemon so it can continue after parent exits
         )
 
@@ -891,6 +895,7 @@ class BackgroundPaperTrader:
         self,
         strategy_module: str,
         strategy_class: str = "Strategy",
+        strategy_config: dict[str, Any] | None = None,
     ) -> int:
         """Resume Paper Trader from saved state.
 
@@ -900,6 +905,7 @@ class BackgroundPaperTrader:
         Args:
             strategy_module: Module path to import strategy from
             strategy_class: Class name of the strategy (default: "Strategy")
+            strategy_config: Strategy configuration dict (from config.json).
 
         Returns:
             Process ID of the background process
@@ -944,7 +950,7 @@ class BackgroundPaperTrader:
                 str(self.state_dir),
                 self.save_interval_seconds,
             ),
-            kwargs={"resume": True},
+            kwargs={"resume": True, "strategy_config": strategy_config},
             daemon=False,
         )
 
@@ -1015,6 +1021,7 @@ def _run_background_paper_trader(
     state_dir: str,
     save_interval_seconds: int,
     resume: bool = False,
+    strategy_config: dict[str, Any] | None = None,
 ) -> None:
     """Entry point for the background Paper Trader process.
 
@@ -1033,6 +1040,7 @@ def _run_background_paper_trader(
         state_dir: Directory for state and log files
         save_interval_seconds: Interval between state saves
         resume: Whether to resume from saved state (default: False)
+        strategy_config: Strategy configuration dict (from config.json).
     """
     import asyncio
 
@@ -1085,12 +1093,30 @@ def _run_background_paper_trader(
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    # Import strategy
+    # Import and instantiate strategy
+    _BACKTEST_WALLET = "0x" + "0" * 40
     try:
         import importlib
 
         module = importlib.import_module(strategy_module)
-        strategy = getattr(module, strategy_class)()
+        cls = getattr(module, strategy_class)
+        strat_cfg = strategy_config or {}
+
+        # Try IntentStrategy signature: (config, chain, wallet_address)
+        try:
+            strategy = cls(
+                strat_cfg,
+                config.chain,
+                config.wallet_address or _BACKTEST_WALLET,
+            )
+        except TypeError:
+            # Fall back to simple signature: (config,)
+            try:
+                strategy = cls(strat_cfg)
+            except TypeError:
+                # Fall back to no-arg constructor (mock strategies)
+                strategy = cls()
+
         bg_logger.info(f"Loaded strategy {strategy_class} from {strategy_module}")
     except (ImportError, AttributeError) as e:
         bg_logger.error(f"Failed to import strategy: {e}")

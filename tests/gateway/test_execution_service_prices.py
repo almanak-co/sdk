@@ -37,6 +37,7 @@ def _make_compilation_result(success: bool = True):
     """Build a mock CompilationResult with real CompilationStatus."""
     bundle = MagicMock()
     bundle.to_dict.return_value = {"intent_type": "swap", "transactions": []}
+    bundle.sensitive_data = None  # prevent MagicMock auto-attr from being JSON-serialized
     result = MagicMock()
     result.status = CompilationStatus.SUCCESS if success else CompilationStatus.FAILED
     result.action_bundle = bundle if success else None
