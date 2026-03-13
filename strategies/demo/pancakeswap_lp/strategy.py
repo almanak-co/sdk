@@ -64,7 +64,7 @@ class PancakeSwapLPStrategy(IntentStrategy):
             current_price = token0_price / token1_price
         except (ValueError, KeyError) as e:
             logger.warning(f"Could not get price: {e}")
-            current_price = Decimal("3400")
+            return Intent.hold(reason=f"Price data unavailable: {e}")
 
         # If we have a position, hold
         if self._current_position_id:
@@ -148,6 +148,17 @@ class PancakeSwapLPStrategy(IntentStrategy):
     def supports_teardown(self) -> bool:
         return True
 
+    def _estimate_lp_value_usd(self) -> Decimal:
+        """Estimate LP position value using live prices."""
+        try:
+            snapshot = self.create_market_snapshot()
+            token0_price = snapshot.price(self.token0_symbol)
+            token1_price = snapshot.price(self.token1_symbol)
+            return self.amount0 * token0_price + self.amount1 * token1_price
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not get live prices for LP value estimate, using fallback $0")
+            return Decimal("0")
+
     def get_open_positions(self):
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
@@ -159,7 +170,7 @@ class PancakeSwapLPStrategy(IntentStrategy):
                     position_id=str(self._current_position_id),
                     chain=self.chain,
                     protocol="pancakeswap_v3",
-                    value_usd=self.amount0 * Decimal("3400") + self.amount1,
+                    value_usd=self._estimate_lp_value_usd(),
                     details={
                         "pool": self.pool,
                         "token0": self.token0_symbol,

@@ -280,9 +280,7 @@ class MorphoLoopingStrategy(IntentStrategy):
             )
         except (ValueError, KeyError) as e:
             logger.warning(f"Could not get prices: {e}")
-            # Use reasonable defaults for testing
-            collateral_price = Decimal("3400")  # wstETH ~= ETH price
-            borrow_price = Decimal("1")  # USDC = $1
+            return Intent.hold(reason=f"Price data unavailable: {e}")
 
         # =================================================================
         # STEP 2: Handle forced actions (for testing)
@@ -407,8 +405,9 @@ class MorphoLoopingStrategy(IntentStrategy):
             # For now, supply the pending amount (set by on_intent_executed)
             supply_amount = self._pending_swap_amount
             if supply_amount <= 0:
-                # Estimate based on last borrow
-                supply_amount = self._total_borrowed / Decimal("3400")  # Rough estimate
+                return Intent.hold(
+                    reason="Swap output amount unavailable; cannot size the next supply safely"
+                )
 
             return self._create_supply_intent(supply_amount)
         else:
@@ -787,7 +786,13 @@ class MorphoLoopingStrategy(IntentStrategy):
 
         # Collateral position
         if self._total_collateral > 0:
-            collateral_value = self._total_collateral * Decimal("3400")  # Estimate
+            try:
+                snapshot = self.create_market_snapshot()
+                collateral_price = snapshot.price(self.collateral_token)
+            except Exception:  # noqa: BLE001
+                logger.debug(f"Could not get live price for {self.collateral_token}, using fallback $1")
+                collateral_price = Decimal("1")
+            collateral_value = self._total_collateral * collateral_price
             positions.append(
                 PositionInfo(
                     position_type=PositionType.SUPPLY,

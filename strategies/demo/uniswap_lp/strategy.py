@@ -305,8 +305,7 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
             logger.debug(f"Current price: {current_price:.2f} {self.token1_symbol}/{self.token0_symbol}")
         except (ValueError, KeyError) as e:
             logger.warning(f"Could not get price: {e}")
-            # Use a reasonable default for testing
-            current_price = Decimal("3400")
+            return Intent.hold(reason=f"Price data unavailable: {e}")
 
         # =================================================================
         # STEP 2: Handle forced actions (for testing)
@@ -596,12 +595,16 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
         position_id = self._current_position_id or self.position_id
 
         if position_id:
-            # Calculate estimated value based on configured amounts
-            # In production, this would query the actual position value
-            token0_price_usd = Decimal("3400")  # Default ETH price
-            token1_price_usd = Decimal("1")  # Default USDC price
+            # Calculate estimated value using live prices
+            try:
+                snapshot = self.create_market_snapshot()
+                token0_price_usd = snapshot.price(self.token0_symbol)
+                token1_price_usd = snapshot.price(self.token1_symbol)
+            except Exception:  # noqa: BLE001
+                logger.debug("Could not get live prices for LP value estimate, using fallback $0")
+                token0_price_usd = Decimal("0")
+                token1_price_usd = Decimal("0")
 
-            # Estimate position value (simplified - actual would query chain)
             estimated_value = self.amount0 * token0_price_usd + self.amount1 * token1_price_usd
 
             positions.append(

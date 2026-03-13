@@ -91,13 +91,9 @@ class AavePnLLendingStrategy(IntentStrategy):
         """
         try:
             supply_price = market.price(self.supply_token)
-        except (ValueError, KeyError):
-            supply_price = Decimal("3400")
-
-        try:
-            borrow_price = market.price(self.borrow_token)
-        except (ValueError, KeyError):
-            borrow_price = Decimal("1")
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Could not get {self.supply_token} price: {e}")
+            return Intent.hold(reason=f"Price data unavailable for {self.supply_token}: {e}")
 
         # Step 1: Supply collateral if idle
         if self._state == "idle":
@@ -118,6 +114,11 @@ class AavePnLLendingStrategy(IntentStrategy):
             price_change = (supply_price - self._reference_price) / self._reference_price
 
             if price_change <= -self.price_drop_threshold:
+                try:
+                    borrow_price = market.price(self.borrow_token)
+                except (ValueError, KeyError) as e:
+                    logger.warning(f"Could not get {self.borrow_token} price: {e}")
+                    return Intent.hold(reason=f"Price data unavailable for {self.borrow_token}: {e}")
                 collateral_value = self._supplied_amount * supply_price
                 borrow_value = collateral_value * self.ltv_target
                 borrow_amount = (borrow_value / borrow_price).quantize(Decimal("0.01"))
@@ -254,13 +255,19 @@ class AavePnLLendingStrategy(IntentStrategy):
         positions: list[PositionInfo] = []
 
         if self._supplied_amount > 0:
+            try:
+                snapshot = self.create_market_snapshot()
+                supply_price = snapshot.price(self.supply_token)
+            except Exception:  # noqa: BLE001
+                logger.debug(f"Could not get live price for {self.supply_token}, using fallback $0")
+                supply_price = Decimal("0")
             positions.append(
                 PositionInfo(
                     position_type=PositionType.SUPPLY,
                     position_id=f"aave-supply-{self.supply_token}-{self.chain}",
                     chain=self.chain,
                     protocol="aave_v3",
-                    value_usd=self._supplied_amount * Decimal("3400"),
+                    value_usd=self._supplied_amount * supply_price,
                     details={"asset": self.supply_token, "amount": str(self._supplied_amount)},
                 )
             )

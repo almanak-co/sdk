@@ -217,9 +217,7 @@ class AaveBorrowStrategy(IntentStrategy):
             )
         except (ValueError, KeyError) as e:
             logger.warning(f"Could not get prices: {e}")
-            # Use reasonable defaults for testing
-            collateral_price = Decimal("3400")  # ETH price
-            borrow_price = Decimal("1")  # USDC price
+            return Intent.hold(reason=f"Price data unavailable: {e}")
 
         # =================================================================
         # STEP 2: Handle forced actions (for testing)
@@ -626,12 +624,12 @@ class AaveBorrowStrategy(IntentStrategy):
 
             if position.has_supply:
                 supply_amount = Decimal(str(position.atoken_balance_decimal))
-                if position.asset in {"WETH", "ETH", "wstETH"}:
-                    supply_price = Decimal("3400")
-                elif position.asset == "WBTC":
-                    supply_price = Decimal("60000")
-                else:
-                    supply_price = Decimal("1")
+                try:
+                    snapshot = self.create_market_snapshot()
+                    supply_price = snapshot.price(position.asset)
+                except Exception:  # noqa: BLE001
+                    logger.debug(f"Could not get live price for {position.asset}, using fallback $0")
+                    supply_price = Decimal("0")
                 onchain_positions.append(
                     PositionInfo(
                         position_type=PositionType.SUPPLY,
@@ -645,12 +643,12 @@ class AaveBorrowStrategy(IntentStrategy):
 
             if position.has_debt:
                 debt_amount = Decimal(str(position.total_debt_decimal))
-                if position.asset in {"WETH", "ETH", "wstETH"}:
-                    debt_price = Decimal("3400")
-                elif position.asset == "WBTC":
-                    debt_price = Decimal("60000")
-                else:
-                    debt_price = Decimal("1")
+                try:
+                    snapshot = self.create_market_snapshot()
+                    debt_price = snapshot.price(position.asset)
+                except Exception:  # noqa: BLE001
+                    logger.debug(f"Could not get live price for {position.asset}, using fallback $0")
+                    debt_price = Decimal("0")
                 onchain_positions.append(
                     PositionInfo(
                         position_type=PositionType.BORROW,
@@ -705,9 +703,14 @@ class AaveBorrowStrategy(IntentStrategy):
         # Fallback to internal state tracking
         # Check for supplied collateral
         if self._supplied_amount > 0:
-            # In production, would query on-chain value
-            # For demo, estimate value based on supply amount
-            supply_value = self._supplied_amount * Decimal("3400")  # Assume ETH price
+            # Estimate value using live price if available
+            try:
+                snapshot = self.create_market_snapshot()
+                collateral_price = snapshot.price(self.collateral_token)
+            except Exception:  # noqa: BLE001
+                logger.debug(f"Could not get live price for {self.collateral_token}, using fallback $0")
+                collateral_price = Decimal("0")
+            supply_value = self._supplied_amount * collateral_price
             positions.append(
                 PositionInfo(
                     position_type=PositionType.SUPPLY,

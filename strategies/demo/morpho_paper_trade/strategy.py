@@ -113,13 +113,10 @@ class MorphoPaperTradeStrategy(IntentStrategy):
         """
         try:
             collateral_price = market.price(self.collateral_token)
-        except (ValueError, KeyError):
-            collateral_price = Decimal("3800")  # wstETH fallback
-
-        try:
             borrow_price = market.price(self.borrow_token)
-        except (ValueError, KeyError):
-            borrow_price = Decimal("1")
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Could not get prices: {e}")
+            return Intent.hold(reason=f"Price data unavailable: {e}")
 
         # Idle -> supply collateral
         if self._state == "idle":
@@ -278,6 +275,15 @@ class MorphoPaperTradeStrategy(IntentStrategy):
     def supports_teardown(self) -> bool:
         return True
 
+    def _get_collateral_price(self) -> Decimal:
+        """Fetch live collateral price for teardown valuation."""
+        try:
+            market = self.create_market_snapshot()
+            return Decimal(str(market.price(self.collateral_token)))
+        except Exception:
+            logger.warning(f"Unable to fetch live price for {self.collateral_token} in teardown valuation")
+            return Decimal("0")
+
     def get_open_positions(self) -> "TeardownPositionSummary":
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
@@ -290,7 +296,7 @@ class MorphoPaperTradeStrategy(IntentStrategy):
                     position_id=f"morpho-supply-{self.collateral_token}-{self.chain}",
                     chain=self.chain,
                     protocol="morpho_blue",
-                    value_usd=self._supplied_amount * Decimal("3800"),
+                    value_usd=self._supplied_amount * self._get_collateral_price(),
                     details={
                         "asset": self.collateral_token,
                         "amount": str(self._supplied_amount),

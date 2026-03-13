@@ -291,8 +291,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             logger.debug(f"Current price: {current_price:.4f} {self.token_y_symbol}/{self.token_x_symbol}")
         except (ValueError, KeyError) as e:
             logger.warning(f"Could not get price: {e}")
-            # Use a reasonable default for AVAX/USDC testing
-            current_price = Decimal("30")  # ~$30 per AVAX
+            return Intent.hold(reason=f"Price data unavailable: {e}")
 
         # =================================================================
         # STEP 2: Handle forced actions (for testing)
@@ -540,9 +539,17 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         positions: list[PositionInfo] = []
 
         if self._position_bin_ids:
-            # Calculate estimated value
-            token_x_price_usd = Decimal("30")  # Default AVAX price
-            token_y_price_usd = Decimal("1")  # Default USDC price
+            # Calculate estimated value using live prices
+            try:
+                snapshot = self.create_market_snapshot()
+                token_x_price_usd = Decimal(str(snapshot.price(self.token_x_symbol)))
+                token_y_price_usd = Decimal(str(snapshot.price(self.token_y_symbol)))
+            except Exception:
+                logger.warning(
+                    f"Unable to fetch live prices for {self.token_x_symbol}/{self.token_y_symbol} in teardown valuation"
+                )
+                token_x_price_usd = Decimal("0")
+                token_y_price_usd = Decimal("0")
 
             estimated_value = self.amount_x * token_x_price_usd + self.amount_y * token_y_price_usd
 

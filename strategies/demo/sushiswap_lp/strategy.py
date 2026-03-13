@@ -298,8 +298,8 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
             token1_price_usd = market.price(self.token1_symbol)
             # Guard against division by zero
             if token1_price_usd == Decimal("0"):
-                logger.warning(f"Token1 price is zero for {self.token1_symbol}, using default price")
-                current_price = Decimal("3400")
+                logger.warning(f"Token1 price is zero for {self.token1_symbol}")
+                return Intent.hold(reason=f"Price data unavailable: {self.token1_symbol} price is zero")
             else:
                 # V3 pool price = token1 per token0 (e.g., USDC per WETH)
                 # To get this from USD prices: token0_usd / token1_usd
@@ -307,8 +307,7 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
             logger.debug(f"Current price: {current_price:.4f} {self.token1_symbol}/{self.token0_symbol}")
         except (ValueError, KeyError) as e:
             logger.warning(f"Could not get price: {e}")
-            # Use a reasonable default for ETH/USDC testing (~$3400 per ETH)
-            current_price = Decimal("3400")
+            return Intent.hold(reason=f"Price data unavailable: {e}")
 
         # =================================================================
         # STEP 2: Handle forced actions (for testing)
@@ -601,9 +600,15 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
         positions: list[PositionInfo] = []
 
         if self._position_id:
-            # Calculate estimated value (for WETH/USDC: token0=WETH, token1=USDC)
-            token0_price_usd = Decimal("3400")  # Default WETH price
-            token1_price_usd = Decimal("1")  # Assume USDC
+            # Calculate estimated value using live prices
+            try:
+                snapshot = self.create_market_snapshot()
+                token0_price_usd = snapshot.price(self.token0_symbol)
+                token1_price_usd = snapshot.price(self.token1_symbol)
+            except Exception:  # noqa: BLE001
+                logger.debug("Could not get live prices for LP value estimate, using fallback $0")
+                token0_price_usd = Decimal("0")
+                token1_price_usd = Decimal("0")
 
             estimated_value = self.amount0 * token0_price_usd + self.amount1 * token1_price_usd
 
