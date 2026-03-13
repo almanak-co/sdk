@@ -846,34 +846,37 @@ def pnl_backtest(
             from ..data.cache import CacheKey, OHLCVData
 
             total_cached = 0
-            for token in token_list:
-                try:
-                    cache_start = start or pnl_config.start_time
-                    cache_end = end or pnl_config.end_time
-                    ohlcv_data = await data_provider.get_ohlcv(token, cache_start, cache_end, interval)
-                    items = []
-                    for ohlcv in ohlcv_data:
-                        key = CacheKey(
-                            token=token.upper(),
-                            timestamp=ohlcv.timestamp,
-                            interval=f"{interval}s",
-                        )
-                        data = OHLCVData(
-                            open=ohlcv.open,
-                            high=ohlcv.high,
-                            low=ohlcv.low,
-                            close=ohlcv.close,
-                            volume=ohlcv.volume if hasattr(ohlcv, "volume") else None,
-                        )
-                        items.append((key, data))
+            try:
+                for token in token_list:
+                    try:
+                        cache_start = start or pnl_config.start_time
+                        cache_end = end or pnl_config.end_time
+                        ohlcv_data = await data_provider.get_ohlcv(token, cache_start, cache_end, interval)
+                        items = []
+                        for ohlcv in ohlcv_data:
+                            key = CacheKey(
+                                token=token.upper(),
+                                timestamp=ohlcv.timestamp,
+                                interval=f"{interval}s",
+                            )
+                            data = OHLCVData(
+                                open=ohlcv.open,
+                                high=ohlcv.high,
+                                low=ohlcv.low,
+                                close=ohlcv.close,
+                                volume=ohlcv.volume if hasattr(ohlcv, "volume") else None,
+                            )
+                            items.append((key, data))
 
-                    if cache is not None:
-                        cached_count = cache.set_batch(items)
-                        total_cached += cached_count
-                        click.echo(f"  Cached {cached_count} data points for {token}")
+                        if cache is not None:
+                            cached_count = cache.set_batch(items)
+                            total_cached += cached_count
+                            click.echo(f"  Cached {cached_count} data points for {token}")
 
-                except Exception as e:
-                    click.echo(f"  Warning: Failed to cache data for {token}: {e}", err=True)
+                    except Exception as e:
+                        click.echo(f"  Warning: Failed to cache data for {token}: {e}", err=True)
+            finally:
+                await data_provider.close()
 
             return total_cached
 
@@ -883,6 +886,10 @@ def pnl_backtest(
         except Exception as e:
             click.echo(f"Warning: Cache warming failed: {e}", err=True)
             click.echo("Proceeding with backtest without pre-warmed cache...")
+
+        # Create fresh data provider — warm_cache_async closed the previous one
+        # to avoid "Event loop is closed" errors from stale aiohttp sessions
+        data_provider = CoinGeckoDataProvider()
 
     # Create backtester
     backtester = PnLBacktester(
@@ -935,9 +942,13 @@ def pnl_backtest(
 
             benchmark_enum = Benchmark.from_string(benchmark)
 
-            # Fetch benchmark data
-            benchmark_returns = asyncio.run(get_benchmark_returns(benchmark_enum, start, end, interval))
-            benchmark_total = asyncio.run(get_benchmark_total_return(benchmark_enum, start, end))
+            # Fetch benchmark data (combined into single asyncio.run to avoid event loop issues)
+            async def _fetch_benchmark():
+                returns = await get_benchmark_returns(benchmark_enum, start, end, interval)
+                total = await get_benchmark_total_return(benchmark_enum, start, end)
+                return returns, total
+
+            benchmark_returns, benchmark_total = asyncio.run(_fetch_benchmark())
 
             # Calculate strategy returns from equity curve
             if result.equity_curve and len(result.equity_curve) >= 2:
