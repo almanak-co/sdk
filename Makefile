@@ -275,28 +275,17 @@ test-gateway:
 
 # Demo strategy tests through gateway (run on Anvil forks)
 # These tests verify strategies work correctly through the gateway architecture
+# Uses public RPCs by default; set ALCHEMY_API_KEY for better rate limits
 test-demo-strategies:
-	@if [ -z "$(ALCHEMY_API_KEY)" ]; then \
-		echo "Error: ALCHEMY_API_KEY environment variable is not set"; \
-		exit 1; \
-	fi
 	uv run --env-file .env python scripts/test_demo_strategies_gateway.py --all
 
 # Quick demo strategy gateway test (one per chain)
 test-demo-quick:
-	@if [ -z "$(ALCHEMY_API_KEY)" ]; then \
-		echo "Error: ALCHEMY_API_KEY environment variable is not set"; \
-		exit 1; \
-	fi
 	uv run --env-file .env python scripts/test_demo_strategies_gateway.py
 
 # Test a single strategy through gateway
 # Usage: make test-demo-single STRATEGY=uniswap_rsi CHAIN=arbitrum
 test-demo-single:
-	@if [ -z "$(ALCHEMY_API_KEY)" ]; then \
-		echo "Error: ALCHEMY_API_KEY environment variable is not set"; \
-		exit 1; \
-	fi
 	@if [ -z "$(STRATEGY)" ]; then \
 		echo "Error: STRATEGY is not set. Usage: make test-demo-single STRATEGY=uniswap_rsi"; \
 		exit 1; \

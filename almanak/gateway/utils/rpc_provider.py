@@ -43,10 +43,12 @@ Environment Variables:
     TENDERLY_API_KEY_{CHAIN}: Per-chain Tenderly keys (e.g., TENDERLY_API_KEY_ARBITRUM)
 """
 
+import json
 import logging
 import os
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -81,86 +83,187 @@ class Network(StrEnum):
 
 
 # =============================================================================
-# Chain Configuration
+# Chain Configuration (loaded from config/rpc_defaults.json)
 # =============================================================================
 
 
-# Mapping of chain names to Alchemy URL prefixes
-# Format: https://{prefix}-mainnet.g.alchemy.com/v2/{API_KEY}
-ALCHEMY_CHAIN_KEYS: dict[str, str] = {
-    "ethereum": "eth",
-    "arbitrum": "arb",
-    "optimism": "opt",
-    "base": "base",
-    "avalanche": "avax",
-    "polygon": "polygon",
-    "bsc": "bnb",  # Alchemy uses "bnb" in their URL
-    "sonic": "sonic",
-    "plasma": "plasma",
-    "linea": "linea",
-    "solana": "solana",
-    "mantle": "mantle",
-    "monad": "monad",
+# Built-in fallback defaults — used when config/rpc_defaults.json is not found
+# (e.g. when the SDK is installed as a package without the repo root).
+_BUILTIN_CHAINS: dict[str, dict] = {
+    "ethereum": {
+        "chain_id": 1,
+        "public_rpc": "https://ethereum-rpc.publicnode.com",
+        "alchemy_prefix": "eth",
+        "tenderly_subdomain": "mainnet",
+        "anvil_port": 8549,
+        "poa": False,
+    },
+    "arbitrum": {
+        "chain_id": 42161,
+        "public_rpc": "https://arbitrum-one-rpc.publicnode.com",
+        "alchemy_prefix": "arb",
+        "tenderly_subdomain": "arbitrum",
+        "anvil_port": 8545,
+        "poa": False,
+    },
+    "optimism": {
+        "chain_id": 10,
+        "public_rpc": "https://optimism-rpc.publicnode.com",
+        "alchemy_prefix": "opt",
+        "anvil_port": 8550,
+        "poa": False,
+    },
+    "base": {
+        "chain_id": 8453,
+        "public_rpc": "https://base-rpc.publicnode.com",
+        "alchemy_prefix": "base",
+        "tenderly_subdomain": "base",
+        "anvil_port": 8548,
+        "poa": False,
+    },
+    "avalanche": {
+        "chain_id": 43114,
+        "public_rpc": "https://avalanche-c-chain-rpc.publicnode.com",
+        "alchemy_prefix": "avax",
+        "tenderly_subdomain": "avalanche",
+        "anvil_port": 8547,
+        "poa": True,
+    },
+    "polygon": {
+        "chain_id": 137,
+        "public_rpc": "https://polygon-bor-rpc.publicnode.com",
+        "alchemy_prefix": "polygon",
+        "anvil_port": 8551,
+        "poa": True,
+    },
+    "bsc": {
+        "chain_id": 56,
+        "public_rpc": "https://bsc-rpc.publicnode.com",
+        "alchemy_prefix": "bnb",
+        "anvil_port": 8546,
+        "poa": True,
+    },
+    "sonic": {
+        "chain_id": 146,
+        "public_rpc": "https://sonic-rpc.publicnode.com",
+        "alchemy_prefix": "sonic",
+        "anvil_port": 8553,
+        "poa": False,
+    },
+    "linea": {
+        "chain_id": 59144,
+        "public_rpc": "https://linea-rpc.publicnode.com",
+        "alchemy_prefix": "linea",
+        "anvil_port": 8552,
+        "poa": False,
+    },
+    "plasma": {
+        "chain_id": 1032,
+        "public_rpc": "https://rpc.plasma.to",
+        "alchemy_prefix": "plasma",
+        "tenderly_subdomain": "plasma",
+        "anvil_port": 8554,
+        "poa": False,
+    },
+    "mantle": {
+        "chain_id": 5000,
+        "public_rpc": "https://rpc.mantle.xyz",
+        "alchemy_prefix": "mantle",
+        "anvil_port": 8556,
+        "poa": False,
+    },
+    "monad": {
+        "chain_id": 10143,
+        "public_rpc": "https://rpc.monad.xyz",
+        "alchemy_prefix": "monad",
+        "anvil_port": 8555,
+        "poa": False,
+    },
+    "solana": {
+        "chain_id": 0,
+        "public_rpc": "https://api.mainnet-beta.solana.com",
+        "alchemy_prefix": "solana",
+        "anvil_port": 8899,
+        "poa": False,
+    },
 }
 
-# Mapping of chain names to Tenderly subdomains
-# Format: https://{subdomain}.gateway.tenderly.co/{API_KEY}
-TENDERLY_SUBDOMAINS: dict[str, str] = {
-    "ethereum": "mainnet",
-    "arbitrum": "arbitrum",
-    "base": "base",
-    "avalanche": "avalanche",
-    "plasma": "plasma",
-    # Note: Optimism, Polygon, BSC, Sonic not supported by Tenderly RPC
-}
-
-# Free public RPC endpoints (no API key required).
-# Used as last-resort fallback when no custom URL or API key is configured.
-# Source: PublicNode (publicnode.com) + official chain RPCs.
-PUBLIC_RPC_URLS: dict[str, str] = {
-    "ethereum": "https://ethereum-rpc.publicnode.com",
-    "arbitrum": "https://arbitrum-one-rpc.publicnode.com",
-    "optimism": "https://optimism-rpc.publicnode.com",
-    "base": "https://base-rpc.publicnode.com",
-    "avalanche": "https://avalanche-c-chain-rpc.publicnode.com",
-    "polygon": "https://polygon-bor-rpc.publicnode.com",
-    "bsc": "https://bsc-rpc.publicnode.com",
-    "sonic": "https://sonic-rpc.publicnode.com",
-    "linea": "https://linea-rpc.publicnode.com",
-    "plasma": "https://rpc.plasma.to",
-    "solana": "https://api.mainnet-beta.solana.com",
-    "mantle": "https://rpc.mantle.xyz",
-    "monad": "https://rpc.monad.xyz",
-}
-
-# Solana cluster URLs (Solana uses cluster names instead of chain IDs)
-SOLANA_CLUSTER_URLS: dict[str, str] = {
+_BUILTIN_SOLANA_CLUSTERS: dict[str, str] = {
     "mainnet-beta": "https://api.mainnet-beta.solana.com",
     "devnet": "https://api.devnet.solana.com",
     "testnet": "https://api.testnet.solana.com",
 }
 
+_REQUIRED_CHAIN_KEYS = {"public_rpc", "anvil_port"}
+
+
+def _load_rpc_defaults() -> dict:
+    """Load RPC defaults from config/rpc_defaults.json.
+
+    Searches for the config file relative to this file's location (inside the
+    installed package) and also relative to common repo root locations.
+    Falls back to built-in defaults if the file is not found.
+    """
+    candidates = [
+        Path(__file__).resolve().parents[3] / "config" / "rpc_defaults.json",  # repo root
+        Path.cwd() / "config" / "rpc_defaults.json",  # cwd
+    ]
+    for path in candidates:
+        if path.is_file():
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                # Validate required keys per chain
+                chains = data.get("chains", {})
+                for chain_name, cfg in chains.items():
+                    missing = _REQUIRED_CHAIN_KEYS - set(cfg.keys())
+                    if missing:
+                        logger.warning(f"Chain '{chain_name}' in {path} missing required keys: {missing}")
+                return data
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning(f"Failed to load {path}: {e}, using built-in defaults")
+                return {"chains": _BUILTIN_CHAINS, "solana_clusters": _BUILTIN_SOLANA_CLUSTERS}
+    logger.debug("config/rpc_defaults.json not found, using built-in defaults")
+    return {"chains": _BUILTIN_CHAINS, "solana_clusters": _BUILTIN_SOLANA_CLUSTERS}
+
+
+_RPC_DEFAULTS = _load_rpc_defaults()
+_CHAINS = _RPC_DEFAULTS.get("chains", {})
+
+# Mapping of chain names to Alchemy URL prefixes
+# Format: https://{prefix}-mainnet.g.alchemy.com/v2/{API_KEY}
+ALCHEMY_CHAIN_KEYS: dict[str, str] = {
+    chain: cfg["alchemy_prefix"] for chain, cfg in _CHAINS.items() if "alchemy_prefix" in cfg
+}
+
+# Mapping of chain names to Tenderly subdomains
+# Format: https://{subdomain}.gateway.tenderly.co/{API_KEY}
+TENDERLY_SUBDOMAINS: dict[str, str] = {
+    chain: cfg["tenderly_subdomain"] for chain, cfg in _CHAINS.items() if "tenderly_subdomain" in cfg
+}
+
+# Free public RPC endpoints (no API key required).
+# Used as last-resort fallback when no custom URL or API key is configured.
+# Source: PublicNode (publicnode.com) + official chain RPCs.
+PUBLIC_RPC_URLS: dict[str, str] = {chain: cfg["public_rpc"] for chain, cfg in _CHAINS.items() if "public_rpc" in cfg}
+
+# Solana cluster URLs (Solana uses cluster names instead of chain IDs)
+SOLANA_CLUSTER_URLS: dict[str, str] = _RPC_DEFAULTS.get(
+    "solana_clusters",
+    {
+        "mainnet-beta": "https://api.mainnet-beta.solana.com",
+        "devnet": "https://api.devnet.solana.com",
+        "testnet": "https://api.testnet.solana.com",
+    },
+)
+
 # Chains that require POA middleware (geth_poa_middleware)
-POA_CHAINS: set[str] = {"avalanche", "bsc", "polygon"}
+POA_CHAINS: set[str] = {chain for chain, cfg in _CHAINS.items() if cfg.get("poa")}
 
 # Default Anvil port mapping for multi-chain local development
 # When running multiple Anvil instances, use ANVIL_{CHAIN}_PORT env vars
 # These defaults match the Makefile _start-anvils target
-ANVIL_CHAIN_PORTS: dict[str, int] = {
-    "arbitrum": 8545,
-    "bsc": 8546,
-    "avalanche": 8547,
-    "base": 8548,
-    "ethereum": 8549,
-    "optimism": 8550,
-    "polygon": 8551,
-    "linea": 8552,
-    "sonic": 8553,
-    "plasma": 8554,
-    "solana": 8899,  # solana-test-validator default port
-    "mantle": 8556,
-    "monad": 8555,
-}
+ANVIL_CHAIN_PORTS: dict[str, int] = {chain: cfg["anvil_port"] for chain, cfg in _CHAINS.items() if "anvil_port" in cfg}
 
 
 # =============================================================================

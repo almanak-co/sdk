@@ -1,0 +1,106 @@
+{
+  "_comment": "Default RPC configuration for all chains. Used by rpc_provider.py, demo tests, Makefile, and kitchenloop. Public RPCs are free, no API key required.",
+  "chains": {
+    "ethereum": {
+      "chain_id": 1,
+      "public_rpc": "https://ethereum-rpc.publicnode.com",
+      "alchemy_prefix": "eth",
+      "tenderly_subdomain": "mainnet",
+      "anvil_port": 8549,
+      "poa": false
+    },
+    "arbitrum": {
+      "chain_id": 42161,
+      "public_rpc": "https://arbitrum-one-rpc.publicnode.com",
+      "alchemy_prefix": "arb",
+      "tenderly_subdomain": "arbitrum",
+      "anvil_port": 8545,
+      "poa": false
+    },
+    "optimism": {
+      "chain_id": 10,
+      "public_rpc": "https://optimism-rpc.publicnode.com",
+      "alchemy_prefix": "opt",
+      "anvil_port": 8550,
+      "poa": false
+    },
+    "base": {
+      "chain_id": 8453,
+      "public_rpc": "https://base-rpc.publicnode.com",
+      "alchemy_prefix": "base",
+      "tenderly_subdomain": "base",
+      "anvil_port": 8548,
+      "poa": false
+    },
+    "avalanche": {
+      "chain_id": 43114,
+      "public_rpc": "https://avalanche-c-chain-rpc.publicnode.com",
+      "alchemy_prefix": "avax",
+      "tenderly_subdomain": "avalanche",
+      "anvil_port": 8547,
+      "poa": true
+    },
+    "polygon": {
+      "chain_id": 137,
+      "public_rpc": "https://polygon-bor-rpc.publicnode.com",
+      "alchemy_prefix": "polygon",
+      "anvil_port": 8551,
+      "poa": true
+    },
+    "bsc": {
+      "chain_id": 56,
+      "public_rpc": "https://bsc-rpc.publicnode.com",
+      "alchemy_prefix": "bnb",
+      "anvil_port": 8546,
+      "poa": true
+    },
+    "sonic": {
+      "chain_id": 146,
+      "public_rpc": "https://sonic-rpc.publicnode.com",
+      "alchemy_prefix": "sonic",
+      "anvil_port": 8553,
+      "poa": false
+    },
+    "linea": {
+      "chain_id": 59144,
+      "public_rpc": "https://linea-rpc.publicnode.com",
+      "alchemy_prefix": "linea",
+      "anvil_port": 8552,
+      "poa": false
+    },
+    "plasma": {
+      "chain_id": 1032,
+      "public_rpc": "https://rpc.plasma.to",
+      "alchemy_prefix": "plasma",
+      "tenderly_subdomain": "plasma",
+      "anvil_port": 8554,
+      "poa": false
+    },
+    "mantle": {
+      "chain_id": 5000,
+      "public_rpc": "https://rpc.mantle.xyz",
+      "alchemy_prefix": "mantle",
+      "anvil_port": 8556,
+      "poa": false
+    },
+    "monad": {
+      "chain_id": 10143,
+      "public_rpc": "https://rpc.monad.xyz",
+      "alchemy_prefix": "monad",
+      "anvil_port": 8555,
+      "poa": false
+    },
+    "solana": {
+      "chain_id": 0,
+      "public_rpc": "https://api.mainnet-beta.solana.com",
+      "alchemy_prefix": "solana",
+      "anvil_port": 8899,
+      "poa": false
+    }
+  },
+  "solana_clusters": {
+    "mainnet-beta": "https://api.mainnet-beta.solana.com",
+    "devnet": "https://api.devnet.solana.com",
+    "testnet": "https://api.testnet.solana.com"
+  }
+}
