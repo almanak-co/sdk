@@ -5,8 +5,9 @@ These are only available in the gateway, not in the framework.
 """
 
 from .aggregator import PriceAggregator
+from .binance import BinancePriceSource
 from .coingecko import CoinGeckoPriceSource
-from .dexscreener import DexScreenerPriceSource
+from .dexscreener import CHAIN_TO_DEXSCREENER_PLATFORM, DexScreenerPriceSource
 from .multi_dex import (
     DEX_CHAINS,
     SUPPORTED_DEXS,
@@ -29,6 +30,8 @@ from .onchain import OnChainPriceSource
 from .pyth import PythPriceSource
 
 __all__ = [
+    "BinancePriceSource",
+    "CHAIN_TO_DEXSCREENER_PLATFORM",
     "CoinGeckoPriceSource",
     "DexScreenerPriceSource",
     "OnChainPriceSource",

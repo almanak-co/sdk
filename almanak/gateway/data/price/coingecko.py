@@ -397,7 +397,7 @@ class CoinGeckoPriceSource(BasePriceSource):
         # Fall back to hardcoded mappings (backward compatibility)
         return GLOBAL_TOKEN_IDS.get(token)
 
-    async def get_price(self, token: str, quote: str = "USD") -> PriceResult:
+    async def get_price(self, token: str, quote: str = "USD", *, resolved_token: object | None = None) -> PriceResult:
         """Fetch the current price for a token.
 
         Args:

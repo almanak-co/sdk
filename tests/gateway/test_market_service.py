@@ -160,8 +160,8 @@ class TestMarketServiceInitialization:
     """Tests for MarketService price source initialization."""
 
     @pytest.mark.asyncio
-    async def test_no_cg_key_uses_onchain_primary(self):
-        """Without CG key, on-chain source is first in aggregator."""
+    async def test_evm_chain_has_four_sources(self):
+        """EVM chain gets 4-source pricing: Chainlink + Binance + DexScreener + CoinGecko."""
         settings = GatewaySettings(coingecko_api_key=None, chains=["arbitrum"])
         service = MarketServiceServicer(settings)
 
@@ -171,9 +171,9 @@ class TestMarketServiceInitialization:
 
             assert service._price_aggregator is not None
             sources = service._price_aggregator.sources
-            assert len(sources) == 2
-            assert sources[0].source_name == "onchain"
-            assert sources[1].source_name == "coingecko"
+            assert len(sources) == 4
+            source_names = [s.source_name for s in sources]
+            assert source_names == ["onchain", "binance", "dexscreener", "coingecko"]
 
             coingecko_sources = [source for source in sources if source.source_name == "coingecko"]
             assert len(coingecko_sources) == 1
@@ -182,8 +182,8 @@ class TestMarketServiceInitialization:
             await service.close()
 
     @pytest.mark.asyncio
-    async def test_with_cg_key_uses_coingecko_primary(self):
-        """With CG key, CoinGecko source is first in aggregator."""
+    async def test_evm_chain_with_cg_key_has_four_sources(self):
+        """EVM chain with CG key still gets 4-source pricing."""
         settings = GatewaySettings(coingecko_api_key="test-key-123", chains=["arbitrum"])
         service = MarketServiceServicer(settings)
 
@@ -192,27 +192,29 @@ class TestMarketServiceInitialization:
                 await service._ensure_initialized()
 
             sources = service._price_aggregator.sources
-            assert len(sources) == 2
-            assert sources[0].source_name == "coingecko"
-            assert sources[1].source_name == "onchain"
-            assert sources[0]._api_key == "test-key-123"
+            assert len(sources) == 4
+            source_names = [s.source_name for s in sources]
+            assert source_names == ["onchain", "binance", "dexscreener", "coingecko"]
+            cg = [s for s in sources if s.source_name == "coingecko"][0]
+            assert cg._api_key == "test-key-123"
         finally:
             await service.close()
 
     @pytest.mark.asyncio
-    async def test_both_sources_registered_when_chain_configured(self):
-        """Aggregator has 2 sources when a chain is configured, regardless of CG key."""
-        for cg_key in [None, "key-123"]:
-            settings = GatewaySettings(coingecko_api_key=cg_key, chains=["arbitrum"])
-            service = MarketServiceServicer(settings)
+    @pytest.mark.parametrize("chain", ["arbitrum", "mantle"])
+    @pytest.mark.parametrize("cg_key", [None, "key-123"])
+    async def test_all_evm_chains_get_four_sources(self, chain, cg_key):
+        """Aggregator has 4 sources for any EVM chain, regardless of CG key."""
+        settings = GatewaySettings(coingecko_api_key=cg_key, chains=[chain])
+        service = MarketServiceServicer(settings)
 
-            try:
-                with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
-                    await service._ensure_initialized()
+        try:
+            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+                await service._ensure_initialized()
 
-                assert len(service._price_aggregator.sources) == 2
-            finally:
-                await service.close()
+            assert len(service._price_aggregator.sources) == 4
+        finally:
+            await service.close()
 
     @pytest.mark.asyncio
     async def test_uses_first_configured_chain(self):

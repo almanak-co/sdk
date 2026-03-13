@@ -75,8 +75,6 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             cache_ttl=30,
         )
 
-        has_cg_key = bool(self.settings.coingecko_api_key)
-
         sources: list[BasePriceSource]
         if not chain:
             # No chain configured -- on-chain pricing unavailable.
@@ -98,14 +96,27 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             sources = [pyth_source, dexscreener_source, cg_source]
             logger.info("MarketService: Pyth (primary) + DexScreener + CoinGecko (fallback), chain=%s", chain)
         else:
-            # EVM: CoinGecko + Chainlink on-chain
+            # EVM: 4-source pricing for production resilience.
+            # All sources are queried concurrently; PriceAggregator returns the
+            # median with outlier detection. Sources that don't support a token
+            # raise DataSourceUnavailable, which the aggregator handles gracefully.
+            from almanak.framework.data.tokens import get_token_resolver
+            from almanak.gateway.data.price.binance import BinancePriceSource
+            from almanak.gateway.data.price.dexscreener import DexScreenerPriceSource
+
             onchain_source = OnChainPriceSource(chain=chain, network=self.settings.network)
-            if has_cg_key:
-                sources = [cg_source, onchain_source]
-                logger.info("MarketService: CoinGecko (primary) + on-chain (fallback), chain=%s", chain)
-            else:
-                sources = [onchain_source, cg_source]
-                logger.info("MarketService: on-chain (primary) + CoinGecko free tier (fallback), chain=%s", chain)
+            binance_source = BinancePriceSource(cache_ttl=30, request_timeout=5.0)
+            dexscreener_source = DexScreenerPriceSource(
+                chain_id=chain.lower(),
+                cache_ttl=30,
+                token_resolver=get_token_resolver(),
+            )
+
+            sources = [onchain_source, binance_source, dexscreener_source, cg_source]
+            logger.info(
+                "MarketService: 4-source EVM pricing (Chainlink + Binance + DexScreener + CoinGecko), chain=%s",
+                chain,
+            )
 
         self._price_aggregator = PriceAggregator(sources=sources)
 

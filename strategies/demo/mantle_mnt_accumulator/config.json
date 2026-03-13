@@ -1,0 +1,25 @@
+{
+    "strategy_id": "mantle_mnt_accumulator",
+    "strategy_name": "mantle_mnt_accumulator",
+    "description": "Multi-signal MNT accumulation strategy with Uniswap V3 on Mantle",
+    "chain": "mantle",
+    "target_token": "WMNT",
+    "stable_token": "USDT",
+    "protocol": "uniswap_v3",
+    "rsi_period": 14,
+    "rsi_oversold_threshold": 30,
+    "rsi_overbought_threshold": 70,
+    "base_buy_pct": 10,
+    "dip_buy_pct": 25,
+    "heavy_dip_buy_pct": 40,
+    "heavy_dip_rsi_threshold": 20,
+    "profit_take_pct": 15,
+    "cooldown_minutes": 30,
+    "max_slippage_bps": 150,
+    "max_position_pct": 80,
+    "anvil_funding": {
+        "MNT": 1000,
+        "WMNT": 100,
+        "USDT": 50000
+    }
+}

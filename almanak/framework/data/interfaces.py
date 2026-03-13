@@ -32,11 +32,16 @@ Example:
     result = await aggregator.get_aggregated_price("ETH", "USD")
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from almanak.framework.data.tokens.models import ResolvedToken
 
 # =============================================================================
 # Exceptions
@@ -339,7 +344,7 @@ class PriceResult:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "PriceResult":
+    def from_dict(cls, data: dict[str, Any]) -> PriceResult:
         """Create PriceResult from dictionary."""
         return cls(
             price=Decimal(data["price"]),
@@ -515,7 +520,7 @@ class OHLCVCandle:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "OHLCVCandle":
+    def from_dict(cls, data: dict[str, Any]) -> OHLCVCandle:
         """Create OHLCVCandle from dictionary."""
         return cls(
             timestamp=datetime.fromisoformat(data["timestamp"]),
@@ -634,12 +639,23 @@ class BasePriceSource(ABC):
     """
 
     @abstractmethod
-    async def get_price(self, token: str, quote: str = "USD") -> PriceResult:
+    async def get_price(
+        self,
+        token: str,
+        quote: str = "USD",
+        *,
+        resolved_token: ResolvedToken | None = None,
+    ) -> PriceResult:
         """Fetch the current price for a token.
 
         Args:
             token: Token symbol (e.g., "ETH", "WETH", "ARB")
             quote: Quote currency (default "USD")
+            resolved_token: Pre-resolved token with contract address and chain
+                metadata. When provided, sources can use the contract address
+                for precise lookup instead of ambiguous symbol matching.
+                This is optional -- sources that don't support address-based
+                lookup simply ignore it.
 
         Returns:
             PriceResult with price and metadata

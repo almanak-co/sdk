@@ -84,7 +84,7 @@ class BinancePriceSource(BasePriceSource):
             await self._session.close()
             self._session = None
 
-    async def get_price(self, token: str, quote: str = "USD") -> PriceResult:
+    async def get_price(self, token: str, quote: str = "USD", *, resolved_token: object | None = None) -> PriceResult:
         quote_upper = quote.upper()
 
         # Binance pairs are quoted in USDT. Accept "USD" and "USDT" as equivalent;
@@ -127,12 +127,12 @@ class BinancePriceSource(BasePriceSource):
             async with session.get(url) as resp:
                 if resp.status != 200:
                     text = await resp.text()
-                    raise DataSourceUnavailable(
-                        source=self.source_name,
-                        reason=f"Binance API returned {resp.status}: {text}",
-                    )
+                    raise ValueError(f"Binance API returned {resp.status}: {text}")
                 data = await resp.json()
-                price = Decimal(str(data["price"]))
+                price_str = data.get("price")
+                if price_str is None:
+                    raise ValueError("Binance response missing 'price' field")
+                price = Decimal(str(price_str))
 
                 result = PriceResult(
                     price=price,
@@ -143,7 +143,7 @@ class BinancePriceSource(BasePriceSource):
                 self._cache[cache_key] = (result, time.time())
                 return result
 
-        except (aiohttp.ClientError, TimeoutError, InvalidOperation) as e:
+        except (aiohttp.ClientError, TimeoutError, InvalidOperation, ValueError, TypeError, KeyError) as e:
             # Check for stale cache
             if cache_key in self._cache:
                 stale_result, _ = self._cache[cache_key]

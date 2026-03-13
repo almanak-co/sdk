@@ -122,7 +122,7 @@ class PythPriceSource(BasePriceSource):
     def cache_ttl_seconds(self) -> int:
         return self._cache_ttl
 
-    async def get_price(self, token: str, quote: str = "USD") -> PriceResult:
+    async def get_price(self, token: str, quote: str = "USD", *, resolved_token: object | None = None) -> PriceResult:
         """Fetch the current price for a token from Pyth.
 
         Args:
@@ -135,6 +135,12 @@ class PythPriceSource(BasePriceSource):
         Raises:
             DataSourceUnavailable: If Pyth is unreachable and no cache exists
         """
+        if quote.upper() != "USD":
+            raise DataSourceUnavailable(
+                source=self.source_name,
+                reason=f"Pyth only supports USD quotes, got '{quote}'",
+            )
+
         token_upper = token.upper()
         cache_key = f"{token_upper}/{quote}"
 

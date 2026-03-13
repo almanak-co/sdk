@@ -20,6 +20,8 @@ Example:
     print(f"Price: {result.price}, Confidence: {result.confidence}")
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import statistics
@@ -28,7 +30,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from almanak.framework.data.tokens.models import ResolvedToken
 
 from almanak.framework.data.interfaces import (
     AllDataSourcesFailed,
@@ -233,6 +238,8 @@ class PriceAggregator:
         self,
         token: str,
         quote: str = "USD",
+        *,
+        resolved_token: ResolvedToken | None = None,
     ) -> PriceResult:
         """Get aggregated price from multiple sources.
 
@@ -242,6 +249,8 @@ class PriceAggregator:
         Args:
             token: Token symbol to get price for (e.g., "ETH", "WETH")
             quote: Quote currency (default "USD")
+            resolved_token: Pre-resolved token with contract address for
+                address-based lookup instead of symbol matching.
 
         Returns:
             PriceResult with aggregated price and confidence score
@@ -257,7 +266,7 @@ class PriceAggregator:
         )
 
         # Fetch from all sources concurrently
-        results = await self._fetch_all_sources(token, quote)
+        results = await self._fetch_all_sources(token, quote, resolved_token=resolved_token)
 
         # Store per-call diagnostics BEFORE the failure check so that
         # get_last_details() is populated even when all sources fail.
@@ -334,18 +343,24 @@ class PriceAggregator:
         self,
         token: str,
         quote: str,
+        *,
+        resolved_token: ResolvedToken | None = None,
     ) -> AggregationResult:
         """Fetch prices from all sources concurrently.
 
         Args:
             token: Token symbol
             quote: Quote currency
+            resolved_token: Pre-resolved token with contract address for
+                address-based lookup instead of symbol matching.
 
         Returns:
             AggregationResult with valid results, outliers, and errors
         """
         # Create tasks for all sources
-        tasks = [self._fetch_with_metrics(source, token, quote) for source in self._sources]
+        tasks = [
+            self._fetch_with_metrics(source, token, quote, resolved_token=resolved_token) for source in self._sources
+        ]
 
         # Gather results (don't raise on individual failures)
         task_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -388,6 +403,8 @@ class PriceAggregator:
         source: BasePriceSource,
         token: str,
         quote: str,
+        *,
+        resolved_token: ResolvedToken | None = None,
     ) -> PriceResult:
         """Fetch price from a source and track metrics.
 
@@ -395,6 +412,8 @@ class PriceAggregator:
             source: Price source to fetch from
             token: Token symbol
             quote: Quote currency
+            resolved_token: Pre-resolved token with contract address for
+                address-based lookup instead of symbol matching.
 
         Returns:
             PriceResult from the source
@@ -406,7 +425,7 @@ class PriceAggregator:
         start_time = time.time()
 
         try:
-            result = await source.get_price(token, quote)
+            result = await source.get_price(token, quote, resolved_token=resolved_token)
             latency_ms = (time.time() - start_time) * 1000
             metrics.record_success(latency_ms)
             return result

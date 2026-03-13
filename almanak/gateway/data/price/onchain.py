@@ -16,13 +16,19 @@ Example:
     await source.close()
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import aiohttp
+
+if TYPE_CHECKING:
+    from almanak.framework.data.tokens.models import ResolvedToken
 
 from almanak.core.chainlink import (
     CHAINLINK_CHAIN_IDS,
@@ -202,7 +208,9 @@ class OnChainPriceSource(BasePriceSource):
                 # Broad catch intentional: chainId validation is best-effort and must never crash the gateway
                 logger.warning("OnChainPriceSource: chainId validation failed: %s -- skipping", e)
 
-    async def get_price(self, token: str, quote: str = "USD") -> PriceResult:
+    async def get_price(
+        self, token: str, quote: str = "USD", *, resolved_token: ResolvedToken | None = None
+    ) -> PriceResult:
         """Get price for a token via on-chain sources.
 
         Resolution order:
@@ -283,8 +291,8 @@ class OnChainPriceSource(BasePriceSource):
             # No direct feed found -- try to resolve the canonical symbol via
             # the token resolver before falling back to the raw input.
             try:
-                resolved_token = self._token_resolver.resolve(token, self._chain, log_errors=False)
-                resolved_symbol = resolved_token.symbol.upper()
+                resolved_info = self._token_resolver.resolve(token, self._chain, log_errors=False)
+                resolved_symbol = resolved_info.symbol.upper()
             except TokenResolutionError:
                 resolved_symbol = token_upper
         derived = await self._try_derived_price(resolved_symbol, cache_key)
