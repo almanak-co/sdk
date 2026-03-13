@@ -1102,12 +1102,13 @@ def _run_background_paper_trader(
         cls = getattr(module, strategy_class)
         strat_cfg = strategy_config or {}
 
-        # Try IntentStrategy signature: (config, chain, wallet_address)
+        # Try IntentStrategy signature: (config, chain, wallet_address, risk_guard_config)
         try:
             strategy = cls(
-                strat_cfg,
-                config.chain,
-                config.wallet_address or _BACKTEST_WALLET,
+                config=strat_cfg,
+                chain=config.chain,
+                wallet_address=config.wallet_address or _BACKTEST_WALLET,
+                risk_guard_config=None,
             )
         except TypeError:
             # Fall back to simple signature: (config,)
