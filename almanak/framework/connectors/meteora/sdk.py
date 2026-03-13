@@ -26,6 +26,8 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from urllib3.util.retry import Retry
 
+from almanak.framework.data.tokens.defaults import WRAPPED_NATIVE
+
 from .constants import (
     ADD_LIQUIDITY_BY_STRATEGY_DISCRIMINATOR,
     ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -42,6 +44,8 @@ from .constants import (
     SYSTEM_PROGRAM_ID,
     TOKEN_PROGRAM_ID,
 )
+
+WSOL_MINT = WRAPPED_NATIVE["solana"]
 from .exceptions import MeteoraAPIError, MeteoraPoolError, MeteoraPositionError
 from .math import get_bin_array_index, get_bin_array_pda
 from .models import MeteoraPool, MeteoraPosition
@@ -555,8 +559,6 @@ class MeteoraSDK:
         ata_program = Pubkey.from_string(ASSOCIATED_TOKEN_PROGRAM_ID)
         system_program = Pubkey.from_string(SYSTEM_PROGRAM_ID)
 
-        wsol_mint = "So11111111111111111111111111111111111111112"
-
         # Create ATAs (idempotent)
         for mint in [mint_x, mint_y]:
             user_ata = self._get_ata(self._owner, mint)
@@ -576,7 +578,7 @@ class MeteoraSDK:
             )
 
         # If token X is WSOL, transfer native SOL and sync
-        if pool.mint_x == wsol_mint and amount_x_lamports > 0:
+        if pool.mint_x == WSOL_MINT and amount_x_lamports > 0:
             user_ata_x = self._get_ata(self._owner, mint_x)
             ixs.append(
                 transfer(

@@ -7,6 +7,7 @@ Reference: https://github.com/orca-so/whirlpools
 """
 
 import hashlib
+import os
 
 # =========================================================================
 # Program IDs
@@ -72,7 +73,7 @@ TICK_ARRAY_SIZE = 88
 # Orca API
 # =========================================================================
 
-ORCA_API_BASE_URL = "https://api.orca.so/v2/solana"
+ORCA_API_BASE_URL = os.environ.get("ORCA_API_BASE_URL") or "https://api.orca.so/v2/solana"
 
 # Common Whirlpool tick spacings and their fee tiers
 TICK_SPACINGS = {

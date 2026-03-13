@@ -41,6 +41,11 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from almanak.framework.data.tokens.defaults import JUP as _JUP
+from almanak.framework.data.tokens.defaults import USDC as _USDC
+from almanak.framework.data.tokens.defaults import USDT as _USDT
+from almanak.framework.data.tokens.defaults import WRAPPED_NATIVE
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,16 +65,20 @@ COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111"
 # Jupiter Aggregator v6 program
 JUPITER_PROGRAM = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
 
-# WSOL special mint
-WSOL_MINT = "So11111111111111111111111111111111111111112"
+# WSOL mint address - sourced from central token registry
+WSOL_MINT = WRAPPED_NATIVE["solana"]
 
 # Common Solana token mints
+# Addresses for SOL, WSOL, USDC, USDT, JUP are sourced from the central token registry
+# (almanak/framework/data/tokens/defaults.py). Tokens not yet in the registry are listed here directly.
+
 SOLANA_TOKEN_MINTS: dict[str, str] = {
     "SOL": WSOL_MINT,
     "WSOL": WSOL_MINT,
-    "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-    "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
-    "JUP": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+    "USDC": _USDC.addresses["solana"],
+    "USDT": _USDT.addresses["solana"],
+    "JUP": _JUP.addresses["solana"],
+    # Tokens not yet in central registry
     "RAY": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
     "ORCA": "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE",
     "BONK": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",

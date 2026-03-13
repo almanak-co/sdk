@@ -29,6 +29,8 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from urllib3.util.retry import Retry
 
+from almanak.framework.data.tokens.defaults import WRAPPED_NATIVE
+
 from ..raydium.math import (
     align_tick_to_spacing,
     get_liquidity_from_amounts,
@@ -51,6 +53,8 @@ from .constants import (
     TOKEN_PROGRAM_ID,
     WHIRLPOOL_PROGRAM_ID,
 )
+
+WSOL_MINT = WRAPPED_NATIVE["solana"]
 from .exceptions import OrcaAPIError, OrcaConfigError, OrcaPoolError
 from .models import OrcaPool, OrcaPosition
 
@@ -581,8 +585,7 @@ class OrcaWhirlpoolSDK:
         ata_program = Pubkey.from_string(ASSOCIATED_TOKEN_PROGRAM_ID)
         system_program = Pubkey.from_string(SYSTEM_PROGRAM_ID)
 
-        wsol_mint = "So11111111111111111111111111111111111111112"
-        is_token_a_wsol = pool.mint_a == wsol_mint
+        is_token_a_wsol = pool.mint_a == WSOL_MINT
 
         # Create ATA for token A (idempotent)
         user_ata_a = self._get_ata(self._owner, mint_a)

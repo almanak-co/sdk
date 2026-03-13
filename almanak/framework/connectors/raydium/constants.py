@@ -6,6 +6,8 @@ constants for the Raydium CLMM program on Solana mainnet.
 Reference: https://github.com/raydium-io/raydium-clmm
 """
 
+import os
+
 # =========================================================================
 # Program IDs
 # =========================================================================
@@ -75,7 +77,7 @@ MAX_SQRT_PRICE_X64 = 79226673521066979257578248091
 # Raydium API
 # =========================================================================
 
-RAYDIUM_API_BASE_URL = "https://api-v3.raydium.io"
+RAYDIUM_API_BASE_URL = os.environ.get("RAYDIUM_API_BASE_URL") or "https://api-v3.raydium.io"
 
 # Common CLMM tick spacings and their fee tiers
 TICK_SPACINGS = {

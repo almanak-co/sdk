@@ -6,6 +6,8 @@ and precision constants for Drift perpetual futures on Solana mainnet.
 Reference: https://github.com/drift-labs/protocol-v2
 """
 
+import os
+
 # =========================================================================
 # Program IDs
 # =========================================================================
@@ -137,13 +139,24 @@ TRIGGER_CONDITION_ABOVE = 0
 TRIGGER_CONDITION_BELOW = 1
 
 # =========================================================================
-# User Account Layout Offsets
+# Account Layout Offsets
 # =========================================================================
+#
+# Version: Verified against Drift protocol-v2 IDL
+# Program ID: dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH
+# Verified date: 2026-03-02
+#
+# IMPORTANT: If Drift upgrades the program, ALL offsets below MUST be
+# re-verified against the new IDL. Steps:
+#   1. Fetch the latest IDL: `anchor idl fetch dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH`
+#   2. Compute byte offsets from the Anchor User/PerpMarket/SpotMarket structs
+#   3. Sanity check: after parsing, verify authority == expected wallet address
+#   4. Update DRIFT_LAYOUT_VERSION below to the new program version
+#
+DRIFT_LAYOUT_VERSION = "2026-03-02"
 
-# Drift User account layout (Anchor account discriminator = 8 bytes)
-# Verified against Drift protocol-v2 program (mainnet deploy as of 2026-03-02).
-# If Drift upgrades the program, these offsets MUST be re-verified.
-# Sanity check: after parsing, verify authority == expected wallet address.
+# --- User Account Layout ---
+# Anchor account discriminator = 8 bytes
 USER_ACCOUNT_DISCRIMINATOR_SIZE = 8
 # Authority pubkey offset (after discriminator)
 USER_AUTHORITY_OFFSET = 8
@@ -162,15 +175,11 @@ SPOT_POSITION_SIZE = 48
 # Number of spot position slots
 MAX_SPOT_POSITIONS = 8
 
-# =========================================================================
-# Perp Market Account Layout Offsets
-# =========================================================================
-
-# Market account oracle offsets (verified against Drift protocol-v2, 2026-03-02).
+# --- Market Account Layout ---
 # PerpMarket: oracle pubkey at offset 48 (after 8-byte discriminator + header fields)
 PERP_MARKET_ORACLE_OFFSET = 48
 # SpotMarket: oracle pubkey at offset 48 (same position in SpotMarket layout)
-# NOTE: Verified against Drift IDL. If spot market layout diverges from perp,
+# NOTE: If spot market layout diverges from perp in a future upgrade,
 # this must be updated separately.
 SPOT_MARKET_ORACLE_OFFSET = 48
 
@@ -178,4 +187,4 @@ SPOT_MARKET_ORACLE_OFFSET = 48
 # Data API
 # =========================================================================
 
-DRIFT_DATA_API_BASE_URL = "https://data.api.drift.trade"
+DRIFT_DATA_API_BASE_URL = os.environ.get("DRIFT_DATA_API_BASE_URL") or "https://data.api.drift.trade"
