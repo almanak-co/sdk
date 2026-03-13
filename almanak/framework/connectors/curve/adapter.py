@@ -58,6 +58,11 @@ CURVE_ADDRESSES: dict[str, dict[str, str]] = {
 }
 
 # Popular Curve pools per chain
+# TECH_DEBT(VIB-581): virtual_price values are approximate snapshots. Curve virtual_price
+# increases monotonically as fees accumulate, so these will drift over time. The safe direction
+# is under-estimating (lower min_lp = worse slippage protection but no reverts). A future
+# improvement should query virtual_price() from the pool contract at runtime via gateway RPC,
+# falling back to these static values if the RPC call fails.
 CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
     "ethereum": {
         "3pool": {
@@ -71,6 +76,7 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
             ],
             "pool_type": "stableswap",
             "n_coins": 3,
+            "virtual_price": Decimal("1.04"),
         },
         "frax_usdc": {
             "address": "0xDcEF968d416a41Cdac0ED8702fAC8128A64241A2",
@@ -82,6 +88,7 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
             ],
             "pool_type": "stableswap",
             "n_coins": 2,
+            "virtual_price": Decimal("1.01"),
         },
         "steth": {
             "address": "0xDC24316b9AE028F1497c275EB9192a3Ea0f67022",
@@ -93,6 +100,7 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
             ],
             "pool_type": "stableswap",
             "n_coins": 2,
+            "virtual_price": Decimal("1.06"),
         },
         "tricrypto2": {
             "address": "0xD51a44d3FaE010294C616388b506AcdA1bfAAE46",
@@ -105,6 +113,7 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
             ],
             "pool_type": "tricrypto",
             "n_coins": 3,
+            "virtual_price": Decimal("1.0"),
         },
     },
     "arbitrum": {
@@ -118,6 +127,7 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
             ],
             "pool_type": "stableswap",
             "n_coins": 2,
+            "virtual_price": Decimal("1.022"),
         },
         "tricrypto": {
             "address": "0x960ea3e3C7FB317332d990873d354E18d7645590",
@@ -130,6 +140,7 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
             ],
             "pool_type": "tricrypto",
             "n_coins": 3,
+            "virtual_price": Decimal("1.0"),
         },
     },
 }
@@ -227,6 +238,9 @@ class PoolInfo:
         pool_type: Type of pool (stableswap, cryptoswap, tricrypto)
         n_coins: Number of coins in pool
         name: Pool name
+        virtual_price: Pool virtual price (LP token value relative to underlying).
+            Mature pools accumulate fees so virtual_price > 1.0. Used to adjust
+            LP token estimates to prevent over-estimation that causes add_liquidity reverts.
     """
 
     address: str
@@ -236,6 +250,7 @@ class PoolInfo:
     pool_type: PoolType
     n_coins: int
     name: str = ""
+    virtual_price: Decimal = field(default_factory=lambda: Decimal("1.0"))
 
     def get_coin_index(self, coin: str) -> int:
         """Get the index of a coin in the pool.
@@ -271,6 +286,7 @@ class PoolInfo:
             "pool_type": self.pool_type.value,
             "n_coins": self.n_coins,
             "name": self.name,
+            "virtual_price": str(self.virtual_price),
         }
 
 
@@ -467,6 +483,7 @@ class CurveAdapter:
                     pool_type=PoolType(pool_data["pool_type"]),
                     n_coins=pool_data["n_coins"],
                     name=name,
+                    virtual_price=pool_data.get("virtual_price", Decimal("1.0")),
                 )
         return None
 
@@ -489,6 +506,7 @@ class CurveAdapter:
                 pool_type=PoolType(pool_data["pool_type"]),
                 n_coins=pool_data["n_coins"],
                 name=name,
+                virtual_price=pool_data.get("virtual_price", Decimal("1.0")),
             )
         return None
 
@@ -1061,24 +1079,34 @@ class CurveAdapter:
     def _estimate_add_liquidity(self, pool_info: PoolInfo, amounts: list[int]) -> int:
         """Estimate LP tokens from add_liquidity.
 
-        In production, this would call calc_token_amount on the pool.
+        Mature Curve pools have virtual_price > 1.0 because accumulated fees
+        increase the value of each LP token relative to the underlying assets.
+        A naive sum of deposit amounts overestimates LP tokens minted, causing
+        add_liquidity to revert when min_lp exceeds actual minted amount.
+
+        We divide by virtual_price to get a realistic estimate.
         """
-        # Simplified: return sum of normalized amounts
         total = 0
         for i, amount in enumerate(amounts):
             decimals = self._get_token_decimals(pool_info.coins[i])
             # Normalize to 18 decimals
             normalized = amount * (10 ** (18 - decimals))
             total += normalized
+
+        # Adjust for virtual_price: each LP token is worth virtual_price underlying
+        total = int(Decimal(total) / pool_info.virtual_price)
+
         return total
 
     def _estimate_remove_liquidity(self, pool_info: PoolInfo, lp_amount: int) -> list[int]:
         """Estimate tokens from remove_liquidity (proportional).
 
-        In production, this would call calc_withdraw_one_coin for each.
+        Accounts for virtual_price: LP tokens are worth virtual_price underlying,
+        so we multiply by virtual_price to get a realistic estimate of tokens out.
         """
-        # Simplified: distribute LP evenly across coins
-        per_coin = lp_amount // pool_info.n_coins
+        # Adjust LP amount by virtual_price to get underlying value
+        adjusted_lp = int(Decimal(lp_amount) * pool_info.virtual_price)
+        per_coin = adjusted_lp // pool_info.n_coins
         amounts = []
         for i in range(pool_info.n_coins):
             decimals = self._get_token_decimals(pool_info.coins[i])
@@ -1090,11 +1118,14 @@ class CurveAdapter:
     def _estimate_remove_liquidity_one(self, pool_info: PoolInfo, lp_amount: int, coin_index: int) -> int:
         """Estimate tokens from remove_liquidity_one_coin.
 
-        In production, this would call calc_withdraw_one_coin.
+        Accounts for virtual_price: LP tokens are worth virtual_price underlying,
+        so we multiply by virtual_price to get a realistic estimate of tokens out.
         """
+        # Adjust LP amount by virtual_price to get underlying value
+        adjusted_lp = int(Decimal(lp_amount) * pool_info.virtual_price)
         decimals = self._get_token_decimals(pool_info.coins[coin_index])
         # Convert from 18 decimals, apply small penalty for single-sided
-        return (lp_amount // (10 ** (18 - decimals))) * 99 // 100
+        return (adjusted_lp // (10 ** (18 - decimals))) * 99 // 100
 
     # =========================================================================
     # Helper Methods
