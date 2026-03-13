@@ -3,7 +3,7 @@
 **Date:** 2026-02-08 18:17
 **Result:** PASS
 **Duration:** 7 minutes
-**Worktree:** `/Users/nick/Documents/Almanak/src/almanak-sdk-worktree-demo-fixes/`
+**Worktree:** `<repo-worktree>/`
 
 ---
 
@@ -146,6 +146,6 @@ force_action: ""
 
 - **Anvil**: Ethereum mainnet fork (chain ID: 1, port 8549)
 - **Gateway**: localhost:50051 (anvil network mode)
-- **Worktree**: `/Users/nick/Documents/Almanak/src/almanak-sdk-worktree-demo-fixes/`
+- **Worktree**: `<repo-worktree>/`
 - **Test Wallet**: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 (Anvil default)
 - **Alchemy RPC**: Used for mainnet fork via `.env` file

@@ -51,7 +51,7 @@ Funding TX(s): None (wallet already had sufficient balance)
 ```text
 [2026-02-16T01:51:01.523868Z] [warning] INSECURE MODE: Auth interceptor disabled - no auth_token configured. This should only be used for local development.
 [2026-02-16T01:51:01.531477Z] [info] Loaded 160 timeline events from database
-[2026-02-16T01:51:01.532040Z] [info] InstanceRegistry initialized with persistent storage: /Users/nick/.config/almanak/gateway.db
+[2026-02-16T01:51:01.532040Z] [info] InstanceRegistry initialized with persistent storage: ~/.config/almanak/gateway.db
 [2026-02-16T01:51:01.533471Z] [info] Gateway gRPC server started on 127.0.0.1:50051
 ```
 

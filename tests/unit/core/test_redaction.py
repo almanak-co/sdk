@@ -81,7 +81,7 @@ class TestCollectSecrets:
         assert len(secrets) == 0
 
     def test_ignores_non_secret_vars(self):
-        env = {"HOME": "/Users/nick", "PATH": "/usr/bin:/usr/local/bin"}
+        env = {"HOME": "/Users/testuser", "PATH": "/usr/bin:/usr/local/bin"}
         with patch.dict(os.environ, env, clear=True):
             secrets = _collect_secrets()
         assert len(secrets) == 0

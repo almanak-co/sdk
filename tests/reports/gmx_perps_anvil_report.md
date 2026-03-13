@@ -4,7 +4,7 @@
 **Tester:** Claude (Strategy Tester Agent)
 **Strategy:** `gmx_perps`
 **Network:** Anvil (Arbitrum fork)
-**Worktree:** `/Users/nick/Documents/Almanak/src/almanak-sdk-worktree-demo-fixes/`
+**Worktree:** `<repo-worktree>/`
 
 ---
 
@@ -227,10 +227,10 @@ For now, mark this as **EXPECTED FAILURE** - the code is correct but the test en
 
 | File | Purpose |
 |------|---------|
-| `/Users/nick/Documents/Almanak/src/almanak-sdk-worktree-demo-fixes/strategies/demo/gmx_perps/config.json` | Strategy configuration |
-| `/Users/nick/Documents/Almanak/src/almanak-sdk-worktree-demo-fixes/strategies/demo/gmx_perps/strategy.py` | Strategy implementation |
-| `/Users/nick/Documents/Almanak/src/almanak-sdk-worktree-demo-fixes/almanak/framework/connectors/gmx_v2/adapter.py` | GMX V2 adapter (DEFAULT_EXECUTION_FEE) |
-| `/Users/nick/Documents/Almanak/src/almanak-sdk-worktree-demo-fixes/almanak/framework/connectors/gmx_v2/__init__.py` | GMX V2 exports (GMX_V2_TOKENS) |
+| `<repo-worktree>/strategies/demo/gmx_perps/config.json` | Strategy configuration |
+| `<repo-worktree>/strategies/demo/gmx_perps/strategy.py` | Strategy implementation |
+| `<repo-worktree>/almanak/framework/connectors/gmx_v2/adapter.py` | GMX V2 adapter (DEFAULT_EXECUTION_FEE) |
+| `<repo-worktree>/almanak/framework/connectors/gmx_v2/__init__.py` | GMX V2 exports (GMX_V2_TOKENS) |
 
 ---
 
