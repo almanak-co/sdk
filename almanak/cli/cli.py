@@ -22,6 +22,15 @@ from almanak.framework.cli.ax import ax as framework_ax_group
 from almanak.framework.cli.demo import demo as framework_demo_cmd
 from almanak.framework.cli.permissions import permissions as framework_permissions_cmd
 from almanak.framework.cli.run import run as framework_run_cmd
+from almanak.framework.cli.status import (
+    list_strategies as framework_list_cmd,
+)
+from almanak.framework.cli.status import (
+    strategy_logs as framework_logs_cmd,
+)
+from almanak.framework.cli.status import (
+    strategy_status as framework_status_cmd,
+)
 from almanak.framework.cli.teardown import teardown as framework_teardown_group
 
 DEFAULT_STRAT_RUN_INTERVAL = 60
@@ -118,6 +127,11 @@ strat.add_command(framework_permissions_cmd, name="permissions")
 
 # Add demo command to strat
 strat.add_command(framework_demo_cmd, name="demo")
+
+# Add monitoring commands to strat
+strat.add_command(framework_list_cmd, name="list")
+strat.add_command(framework_status_cmd, name="status")
+strat.add_command(framework_logs_cmd, name="logs")
 
 
 def _load_cli_config(path: str) -> dict:

@@ -26,7 +26,13 @@ from ..gateway_client import GatewayClient, GatewayClientConfig
 def _make_client(gateway_host: str, gateway_port: int) -> GatewayClient:
     """Create and connect a gateway client, exiting on failure."""
     effective_host = "127.0.0.1" if gateway_host == "localhost" else gateway_host
-    config = GatewayClientConfig(host=effective_host, port=gateway_port)
+    try:
+        config = GatewayClientConfig.from_env()
+    except (ValueError, TypeError) as e:
+        click.secho(f"Invalid gateway configuration: {e}", fg="red", err=True)
+        sys.exit(1)
+    config.host = effective_host
+    config.port = gateway_port
     client = GatewayClient(config)
     try:
         client.connect()
@@ -79,18 +85,20 @@ def _format_relative_time(epoch_seconds: int) -> str:
     return f"{total_seconds // 86400}d ago"
 
 
+_STATUS_COLORS = {
+    "RUNNING": "green",
+    "PAUSED": "yellow",
+    "ERROR": "red",
+    "STUCK": "red",
+    "STALE": "yellow",
+    "INACTIVE": "white",
+    "ARCHIVED": "bright_black",
+}
+
+
 def _status_color(status: str) -> str:
     """Return colored status string."""
-    colors = {
-        "RUNNING": "green",
-        "PAUSED": "yellow",
-        "ERROR": "red",
-        "STUCK": "red",
-        "STALE": "yellow",
-        "INACTIVE": "white",
-        "ARCHIVED": "bright_black",
-    }
-    return click.style(status, fg=colors.get(status.upper(), "white"))
+    return click.style(status, fg=_STATUS_COLORS.get(status.upper(), "white"))
 
 
 # Shared gateway options
@@ -217,8 +225,9 @@ def list_strategies(status_filter, chain, as_json, gateway_host, gateway_port):
         pnl = s.pnl_24h_usd if s.pnl_24h_usd is not None else "-"
         chain_display = ",".join(s.chains) if s.is_multi_chain else (s.chain or "-")
 
+        colored_status = click.style(f"{s.status:<10}", fg=_STATUS_COLORS.get(s.status.upper(), "white"))
         line = (
-            f"{sid:<{id_w}}  {_status_color(s.status):<21}  {chain_display:<12}  "
+            f"{sid:<{id_w}}  {colored_status}  {chain_display:<12}  "
             f"{value:>12}  {pnl:>10}  {_format_relative_time(s.last_action_at):<14}"
         )
         click.echo(line)
@@ -269,6 +278,10 @@ def strategy_status(strategy_id, timeline, timeline_limit, as_json, gateway_host
         almanak strat status -s my_strategy --no-timeline
         almanak strat status -s uniswap_lp:abc123 --timeline-limit 20
     """
+    if timeline_limit < 1:
+        click.secho("--timeline-limit must be >= 1.", fg="red", err=True)
+        sys.exit(1)
+
     from almanak.gateway.proto import gateway_pb2
 
     client = _make_client(gateway_host, gateway_port)
@@ -333,6 +346,15 @@ def strategy_status(strategy_id, timeline, timeline_limit, as_json, gateway_host
                 }
                 for e in details.timeline
             ]
+        if details.chain_health:
+            result["chain_health"] = {
+                name: {
+                    "status": h.status,
+                    "rpc_latency_ms": h.rpc_latency_ms,
+                    "gas_price_gwei": h.gas_price_gwei,
+                }
+                for name, h in details.chain_health.items()
+            }
         if details.operator_card and details.operator_card.strategy_id:
             result["operator_card"] = {
                 "severity": details.operator_card.severity,
@@ -469,6 +491,10 @@ def strategy_logs(strategy_id, limit, event_type, since, as_json, gateway_host, 
         almanak strat logs -s my_strategy --since 2026-03-01T00:00:00Z
         almanak strat logs -s my_strategy --json
     """
+    if limit < 1:
+        click.secho("--limit must be >= 1.", fg="red", err=True)
+        sys.exit(1)
+
     from almanak.gateway.proto import gateway_pb2
 
     # Parse --since
@@ -489,7 +515,7 @@ def strategy_logs(strategy_id, limit, event_type, since, as_json, gateway_host, 
         request = gateway_pb2.GetTimelineRequest(
             strategy_id=strategy_id,
             limit=limit,
-            event_type_filter=event_type or "",
+            event_type_filter=event_type.upper() if event_type else "",
             since_timestamp=since_ts,
         )
         response = client.dashboard.GetTimeline(request)
