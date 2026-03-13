@@ -590,6 +590,7 @@ class StrategyRunner:
 
         # Shutdown control
         self._shutdown_requested = False
+        self._signal_received = False
         self._current_loop_task: asyncio.Task[None] | None = None
 
         # Metrics tracking
@@ -1375,6 +1376,7 @@ class StrategyRunner:
                 logger.warning(f"Failed to restore copy trading state: {e}")
 
         self._shutdown_requested = False
+        self._signal_received = False
 
         # Set up dual-write for timeline events (gateway persistence)
         gateway_client = self._get_gateway_client()
@@ -1625,6 +1627,7 @@ class StrategyRunner:
         def handle_signal(signum: int, frame: Any) -> None:
             signal_name = signal.Signals(signum).name
             logger.info(f"Received {signal_name}, requesting shutdown...")
+            self._signal_received = True
             self.request_shutdown()
 
         signal.signal(signal.SIGINT, handle_signal)

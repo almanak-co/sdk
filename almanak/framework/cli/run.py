@@ -2513,6 +2513,14 @@ def run(
             asyncio.run(run_loop_with_cleanup())
             click.echo()
 
+            # Exit 2 when stopped by signal (SIGTERM/SIGINT) so K8s sees a
+            # pod failure and retries.  Check this first so it takes
+            # precedence over the max-iterations branch.
+            if runner._signal_received:
+                click.echo("Runner stopped by signal.")
+                stop_dashboard(dashboard_process)
+                sys.exit(2)
+
             # Return a failure exit code when max_iterations is set and every
             # single iteration failed (no successful iterations at all).
             if max_iterations and runner._successful_iterations == 0 and runner._total_iterations > 0:
