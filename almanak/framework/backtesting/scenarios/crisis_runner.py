@@ -36,8 +36,9 @@ Example:
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -47,6 +48,9 @@ from almanak.framework.backtesting.pnl.engine import BacktestableStrategy, PnLBa
 from almanak.framework.backtesting.scenarios.crisis import CrisisScenario
 
 logger = logging.getLogger(__name__)
+
+# CoinGecko free tier only provides 365 days of historical data
+_COINGECKO_FREE_TIER_MAX_DAYS = 365
 
 
 @dataclass
@@ -196,9 +200,12 @@ class CrisisBacktestResult:
         """Serialize to dictionary.
 
         Returns:
-            Dictionary with result data
+            Dictionary with result data including top-level success/error fields
+            for consistency with PnL backtest output.
         """
         return {
+            "success": self.result.success,
+            "error": self.result.error,
             "result": self.result.to_dict(),
             "scenario": self.scenario.to_dict(),
             "crisis_metrics": self.crisis_metrics,
@@ -239,6 +246,57 @@ class CrisisBacktestResult:
             f"  Total Trades: {self.result.metrics.total_trades}\n"
             f"\n"
             f"Strategy: {self.result.strategy_id}"
+        )
+
+
+class CrisisScenarioDateRangeError(Exception):
+    """Raised when a crisis scenario's dates exceed CoinGecko free tier limits."""
+
+
+def _is_coingecko_provider(backtester: PnLBacktester) -> bool:
+    """Check if the backtester uses a CoinGecko-based data provider."""
+    provider = getattr(backtester, "data_provider", None)
+    if provider is None:
+        return False
+    type_name = type(provider).__name__
+    return "coingecko" in type_name.lower()
+
+
+def _validate_scenario_date_range(scenario: CrisisScenario, backtester: PnLBacktester) -> None:
+    """Validate that scenario dates are within CoinGecko data availability.
+
+    CoinGecko free tier only provides 365 days of historical data.
+    Predefined crisis scenarios (2020-2022) always exceed this limit.
+    Skips validation if: (a) the backtester uses a non-CoinGecko data provider,
+    or (b) the user has COINGECKO_API_KEY set (pro tier has no limit).
+
+    Raises:
+        CrisisScenarioDateRangeError: If dates exceed free tier limit and no API key
+    """
+    if not _is_coingecko_provider(backtester):
+        return
+
+    has_api_key = bool(os.environ.get("COINGECKO_API_KEY", ""))
+    if has_api_key:
+        return
+
+    now = datetime.now(UTC)
+    start = (
+        scenario.start_date.replace(tzinfo=UTC)
+        if scenario.start_date.tzinfo is None
+        else scenario.start_date.astimezone(UTC)
+    )
+    days_ago = (now.date() - start.date()).days
+
+    if days_ago > _COINGECKO_FREE_TIER_MAX_DAYS:
+        raise CrisisScenarioDateRangeError(
+            f"Crisis scenario '{scenario.name}' requires data from "
+            f"{scenario.start_date.strftime('%Y-%m-%d')} ({days_ago} days ago), "
+            f"but CoinGecko free tier only provides {_COINGECKO_FREE_TIER_MAX_DAYS} days "
+            f"of historical data. To use predefined crisis scenarios, either:\n"
+            f"  1. Set COINGECKO_API_KEY environment variable (pro tier has no date limit)\n"
+            f"  2. Create a custom scenario with dates within the last "
+            f"{_COINGECKO_FREE_TIER_MAX_DAYS} days"
         )
 
 
@@ -309,6 +367,9 @@ async def run_crisis_backtest(
     """
     if tokens is None:
         tokens = ["WETH", "USDC"]
+
+    # Validate date range against CoinGecko free tier limit
+    _validate_scenario_date_range(scenario, backtester)
 
     # Use provided config or create one from parameters
     if config is not None:
@@ -782,6 +843,7 @@ def run_multiple_crisis_backtests_sync(
 __all__ = [
     "CrisisBacktestConfig",
     "CrisisBacktestResult",
+    "CrisisScenarioDateRangeError",
     "build_crisis_metrics",
     "compare_crisis_to_normal",
     "run_crisis_backtest",
