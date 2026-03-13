@@ -304,29 +304,10 @@ def validate_loaded_config(config_data: dict[str, Any]) -> ValidationResult:
         elif not tokens:
             errors.append("tokens list cannot be empty")
 
-    # Check for deprecated or unknown fields (warnings only)
-    known_fields = {
-        "start_time",
-        "end_time",
-        "interval_seconds",
-        "initial_capital_usd",
-        "fee_model",
-        "slippage_model",
-        "include_gas_costs",
-        "gas_price_gwei",
-        "inclusion_delay_blocks",
-        "chain",
-        "tokens",
-        "benchmark_token",
-        "risk_free_rate",
-        "trading_days_per_year",
-        "initial_margin_ratio",
-        "maintenance_margin_ratio",
-        "mev_simulation_enabled",
-        "auto_correct_positions",
-        "reconciliation_alert_threshold_pct",
-        "random_seed",
-        # Computed properties (read-only, not used for loading)
+    # Derive known fields from PnLBacktestConfig dataclass to prevent schema drift.
+    # Previously this was a manually curated set that fell out of sync with to_dict().
+    known_fields = set(PnLBacktestConfig.__dataclass_fields__.keys()) | {
+        # Computed properties emitted by to_dict() (read-only, not used for loading)
         "duration_seconds",
         "duration_days",
         "estimated_ticks",

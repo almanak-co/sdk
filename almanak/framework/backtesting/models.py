@@ -2174,8 +2174,9 @@ class BacktestResult:
                     "",
                     "DATA COVERAGE METRICS",
                     "-" * 70,
+                    f"Ticks Processed:    {len(self.equity_curve)}",
                     f"Overall Coverage:   {dcm.data_coverage_pct:.1f}% HIGH confidence",
-                    f"Total Data Points:  {dcm.total_data_points}",
+                    f"Protocol Data Pts:  {dcm.total_data_points}",
                     f"HIGH Confidence:    {dcm.high_confidence_data_points}",
                 ]
             )

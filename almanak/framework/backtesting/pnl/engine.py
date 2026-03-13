@@ -1601,8 +1601,22 @@ class PnLBacktester:
                     try:
                         decide_result = strategy.decide(snapshot)
                     except Exception as e:
-                        # Use error handler for consistent classification
-                        if self._error_handler:
+                        # Check if this is an indicator warm-up error (expected during initial ticks).
+                        # The indicator engine's is_warming_up() is the authoritative signal:
+                        # if the engine hasn't accumulated enough data points AND the strategy
+                        # raised a ValueError, it's almost certainly because indicators aren't
+                        # ready yet (e.g. "Cannot calculate RSI", "MACD data not available").
+                        # We only suppress ValueError to avoid masking real bugs (AttributeError,
+                        # KeyError, etc.).
+                        is_warmup = isinstance(e, ValueError) and any(
+                            indicator_engine.is_warming_up(t, strategy_config) for t in tick_tokens
+                        )
+                        if is_warmup:
+                            # Expected: not enough data points yet for indicators.
+                            # Log at debug (not warning) to avoid alarming users.
+                            bt_logger.debug(f"Tick {tick_count}: indicator warm-up ({e}) - holding")
+                        elif self._error_handler:
+                            # Use error handler for consistent classification
                             result = self._error_handler.handle_error(
                                 e,
                                 context=f"strategy_decide:tick_{tick_count}:{timestamp.isoformat()}",
@@ -2718,10 +2732,17 @@ class PnLBacktester:
 
         # Apply slippage for market orders
         if intent_type in (IntentType.SWAP, IntentType.PERP_OPEN, IntentType.PERP_CLOSE):
-            # Slippage is typically adverse (worse price for taker)
-            # For buys, price is higher; for sells, price is lower
-            # Simplification: assume we're buying, so price is higher
-            return market_price * (Decimal("1") + slippage_pct)
+            # Slippage is adverse: buying gets a higher price, selling gets a lower price.
+            # primary_token = tokens[0], which for swaps is from_token (the token being sold).
+            # Determine direction by checking to_token: if the intent has a to_token that
+            # matches primary_token, we're BUYING it (pay more). Otherwise we're selling it
+            # (receive less).
+            to_token = getattr(intent, "to_token", None)
+            if to_token and to_token.upper() == primary_token.upper():
+                # Buying primary_token: adverse slippage means higher price
+                return market_price * (Decimal("1") + slippage_pct)
+            # Selling primary_token (or no to_token): adverse slippage means lower price
+            return market_price * (Decimal("1") - slippage_pct)
 
         return market_price
 

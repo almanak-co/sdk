@@ -28,8 +28,11 @@ Usage:
 """
 
 import importlib
+import importlib.machinery
+import importlib.util
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -90,24 +93,83 @@ logger = logging.getLogger(__name__)
 STRATEGY_REGISTRY: dict[str, type[Any]] = {}
 
 
-def _try_import_strategy(module_name: str) -> None:
+def _try_import_strategy(module_name: str, file_path: Path | None = None) -> None:
     """Import a strategy module, retrying once on circular import errors.
 
-    Circular imports can occur during auto-discovery when large modules like
-    compiler.py create dependency chains that resolve on a second attempt.
-    This is benign -- Python's import machinery resolves the cycle.
+    Uses spec_from_file_location when a file_path is provided, which allows
+    strategy discovery without requiring PYTHONPATH to include the project root.
+    Falls back to importlib.import_module if no file_path is given (e.g. when
+    the module is already on sys.path).
 
     Args:
         module_name: Fully qualified module name to import
+        file_path: Optional path to the strategy.py file for direct loading
     """
+
+    def _do_import() -> bool:
+        if file_path is not None:
+            # If the leaf module was already loaded (e.g. by a parent __init__.py
+            # that does `from .strategy import ...`), skip re-execution to avoid
+            # duplicate registration and double side-effects.
+            if module_name in sys.modules:
+                return True
+
+            # Ensure the parent package hierarchy exists in sys.modules so that
+            # relative imports within the strategy module resolve correctly.
+            # Track inserted keys so we can clean up on failure.
+            inserted_modules: list[str] = []
+            try:
+                parts = module_name.split(".")
+                for i in range(1, len(parts)):
+                    parent = ".".join(parts[:i])
+                    if parent not in sys.modules:
+                        parent_path = file_path.parents[len(parts) - i - 1]
+                        parent_init = parent_path / "__init__.py"
+                        if parent_init.exists():
+                            parent_spec = importlib.util.spec_from_file_location(parent, parent_init)
+                            if parent_spec and parent_spec.loader:
+                                parent_mod = importlib.util.module_from_spec(parent_spec)
+                                parent_mod.__path__ = [str(parent_path)]
+                                sys.modules[parent] = parent_mod
+                                inserted_modules.append(parent)
+                                parent_spec.loader.exec_module(parent_mod)
+                        else:
+                            # Create a namespace package placeholder
+                            parent_mod = importlib.util.module_from_spec(
+                                importlib.machinery.ModuleSpec(parent, None, is_package=True)
+                            )
+                            parent_mod.__path__ = [str(parent_path)]
+                            sys.modules[parent] = parent_mod
+                            inserted_modules.append(parent)
+
+                spec = importlib.util.spec_from_file_location(module_name, file_path)
+                if spec is None or spec.loader is None:
+                    logger.warning(f"Could not create module spec for {module_name} at {file_path}")
+                    # Clean up parent entries we inserted before returning
+                    for name in reversed(inserted_modules):
+                        sys.modules.pop(name, None)
+                    return False
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                inserted_modules.append(module_name)
+                spec.loader.exec_module(module)
+            except Exception:
+                # Clean up partially-inserted sys.modules entries to avoid poisoned state
+                for name in reversed(inserted_modules):
+                    sys.modules.pop(name, None)
+                raise
+        else:
+            importlib.import_module(module_name)
+        return True
+
     try:
-        importlib.import_module(module_name)
-        logger.debug(f"Imported strategy module: {module_name}")
+        if _do_import():
+            logger.debug(f"Imported strategy module: {module_name}")
     except ImportError as e:
         if "circular import" in str(e):
             # Retry once -- Python's import machinery resolves the cycle
             try:
-                importlib.import_module(module_name)
+                _do_import()
                 logger.debug(f"Imported strategy module on retry: {module_name}")
             except Exception as retry_err:
                 logger.warning(f"Failed to import strategy {module_name} (retry failed): {retry_err}")
@@ -168,7 +230,7 @@ def _auto_discover_strategies() -> None:
                 if strategy_file.exists():
                     # Direct nested strategy: tier/<strategy>/strategy.py
                     module_name = f"strategies.{strategy_folder.name}.{nested_folder.name}.strategy"
-                    _try_import_strategy(module_name)
+                    _try_import_strategy(module_name, strategy_file)
                 else:
                     # Check for sub-tier (e.g., tests/lp/<strategy>/strategy.py)
                     for sub_nested_folder in nested_folder.iterdir():
@@ -184,7 +246,7 @@ def _auto_discover_strategies() -> None:
                         module_name = (
                             f"strategies.{strategy_folder.name}.{nested_folder.name}.{sub_nested_folder.name}.strategy"
                         )
-                        _try_import_strategy(module_name)
+                        _try_import_strategy(module_name, sub_strategy_file)
         else:
             # Top-level strategy (backward compatibility)
             strategy_file = strategy_folder / "strategy.py"
@@ -192,7 +254,7 @@ def _auto_discover_strategies() -> None:
                 continue
 
             module_name = f"strategies.{strategy_folder.name}.strategy"
-            _try_import_strategy(module_name)
+            _try_import_strategy(module_name, strategy_file)
 
 
 # Auto-discover strategies on module load

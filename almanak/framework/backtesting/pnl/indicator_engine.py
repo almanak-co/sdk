@@ -242,6 +242,37 @@ class BacktestIndicatorEngine:
         except InsufficientDataError:
             pass
 
+    def min_warmup_ticks(self, config: dict | None = None) -> int:
+        """Return the minimum number of ticks required before all indicators can compute.
+
+        This is determined by the indicator with the largest period requirement.
+        For example, MACD(26, 12, 9) needs 26+9-1 = 34 data points, while RSI(14) needs 15.
+        """
+        config = config or {}
+        required = 0
+        if "rsi" in self._required:
+            # RSI needs period + 1 data points
+            required = max(required, int(config.get("rsi_period", 14)) + 1)
+        if "macd" in self._required:
+            slow = int(config.get("macd_slow", 26))
+            signal = int(config.get("macd_signal", 9))
+            required = max(required, slow + signal - 1)
+        if "bollinger_bands" in self._required:
+            required = max(required, int(config.get("bb_period", 20)))
+        if "atr" in self._required:
+            # ATR needs period + 1 data points
+            required = max(required, int(config.get("atr_period", 14)) + 1)
+        return required
+
+    def is_warming_up(self, token: str, config: dict | None = None) -> bool:
+        """Check if the engine is still in warm-up for a given token.
+
+        During warm-up, not enough data points have accumulated for indicators
+        to compute. Strategy calls to market.rsi() etc. will raise ValueError,
+        which is expected and should not be logged as an error.
+        """
+        return self.get_buffer_size(token) < self.min_warmup_ticks(config)
+
     def reset(self) -> None:
         """Clear all price buffers. Useful between backtest runs."""
         self._price_buffers.clear()

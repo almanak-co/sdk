@@ -494,3 +494,69 @@ class TestATRCalculatorFromPrices:
         # Both should be positive but different
         assert atr_7 > 0
         assert atr_14 > 0
+
+
+# ---------------------------------------------------------------------------
+# Warm-up methods
+# ---------------------------------------------------------------------------
+
+
+class TestMinWarmupTicks:
+    """Tests for min_warmup_ticks() method."""
+
+    def test_defaults_rsi(self):
+        engine = BacktestIndicatorEngine(required_indicators={"rsi"})
+        assert engine.min_warmup_ticks() == 15  # default rsi_period=14, +1
+
+    def test_defaults_macd(self):
+        engine = BacktestIndicatorEngine(required_indicators={"macd"})
+        assert engine.min_warmup_ticks() == 34  # 26 + 9 - 1
+
+    def test_defaults_bollinger(self):
+        engine = BacktestIndicatorEngine(required_indicators={"bollinger_bands"})
+        assert engine.min_warmup_ticks() == 20  # default bb_period=20
+
+    def test_defaults_atr(self):
+        engine = BacktestIndicatorEngine(required_indicators={"atr"})
+        assert engine.min_warmup_ticks() == 15  # default atr_period=14, +1
+
+    def test_all_indicators_returns_max(self):
+        engine = BacktestIndicatorEngine(required_indicators={"rsi", "macd", "bollinger_bands", "atr"})
+        # MACD has the largest requirement (34)
+        assert engine.min_warmup_ticks() == 34
+
+    def test_custom_config(self):
+        engine = BacktestIndicatorEngine(required_indicators={"rsi", "macd"})
+        config = {"rsi_period": 20, "macd_slow": 50, "macd_signal": 12}
+        # RSI: 20+1=21, MACD: 50+12-1=61
+        assert engine.min_warmup_ticks(config) == 61
+
+    def test_no_indicators(self):
+        engine = BacktestIndicatorEngine(required_indicators=set())
+        assert engine.min_warmup_ticks() == 0
+
+
+class TestIsWarmingUp:
+    """Tests for is_warming_up() method."""
+
+    def test_warming_up_when_buffer_empty(self):
+        engine = BacktestIndicatorEngine(required_indicators={"rsi"})
+        assert engine.is_warming_up("ETH") is True
+
+    def test_warming_up_with_insufficient_data(self):
+        engine = BacktestIndicatorEngine(required_indicators={"rsi"})
+        # Add 10 points (need 15 for RSI-14)
+        for i in range(10):
+            engine.append_price("ETH", Decimal(str(3000 + i)))
+        assert engine.is_warming_up("ETH") is True
+
+    def test_not_warming_up_with_sufficient_data(self):
+        engine = BacktestIndicatorEngine(required_indicators={"rsi"})
+        # Add 15 points (exactly enough for RSI-14)
+        for i in range(15):
+            engine.append_price("ETH", Decimal(str(3000 + i)))
+        assert engine.is_warming_up("ETH") is False
+
+    def test_not_warming_up_no_indicators(self):
+        engine = BacktestIndicatorEngine(required_indicators=set())
+        assert engine.is_warming_up("ETH") is False
