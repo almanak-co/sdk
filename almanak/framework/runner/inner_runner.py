@@ -126,6 +126,11 @@ _NON_RETRYABLE_PATTERNS = frozenset(
         "out of gas",
         "execution reverted",
         "invalid selector",
+        # Auth errors are never transient — retrying wastes time
+        "unauthenticated",
+        "no authentication token",
+        "permission denied",
+        "permission_denied",
     }
 )
 

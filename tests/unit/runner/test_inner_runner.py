@@ -116,6 +116,15 @@ class TestRetryability:
     def test_nonce_too_low_not_retryable(self):
         assert not _is_retryable("nonce too low: next nonce 42, got 41")
 
+    def test_unauthenticated_not_retryable(self):
+        assert not _is_retryable("UNAUTHENTICATED: invalid token")
+
+    def test_no_authentication_token_not_retryable(self):
+        assert not _is_retryable("No authentication token provided")
+
+    def test_permission_denied_not_retryable(self):
+        assert not _is_retryable("PERMISSION_DENIED: insufficient scope")
+
     def test_timeout_is_retryable(self):
         assert _is_retryable("Transaction confirmation timeout after 60s")
 
