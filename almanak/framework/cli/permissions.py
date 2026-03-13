@@ -42,7 +42,14 @@ logger = logging.getLogger(__name__)
     default=None,
     help="Write manifest to file instead of stdout.",
 )
-def permissions(working_dir: str, chain: str | None, output: str | None) -> None:
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["manifest", "zodiac"]),
+    default="manifest",
+    help="Output format: 'manifest' (SDK format) or 'zodiac' (Zodiac Roles Target[]).",
+)
+def permissions(working_dir: str, chain: str | None, output: str | None, output_format: str) -> None:
     """Generate a Zodiac Roles permission manifest for a strategy.
 
     Automatically discovers required contract permissions by compiling
@@ -98,6 +105,34 @@ def permissions(working_dir: str, chain: str | None, output: str | None) -> None
     # Generate manifest for each chain
     from ..permissions.generator import generate_manifest
 
+    # Filter out non-EVM chains for zodiac format (Safe/Zodiac is EVM-only)
+    # This must happen before the compiler logger mutation so the early exit
+    # doesn't leave the logger stuck at CRITICAL.
+    if output_format == "zodiac":
+        from almanak.core.enums import CHAIN_FAMILY_MAP, Chain, ChainFamily
+
+        evm_chains = []
+        for c in chains:
+            try:
+                chain_enum = Chain(c.upper())
+                if CHAIN_FAMILY_MAP.get(chain_enum) == ChainFamily.EVM:
+                    evm_chains.append(c)
+                else:
+                    click.echo(f"  Skipping {c} (non-EVM, Zodiac not applicable)", err=True)
+            except ValueError:
+                # Unknown chain -- fail closed to match PermissionManifest.is_evm_chain
+                click.echo(f"  Skipping {c} (unknown chain, cannot verify EVM)", err=True)
+        chains = evm_chains
+
+    if not chains:
+        click.echo("No EVM chains to generate permissions for.", err=True)
+        if output:
+            Path(output).write_text("[]")
+            click.echo(f"Empty zodiac targets written to {output}", err=True)
+        else:
+            click.echo("[]")
+        return
+
     # Suppress noisy compiler warnings during permission discovery
     # (e.g., Enso API key errors, placeholder price warnings produce tracebacks)
     compiler_logger = logging.getLogger("almanak.framework.intents.compiler")
@@ -130,13 +165,22 @@ def permissions(working_dir: str, chain: str | None, output: str | None) -> None
         compiler_logger.setLevel(original_level)
 
     # Output
-    output_data: dict | list = manifests[0].to_dict() if len(manifests) == 1 else [m.to_dict() for m in manifests]
+    output_data: object
+    if output_format == "zodiac":
+        if len(manifests) == 1:
+            output_data = manifests[0].to_zodiac_targets()
+        else:
+            output_data = {m.chain: m.to_zodiac_targets() for m in manifests}
+    else:
+        output_data = manifests[0].to_dict() if len(manifests) == 1 else [m.to_dict() for m in manifests]
 
     json_output = json.dumps(output_data, indent=2)
 
     if output:
         output_path = Path(output)
         output_path.write_text(json_output)
-        click.echo(f"Manifest written to {output_path}", err=True)
+        click.echo(
+            f"{'Zodiac targets' if output_format == 'zodiac' else 'Manifest'} written to {output_path}", err=True
+        )
     else:
         click.echo(json_output)

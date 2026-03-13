@@ -9,7 +9,11 @@ from almanak.framework.execution.signer.safe.constants import (
 )
 from almanak.framework.intents.compiler import ERC20_APPROVE_SELECTOR
 from almanak.framework.permissions.generator import generate_manifest
-from almanak.framework.permissions.models import PermissionManifest
+from almanak.framework.permissions.models import (
+    ContractPermission,
+    FunctionPermission,
+    PermissionManifest,
+)
 
 
 class TestGenerateManifest:
@@ -205,3 +209,190 @@ class TestWarnings:
         )
         # Should still have MultiSend
         assert len(manifest.permissions) >= 1
+
+
+class TestZodiacTargetConversion:
+    """Test to_zodiac_targets() conversion."""
+
+    def _make_manifest(
+        self, permissions: list[ContractPermission], chain: str = "arbitrum"
+    ) -> PermissionManifest:
+        return PermissionManifest(
+            version="1.0",
+            chain=chain,
+            strategy="test",
+            generated_at="2025-01-01T00:00:00+00:00",
+            permissions=permissions,
+        )
+
+    def test_basic_call_with_selectors(self):
+        """CALL + selectors -> clearance=2, executionOptions=0, functions present."""
+        manifest = self._make_manifest([
+            ContractPermission(
+                target="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                label="ERC-20: USDC",
+                operation=0,
+                send_allowed=False,
+                function_selectors=[
+                    FunctionPermission(selector="0x095ea7b3", label="approve(address,uint256)"),
+                ],
+            ),
+        ])
+        targets = manifest.to_zodiac_targets()
+        assert len(targets) == 1
+        t = targets[0]
+        assert t["address"] == "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+        assert t["clearance"] == 2
+        assert t["executionOptions"] == 0
+        assert len(t["functions"]) == 1
+        assert t["functions"][0]["selector"] == "0x095ea7b3"
+        assert t["functions"][0]["wildcarded"] is True
+
+    def test_delegatecall_no_selectors_target_clearance(self):
+        """DELEGATECALL + no selectors -> clearance=1 (Target), executionOptions=2."""
+        manifest = self._make_manifest([
+            ContractPermission(
+                target="0x7663fd40081dccd47805c00e613b6beac3b87f08",
+                label="Enso Delegate",
+                operation=1,
+                send_allowed=False,
+                function_selectors=[],
+            ),
+        ])
+        targets = manifest.to_zodiac_targets()
+        assert len(targets) == 1
+        t = targets[0]
+        assert t["clearance"] == 1  # Target-level
+        assert t["executionOptions"] == 2  # DelegateCall
+        assert "functions" not in t  # No functions key for Target clearance
+
+    def test_send_allowed_execution_options(self):
+        """send_allowed=True with CALL -> executionOptions=1 (Send)."""
+        manifest = self._make_manifest([
+            ContractPermission(
+                target="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                label="test",
+                operation=0,
+                send_allowed=True,
+                function_selectors=[
+                    FunctionPermission(selector="0xaabbccdd", label="test()"),
+                ],
+            ),
+        ])
+        targets = manifest.to_zodiac_targets()
+        assert targets[0]["executionOptions"] == 1  # Send
+
+    def test_delegatecall_with_send_execution_options(self):
+        """DELEGATECALL + send_allowed -> executionOptions=3 (Both)."""
+        manifest = self._make_manifest([
+            ContractPermission(
+                target="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                label="test",
+                operation=1,
+                send_allowed=True,
+                function_selectors=[
+                    FunctionPermission(selector="0xaabbccdd", label="test()"),
+                ],
+            ),
+        ])
+        targets = manifest.to_zodiac_targets()
+        assert targets[0]["executionOptions"] == 3  # Both
+
+    def test_addresses_are_checksummed(self):
+        """All addresses in zodiac targets should be EIP-55 checksummed."""
+        manifest = generate_manifest(
+            strategy_name="test",
+            chain="arbitrum",
+            supported_protocols=["uniswap_v3"],
+            intent_types=["SWAP"],
+        )
+        targets = manifest.to_zodiac_targets()
+        assert len(targets) > 0
+        from web3 import Web3
+        for t in targets:
+            assert t["address"] == Web3.to_checksum_address(t["address"])
+
+    def test_multiple_selectors(self):
+        """Multiple selectors produce multiple function entries."""
+        manifest = self._make_manifest([
+            ContractPermission(
+                target="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                label="Router",
+                operation=0,
+                send_allowed=False,
+                function_selectors=[
+                    FunctionPermission(selector="0x095ea7b3", label="approve(address,uint256)"),
+                    FunctionPermission(selector="0x8d80ff0a", label="multiSend(bytes)"),
+                ],
+            ),
+        ])
+        targets = manifest.to_zodiac_targets()
+        assert len(targets[0]["functions"]) == 2
+
+    def test_empty_manifest(self):
+        """Empty permissions produce empty targets."""
+        manifest = self._make_manifest([])
+        assert manifest.to_zodiac_targets() == []
+
+    def test_full_manifest_roundtrip(self):
+        """Generate a manifest and convert to zodiac targets end-to-end."""
+        manifest = generate_manifest(
+            strategy_name="test",
+            chain="arbitrum",
+            supported_protocols=["uniswap_v3"],
+            intent_types=["SWAP"],
+        )
+        targets = manifest.to_zodiac_targets()
+        assert len(targets) > 0
+        # Every target must have required fields
+        for t in targets:
+            assert "address" in t
+            assert "clearance" in t
+            assert t["clearance"] in (1, 2)
+            assert "executionOptions" in t
+            assert t["executionOptions"] in (0, 1, 2, 3)
+            if t["clearance"] == 2:
+                assert "functions" in t
+                for fn in t["functions"]:
+                    assert "selector" in fn
+                    assert fn["wildcarded"] is True
+
+    def test_enso_delegates_get_target_clearance(self):
+        """Enso delegates (no selectors) should get clearance=1."""
+        manifest = generate_manifest(
+            strategy_name="test",
+            chain="arbitrum",
+            supported_protocols=["enso"],
+            intent_types=["SWAP"],
+        )
+        targets = manifest.to_zodiac_targets()
+        enso_targets = [
+            t for t in targets
+            if t["address"].lower() in {
+                "0x7663fd40081dccd47805c00e613b6beac3b87f08",
+                "0xa2f4f9c6ec598ca8c633024f8851c79ca5f43e48",
+            }
+        ]
+        assert len(enso_targets) > 0, "Expected at least one Enso delegate target"
+        for t in enso_targets:
+            assert t["clearance"] == 1  # Target-level
+            assert t["executionOptions"] == 2  # DelegateCall
+            assert "functions" not in t
+
+    def test_non_evm_chain_returns_empty(self):
+        """Non-EVM chains (Solana) should return empty zodiac targets."""
+        manifest = self._make_manifest(
+            permissions=[
+                ContractPermission(
+                    target="epjfwdd5aufqssqem2qn1xzybapc8g4weggkzwytdt1v",
+                    label="USDC (Solana)",
+                    operation=0,
+                    send_allowed=False,
+                    function_selectors=[
+                        FunctionPermission(selector="0x095ea7b3", label="approve(address,uint256)"),
+                    ],
+                ),
+            ],
+            chain="solana",
+        )
+        assert manifest.to_zodiac_targets() == []

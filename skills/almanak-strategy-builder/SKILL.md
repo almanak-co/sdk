@@ -23,6 +23,14 @@ You are helping a quant build DeFi strategies using the Almanak SDK.
 Strategies are Python classes that return Intent objects. The framework handles
 compilation to transactions, execution, and state management.
 
+**IMPORTANT — Zodiac permissions auto-generation**: Whenever you create a new
+strategy or modify `strategy.py` in a way that changes protocols, intent types,
+tokens, or chains, you MUST regenerate the Zodiac Roles permission manifest
+by running `almanak strat permissions --format zodiac -o zodiac_permissions.json`
+from the strategy directory. This ensures the Safe wallet permissions stay in
+sync with the strategy's actual contract interactions. Always do this as a
+final step after writing or editing strategy code.
+
 <!-- almanak-sdk-start: quick-start -->
 
 ## Quick Start
@@ -944,13 +952,14 @@ almanak strat teardown execute        # Execute teardown
 ### Permissions
 
 ```bash
-almanak strat permissions               # Generate Zodiac Roles permission manifest
-almanak strat permissions -d path/to/strat  # Explicit directory
-almanak strat permissions --chain base   # Override chain
-almanak strat permissions -o manifest.json  # Write to file
+almanak strat permissions                          # SDK manifest format (default)
+almanak strat permissions --format zodiac           # Zodiac Roles Target[] format
+almanak strat permissions --format zodiac -o zodiac_permissions.json  # Write to file
+almanak strat permissions -d path/to/strat          # Explicit directory
+almanak strat permissions --chain base              # Override chain
 ```
 
-Generates a JSON manifest of minimum-privilege contract permissions needed for Safe wallet deployments with Zodiac Roles. Reads `supported_protocols` and `intent_types` from `@almanak_strategy` metadata and compiles synthetic intents to discover required contract addresses and function selectors.
+Generates a JSON manifest of minimum-privilege contract permissions needed for Safe wallet deployments with Zodiac Roles. Reads `supported_protocols` and `intent_types` from `@almanak_strategy` metadata and compiles synthetic intents to discover required contract addresses and function selectors. Non-EVM chains are automatically skipped when using `--format zodiac`.
 
 ### Gateway
 
@@ -980,6 +989,82 @@ almanak docs agent-skill --dump       # Print agent skill content
 ```
 
 <!-- almanak-sdk-end: cli-commands -->
+
+<!-- almanak-sdk-start: permissions -->
+
+## Zodiac Permissions
+
+Every strategy deployed on a Safe wallet uses **Zodiac Roles** to enforce minimum-privilege access. The permissions system automatically discovers which contracts and function selectors the strategy needs by compiling synthetic intents.
+
+### When to Generate
+
+Regenerate permissions whenever you:
+- Create a new strategy
+- Add or remove protocols in `@almanak_strategy(supported_protocols=[...])`
+- Add or remove intent types in `@almanak_strategy(intent_types=[...])`
+- Change tokens in `config.json` (base_token, quote_token, collateral_token, etc.)
+- Add or remove chains in `@almanak_strategy(supported_chains=[...])`
+
+### How It Works
+
+1. Reads `supported_protocols` and `intent_types` from the `@almanak_strategy()` decorator
+2. Creates synthetic intents for each (protocol, intent_type) pair
+3. Compiles them through the real IntentCompiler to extract target contracts and selectors
+4. Adds ERC-20 `approve` permissions for tokens found in `config.json`
+5. Adds infrastructure permissions (MultiSend for atomic execution)
+6. Merges, deduplicates, and outputs as Zodiac Roles Target[] format
+
+### Usage
+
+```bash
+# Generate Zodiac permissions and write to file (recommended)
+almanak strat permissions --format zodiac -o zodiac_permissions.json
+
+# Preview on stdout
+almanak strat permissions --format zodiac
+
+# Single chain override
+almanak strat permissions --format zodiac --chain arbitrum -o zodiac_permissions.json
+```
+
+### Output Format
+
+The Zodiac Roles Target[] format is a JSON array ready for Safe wallet configuration:
+
+```json
+[
+  {
+    "address": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
+    "clearance": 2,
+    "executionOptions": 0,
+    "functions": [
+      { "selector": "0x04e45aaf", "wildcarded": true }
+    ]
+  }
+]
+```
+
+- `clearance`: 2 = function-level (specific selectors), 1 = target-level (all functions)
+- `executionOptions`: 0 = None, 1 = Send, 2 = DelegateCall, 3 = Both
+- `wildcarded`: true means the selector applies regardless of input arguments
+
+### Strategy Decorator Requirements
+
+For permissions to generate correctly, ensure your `@almanak_strategy` decorator declares all protocols and intent types:
+
+```python
+@almanak_strategy(
+    name="my_strategy",
+    default_chain="arbitrum",
+    supported_chains=["arbitrum", "base"],
+    supported_protocols=["uniswap_v3", "aave_v3"],
+    intent_types=["SWAP", "SUPPLY", "WITHDRAW", "BORROW", "REPAY"],
+)
+class MyStrategy(IntentStrategy):
+    ...
+```
+
+<!-- almanak-sdk-end: permissions -->
 
 <!-- almanak-sdk-start: supported-chains -->
 
@@ -1301,6 +1386,7 @@ Before deploying to mainnet:
 - [ ] Run `--dry-run --once` on mainnet to verify compilation without submitting transactions
 - [ ] Use `amount=` (token units) for swaps if `amount_usd=` causes reverts (see swap reference above)
 - [ ] Override `get_persistent_state()` / `load_persistent_state()` if your strategy tracks positions or phase state
+- [ ] Generate Zodiac permissions: `almanak strat permissions --format zodiac -o zodiac_permissions.json`
 - [ ] Verify token approvals for all protocols used (auto-handled for most, but verify on first run)
 - [ ] Fund wallet on the correct chain with sufficient tokens plus gas (ETH/AVAX/MATIC)
 - [ ] Note your instance ID after first successful iteration (needed for `--id` resume)
