@@ -937,7 +937,18 @@ def dashboard(port, gateway_host, gateway_port, no_browser):
     "--template",
     "-t",
     type=click.Choice(
-        ["blank", "dynamic_lp", "mean_reversion", "bollinger", "basis_trade", "lending_loop", "copy_trader"]
+        [
+            "blank",
+            "ta_swap",
+            "dynamic_lp",
+            "lending_loop",
+            "basis_trade",
+            "vault_yield",
+            "copy_trader",
+            "perps",
+            "multi_step",
+            "staking",
+        ]
     ),
     default="blank",
     help="Strategy template to use (default: blank)",
@@ -945,7 +956,24 @@ def dashboard(port, gateway_host, gateway_port, no_browser):
 @click.option(
     "--chain",
     "-c",
-    type=click.Choice(["ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche"]),
+    type=click.Choice(
+        [
+            "ethereum",
+            "arbitrum",
+            "optimism",
+            "polygon",
+            "base",
+            "avalanche",
+            "bsc",
+            "sonic",
+            "plasma",
+            "blast",
+            "mantle",
+            "berachain",
+            "solana",
+            "monad",
+        ]
+    ),
     default="arbitrum",
     help="Target blockchain network (default: arbitrum)",
 )
@@ -955,16 +983,20 @@ def new(ctx, name, working_dir, template, chain):
 
     This creates a strategy using the v2 intent-based framework with:
     - strategy.py: Main strategy with decide() method
-    - config.py: Configuration dataclass
+    - config.json: Runtime configuration
     - tests/: Test scaffolding
 
     Templates:
-    - blank: Minimal strategy for custom implementations
-    - dynamic_lp: Volatility-based LP strategy
-    - mean_reversion: RSI-based trading strategy
-    - basis_trade: Spot+perp funding arbitrage
-    - lending_loop: Aave/Morpho leverage looping
+    - blank: Minimal template for custom implementations
+    - ta_swap: Technical analysis swap (RSI, Bollinger, or combined)
+    - dynamic_lp: Price-based LP range management
+    - lending_loop: Supply/borrow leverage loop (Aave V3)
+    - basis_trade: Spot+perp funding rate arbitrage (GMX V2)
+    - vault_yield: Vault deposit/redeem yield farming (MetaMorpho)
     - copy_trader: Copy trading from leader wallets
+    - perps: Perpetual futures with TP/SL (GMX V2)
+    - multi_step: Atomic multi-step via IntentSequence
+    - staking: Liquid staking (Lido)
     """
     try:
         # Use provided name or prompt interactively
