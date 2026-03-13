@@ -113,14 +113,12 @@ class TestSpecBacktestStrategy:
         intent2 = strategy.decide(None)
         assert isinstance(intent2, HoldIntent)  # Second tick: Hold
 
-    def test_unknown_action_returns_hold(self):
-        from almanak.framework.intents.vocabulary import HoldIntent
+    def test_unknown_action_raises_value_error(self):
         from almanak.services.backtest.models import StrategySpec
 
         spec = StrategySpec(protocol="some_protocol", chain="ethereum", action="unknown_action")
-        strategy = SpecBacktestStrategy(spec)
-        intent = strategy.decide(None)
-        assert isinstance(intent, HoldIntent)
+        with pytest.raises(ValueError, match="Unknown action 'unknown_action'"):
+            SpecBacktestStrategy(spec)
 
 
 class TestExtractTokens:

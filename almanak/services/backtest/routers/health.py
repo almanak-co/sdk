@@ -37,8 +37,32 @@ def configure(
 
 @router.get("/health")
 async def health() -> HealthResponse:
-    """Service health and capacity."""
+    """Service health and capacity with resource reporting."""
+    import os
     import time
+
+    # Memory usage via RSS (no external dependency)
+    memory_mb = 0.0
+    cpu_percent = None
+    try:
+        import resource
+
+        rusage = resource.getrusage(resource.RUSAGE_SELF)
+        # ru_maxrss is in bytes on Linux, kilobytes on macOS
+        if hasattr(os, "uname") and os.uname().sysname == "Darwin":
+            memory_mb = round(rusage.ru_maxrss / (1024 * 1024), 1)
+        else:
+            memory_mb = round(rusage.ru_maxrss / 1024, 1)
+    except Exception:
+        pass
+
+    # CPU usage via psutil if available
+    try:
+        import psutil  # type: ignore[import-untyped]
+
+        cpu_percent = psutil.Process(os.getpid()).cpu_percent(interval=0)
+    except Exception:
+        pass
 
     return HealthResponse(
         status="ok",
@@ -46,4 +70,6 @@ async def health() -> HealthResponse:
         active_backtest_jobs=_get_active_backtest_jobs(),
         active_paper_sessions=_get_active_paper_sessions(),
         uptime_seconds=round(time.time() - _start_time, 1) if _start_time else 0.0,
+        peak_memory_mb=memory_mb,
+        cpu_percent=cpu_percent,
     )

@@ -16,12 +16,12 @@ from almanak.services.backtest.models import (
     JobStatus,
     QuickBacktestRequest,
     QuickBacktestResponse,
+    StrategyListResponse,
 )
 from almanak.services.backtest.services.backtest_runner import (
-    SpecBacktestStrategy,
-    build_backtest_config,
-    build_quick_timeframe,
     create_backtester,
+    list_available_strategies,
+    resolve_strategy,
     run_backtest_job,
 )
 from almanak.services.backtest.services.job_manager import JobManager
@@ -53,6 +53,10 @@ async def submit_backtest(
 ) -> BacktestJobResponse:
     """Submit an async backtest job.
 
+    Two ways to specify a strategy:
+    - ``strategy_name``: name of a registered SDK strategy (e.g. "demo_uniswap_rsi")
+    - ``strategy_spec``: declarative spec (protocol + action + params)
+
     Returns immediately with a job_id. Poll GET /backtest/{job_id} for results.
     """
     jm = _get_job_manager()
@@ -65,8 +69,7 @@ async def submit_backtest(
     background_tasks.add_task(
         run_backtest_job,
         job_id=job_id,
-        spec=request.strategy_spec,
-        timeframe=request.timeframe,
+        request=request,
         job_manager=jm,
     )
 
@@ -91,7 +94,7 @@ async def get_backtest_status(job_id: str) -> BacktestJobResponse:
     if job.status == JobStatus.COMPLETE and job.result:
         metrics_data = job.result.get("metrics", {})
         result_response = BacktestResultResponse(
-            metrics=BacktestMetricsResponse(**metrics_data),
+            metrics=BacktestMetricsResponse.model_validate(metrics_data),
             equity_curve=job.result.get("equity_curve", []),
             trades=job.result.get("trades", []),
             duration_seconds=job.result.get("duration_seconds", 0.0),
@@ -113,20 +116,18 @@ async def quick_backtest(request: QuickBacktestRequest) -> QuickBacktestResponse
     """Synchronous quick eligibility check (<30s).
 
     Uses a 7-day window with simplified fees for fast signal validation.
+    Supports both strategy_name and strategy_spec.
     """
     import time
 
     start_time = time.monotonic()
 
-    timeframe = request.timeframe or build_quick_timeframe()
-
     try:
-        config = build_backtest_config(request.strategy_spec, timeframe, quick=True)
-        strategy = SpecBacktestStrategy(request.strategy_spec)
+        strategy, config = resolve_strategy(request, quick=True)
 
         backtester = create_backtester()
         try:
-            result = await backtester.backtest(strategy, config)  # type: ignore[arg-type]
+            result = await backtester.backtest(strategy, config)
         finally:
             await backtester.close()
 
@@ -135,21 +136,23 @@ async def quick_backtest(request: QuickBacktestRequest) -> QuickBacktestResponse
 
         return QuickBacktestResponse(
             eligible=metrics.sharpe_ratio > 0 and metrics.max_drawdown_pct < Decimal("0.5"),
-            metrics=BacktestMetricsResponse(
-                net_pnl_usd=str(metrics.net_pnl_usd),
-                total_return_pct=str(metrics.total_return_pct),
-                sharpe_ratio=str(metrics.sharpe_ratio),
-                max_drawdown_pct=str(metrics.max_drawdown_pct),
-                win_rate=str(metrics.win_rate),
-                total_trades=metrics.total_trades,
-                total_fees_usd=str(metrics.total_fees_usd),
-                sortino_ratio=str(metrics.sortino_ratio),
-                calmar_ratio=str(metrics.calmar_ratio),
-                profit_factor=str(metrics.profit_factor),
-            ),
+            metrics=BacktestMetricsResponse.model_validate(metrics.to_dict()),
             duration_seconds=round(duration, 2),
         )
 
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
     except Exception:
         logger.exception("Quick backtest failed")
         raise HTTPException(status_code=500, detail="Quick backtest failed. Check server logs for details.") from None
+
+
+@router.get("/strategies")
+async def list_strategies() -> StrategyListResponse:
+    """List all registered SDK strategies available for backtesting.
+
+    Edge can use any of these names in the ``strategy_name`` field of
+    POST /backtest or POST /backtest/quick.
+    """
+    strategies = list_available_strategies()
+    return StrategyListResponse(strategies=sorted(strategies), count=len(strategies))

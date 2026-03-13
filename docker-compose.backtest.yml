@@ -1,0 +1,32 @@
+# Docker Compose for the BacktestService
+#
+# Usage:
+#   docker compose -f docker-compose.backtest.yml up --build
+#
+# Access:
+#   Health:  http://localhost:8000/api/v1/health
+#   Docs:    http://localhost:8000/docs
+#   Submit:  curl -X POST http://localhost:8000/api/v1/backtest -H 'Content-Type: application/json' -d '...'
+
+services:
+  backtest-service:
+    build:
+      context: .
+      dockerfile: almanak/services/backtest/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - BACKTEST_SERVICE_HOST=0.0.0.0
+      - BACKTEST_SERVICE_PORT=8000
+      - BACKTEST_SERVICE_WORKERS=1
+      - BACKTEST_MAX_JOBS=4
+      - BACKTEST_MAX_PAPER_SESSIONS=2
+      # Optional: CoinGecko pro API key for higher rate limits
+      - COINGECKO_API_KEY=${COINGECKO_API_KEY:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
