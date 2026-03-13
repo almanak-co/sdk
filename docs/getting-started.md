@@ -272,6 +272,29 @@ class MyStrategy(IntentStrategy):
 
 If your strategy holds multiple position types, close them in order: **perps -> borrows -> supplies -> LPs -> tokens**. See the [Teardown CLI](cli/strat-teardown.md) for how operators trigger teardown.
 
+## Generating Permissions (Safe Wallets)
+
+When deploying a strategy through a Safe wallet with Zodiac Roles restrictions, the agent needs an explicit set of contract permissions. The SDK can generate this manifest automatically by inspecting which contracts and function selectors your strategy's intents compile to:
+
+```bash
+# From your strategy directory
+almanak strat permissions
+
+# Explicit directory
+almanak strat permissions -d strategies/demo/uniswap_rsi
+
+# Override chain
+almanak strat permissions --chain base
+
+# Write to file
+almanak strat permissions -o manifest.json
+```
+
+The command reads `supported_protocols` and `intent_types` from your `@almanak_strategy` decorator, compiles synthetic intents through the real compiler, and extracts the minimum set of contract addresses and function selectors needed. The output is a JSON manifest you can apply to a Zodiac Roles module. If the strategy supports multiple chains, the output is a JSON array with one manifest per chain; use `--chain` to generate for a single chain.
+
+!!! note "Only for Safe/Zodiac deployments"
+    Permission manifests are only needed when running through a Safe wallet with Zodiac Roles. For local Anvil testing or direct-key execution, no permissions are required.
+
 !!! note "Backtest CLI"
     Unlike `almanak strat run` which auto-discovers the strategy from the current directory,
     backtest commands require an explicit strategy name: `almanak strat backtest pnl -s my_strategy`.

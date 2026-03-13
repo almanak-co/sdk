@@ -32,7 +32,7 @@ Le SDK Almanak fournit un framework complet pour le développement, le test et l
 - **Backtesting complet** - Simulation PnL, paper trading sur des forks Anvil et balayage de paramètres.
 - **Support multi-chaînes** - Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Plasma, Blast, Mantle, Berachain, et plus encore.
 - **Intégration de protocoles** - Uniswap V3, Aave V3, Morpho Blue, GMX V2, Pendle, Polymarket, Kraken, et plus encore.
-- **Conception non-custodiale** - Contrôle total de vos fonds via des comptes intelligents Safe.
+- **Conception non-custodiale** - Contrôle total de vos fonds via des comptes intelligents Safe avec génération automatique du manifeste de permissions Zodiac Roles.
 - **Prêt pour la production** - Alertes intégrées, détection de blocage, gestion d'urgence et déploiements canari.
 
 ## Installation

@@ -941,6 +941,17 @@ almanak strat teardown plan           # Preview teardown intents
 almanak strat teardown execute        # Execute teardown
 ```
 
+### Permissions
+
+```bash
+almanak strat permissions               # Generate Zodiac Roles permission manifest
+almanak strat permissions -d path/to/strat  # Explicit directory
+almanak strat permissions --chain base   # Override chain
+almanak strat permissions -o manifest.json  # Write to file
+```
+
+Generates a JSON manifest of minimum-privilege contract permissions needed for Safe wallet deployments with Zodiac Roles. Reads `supported_protocols` and `intent_types` from `@almanak_strategy` metadata and compiles synthetic intents to discover required contract addresses and function selectors.
+
 ### Gateway
 
 ```bash

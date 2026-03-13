@@ -203,6 +203,29 @@ class MyStrategy(IntentStrategy):
 | `BridgeIntent` | Transferir tokens entre cadenas |
 | `EnsureBalanceIntent` | Meta-intent que se resuelve a un `BridgeIntent` o `HoldIntent` para asegurar un saldo mínimo de tokens en una cadena destino |
 
+## Generación del manifiesto de permisos (carteras Safe)
+
+Al desplegar una estrategia a través de una cartera Safe con restricciones Zodiac Roles, el agente necesita un conjunto explícito de permisos de contratos. El SDK puede generar este manifiesto automáticamente inspeccionando a qué contratos y selectores de funciones compilan los intents de tu estrategia:
+
+```bash
+# Desde el directorio de la estrategia
+almanak strat permissions
+
+# Directorio explícito
+almanak strat permissions -d strategies/demo/uniswap_rsi
+
+# Especificar cadena
+almanak strat permissions --chain base
+
+# Escribir en archivo
+almanak strat permissions -o manifest.json
+```
+
+El comando lee `supported_protocols` e `intent_types` de tu decorador `@almanak_strategy`, compila intents sintéticos a través del compilador real y extrae el conjunto mínimo de direcciones de contratos y selectores de funciones necesarios. La salida es un manifiesto JSON que se puede aplicar a un módulo Zodiac Roles. Si la estrategia soporta múltiples cadenas, la salida es un array JSON con un manifiesto por cadena; usa `--chain` para generar solo una cadena.
+
+!!! note "Solo para despliegues Safe/Zodiac"
+    Los manifiestos de permisos solo son necesarios al ejecutar a través de una cartera Safe con Zodiac Roles. Para pruebas locales en Anvil o ejecución con clave directa, no se requieren permisos.
+
 ## Próximos pasos
 
 - [Variables de entorno](environment-variables.md) - Todas las opciones de configuración

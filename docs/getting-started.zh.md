@@ -203,6 +203,29 @@ class MyStrategy(IntentStrategy):
 | `BridgeIntent` | 跨链桥接代币 |
 | `EnsureBalanceIntent` | 元意图，解析为 `BridgeIntent` 或 `HoldIntent`，确保目标链上的最低代币余额 |
 
+## 生成权限清单（Safe 钱包）
+
+通过带有 Zodiac Roles 限制的 Safe 钱包部署策略时，代理需要一组明确的合约权限。SDK 可以通过检查策略的 intent 编译到哪些合约和函数选择器来自动生成此清单：
+
+```bash
+# 从策略目录运行
+almanak strat permissions
+
+# 指定目录
+almanak strat permissions -d strategies/demo/uniswap_rsi
+
+# 覆盖链
+almanak strat permissions --chain base
+
+# 写入文件
+almanak strat permissions -o manifest.json
+```
+
+该命令从 `@almanak_strategy` 装饰器读取 `supported_protocols` 和 `intent_types`，通过真实编译器编译合成 intent，并提取所需的最小合约地址和函数选择器集合。输出为 JSON 清单，可应用于 Zodiac Roles 模块。如果策略支持多条链，输出为 JSON 数组，每条链一个清单；使用 `--chain` 可生成单条链的清单。
+
+!!! note "仅用于 Safe/Zodiac 部署"
+    权限清单仅在通过带有 Zodiac Roles 的 Safe 钱包运行时需要。本地 Anvil 测试或直接密钥执行不需要权限。
+
 ## 下一步
 
 - [环境变量](environment-variables.md) - 所有配置选项
