@@ -2166,8 +2166,8 @@ class BacktestResult:
                 for source, count in sorted(sources_summary.items()):
                     lines.append(f"  - {source}: {count}")
 
-        # Data coverage metrics section
-        if self.data_coverage_metrics:
+        # Data coverage metrics section (only show when protocol data points exist)
+        if self.data_coverage_metrics and self.data_coverage_metrics.total_data_points > 0:
             dcm = self.data_coverage_metrics
             lines.extend(
                 [

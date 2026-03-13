@@ -311,12 +311,16 @@ def validate_loaded_config(config_data: dict[str, Any]) -> ValidationResult:
         "duration_seconds",
         "duration_days",
         "estimated_ticks",
+        # Properties emitted by to_dict_with_metadata()
+        "trading_days_per_year",
         # Metadata section
         "_metadata",
+        "_meta",
     }
 
     for field in config_data:
         if field not in known_fields:
+            logger.debug(f"Ignoring unknown field in config: {field}")
             warnings.append(f"Unknown field in config (will be ignored): {field}")
 
     return ValidationResult(errors=errors, warnings=warnings)

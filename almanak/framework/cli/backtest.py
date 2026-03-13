@@ -2118,6 +2118,18 @@ def sweep_backtest(
             },
         }
 
+        # Add best_params for easy consumption by downstream tools
+        # Secondary sort on params tuple ensures deterministic output on ties
+        if all_results:
+            if multi_period_mode and len(backtest_periods) > 1:
+                agg = _aggregate_multi_period_results(all_results, combinations)
+                if agg:
+                    best_agg = sorted(agg, key=lambda x: (x.avg_sharpe, sorted(x.params.items())), reverse=True)[0]
+                    output_data["best_params"] = best_agg.params
+            else:
+                best_single = max(all_results, key=lambda x: (x.sharpe_ratio, sorted(x.params.items())))
+                output_data["best_params"] = best_single.params
+
         if multi_period_mode and len(backtest_periods) > 1:
             aggregated = _aggregate_multi_period_results(all_results, combinations)
             output_data["aggregated"] = [
