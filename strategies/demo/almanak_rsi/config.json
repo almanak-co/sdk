@@ -9,7 +9,7 @@
     "rsi_overbought": 70,
     "rsi_oversold": 30,
     "data_granularity": "15m",
-    "initial_capital_usdc": 20,
+    "initial_capital_usdc": 10,
     "position_size_pct": 100,
     "cooldown_hours": 1,
     "max_slippage_pct": 1.0,

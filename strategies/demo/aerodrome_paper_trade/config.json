@@ -1,8 +1,8 @@
 {
     "pool": "WETH/USDC",
     "stable": false,
-    "amount0": "0.001",
-    "amount1": "3",
+    "amount0": "0.0008",
+    "amount1": "2.5",
     "rsi_period": 14,
     "rsi_oversold": 35,
     "rsi_overbought": 65,
