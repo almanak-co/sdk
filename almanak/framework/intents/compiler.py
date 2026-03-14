@@ -2811,6 +2811,19 @@ class IntentCompiler:
                 result.error = "Unwrap amount must be positive"
                 return result
 
+            # Pre-flight balance check: catch insufficient balance before on-chain revert
+            if not (isinstance(amount, str) and amount == "all"):
+                balance = self._query_erc20_balance(weth_address, self.wallet_address)
+                if balance is not None and balance < amount_raw:
+                    decimals = resolved.decimals
+                    have = Decimal(balance) / Decimal(10**decimals)
+                    need = Decimal(str(intent.amount))
+                    result.status = CompilationStatus.FAILED
+                    result.error = (
+                        f"Insufficient {token_symbol} balance: have {have} {token_symbol}, need {need} {token_symbol}"
+                    )
+                    return result
+
             # Build withdraw(uint256) calldata
             # Function selector: 0x2e1a7d4d = keccak256("withdraw(uint256)")[:4]
             amount_hex = hex(amount_raw)[2:].zfill(64)
