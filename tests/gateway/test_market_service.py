@@ -4,6 +4,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
@@ -16,10 +17,12 @@ def settings():
     return GatewaySettings()
 
 
-@pytest.fixture
-def market_service(settings):
+@pytest_asyncio.fixture
+async def market_service(settings):
     """Create MarketService instance."""
-    return MarketServiceServicer(settings)
+    service = MarketServiceServicer(settings)
+    yield service
+    await service.close()
 
 
 @pytest.fixture
