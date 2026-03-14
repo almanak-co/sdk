@@ -9,6 +9,7 @@ Verifies:
 
 import asyncio
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -486,3 +487,117 @@ class TestEnrichedExecutionResult:
         assert result.lp_close_data is None
         assert result.extracted_data == {}
         assert result.extraction_warnings == []
+
+
+# =============================================================================
+# IntentExecutionService - retry log-level matrix (VIB-1147)
+# =============================================================================
+
+
+class TestRetryLogLevelMatrix:
+    """Verify intermediate retry failures log at DEBUG, final failures at WARNING."""
+
+    @pytest.mark.asyncio
+    async def test_intermediate_compile_rpc_error_logs_debug(self, service, mock_gateway, caplog):
+        """Retryable compile RPC error on non-final attempt -> DEBUG."""
+        mock_gateway.execution.CompileIntent.side_effect = [
+            Exception("gateway timeout"),
+            _make_compile_resp(success=True),
+        ]
+        mock_gateway.execution.Execute.return_value = _make_exec_resp()
+
+        with caplog.at_level(logging.DEBUG):
+            result = await service.execute_intent("swap", {"from_token": "USDC", "to_token": "ETH"})
+
+        assert result.success
+        compile_fail_records = [
+            r for r in caplog.records if "Intent compilation failed" in r.message and "attempt 1/" in r.message
+        ]
+        assert len(compile_fail_records) == 1
+        assert compile_fail_records[0].levelno == logging.DEBUG
+
+    @pytest.mark.asyncio
+    async def test_final_compile_rpc_error_logs_warning(self, mock_gateway, caplog):
+        """Retryable compile RPC error on final attempt -> WARNING."""
+        service = IntentExecutionService(
+            mock_gateway, chain="arbitrum", wallet_address="0x1234",
+            strategy_id="test", retry_policy=RetryPolicy(max_retries=0, initial_delay_seconds=0.01),
+        )
+        mock_gateway.execution.CompileIntent.side_effect = Exception("gateway timeout")
+
+        with caplog.at_level(logging.DEBUG):
+            result = await service.execute_intent("swap", {"from_token": "USDC", "to_token": "ETH"})
+
+        assert not result.success
+        compile_fail_records = [r for r in caplog.records if "Intent compilation failed" in r.message]
+        assert len(compile_fail_records) == 1
+        assert compile_fail_records[0].levelno == logging.WARNING
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_compile_error_logs_warning_immediately(self, service, mock_gateway, caplog):
+        """Non-retryable compile error -> WARNING on first attempt."""
+        mock_gateway.execution.CompileIntent.side_effect = Exception("execution reverted: bad selector")
+
+        with caplog.at_level(logging.DEBUG):
+            result = await service.execute_intent("swap", {"from_token": "USDC", "to_token": "ETH"})
+
+        assert not result.success
+        assert result.attempts == 1
+        compile_fail_records = [r for r in caplog.records if "Intent compilation failed" in r.message]
+        assert len(compile_fail_records) == 1
+        assert compile_fail_records[0].levelno == logging.WARNING
+
+    @pytest.mark.asyncio
+    async def test_intermediate_exec_failure_logs_debug(self, service, mock_gateway, caplog):
+        """Retryable execution failure on non-final attempt -> DEBUG."""
+        mock_gateway.execution.CompileIntent.return_value = _make_compile_resp()
+        mock_gateway.execution.Execute.side_effect = [
+            _make_exec_resp(success=False, error="timeout waiting for confirmation"),
+            _make_exec_resp(success=True),
+        ]
+
+        with caplog.at_level(logging.DEBUG):
+            result = await service.execute_intent("swap", {"from_token": "USDC", "to_token": "ETH"})
+
+        assert result.success
+        exec_fail_records = [
+            r for r in caplog.records if "Intent execution failed" in r.message and "attempt 1/" in r.message
+        ]
+        assert len(exec_fail_records) == 1
+        assert exec_fail_records[0].levelno == logging.DEBUG
+
+    @pytest.mark.asyncio
+    async def test_final_exec_failure_logs_warning(self, mock_gateway, caplog):
+        """Retryable execution failure on final attempt -> WARNING."""
+        service = IntentExecutionService(
+            mock_gateway, chain="arbitrum", wallet_address="0x1234",
+            strategy_id="test", retry_policy=RetryPolicy(max_retries=0, initial_delay_seconds=0.01),
+        )
+        mock_gateway.execution.CompileIntent.return_value = _make_compile_resp()
+        mock_gateway.execution.Execute.return_value = _make_exec_resp(
+            success=False, error="timeout waiting for confirmation"
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            result = await service.execute_intent("swap", {"from_token": "USDC", "to_token": "ETH"})
+
+        assert not result.success
+        exec_fail_records = [r for r in caplog.records if "Intent execution failed" in r.message]
+        assert len(exec_fail_records) == 1
+        assert exec_fail_records[0].levelno == logging.WARNING
+
+    @pytest.mark.asyncio
+    async def test_exec_with_tx_hashes_logs_warning(self, service, mock_gateway, caplog):
+        """Execution failure with tx_hashes (broadcast) -> WARNING regardless of attempt."""
+        mock_gateway.execution.CompileIntent.return_value = _make_compile_resp()
+        mock_gateway.execution.Execute.return_value = _make_exec_resp(
+            success=False, error="timeout waiting for confirmation", tx_hashes=["0xbroadcast"]
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            result = await service.execute_intent("swap", {"from_token": "USDC", "to_token": "ETH"})
+
+        assert not result.success
+        exec_fail_records = [r for r in caplog.records if "Intent execution failed" in r.message]
+        assert len(exec_fail_records) == 1
+        assert exec_fail_records[0].levelno == logging.WARNING

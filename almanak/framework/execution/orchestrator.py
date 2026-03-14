@@ -2229,7 +2229,7 @@ class ExecutionOrchestrator:
                         "(expected for multi-step bundles). Using compiler-provided gas limit."
                     )
                 else:
-                    logger.warning(f"Gas estimation failed for {warning_msg}. Using compiler-provided gas limit.")
+                    logger.debug(f"Gas estimation failed for {warning_msg}. Using compiler-provided gas limit.")
                 updated.append(tx)
 
         return updated, gas_warnings

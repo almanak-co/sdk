@@ -119,9 +119,10 @@ class TestGasEstimationMultiTxBundle:
         assert len(updated_txs) == 1
         assert len(warnings) == 1
 
-        # First TX in single-TX bundle: should be WARNING level
-        warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING and "Gas estimation failed" in r.message]
-        assert len(warning_msgs) == 1, "Single-TX revert should be WARNING level"
+        # Gas estimation failures always use DEBUG level since execution proceeds
+        # with the compiler-provided gas limit regardless (no user action needed)
+        debug_msgs = [r for r in caplog.records if r.levelno == logging.DEBUG and "Gas estimation failed" in r.message]
+        assert len(debug_msgs) == 1, "Single-TX revert should be DEBUG level (non-actionable)"
 
     @pytest.mark.asyncio
     async def test_known_pattern_on_first_tx_is_debug(self, orchestrator, caplog):
@@ -189,9 +190,9 @@ class TestGasEstimationMultiTxBundle:
         # Only TX 1's failure produces a warning entry
         assert len(warnings) == 1
 
-        # TX 1 failed with an unexpected revert on a single-like TX -> WARNING level
-        warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING and "Gas estimation" in r.message]
-        assert len(warning_msgs) == 1, "TX 1 failure should produce WARNING"
+        # TX 1 failed but gas estimation failures are DEBUG (non-actionable, fallback used)
+        debug_msgs = [r for r in caplog.records if r.levelno == logging.DEBUG and "Gas estimation" in r.message]
+        assert len(debug_msgs) == 1, "TX 1 failure should produce DEBUG (non-actionable)"
 
 
 class TestZeroGasEstimateFallback:

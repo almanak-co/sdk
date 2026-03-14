@@ -293,7 +293,9 @@ class IntentExecutionService:
                 )
             except Exception as e:
                 last_error = f"Compilation RPC error: {e}"
-                logger.warning(
+                is_last_rpc = attempt == max_retries or not _is_retryable(str(e))
+                log_fn = logger.warning if is_last_rpc else logger.debug
+                log_fn(
                     "Intent compilation failed (attempt %d/%d): %s",
                     attempts,
                     max_retries + 1,
@@ -304,7 +306,6 @@ class IntentExecutionService:
                         intent_type, intent_params, last_error, attempt, max_retries, True, effective_chain, tool_name
                     )
                     break
-                is_last_rpc = attempt == max_retries
                 self._fire_sadflow(
                     intent_type,
                     intent_params,
@@ -323,7 +324,9 @@ class IntentExecutionService:
 
             if not compile_resp.success:
                 last_error = f"Compilation failed: {compile_resp.error}"
-                logger.warning(
+                is_last = attempt == max_retries or not _is_retryable(compile_resp.error or "")
+                log_fn = logger.warning if is_last else logger.debug
+                log_fn(
                     "Intent compilation failed (attempt %d/%d): %s",
                     attempts,
                     max_retries + 1,
@@ -357,7 +360,9 @@ class IntentExecutionService:
                 )
             except Exception as e:
                 last_error = f"Execution RPC error: {e}"
-                logger.warning(
+                is_last_exec = attempt == max_retries or not _is_retryable(str(e))
+                log_fn = logger.warning if is_last_exec else logger.debug
+                log_fn(
                     "Intent execution failed (attempt %d/%d): %s",
                     attempts,
                     max_retries + 1,
@@ -368,7 +373,6 @@ class IntentExecutionService:
                         intent_type, intent_params, last_error, attempt, max_retries, True, effective_chain, tool_name
                     )
                     break
-                is_last_exec = attempt == max_retries
                 self._fire_sadflow(
                     intent_type,
                     intent_params,
@@ -411,7 +415,9 @@ class IntentExecutionService:
 
             # Execution failed
             last_error = exec_resp.error or "Unknown execution error"
-            logger.warning(
+            is_final_attempt = attempt == max_retries or not _is_retryable(last_error) or bool(exec_resp.tx_hashes)
+            log_fn = logger.warning if is_final_attempt else logger.debug
+            log_fn(
                 "Intent execution failed (attempt %d/%d): %s",
                 attempts,
                 max_retries + 1,
