@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 from ..alerting.alert_manager import AlertManager
 from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 from ..data.interfaces import BalanceProvider, PriceOracle
+from ..execution.circuit_breaker import CircuitBreaker
 from ..execution.enso_state_provider import EnsoStateProvider
 from ..execution.interfaces import TransactionReceipt as FullTransactionReceipt
 from ..execution.multichain import (
@@ -321,7 +322,9 @@ class IterationStatus(StrEnum):
     COMPILATION_FAILED = "COMPILATION_FAILED"
     EXECUTION_FAILED = "EXECUTION_FAILED"
     STRATEGY_ERROR = "STRATEGY_ERROR"
+    STRATEGY_TIMEOUT = "STRATEGY_TIMEOUT"  # strategy.decide() exceeded timeout
     DATA_ERROR = "DATA_ERROR"
+    CIRCUIT_BREAKER_OPEN = "CIRCUIT_BREAKER_OPEN"  # Execution blocked by circuit breaker
 
 
 @dataclass
@@ -467,6 +470,7 @@ class RunnerConfig:
     initial_retry_delay: float = 1.0
     max_retry_delay: float = 60.0
     lifecycle_poll_interval: float = 2.0
+    decide_timeout_seconds: float = 60.0
 
 
 # =============================================================================
@@ -561,6 +565,7 @@ class StrategyRunner:
         config: RunnerConfig | None = None,
         session_store: ExecutionSessionStore | None = None,
         vault_lifecycle: "VaultLifecycleManager | None" = None,
+        circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         """Initialize the StrategyRunner.
 
@@ -575,6 +580,9 @@ class StrategyRunner:
             config: Optional runner configuration
             session_store: Optional ExecutionSessionStore for crash recovery
             vault_lifecycle: Optional VaultLifecycleManager for vault-wrapped strategies
+            circuit_breaker: Optional circuit breaker for execution safety.
+                When provided, blocks execution after consecutive failures or
+                cumulative loss thresholds are exceeded.
         """
         self.price_oracle = price_oracle
         self.balance_provider = balance_provider
@@ -584,6 +592,12 @@ class StrategyRunner:
         self.config = config or RunnerConfig()
         self._session_store = session_store
         self._vault_lifecycle = vault_lifecycle
+        self._circuit_breaker = circuit_breaker
+
+        # Stuck detection and operator card generation (lazy-initialized on first failure)
+        self._stuck_detector: Any | None = None
+        self._operator_card_generator: Any | None = None
+        self._failure_state_entered_at: datetime | None = None
 
         # Detect if we're in multi-chain mode
         self._is_multi_chain = isinstance(execution_orchestrator, MultiChainOrchestrator)
@@ -898,7 +912,42 @@ class StrategyRunner:
             # Strategy resumed: clear pause log marker.
             self._logged_paused_strategy_ids.discard(strategy_id)
 
-            # Step 0: Check for stuck execution that needs resumption (multi-chain only)
+            # Step 0a: Check for teardown early — needed to gate circuit breaker
+            # Called once here and reused at Step 0.5 to avoid double-invocation
+            # (acknowledge_teardown_request has side effects).
+            teardown_mode = self._check_teardown_requested(strategy)
+
+            # Step 0b: Circuit breaker check — block execution if breaker is OPEN/PAUSED
+            # Skip when a teardown is pending — teardown must always be allowed to run
+            # so operators can safely close positions even after consecutive failures.
+            if self._circuit_breaker is not None and teardown_mode is None:
+                cb_result = self._circuit_breaker.check()
+                if not cb_result.can_execute:
+                    logger.warning(
+                        "Circuit breaker blocking execution for %s: %s (state=%s, failures=%d)",
+                        strategy_id,
+                        cb_result.reason,
+                        cb_result.state.value,
+                        cb_result.consecutive_failures,
+                    )
+                    cb_state_label = cb_result.state.value  # "open" or "paused"
+                    add_event(
+                        TimelineEvent(
+                            timestamp=datetime.now(UTC),
+                            event_type=TimelineEventType.STRATEGY_STUCK,
+                            description=f"Circuit breaker {cb_state_label}: {cb_result.reason}",
+                            strategy_id=strategy_id,
+                            details=cb_result.to_dict(),
+                        )
+                    )
+                    return IterationResult(
+                        status=IterationStatus.CIRCUIT_BREAKER_OPEN,
+                        error=cb_result.reason,
+                        strategy_id=strategy_id,
+                        duration_ms=self._calculate_duration_ms(start_time),
+                    )
+
+            # Step 0c: Check for stuck execution that needs resumption (multi-chain only)
             # This MUST happen before decide() to prevent lost progress when state changes
             if self._is_multi_chain:
                 stuck_result = await self._check_and_resume_stuck_execution(
@@ -908,9 +957,8 @@ class StrategyRunner:
                 if stuck_result is not None:
                     return stuck_result
 
-            # Step 0.5: Check for teardown request (stack-level, not strategy-specific)
+            # Step 0.5: Check for teardown request (reuses result from Step 0a)
             # If teardown is requested, intercept the iteration and generate teardown intents
-            teardown_mode = self._check_teardown_requested(strategy)
             if teardown_mode is not None:
                 from ..teardown import get_teardown_state_manager
 
@@ -1157,11 +1205,40 @@ class StrategyRunner:
                     start_time,
                 )
 
-            # Step 2: Get strategy decision
+            # Step 2: Get strategy decision (with timeout protection)
             try:
-                decide_result = strategy.decide(market)
+                timeout = self.config.decide_timeout_seconds
+                if timeout and timeout > 0:
+                    decide_result = await asyncio.wait_for(
+                        asyncio.get_running_loop().run_in_executor(None, strategy.decide, market),
+                        timeout=timeout,
+                    )
+                else:
+                    decide_result = strategy.decide(market)
+            except TimeoutError:
+                timeout_msg = f"strategy.decide() timed out after {self.config.decide_timeout_seconds}s"
+                logger.error(f"{strategy_id}: {timeout_msg}")
+                add_event(
+                    TimelineEvent(
+                        timestamp=datetime.now(UTC),
+                        event_type=TimelineEventType.STRATEGY_STUCK,
+                        description=timeout_msg,
+                        strategy_id=strategy_id,
+                        details={"timeout_seconds": self.config.decide_timeout_seconds},
+                    )
+                )
+                if self._circuit_breaker is not None:
+                    self._circuit_breaker.record_failure(timeout_msg)
+                return self._create_error_result(
+                    strategy_id,
+                    IterationStatus.STRATEGY_TIMEOUT,
+                    timeout_msg,
+                    start_time,
+                )
             except Exception as e:
                 logger.error(f"Strategy decision failed: {e}")
+                if self._circuit_breaker is not None:
+                    self._circuit_breaker.record_failure(f"decide() error: {e}")
                 return self._create_error_result(
                     strategy_id,
                     IterationStatus.STRATEGY_ERROR,
@@ -1451,9 +1528,35 @@ class StrategyRunner:
                     except Exception as e:
                         logger.error(f"Iteration callback error: {e}")
 
-                # Handle consecutive errors
-                if not result.success:
+                # Record outcome in circuit breaker (skip statuses managed elsewhere)
+                # HOLD/DRY_RUN are neutral — they don't prove execution works (would
+                # prematurely close a HALF_OPEN breaker), so only SUCCESS resets it.
+                if self._circuit_breaker is not None and result.status not in (
+                    IterationStatus.CIRCUIT_BREAKER_OPEN,
+                    IterationStatus.TEARDOWN,
+                ):
+                    if result.status == IterationStatus.SUCCESS:
+                        self._circuit_breaker.record_success()
+                        self._failure_state_entered_at = None
+                    elif result.status not in (
+                        IterationStatus.HOLD,
+                        IterationStatus.DRY_RUN,
+                        IterationStatus.STRATEGY_ERROR,
+                        IterationStatus.STRATEGY_TIMEOUT,
+                    ):
+                        self._circuit_breaker.record_failure(result.error or "unknown error")
+
+                # Handle consecutive errors (skip breaker-managed and teardown iterations)
+                if not result.success and result.status not in (
+                    IterationStatus.CIRCUIT_BREAKER_OPEN,
+                    IterationStatus.TEARDOWN,
+                ):
                     self._consecutive_errors += 1
+                    # Track when failure state began for stuck detection
+                    if self._failure_state_entered_at is None:
+                        self._failure_state_entered_at = datetime.now(UTC)
+                    # Run stuck detection and generate operator card
+                    await self._detect_stuck_and_alert(strategy, result)
                     if self._consecutive_errors >= self.config.max_consecutive_errors:
                         await self._alert_consecutive_errors(strategy, result)
                         self._lifecycle_write_state(
@@ -1461,6 +1564,7 @@ class StrategyRunner:
                         )
                 else:
                     self._consecutive_errors = 0
+                    self._failure_state_entered_at = None
 
                 # Send heartbeat to gateway after each iteration
                 self._gateway_heartbeat(strategy_id)
@@ -3188,6 +3292,84 @@ class StrategyRunner:
         """Calculate duration in milliseconds since start_time."""
         elapsed = datetime.now(UTC) - start_time
         return elapsed.total_seconds() * 1000
+
+    async def _detect_stuck_and_alert(self, strategy: StrategyProtocol, result: IterationResult) -> None:
+        """Run stuck detection on a failed iteration and generate an OperatorCard if stuck.
+
+        Lazy-initializes StuckDetector and OperatorCardGenerator on first call to
+        avoid import overhead on every iteration.
+
+        Args:
+            strategy: The strategy that failed
+            result: The failed iteration result
+        """
+        try:
+            # Lazy import and init to avoid overhead on the happy path
+            if self._stuck_detector is None:
+                from ..services.stuck_detector import StuckDetector
+
+                self._stuck_detector = StuckDetector(emit_events=True)
+
+            if self._operator_card_generator is None:
+                from ..services.operator_card_generator import OperatorCardGenerator
+
+                self._operator_card_generator = OperatorCardGenerator()
+
+            from ..services.stuck_detector import StrategySnapshot
+
+            # Build a lightweight snapshot from available runner state
+            state_entered_at = self._failure_state_entered_at or datetime.now(UTC)
+            snapshot = StrategySnapshot(
+                strategy_id=strategy.strategy_id,
+                chain=getattr(strategy, "chain", "unknown"),
+                current_state=result.status.value,
+                state_entered_at=state_entered_at,
+                pending_transactions=[],
+                circuit_breaker_triggered=(
+                    self._circuit_breaker is not None and self._circuit_breaker.state.value != "closed"
+                ),
+            )
+
+            detection = self._stuck_detector.detect_stuck(snapshot)
+            if not detection.is_stuck:
+                return
+
+            logger.warning(
+                "StuckDetector: %s is stuck (reason=%s, duration=%.0fs)",
+                strategy.strategy_id,
+                detection.reason.value if detection.reason else "unknown",
+                detection.time_in_state_seconds,
+            )
+
+            # Generate OperatorCard
+            from ..services.operator_card_generator import ErrorContext, StrategyState
+
+            strategy_state = StrategyState(
+                strategy_id=strategy.strategy_id,
+                status="stuck",
+                total_value_usd=Decimal("0"),
+                available_balance_usd=Decimal("0"),
+                stuck_since=state_entered_at,
+            )
+            error_context = ErrorContext(
+                error_type=result.status.value,
+                error_message=result.error or "unknown",
+            )
+            card = self._operator_card_generator.generate_card(
+                strategy_state=strategy_state,
+                error_context=error_context,
+            )
+
+            # Route card to AlertManager
+            if self.alert_manager is not None:
+                try:
+                    await self.alert_manager.send_alert(card)
+                except Exception as alert_err:
+                    logger.debug("Failed to send stuck alert (non-fatal): %s", alert_err)
+
+        except Exception as e:
+            # Stuck detection is non-fatal — never block the runner
+            logger.debug("Stuck detection failed (non-fatal): %s", e)
 
     def _emit_iteration_summary(self, result: IterationResult, chain: str | None = None) -> None:
         """Emit a structured iteration_summary log record for JSONL analysis.
