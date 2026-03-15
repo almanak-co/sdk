@@ -1,11 +1,11 @@
 {
     "supply_token": "USDC",
-    "supply_amount": "100",
+    "supply_amount": "40",
     "market": "usdc",
     "price_supply_above": 2000,
     "price_withdraw_below": 1500,
     "chain": "base",
-    "network": "mainnet",
+    "network": "anvil",
     "anvil_funding": {
         "ETH": 100,
         "USDC": 10000
