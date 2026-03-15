@@ -1,9 +1,19 @@
 # E2E Strategy Test Report: enso_uniswap_arbitrage (Anvil)
 
-**Date:** 2026-03-06 06:21
+**Date:** 2026-03-15 17:52
 **Result:** PASS
 **Mode:** Anvil
-**Duration:** ~2 minutes
+**Duration:** ~3 minutes
+
+---
+
+> **[2026-03-15 update]** Re-run for kitchen loop iter-81. PASS again. New finding: Uniswap V3
+> receipt parser falls back to 18 decimals for USDC on Base, causing `0.0000 token1` in log
+> output (display/data quality bug). See Suspicious Behaviour section.
+
+---
+
+**[Previous run: 2026-03-06 06:21 — PASS]**
 
 ## Configuration
 
@@ -18,9 +28,11 @@
 | Mode | buy_enso_sell_uniswap |
 | Config Changes | None (trade_size_usd was already $0.40) |
 
-**Note:** The strategy lives at `strategies/incubating/enso_uniswap_arbitrage/` (not `demo/`). The prompt referenced `strategies/demo/enso_uniswap_arbitrage` which does not exist in this worktree. The ALCHEMY_API_KEY is not set in `.env`; the framework fell back to the free public RPC (`base-rpc.publicnode.com`).
+**Note:** The strategy lives at `strategies/incubating/enso_uniswap_arbitrage/` (not `demo/`). The prompt referenced `strategies/demo/enso_uniswap_arbitrage` which does not exist in this worktree.
 
-**Previous run (2026-03-05):** FAIL - `amount="all"` chaining was broken because Enso receipt parser lacked `extract_swap_amounts()`. This run confirms that bug has been fixed.
+**Config changes:** None. `trade_size_usd = "0.4"` is well under the $1000 budget cap. No `force_action` field exists — `decide()` always executes the arbitrage unconditionally.
+
+**Previous run (2026-03-05):** FAIL - `amount="all"` chaining was broken because Enso receipt parser lacked `extract_swap_amounts()`. Fixed by 2026-03-06.
 
 ## Execution
 
@@ -74,27 +86,46 @@ Status: SUCCESS | Intent: SWAP | Gas used: 160168 | Duration: 98144ms
 Iteration completed successfully.
 ```
 
-## Suspicious Behaviour
+## Suspicious Behaviour (2026-03-15 run)
 
 | # | Source | Severity | Pattern | Log Line |
 |---|--------|----------|---------|----------|
-| 1 | strategy | WARNING | Placeholder prices (fired twice, once per intent) | `IntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT. This is only acceptable for unit tests.` |
-| 2 | strategy | WARNING | Insecure gateway mode | `INSECURE MODE: Auth interceptor disabled - no auth_token configured. This is acceptable for local development on 'anvil'.` |
-| 3 | strategy | INFO | No Alchemy key, using public RPC | `No API key configured -- using free public RPC for base (rate limits may apply)` |
-| 4 | strategy | INFO | No CoinGecko key, using on-chain fallback | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback.` |
-| 5 | strategy | WARNING | Unrelated strategy import failure | `Failed to import strategy strategies.incubating.pendle_pt_swap_arbitrum.strategy (retry failed): cannot import name 'IntentStrategy' from partially initialized module 'almanak' (most likely due to a circular import)` |
+| 1 | strategy | WARNING | Insecure gateway mode (expected for Anvil) | `INSECURE MODE: Auth interceptor disabled - no auth_token configured. This is acceptable for local development on 'anvil'.` |
+| 2 | strategy | WARNING | Uniswap V3 receipt parser: zero amount_out display for USDC | `Parsed Uniswap V3 swap: 0.0002 token0 -> 0.0000 token1, slippage=N/A, tx=0x56b3...9aac` |
 
 **Notes on findings:**
-- Finding #1 (Placeholder prices): The IntentCompiler used placeholder prices because no live price feed was available in Anvil mode. Slippage protection may not function precisely. This is a known Anvil limitation but worth tracking since it affects risk controls.
-- Finding #2 (Insecure mode): Expected and safe for Anvil.
-- Finding #3 & #4 (No API keys): Non-blocking; strategy executed successfully using public RPC and on-chain pricing fallback.
-- Finding #5 (Pendle circular import): Bug in `strategies/incubating/pendle_pt_swap_arbitrum/strategy.py` - unrelated to the tested strategy but indicates a broken incubating strategy that should be fixed.
+- Finding #1 (Insecure mode): Expected and safe for Anvil local testing.
+- Finding #2 (Zero amount_out in receipt parser): Root cause confirmed in
+  `almanak/framework/connectors/uniswap_v3/receipt_parser.py` lines 413-417. When token decimals
+  are unresolved at parse time, the parser falls back to 18 decimals. USDC has 6 decimals. With
+  18-decimal fallback, the raw USDC amount (~401,000 microUSDC = 401000) is divided by 10^18
+  yielding ~4e-13, which displays as `0.0000` with `:.4f`. The on-chain swap itself executed
+  correctly (compiler showed "0.0002 WETH -> 0.4010 USDC"), but `SwapAmounts.amount_out_decimal`
+  in the enriched result would carry the wrong value. This is a data quality bug affecting any
+  code that consumes `result.swap_amounts.amount_out` downstream (e.g., PnL tracking, teardown
+  valuation).
+
+**CoinGecko fallback (INFO):** `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback.` Non-blocking. Prices resolved correctly (USDC: $0.9999, WETH: $2097, all 4 sources).
 
 ## Result
 
-**PASS** - The `enso_uniswap_arbitrage` strategy completed the full two-step cross-protocol arbitrage sequence. Both intents in the `Intent.sequence()` executed: (1) USDC->WETH via Enso (2 TXs confirmed), (2) WETH->USDC via Uniswap V3 using `amount="all"` chaining (2 TXs confirmed). The `amount="all"` chaining that failed in the previous run (2026-03-05) now works correctly - the Enso receipt enrichment is properly passing the output amount to the next step.
+**PASS** — Both legs of the Enso-Uniswap arbitrage sequence executed on-chain against the Base
+Anvil fork. All 4 transactions confirmed. The `amount="all"` chaining resolved correctly to
+`0.000191778881417066 WETH`. One data quality bug identified: Uniswap V3 receipt parser falls
+back to 18 decimals for USDC on Base (should be 6), producing `0.0000` for `amount_out_decimal`
+in the enriched `SwapAmounts` result.
 
 ---
 
-SUSPICIOUS_BEHAVIOUR_COUNT: 5
+### Previous Run Suspicious Behaviour (2026-03-06)
+
+| # | Source | Severity | Pattern | Log Line |
+|---|--------|----------|---------|----------|
+| 1 | strategy | WARNING | Placeholder prices | `IntentCompiler using PLACEHOLDER PRICES. Slippage calculations will be INCORRECT.` |
+| 2 | strategy | WARNING | Insecure gateway mode | `INSECURE MODE: Auth interceptor disabled...` |
+| 3 | strategy | INFO | No Alchemy key, using public RPC | `No API key configured -- using free public RPC for base (rate limits may apply)` |
+| 4 | strategy | INFO | No CoinGecko key | `No CoinGecko API key -- using on-chain pricing...` |
+| 5 | strategy | WARNING | Unrelated strategy import failure | `Failed to import strategy strategies.incubating.pendle_pt_swap_arbitrum.strategy...` |
+
+SUSPICIOUS_BEHAVIOUR_COUNT: 2
 SUSPICIOUS_BEHAVIOUR_ERRORS: 0

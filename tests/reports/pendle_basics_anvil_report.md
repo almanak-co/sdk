@@ -21,7 +21,9 @@
 | 2026-02-27 09:41 | FAIL | Same root cause (ratio=4,928,224x) |
 | 2026-02-27 05:33 | PASS | Aggregator accepted corrupt Chainlink before divergence guard was tightened |
 
-**Latest run note (2026-03-06 05:39)**: PASS. Second consecutive clean pass.
+**Latest run note (2026-03-15 18:34)**: PASS. Clean pass. wstETH/USD priced via Chainlink ($2,594.78) + on-chain derivation (confidence=0.65, 2/4 sources). CoinGecko free tier rate-limited 4 times (backoffs 1s/2s/4s/8s). Post-swap PT-wstETH price lookup failed across all 4 sources (Chainlink, Binance, DexScreener, CoinGecko) -- expected for Pendle derivative tokens with no oracle coverage. TX1 (approve): `0xc04b948b3ab5e97cf539cc6280542c4286bcabf080ccf896a7471241f8383ed5` -- 51,287 gas. TX2 (swap): `0xfa811c867c811e5faa929d3ef0e4bf081c31ac7b64c97ee27902d6448b7d597a` -- 297,940 gas. Total: 349,227 gas. Duration: 36,287ms.
+
+**Prior run note (2026-03-06 05:39)**: PASS. Second consecutive clean pass.
 Chainlink WSTETH/USD returned $2,556.50 (WSTETH/ETH ratio 1.2276 x ETH/USD $2,082.51, confidence=0.81).
 CoinGecko free tier was rate-limited (3x, backoffs 1s/2s/4s) so the aggregator used only 1/2 sources
 (confidence=0.57). Despite reduced confidence, the on-chain Chainlink price was valid and the swap
@@ -129,9 +131,10 @@ total gas confirmed on-chain. The Chainlink wstETH oracle returned a correct pri
 
 ---
 
-SUSPICIOUS_BEHAVIOUR_COUNT: 5
-SUSPICIOUS_BEHAVIOUR_ERRORS: 2
+SUSPICIOUS_BEHAVIOUR_COUNT: 2
+SUSPICIOUS_BEHAVIOUR_ERRORS: 1
 
+<!-- Run: 2026-03-15 18:34 | wstETH price: $2,593.27 | TX1: 0xc04b948b...3ed5 | TX2: 0xfa811c86...597a | Gas: 349,227 | PASS -->
 <!-- Run: 2026-03-06 05:39 | wstETH price: $2,556.50 | TX1: 0xbb27fc75...b81e | TX2: 0x7b3e0562...78c7 | Gas: 350,024 | PASS -->
 <!-- Run: 2026-03-05 14:07 | wstETH price: $2,604.38 | TX1: 0x3839fdb3...caa4 | TX2: 0x9dc8d581...cd52 | Gas: 350,009 | PASS -->
 <!-- Prior run: 2026-03-05 02:38 | Chainlink corrupt price: $12,284,513,449 | Divergence guard triggered (CoinGecko available, ratio=4,716,704x) | FAIL | VIB-297 -->

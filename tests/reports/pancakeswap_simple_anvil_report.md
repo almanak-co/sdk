@@ -1,9 +1,9 @@
 # E2E Strategy Test Report: pancakeswap_simple (Anvil)
 
-**Date:** 2026-03-05 22:33
+**Date:** 2026-03-16 01:30
 **Result:** PASS
 **Mode:** Anvil
-**Duration:** ~4 minutes
+**Duration:** ~3 minutes
 
 ## Configuration
 
@@ -11,33 +11,30 @@
 |-------|-------|
 | Strategy | demo_pancakeswap_simple |
 | Chain | arbitrum |
-| Network | Anvil fork (managed, public RPC: publicnode.com) |
-| Anvil Port | 60741 (auto-assigned by managed gateway) |
-| swap_amount_usd | $10 (within $50 budget cap) |
+| Network | Anvil fork (managed, Alchemy RPC) |
+| Anvil Port | 55766 (auto-assigned by managed gateway) |
+| swap_amount_usd | $10 (within $1000 budget cap) |
 | from_token | WETH |
 | to_token | USDC |
 | max_slippage | 1.00% |
 
-**Config changes made:** None. `swap_amount_usd` was $10, within the $50 budget cap. The strategy
-always executes a swap unconditionally (no `force_action` field supported or needed).
-
-**Note on Alchemy key:** `ALCHEMY_API_KEY` was empty in `.env`. The CLI auto-selected a free public
-Arbitrum RPC. Pricing used on-chain Chainlink oracles as primary source with free CoinGecko as fallback.
+**Config changes made:** None. `swap_amount_usd` was already $10, well within the $1000 budget cap.
+The strategy always executes a swap unconditionally (no `force_action` field supported or needed).
 
 ## Execution
 
 ### Setup
-- [x] Anvil fork auto-started by managed gateway (port 60741, chain_id=42161, block 438736486, public RPC)
-- [x] Gateway started on port 50053 (insecure mode, anvil network, managed/embedded)
+- [x] Anvil fork auto-started by managed gateway (port 55766, chain_id=42161, block 442133488, Alchemy RPC)
+- [x] Gateway started on port 50052 (insecure mode, anvil network, managed/embedded)
 - [x] Wallet auto-funded by managed gateway via `anvil_funding` config: 100 ETH, 10 WETH (slot 51), 10,000 USDC (slot 9)
-- [x] Pricing: on-chain Chainlink (primary) + free CoinGecko (fallback)
+- [x] Pricing: 4-source aggregation (Chainlink + Binance + DexScreener + CoinGecko), all 4 sources active
 
 ### Strategy Run
 - [x] Strategy executed with `uv run almanak strat run -d strategies/demo/pancakeswap_simple --network anvil --once`
-- [x] Prices fetched: WETH=$2080.15, USDC=$1.00 (on-chain Chainlink; CoinGecko rate-limited for USDC, fallback used)
-- [x] Balance confirmed: 10 WETH ($20,801.50)
+- [x] Prices fetched: WETH=$2108.52, USDC=$0.999983 (confidence: 1.00, sources: 4/4, outliers: 0)
+- [x] Balance confirmed: 10 WETH ($21,085.20)
 - [x] SWAP intent returned: $10.00 WETH -> USDC via pancakeswap_v3 (1.00% slippage)
-- [x] Intent compiled: 0.0048 WETH -> 9.9700 USDC (min: 9.8703 USDC), 2 TXs, gas estimate 280,000
+- [x] Intent compiled: 0.0047 WETH -> 9.9702 USDC (min: 9.8705 USDC), 2 TXs, gas estimate 280,000
 - [x] Simulation: successful via LocalSimulator / eth_estimateGas (total gas 353,800)
 - [x] Receipt parsed: PancakeSwap V3 swap detected (swaps=1)
 - [x] Result enriched with swap_amounts
@@ -46,57 +43,55 @@ Arbitrum RPC. Pricing used on-chain Chainlink oracles as primary source with fre
 
 | TX # | Hash | Block | Gas Used | Status |
 |------|------|-------|----------|--------|
-| 1 (Approve) | `0x51ee32a3969c757f148dd4305b4dc0eb5efffdd21a3ae068cd48528d1d91f8fd` | 438736489 | 53,452 | SUCCESS |
-| 2 (Swap) | `0x45b0709813da7e316658d7773f65c324b983419b9638466efdda2797903f5976` | 438736490 | 173,227 | SUCCESS |
+| 1 (Approve) | `0xc84bf0fe47b9c3adbac6ba254c0e78691f1809663ce8468c6af7f5dde1b39f61` | 442133491 | 53,452 | SUCCESS |
+| 2 (Swap) | `0xc53715ab5280f544b7732c20db7f4690997eaa1c99732f87d983b4140d466461` | 442133492 | 173,207 | SUCCESS |
 
-**Total gas used:** 226,679 | Duration: 27,776ms
+**Total gas used:** 226,659 | Duration: 28,479ms
 
 ### Key Log Output
 
 ```text
-Aggregated price for WETH/USD: 2080.149799625 (confidence: 1.00, sources: 2/2, outliers: 0)
-Rate limited by CoinGecko for USDC/USD, backoff: 1.00s
-Aggregated price for USDC/USD: 1.00 (confidence: 0.90, sources: 1/2, outliers: 0)
-Prices: WETH=$2080.15, USDC=$1.000000
-Balance: 10 WETH ($20801.50)
+Aggregated price for WETH/USD: 2108.52 (confidence: 1.00, sources: 4/4, outliers: 0)
+Aggregated price for USDC/USD: 0.9999825 (confidence: 1.00, sources: 4/4, outliers: 0)
+Prices: WETH=$2108.52, USDC=$0.999982
+Balance: 10 WETH ($21085.20)
 Swapping $10 WETH -> USDC via PancakeSwap V3
 intent: SWAP: $10.00 WETH -> USDC (slippage: 1.00%) via pancakeswap_v3
-Compiled SWAP: 0.0048 WETH -> 9.9700 USDC (min: 9.8703 USDC) | Slippage: 1.00% | Txs: 2 | Gas: 280,000
+Compiled SWAP: 0.0047 WETH -> 9.9702 USDC (min: 9.8705 USDC) | Slippage: 1.00% | Txs: 2 | Gas: 280,000
 Simulation successful: 2 transaction(s), total gas: 353800
-TX 51ee32...f8fd confirmed block=438736489, gas=53452
-TX 45b070...5976 confirmed block=438736490, gas=173227
-EXECUTED: SWAP completed successfully | Txs: 2 | 226,679 gas
-Parsed PancakeSwap V3 receipt: tx=0x51ee32a3..., swaps=0
-Parsed PancakeSwap V3 receipt: tx=0x45b07098..., swaps=1
+TX c84bf0...9f61 confirmed block=442133491, gas=53452
+TX c53715...6461 confirmed block=442133492, gas=173207
+EXECUTED: SWAP completed successfully | Txs: 2 | 226,659 gas
+Parsed PancakeSwap V3 receipt: tx=0xc84bf0fe..., swaps=0
+Parsed PancakeSwap V3 receipt: tx=0xc53715ab..., swaps=1
 Enriched SWAP result with: swap_amounts (protocol=pancakeswap_v3, chain=arbitrum)
-Status: SUCCESS | Intent: SWAP | Gas used: 226679 | Duration: 27776ms
+Status: SUCCESS | Intent: SWAP | Gas used: 226659 | Duration: 28479ms
 ```
 
 ## Suspicious Behaviour
 
 | # | Source | Severity | Pattern | Log Line |
 |---|--------|----------|---------|----------|
-| 1 | strategy | WARNING | CoinGecko rate limit on USDC price (free tier) | `Rate limited by CoinGecko for USDC/USD, backoff: 1.00s` |
-| 2 | strategy | ERROR | Circular import in incubating strategy scan | `Failed to import strategy strategies.incubating.pendle_pt_swap_arbitrum.strategy: cannot import name 'IntentStrategy' from partially initialized module 'almanak'` |
+| 1 | strategy | WARNING | Insecure mode — expected for Anvil local dev | `INSECURE MODE: Auth interceptor disabled - no auth_token configured. This is acceptable for local development on 'anvil'.` |
+| 2 | strategy | INFO | No CoinGecko API key — Chainlink primary, CoinGecko fallback | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback.` |
 
 **Notes on findings:**
 
-- Item 1 (CoinGecko rate limit): Expected on the free tier with no API key. The aggregator correctly
-  fell back to on-chain pricing for USDC (confidence 0.90 with 1/2 sources). Price resolved correctly as $1.00.
-  Non-blocking and non-impactful for this test.
-- Item 2 (circular import): Pre-existing issue in `strategies/incubating/pendle_pt_swap_arbitrum/strategy.py`.
-  A circular import in `almanak/__init__.py` prevents this incubating strategy from being discovered.
-  This does not affect `pancakeswap_simple` execution but is a real ERROR-severity defect that should
-  be tracked separately.
-- No zero prices, no failed API fetches (only rate-limited with fallback), no token resolution failures,
-  no on-chain reverts, no NaN/None in numeric contexts.
+- Item 1 (Insecure mode): Fully expected for Anvil local dev. The gateway correctly identifies this as
+  acceptable and logs a warning. Non-blocking.
+- Item 2 (No CoinGecko key): CoinGecko is used as fallback only; primary pricing is Chainlink on-chain.
+  All 4 price sources (Chainlink + Binance + DexScreener + CoinGecko) aggregated with confidence 1.00
+  in this run, so the missing dedicated API key had no impact.
+- No zero prices, no failed API fetches, no reverts, no token resolution failures, no rate limiting,
+  no NaN/None in numeric contexts.
 
 ## Result
 
-**PASS** - The `pancakeswap_simple` strategy executed a WETH->USDC swap on PancakeSwap V3 on an Arbitrum Anvil
-fork. Both transactions (approve + swap) confirmed on-chain. ~0.0048 WETH swapped for ~9.97 USDC. Total gas:
-226,679. Receipt parsing and result enrichment succeeded cleanly. One pre-existing incubating strategy import
-error detected (pendle_pt_swap_arbitrum circular import).
+**PASS** - The `pancakeswap_simple` strategy executed a WETH->USDC swap on PancakeSwap V3 on an
+Arbitrum Anvil fork. Both transactions (approve + swap) confirmed on-chain. ~0.0047 WETH swapped
+for ~9.97 USDC. Total gas: 226,659. Receipt parsing and result enrichment succeeded cleanly.
+Pricing aggregation improved vs previous run: 4/4 sources active (vs 2/2 previously), no rate
+limiting observed.
 
 SUSPICIOUS_BEHAVIOUR_COUNT: 2
-SUSPICIOUS_BEHAVIOUR_ERRORS: 1
+SUSPICIOUS_BEHAVIOUR_ERRORS: 0

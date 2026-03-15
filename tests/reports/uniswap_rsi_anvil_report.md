@@ -1,5 +1,77 @@
 # E2E Strategy Test Report: uniswap_rsi (Anvil)
 
+**Date:** 2026-03-16 01:55
+**Result:** PASS (HOLD)
+**Mode:** Anvil
+**Duration:** ~3 minutes
+
+---
+
+## Run: 2026-03-16 (iter-81)
+
+### Configuration
+
+| Field | Value |
+|-------|-------|
+| Strategy | uniswap_rsi |
+| Chain | ethereum (default_chain) |
+| Network | Anvil fork (auto-managed) |
+| Anvil Port | 59902 (auto-assigned) |
+| trade_size_usd | $3 (well within $1000 cap — no change) |
+| rsi_period | 14 |
+| rsi_oversold | 40 |
+| rsi_overbought | 70 |
+
+### Config Changes Made
+
+None. `trade_size_usd` was already $3, well under $1000. The strategy has no `force_action` field. No modifications were needed.
+
+### Execution
+
+- [x] Anvil fork started (managed, port 59902, Ethereum mainnet fork at block 24664818)
+- [x] Gateway started on port 50052 (managed, embedded)
+- [x] Wallet funded automatically: 100 ETH, 1 WETH, 10,000 USDC
+- [x] Strategy executed: `--network anvil --once`
+- [x] Decision: **HOLD** (RSI=53.74 in neutral zone [40-70])
+- [x] No swap transaction submitted (RSI not at threshold — correct behaviour)
+- [x] Iteration completed in 1566ms, exit code 0
+
+### Key Log Output
+
+```text
+2026-03-15T18:55:06.025319Z [info] Aggregated price for WETH/USD: 2099.065 (confidence: 1.00, sources: 4/4)
+2026-03-15T18:55:06.213503Z [info] ohlcv_fetched provider=binance instrument=WETH/USD candles=34
+2026-03-15T18:55:06.537171Z [info] UniswapRSIStrategy HOLD: RSI=53.74 in neutral zone [40-70] (hold #1)
+Status: HOLD | Intent: HOLD | Duration: 1566ms
+Iteration completed successfully.
+```
+
+### On-Chain Transaction
+
+None. RSI=53.74 fell in the neutral zone; no swap was triggered. Expected behaviour.
+
+### Suspicious Behaviour
+
+| # | Source | Severity | Pattern | Log Line |
+|---|--------|----------|---------|----------|
+| 1 | gateway | INFO | No CoinGecko API key | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback.` |
+| 2 | gateway | WARNING | Insecure mode (expected for anvil) | `INSECURE MODE: Auth interceptor disabled - no auth_token configured. This is acceptable for local development on 'anvil'.` |
+
+No zero prices, no reverts, no token resolution failures, no API errors, no timeouts. All 4 price sources returned data (confidence: 1.00, sources: 4/4). Warning #2 is expected for Anvil local dev.
+
+### Result
+
+**PASS (HOLD)** - Strategy correctly computed RSI=53.74 from 34 Binance OHLCV candles, priced WETH at $2,099.07 (4-source aggregation, confidence 1.00), and returned HOLD (neutral zone). No transaction was submitted. Exit 0.
+
+---
+
+SUSPICIOUS_BEHAVIOUR_COUNT: 2
+SUSPICIOUS_BEHAVIOUR_ERRORS: 0
+
+---
+
+## Run: 2026-03-06 (prior run archived below)
+
 **Date:** 2026-03-06 06:08
 **Result:** PASS
 **Mode:** Anvil

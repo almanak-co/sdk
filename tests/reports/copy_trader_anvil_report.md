@@ -1,9 +1,9 @@
 # E2E Strategy Test Report: copy_trader (Anvil)
 
-**Date:** 2026-03-06 06:13
-**Result:** PASS
+**Date:** 2026-03-16 01:58
+**Result:** PASS (HOLD)
 **Mode:** Anvil
-**Duration:** ~4 minutes
+**Duration:** ~5 minutes
 
 ## Configuration
 
@@ -14,7 +14,7 @@
 | Strategy ID | demo_copy_trader |
 | Chain | arbitrum |
 | Network | Anvil fork (managed gateway) |
-| Managed Anvil Port | 64974 (auto-assigned) |
+| Managed Anvil Port | 60495 (auto-assigned) |
 | Gateway Port | 50052 (managed gateway) |
 | Wallet | 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 (Anvil default) |
 
@@ -36,8 +36,8 @@ is the expected outcome.
 ## Execution
 
 ### Setup
-- Anvil fork started (managed, port 53605, forked Arbitrum mainnet via public RPC: arb1.arbitrum.io/rpc)
-- Gateway started on port 50053 (managed gateway, insecure mode for Anvil)
+- Anvil fork started (managed, port 60495, forked Arbitrum mainnet via Alchemy)
+- Gateway auto-started on port 50052 (managed gateway, insecure mode for Anvil)
 - Wallet auto-funded: 100 ETH, 1 WETH, 10,000 USDC (via `anvil_funding` in config.json)
 
 ### Strategy Run
@@ -48,7 +48,7 @@ uv run almanak strat run -d strategies/incubating/copy_trader --network anvil --
 
 - Strategy initialized: CopyTraderStrategy, mode=live, submission_mode=auto, strict=False
 - 1 leader monitored: `0x489ee077994B6658eFaCA1507F1FBB620B9308aa` (wintermute, arbitrum)
-- WalletMonitor polled blocks 438746232-438746282 (50-block lookback window)
+- WalletMonitor polled blocks 442140231-442140281 (50-block lookback window)
 - Result: 0 copy signals detected in monitored range
 - Intent returned: HOLD -- "No new leader activity"
 - Exit code: 0
@@ -58,9 +58,9 @@ uv run almanak strat run -d strategies/incubating/copy_trader --network anvil --
 ```text
 CopyTraderStrategy initialized: mode=live, submission_mode=auto, strict=False
 Copy trading initialized: monitoring 1 leader(s) on arbitrum
-WalletMonitor polled blocks 438746232-438746282: 0 events
+WalletMonitor polled blocks 442140231-442140281: 0 events
 demo_copy_trader HOLD: No new leader activity
-Status: HOLD | Intent: HOLD | Duration: 14218ms
+Status: HOLD | Intent: HOLD | Duration: 4688ms
 Iteration completed successfully.
 ```
 
@@ -74,33 +74,27 @@ polls a historical window that may not contain leader activity.
 
 | # | Source | Severity | Pattern | Log Line |
 |---|--------|----------|---------|----------|
-| 1 | strategy | ERROR | Circular import in pendle_pt_swap_arbitrum strategy | `Failed to import strategy strategies.incubating.pendle_pt_swap_arbitrum.strategy: cannot import name 'IntentStrategy' from partially initialized module 'almanak'` |
-| 2 | gateway | ERROR | Metrics HTTP port 9090 already in use | `OSError: [Errno 48] Address already in use` (metrics server, pre-existing gateway held port) |
-| 3 | gateway | INFO | No CoinGecko API key, using Chainlink + free fallback | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback.` |
-| 4 | strategy | INFO | IntentCompiler using placeholder prices | `IntentCompiler initialized for chain=arbitrum ... using_placeholders=True` |
-| 5 | strategy | INFO | No Alchemy API key, using free public RPC | `No API key configured -- using free public RPC for arbitrum (rate limits may apply)` |
+| 1 | gateway | INFO | No CoinGecko API key, using Chainlink primary + free fallback | `No CoinGecko API key -- using on-chain pricing (Chainlink oracles) with free CoinGecko as fallback.` |
+| 2 | gateway | WARNING | Insecure mode (expected for Anvil) | `INSECURE MODE: Auth interceptor disabled - no auth_token configured. This is acceptable for local development on 'anvil'.` |
 
 **Notes:**
-- **Finding 1**: A circular import error surfaced in `pendle_pt_swap_arbitrum.strategy` during
-  strategy discovery. This is unrelated to copy_trader but is a real bug that should be
-  ticketed separately. Severity is ERROR because it silently prevents that strategy from loading.
-- **Finding 2**: Port 9090 collision occurred because a pre-existing standalone gateway from the
-  test setup was still holding the metrics port. The strategy's auto-managed gateway started
-  cleanly on port 50053 instead. Non-blocking to this test, but indicates test isolation
-  needs improvement when running manual gateway alongside auto-managed gateway.
-- **Findings 3-5**: Informational only. Expected for Anvil testing without API keys configured.
-  No pricing was actually needed since the strategy returned HOLD without any intent compilation.
+- **Finding 1**: Informational only. Chainlink on-chain pricing is the correct primary oracle for
+  Anvil testing. No pricing was actually needed since the strategy returned HOLD.
+- **Finding 2**: Expected warning in insecure/local mode. Correct behavior for Anvil testing.
+  No auth token is the right configuration for local development.
+- No zero prices, no API fetch failures, no token resolution errors, no reverts, no timeouts,
+  no circular imports, no port collisions (clean test environment this run).
 
 ## Result
 
-**PASS** -- The copy_trader strategy initialized cleanly, started a WalletMonitor for the
-Wintermute leader on Arbitrum, found no copy signals in the 50-block lookback window (blocks
-438746232-438746282), and correctly returned HOLD in 14,218ms. No on-chain transaction was
-submitted. Two ERROR-class findings were detected: a pre-existing circular import bug in
-`pendle_pt_swap_arbitrum` (unrelated to copy_trader) and a metrics port collision from the test
-setup. Neither blocked the copy_trader run.
+**PASS (HOLD)** -- The copy_trader strategy initialized cleanly on iter-81, auto-started a managed
+gateway with Anvil fork, started a WalletMonitor for the Wintermute leader on Arbitrum, found no
+copy signals in the 50-block lookback window (blocks 442140231-442140281), and correctly returned
+HOLD in 4,688ms. All infrastructure components (WalletMonitor, CopyPolicyEngine, CopySizer,
+CircuitBreaker, CopyLedger) initialized without errors. No on-chain transaction was submitted.
+Log scan was clean with only two expected informational/warning entries.
 
 ---
 
-SUSPICIOUS_BEHAVIOUR_COUNT: 5
-SUSPICIOUS_BEHAVIOUR_ERRORS: 2
+SUSPICIOUS_BEHAVIOUR_COUNT: 2
+SUSPICIOUS_BEHAVIOUR_ERRORS: 0
