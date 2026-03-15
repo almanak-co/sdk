@@ -1156,7 +1156,15 @@ def run(
                 if ext_chain not in anvil_chains:
                     anvil_chains.append(ext_chain)
 
-            if not anvil_chains:
+            # Solana uses solana-test-validator (not Anvil); filter it out so
+            # ManagedGateway doesn't try to start a RollingForkManager for it.
+            # The Solana fork is started separately below in the runner setup.
+            NON_EVM_CHAINS = {"solana"}
+            evm_anvil_chains = [c for c in anvil_chains if c.lower() not in NON_EVM_CHAINS]
+            solana_anvil = any(c.lower() in NON_EVM_CHAINS for c in anvil_chains)
+            anvil_chains = evm_anvil_chains
+
+            if not anvil_chains and not solana_anvil:
                 click.echo(
                     "Warning: --network anvil specified but no chain found in config or decorator. "
                     "Gateway will start without Anvil forks."
