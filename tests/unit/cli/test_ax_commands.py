@@ -287,6 +287,41 @@ class TestAxTools:
         assert result.exit_code == 0
         assert "--category" in result.output
 
+    def test_tools_describe_supply_lending(self):
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "tools", "--describe", "supply_lending"])
+        assert result.exit_code == 0
+        assert "supply_lending" in result.output
+        assert "Required:" in result.output
+        assert "token" in result.output
+        assert "amount" in result.output
+        assert "Optional:" in result.output
+        assert "protocol" in result.output
+
+    def test_tools_describe_shows_defaults(self):
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "tools", "--describe", "swap_tokens"])
+        assert result.exit_code == 0
+        assert "default:" in result.output
+        assert "slippage_bps" in result.output
+
+    def test_tools_describe_unknown_tool(self):
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "tools", "--describe", "nonexistent_tool"])
+        assert result.exit_code != 0
+        assert "Unknown tool" in result.output
+
+    def test_tools_describe_json_mode(self):
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--json", "tools", "--describe", "get_price"])
+        assert result.exit_code == 0
+        import json
+
+        data = json.loads(result.output)
+        assert "properties" in data
+        assert "_meta" in data
+        assert data["_meta"]["name"] == "get_price"
+
 
 class TestAxRun:
     @patch("almanak.framework.cli.ax._get_executor")

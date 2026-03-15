@@ -918,22 +918,54 @@ def unwrap(ctx, token, amount):
     default=None,
     help="Filter tools by category.",
 )
+@click.option(
+    "--describe",
+    default=None,
+    metavar="TOOL_NAME",
+    help="Show full argument schema for a specific tool.",
+)
 @click.pass_context
-def tools_list(ctx, category):
+def tools_list(ctx, category, describe):
     """List all available tools in the catalog.
 
     \b
     Examples:
-        almanak ax tools                    # List all tools
-        almanak ax tools --category action  # Only action tools
-        almanak ax tools --json             # JSON output
+        almanak ax tools                            # List all tools
+        almanak ax tools --category action          # Only action tools
+        almanak ax tools --describe supply_lending   # Show argument schema
+        almanak ax tools --json                     # JSON output
     """
     import json as json_mod
 
     from almanak.framework.agent_tools.catalog import ToolCategory, get_default_catalog
+    from almanak.framework.cli.ax_render import render_error
 
     json_output = ctx.obj["json_output"]
     catalog = get_default_catalog()
+
+    # --describe: show full schema for a specific tool
+    if describe:
+        tool_def = catalog.get(describe)
+        if tool_def is None:
+            available = [t.name for t in catalog.list_tools()]
+            render_error(
+                f"Unknown tool: '{describe}'. Available: {', '.join(available)}",
+                json_output=json_output,
+            )
+            sys.exit(1)
+
+        if json_output:
+            schema = tool_def.input_json_schema()
+            schema["_meta"] = {
+                "name": tool_def.name,
+                "category": tool_def.category.value,
+                "risk_tier": tool_def.risk_tier.value,
+                "description": tool_def.description,
+            }
+            click.echo(json_mod.dumps(schema, indent=2))
+        else:
+            _render_tool_schema(tool_def)
+        return
 
     cat_filter = ToolCategory(category) if category else None
     tool_defs = catalog.list_tools(category=cat_filter)
@@ -954,9 +986,117 @@ def tools_list(ctx, category):
         click.echo("-" * 60)
         for t in tool_defs:
             risk = t.risk_tier.value.upper()
-            risk_color = {"NONE": "green", "LOW": "blue", "MEDIUM": "yellow", "HIGH": "red"}.get(risk, "white")
+            risk_color = _RISK_COLORS.get(risk, "white")
             click.echo(f"  {t.name:<30} [{click.style(risk, fg=risk_color)}] {t.description}")
         click.echo()
+
+
+_RISK_COLORS = {"NONE": "green", "LOW": "blue", "MEDIUM": "yellow", "HIGH": "red"}
+
+
+def _render_tool_schema(tool_def) -> None:
+    """Render a tool's argument schema in human-readable format."""
+    risk = tool_def.risk_tier.value.upper()
+    risk_color = _RISK_COLORS.get(risk, "white")
+    category = tool_def.category.value.upper()
+
+    click.echo()
+    click.echo(f"  {click.style(tool_def.name, bold=True)} ({category}, {click.style(risk, fg=risk_color)} risk)")
+    click.echo(f"  {tool_def.description}")
+    click.echo()
+
+    schema = tool_def.input_json_schema()
+    properties = schema.get("properties", {})
+    required_fields = set(schema.get("required", []))
+    defs = schema.get("$defs", {})
+
+    if not properties:
+        click.echo("  No arguments.")
+        click.echo()
+        return
+
+    # Separate required and optional fields
+    required_items = []
+    optional_items = []
+    for field_name, field_schema in properties.items():
+        entry = (field_name, field_schema)
+        if field_name in required_fields:
+            required_items.append(entry)
+        else:
+            optional_items.append(entry)
+
+    if required_items:
+        click.echo(click.style("  Required:", bold=True))
+        for field_name, field_schema in required_items:
+            _render_field(field_name, field_schema, defs)
+
+    if optional_items:
+        if required_items:
+            click.echo()
+        click.echo(click.style("  Optional:", bold=True))
+        for field_name, field_schema in optional_items:
+            _render_field(field_name, field_schema, defs)
+
+    click.echo()
+
+
+def _render_field(field_name: str, field_schema: dict, defs: dict | None = None) -> None:
+    """Render a single field in the schema."""
+    type_str = _format_type(field_schema, defs or {})
+    description = field_schema.get("description", "")
+    has_default = "default" in field_schema
+    default = field_schema.get("default")
+
+    parts = [f"    {field_name:<22} ({type_str})"]
+    if has_default:
+        parts[0] += f"  [default: {default}]"
+    if description:
+        parts.append(f"      {description}")
+
+    click.echo("\n".join(parts))
+
+
+def _resolve_ref(schema: dict, defs: dict) -> dict | None:
+    """Resolve a $ref pointer against $defs. Returns None if unresolvable."""
+    ref = schema.get("$ref", "")
+    if ref.startswith("#/$defs/"):
+        name = ref[len("#/$defs/") :]
+        return defs.get(name)
+    return None
+
+
+def _format_type(field_schema: dict, defs: dict | None = None) -> str:
+    """Format a JSON Schema type into a readable string."""
+    defs = defs or {}
+
+    # Resolve top-level $ref
+    if "$ref" in field_schema:
+        resolved = _resolve_ref(field_schema, defs)
+        return _format_type(resolved, defs) if resolved is not None else "any"
+
+    # Handle anyOf (union types, e.g. str | None)
+    if "anyOf" in field_schema:
+        types = []
+        for opt in field_schema["anyOf"]:
+            fmt = _format_type(opt, defs)
+            if fmt != "null":
+                types.append(fmt)
+        types = list(dict.fromkeys(types))
+        return " | ".join(types) if types else "any"
+
+    field_type = field_schema.get("type", "any")
+
+    # Handle enum values
+    if "enum" in field_schema:
+        return f"{field_type} ({' | '.join(repr(v) for v in field_schema['enum'])})"
+
+    # Handle arrays
+    if field_type == "array":
+        items = field_schema.get("items", {})
+        item_type = _format_type(items, defs)
+        return f"list[{item_type}]"
+
+    return field_type
 
 
 # ---------------------------------------------------------------------------
