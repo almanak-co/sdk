@@ -244,6 +244,7 @@ class PendleAdapter:
                 token_out=params.token_out,
                 min_token_out=params.min_amount_out,
                 slippage_bps=params.slippage_bps,
+                token_redeem_sy=params.token_mint_sy,
             )
         elif swap_type == "token_to_yt":
             return self.sdk.build_swap_exact_token_for_yt(

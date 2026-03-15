@@ -520,12 +520,13 @@ class PendleSDK:
         token_out: str,
         min_token_out: int,
         slippage_bps: int = 50,
+        token_redeem_sy: str | None = None,
     ) -> PendleTransactionData:
         """
-        Build a swap transaction from PT to token using swapExactPtForTokenSimple.
+        Build a swap transaction from PT to token using swapExactPtForToken.
 
-        This uses the simplified Pendle V4 function that doesn't require
-        LimitOrderData, making encoding more reliable.
+        Uses the full Pendle V4 function with empty LimitOrderData (the
+        Simple variant does not exist on the deployed router).
 
         Args:
             receiver: Address to receive the token
@@ -534,19 +535,25 @@ class PendleSDK:
             token_out: Output token address
             min_token_out: Minimum output token to receive
             slippage_bps: Slippage tolerance in basis points
+            token_redeem_sy: Token that redeems SY (defaults to token_out if not specified).
+                            For yield-bearing token markets, this should be the
+                            yield-bearing token address, not the underlying.
 
         Returns:
             Transaction data for execution
         """
         min_token_out_with_slippage = int(min_token_out * (10000 - slippage_bps) // 10000)
 
-        # Build TokenOutput struct for Simple function
+        # Use token_redeem_sy if provided, otherwise default to token_out
+        redeem_sy_address = token_redeem_sy if token_redeem_sy else token_out
+
+        # Build TokenOutput struct
         # TokenOutput: (tokenOut, minTokenOut, tokenRedeemSy, pendleSwap, swapData)
         # SwapData: (swapType, extRouter, extCalldata, needScale)
         token_output = (
             self.web3.to_checksum_address(token_out),  # tokenOut
             min_token_out_with_slippage,  # minTokenOut
-            self.web3.to_checksum_address(token_out),  # tokenRedeemSy
+            self.web3.to_checksum_address(redeem_sy_address),  # tokenRedeemSy
             "0x0000000000000000000000000000000000000000",  # pendleSwap
             (
                 0,
@@ -556,11 +563,21 @@ class PendleSDK:
             ),  # swapData: (swapType=NONE, extRouter, extCalldata, needScale)
         )
 
-        calldata = self._encode_swap_exact_pt_for_token_simple(
+        # LimitOrderData (empty - no limit orders)
+        limit_order_data: tuple[Any, ...] = (
+            "0x0000000000000000000000000000000000000000",
+            0,
+            [],
+            [],
+            b"",
+        )
+
+        calldata = self._encode_swap_exact_pt_for_token(
             receiver=receiver,
             market=market,
             pt_amount=pt_amount,
             token_output=token_output,
+            limit_order_data=limit_order_data,
         )
 
         return PendleTransactionData(
@@ -974,26 +991,33 @@ class PendleSDK:
 
         return calldata
 
-    def _encode_swap_exact_pt_for_token_simple(
+    def _encode_swap_exact_pt_for_token(
         self,
         receiver: str,
         market: str,
         pt_amount: int,
         token_output: tuple,
+        limit_order_data: tuple,
     ) -> str:
-        """Encode swapExactPtForTokenSimple calldata using ABI encoding."""
+        """Encode swapExactPtForToken calldata using ABI encoding.
+
+        Uses the full V4 function with LimitOrderData (pass empty tuple
+        for no limit orders). The Simple variant does not exist on the
+        deployed Pendle Router.
+        """
         router = self.get_router()
 
         receiver = self.web3.to_checksum_address(receiver)
         market = self.web3.to_checksum_address(market)
 
         calldata = router.encode_abi(
-            "swapExactPtForTokenSimple",
+            "swapExactPtForToken",
             args=[
                 receiver,
                 market,
                 pt_amount,
                 token_output,
+                limit_order_data,
             ],
         )
 
