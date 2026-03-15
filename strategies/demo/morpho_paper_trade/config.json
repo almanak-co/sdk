@@ -5,7 +5,7 @@
     "market_id": "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
     "collateral_token": "wstETH",
     "borrow_token": "USDC",
-    "collateral_amount": "0.05",
+    "collateral_amount": "0.028",
     "ltv_target": 0.5,
     "price_drop_pct": 0.02,
     "price_rise_pct": 0.04,

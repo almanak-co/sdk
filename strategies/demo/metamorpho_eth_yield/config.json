@@ -4,7 +4,7 @@
     "description": "MetaMorpho ERC-4626 yield strategy on Ethereum - deposits USDC into Steakhouse USDC vault for optimized lending yield across Morpho Blue markets",
     "vault_address": "0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB",
     "deposit_token": "USDC",
-    "deposit_amount": "1000",
+    "deposit_amount": "100",
     "min_deposit_usd": "100",
     "rebalance_threshold_bps": 200,
     "max_vault_allocation_pct": 80,
