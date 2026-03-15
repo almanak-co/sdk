@@ -41,6 +41,7 @@ Examples:
 import asyncio
 import json
 import os
+import re
 import signal
 import sys
 from dataclasses import dataclass
@@ -4476,6 +4477,35 @@ def list_paper_sessions() -> list[dict[str, Any]]:
 # =============================================================================
 
 
+def _parse_duration(duration_str: str) -> int | None:
+    """Parse a human-readable duration string into seconds.
+
+    Supports: '30s', '5m', '1h', '2h30m', '90m', '1h30m15s'.
+
+    Returns:
+        Total seconds, or None if the string is unparseable.
+    """
+    duration_str = duration_str.strip().lower()
+    if not duration_str:
+        return None
+
+    # Try pure integer (treat as seconds)
+    if duration_str.isdigit():
+        total = int(duration_str)
+        return total if total > 0 else None
+
+    pattern = re.compile(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
+    match = pattern.match(duration_str)
+    if not match or not any(match.groups()):
+        return None
+
+    hours = int(match.group(1) or 0)
+    minutes = int(match.group(2) or 0)
+    seconds = int(match.group(3) or 0)
+    total = hours * 3600 + minutes * 60 + seconds
+    return total if total > 0 else None
+
+
 @backtest.group("paper")
 def paper() -> None:
     """
@@ -4557,6 +4587,12 @@ def paper() -> None:
     help="Maximum number of ticks to run (default: unlimited)",
 )
 @click.option(
+    "--duration",
+    type=str,
+    default=None,
+    help="Session duration as human-readable string (e.g., '5m', '1h', '30s'). Mutually exclusive with --max-ticks.",
+)
+@click.option(
     "--rpc-url",
     type=str,
     default=None,
@@ -4601,6 +4637,7 @@ def paper_start(
     initial_tokens: str,
     tick_interval: int,
     max_ticks: int | None,
+    duration: str | None,
     rpc_url: str | None,
     anvil_port: int,
     no_reset_fork: bool,
@@ -4636,9 +4673,31 @@ def paper_start(
         # Run for limited ticks
         almanak strat backtest paper start -s test_strategy --max-ticks 100
 
+        # Run for a specific duration
+        almanak strat backtest paper start -s test_strategy --duration 5m
+
         # Run in foreground (blocks terminal)
         almanak strat backtest paper start -s test_strategy --foreground
     """
+    # Resolve --duration into max_ticks (mutually exclusive with --max-ticks)
+    if duration is not None and max_ticks is not None:
+        click.echo("Error: --duration and --max-ticks are mutually exclusive.", err=True)
+        raise click.Abort()
+
+    if duration is not None:
+        if tick_interval <= 0:
+            click.echo("Error: --tick-interval must be greater than 0.", err=True)
+            raise click.Abort()
+        duration_seconds = _parse_duration(duration)
+        if duration_seconds is None:
+            click.echo(
+                f"Error: Invalid duration '{duration}'. Use format like '30s', '5m', '1h', '2h30m'.",
+                err=True,
+            )
+            raise click.Abort()
+        # +1 because the first tick executes immediately; N ticks = (N-1) sleep intervals
+        max_ticks = max(1, duration_seconds // tick_interval + 1)
+        click.echo(f"Duration {duration} -> {max_ticks} ticks at {tick_interval}s interval")
     # Validate strategy exists
     available_strategies = list_strategies_fn()
     if strategy not in available_strategies and available_strategies:
