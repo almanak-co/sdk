@@ -8,7 +8,6 @@ access to external services or credentials.
 import asyncio
 import logging
 import signal
-import sys
 from concurrent import futures
 
 import grpc
@@ -439,7 +438,6 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        stream=sys.stdout,
     )
 
     # Install centralized secret redaction on all logging channels

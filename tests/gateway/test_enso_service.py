@@ -3,7 +3,6 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import pytest_asyncio
 
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
@@ -16,12 +15,10 @@ def settings():
     return GatewaySettings()
 
 
-@pytest_asyncio.fixture
-async def enso_service(settings):
+@pytest.fixture
+def enso_service(settings):
     """Create EnsoService instance."""
-    service = EnsoServiceServicer(settings)
-    yield service
-    await service.close()
+    return EnsoServiceServicer(settings)
 
 
 @pytest.fixture

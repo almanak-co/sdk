@@ -684,7 +684,6 @@ def gateway(port, network, metrics, metrics_port, log_level, chains):
     logging.basicConfig(
         level=log_level_map.get(log_level, logging.INFO),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        stream=sys.stdout,
     )
 
     # Install centralized secret redaction on all logging channels

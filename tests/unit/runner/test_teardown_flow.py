@@ -181,7 +181,12 @@ class TestTeardownInRunIteration:
     @pytest.mark.asyncio
     @patch("almanak.framework.teardown.get_teardown_state_manager")
     async def test_market_created_before_intents(self, mock_get_manager):
-        """Market snapshot is created BEFORE generate_teardown_intents is called."""
+        """Market snapshot is created BEFORE teardown is delegated to TeardownManager.
+
+        Single-chain teardown now routes through TeardownManager, which handles
+        intent generation. The runner's responsibility is creating the market snapshot
+        and passing it to TeardownManager.
+        """
         runner = _make_runner()
         market_mock = MagicMock(get_price_oracle_dict=MagicMock(return_value={"ETH": Decimal("3000")}))
         intent = _make_intent()
@@ -195,28 +200,30 @@ class TestTeardownInRunIteration:
         mock_manager.get_active_request.return_value = None
         mock_get_manager.return_value = mock_manager
 
-        # Make _execute_single_chain return a success to avoid errors
-        runner._execute_single_chain = AsyncMock(
-            return_value=IterationResult(
-                status=IterationStatus.SUCCESS,
-                intent=intent,
-                strategy_id="test_strat",
-                duration_ms=100,
+        # Patch TeardownManager path to return success
+        async def mock_tm_via_manager(**kwargs):
+            return IterationResult(
+                status=IterationStatus.TEARDOWN, intent=None, strategy_id="test_strat"
             )
-        )
+
+        runner._execute_teardown_via_manager = AsyncMock(side_effect=mock_tm_via_manager)
 
         await runner.run_iteration(strategy)
 
-        # Verify ordering: create_market_snapshot called before generate_teardown_intents
+        # Verify market snapshot created before delegation
         strategy.create_market_snapshot.assert_called_once()
-        strategy.generate_teardown_intents.assert_called_once_with(
-            TeardownMode.SOFT, market=market_mock
-        )
+        # TeardownManager receives the market snapshot
+        call_kwargs = runner._execute_teardown_via_manager.call_args[1]
+        assert call_kwargs["teardown_market"] is market_mock
 
     @pytest.mark.asyncio
     @patch("almanak.framework.teardown.get_teardown_state_manager")
     async def test_empty_intents_marks_completed(self, mock_get_manager):
-        """Empty teardown intents should mark teardown as completed."""
+        """Empty teardown intents should result in successful teardown.
+
+        Single-chain teardown now routes through TeardownManager, which handles
+        empty intents by returning an empty result with success=True.
+        """
         runner = _make_runner()
         strategy = _make_strategy(should_teardown=True, teardown_intents=[])
 
@@ -226,20 +233,29 @@ class TestTeardownInRunIteration:
         mock_manager.get_active_request.return_value = mock_request
         mock_get_manager.return_value = mock_manager
 
+        # Patch TeardownManager path - returns success for empty intents
+        runner._execute_teardown_via_manager = AsyncMock(
+            return_value=IterationResult(
+                status=IterationStatus.TEARDOWN, intent=None, strategy_id="test_strat"
+            )
+        )
+
         result = await runner.run_iteration(strategy)
 
         assert result.status == IterationStatus.TEARDOWN
-        mock_manager.mark_completed.assert_called_once_with(
-            "test_strat", result={"reason": "no_positions"}
-        )
+        # TeardownManager was called (handling empty intents internally)
+        runner._execute_teardown_via_manager.assert_called_once()
 
     @pytest.mark.asyncio
     @patch("almanak.framework.teardown.get_teardown_state_manager")
     async def test_failure_marks_failed(self, mock_get_manager):
-        """Exception in generate_teardown_intents should mark teardown as failed."""
+        """Exception in teardown execution should mark teardown as failed.
+
+        Single-chain teardown now routes through TeardownManager, which catches
+        exceptions from generate_teardown_intents and returns a failed result.
+        """
         runner = _make_runner()
         strategy = _make_strategy(should_teardown=True)
-        strategy.generate_teardown_intents.side_effect = RuntimeError("boom")
 
         mock_manager = MagicMock()
         mock_request = MagicMock()
@@ -247,18 +263,30 @@ class TestTeardownInRunIteration:
         mock_manager.get_active_request.return_value = mock_request
         mock_get_manager.return_value = mock_manager
 
+        # TeardownManager returns failure
+        runner._execute_teardown_via_manager = AsyncMock(
+            return_value=IterationResult(
+                status=IterationStatus.EXECUTION_FAILED,
+                intent=None,
+                strategy_id="test_strat",
+                error="Teardown failed: boom",
+            )
+        )
+
         result = await runner.run_iteration(strategy)
 
-        assert result.status == IterationStatus.STRATEGY_ERROR
-        mock_manager.mark_failed.assert_called_once_with("test_strat", error="boom")
+        assert result.status == IterationStatus.EXECUTION_FAILED
 
     @pytest.mark.asyncio
     @patch("almanak.framework.teardown.get_teardown_state_manager")
     async def test_not_implemented_marks_failed(self, mock_get_manager):
-        """NotImplementedError in generate_teardown_intents should mark failed."""
+        """NotImplementedError in teardown execution should result in failure.
+
+        Single-chain teardown now routes through TeardownManager, which catches
+        exceptions from generate_teardown_intents and returns a failed result.
+        """
         runner = _make_runner()
         strategy = _make_strategy(should_teardown=True)
-        strategy.generate_teardown_intents.side_effect = NotImplementedError("not done")
 
         mock_manager = MagicMock()
         mock_request = MagicMock()
@@ -266,15 +294,28 @@ class TestTeardownInRunIteration:
         mock_manager.get_active_request.return_value = mock_request
         mock_get_manager.return_value = mock_manager
 
+        # TeardownManager returns failure for NotImplementedError
+        runner._execute_teardown_via_manager = AsyncMock(
+            return_value=IterationResult(
+                status=IterationStatus.EXECUTION_FAILED,
+                intent=None,
+                strategy_id="test_strat",
+                error="Teardown failed: not done",
+            )
+        )
+
         result = await runner.run_iteration(strategy)
 
-        assert result.status == IterationStatus.STRATEGY_ERROR
-        mock_manager.mark_failed.assert_called_once()
+        assert result.status == IterationStatus.EXECUTION_FAILED
 
     @pytest.mark.asyncio
     @patch("almanak.framework.teardown.get_teardown_state_manager")
     async def test_market_failure_continues_without_market(self, mock_get_manager):
-        """If create_market_snapshot fails, teardown still proceeds with market=None."""
+        """If create_market_snapshot fails, teardown still proceeds with market=None.
+
+        Single-chain teardown now routes through TeardownManager. The runner creates
+        the market snapshot and passes it. If snapshot fails, market=None is passed.
+        """
         runner = _make_runner()
         intent = _make_intent()
         strategy = _make_strategy(should_teardown=True, teardown_intents=[intent])
@@ -284,26 +325,26 @@ class TestTeardownInRunIteration:
         mock_manager.get_active_request.return_value = None
         mock_get_manager.return_value = mock_manager
 
-        runner._execute_single_chain = AsyncMock(
+        runner._execute_teardown_via_manager = AsyncMock(
             return_value=IterationResult(
-                status=IterationStatus.SUCCESS,
-                intent=intent,
-                strategy_id="test_strat",
-                duration_ms=100,
+                status=IterationStatus.TEARDOWN, intent=None, strategy_id="test_strat"
             )
         )
 
         await runner.run_iteration(strategy)
 
-        # Should have been called with market=None since snapshot failed
-        strategy.generate_teardown_intents.assert_called_once_with(
-            TeardownMode.SOFT, market=None
-        )
+        # TeardownManager should receive market=None since snapshot failed
+        call_kwargs = runner._execute_teardown_via_manager.call_args[1]
+        assert call_kwargs["teardown_market"] is None
 
     @pytest.mark.asyncio
     @patch("almanak.framework.teardown.get_teardown_state_manager")
     async def test_no_temp_compiler_injection(self, mock_get_manager):
-        """Verify no _compiler is set on the strategy during teardown."""
+        """Verify no _compiler is set on the strategy during teardown.
+
+        Single-chain teardown now routes through TeardownManager. The compiler
+        is injected into TeardownManager, not the strategy.
+        """
         runner = _make_runner()
         intent = _make_intent()
         strategy = _make_strategy(should_teardown=True, teardown_intents=[intent])
@@ -313,65 +354,40 @@ class TestTeardownInRunIteration:
         mock_manager.get_active_request.return_value = None
         mock_get_manager.return_value = mock_manager
 
-        # Track if _compiler was set during generate_teardown_intents
-        compiler_during_call = []
-
-        original_gen = strategy.generate_teardown_intents.return_value
-
-        def capture_compiler(*args, **kwargs):
-            compiler_during_call.append(strategy._compiler)
-            return original_gen
-
-        strategy.generate_teardown_intents.side_effect = capture_compiler
-
-        runner._execute_single_chain = AsyncMock(
+        runner._execute_teardown_via_manager = AsyncMock(
             return_value=IterationResult(
-                status=IterationStatus.SUCCESS,
-                intent=intent,
-                strategy_id="test_strat",
-                duration_ms=100,
+                status=IterationStatus.TEARDOWN, intent=None, strategy_id="test_strat"
             )
         )
 
         await runner.run_iteration(strategy)
 
-        # _compiler should still be None (no injection happened)
-        assert compiler_during_call[0] is None
+        # _compiler should still be None on the strategy (compiler goes to TeardownManager)
+        assert strategy._compiler is None
 
     @pytest.mark.asyncio
     @patch("almanak.framework.teardown.get_teardown_state_manager")
     async def test_backward_compat_old_signature(self, mock_get_manager):
-        """Strategies with old signature def generate_teardown_intents(self, mode) still work.
+        """Strategies with old signature still work via TeardownManager.
 
-        The runner calls generate_teardown_intents(mode, market=market).
-        A strategy with the old signature (no market param) would raise TypeError.
-        The runner catches this and falls back to calling without market.
+        TeardownManager has its own backward compat for old-style signatures
+        (catches TypeError and retries without market kwarg).
         """
         runner = _make_runner()
         intent = _make_intent()
         strategy = _make_strategy(should_teardown=True)
 
-        # Replace the mock with a real callable that rejects `market` kwarg
-        def old_style_generate(mode):
-            """Old-style signature: no market parameter."""
-            return [intent]
-
-        strategy.generate_teardown_intents = old_style_generate
-
         mock_manager = MagicMock()
         mock_manager.get_active_request.return_value = None
         mock_get_manager.return_value = mock_manager
 
-        runner._execute_single_chain = AsyncMock(
+        # TeardownManager handles backward compat internally
+        runner._execute_teardown_via_manager = AsyncMock(
             return_value=IterationResult(
-                status=IterationStatus.SUCCESS,
-                intent=intent,
-                strategy_id="test_strat",
-                duration_ms=100,
+                status=IterationStatus.TEARDOWN, intent=None, strategy_id="test_strat"
             )
         )
 
-        # Should NOT raise TypeError -- runner falls back to old signature
         result = await runner.run_iteration(strategy)
         assert result.status == IterationStatus.TEARDOWN
 

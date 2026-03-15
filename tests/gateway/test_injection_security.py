@@ -5,7 +5,6 @@ that could be used for injection attacks (SQL, command, path traversal, etc.).
 """
 
 import pytest
-import pytest_asyncio
 
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
@@ -20,14 +19,12 @@ def settings():
 class TestRpcServiceInjection:
     """Injection tests for RpcService."""
 
-    @pytest_asyncio.fixture
-    async def rpc_service(self, settings):
+    @pytest.fixture
+    def rpc_service(self, settings):
         """Create RpcService instance."""
         from almanak.gateway.services.rpc_service import RpcServiceServicer
 
-        service = RpcServiceServicer(settings)
-        yield service
-        await service.close()
+        return RpcServiceServicer(settings)
 
     @pytest.mark.asyncio
     async def test_chain_injection_blocked(self, rpc_service):
@@ -316,14 +313,12 @@ class TestIntegrationServiceInjection:
 class TestMarketServiceInjection:
     """Injection tests for MarketService."""
 
-    @pytest_asyncio.fixture
-    async def market_service(self, settings):
+    @pytest.fixture
+    def market_service(self, settings):
         """Create MarketService instance."""
         from almanak.gateway.services.market_service import MarketServiceServicer
 
-        service = MarketServiceServicer(settings)
-        yield service
-        await service.close()
+        return MarketServiceServicer(settings)
 
     @pytest.mark.asyncio
     async def test_chain_injection_blocked(self, market_service):

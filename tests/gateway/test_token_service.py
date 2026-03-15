@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
 import pytest
-import pytest_asyncio
 
 from almanak.core.enums import Chain
 from almanak.framework.data.tokens import (
@@ -32,12 +31,10 @@ def settings():
     return GatewaySettings()
 
 
-@pytest_asyncio.fixture
-async def token_service(settings):
+@pytest.fixture
+def token_service(settings):
     """Create TokenService instance."""
-    service = TokenServiceServicer(settings)
-    yield service
-    await service.close()
+    return TokenServiceServicer(settings)
 
 
 @pytest.fixture

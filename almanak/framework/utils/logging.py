@@ -221,9 +221,8 @@ def configure_logging(
         # JSON renderer for production
         renderer: Processor = structlog.processors.JSONRenderer()
     else:
-        # Console renderer - enable colors only when outputting to a real terminal
-        isatty_method = getattr(stream, "isatty", None)
-        use_colors = callable(isatty_method) and isatty_method()
+        # Console renderer for development
+        use_colors = hasattr(stream, "isatty") and stream.isatty()
         renderer = structlog.dev.ConsoleRenderer(
             colors=use_colors,
             exception_formatter=structlog.dev.plain_traceback,

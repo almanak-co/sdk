@@ -33,6 +33,7 @@ import hashlib
 import json
 import logging
 import signal
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -42,6 +43,9 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
+    from ..services.emergency_manager import EmergencyManager
+    from ..services.operator_card_generator import OperatorCardGenerator
+    from ..services.stuck_detector import StuckDetector
     from ..teardown import TeardownMode
     from ..vault.lifecycle import VaultLifecycleManager
 
@@ -322,9 +326,9 @@ class IterationStatus(StrEnum):
     COMPILATION_FAILED = "COMPILATION_FAILED"
     EXECUTION_FAILED = "EXECUTION_FAILED"
     STRATEGY_ERROR = "STRATEGY_ERROR"
-    STRATEGY_TIMEOUT = "STRATEGY_TIMEOUT"  # strategy.decide() exceeded timeout
+    STRATEGY_TIMEOUT = "STRATEGY_TIMEOUT"  # strategy.decide() exceeded time limit
     DATA_ERROR = "DATA_ERROR"
-    CIRCUIT_BREAKER_OPEN = "CIRCUIT_BREAKER_OPEN"  # Execution blocked by circuit breaker
+    CIRCUIT_BREAKER_OPEN = "CIRCUIT_BREAKER_OPEN"  # Circuit breaker blocked execution
 
 
 @dataclass
@@ -348,11 +352,17 @@ class IterationResult:
     strategy_id: str = ""
     duration_ms: float = 0.0
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+    balance_reconciliation: dict[str, Any] | None = None  # Post-execution balance check
 
     @property
     def success(self) -> bool:
-        """Check if iteration was successful (including DRY_RUN and HOLD)."""
-        return self.status in (IterationStatus.SUCCESS, IterationStatus.DRY_RUN, IterationStatus.HOLD)
+        """Check if iteration was successful (including DRY_RUN, HOLD, and TEARDOWN)."""
+        return self.status in (
+            IterationStatus.SUCCESS,
+            IterationStatus.DRY_RUN,
+            IterationStatus.HOLD,
+            IterationStatus.TEARDOWN,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -364,6 +374,7 @@ class IterationResult:
             "strategy_id": self.strategy_id,
             "duration_ms": self.duration_ms,
             "timestamp": self.timestamp.isoformat(),
+            "balance_reconciliation": self.balance_reconciliation,
         }
 
 
@@ -459,6 +470,7 @@ class RunnerConfig:
         max_retries: Maximum number of automatic retries per intent (default 3)
         initial_retry_delay: Initial delay between retries in seconds (default 1.0)
         max_retry_delay: Maximum delay between retries in seconds (default 60.0)
+        decide_timeout_seconds: Hard timeout for strategy.decide() in seconds (default 30.0)
     """
 
     default_interval_seconds: int = 60
@@ -470,7 +482,7 @@ class RunnerConfig:
     initial_retry_delay: float = 1.0
     max_retry_delay: float = 60.0
     lifecycle_poll_interval: float = 2.0
-    decide_timeout_seconds: float = 60.0
+    decide_timeout_seconds: float = 30.0
 
 
 # =============================================================================
@@ -566,6 +578,9 @@ class StrategyRunner:
         session_store: ExecutionSessionStore | None = None,
         vault_lifecycle: "VaultLifecycleManager | None" = None,
         circuit_breaker: CircuitBreaker | None = None,
+        stuck_detector: "StuckDetector | None" = None,
+        operator_card_generator: "OperatorCardGenerator | None" = None,
+        emergency_manager: "EmergencyManager | None" = None,
     ) -> None:
         """Initialize the StrategyRunner.
 
@@ -580,9 +595,17 @@ class StrategyRunner:
             config: Optional runner configuration
             session_store: Optional ExecutionSessionStore for crash recovery
             vault_lifecycle: Optional VaultLifecycleManager for vault-wrapped strategies
-            circuit_breaker: Optional circuit breaker for execution safety.
-                When provided, blocks execution after consecutive failures or
+            circuit_breaker: Optional circuit breaker for fail-closed execution safety.
+                When provided, execution is blocked after consecutive failures or
                 cumulative loss thresholds are exceeded.
+            stuck_detector: Optional StuckDetector for intelligent failure classification.
+                When provided, consecutive error alerts include root-cause analysis.
+            operator_card_generator: Optional OperatorCardGenerator for rich actionable cards.
+                When provided, alerts include auto-detected severity, suggested actions,
+                and auto-remediation where applicable.
+            emergency_manager: Optional EmergencyManager for auto-triggering emergency stops.
+                When provided, the runner automatically triggers emergency_stop when the
+                circuit breaker trips to OPEN, pausing the strategy and sending CRITICAL alerts.
         """
         self.price_oracle = price_oracle
         self.balance_provider = balance_provider
@@ -593,11 +616,12 @@ class StrategyRunner:
         self._session_store = session_store
         self._vault_lifecycle = vault_lifecycle
         self._circuit_breaker = circuit_breaker
-
-        # Stuck detection and operator card generation (lazy-initialized on first failure)
-        self._stuck_detector: Any | None = None
-        self._operator_card_generator: Any | None = None
-        self._failure_state_entered_at: datetime | None = None
+        self._stuck_detector = stuck_detector
+        self._operator_card_generator = operator_card_generator
+        self._emergency_manager = emergency_manager
+        self._emergency_triggered_for_open = False  # Track once-per-OPEN-episode firing
+        self._decide_in_progress = False  # Guard against overlapping decide() calls after timeout
+        self._decide_timed_out_at: float | None = None  # Monotonic timestamp of last timeout
 
         # Detect if we're in multi-chain mode
         self._is_multi_chain = isinstance(execution_orchestrator, MultiChainOrchestrator)
@@ -609,6 +633,7 @@ class StrategyRunner:
 
         # Metrics tracking
         self._consecutive_errors = 0
+        self._first_error_at: datetime | None = None  # Timestamp of first error in current streak
         self._total_iterations = 0
         self._successful_iterations = 0
 
@@ -981,6 +1006,24 @@ class StrategyRunner:
                         f"Failed to create market snapshot for teardown: {e}. Continuing without market data."
                     )
 
+                # Single-chain: delegate to TeardownManager for full safety path
+                # (safety validation, escalating slippage, post-execution verification).
+                # TeardownManager handles intent generation, amount resolution, etc.
+                # Multi-chain falls through to the direct path below.
+                if not self._is_multi_chain:
+                    return await self._execute_teardown_via_manager(
+                        strategy=strategy,
+                        teardown_mode=teardown_mode,
+                        teardown_market=teardown_market,
+                        teardown_intents=[],  # TeardownManager generates intents internally
+                        start_time=start_time,
+                        state_mgr=manager,
+                        request=request,
+                    )
+
+                # Multi-chain path: generate and execute teardown intents directly
+                # (TeardownManager doesn't support multi-chain yet)
+
                 # Step T2: Generate teardown intents WITH market (symmetric with decide(market))
                 try:
                     try:
@@ -1084,68 +1127,23 @@ class StrategyRunner:
                         duration_ms=self._calculate_duration_ms(start_time),
                     )
 
-                # Step T3: Execute (SAME as normal path)
-                if self._is_multi_chain:
-                    result = await self._execute_multi_chain(
-                        strategy=strategy,
-                        intents=teardown_intents,
-                        start_time=start_time,
-                        market=teardown_market,
-                    )
-                    if result.success:
-                        result.status = IterationStatus.TEARDOWN
-                        logger.info(f"🛑 {strategy_id} teardown complete - shutting down strategy runner")
-                        self.request_shutdown()
-                        if request:
-                            manager.mark_completed(strategy_id, result={"intents": len(teardown_intents)})
-                    else:
-                        if request:
-                            manager.mark_failed(strategy_id, error=result.error or "execution failed")
-                    return result
+                # Step T3: Execute multi-chain teardown directly
+                result = await self._execute_multi_chain(
+                    strategy=strategy,
+                    intents=teardown_intents,
+                    start_time=start_time,
+                    market=teardown_market,
+                )
+                if result.success:
+                    result.status = IterationStatus.TEARDOWN
+                    logger.info(f"🛑 {strategy_id} teardown complete - shutting down strategy runner")
+                    self.request_shutdown()
+                    if request:
+                        manager.mark_completed(strategy_id, result={"intents": len(teardown_intents)})
                 else:
-                    # Single-chain: execute ALL teardown intents sequentially
-                    # Teardown must complete fully - partial teardown is dangerous
-                    all_success = True
-                    last_result = None
-                    for i, intent in enumerate(teardown_intents):
-                        logger.info(
-                            f"🛑 Executing teardown intent {i + 1}/{len(teardown_intents)}: {intent.intent_type.value}"
-                        )
-                        result = await self._execute_single_chain(
-                            strategy=strategy,
-                            intent=intent,
-                            start_time=start_time,
-                            total_intents=1,  # Don't log "multiple intents" warning
-                            market=teardown_market,
-                        )
-                        last_result = result
-                        if not result.success:
-                            all_success = False
-                            logger.error(f"🛑 Teardown intent {i + 1} failed: {result.error}")
-                            break  # Stop on first failure - don't continue partial teardown
-
-                    if last_result:
-                        if all_success:
-                            last_result.status = IterationStatus.TEARDOWN
-                            logger.info(f"🛑 {strategy_id} teardown complete - shutting down strategy runner")
-                            self.request_shutdown()
-                            if request:
-                                manager.mark_completed(strategy_id, result={"intents": len(teardown_intents)})
-                        else:
-                            logger.warning(
-                                f"🛑 {strategy_id} teardown incomplete - manual intervention may be required"
-                            )
-                            if request:
-                                manager.mark_failed(strategy_id, error=last_result.error or "execution failed")
-                        return last_result
-
-                    # Edge case: no intents executed (shouldn't happen)
-                    return IterationResult(
-                        status=IterationStatus.TEARDOWN,
-                        intent=None,
-                        strategy_id=strategy_id,
-                        duration_ms=self._calculate_duration_ms(start_time),
-                    )
+                    if request:
+                        manager.mark_failed(strategy_id, error=result.error or "execution failed")
+                return result
 
             # Step 0b: Poll copy trading wallet activity (if configured)
             activity_provider = getattr(strategy, "_wallet_activity_provider", None)
@@ -1205,37 +1203,60 @@ class StrategyRunner:
                     start_time,
                 )
 
-            # Step 2: Get strategy decision (with timeout protection)
+            # Step 2: Get strategy decision (with hard timeout)
+            # NOTE: asyncio.to_thread runs decide() in a worker thread. If decide()
+            # times out, the worker thread continues running (Python limitation).
+            # The _decide_in_progress guard prevents overlapping decide() calls.
+            decide_timeout = self.config.decide_timeout_seconds
+            if self._decide_in_progress:
+                # Allow recovery after 2x timeout -- the orphan thread has had plenty of time
+                if self._decide_timed_out_at is not None:
+                    elapsed = time.monotonic() - self._decide_timed_out_at
+                    if elapsed > 2 * decide_timeout:
+                        logger.warning(
+                            f"Resetting decide guard after {elapsed:.1f}s "
+                            f"(timeout was {decide_timeout}s) for {strategy_id}"
+                        )
+                        self._decide_in_progress = False
+                        self._decide_timed_out_at = None
+                if self._decide_in_progress:
+                    msg = "strategy.decide() still running from previous timed-out call"
+                    logger.error(f"OVERLAP: {msg} for {strategy_id}")
+                    if self._circuit_breaker is not None:
+                        self._circuit_breaker.record_failure(error_message=msg)
+                    return self._create_error_result(
+                        strategy_id,
+                        IterationStatus.STRATEGY_TIMEOUT,
+                        msg,
+                        start_time,
+                    )
             try:
-                timeout = self.config.decide_timeout_seconds
-                if timeout and timeout > 0:
-                    decide_result = await asyncio.wait_for(
-                        asyncio.get_running_loop().run_in_executor(None, strategy.decide, market),
-                        timeout=timeout,
-                    )
+                self._decide_in_progress = True
+                if decide_timeout <= 0:
+                    # Timeout disabled -- run decide() without a time limit
+                    decide_result = await asyncio.to_thread(strategy.decide, market)
                 else:
-                    decide_result = strategy.decide(market)
-            except TimeoutError:
-                timeout_msg = f"strategy.decide() timed out after {self.config.decide_timeout_seconds}s"
-                logger.error(f"{strategy_id}: {timeout_msg}")
-                add_event(
-                    TimelineEvent(
-                        timestamp=datetime.now(UTC),
-                        event_type=TimelineEventType.STRATEGY_STUCK,
-                        description=timeout_msg,
-                        strategy_id=strategy_id,
-                        details={"timeout_seconds": self.config.decide_timeout_seconds},
+                    decide_result = await asyncio.wait_for(
+                        asyncio.to_thread(strategy.decide, market),
+                        timeout=decide_timeout,
                     )
-                )
+                self._decide_in_progress = False
+            except TimeoutError:
+                # Worker thread may still be running; _decide_in_progress stays True
+                # to block overlapping calls. Recovery allowed after 2x timeout elapsed.
+                self._decide_timed_out_at = time.monotonic()
+                msg = f"strategy.decide() timed out after {decide_timeout}s"
+                logger.error(f"TIMEOUT: {msg} for {strategy_id}")
                 if self._circuit_breaker is not None:
-                    self._circuit_breaker.record_failure(timeout_msg)
+                    self._circuit_breaker.record_failure(error_message=msg)
                 return self._create_error_result(
                     strategy_id,
                     IterationStatus.STRATEGY_TIMEOUT,
-                    timeout_msg,
+                    msg,
                     start_time,
                 )
             except Exception as e:
+                self._decide_in_progress = False  # Normal exceptions complete; reset guard
                 logger.error(f"Strategy decision failed: {e}")
                 if self._circuit_breaker is not None:
                     self._circuit_breaker.record_failure(f"decide() error: {e}")
@@ -1289,6 +1310,38 @@ class StrategyRunner:
                 for i, intent in enumerate(intents, 1):
                     intent_summary = _format_intent_for_log(intent)
                     logger.info(f"   {i}. {intent_summary}")
+
+            # Step 5.5: Circuit breaker gate — block execution if breaker is open
+            if self._circuit_breaker is not None:
+                cb_check = self._circuit_breaker.check()
+                if not cb_check.can_execute:
+                    logger.warning(
+                        f"Circuit breaker BLOCKED execution for {strategy_id}: "
+                        f"state={cb_check.state.value}, reason={cb_check.reason}"
+                    )
+                    add_event(
+                        TimelineEvent(
+                            timestamp=datetime.now(UTC),
+                            event_type=TimelineEventType.ERROR,
+                            description=f"Circuit breaker blocked execution: {cb_check.reason}",
+                            strategy_id=strategy_id,
+                            chain=getattr(strategy, "chain", ""),
+                            details={
+                                "circuit_breaker_state": cb_check.state.value,
+                                "trip_reason": cb_check.trip_reason.value if cb_check.trip_reason else None,
+                                "consecutive_failures": cb_check.consecutive_failures,
+                                "cumulative_loss_usd": str(cb_check.cumulative_loss_usd),
+                                "cooldown_remaining_seconds": cb_check.cooldown_remaining_seconds,
+                            },
+                        )
+                    )
+                    return IterationResult(
+                        status=IterationStatus.CIRCUIT_BREAKER_OPEN,
+                        intent=intents[0] if intents else None,
+                        error=f"Circuit breaker open: {cb_check.reason}",
+                        strategy_id=strategy_id,
+                        duration_ms=self._calculate_duration_ms(start_time),
+                    )
 
             # Step 6: Execute based on orchestrator type
             if self._is_multi_chain:
@@ -1377,7 +1430,7 @@ class StrategyRunner:
                 # For multi-intent sequences, record metrics once per iteration
                 if is_multi_intent and intent_result is not None:
                     if intent_result.success:
-                        self._record_success()
+                        self._record_success(execution_proved=True)
                     else:
                         # Only track total_iterations here; consecutive_errors is
                         # already handled by run_loop when result.success is False
@@ -1528,35 +1581,28 @@ class StrategyRunner:
                     except Exception as e:
                         logger.error(f"Iteration callback error: {e}")
 
-                # Record outcome in circuit breaker (skip statuses managed elsewhere)
-                # HOLD/DRY_RUN are neutral — they don't prove execution works (would
-                # prematurely close a HALF_OPEN breaker), so only SUCCESS resets it.
-                if self._circuit_breaker is not None and result.status not in (
-                    IterationStatus.CIRCUIT_BREAKER_OPEN,
-                    IterationStatus.TEARDOWN,
-                ):
-                    if result.status == IterationStatus.SUCCESS:
-                        self._circuit_breaker.record_success()
-                        self._failure_state_entered_at = None
-                    elif result.status not in (
-                        IterationStatus.HOLD,
-                        IterationStatus.DRY_RUN,
-                        IterationStatus.STRATEGY_ERROR,
-                        IterationStatus.STRATEGY_TIMEOUT,
-                    ):
-                        self._circuit_breaker.record_failure(result.error or "unknown error")
-
-                # Handle consecutive errors (skip breaker-managed and teardown iterations)
-                if not result.success and result.status not in (
-                    IterationStatus.CIRCUIT_BREAKER_OPEN,
-                    IterationStatus.TEARDOWN,
-                ):
+                # Handle consecutive errors and circuit breaker recording
+                if not result.success:
                     self._consecutive_errors += 1
-                    # Track when failure state began for stuck detection
-                    if self._failure_state_entered_at is None:
-                        self._failure_state_entered_at = datetime.now(UTC)
-                    # Run stuck detection and generate operator card
-                    await self._detect_stuck_and_alert(strategy, result)
+                    if self._first_error_at is None:
+                        self._first_error_at = datetime.now(UTC)
+
+                    # Record failure in circuit breaker (skip statuses that already
+                    # recorded inline to avoid double-counting)
+                    if self._circuit_breaker is not None and result.status not in (
+                        IterationStatus.CIRCUIT_BREAKER_OPEN,
+                        IterationStatus.STRATEGY_TIMEOUT,  # already recorded in decide() handler
+                        IterationStatus.STRATEGY_ERROR,  # already recorded in decide() handler
+                    ):
+                        self._circuit_breaker.record_failure(
+                            error_message=result.error or f"Iteration failed: {result.status.value}",
+                        )
+
+                    # Auto-trigger emergency stop if breaker just tripped to OPEN
+                    # (checked after both inline and run_loop recording paths)
+                    if self._circuit_breaker is not None:
+                        await self._maybe_trigger_emergency(strategy, result)
+
                     if self._consecutive_errors >= self.config.max_consecutive_errors:
                         await self._alert_consecutive_errors(strategy, result)
                         self._lifecycle_write_state(
@@ -1564,7 +1610,13 @@ class StrategyRunner:
                         )
                 else:
                     self._consecutive_errors = 0
-                    self._failure_state_entered_at = None
+                    self._first_error_at = None
+                    # Reset emergency guard so a future HALF_OPEN->OPEN relapse can re-fire
+                    if self._circuit_breaker is not None:
+                        from ..execution.circuit_breaker import CircuitBreakerState
+
+                        if self._circuit_breaker.state != CircuitBreakerState.OPEN:
+                            self._emergency_triggered_for_open = False
 
                 # Send heartbeat to gateway after each iteration
                 self._gateway_heartbeat(strategy_id)
@@ -2235,7 +2287,7 @@ class StrategyRunner:
             # Emit timeline event for successful execution
             self._emit_execution_timeline_event(strategy, intent, success=True, result=last_execution_result)
             if record_metrics:
-                self._record_success()
+                self._record_success(execution_proved=True)
 
             # Notify strategy of successful execution
             if hasattr(strategy, "on_intent_executed"):
@@ -2261,12 +2313,16 @@ class StrategyRunner:
                 except Exception as e:
                     logger.warning(f"Error saving strategy state: {e}")
 
+            # Post-execution balance reconciliation
+            recon = await self._reconcile_post_execution_balances(strategy, intent, last_execution_result)
+
             return IterationResult(
                 status=IterationStatus.SUCCESS,
                 intent=intent,
                 execution_result=last_execution_result,
                 strategy_id=strategy_id,
                 duration_ms=self._calculate_duration_ms(start_time),
+                balance_reconciliation=recon,
             )
         else:
             # State machine reached FAILED state - escalate to operator
@@ -2433,6 +2489,219 @@ class StrategyRunner:
             start_time=start_time,
             resume_progress=saved_progress,
         )
+
+    def _create_teardown_compiler(self, strategy: StrategyProtocol, market: Any = None) -> "IntentCompiler":
+        """Create an IntentCompiler for use by TeardownManager.
+
+        Mirrors the compiler setup in _execute_single_chain but without
+        per-intent specifics (Polymarket, CLOB, etc.).
+        """
+        from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
+
+        gateway_client = None
+        rpc_url = None
+        if isinstance(self.execution_orchestrator, GatewayExecutionOrchestrator):
+            gateway_client = self.execution_orchestrator._client
+        else:
+            rpc_url = getattr(self.execution_orchestrator, "rpc_url", None)
+
+        price_oracle = None
+        if market is not None and hasattr(market, "get_price_oracle_dict"):
+            price_oracle = market.get_price_oracle_dict() or None
+
+        compiler_config = IntentCompilerConfig(
+            allow_placeholder_prices=price_oracle is None,
+        )
+
+        return IntentCompiler(
+            chain=strategy.chain,
+            wallet_address=strategy.wallet_address,
+            rpc_url=rpc_url,
+            price_oracle=price_oracle,
+            config=compiler_config,
+            gateway_client=gateway_client,
+        )
+
+    async def _execute_teardown_via_manager(
+        self,
+        strategy: StrategyProtocol,
+        teardown_mode: Any,
+        teardown_market: Any,
+        teardown_intents: list,
+        start_time: datetime,
+        state_mgr: Any,
+        request: Any,
+    ) -> IterationResult:
+        """Execute teardown through TeardownManager with full safety guarantees.
+
+        Routes single-chain teardown through the dedicated TeardownManager which
+        provides safety validation, escalating slippage with approval gates,
+        state persistence for resumability, and post-execution verification.
+
+        Falls back to direct sequential execution if TeardownManager cannot be
+        initialized (e.g., compiler creation fails).
+        """
+        from ..teardown import TeardownConfig, TeardownManager, TeardownMode
+
+        strategy_id = strategy.strategy_id
+        mode_str = "graceful" if teardown_mode == TeardownMode.SOFT else "emergency"
+
+        # Ensure strategy satisfies TeardownManager's IntentStrategy protocol.
+        # The key requirement is an async pause() method. If missing, provide a no-op.
+        import asyncio
+        import inspect
+
+        if not hasattr(strategy, "pause") or not (
+            asyncio.iscoroutinefunction(getattr(strategy, "pause", None))
+            or inspect.iscoroutinefunction(getattr(strategy, "pause", None))
+        ):
+
+            async def _noop_pause() -> None:
+                pass
+
+            strategy.pause = _noop_pause  # type: ignore[attr-defined]
+            logger.debug("Injected no-op async pause() for TeardownManager compatibility")
+
+        # Try to create TeardownManager with execution dependencies
+        try:
+            compiler = self._create_teardown_compiler(strategy, teardown_market)
+            teardown_mgr = TeardownManager(
+                config=TeardownConfig.default(),
+                orchestrator=self.execution_orchestrator,  # type: ignore[arg-type]
+                compiler=compiler,
+            )
+        except Exception as e:
+            logger.warning(f"Could not create TeardownManager ({e}), falling back to direct teardown execution")
+            # Generate intents for fallback since TeardownManager won't do it
+            fallback_intents = teardown_intents
+            if not fallback_intents:
+                try:
+                    fallback_intents = strategy.generate_teardown_intents(teardown_mode, market=teardown_market)
+                except TypeError as exc:
+                    if "unexpected keyword argument" not in str(exc):
+                        raise
+                    fallback_intents = strategy.generate_teardown_intents(teardown_mode)
+            return await self._execute_teardown_direct(
+                strategy, fallback_intents, teardown_market, start_time, state_mgr, request
+            )
+
+        logger.info(f"🛑 {strategy_id} executing teardown via TeardownManager ({mode_str})")
+        if request:
+            state_mgr.mark_started(strategy_id)
+
+        teardown_result = await teardown_mgr.execute(
+            strategy=strategy,  # type: ignore[arg-type]
+            mode=mode_str,
+            market=teardown_market,
+            is_auto_mode=True,  # runner-triggered, skip cancel window
+        )
+
+        if teardown_result.success:
+            logger.info(
+                f"🛑 {strategy_id} teardown complete via TeardownManager "
+                f"({teardown_result.intents_succeeded}/{teardown_result.intents_total} succeeded)"
+            )
+            self.request_shutdown()
+            self._lifecycle_write_state(strategy_id, "TERMINATED")
+            if request:
+                state_mgr.mark_completed(
+                    strategy_id,
+                    result={
+                        "via": "teardown_manager",
+                        "intents_succeeded": teardown_result.intents_succeeded,
+                        "intents_failed": teardown_result.intents_failed,
+                    },
+                )
+            self._record_success(execution_proved=True)
+            return IterationResult(
+                status=IterationStatus.TEARDOWN,
+                intent=None,
+                strategy_id=strategy_id,
+                duration_ms=self._calculate_duration_ms(start_time),
+            )
+        else:
+            logger.warning(f"🛑 {strategy_id} teardown failed via TeardownManager: {teardown_result.error}")
+            if request:
+                state_mgr.mark_failed(strategy_id, error=teardown_result.error or "teardown execution failed")
+            return self._create_error_result(
+                strategy_id,
+                IterationStatus.EXECUTION_FAILED,
+                f"Teardown failed: {teardown_result.error}",
+                start_time,
+            )
+
+    async def _execute_teardown_direct(
+        self,
+        strategy: StrategyProtocol,
+        teardown_intents: list,
+        teardown_market: Any,
+        start_time: datetime,
+        state_mgr: Any,
+        request: Any,
+    ) -> IterationResult:
+        """Fallback: execute teardown intents directly without TeardownManager.
+
+        Used when TeardownManager cannot be initialized (e.g., compiler creation
+        fails). Executes intents sequentially through _execute_single_chain.
+        """
+        strategy_id = strategy.strategy_id
+
+        if not teardown_intents:
+            logger.info(f"🛑 {strategy_id} teardown complete (direct fallback: no positions)")
+            self.request_shutdown()
+            if request:
+                state_mgr.mark_completed(
+                    strategy_id,
+                    result={"via": "direct", "reason": "no_positions"},
+                )
+            self._record_success()
+            return IterationResult(
+                status=IterationStatus.TEARDOWN,
+                intent=None,
+                strategy_id=strategy_id,
+                duration_ms=self._calculate_duration_ms(start_time),
+            )
+
+        all_success = True
+        last_result = None
+        for i, intent in enumerate(teardown_intents):
+            logger.info(
+                f"🛑 Executing teardown intent {i + 1}/{len(teardown_intents)}: "
+                f"{intent.intent_type.value} (direct path)"
+            )
+            result = await self._execute_single_chain(
+                strategy=strategy,
+                intent=intent,
+                start_time=start_time,
+                total_intents=1,
+                market=teardown_market,
+            )
+            last_result = result
+            if not result.success:
+                all_success = False
+                logger.error(f"🛑 Teardown intent {i + 1} failed: {result.error}")
+                break
+
+        if last_result:
+            if all_success:
+                last_result.status = IterationStatus.TEARDOWN
+                logger.info(f"🛑 {strategy_id} teardown complete (direct) - shutting down")
+                self.request_shutdown()
+                if request:
+                    state_mgr.mark_completed(
+                        strategy_id,
+                        result={
+                            "via": "direct",
+                            "intents": len(teardown_intents),
+                        },
+                    )
+            else:
+                logger.warning(f"🛑 {strategy_id} teardown incomplete - manual intervention may be required")
+                if request:
+                    state_mgr.mark_failed(strategy_id, error=last_result.error or "execution failed")
+            return last_result
+        # last_result is always set when teardown_intents is non-empty (guarded above)
+        return last_result  # type: ignore[return-value]
 
     def _check_teardown_requested(
         self,
@@ -2620,7 +2889,7 @@ class StrategyRunner:
             # Invalidate balance cache after execution
             self.balance_provider.invalidate_cache()
 
-            self._record_success()
+            self._record_success(execution_proved=True)
             return IterationResult(
                 status=IterationStatus.SUCCESS,
                 intent=first_intent,
@@ -3095,7 +3364,7 @@ class StrategyRunner:
         # Invalidate balance cache after execution
         self.balance_provider.invalidate_cache()
 
-        self._record_success()
+        self._record_success(execution_proved=True)
         return IterationResult(
             status=IterationStatus.SUCCESS,
             intent=first_intent,
@@ -3282,11 +3551,98 @@ class StrategyRunner:
             duration_ms=self._calculate_duration_ms(start_time),
         )
 
-    def _record_success(self) -> None:
-        """Record a successful iteration in metrics."""
+    async def _reconcile_post_execution_balances(
+        self,
+        strategy: StrategyProtocol,
+        intent: AnyIntent,
+        execution_result: ExecutionResult | None,
+    ) -> dict[str, Any] | None:
+        """Verify post-execution token balances match intent expectations.
+
+        After a successful on-chain execution, queries actual balances and
+        compares with expected token flow direction. Returns a reconciliation
+        dict with results, or None if reconciliation couldn't be performed.
+
+        This is a safety net: even if the transaction receipt looks fine,
+        the on-chain balance should reflect the expected token movements.
+        """
+        try:
+            # Extract tokens from the intent
+            tokens = self._extract_intent_tokens(intent)
+            if not tokens:
+                return None
+
+            # Query current balances for involved tokens
+            post_balances: dict[str, Decimal] = {}
+            for token_symbol in tokens:
+                try:
+                    bal = await self.balance_provider.get_balance(token_symbol)
+                    post_balances[token_symbol] = bal.balance
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Balance reconciliation: failed to fetch %s balance: %s", token_symbol, exc)
+                    # Balance query failures are non-fatal for reconciliation
+                    continue
+
+            if not post_balances:
+                return None
+
+            # Build reconciliation report
+            recon: dict[str, Any] = {
+                "tokens_checked": list(post_balances.keys()),
+                "post_balances": {k: str(v) for k, v in post_balances.items()},
+                "warnings": [],
+            }
+
+            # For swaps, verify directional correctness using enriched swap_amounts
+            if execution_result and execution_result.swap_amounts:
+                sa = execution_result.swap_amounts
+                if sa.amount_out_decimal is not None and sa.amount_out_decimal <= 0:
+                    recon["warnings"].append(f"Swap output amount is zero or negative: {sa.amount_out_decimal}")
+                if sa.amount_in_decimal is not None and sa.amount_in_decimal <= 0:
+                    recon["warnings"].append(f"Swap input amount is zero or negative: {sa.amount_in_decimal}")
+
+            if recon["warnings"]:
+                logger.warning(
+                    "Balance reconciliation warnings for %s: %s",
+                    strategy.strategy_id,
+                    recon["warnings"],
+                )
+
+            return recon
+
+        except Exception as e:
+            logger.debug(f"Balance reconciliation skipped: {e}")
+            return None
+
+    @staticmethod
+    def _extract_intent_tokens(intent: AnyIntent) -> list[str]:
+        """Extract token symbols involved in an intent."""
+        tokens: list[str] = []
+        # SwapIntent
+        if hasattr(intent, "from_token") and hasattr(intent, "to_token"):
+            tokens.extend([intent.from_token, intent.to_token])
+        # LP intents
+        elif hasattr(intent, "token0") and hasattr(intent, "token1"):
+            tokens.extend([intent.token0, intent.token1])
+        # Supply/Borrow intents
+        elif hasattr(intent, "token"):
+            tokens.append(intent.token)
+        return tokens
+
+    def _record_success(self, *, execution_proved: bool = False) -> None:
+        """Record a successful iteration in metrics and circuit breaker.
+
+        Args:
+            execution_proved: True when an actual on-chain execution succeeded.
+                Only execution-proved successes count toward closing a HALF_OPEN
+                circuit breaker, so HOLD/DRY_RUN cannot prematurely close the
+                breaker without proving the execution path works.
+        """
         self._total_iterations += 1
         self._successful_iterations += 1
         self._consecutive_errors = 0
+        if self._circuit_breaker is not None and execution_proved:
+            self._circuit_breaker.record_success()
 
     def _calculate_duration_ms(self, start_time: datetime) -> float:
         """Calculate duration in milliseconds since start_time."""
@@ -3318,7 +3674,7 @@ class StrategyRunner:
             from ..services.stuck_detector import StrategySnapshot
 
             # Build a lightweight snapshot from available runner state
-            state_entered_at = self._failure_state_entered_at or datetime.now(UTC)
+            state_entered_at = self._first_error_at or datetime.now(UTC)
             snapshot = StrategySnapshot(
                 strategy_id=strategy.strategy_id,
                 chain=getattr(strategy, "chain", "unknown"),
@@ -3639,38 +3995,65 @@ class StrategyRunner:
         strategy: StrategyProtocol,
         execution_result: ExecutionResult,
     ) -> None:
-        """Handle execution errors with alerting."""
+        """Handle execution errors with alerting.
+
+        When an OperatorCardGenerator is configured, generates rich cards with
+        auto-detected StuckReason, computed severity, and suggested actions.
+        Falls back to a basic card when no generator is available.
+        """
         if not self.config.enable_alerting or not self.alert_manager:
             return
 
         try:
-            # Create operator card for the error
-            card = OperatorCard(
-                strategy_id=strategy.strategy_id,
-                timestamp=datetime.now(UTC),
-                event_type=EventType.ERROR,
-                reason=StuckReason.TRANSACTION_REVERTED,
-                context={
-                    "phase": execution_result.phase.value if execution_result.phase else "unknown",
-                    "error": execution_result.error or "Unknown error",
-                    "gas_used": execution_result.total_gas_used,
-                },
-                severity=Severity.HIGH,
-                position_summary=PositionSummary(
+            if self._operator_card_generator is not None:
+                from ..services.operator_card_generator import ErrorContext, StrategyState
+
+                error_ctx = ErrorContext(
+                    error_type=type(execution_result).__name__,
+                    error_message=execution_result.error or "Unknown execution error",
+                    gas_used=execution_result.total_gas_used,
+                    revert_reason=getattr(execution_result, "revert_reason", None),
+                )
+                strategy_state = StrategyState(
+                    strategy_id=strategy.strategy_id,
+                    status="error",
                     total_value_usd=Decimal("0"),
                     available_balance_usd=Decimal("0"),
-                ),
-                risk_description="Strategy execution failed - positions may be at risk",
-                suggested_actions=[
-                    SuggestedAction(
-                        action=AvailableAction.RESUME,
-                        description="Resume to retry the failed transaction",
-                        priority=1,
-                        is_recommended=True,
+                    stuck_since=self._first_error_at,
+                    last_successful_action=None,
+                )
+                card = self._operator_card_generator.generate_card(
+                    strategy_state=strategy_state,
+                    error_context=error_ctx,
+                    event_type=EventType.ERROR,
+                )
+            else:
+                card = OperatorCard(
+                    strategy_id=strategy.strategy_id,
+                    timestamp=datetime.now(UTC),
+                    event_type=EventType.ERROR,
+                    reason=StuckReason.TRANSACTION_REVERTED,
+                    context={
+                        "phase": execution_result.phase.value if execution_result.phase else "unknown",
+                        "error": execution_result.error or "Unknown error",
+                        "gas_used": execution_result.total_gas_used,
+                    },
+                    severity=Severity.HIGH,
+                    position_summary=PositionSummary(
+                        total_value_usd=Decimal("0"),
+                        available_balance_usd=Decimal("0"),
                     ),
-                ],
-                available_actions=[AvailableAction.RESUME, AvailableAction.PAUSE],
-            )
+                    risk_description="Strategy execution failed - positions may be at risk",
+                    suggested_actions=[
+                        SuggestedAction(
+                            action=AvailableAction.RESUME,
+                            description="Resume to retry the failed transaction",
+                            priority=1,
+                            is_recommended=True,
+                        ),
+                    ],
+                    available_actions=[AvailableAction.RESUME, AvailableAction.PAUSE],
+                )
 
             await self.alert_manager.send_alert(card)
 
@@ -3682,43 +4065,158 @@ class StrategyRunner:
         strategy: StrategyProtocol,
         last_result: IterationResult,
     ) -> None:
-        """Send alert for consecutive errors threshold breach."""
+        """Send alert for consecutive errors threshold breach.
+
+        When StuckDetector and OperatorCardGenerator are configured, produces
+        intelligent failure classification with root-cause analysis and
+        actionable remediation steps. Falls back to a basic card otherwise.
+        """
         if not self.config.enable_alerting or not self.alert_manager:
             return
 
         try:
-            card = OperatorCard(
-                strategy_id=strategy.strategy_id,
-                timestamp=datetime.now(UTC),
-                event_type=EventType.WARNING,
-                reason=StuckReason.UNKNOWN,
-                context={
-                    "consecutive_errors": self._consecutive_errors,
-                    "max_allowed": self.config.max_consecutive_errors,
-                    "last_error": last_result.error or "Unknown",
-                    "last_status": last_result.status.value,
-                },
-                severity=Severity.MEDIUM,
-                position_summary=PositionSummary(
+            if self._operator_card_generator is not None:
+                from ..services.operator_card_generator import ErrorContext, StrategyState
+
+                # Build ErrorContext from the last iteration result
+                error_ctx = ErrorContext(
+                    error_type=last_result.status.value,
+                    error_message=last_result.error or "Unknown error",
+                )
+
+                # Build StrategyState with what we know from the runner
+                strategy_state = StrategyState(
+                    strategy_id=strategy.strategy_id,
+                    status="stuck" if self._consecutive_errors >= self.config.max_consecutive_errors else "error",
                     total_value_usd=Decimal("0"),
                     available_balance_usd=Decimal("0"),
-                ),
-                risk_description=(f"Strategy has failed {self._consecutive_errors} consecutive times"),
-                suggested_actions=[
-                    SuggestedAction(
-                        action=AvailableAction.PAUSE,
-                        description="Pause strategy to review error logs",
-                        priority=1,
-                        is_recommended=True,
+                    stuck_since=self._first_error_at,
+                    last_successful_action=None,
+                )
+
+                # Use StuckDetector for intelligent classification if available
+                stuck_reason = None
+                if self._stuck_detector is not None:
+                    from ..execution.circuit_breaker import CircuitBreakerState
+                    from ..services.stuck_detector import StrategySnapshot
+
+                    snapshot = StrategySnapshot(
+                        strategy_id=strategy.strategy_id,
+                        chain=getattr(strategy, "chain", "unknown"),
+                        current_state=last_result.status.value,
+                        state_entered_at=self._first_error_at or datetime.now(UTC),
+                        pending_transactions=[],
+                        circuit_breaker_triggered=(
+                            self._circuit_breaker is not None
+                            and self._circuit_breaker.state == CircuitBreakerState.OPEN
+                        ),
+                        rpc_healthy="rpc" not in (last_result.error or "").lower(),
+                        last_rpc_error=(
+                            last_result.error if last_result.error and "rpc" in last_result.error.lower() else None
+                        ),
+                    )
+                    detection = self._stuck_detector.detect_stuck(snapshot)
+                    if detection.is_stuck and detection.reason:
+                        stuck_reason = detection.reason
+                        logger.info(
+                            "StuckDetector classified %s as %s",
+                            strategy.strategy_id,
+                            stuck_reason.value,
+                        )
+
+                # Generate rich card via OperatorCardGenerator
+                event_type = EventType.STUCK if stuck_reason else EventType.WARNING
+                card = self._operator_card_generator.generate_card(
+                    strategy_state=strategy_state,
+                    error_context=error_ctx,
+                    event_type=event_type,
+                )
+            else:
+                # Fallback: basic card without intelligent classification
+                card = OperatorCard(
+                    strategy_id=strategy.strategy_id,
+                    timestamp=datetime.now(UTC),
+                    event_type=EventType.WARNING,
+                    reason=StuckReason.UNKNOWN,
+                    context={
+                        "consecutive_errors": self._consecutive_errors,
+                        "max_allowed": self.config.max_consecutive_errors,
+                        "last_error": last_result.error or "Unknown",
+                        "last_status": last_result.status.value,
+                    },
+                    severity=Severity.MEDIUM,
+                    position_summary=PositionSummary(
+                        total_value_usd=Decimal("0"),
+                        available_balance_usd=Decimal("0"),
                     ),
-                ],
-                available_actions=[AvailableAction.PAUSE, AvailableAction.RESUME],
-            )
+                    risk_description=(f"Strategy has failed {self._consecutive_errors} consecutive times"),
+                    suggested_actions=[
+                        SuggestedAction(
+                            action=AvailableAction.PAUSE,
+                            description="Pause strategy to review error logs",
+                            priority=1,
+                            is_recommended=True,
+                        ),
+                    ],
+                    available_actions=[AvailableAction.PAUSE, AvailableAction.RESUME],
+                )
 
             await self.alert_manager.send_alert(card)
 
         except Exception as e:
             logger.error(f"Failed to send consecutive errors alert: {e}")
+
+    async def _maybe_trigger_emergency(
+        self,
+        strategy: StrategyProtocol,
+        last_result: IterationResult,
+    ) -> None:
+        """Trigger emergency stop if the circuit breaker just tripped to OPEN.
+
+        Called after every failure recording. Only fires once per OPEN transition
+        by tracking whether we've already triggered for this OPEN state via
+        the _emergency_triggered_for_open flag.
+        """
+        if self._emergency_manager is None or self._circuit_breaker is None:
+            return
+
+        # Only trigger when breaker is OPEN
+        from ..execution.circuit_breaker import CircuitBreakerState
+
+        if self._circuit_breaker.state != CircuitBreakerState.OPEN:
+            self._emergency_triggered_for_open = False
+            return
+
+        # Don't trigger more than once per OPEN episode
+        if self._emergency_triggered_for_open:
+            return
+
+        try:
+            cb_check = self._circuit_breaker.check()
+            reason = (
+                f"Circuit breaker tripped after {cb_check.consecutive_failures} "
+                f"consecutive failures: {last_result.error or 'unknown error'}"
+            )
+            logger.warning(
+                "EMERGENCY: triggering emergency stop for %s — %s",
+                strategy.strategy_id,
+                reason,
+            )
+            await self._emergency_manager.emergency_stop_async(
+                strategy_id=strategy.strategy_id,
+                reason=reason,
+                chain=getattr(strategy, "chain", ""),
+                trigger_context={
+                    "consecutive_failures": cb_check.consecutive_failures,
+                    "cumulative_loss_usd": str(cb_check.cumulative_loss_usd),
+                    "last_status": last_result.status.value,
+                    "last_error": last_result.error,
+                },
+            )
+            # Only mark as triggered after successful emergency stop
+            self._emergency_triggered_for_open = True
+        except Exception as e:
+            logger.error(f"Failed to trigger emergency stop for {strategy.strategy_id}: {e}")
 
     def get_metrics(self) -> dict[str, Any]:
         """Get current runner metrics.

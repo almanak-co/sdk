@@ -1047,8 +1047,7 @@ def run(
         gateway_client = GatewayClient(gateway_config)
         gateway_client.connect()
 
-        click.echo("Waiting for gateway to become ready...")
-        if not gateway_client.wait_for_ready(timeout=60.0, interval=5.0):
+        if not gateway_client.health_check():
             gateway_client.disconnect()
             click.echo()
             click.secho("ERROR: Gateway is not running or not healthy", fg="red", bold=True)
@@ -1293,8 +1292,7 @@ def run(
         gateway_client = GatewayClient(gateway_config)
         gateway_client.connect()
 
-        click.echo("Waiting for gateway to become ready...")
-        if not gateway_client.wait_for_ready(timeout=60.0, interval=5.0):
+        if not gateway_client.health_check():
             managed_gateway.stop()
             gateway_client.disconnect()
             raise click.ClickException(
@@ -2333,6 +2331,17 @@ def run(
             enable_alerting=False,  # No alert manager configured
         )
 
+        # Create safety components for fail-closed execution
+        from ..execution.circuit_breaker import CircuitBreaker
+        from ..services.emergency_manager import EmergencyManager
+        from ..services.operator_card_generator import OperatorCardGenerator
+        from ..services.stuck_detector import StuckDetector
+
+        circuit_breaker = CircuitBreaker(strategy_id=strategy_id)
+        stuck_detector = StuckDetector()
+        operator_card_generator = OperatorCardGenerator()
+        emergency_manager = EmergencyManager()
+
         # Create runner
         runner = StrategyRunner(
             price_oracle=price_oracle,
@@ -2341,6 +2350,10 @@ def run(
             state_manager=state_manager,  # type: ignore[arg-type]
             config=runner_config,
             vault_lifecycle=vault_lifecycle,
+            circuit_breaker=circuit_breaker,
+            stuck_detector=stuck_detector,
+            operator_card_generator=operator_card_generator,
+            emergency_manager=emergency_manager,
         )
 
         click.echo("Components initialized successfully")

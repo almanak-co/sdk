@@ -277,14 +277,7 @@ def _get_executor(ctx: click.Context):
     port = ctx.obj["gateway_port"]
     network = ctx.obj.get("network")
 
-    # Try connecting to an existing gateway first.
-    # Suppress gateway client logs during probe -- connection-refused warnings
-    # are expected when no gateway is pre-running and look like errors to users.
-    import logging
-
-    gw_logger = logging.getLogger("almanak.framework.gateway_client")
-    prev_level = gw_logger.level
-    gw_logger.setLevel(logging.ERROR)
+    # Try connecting to an existing gateway first
     try:
         executor, client = create_cli_executor(
             gateway_host=host,
@@ -299,8 +292,6 @@ def _get_executor(ctx: click.Context):
         return executor, client
     except click.ClickException:
         pass  # No gateway running -- auto-start one below
-    finally:
-        gw_logger.setLevel(prev_level)
 
     # Auto-start a managed gateway (mainnet or anvil)
     managed = _start_managed_gateway(ctx, host, port, network)
@@ -429,7 +420,7 @@ def price(ctx, token):
     Examples:
         almanak ax price ETH
         almanak ax price USDC --chain base
-        almanak ax --json price ETH
+        almanak ax price ETH --json
     """
     from almanak.framework.cli.ax_render import render_error, render_result
 
@@ -468,7 +459,7 @@ def balance(ctx, token):
     Examples:
         almanak ax balance USDC
         almanak ax balance ETH --chain base
-        almanak ax --json balance WETH
+        almanak ax balance WETH --json
     """
     from almanak.framework.cli.ax_render import render_error, render_result
 
@@ -674,7 +665,7 @@ def lp_info(ctx, position_id, protocol):
     \b
     Examples:
         almanak ax lp-info 123456                      # View LP #123456
-        almanak ax --json lp-info 123456               # JSON output
+        almanak ax lp-info 123456 --json               # JSON output
         almanak ax lp-info 123456 --protocol uniswap_v3
     """
     from almanak.framework.cli.ax_render import render_error, render_result
@@ -729,7 +720,7 @@ def pool(ctx, token_a, token_b, fee_tier, protocol):
     Examples:
         almanak ax pool WBTC WETH                      # WBTC-WETH pool info
         almanak ax pool USDC ETH --fee-tier 500         # 0.05% fee tier
-        almanak ax --json pool WBTC WETH                # JSON output
+        almanak ax pool WBTC WETH --json                # JSON output
     """
     from almanak.framework.cli.ax_render import render_error, render_result
 
@@ -935,7 +926,7 @@ def tools_list(ctx, category):
     Examples:
         almanak ax tools                    # List all tools
         almanak ax tools --category action  # Only action tools
-        almanak ax --json tools             # JSON output
+        almanak ax tools --json             # JSON output
     """
     import json as json_mod
 
@@ -986,7 +977,7 @@ def run_tool(ctx, tool_name, args_json):
     \b
     Examples:
         almanak ax run get_price '{"token": "ETH"}'
-        almanak ax --json run get_balance '{"token": "USDC"}'
+        almanak ax run get_balance '{"token": "USDC"}' --json
         almanak ax run compile_intent '{"intent_type": "swap", ...}'
         almanak ax --dry-run run swap_tokens '{"token_in": "USDC", "token_out": "ETH", "amount": "100"}'
     """

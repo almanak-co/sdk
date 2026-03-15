@@ -1,7 +1,7 @@
 {
     "market": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
     "market_name": "PT-wstETH-25JUN2026",
-    "trade_size_token": 0.001,
+    "trade_size_token": 0.01,
     "max_slippage_bps": 100,
     "base_token": "WSTETH",
     "base_token_symbol": "WSTETH",

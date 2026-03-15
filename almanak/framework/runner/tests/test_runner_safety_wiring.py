@@ -219,7 +219,7 @@ class TestCircuitBreakerWiring:
 
     @pytest.mark.asyncio
     async def test_circuit_breaker_hold_is_neutral(self):
-        """HOLD results should NOT reset breaker (neutral — doesn't prove execution works)."""
+        """HOLD should NOT reset breaker — only real execution proves the path works."""
         breaker = CircuitBreaker("test_strategy", CircuitBreakerConfig(max_consecutive_failures=3))
         breaker.record_failure("fail 1")
         breaker.record_failure("fail 2")
@@ -231,7 +231,7 @@ class TestCircuitBreakerWiring:
         # Run via run_loop so post-iteration recording fires
         await runner.run_loop(strategy, max_iterations=1)
 
-        # HOLD is neutral — failures should NOT be cleared
+        # HOLD is neutral — failures should NOT be cleared (only actual execution resets)
         assert breaker._consecutive_failures == 2
 
     @pytest.mark.asyncio
@@ -379,38 +379,29 @@ class TestStuckDetectorWiring:
     """Tests that StuckDetector and OperatorCardGenerator are wired into the runner."""
 
     @pytest.mark.asyncio
-    async def test_stuck_detection_runs_on_failure(self):
-        """Stuck detection should be triggered when consecutive failures occur."""
+    async def test_stuck_detection_runs_on_consecutive_failures(self):
+        """Stuck detection via _alert_consecutive_errors triggers after max_consecutive_errors."""
         alert_manager = MockAlertManager()
-        runner = _make_runner(alert_manager=alert_manager)
+        config = RunnerConfig(max_consecutive_errors=1)  # Trip after 1 failure
+        runner = _make_runner(alert_manager=alert_manager, config=config)
         strategy = MockStrategy(decide_raises=ValueError("stuck test"))
 
-        # First failure — sets _failure_state_entered_at
-        await runner.run_iteration(strategy)
-
-        # Simulate time passing so stuck detector triggers (>10min default)
-        runner._failure_state_entered_at = datetime.now(UTC) - timedelta(minutes=15)
-
-        # Second failure — should trigger stuck detection
-        # Use run_loop with max_iterations=1 to trigger the post-iteration stuck detection
+        # Run one iteration via run_loop to trigger post-iteration alert logic
         await runner.run_loop(strategy, max_iterations=1)
 
-        # Verify stuck detection was lazy-initialized
-        assert runner._stuck_detector is not None
-        assert runner._operator_card_generator is not None
+        # _alert_consecutive_errors should have run and sent an alert
+        assert len(alert_manager.alerts_sent) >= 1
 
     @pytest.mark.asyncio
     async def test_stuck_detection_sends_operator_card_to_alert_manager(self):
-        """When stuck is detected, an OperatorCard should be sent via AlertManager."""
+        """When consecutive errors hit threshold, an OperatorCard should be sent via AlertManager."""
         alert_manager = MockAlertManager()
-        runner = _make_runner(alert_manager=alert_manager)
-
-        # Simulate pre-existing failure state that is old enough to be "stuck"
-        runner._failure_state_entered_at = datetime.now(UTC) - timedelta(minutes=15)
+        config = RunnerConfig(max_consecutive_errors=1)  # Trip after 1 failure
+        runner = _make_runner(alert_manager=alert_manager, config=config)
 
         strategy = MockStrategy(decide_raises=ValueError("stuck"))
 
-        # Run a single loop iteration to trigger post-iteration stuck detection
+        # Run a single loop iteration to trigger consecutive error alert
         await runner.run_loop(strategy, max_iterations=1)
 
         # Should have received at least one OperatorCard alert
@@ -430,48 +421,52 @@ class TestStuckDetectorWiring:
 
     @pytest.mark.asyncio
     async def test_failure_state_timestamp_tracks_first_failure(self):
-        """_failure_state_entered_at should be set on first failure and persist across subsequent failures."""
+        """_first_error_at should be set on first failure and persist across subsequent failures."""
         runner = _make_runner()
         strategy = MockStrategy(decide_raises=ValueError("fail"))
 
-        assert runner._failure_state_entered_at is None
+        assert runner._first_error_at is None
 
         await runner.run_loop(strategy, max_iterations=1)
-        first_failure_at = runner._failure_state_entered_at
+        first_failure_at = runner._first_error_at
         assert first_failure_at is not None
 
         # Second failure should NOT overwrite the timestamp
         await runner.run_loop(strategy, max_iterations=1)
-        assert runner._failure_state_entered_at == first_failure_at
+        assert runner._first_error_at == first_failure_at
 
     @pytest.mark.asyncio
     async def test_failure_state_resets_on_success(self):
-        """_failure_state_entered_at should reset when a successful iteration occurs."""
+        """_first_error_at should reset when a successful iteration occurs."""
         runner = _make_runner()
 
         # Simulate an existing failure timestamp
-        runner._failure_state_entered_at = datetime.now(UTC) - timedelta(minutes=5)
+        runner._first_error_at = datetime.now(UTC) - timedelta(minutes=5)
 
         strategy = MockStrategy(decide_returns=HoldIntent(reason="recovered"))
 
         await runner.run_loop(strategy, max_iterations=1)
 
         # Should have been cleared on success
-        assert runner._failure_state_entered_at is None
+        assert runner._first_error_at is None
 
     @pytest.mark.asyncio
     async def test_stuck_detection_is_non_fatal(self):
         """Even if stuck detection crashes, the runner should continue."""
-        runner = _make_runner()
+        config = RunnerConfig(max_consecutive_errors=1)
+        runner = _make_runner(config=config)
         strategy = MockStrategy(decide_raises=ValueError("fail"))
 
-        # Inject a broken stuck detector that raises
-        runner._stuck_detector = MagicMock()
-        runner._stuck_detector.detect_stuck.side_effect = RuntimeError("detector crash")
-        runner._failure_state_entered_at = datetime.now(UTC) - timedelta(minutes=15)
+        # Inject a broken operator card generator that raises
+        from almanak.framework.services.operator_card_generator import OperatorCardGenerator
 
-        # Should not raise - stuck detection is non-fatal
-        await runner.run_loop(strategy, max_iterations=1)
+        runner._operator_card_generator = MagicMock(spec=OperatorCardGenerator)
+        runner._operator_card_generator.generate_card.side_effect = RuntimeError("card gen crash")
+        runner._first_error_at = datetime.now(UTC) - timedelta(minutes=15)
+
+        # Should not raise - alert generation is non-fatal, loop continues
+        await runner.run_loop(strategy, max_iterations=2)
+        assert strategy.decide_call_count == 2
 
 
 # =============================================================================

@@ -18,8 +18,8 @@
     "max_slippage_bps": 150,
     "max_position_pct": 80,
     "anvil_funding": {
-        "MNT": 10,
-        "WMNT": 10,
-        "USDT": 50
+        "MNT": 1000,
+        "WMNT": 100,
+        "USDT": 50000
     }
 }

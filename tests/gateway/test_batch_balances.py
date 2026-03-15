@@ -8,7 +8,6 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import pytest_asyncio
 
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.market_service import MarketServiceServicer
@@ -26,12 +25,10 @@ def settings():
     )
 
 
-@pytest_asyncio.fixture
-async def market_service(settings):
+@pytest.fixture
+def market_service(settings):
     """Create MarketServiceServicer."""
-    service = MarketServiceServicer(settings)
-    yield service
-    await service.close()
+    return MarketServiceServicer(settings)
 
 
 @pytest.fixture

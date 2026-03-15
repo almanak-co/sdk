@@ -3,7 +3,6 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-import pytest_asyncio
 
 from almanak.gateway.services.token_service import TokenServiceServicer
 
@@ -16,8 +15,8 @@ def mock_settings():
     return settings
 
 
-@pytest_asyncio.fixture
-async def token_service(mock_settings):
+@pytest.fixture
+def token_service(mock_settings):
     """Create TokenService with mock settings."""
     with patch("almanak.gateway.services.token_service.get_token_resolver") as mock_resolver:
         resolver = MagicMock()
@@ -37,8 +36,7 @@ async def token_service(mock_settings):
         resolver.is_gateway_connected.return_value = False
         mock_resolver.return_value = resolver
         service = TokenServiceServicer(mock_settings)
-    yield service
-    await service.close()
+    return service
 
 
 class TestTokenServiceHealthCheck:
