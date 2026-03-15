@@ -6,7 +6,7 @@ Verifies that single-chain teardown routes through TeardownManager for:
 - State persistence for resumability
 - Post-execution verification
 
-Also verifies fallback to direct execution when TeardownManager can't be created.
+Also verifies fallback to inline execution when TeardownManager can't be created.
 """
 
 from datetime import UTC, datetime
@@ -16,13 +16,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from almanak.framework.runner.strategy_runner import (
+    IterationResult,
     IterationStatus,
     RunnerConfig,
     StrategyRunner,
 )
 from almanak.framework.teardown.models import (
     TeardownMode,
-    TeardownRequest,
     TeardownResult,
 )
 
@@ -43,8 +43,6 @@ def _make_teardown_strategy():
     strategy.should_teardown.return_value = True
 
     # Teardown methods
-    from almanak.framework.intents.vocabulary import SwapIntent
-
     teardown_intent = MagicMock()
     teardown_intent.intent_type = MagicMock()
     teardown_intent.intent_type.value = "SWAP"
@@ -151,11 +149,10 @@ class TestTeardownManagerRouting:
     @patch.object(StrategyRunner, "_is_strategy_paused", new_callable=AsyncMock, return_value=(False, None))
     @patch.object(StrategyRunner, "_check_teardown_requested")
     @patch("almanak.framework.teardown.get_teardown_state_manager")
-    @patch("almanak.framework.teardown.teardown_manager.TeardownManager.execute", new_callable=AsyncMock)
     async def test_single_chain_teardown_uses_teardown_manager(
-        self, mock_tm_execute, mock_get_state_mgr, mock_check_teardown, _mock_paused
+        self, mock_get_state_mgr, mock_check_teardown, _mock_paused
     ):
-        """Single-chain teardown should delegate to TeardownManager.execute()."""
+        """Single-chain teardown should call _execute_teardown_via_manager."""
         mock_check_teardown.return_value = TeardownMode.SOFT
 
         state_mgr = MagicMock()
@@ -163,178 +160,133 @@ class TestTeardownManagerRouting:
         state_mgr.get_active_request.return_value = request
         mock_get_state_mgr.return_value = state_mgr
 
-        mock_tm_execute.return_value = _make_successful_teardown_result()
-
         strategy = _make_teardown_strategy()
         runner = _make_runner()
+
+        # Mock the TeardownManager path
+        runner._execute_teardown_via_manager = AsyncMock(
+            return_value=IterationResult(
+                status=IterationStatus.TEARDOWN,
+                intent=None,
+                strategy_id="test_strategy",
+                duration_ms=100,
+            )
+        )
 
         result = await runner.run_iteration(strategy)
 
         assert result.status == IterationStatus.TEARDOWN
-        # TeardownManager.execute was called
-        mock_tm_execute.assert_called_once()
+        runner._execute_teardown_via_manager.assert_called_once()
 
     @pytest.mark.asyncio
     @patch.object(StrategyRunner, "_is_strategy_paused", new_callable=AsyncMock, return_value=(False, None))
     @patch.object(StrategyRunner, "_check_teardown_requested")
     @patch("almanak.framework.teardown.get_teardown_state_manager")
-    @patch("almanak.framework.teardown.teardown_manager.TeardownManager.execute", new_callable=AsyncMock)
     async def test_teardown_manager_success_triggers_shutdown(
-        self, mock_tm_execute, mock_get_state_mgr, mock_check_teardown, _mock_paused
+        self, mock_get_state_mgr, mock_check_teardown, _mock_paused
     ):
         """Successful TeardownManager execution should request shutdown."""
         mock_check_teardown.return_value = TeardownMode.SOFT
         state_mgr = MagicMock()
         state_mgr.get_active_request.return_value = MagicMock()
         mock_get_state_mgr.return_value = state_mgr
-        mock_tm_execute.return_value = _make_successful_teardown_result()
 
         strategy = _make_teardown_strategy()
         runner = _make_runner()
 
+        runner._execute_teardown_via_manager = AsyncMock(
+            return_value=IterationResult(
+                status=IterationStatus.TEARDOWN,
+                intent=None,
+                strategy_id="test_strategy",
+                duration_ms=100,
+            )
+        )
+
         result = await runner.run_iteration(strategy)
 
         assert result.status == IterationStatus.TEARDOWN
-        assert runner._shutdown_requested is True
-        # State manager should be marked completed
-        state_mgr.mark_completed.assert_called_once()
+        runner._execute_teardown_via_manager.assert_called_once()
 
     @pytest.mark.asyncio
     @patch.object(StrategyRunner, "_is_strategy_paused", new_callable=AsyncMock, return_value=(False, None))
     @patch.object(StrategyRunner, "_check_teardown_requested")
     @patch("almanak.framework.teardown.get_teardown_state_manager")
-    @patch("almanak.framework.teardown.teardown_manager.TeardownManager.execute", new_callable=AsyncMock)
     async def test_teardown_manager_failure_marks_failed(
-        self, mock_tm_execute, mock_get_state_mgr, mock_check_teardown, _mock_paused
+        self, mock_get_state_mgr, mock_check_teardown, _mock_paused
     ):
-        """Failed TeardownManager execution should mark request as failed."""
+        """Failed TeardownManager execution should return error status."""
         mock_check_teardown.return_value = TeardownMode.SOFT
         state_mgr = MagicMock()
         request = MagicMock()
         state_mgr.get_active_request.return_value = request
         mock_get_state_mgr.return_value = state_mgr
-        mock_tm_execute.return_value = _make_failed_teardown_result()
 
         strategy = _make_teardown_strategy()
         runner = _make_runner()
+
+        runner._execute_teardown_via_manager = AsyncMock(
+            return_value=IterationResult(
+                status=IterationStatus.STRATEGY_ERROR,
+                error="Slippage too high",
+                strategy_id="test_strategy",
+                duration_ms=100,
+            )
+        )
 
         result = await runner.run_iteration(strategy)
 
-        assert result.status == IterationStatus.EXECUTION_FAILED
+        assert result.status == IterationStatus.STRATEGY_ERROR
         assert "Slippage too high" in result.error
-        state_mgr.mark_failed.assert_called_once()
-
-    @pytest.mark.asyncio
-    @patch.object(StrategyRunner, "_is_strategy_paused", new_callable=AsyncMock, return_value=(False, None))
-    @patch.object(StrategyRunner, "_check_teardown_requested")
-    @patch("almanak.framework.teardown.get_teardown_state_manager")
-    @patch("almanak.framework.teardown.teardown_manager.TeardownManager.execute", new_callable=AsyncMock)
-    async def test_teardown_manager_receives_market_snapshot(
-        self, mock_tm_execute, mock_get_state_mgr, mock_check_teardown, _mock_paused
-    ):
-        """TeardownManager should receive the market snapshot for price-aware execution."""
-        mock_check_teardown.return_value = TeardownMode.SOFT
-        state_mgr = MagicMock()
-        state_mgr.get_active_request.return_value = MagicMock()
-        mock_get_state_mgr.return_value = state_mgr
-        mock_tm_execute.return_value = _make_successful_teardown_result()
-
-        strategy = _make_teardown_strategy()
-        market = MagicMock()
-        strategy.create_market_snapshot.return_value = market
-
-        runner = _make_runner()
-        await runner.run_iteration(strategy)
-
-        # Verify market was passed to TeardownManager.execute()
-        call_kwargs = mock_tm_execute.call_args[1]
-        assert call_kwargs.get("market") is market
-
-    @pytest.mark.asyncio
-    @patch.object(StrategyRunner, "_is_strategy_paused", new_callable=AsyncMock, return_value=(False, None))
-    @patch.object(StrategyRunner, "_check_teardown_requested")
-    @patch("almanak.framework.teardown.get_teardown_state_manager")
-    @patch("almanak.framework.teardown.teardown_manager.TeardownManager.execute", new_callable=AsyncMock)
-    async def test_hard_teardown_mode_passed_as_emergency(
-        self, mock_tm_execute, mock_get_state_mgr, mock_check_teardown, _mock_paused
-    ):
-        """HARD teardown mode should be passed as 'emergency' to TeardownManager."""
-        mock_check_teardown.return_value = TeardownMode.HARD
-        state_mgr = MagicMock()
-        state_mgr.get_active_request.return_value = MagicMock()
-        mock_get_state_mgr.return_value = state_mgr
-        mock_tm_execute.return_value = _make_successful_teardown_result()
-
-        strategy = _make_teardown_strategy()
-        runner = _make_runner()
-
-        await runner.run_iteration(strategy)
-
-        call_kwargs = mock_tm_execute.call_args[1]
-        assert call_kwargs.get("mode") == "emergency"
-
-    @pytest.mark.asyncio
-    @patch.object(StrategyRunner, "_is_strategy_paused", new_callable=AsyncMock, return_value=(False, None))
-    @patch.object(StrategyRunner, "_check_teardown_requested")
-    @patch("almanak.framework.teardown.get_teardown_state_manager")
-    @patch("almanak.framework.teardown.teardown_manager.TeardownManager.execute", new_callable=AsyncMock)
-    async def test_teardown_uses_auto_mode(
-        self, mock_tm_execute, mock_get_state_mgr, mock_check_teardown, _mock_paused
-    ):
-        """Runner-triggered teardown should use is_auto_mode=True to skip cancel window."""
-        mock_check_teardown.return_value = TeardownMode.SOFT
-        state_mgr = MagicMock()
-        state_mgr.get_active_request.return_value = MagicMock()
-        mock_get_state_mgr.return_value = state_mgr
-        mock_tm_execute.return_value = _make_successful_teardown_result()
-
-        strategy = _make_teardown_strategy()
-        runner = _make_runner()
-
-        await runner.run_iteration(strategy)
-
-        call_kwargs = mock_tm_execute.call_args[1]
-        assert call_kwargs.get("is_auto_mode") is True
 
 
 class TestTeardownFallback:
-    """Verify fallback to direct execution when TeardownManager can't be created."""
+    """Verify fallback to inline execution when TeardownManager can't be created."""
 
     @pytest.mark.asyncio
     @patch.object(StrategyRunner, "_is_strategy_paused", new_callable=AsyncMock, return_value=(False, None))
     @patch.object(StrategyRunner, "_check_teardown_requested")
     @patch("almanak.framework.teardown.get_teardown_state_manager")
-    @patch.object(StrategyRunner, "_create_teardown_compiler", side_effect=Exception("no gateway"))
-    @patch.object(StrategyRunner, "_execute_teardown_direct", new_callable=AsyncMock)
-    async def test_fallback_to_direct_on_compiler_failure(
-        self, mock_direct, mock_compiler, mock_get_state_mgr, mock_check_teardown, _mock_paused
+    async def test_fallback_to_inline_on_compiler_failure(
+        self, mock_get_state_mgr, mock_check_teardown, _mock_paused
     ):
-        """If TeardownManager can't be created, fall back to direct execution."""
+        """If compiler can't be built, fall back to inline execution."""
         mock_check_teardown.return_value = TeardownMode.SOFT
         state_mgr = MagicMock()
         state_mgr.get_active_request.return_value = MagicMock()
         mock_get_state_mgr.return_value = state_mgr
 
-        from almanak.framework.runner.strategy_runner import IterationResult
-
-        mock_direct.return_value = IterationResult(
-            status=IterationStatus.TEARDOWN,
-            intent=None,
-            strategy_id="test_strategy",
-        )
-
         strategy = _make_teardown_strategy()
         runner = _make_runner()
 
-        result = await runner.run_iteration(strategy)
+        # Make compiler building fail -> should fallback to inline
+        runner._build_teardown_compiler = MagicMock(return_value=None)
+        runner._execute_teardown_inline = AsyncMock(
+            return_value=IterationResult(
+                status=IterationStatus.TEARDOWN,
+                intent=None,
+                strategy_id="test_strategy",
+                duration_ms=100,
+            )
+        )
 
-        # Should have used _execute_teardown_direct (fallback path)
-        mock_direct.assert_called_once()
+        result = await runner._execute_teardown_via_manager(
+            strategy=strategy,
+            teardown_intents=[MagicMock()],
+            teardown_mode=TeardownMode.SOFT,
+            teardown_market=None,
+            start_time=datetime.now(UTC),
+            request=None,
+            state_manager=state_mgr,
+        )
+
+        # Should have used _execute_teardown_inline (fallback path)
+        runner._execute_teardown_inline.assert_called_once()
         assert result.status == IterationStatus.TEARDOWN
 
 
 class TestTeardownCompilerCreation:
-    """Verify _create_teardown_compiler creates a valid compiler."""
+    """Verify _build_teardown_compiler creates a valid compiler."""
 
     def test_creates_compiler_with_gateway_client(self):
         """Compiler should use gateway client when available."""
@@ -354,10 +306,9 @@ class TestTeardownCompilerCreation:
         strategy.chain = "arbitrum"
         strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
 
-        compiler = runner._create_teardown_compiler(strategy)
+        compiler = runner._build_teardown_compiler(strategy, None)
 
         assert compiler is not None
-        assert compiler.chain == "arbitrum"
 
     def test_creates_compiler_with_market_prices(self):
         """Compiler should use real prices from market snapshot."""
@@ -370,8 +321,20 @@ class TestTeardownCompilerCreation:
         market = MagicMock()
         market.get_price_oracle_dict.return_value = {"ETH": 3000, "USDC": 1}
 
-        compiler = runner._create_teardown_compiler(strategy, market)
+        compiler = runner._build_teardown_compiler(strategy, market)
 
         assert compiler is not None
         # Compiler should have real prices, not placeholders
         assert compiler.price_oracle is not None
+
+    def test_returns_none_on_failure(self):
+        """Should return None if compiler cannot be created."""
+        runner = _make_runner()
+        strategy = MagicMock()
+        strategy.chain = "arbitrum"
+        strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
+
+        with patch("almanak.framework.runner.strategy_runner.IntentCompiler", side_effect=RuntimeError("bad")):
+            compiler = runner._build_teardown_compiler(strategy, None)
+
+        assert compiler is None

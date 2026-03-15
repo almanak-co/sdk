@@ -531,6 +531,10 @@ class StrategyProtocol(Protocol):
         """Generate intents to close all positions (optional, checked via hasattr)."""
         ...
 
+    def get_open_positions(self) -> Any:
+        """Return open positions for teardown safety validation (optional)."""
+        ...
+
 
 class StatefulActivityProviderProtocol(Protocol):
     """Protocol for copy-trading activity providers with cursor state."""
@@ -983,167 +987,12 @@ class StrategyRunner:
                     return stuck_result
 
             # Step 0.5: Check for teardown request (reuses result from Step 0a)
-            # If teardown is requested, intercept the iteration and generate teardown intents
+            # If teardown is requested, intercept the iteration and execute teardown.
+            # Single-chain teardowns route through TeardownManager for full safety
+            # (loss caps, escalating slippage, cancel window, post-execution verification).
+            # Multi-chain teardowns use the inline path until TeardownManager supports it.
             if teardown_mode is not None:
-                from ..teardown import get_teardown_state_manager
-
-                manager = get_teardown_state_manager()
-                request = manager.get_active_request(strategy_id)
-
-                # Step T1: Create market snapshot (SAME as normal decide() path)
-                teardown_market = None
-                try:
-                    teardown_market = strategy.create_market_snapshot()
-                    if hasattr(teardown_market, "get_price_oracle_dict"):
-                        logger.debug(
-                            f"Created market snapshot for teardown with prices: "
-                            f"{list(teardown_market.get_price_oracle_dict().keys())}"
-                        )
-                    else:
-                        logger.debug("Created multi-chain market snapshot for teardown")
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to create market snapshot for teardown: {e}. Continuing without market data."
-                    )
-
-                # Single-chain: delegate to TeardownManager for full safety path
-                # (safety validation, escalating slippage, post-execution verification).
-                # TeardownManager handles intent generation, amount resolution, etc.
-                # Multi-chain falls through to the direct path below.
-                if not self._is_multi_chain:
-                    return await self._execute_teardown_via_manager(
-                        strategy=strategy,
-                        teardown_mode=teardown_mode,
-                        teardown_market=teardown_market,
-                        teardown_intents=[],  # TeardownManager generates intents internally
-                        start_time=start_time,
-                        state_mgr=manager,
-                        request=request,
-                    )
-
-                # Multi-chain path: generate and execute teardown intents directly
-                # (TeardownManager doesn't support multi-chain yet)
-
-                # Step T2: Generate teardown intents WITH market (symmetric with decide(market))
-                try:
-                    try:
-                        teardown_intents = strategy.generate_teardown_intents(teardown_mode, market=teardown_market)
-                    except TypeError as exc:
-                        if "unexpected keyword argument" not in str(exc):
-                            raise
-                        # Backward compat: old-style signature def generate_teardown_intents(self, mode)
-                        logger.debug(
-                            f"Strategy {strategy_id} uses old teardown signature (no market param), falling back"
-                        )
-                        teardown_intents = strategy.generate_teardown_intents(teardown_mode)
-                except NotImplementedError:
-                    logger.error(
-                        f"Strategy {strategy_id} supports_teardown()=True but "
-                        f"generate_teardown_intents() raises NotImplementedError"
-                    )
-                    if request:
-                        manager.mark_failed(strategy_id, error="generate_teardown_intents not implemented")
-                    return self._create_error_result(
-                        strategy_id,
-                        IterationStatus.STRATEGY_ERROR,
-                        "generate_teardown_intents not implemented",
-                        start_time,
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to generate teardown intents for {strategy_id}: {e}")
-                    if request:
-                        manager.mark_failed(strategy_id, error=str(e))
-                    return self._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
-
-                if not teardown_intents:
-                    logger.info(f"🛑 {strategy_id} teardown complete (no positions to close)")
-                    if request:
-                        manager.mark_completed(strategy_id, result={"reason": "no_positions"})
-                    self.request_shutdown()
-                    self._record_success()
-                    return IterationResult(
-                        status=IterationStatus.TEARDOWN,
-                        intent=None,
-                        strategy_id=strategy_id,
-                        duration_ms=self._calculate_duration_ms(start_time),
-                    )
-
-                logger.info(f"🛑 {strategy_id} entering TEARDOWN mode ({len(teardown_intents)} intents to execute)")
-                if request:
-                    manager.mark_started(strategy_id, total_positions=len(teardown_intents))
-
-                # Step T2.5: Pre-fetch prices for tokens in teardown intents
-                # MarketSnapshot is lazy — prices only populate on market.price() calls.
-                # generate_teardown_intents() typically doesn't call market.price(),
-                # so without this the compiler falls back to placeholder prices.
-                if teardown_market is not None and hasattr(teardown_market, "price"):
-                    try:
-                        self._prefetch_teardown_prices(teardown_market, teardown_intents)
-                    except Exception as e:
-                        logger.warning(f"Failed to pre-fetch teardown prices: {e}")
-
-                # Step T2.6: Resolve amount="all" in teardown intents
-                # The compiler rejects amount="all" — it must be resolved to a concrete
-                # token balance before compilation. Strategy authors commonly use
-                # amount="all" in generate_teardown_intents() (and the scaffold suggests it),
-                # so we resolve it here using the wallet balance from the market snapshot.
-                if teardown_market is not None:
-                    resolved_intents = []
-                    for intent in teardown_intents:
-                        if getattr(intent, "amount", None) == "all":
-                            amount_token = (
-                                getattr(intent, "from_token", None)
-                                or getattr(intent, "token", None)
-                                or getattr(intent, "collateral_token", None)
-                            )
-                            if amount_token:
-                                try:
-                                    bal = teardown_market.balance(amount_token)
-                                    numeric_balance = bal.balance if hasattr(bal, "balance") else bal
-                                    if numeric_balance > 0:
-                                        intent = Intent.set_resolved_amount(intent, numeric_balance)
-                                        logger.info(f"Resolved amount='all' for {amount_token}: {numeric_balance}")
-                                    else:
-                                        logger.warning(f"Teardown: {amount_token} balance is 0, skipping")
-                                        continue
-                                except Exception as e:
-                                    logger.warning(f"Could not resolve amount='all' for {amount_token}: {e}")
-                        resolved_intents.append(intent)
-                    teardown_intents = resolved_intents
-
-                # Step T2.7: If all intents were resolved away (e.g. all balances are 0),
-                # treat as "teardown complete" — nothing left to close.
-                if not teardown_intents:
-                    logger.info(f"🛑 {strategy_id} teardown complete (all positions already closed)")
-                    if request:
-                        manager.mark_completed(strategy_id, result={"reason": "all_balances_zero"})
-                    self.request_shutdown()
-                    self._lifecycle_write_state(strategy_id, "TERMINATED")
-                    self._record_success()
-                    return IterationResult(
-                        status=IterationStatus.TEARDOWN,
-                        intent=None,
-                        strategy_id=strategy_id,
-                        duration_ms=self._calculate_duration_ms(start_time),
-                    )
-
-                # Step T3: Execute multi-chain teardown directly
-                result = await self._execute_multi_chain(
-                    strategy=strategy,
-                    intents=teardown_intents,
-                    start_time=start_time,
-                    market=teardown_market,
-                )
-                if result.success:
-                    result.status = IterationStatus.TEARDOWN
-                    logger.info(f"🛑 {strategy_id} teardown complete - shutting down strategy runner")
-                    self.request_shutdown()
-                    if request:
-                        manager.mark_completed(strategy_id, result={"intents": len(teardown_intents)})
-                else:
-                    if request:
-                        manager.mark_failed(strategy_id, error=result.error or "execution failed")
-                return result
+                return await self._execute_teardown(strategy, teardown_mode, start_time)
 
             # Step 0b: Poll copy trading wallet activity (if configured)
             activity_provider = getattr(strategy, "_wallet_activity_provider", None)
@@ -2490,219 +2339,6 @@ class StrategyRunner:
             resume_progress=saved_progress,
         )
 
-    def _create_teardown_compiler(self, strategy: StrategyProtocol, market: Any = None) -> "IntentCompiler":
-        """Create an IntentCompiler for use by TeardownManager.
-
-        Mirrors the compiler setup in _execute_single_chain but without
-        per-intent specifics (Polymarket, CLOB, etc.).
-        """
-        from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
-
-        gateway_client = None
-        rpc_url = None
-        if isinstance(self.execution_orchestrator, GatewayExecutionOrchestrator):
-            gateway_client = self.execution_orchestrator._client
-        else:
-            rpc_url = getattr(self.execution_orchestrator, "rpc_url", None)
-
-        price_oracle = None
-        if market is not None and hasattr(market, "get_price_oracle_dict"):
-            price_oracle = market.get_price_oracle_dict() or None
-
-        compiler_config = IntentCompilerConfig(
-            allow_placeholder_prices=price_oracle is None,
-        )
-
-        return IntentCompiler(
-            chain=strategy.chain,
-            wallet_address=strategy.wallet_address,
-            rpc_url=rpc_url,
-            price_oracle=price_oracle,
-            config=compiler_config,
-            gateway_client=gateway_client,
-        )
-
-    async def _execute_teardown_via_manager(
-        self,
-        strategy: StrategyProtocol,
-        teardown_mode: Any,
-        teardown_market: Any,
-        teardown_intents: list,
-        start_time: datetime,
-        state_mgr: Any,
-        request: Any,
-    ) -> IterationResult:
-        """Execute teardown through TeardownManager with full safety guarantees.
-
-        Routes single-chain teardown through the dedicated TeardownManager which
-        provides safety validation, escalating slippage with approval gates,
-        state persistence for resumability, and post-execution verification.
-
-        Falls back to direct sequential execution if TeardownManager cannot be
-        initialized (e.g., compiler creation fails).
-        """
-        from ..teardown import TeardownConfig, TeardownManager, TeardownMode
-
-        strategy_id = strategy.strategy_id
-        mode_str = "graceful" if teardown_mode == TeardownMode.SOFT else "emergency"
-
-        # Ensure strategy satisfies TeardownManager's IntentStrategy protocol.
-        # The key requirement is an async pause() method. If missing, provide a no-op.
-        import asyncio
-        import inspect
-
-        if not hasattr(strategy, "pause") or not (
-            asyncio.iscoroutinefunction(getattr(strategy, "pause", None))
-            or inspect.iscoroutinefunction(getattr(strategy, "pause", None))
-        ):
-
-            async def _noop_pause() -> None:
-                pass
-
-            strategy.pause = _noop_pause  # type: ignore[attr-defined]
-            logger.debug("Injected no-op async pause() for TeardownManager compatibility")
-
-        # Try to create TeardownManager with execution dependencies
-        try:
-            compiler = self._create_teardown_compiler(strategy, teardown_market)
-            teardown_mgr = TeardownManager(
-                config=TeardownConfig.default(),
-                orchestrator=self.execution_orchestrator,  # type: ignore[arg-type]
-                compiler=compiler,
-            )
-        except Exception as e:
-            logger.warning(f"Could not create TeardownManager ({e}), falling back to direct teardown execution")
-            # Generate intents for fallback since TeardownManager won't do it
-            fallback_intents = teardown_intents
-            if not fallback_intents:
-                try:
-                    fallback_intents = strategy.generate_teardown_intents(teardown_mode, market=teardown_market)
-                except TypeError as exc:
-                    if "unexpected keyword argument" not in str(exc):
-                        raise
-                    fallback_intents = strategy.generate_teardown_intents(teardown_mode)
-            return await self._execute_teardown_direct(
-                strategy, fallback_intents, teardown_market, start_time, state_mgr, request
-            )
-
-        logger.info(f"🛑 {strategy_id} executing teardown via TeardownManager ({mode_str})")
-        if request:
-            state_mgr.mark_started(strategy_id)
-
-        teardown_result = await teardown_mgr.execute(
-            strategy=strategy,  # type: ignore[arg-type]
-            mode=mode_str,
-            market=teardown_market,
-            is_auto_mode=True,  # runner-triggered, skip cancel window
-        )
-
-        if teardown_result.success:
-            logger.info(
-                f"🛑 {strategy_id} teardown complete via TeardownManager "
-                f"({teardown_result.intents_succeeded}/{teardown_result.intents_total} succeeded)"
-            )
-            self.request_shutdown()
-            self._lifecycle_write_state(strategy_id, "TERMINATED")
-            if request:
-                state_mgr.mark_completed(
-                    strategy_id,
-                    result={
-                        "via": "teardown_manager",
-                        "intents_succeeded": teardown_result.intents_succeeded,
-                        "intents_failed": teardown_result.intents_failed,
-                    },
-                )
-            self._record_success(execution_proved=True)
-            return IterationResult(
-                status=IterationStatus.TEARDOWN,
-                intent=None,
-                strategy_id=strategy_id,
-                duration_ms=self._calculate_duration_ms(start_time),
-            )
-        else:
-            logger.warning(f"🛑 {strategy_id} teardown failed via TeardownManager: {teardown_result.error}")
-            if request:
-                state_mgr.mark_failed(strategy_id, error=teardown_result.error or "teardown execution failed")
-            return self._create_error_result(
-                strategy_id,
-                IterationStatus.EXECUTION_FAILED,
-                f"Teardown failed: {teardown_result.error}",
-                start_time,
-            )
-
-    async def _execute_teardown_direct(
-        self,
-        strategy: StrategyProtocol,
-        teardown_intents: list,
-        teardown_market: Any,
-        start_time: datetime,
-        state_mgr: Any,
-        request: Any,
-    ) -> IterationResult:
-        """Fallback: execute teardown intents directly without TeardownManager.
-
-        Used when TeardownManager cannot be initialized (e.g., compiler creation
-        fails). Executes intents sequentially through _execute_single_chain.
-        """
-        strategy_id = strategy.strategy_id
-
-        if not teardown_intents:
-            logger.info(f"🛑 {strategy_id} teardown complete (direct fallback: no positions)")
-            self.request_shutdown()
-            if request:
-                state_mgr.mark_completed(
-                    strategy_id,
-                    result={"via": "direct", "reason": "no_positions"},
-                )
-            self._record_success()
-            return IterationResult(
-                status=IterationStatus.TEARDOWN,
-                intent=None,
-                strategy_id=strategy_id,
-                duration_ms=self._calculate_duration_ms(start_time),
-            )
-
-        all_success = True
-        last_result = None
-        for i, intent in enumerate(teardown_intents):
-            logger.info(
-                f"🛑 Executing teardown intent {i + 1}/{len(teardown_intents)}: "
-                f"{intent.intent_type.value} (direct path)"
-            )
-            result = await self._execute_single_chain(
-                strategy=strategy,
-                intent=intent,
-                start_time=start_time,
-                total_intents=1,
-                market=teardown_market,
-            )
-            last_result = result
-            if not result.success:
-                all_success = False
-                logger.error(f"🛑 Teardown intent {i + 1} failed: {result.error}")
-                break
-
-        if last_result:
-            if all_success:
-                last_result.status = IterationStatus.TEARDOWN
-                logger.info(f"🛑 {strategy_id} teardown complete (direct) - shutting down")
-                self.request_shutdown()
-                if request:
-                    state_mgr.mark_completed(
-                        strategy_id,
-                        result={
-                            "via": "direct",
-                            "intents": len(teardown_intents),
-                        },
-                    )
-            else:
-                logger.warning(f"🛑 {strategy_id} teardown incomplete - manual intervention may be required")
-                if request:
-                    state_mgr.mark_failed(strategy_id, error=last_result.error or "execution failed")
-            return last_result
-        # last_result is always set when teardown_intents is non-empty (guarded above)
-        return last_result  # type: ignore[return-value]
-
     def _check_teardown_requested(
         self,
         strategy: StrategyProtocol,
@@ -3465,6 +3101,480 @@ class StrategyRunner:
             chain=destination_chain,
             reason=(f"Unable to resolve token decimals for bridge balance normalization (candidates={candidates})"),
         )
+
+    # -------------------------------------------------------------------------
+    # Teardown execution
+    # -------------------------------------------------------------------------
+
+    async def _execute_teardown(
+        self,
+        strategy: StrategyProtocol,
+        teardown_mode: "TeardownMode",
+        start_time: datetime,
+    ) -> IterationResult:
+        """Execute teardown, routing through TeardownManager when possible.
+
+        For single-chain strategies, delegates to TeardownManager which provides:
+        - Position-aware loss caps (1-3% based on position size)
+        - Escalating slippage tolerance (tight -> loose with approval gates)
+        - Cancel window (configurable, default 10 seconds)
+        - Post-execution verification (checks positions are actually closed)
+        - State persistence for resumability
+
+        For multi-chain strategies, uses the inline execution path (TeardownManager
+        does not yet support multi-chain orchestration).
+
+        Args:
+            strategy: The strategy to teardown
+            teardown_mode: SOFT (graceful) or HARD (emergency)
+            start_time: When the iteration started
+
+        Returns:
+            IterationResult with teardown status
+        """
+        from ..teardown import get_teardown_state_manager
+
+        strategy_id = strategy.strategy_id
+        manager = get_teardown_state_manager()
+        request = manager.get_active_request(strategy_id)
+
+        # Step T1: Create market snapshot (SAME as normal decide() path)
+        teardown_market = None
+        try:
+            teardown_market = strategy.create_market_snapshot()
+            if hasattr(teardown_market, "get_price_oracle_dict"):
+                logger.debug(
+                    f"Created market snapshot for teardown with prices: "
+                    f"{list(teardown_market.get_price_oracle_dict().keys())}"
+                )
+            else:
+                logger.debug("Created multi-chain market snapshot for teardown")
+        except Exception as e:
+            logger.warning(f"Failed to create market snapshot for teardown: {e}. Continuing without market data.")
+
+        # Step T2: Generate teardown intents WITH market (symmetric with decide(market))
+        try:
+            try:
+                teardown_intents = strategy.generate_teardown_intents(teardown_mode, market=teardown_market)
+            except TypeError as exc:
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                # Backward compat: old-style signature def generate_teardown_intents(self, mode)
+                logger.debug(f"Strategy {strategy_id} uses old teardown signature (no market param), falling back")
+                teardown_intents = strategy.generate_teardown_intents(teardown_mode)
+        except NotImplementedError:
+            logger.error(
+                f"Strategy {strategy_id} supports_teardown()=True but "
+                f"generate_teardown_intents() raises NotImplementedError"
+            )
+            if request:
+                manager.mark_failed(strategy_id, error="generate_teardown_intents not implemented")
+            return self._create_error_result(
+                strategy_id,
+                IterationStatus.STRATEGY_ERROR,
+                "generate_teardown_intents not implemented",
+                start_time,
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate teardown intents for {strategy_id}: {e}")
+            if request:
+                manager.mark_failed(strategy_id, error=str(e))
+            return self._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
+
+        if not teardown_intents:
+            logger.info(f"🛑 {strategy_id} teardown complete (no positions to close)")
+            if request:
+                manager.mark_completed(strategy_id, result={"reason": "no_positions"})
+            self.request_shutdown()
+            self._record_success()
+            return IterationResult(
+                status=IterationStatus.TEARDOWN,
+                intent=None,
+                strategy_id=strategy_id,
+                duration_ms=self._calculate_duration_ms(start_time),
+            )
+
+        logger.info(f"🛑 {strategy_id} entering TEARDOWN mode ({len(teardown_intents)} intents to execute)")
+        if request:
+            manager.mark_started(strategy_id, total_positions=len(teardown_intents))
+
+        # Step T2.5: Pre-fetch prices for tokens in teardown intents
+        if teardown_market is not None and hasattr(teardown_market, "price"):
+            try:
+                self._prefetch_teardown_prices(teardown_market, teardown_intents)
+            except Exception as e:
+                logger.warning(f"Failed to pre-fetch teardown prices: {e}")
+
+        # Note: amount="all" resolution is handled lazily inside _execute_intents
+        # (per-intent, just before execution) so staged exits work correctly
+        # (e.g., withdraw then swap uses tokens produced by the earlier step).
+
+        # Step T2.7: If all intents were resolved away, teardown is complete
+        if not teardown_intents:
+            logger.info(f"🛑 {strategy_id} teardown complete (all positions already closed)")
+            if request:
+                manager.mark_completed(strategy_id, result={"reason": "all_balances_zero"})
+            self.request_shutdown()
+            self._lifecycle_write_state(strategy_id, "TERMINATED")
+            self._record_success()
+            return IterationResult(
+                status=IterationStatus.TEARDOWN,
+                intent=None,
+                strategy_id=strategy_id,
+                duration_ms=self._calculate_duration_ms(start_time),
+            )
+
+        # Step T3: Execute teardown intents
+        if self._is_multi_chain:
+            # Multi-chain: use inline path (TeardownManager doesn't support multi-chain yet)
+            result = await self._execute_multi_chain(
+                strategy=strategy,
+                intents=teardown_intents,
+                start_time=start_time,
+                market=teardown_market,
+            )
+            if result.success:
+                result.status = IterationStatus.TEARDOWN
+                logger.info(f"🛑 {strategy_id} teardown complete - shutting down strategy runner")
+                self.request_shutdown()
+                if request:
+                    manager.mark_completed(strategy_id, result={"intents": len(teardown_intents)})
+            else:
+                if request:
+                    manager.mark_failed(strategy_id, error=result.error or "execution failed")
+            return result
+        else:
+            # Single-chain: route through TeardownManager for safety guarantees
+            return await self._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=teardown_intents,
+                teardown_mode=teardown_mode,
+                teardown_market=teardown_market,
+                start_time=start_time,
+                request=request,
+                state_manager=manager,
+            )
+
+    async def _execute_teardown_via_manager(
+        self,
+        strategy: StrategyProtocol,
+        teardown_intents: list,
+        teardown_mode: "TeardownMode",
+        teardown_market: Any | None,
+        start_time: datetime,
+        request: Any | None,
+        state_manager: Any,
+    ) -> IterationResult:
+        """Execute single-chain teardown through TeardownManager for full safety.
+
+        TeardownManager provides safety features that the inline path lacks:
+        - Position-aware loss caps (1-3% based on portfolio size)
+        - Escalating slippage tolerance with operator approval gates
+        - Cancel window for operator intervention
+        - Post-execution verification (checks positions are closed on-chain)
+        - Resumable state persistence
+
+        Falls back to inline sequential execution if TeardownManager cannot
+        be initialized (e.g., incompatible orchestrator type).
+
+        Args:
+            strategy: The strategy to teardown
+            teardown_intents: Pre-resolved teardown intents
+            teardown_mode: SOFT (graceful) or HARD (emergency)
+            teardown_market: Market snapshot (may be None)
+            start_time: When the iteration started
+            request: Active teardown request from state manager
+            state_manager: Teardown state manager for lifecycle tracking
+        """
+        import uuid
+
+        from ..teardown import TeardownMode
+        from ..teardown.teardown_manager import TeardownManager
+
+        strategy_id = strategy.strategy_id
+        mode_str = "graceful" if teardown_mode == TeardownMode.SOFT else "emergency"
+
+        # Build compiler for TeardownManager
+        compiler = self._build_teardown_compiler(strategy, teardown_market)
+        if compiler is None:
+            logger.warning(
+                f"Cannot build compiler for TeardownManager — falling back to inline teardown for {strategy_id}"
+            )
+            return await self._execute_teardown_inline(
+                strategy, teardown_intents, teardown_market, start_time, request, state_manager
+            )
+
+        # Create TeardownManager with safety features
+        teardown_mgr = TeardownManager(
+            orchestrator=self.execution_orchestrator,  # type: ignore[arg-type]
+            compiler=compiler,
+            alert_manager=self.alert_manager,  # type: ignore[arg-type]
+        )
+
+        # Execute with TeardownManager safety: loss caps, escalating slippage,
+        # cancel window, post-execution verification
+        logger.info(
+            f"🛑 Routing {strategy_id} teardown through TeardownManager "
+            f"(mode={mode_str}, intents={len(teardown_intents)})"
+        )
+
+        try:
+            # Get positions for safety validation (loss caps).
+            # If positions can't be fetched, fall back to inline execution —
+            # we must NOT pass an empty portfolio through safety validation
+            # as it would trivially pass loss cap checks (3% of $0 = $0).
+            try:
+                positions = strategy.get_open_positions()
+            except Exception as pos_err:
+                logger.warning(
+                    f"Cannot fetch positions for safety validation — "
+                    f"falling back to inline teardown for {strategy_id}: {pos_err}"
+                )
+                return await self._execute_teardown_inline(
+                    strategy, teardown_intents, teardown_market, start_time, request, state_manager
+                )
+
+            # Safety validation: check loss caps before execution
+            validation = teardown_mgr.safety_guard.validate_teardown_request(positions, teardown_mode)
+            if not validation.all_passed:
+                logger.error(f"🛑 Teardown safety validation failed: {validation.blocked_reason}")
+                if request:
+                    state_manager.mark_failed(
+                        strategy_id, error=f"Safety validation failed: {validation.blocked_reason}"
+                    )
+                return self._create_error_result(
+                    strategy_id,
+                    IterationStatus.STRATEGY_ERROR,
+                    f"Teardown safety validation failed: {validation.blocked_reason}",
+                    start_time,
+                )
+
+            # Persist state for resumability
+            teardown_id = f"td_{uuid.uuid4().hex[:12]}"
+            teardown_state = await teardown_mgr._persist_state(
+                teardown_id=teardown_id,
+                strategy=strategy,  # type: ignore[arg-type]
+                mode=teardown_mode,
+                intents=teardown_intents,
+            )
+
+            # Run cancel window — gives operator time to abort
+            cancel_result = await teardown_mgr.cancel_window.run_cancel_window(
+                teardown_id=teardown_id,
+                is_auto_mode=True,
+            )
+            if cancel_result.was_cancelled:
+                logger.info(f"🛑 Teardown {teardown_id} cancelled during window")
+                self._record_success()
+                return IterationResult(
+                    status=IterationStatus.TEARDOWN,
+                    intent=None,
+                    strategy_id=strategy_id,
+                    duration_ms=self._calculate_duration_ms(start_time),
+                )
+
+            # Update state to EXECUTING after cancel window
+            from ..teardown.models import TeardownStatus
+
+            teardown_state.status = TeardownStatus.EXECUTING
+            if teardown_mgr.state_manager:
+                await teardown_mgr.state_manager.save_teardown_state(teardown_state)
+
+            # Extract price oracle for accurate compilation during execution
+            price_oracle = None
+            if teardown_market is not None and hasattr(teardown_market, "get_price_oracle_dict"):
+                price_oracle = teardown_market.get_price_oracle_dict() or None
+
+            # Execute intents with escalating slippage
+            teardown_result = await teardown_mgr._execute_intents(
+                teardown_id=teardown_state.teardown_id,
+                strategy=strategy,  # type: ignore[arg-type]
+                intents=teardown_intents,
+                positions=positions,
+                mode=teardown_mode,
+                teardown_state=teardown_state,
+                is_auto_mode=True,
+                price_oracle=price_oracle,
+                market=teardown_market,
+            )
+
+            # Post-execution verification: check positions are actually closed.
+            # Fail closed: if verification raises, treat teardown as failed to
+            # avoid reporting success while positions may still be open.
+            try:
+                positions_closed = await teardown_mgr._verify_closure(strategy)  # type: ignore[arg-type]
+                if not positions_closed:
+                    # Log warning but don't fail — some strategies have advisory
+                    # get_open_positions() that doesn't reflect on-chain state.
+                    # Matches TeardownManager.execute() which also doesn't fail on this.
+                    logger.warning(
+                        f"Post-teardown verification: {strategy_id} still reports open positions "
+                        f"(may be advisory — check strategy's get_open_positions())"
+                    )
+            except Exception as verify_err:
+                logger.error(f"Post-teardown verification failed: {verify_err}")
+                if request:
+                    state_manager.mark_failed(strategy_id, error=f"Post-teardown verification failed: {verify_err}")
+                return self._create_error_result(
+                    strategy_id,
+                    IterationStatus.STRATEGY_ERROR,
+                    f"Post-teardown verification failed: {verify_err}",
+                    start_time,
+                )
+
+            # Send completion alert
+            if teardown_mgr.alert_manager and teardown_result.success:
+                try:
+                    await teardown_mgr.alert_manager.send_teardown_complete(teardown_result)
+                except Exception as alert_err:
+                    logger.warning(f"Failed to send teardown completion alert: {alert_err}")
+
+            # Clean up persisted state on success
+            if teardown_mgr.state_manager and teardown_result.success:
+                try:
+                    await teardown_mgr.state_manager.delete_teardown_state(teardown_id)
+                except Exception as cleanup_err:
+                    logger.warning(f"Failed to clean up teardown state: {cleanup_err}")
+
+        except Exception as e:
+            logger.error(f"🛑 TeardownManager execution failed for {strategy_id}: {e}")
+            if request:
+                state_manager.mark_failed(strategy_id, error=str(e))
+            return self._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
+
+        # Map TeardownResult -> IterationResult
+        if teardown_result.success:
+            logger.info(
+                f"🛑 {strategy_id} teardown complete via TeardownManager "
+                f"({teardown_result.intents_succeeded}/{teardown_result.intents_total} intents, "
+                f"{teardown_result.duration_seconds:.1f}s)"
+            )
+            self.request_shutdown()
+            self._lifecycle_write_state(strategy_id, "TERMINATED")
+            if request:
+                state_manager.mark_completed(
+                    strategy_id,
+                    result={
+                        "intents": teardown_result.intents_succeeded,
+                        "mode": mode_str,
+                        "duration_s": teardown_result.duration_seconds,
+                    },
+                )
+            self._record_success()
+            return IterationResult(
+                status=IterationStatus.TEARDOWN,
+                intent=None,
+                strategy_id=strategy_id,
+                duration_ms=self._calculate_duration_ms(start_time),
+            )
+        else:
+            logger.warning(f"🛑 {strategy_id} teardown incomplete via TeardownManager: {teardown_result.error}")
+            if request:
+                state_manager.mark_failed(strategy_id, error=teardown_result.error or "teardown failed")
+            return IterationResult(
+                status=IterationStatus.STRATEGY_ERROR,
+                error=teardown_result.error,
+                strategy_id=strategy_id,
+                duration_ms=self._calculate_duration_ms(start_time),
+            )
+
+    async def _execute_teardown_inline(
+        self,
+        strategy: StrategyProtocol,
+        teardown_intents: list,
+        teardown_market: Any | None,
+        start_time: datetime,
+        request: Any | None,
+        state_manager: Any,
+    ) -> IterationResult:
+        """Fallback inline teardown execution (no TeardownManager safety features).
+
+        Used when TeardownManager cannot be initialized (e.g., incompatible
+        orchestrator type or missing compiler dependencies).
+
+        Executes teardown intents sequentially via _execute_single_chain.
+        """
+        strategy_id = strategy.strategy_id
+
+        all_success = True
+        last_result = None
+        for i, intent in enumerate(teardown_intents):
+            logger.info(f"🛑 Executing teardown intent {i + 1}/{len(teardown_intents)}: {intent.intent_type.value}")
+            result = await self._execute_single_chain(
+                strategy=strategy,
+                intent=intent,
+                start_time=start_time,
+                total_intents=1,
+                market=teardown_market,
+            )
+            last_result = result
+            if not result.success:
+                all_success = False
+                logger.error(f"🛑 Teardown intent {i + 1} failed: {result.error}")
+                break  # Stop on first failure
+
+        if last_result:
+            if all_success:
+                last_result.status = IterationStatus.TEARDOWN
+                logger.info(f"🛑 {strategy_id} teardown complete - shutting down strategy runner")
+                self.request_shutdown()
+                self._lifecycle_write_state(strategy_id, "TERMINATED")
+                self._record_success()
+                if request:
+                    state_manager.mark_completed(strategy_id, result={"intents": len(teardown_intents)})
+            else:
+                logger.warning(f"🛑 {strategy_id} teardown incomplete - manual intervention may be required")
+                if request:
+                    state_manager.mark_failed(strategy_id, error=last_result.error or "execution failed")
+            return last_result
+
+        # Edge case: no intents executed
+        return IterationResult(
+            status=IterationStatus.TEARDOWN,
+            intent=None,
+            strategy_id=strategy_id,
+            duration_ms=self._calculate_duration_ms(start_time),
+        )
+
+    def _build_teardown_compiler(
+        self,
+        strategy: StrategyProtocol,
+        market: Any | None,
+    ) -> "IntentCompiler | None":
+        """Build an IntentCompiler for TeardownManager teardown execution.
+
+        Returns None if compiler cannot be built (e.g., missing RPC access).
+        """
+        from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
+
+        gateway_client = None
+        rpc_url = None
+
+        if isinstance(self.execution_orchestrator, GatewayExecutionOrchestrator):
+            gateway_client = self.execution_orchestrator._client
+        else:
+            rpc_url = getattr(self.execution_orchestrator, "rpc_url", None)
+
+        # Extract prices from market snapshot
+        price_oracle = None
+        if market is not None and hasattr(market, "get_price_oracle_dict"):
+            price_oracle = market.get_price_oracle_dict() or None
+
+        try:
+            compiler_config = IntentCompilerConfig(
+                allow_placeholder_prices=price_oracle is None,
+            )
+            return IntentCompiler(
+                chain=strategy.chain,
+                wallet_address=strategy.wallet_address,
+                rpc_url=rpc_url,
+                price_oracle=price_oracle,
+                config=compiler_config,
+                gateway_client=gateway_client,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to build teardown compiler: {e}")
+            return None
 
     @staticmethod
     def _prefetch_teardown_prices(market: Any, intents: list) -> None:
