@@ -78,6 +78,7 @@ def _make_intent(intent_type: str = "SWAP", chain: str = "arbitrum") -> MagicMoc
     intent = MagicMock()
     intent.intent_type = SimpleNamespace(value=intent_type)
     intent.chain = chain
+    intent.is_chained_amount = False
     return intent
 
 
@@ -792,3 +793,175 @@ class TestTeardownViaManager:
         # Should stop after first failure, not execute second intent
         assert runner._execute_single_chain.call_count == 1
         mock_state_mgr.mark_failed.assert_called_once()
+
+
+class TestInlineTeardownAmountResolution:
+    """Tests for amount='all' resolution in _execute_teardown_inline."""
+
+    @pytest.mark.asyncio
+    async def test_chained_amount_missing_market_passes_through(self):
+        """amount='all' with no teardown_market passes to compiler as-is (may fail there)."""
+        runner = _make_runner()
+        strategy = _make_strategy()
+
+        intent = MagicMock()
+        intent.intent_type = SimpleNamespace(value="SWAP")
+        intent.chain = "arbitrum"
+        intent.is_chained_amount = True
+        intent.from_token = "PT-wstETH"
+
+        runner._execute_single_chain = AsyncMock(
+            return_value=IterationResult(
+                status=IterationStatus.SUCCESS,
+                intent=intent,
+                strategy_id="test_strat",
+                duration_ms=100,
+            )
+        )
+
+        result = await runner._execute_teardown_inline(
+            strategy=strategy,
+            teardown_intents=[intent],
+            teardown_market=None,
+            start_time=datetime.now(UTC),
+            request=None,
+            state_manager=MagicMock(),
+        )
+
+        # Intent passes through unresolved — compiler will handle or reject
+        assert result.status == IterationStatus.TEARDOWN
+        runner._execute_single_chain.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_chained_amount_no_token_field_passes_through(self):
+        """amount='all' with no token field (e.g. shares='all') passes to compiler as-is."""
+        runner = _make_runner()
+        strategy = _make_strategy()
+
+        intent = MagicMock(spec=[])  # empty spec so getattr returns None
+        intent.intent_type = SimpleNamespace(value="VAULT_REDEEM")
+        intent.chain = "arbitrum"
+        intent.is_chained_amount = True
+
+        runner._execute_single_chain = AsyncMock(
+            return_value=IterationResult(
+                status=IterationStatus.SUCCESS,
+                intent=intent,
+                strategy_id="test_strat",
+                duration_ms=100,
+            )
+        )
+
+        result = await runner._execute_teardown_inline(
+            strategy=strategy,
+            teardown_intents=[intent],
+            teardown_market=MagicMock(),
+            start_time=datetime.now(UTC),
+            request=None,
+            state_manager=MagicMock(),
+        )
+
+        # Intent passes through to compiler without balance resolution
+        assert result.status == IterationStatus.TEARDOWN
+        runner._execute_single_chain.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_chained_amount_balance_exception_fails(self):
+        """amount='all' when balance() raises returns COMPILATION_FAILED."""
+        runner = _make_runner()
+        strategy = _make_strategy()
+
+        intent = MagicMock()
+        intent.intent_type = SimpleNamespace(value="SWAP")
+        intent.chain = "arbitrum"
+        intent.is_chained_amount = True
+        intent.from_token = "PT-wstETH"
+
+        mock_market = MagicMock()
+        mock_market.balance.side_effect = ValueError("Token not found in registry")
+
+        result = await runner._execute_teardown_inline(
+            strategy=strategy,
+            teardown_intents=[intent],
+            teardown_market=mock_market,
+            start_time=datetime.now(UTC),
+            request=None,
+            state_manager=MagicMock(),
+        )
+
+        assert result.status == IterationStatus.COMPILATION_FAILED
+        assert "PT-wstETH" in result.error
+
+    @pytest.mark.asyncio
+    async def test_chained_amount_zero_balance_skips(self):
+        """amount='all' with zero balance skips intent and completes teardown."""
+        runner = _make_runner()
+        strategy = _make_strategy()
+        runner._execute_single_chain = AsyncMock()
+
+        intent = MagicMock()
+        intent.intent_type = SimpleNamespace(value="SWAP")
+        intent.chain = "arbitrum"
+        intent.is_chained_amount = True
+        intent.from_token = "PT-wstETH"
+
+        mock_market = MagicMock()
+        mock_market.balance.return_value = MagicMock(balance=Decimal("0"))
+
+        result = await runner._execute_teardown_inline(
+            strategy=strategy,
+            teardown_intents=[intent],
+            teardown_market=mock_market,
+            start_time=datetime.now(UTC),
+            request=None,
+            state_manager=MagicMock(),
+        )
+
+        # All skipped = teardown complete (positions already closed)
+        assert result.status == IterationStatus.TEARDOWN
+        runner._execute_single_chain.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_chained_amount_resolved_executes(self):
+        """amount='all' with positive balance resolves and executes."""
+        runner = _make_runner()
+        strategy = _make_strategy()
+
+        intent = MagicMock()
+        intent.intent_type = SimpleNamespace(value="SWAP")
+        intent.chain = "arbitrum"
+        intent.is_chained_amount = True
+        intent.from_token = "PT-wstETH"
+
+        mock_market = MagicMock()
+        mock_market.balance.return_value = MagicMock(balance=Decimal("1.5"))
+
+        runner._execute_single_chain = AsyncMock(
+            return_value=IterationResult(
+                status=IterationStatus.SUCCESS,
+                intent=intent,
+                strategy_id="test_strat",
+                duration_ms=100,
+            )
+        )
+
+        resolved_intent = _make_intent()
+        with patch(
+            "almanak.framework.intents.vocabulary.Intent.set_resolved_amount",
+            return_value=resolved_intent,
+        ) as mock_set:
+            result = await runner._execute_teardown_inline(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_market=mock_market,
+                start_time=datetime.now(UTC),
+                request=None,
+                state_manager=MagicMock(),
+            )
+
+        assert result.status == IterationStatus.TEARDOWN
+        runner._execute_single_chain.assert_called_once()
+        mock_set.assert_called_once_with(intent, Decimal("1.5"))
+        # Verify the resolved intent (not original) was executed
+        called_kwargs = runner._execute_single_chain.call_args.kwargs
+        assert called_kwargs["intent"] is resolved_intent

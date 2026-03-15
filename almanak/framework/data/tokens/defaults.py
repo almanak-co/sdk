@@ -988,6 +988,17 @@ PT_USDai = Token(
     is_stablecoin=False,
 )
 
+PT_wstETH = Token(
+    symbol="PT-wstETH",
+    name="Pendle PT wstETH",  # Maturity: 25-JUN-2026
+    decimals=18,
+    addresses={
+        "arbitrum": "0x71fbf40651e9d4278a74586afc99f307f369ce9a",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
 
 # =============================================================================
 # DEFAULT TOKENS LIST
@@ -1070,6 +1081,7 @@ DEFAULT_TOKENS: list[Token] = [
     PT_eUSDe,
     PT_USDe,
     PT_USDai,
+    PT_wstETH,
 ]
 
 

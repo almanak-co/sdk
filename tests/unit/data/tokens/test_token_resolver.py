@@ -243,6 +243,16 @@ class TestTokenResolverBySymbol:
         with pytest.raises(TokenNotFoundError):
             resolver.resolve("GMX", "ethereum")
 
+    def test_resolve_pt_wsteth_arbitrum(self, temp_cache_file):
+        """Test resolving PT-wstETH on Arbitrum (Pendle PT token for teardown)."""
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        token = resolver.resolve("PT-wstETH", "arbitrum")
+
+        assert token.symbol.upper() == "PT-WSTETH"
+        assert token.decimals == 18
+        assert token.chain == Chain.ARBITRUM
+        assert token.address.lower() == "0x71fbf40651e9d4278a74586afc99f307f369ce9a"
+
 
 class TestTokenResolverByAddress:
     """Tests for resolving tokens by address."""

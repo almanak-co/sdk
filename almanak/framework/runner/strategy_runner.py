@@ -3524,9 +3524,64 @@ class StrategyRunner:
         last_result = None
         for i, intent in enumerate(teardown_intents):
             logger.info(f"🛑 Executing teardown intent {i + 1}/{len(teardown_intents)}: {intent.intent_type.value}")
+
+            # Resolve amount="all" to actual wallet balance before execution.
+            # Only resolve for intents with a token balance field (e.g., SwapIntent.from_token).
+            # Intents like vault_redeem(shares="all") are handled natively by the compiler.
+            intent_to_execute = intent
+            if Intent.has_chained_amount(intent):
+                balance_token = (
+                    getattr(intent, "from_token", None)
+                    or getattr(intent, "token", None)
+                    or getattr(intent, "token_in", None)
+                )
+                if balance_token and teardown_market is not None:
+                    # Resolve balance — pass chain for multi-chain market snapshots
+                    intent_chain = getattr(intent, "chain", None)
+                    try:
+                        if intent_chain:
+                            bal = teardown_market.balance(balance_token, intent_chain)
+                        else:
+                            bal = teardown_market.balance(balance_token)
+                    except TypeError:
+                        # Single-chain MarketSnapshot doesn't accept chain param
+                        bal = teardown_market.balance(balance_token)
+                    except Exception as e:  # noqa: BLE001
+                        logger.error(
+                            f"🛑 Teardown intent {i + 1}: failed to resolve balance for {balance_token}: {e}. "
+                            f"Token may be missing from the registry. Position may remain open."
+                        )
+                        all_success = False
+                        last_result = IterationResult(
+                            status=IterationStatus.COMPILATION_FAILED,
+                            intent=intent,
+                            error=f"Cannot resolve amount='all' for {balance_token}: {e}",
+                            strategy_id=strategy_id,
+                            duration_ms=self._calculate_duration_ms(start_time),
+                        )
+                        break
+                    # MarketSnapshot.balance() returns Decimal; IntentStrategy.balance() returns TokenBalance
+                    balance_value = bal.balance if hasattr(bal, "balance") else bal
+                    if balance_value <= 0:
+                        logger.info(
+                            f"🛑 Teardown intent {i + 1}: {balance_token} balance is 0, skipping (already closed)"
+                        )
+                        continue
+                    intent_to_execute = Intent.set_resolved_amount(intent, balance_value)
+                    logger.info(f"🛑 Resolved amount='all' for {balance_token}: {balance_value}")
+                elif balance_token and teardown_market is None:
+                    # Have a token to resolve but no market — log warning, let compiler try
+                    logger.warning(
+                        f"🛑 Teardown intent {i + 1}: amount='all' for {balance_token} but no market context. "
+                        f"Passing to compiler as-is — compilation may fail."
+                    )
+                else:
+                    # No token field — let compiler handle natively (e.g., shares="all")
+                    logger.debug(f"🛑 Teardown intent {i + 1}: no token field, passing to compiler as-is")
+
             result = await self._execute_single_chain(
                 strategy=strategy,
-                intent=intent,
+                intent=intent_to_execute,
                 start_time=start_time,
                 total_intents=1,
                 market=teardown_market,
@@ -3552,7 +3607,13 @@ class StrategyRunner:
                     state_manager.mark_failed(strategy_id, error=last_result.error or "execution failed")
             return last_result
 
-        # Edge case: no intents executed
+        # Edge case: no intents executed (all positions already closed)
+        logger.info(f"🛑 {strategy_id} teardown: all positions already closed, shutting down")
+        self.request_shutdown()
+        self._lifecycle_write_state(strategy_id, "TERMINATED")
+        self._record_success()
+        if request:
+            state_manager.mark_completed(strategy_id, result={"reason": "all_positions_already_closed"})
         return IterationResult(
             status=IterationStatus.TEARDOWN,
             intent=None,
