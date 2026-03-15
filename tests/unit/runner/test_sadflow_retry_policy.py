@@ -45,6 +45,21 @@ def test_abort_retries_for_insufficient_funds() -> None:
     assert action.reason == context.error_message
 
 
+def test_abort_retries_for_revert() -> None:
+    """REVERT errors (e.g. STF) are deterministic — retrying wastes gas."""
+    runner = _make_runner()
+    context = _make_context(
+        "Error: STF (Solidity Transfer Failure)",
+        "REVERT",
+    )
+
+    action = runner._on_sadflow_enter("REVERT", 1, context)
+
+    assert action is not None
+    assert action.action_type == SadflowActionType.ABORT
+    assert action.reason == context.error_message
+
+
 def test_keep_default_retry_for_timeout() -> None:
     runner = _make_runner()
     context = _make_context(

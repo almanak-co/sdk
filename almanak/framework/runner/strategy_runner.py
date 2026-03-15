@@ -1674,7 +1674,7 @@ class StrategyRunner:
         surface the root cause faster.
         """
         _ = attempt  # Included for callback compatibility
-        non_retryable_types = {"INSUFFICIENT_FUNDS", "NONCE_ERROR", "COMPILATION_PERMANENT"}
+        non_retryable_types = {"INSUFFICIENT_FUNDS", "NONCE_ERROR", "COMPILATION_PERMANENT", "REVERT"}
         if error_type in non_retryable_types:
             logger.warning(
                 f"Non-retryable error ({error_type}): {context.error_message}. "
@@ -2081,11 +2081,12 @@ class StrategyRunner:
             except Exception:
                 logger.debug("Failed to close ClobClient", exc_info=True)
 
+        # Always invalidate balance cache after execution (success or failure)
+        # to prevent stale reads on the next decide() cycle.
+        self.balance_provider.invalidate_cache()
+
         # State machine completed - check final result
         if state_machine.success:
-            # Invalidate balance cache after successful execution
-            self.balance_provider.invalidate_cache()
-
             # Enrich result with intent-specific extracted data
             if last_execution_result and last_execution_context:
                 try:
@@ -2532,6 +2533,9 @@ class StrategyRunner:
         # For same-chain only flows, use direct execute_sequence (faster)
         multi_result = await orchestrator.execute_sequence(intents, price_map=price_map, price_oracle=price_oracle)
 
+        # Always invalidate balance cache after execution (success or failure)
+        self.balance_provider.invalidate_cache()
+
         if multi_result.success:
             logger.info(
                 f"Multi-chain execution successful for {strategy_id}: "
@@ -2539,9 +2543,6 @@ class StrategyRunner:
                 f"chains={list(multi_result.chains_used)}, "
                 f"time={multi_result.total_execution_time_ms:.0f}ms"
             )
-
-            # Invalidate balance cache after execution
-            self.balance_provider.invalidate_cache()
 
             self._record_success(execution_proved=True)
             return IterationResult(
@@ -2999,6 +3000,10 @@ class StrategyRunner:
             except Exception as diag_error:
                 logger.warning(f"Revert diagnostic failed: {diag_error}", exc_info=True)
 
+            # Always invalidate balance cache after execution (success or failure)
+            # to prevent stale reads on the next decide() cycle.
+            self.balance_provider.invalidate_cache()
+
             return IterationResult(
                 status=IterationStatus.EXECUTION_FAILED,
                 intent=first_intent,
@@ -3007,6 +3012,10 @@ class StrategyRunner:
                 duration_ms=self._calculate_duration_ms(start_time),
             )
 
+        # Always invalidate balance cache after execution (success or failure)
+        # to prevent stale reads on the next decide() cycle.
+        self.balance_provider.invalidate_cache()
+
         logger.info(
             f"Multi-chain execution with bridge waiting successful for {strategy_id}: "
             f"{successful_count}/{len(intents)} succeeded"
@@ -3014,9 +3023,6 @@ class StrategyRunner:
 
         # Clear execution progress on successful completion
         await self._clear_execution_progress(strategy_id)
-
-        # Invalidate balance cache after execution
-        self.balance_provider.invalidate_cache()
 
         self._record_success(execution_proved=True)
         return IterationResult(
