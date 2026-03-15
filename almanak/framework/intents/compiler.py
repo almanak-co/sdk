@@ -46,6 +46,7 @@ from .vocabulary import (
     CollectFeesIntent,
     FlashLoanIntent,
     HoldIntent,
+    Intent,
     IntentType,
     LPCloseIntent,
     LPOpenIntent,
@@ -9657,11 +9658,51 @@ class IntentCompiler:
             amount_wei = int(intent.amount * Decimal(10**token_info.decimals))
 
             # Step 4: Compile callback intents to get their transactions
+            # For flash loan callbacks, amount='all' means "use the full output from the
+            # previous callback." We estimate this at compile time using the price oracle,
+            # since the exact amount is only known on-chain at execution time.
             callback_transactions: list[TransactionData] = []
             callback_gas_total = 0
+            # Seed with flash loan's own borrow amount/token so callback 1 can use amount='all'
+            prev_output_amount: Decimal | None = intent.amount
+            prev_output_token: str | None = intent.token
 
             for i, callback_intent in enumerate(intent.callback_intents):
-                callback_result = self.compile(callback_intent)
+                # Resolve amount='all' using estimated output from previous callback
+                resolved_intent: AnyIntent = callback_intent
+                if (
+                    hasattr(callback_intent, "amount")
+                    and callback_intent.amount == "all"
+                    and prev_output_amount is not None
+                ):
+                    # Validate token compatibility: the callback's input token must match
+                    # the previous callback's output token to use amount='all'.
+                    # Resolve both tokens to addresses to handle symbol/address/alias equivalence.
+                    callback_from = getattr(callback_intent, "from_token", None)
+                    if callback_from and prev_output_token:
+                        resolved_from = self._resolve_token(callback_from)
+                        resolved_prev = self._resolve_token(prev_output_token)
+                        if (
+                            resolved_from
+                            and resolved_prev
+                            and resolved_from.address.lower() != resolved_prev.address.lower()
+                        ):
+                            return CompilationResult(
+                                status=CompilationStatus.FAILED,
+                                error=(
+                                    f"Flash loan callback {i + 1}: amount='all' expects token "
+                                    f"'{prev_output_token}' (output of previous callback) but "
+                                    f"from_token is '{callback_from}'. Use an explicit amount instead."
+                                ),
+                                intent_id=intent.intent_id,
+                            )
+                    resolved_intent = Intent.set_resolved_amount(callback_intent, prev_output_amount)
+                    logger.info(
+                        f"Flash loan callback {i + 1}: resolved amount='all' to "
+                        f"{prev_output_amount} {prev_output_token} (estimated from previous callback)"
+                    )
+
+                callback_result = self.compile(resolved_intent)
                 if callback_result.status != CompilationStatus.SUCCESS:
                     return CompilationResult(
                         status=CompilationStatus.FAILED,
@@ -9671,6 +9712,11 @@ class IntentCompiler:
                 if callback_result.transactions:
                     callback_transactions.extend(callback_result.transactions)
                     callback_gas_total += callback_result.total_gas_estimate or 0
+
+                # Estimate output for next callback's amount='all' resolution
+                prev_output_amount, prev_output_token = self._estimate_callback_output(
+                    resolved_intent, prev_output_amount, prev_output_token
+                )
 
             # Step 5: Encode callback transactions as params
             callback_params = self._encode_flash_loan_callbacks(callback_transactions)
@@ -9746,6 +9792,66 @@ class IntentCompiler:
             result.error = str(e)
 
         return result
+
+    def _estimate_callback_output(
+        self,
+        callback_intent: AnyIntent,
+        prev_output_amount: Decimal | None,
+        prev_output_token: str | None,
+    ) -> tuple[Decimal | None, str | None]:
+        """Estimate the output token and amount from a compiled callback intent.
+
+        Used by _compile_flash_loan to resolve amount='all' in subsequent callbacks.
+        The estimate is based on the price oracle and is approximate -- the actual
+        amount is only known on-chain at execution time.
+
+        Args:
+            callback_intent: The callback intent (after amount='all' resolution)
+            prev_output_amount: Previous callback's estimated output amount
+            prev_output_token: Previous callback's output token symbol
+
+        Returns:
+            Tuple of (estimated_output_amount, output_token_symbol).
+            Returns (None, None) for unsupported intent types.
+
+        Raises:
+            ValueError: If price data is unavailable for token resolution.
+        """
+        if not isinstance(callback_intent, SwapIntent):
+            intent_type = getattr(callback_intent, "intent_type", "unknown")
+            logger.warning(
+                f"Cannot estimate output for non-swap callback intent type {intent_type}. "
+                f"Subsequent amount='all' callbacks will fail to resolve."
+            )
+            return None, None
+
+        from_token_info = self._resolve_token(callback_intent.from_token)
+        to_token_info = self._resolve_token(callback_intent.to_token)
+        if not from_token_info or not to_token_info:
+            raise ValueError(
+                f"Cannot resolve tokens for callback output estimate: "
+                f"{callback_intent.from_token} -> {callback_intent.to_token}"
+            )
+
+        # Determine input amount in wei
+        amount_in_wei: int | None = None
+        if callback_intent.amount_usd is not None:
+            amount_in_wei = self._usd_to_token_amount(callback_intent.amount_usd, from_token_info)
+        elif callback_intent.amount is not None and callback_intent.amount != "all":
+            amount_decimal = (
+                callback_intent.amount
+                if isinstance(callback_intent.amount, Decimal)
+                else Decimal(str(callback_intent.amount))
+            )
+            amount_in_wei = int(amount_decimal * Decimal(10**from_token_info.decimals))
+
+        if amount_in_wei is not None:
+            expected_out_wei = self._calculate_expected_output(amount_in_wei, from_token_info, to_token_info)
+            return (
+                Decimal(str(expected_out_wei)) / Decimal(10**to_token_info.decimals),
+                callback_intent.to_token,
+            )
+        return None, None
 
     def _compile_stake_intent(self, intent: StakeIntent) -> CompilationResult:
         """Compile a STAKE intent into an ActionBundle.
