@@ -56,6 +56,12 @@ DEFAULT_PARTIAL_FAILURE_CONFIDENCE_PENALTY = 0.1  # Reduce by 10% per failed sou
 # At this scale, averaging produces nonsense -- we must raise AllDataSourcesFailed.
 DEFAULT_MAGNITUDE_OUTLIER_RATIO = 100.0
 
+# Absolute price ceiling for single-source results (USD per token).
+# Any single-source price above this is almost certainly a feed misconfiguration
+# (wrong decimals, exchange rate vs USD, etc.). BTC at ~$100K is the most expensive
+# fungible DeFi token; $10M/token provides >100× headroom.
+DEFAULT_SINGLE_SOURCE_PRICE_CEILING = Decimal("10_000_000")  # $10M per token
+
 # Stablecoins that fall back to $1.00 when all price sources fail
 STABLECOIN_FALLBACK_TOKENS = frozenset({"USDC", "USDT", "DAI", "FRAX", "LUSD", "USDC.E", "USDT.E"})
 
@@ -210,6 +216,7 @@ class PriceAggregator:
         self._stale_confidence_penalty = stale_confidence_penalty
         self._partial_failure_penalty = partial_failure_penalty
         self._magnitude_outlier_ratio = magnitude_outlier_ratio
+        self._single_source_price_ceiling = DEFAULT_SINGLE_SOURCE_PRICE_CEILING
 
         # Health metrics per source
         self._health_metrics: dict[str, SourceHealthMetrics] = {
@@ -386,10 +393,28 @@ class PriceAggregator:
                 errors=errors,
             )
 
-        # Single source: return as-is
+        # Single source: return as-is, with absolute price ceiling check
         if len(valid_results) == 1:
+            price = valid_results[0].price
+            if price > self._single_source_price_ceiling:
+                source_name = valid_results[0].source
+                logger.error(
+                    "Single-source price from %s exceeds ceiling: %s > %s. "
+                    "Likely feed misconfiguration (wrong decimals or exchange rate vs USD). "
+                    "Rejecting to prevent corrupted price from reaching strategies.",
+                    source_name,
+                    price,
+                    self._single_source_price_ceiling,
+                )
+                ceiling_errors = {
+                    source_name: (
+                        f"Price {price} exceeds single-source ceiling of {self._single_source_price_ceiling}"
+                    ),
+                }
+                ceiling_errors.update(errors)
+                raise AllDataSourcesFailed(errors=ceiling_errors)
             return AggregationResult(
-                price=valid_results[0].price,
+                price=price,
                 valid_results=valid_results,
                 outliers=[],
                 errors=errors,

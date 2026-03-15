@@ -81,7 +81,8 @@ BASE_PRICE_FEEDS: dict[str, str] = {
     "USDC/USD": "0x7e860098F58bBFC8648a4311b374B1D669a2bc6B",
     "DAI/USD": "0x591e79239a7d679378eC8c847e5038150364C78F",
     "CBETH/USD": "0xd7818272B9e248357d13057AAb0B417aF31E817d",
-    "WSTETH/USD": "0x43a5C292A453A3bF3606fa856197F09D7B74251a",
+    # Note: Base has no direct WSTETH/USD Chainlink feed.
+    # Use derived price (WSTETH/ETH * ETH/USD) via ETH_DENOMINATED_FEEDS below.
 }
 
 # Optimism price feeds (Chain ID: 10)
@@ -220,6 +221,11 @@ CHAINLINK_CHAIN_IDS: dict[str, int] = {
 ETH_DENOMINATED_FEEDS: dict[str, dict[str, str]] = {
     "arbitrum": {
         "WSTETH/ETH": "0xb523AE262D20A936BC152e6023996e46FDC2A95D",
+    },
+    "base": {
+        # 0x43a5... is the wstETH/ETH exchange rate feed (18 decimals), NOT a USD feed.
+        # Previously misconfigured as BASE_PRICE_FEEDS["WSTETH/USD"], causing prices of ~$12B.
+        "WSTETH/ETH": "0x43a5C292A453A3bF3606fa856197F09D7B74251a",
     },
 }
 
