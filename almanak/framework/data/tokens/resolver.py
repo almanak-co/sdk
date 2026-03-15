@@ -1131,6 +1131,95 @@ class TokenResolver:
             self._cache.put(token)
             logger.debug(f"Registered token {token.symbol} on {token.chain.value}")
 
+    def register_token(
+        self,
+        symbol: str,
+        chain: str | Chain,
+        address: str,
+        decimals: int,
+        *,
+        name: str | None = None,
+        coingecko_id: str | None = None,
+        is_stablecoin: bool = False,
+    ) -> ResolvedToken:
+        """Register a custom token by its basic properties.
+
+        Convenience wrapper around register() for strategy authors who need to
+        register protocol-specific tokens (e.g., Pendle PT/YT, LP tokens) that
+        aren't in the static registry.
+
+        After registration, the token is resolvable via resolve(), get_address(),
+        and get_decimals() within the same process.
+
+        Note: This registers tokens in the local resolver only. Gateway-backed
+        lookups (e.g., MarketSnapshot.balance() by symbol) require the gateway
+        to also know the token. For balance queries on custom tokens, use the
+        token address directly: market.balance("0x...").
+
+        Args:
+            symbol: Token symbol (e.g., "PT-wstETH-25JUN2026")
+            chain: Chain name or Chain enum
+            address: Token contract address
+            decimals: Token decimal places
+            name: Optional human-readable name
+            coingecko_id: Optional CoinGecko ID for price fetching
+            is_stablecoin: Whether this is a stablecoin (default False)
+
+        Returns:
+            The registered ResolvedToken (can be used immediately)
+
+        Raises:
+            InvalidTokenAddressError: If address format is invalid
+            TokenResolutionError: If chain is not recognized
+
+        Example:
+            resolver = get_token_resolver()
+            resolver.register_token(
+                symbol="PT-wstETH-25JUN2026",
+                chain="arbitrum",
+                address="0x71fbf40651e9d4bc027876e5aa4a3806d8e0b243",
+                decimals=18,
+            )
+            # Now works:
+            token = resolver.resolve("PT-wstETH-25JUN2026", "arbitrum")
+        """
+        chain_lower, chain_enum = _normalize_chain(chain)
+        _validate_address(address, chain_lower)
+
+        from almanak.core.constants import get_chain_id
+
+        try:
+            chain_id = get_chain_id(chain_enum)
+        except ValueError:
+            chain_id = 0  # Fallback for chains without EIP-155 IDs (e.g., Solana)
+
+        try:
+            resolved = ResolvedToken(
+                symbol=symbol,
+                address=_normalize_address_for_chain(address, chain_lower),
+                decimals=decimals,
+                chain=chain_enum,
+                chain_id=chain_id,
+                name=name or symbol,
+                coingecko_id=coingecko_id,
+                is_stablecoin=is_stablecoin,
+                is_native=False,
+                is_wrapped_native=False,
+                canonical_symbol=symbol.upper(),
+                source="registered",
+                is_verified=False,
+            )
+        except ValueError as e:
+            raise TokenResolutionError(
+                token=symbol,
+                chain=chain_lower,
+                reason=str(e),
+            ) from e
+
+        self.register(resolved)
+        logger.info(f"Registered custom token {symbol} ({address}) on {chain_lower} with {decimals} decimals")
+        return resolved
+
     def stats(self) -> dict[str, int]:
         """Get resolver performance statistics.
 

@@ -1506,3 +1506,173 @@ class TestResolverLockContention:
         gateway_call_proceed.set()
         t1.join(timeout=5)
         assert not errors, f"Gateway thread had errors: {errors}"
+
+
+class TestRegisterToken:
+    """Tests for register_token() convenience method."""
+
+    def setup_method(self):
+        TokenResolver.reset_instance()
+
+    def teardown_method(self):
+        TokenResolver.reset_instance()
+
+    def test_register_token_basic(self):
+        """register_token() creates and caches a ResolvedToken."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        result = resolver.register_token(
+            symbol="PT-wstETH-25JUN2026",
+            chain="arbitrum",
+            address="0x71fbf40651e9d4bc027876e5aa4a3806d8e0b243",
+            decimals=18,
+        )
+
+        assert result.symbol == "PT-wstETH-25JUN2026"
+        assert result.decimals == 18
+        assert result.chain == Chain.ARBITRUM
+        assert result.chain_id == 42161
+        assert result.source == "registered"
+
+    def test_register_token_resolvable_by_symbol(self):
+        """Registered token is resolvable via resolve()."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        resolver.register_token(
+            symbol="YT-AAVE-v3",
+            chain="arbitrum",
+            address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            decimals=18,
+        )
+
+        resolved = resolver.resolve("YT-AAVE-v3", "arbitrum")
+        assert resolved.symbol == "YT-AAVE-v3"
+        assert resolved.decimals == 18
+        assert resolved.address == "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    def test_register_token_resolvable_by_address(self):
+        """Registered token is resolvable by address."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        resolver.register_token(
+            symbol="LP-USDC-WETH",
+            chain="base",
+            address="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            decimals=18,
+        )
+
+        resolved = resolver.resolve("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "base")
+        assert resolved.symbol == "LP-USDC-WETH"
+
+    def test_register_token_get_decimals(self):
+        """Registered token works with get_decimals()."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        resolver.register_token(
+            symbol="PT-USDe",
+            chain="ethereum",
+            address="0xcccccccccccccccccccccccccccccccccccccccc",
+            decimals=18,
+        )
+
+        decimals = resolver.get_decimals("ethereum", "PT-USDe")
+        assert decimals == 18
+
+    def test_register_token_get_address(self):
+        """Registered token works with get_address()."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        resolver.register_token(
+            symbol="MY-TOKEN",
+            chain="arbitrum",
+            address="0xDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+            decimals=6,
+        )
+
+        address = resolver.get_address("arbitrum", "MY-TOKEN")
+        # EVM addresses are normalized to lowercase
+        assert address == "0xdddddddddddddddddddddddddddddddddddddddd"
+
+    def test_register_token_invalid_address_raises(self):
+        """register_token() raises on invalid address format."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        with pytest.raises(InvalidTokenAddressError):
+            resolver.register_token(
+                symbol="BAD",
+                chain="arbitrum",
+                address="not_an_address",
+                decimals=18,
+            )
+
+    def test_register_token_with_optional_fields(self):
+        """register_token() accepts optional name, coingecko_id, is_stablecoin."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        result = resolver.register_token(
+            symbol="CUSTOM-STABLE",
+            chain="ethereum",
+            address="0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            decimals=6,
+            name="Custom Stablecoin",
+            coingecko_id="custom-stable",
+            is_stablecoin=True,
+        )
+
+        assert result.name == "Custom Stablecoin"
+        assert result.coingecko_id == "custom-stable"
+        assert result.is_stablecoin is True
+
+    def test_register_token_returns_resolved_token(self):
+        """register_token() returns the ResolvedToken for immediate use."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        result = resolver.register_token(
+            symbol="QUICK",
+            chain="polygon",
+            address="0xffffffffffffffffffffffffffffffffffffffff",
+            decimals=18,
+        )
+
+        assert isinstance(result, ResolvedToken)
+        assert result.chain == Chain.POLYGON
+
+    def test_register_token_chain_enum(self):
+        """register_token() accepts Chain enum as well as string."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        result = resolver.register_token(
+            symbol="ENUM-TOKEN",
+            chain=Chain.BASE,
+            address="0x1111111111111111111111111111111111111111",
+            decimals=18,
+        )
+
+        assert result.chain == Chain.BASE
+        assert result.chain_id == 8453
+
+    def test_register_token_chain_not_in_models_map(self):
+        """register_token() gets correct chain_id for chains not in models.CHAIN_ID_MAP."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        result = resolver.register_token(
+            symbol="TEST-SONIC",
+            chain="sonic",
+            address="0x1111111111111111111111111111111111111111",
+            decimals=18,
+        )
+
+        assert result.chain == Chain.SONIC
+        assert result.chain_id == 146
+
+    def test_register_token_invalid_decimals_raises(self):
+        """register_token() raises TokenResolutionError on invalid decimals."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        with pytest.raises(TokenResolutionError):
+            resolver.register_token(
+                symbol="BAD-DECIMALS",
+                chain="arbitrum",
+                address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                decimals=-1,
+            )
