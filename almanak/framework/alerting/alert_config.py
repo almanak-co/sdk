@@ -72,6 +72,9 @@ class AlertCondition(StrEnum):
     RISK_GUARD_TRIGGERED = "RISK_GUARD_TRIGGERED"
     CIRCUIT_BREAKER_TRIGGERED = "CIRCUIT_BREAKER_TRIGGERED"
 
+    # Balance reconciliation
+    BALANCE_MISMATCH = "BALANCE_MISMATCH"
+
     # Custom condition for user-defined checks
     CUSTOM = "CUSTOM"
 
@@ -170,13 +173,23 @@ class AlertConfig:
     This dataclass holds all the configuration needed to send alerts
     to operators via multiple channels.
 
+    **Default behavior** (no configuration):
+    - Cooldown: 300s (5 min) per rule — alerts for the same condition won't
+      repeat more often than this.
+    - Quiet hours: None (disabled) — all severities sent 24/7.
+    - Escalation timeout: 900s (15 min) — unacknowledged alerts escalate.
+
+    For production deployments, use :meth:`default_production` which enables
+    quiet hours (22:00-06:00 UTC, CRITICAL-only).
+
     Attributes:
         telegram_chat_id: Telegram chat ID for notifications
         slack_webhook: Slack webhook URL for notifications
         email: Email address for notifications
         pagerduty_key: PagerDuty integration key for critical alerts
         rules: List of alert rules to evaluate
-        quiet_hours: Optional time range during which only CRITICAL alerts are sent
+        quiet_hours: Optional time range during which only CRITICAL alerts are sent.
+            Default: None (disabled). Production recommendation: 22:00-06:00 UTC.
         escalation_timeout_seconds: Time before escalating unacknowledged alerts
         dashboard_base_url: Base URL for dashboard links in alerts
         enabled: Global enable/disable for all alerting
@@ -191,7 +204,8 @@ class AlertConfig:
     # Alert rules
     rules: list[AlertRule] = field(default_factory=list)
 
-    # Quiet hours
+    # Quiet hours — None means all severities sent 24/7.
+    # Use default_production() for recommended quiet hours.
     quiet_hours: TimeRange | None = None
 
     # Escalation
@@ -202,6 +216,28 @@ class AlertConfig:
 
     # Global enable
     enabled: bool = True
+
+    @classmethod
+    def default_production(cls, **overrides: Any) -> "AlertConfig":
+        """Create an AlertConfig with production-safe defaults.
+
+        Differences from the bare default:
+        - Quiet hours enabled: 22:00-06:00 UTC (only CRITICAL alerts)
+
+        Channel credentials and rules still need to be provided via overrides.
+
+        Example::
+
+            config = AlertConfig.default_production(
+                telegram_chat_id="123456",
+                rules=[AlertRule(...)],
+            )
+        """
+        defaults: dict[str, Any] = {
+            "quiet_hours": TimeRange(start=time(22, 0), end=time(6, 0), timezone="UTC"),
+        }
+        defaults.update(overrides)
+        return cls(**defaults)
 
     @property
     def configured_channels(self) -> list[AlertChannel]:
