@@ -1215,23 +1215,41 @@ class StrategyRunner:
                     intent_to_execute = intent
                     if is_multi_intent and Intent.has_chained_amount(intent):
                         if previous_amount_received is None:
-                            logger.error(
-                                f"  Intent {idx + 1}/{len(intents)} uses amount='all' "
-                                "but no previous step amount available"
+                            if self.config.dry_run:
+                                logger.warning(
+                                    f"  Intent {idx + 1}/{len(intents)} uses amount='all' "
+                                    "but no previous step output available (dry-run mode). "
+                                    "Skipping compilation of this step."
+                                )
+                                # In dry-run mode, the previous step didn't execute so
+                                # there's no output amount to chain. Skip compilation
+                                # (compiler rejects unresolved 'all') and mark as DRY_RUN.
+                                intent_result = IterationResult(
+                                    status=IterationStatus.DRY_RUN,
+                                    intent=intent,
+                                    strategy_id=strategy.strategy_id,
+                                    duration_ms=self._calculate_duration_ms(start_time),
+                                )
+                                continue
+                            else:
+                                logger.error(
+                                    f"  Intent {idx + 1}/{len(intents)} uses amount='all' "
+                                    "but no previous step amount available"
+                                )
+                                intent_result = IterationResult(
+                                    status=IterationStatus.COMPILATION_FAILED,
+                                    intent=intent,
+                                    error="amount='all' used but no previous step amount available",
+                                    strategy_id=strategy.strategy_id,
+                                    duration_ms=self._calculate_duration_ms(start_time),
+                                )
+                                break
+                        else:
+                            logger.info(
+                                f"  Resolving amount='all' to {previous_amount_received} "
+                                f"for intent {idx + 1}/{len(intents)}"
                             )
-                            intent_result = IterationResult(
-                                status=IterationStatus.COMPILATION_FAILED,
-                                intent=intent,
-                                error="amount='all' used but no previous step amount available",
-                                strategy_id=strategy.strategy_id,
-                                duration_ms=self._calculate_duration_ms(start_time),
-                            )
-                            break
-                        logger.info(
-                            f"  Resolving amount='all' to {previous_amount_received} "
-                            f"for intent {idx + 1}/{len(intents)}"
-                        )
-                        intent_to_execute = Intent.set_resolved_amount(intent, previous_amount_received)
+                            intent_to_execute = Intent.set_resolved_amount(intent, previous_amount_received)
 
                     if is_multi_intent:
                         logger.info(
@@ -1279,7 +1297,7 @@ class StrategyRunner:
                 # For multi-intent sequences, record metrics once per iteration
                 if is_multi_intent and intent_result is not None:
                     if intent_result.success:
-                        self._record_success(execution_proved=True)
+                        self._record_success(execution_proved=intent_result.status == IterationStatus.SUCCESS)
                     else:
                         # Only track total_iterations here; consecutive_errors is
                         # already handled by run_loop when result.success is False

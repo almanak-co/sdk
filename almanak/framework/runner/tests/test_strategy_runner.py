@@ -420,6 +420,107 @@ class TestRunIteration:
         assert execution_orchestrator.execute_called is False
 
     @pytest.mark.asyncio
+    async def test_dry_run_intent_sequence_amount_all_does_not_fail(
+        self,
+        dry_run_runner: StrategyRunner,
+        execution_orchestrator: MockExecutionOrchestrator,
+    ) -> None:
+        """Test that dry-run mode doesn't fail on IntentSequence with amount='all'.
+
+        In dry-run mode, no execution happens so previous step output is unavailable.
+        The runner should gracefully skip amount='all' resolution instead of failing
+        with 'no previous step amount available'.
+        """
+        from almanak.framework.intents.vocabulary import IntentSequence, SupplyIntent
+
+        sequence = IntentSequence(
+            intents=[
+                Intent.swap(
+                    from_token="USDC",
+                    to_token="WETH",
+                    amount=Decimal("1000"),
+                ),
+                SupplyIntent(
+                    protocol="aave_v3",
+                    token="WETH",
+                    amount="all",
+                ),
+            ]
+        )
+        strategy = MockStrategy(decide_returns=sequence)
+
+        result = await dry_run_runner.run_iteration(strategy)
+
+        # Should succeed in dry-run (not fail with COMPILATION_FAILED)
+        assert result.success is True
+        assert result.status == IterationStatus.DRY_RUN
+        # Orchestrator should NOT be called in dry run mode
+        assert execution_orchestrator.execute_called is False
+
+    @pytest.mark.asyncio
+    async def test_non_dry_run_intent_sequence_amount_all_fails_without_previous(
+        self,
+        price_oracle: MockPriceOracle,
+        balance_provider: MockBalanceProvider,
+        state_manager: MockStateManager,
+    ) -> None:
+        """Test that normal mode still fails on amount='all' without previous output.
+
+        This regression test ensures the fix for dry-run doesn't accidentally
+        relax validation in normal execution mode.
+        """
+        from almanak.framework.intents.vocabulary import IntentSequence, SupplyIntent
+
+        # Create orchestrator that returns success but with no swap_amounts
+        orch = MockExecutionOrchestrator(success=True)
+
+        # Patch execute to return a result without swap_amounts
+        async def execute_no_swap_amounts(action_bundle, context=None):
+            orch.execute_called = True
+            result = MagicMock(spec=ExecutionResult)
+            result.success = True
+            result.error = None
+            result.phase = ExecutionPhase.COMPLETE
+            result.transaction_results = []
+            result.total_gas_used = 100000
+            result.total_gas_cost_wei = 1000000000000
+            result.swap_amounts = None  # Explicitly no swap amounts
+            result.to_dict = MagicMock(return_value={"success": True})
+            return result
+
+        orch.execute = execute_no_swap_amounts
+
+        runner_no_swap = StrategyRunner(
+            price_oracle=price_oracle,
+            balance_provider=balance_provider,
+            execution_orchestrator=orch,
+            state_manager=state_manager,
+        )
+
+        sequence = IntentSequence(
+            intents=[
+                Intent.swap(
+                    from_token="USDC",
+                    to_token="WETH",
+                    amount=Decimal("1000"),
+                ),
+                SupplyIntent(
+                    protocol="aave_v3",
+                    token="WETH",
+                    amount="all",
+                ),
+            ]
+        )
+        strategy = MockStrategy(decide_returns=sequence)
+
+        result = await runner_no_swap.run_iteration(strategy)
+
+        # The first intent succeeds but no swap_amounts available,
+        # so the second intent with amount='all' should fail
+        assert result.status == IterationStatus.COMPILATION_FAILED
+        assert "amount='all'" in result.error
+
+    @pytest.mark.asyncio
     async def test_balance_cache_invalidated_after_execution(
         self,
         runner: StrategyRunner,
