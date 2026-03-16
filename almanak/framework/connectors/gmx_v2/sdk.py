@@ -57,6 +57,7 @@ class DecreasePositionSwapType(IntEnum):
 GMX_V2_SDK_ADDRESSES = {
     "arbitrum": {
         "EXCHANGE_ROUTER": GMX_V2["arbitrum"]["exchange_router"],
+        "ROUTER": GMX_V2["arbitrum"]["router"],
         "DATA_STORE": GMX_V2["arbitrum"]["data_store"],
         "ORDER_VAULT": GMX_V2["arbitrum"]["order_vault"],
         "READER": GMX_V2["arbitrum"]["reader"],
@@ -145,6 +146,7 @@ class GMXV2SDK:
         # Get contract addresses
         self.addresses = GMX_V2_SDK_ADDRESSES[chain]
         self.EXCHANGE_ROUTER_ADDRESS = self.addresses["EXCHANGE_ROUTER"]
+        self.ROUTER_ADDRESS = self.addresses["ROUTER"]
         self.ORDER_VAULT_ADDRESS = self.addresses["ORDER_VAULT"]
         self.WETH_ADDRESS = self.addresses["WETH"]
 

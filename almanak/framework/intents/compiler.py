@@ -9266,14 +9266,15 @@ class IntentCompiler:
             tx_data = sdk.build_increase_order_multicall(order_params)
 
             # Step 5.5: Prepend ERC-20 approval for collateral token.
-            # ExchangeRouter.sendTokens() calls transferFrom() on the collateral,
-            # so the wallet must approve ExchangeRouter to spend the collateral.
+            # ExchangeRouter.sendTokens() delegates to Router.pluginTransfer(),
+            # which calls IERC20.safeTransferFrom() — so the Router is the msg.sender
+            # that needs the allowance, NOT the ExchangeRouter.
             # Native tokens (WETH/ETH) are sent as msg.value via sendWnt(), no approval needed.
             is_native_collateral = collateral_token_upper in ("WETH", "ETH", "WAVAX", "AVAX")
             if not is_native_collateral and collateral_wei > 0:
                 approve_txs = self._build_approve_tx(
                     token_address=collateral_address,
-                    spender=sdk.EXCHANGE_ROUTER_ADDRESS,
+                    spender=sdk.ROUTER_ADDRESS,
                     amount=collateral_wei,
                 )
                 transactions.extend(approve_txs)

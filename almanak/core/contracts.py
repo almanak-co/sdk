@@ -501,6 +501,7 @@ SUSHISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
 GMX_V2: dict[str, dict[str, str]] = {
     "arbitrum": {
         "exchange_router": "0x1C3fa76e6E1088bCE750f23a5BFcffa1efEF6A41",
+        "router": "0x7452c558d45f8afC8c83dAe62C3f8A5BE19c71f6",
         "data_store": "0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8",
         "order_vault": "0x31eF83a530Fde1B38EE9A18093A333D8Bbbc40D5",
         "reader": "0x470fbC46bcC0f16532691Df360A07d8Bf5ee0789",

@@ -1,8 +1,8 @@
 """Tests for GMX V2 PERP_OPEN ERC-20 approval prepend (VIB-131).
 
 Verifies that the compiler prepends an ERC-20 approval TX for the collateral
-token when compiling PERP_OPEN intents. The ExchangeRouter's sendTokens()
-calls transferFrom(), so the wallet must approve ExchangeRouter first.
+token when compiling PERP_OPEN intents. The Router contract (not ExchangeRouter)
+calls transferFrom() via pluginTransfer(), so the wallet must approve Router.
 
 Native tokens (WETH/ETH/WAVAX/AVAX) are sent as msg.value via sendWnt() and
 do NOT require approval.
@@ -101,6 +101,7 @@ class TestPerpOpenApproval:
         # Mock SDK
         mock_sdk = MagicMock()
         mock_sdk.EXCHANGE_ROUTER_ADDRESS = "0x1C3fa76e6E1088bCE750f23a5BFcffa1efEF6A41"
+        mock_sdk.ROUTER_ADDRESS = "0x7452c558d45f8afC8c83dAe62C3f8A5BE19c71f6"
         mock_sdk.get_execution_fee.return_value = 100000000000000  # 0.0001 ETH
         mock_tx_data = MagicMock()
         mock_tx_data.to = mock_sdk.EXCHANGE_ROUTER_ADDRESS
@@ -127,9 +128,10 @@ class TestPerpOpenApproval:
         # Should succeed
         assert result.status.value == "SUCCESS", f"Compilation failed: {result.error}"
 
-        # Should have called _build_approve_tx for USDC
+        # Should have called _build_approve_tx for USDC targeting the Router
+        # (Router calls transferFrom via pluginTransfer, not ExchangeRouter)
         assert len(approve_calls) == 1, "Should prepend one approval TX for USDC"
-        assert approve_calls[0]["spender"] == mock_sdk.EXCHANGE_ROUTER_ADDRESS
+        assert approve_calls[0]["spender"] == mock_sdk.ROUTER_ADDRESS
         assert approve_calls[0]["token_address"] == "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
         # 100 USDC = 100 * 10^6 = 100_000_000 wei
         assert approve_calls[0]["amount"] == 100_000_000
