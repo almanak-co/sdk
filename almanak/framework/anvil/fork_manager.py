@@ -819,6 +819,11 @@ class RollingForkManager:
         if self.block_time is not None:
             cmd.extend(["--block-time", str(self.block_time)])
 
+        # Upstream RPC settings - prevent Anvil from hanging on
+        # expensive fork calls (e.g. simulating large failing swaps)
+        cmd.extend(["--timeout", "120000"])  # 120s upstream RPC timeout
+        cmd.extend(["--retries", "3"])  # Retry failed upstream calls
+
         # Silent mode for cleaner logs
         cmd.append("--silent")
 

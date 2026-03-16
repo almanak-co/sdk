@@ -269,6 +269,13 @@ class TestRollingForkManagerCommand:
         assert "--chain-id" in cmd
         assert "42161" in cmd
         assert "--silent" in cmd
+        # Upstream RPC resilience flags
+        assert "--timeout" in cmd
+        idx = cmd.index("--timeout")
+        assert cmd[idx + 1] == "120000"
+        assert "--retries" in cmd
+        idx = cmd.index("--retries")
+        assert cmd[idx + 1] == "3"
 
     def test_build_command_auto_impersonate(self, fork_manager: RollingForkManager) -> None:
         """Test command includes auto-impersonate by default."""

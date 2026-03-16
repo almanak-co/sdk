@@ -42,7 +42,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, cast
 
 from web3 import AsyncHTTPProvider, AsyncWeb3
-from web3.types import TxParams
+from web3.types import HexStr, TxParams
 
 from almanak.framework.execution.config import CHAIN_IDS
 from almanak.framework.execution.signer.safe.base import SafeSigner
@@ -1092,7 +1092,12 @@ class ExecutionOrchestrator:
                 )
                 return result
 
-            # Step 1.5: On-chain gas estimation fallback (when simulation is disabled)
+            # Step 1.5: Pre-flight token balance check
+            # Prevents sending doomed transactions that can hang Anvil forks
+            # via expensive upstream RPC calls during gas estimation / simulation.
+            await self._check_token_balance_before_submit(action_bundle, context)
+
+            # Step 1.6: On-chain gas estimation fallback (when simulation is disabled)
             if not context.simulation_enabled:
                 unsigned_txs, gas_warnings = await self._maybe_estimate_gas_limits(unsigned_txs, context)
                 if gas_warnings:
@@ -2325,6 +2330,65 @@ class ExecutionOrchestrator:
             result_txs.append(updated_tx)
 
         return result_txs
+
+    async def _check_token_balance_before_submit(
+        self,
+        action_bundle: ActionBundle,
+        context: ExecutionContext,
+    ) -> None:
+        """Check ERC20 token balance before submitting swap transactions.
+
+        For SWAP intents, verifies the wallet has sufficient input tokens.
+        Raises InsufficientFundsError if balance is too low.
+        """
+        if (action_bundle.intent_type or "").upper() != "SWAP":
+            return
+
+        metadata = action_bundle.metadata or {}
+        from_token = metadata.get("from_token", {})
+        amount_in_str = metadata.get("amount_in")
+
+        if not from_token or not amount_in_str:
+            return  # Can't check without metadata
+
+        token_address = from_token.get("address")
+        is_native = from_token.get("is_native", False)
+
+        if not token_address or is_native:
+            return  # Skip for native tokens
+
+        try:
+            amount_in = int(amount_in_str)
+        except (ValueError, TypeError):
+            return  # Can't parse amount
+
+        if not self.rpc_url:
+            return  # No RPC URL configured
+
+        try:
+            web3 = await self._get_web3()
+            balance = await asyncio.wait_for(
+                web3.eth.call(
+                    {
+                        "to": web3.to_checksum_address(token_address),
+                        "data": HexStr("0x70a08231" + context.wallet_address[2:].lower().zfill(64)),
+                    }
+                ),
+                timeout=10.0,
+            )
+            balance_int = int.from_bytes(balance, "big")
+        except Exception as e:  # noqa: BLE001
+            # Balance check is best-effort - don't block execution on RPC errors
+            logger.debug(f"Pre-submission balance check failed: {e}")
+            return
+
+        if balance_int < amount_in:
+            token_symbol = from_token.get("symbol", "ERC20")
+            raise InsufficientFundsError(
+                required=amount_in,
+                available=balance_int,
+                token=token_symbol,
+            )
 
     def set_event_callback(self, callback: EventCallback | None) -> None:
         """Set the event callback.
