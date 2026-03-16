@@ -345,7 +345,7 @@ class GatewayClient:
         # Initialize Lifecycle service stub
         self._lifecycle_stub = gateway_pb2_grpc.LifecycleServiceStub(self._channel)
 
-        logger.info(f"Connected to gateway at {self.target}")
+        logger.debug(f"Channel opened to gateway at {self.target}")
 
     def disconnect(self) -> None:
         """Close connection to gateway.
@@ -401,6 +401,9 @@ class GatewayClient:
     def wait_for_ready(self, timeout: float = 30.0, interval: float = 1.0) -> bool:
         """Wait for gateway to become ready.
 
+        Suppresses per-attempt logs and only logs an error if the gateway
+        never becomes ready within the timeout.
+
         Args:
             timeout: Maximum time to wait in seconds
             interval: Time between health check attempts in seconds
@@ -410,11 +413,29 @@ class GatewayClient:
         """
         import time
 
-        start = time.time()
-        while time.time() - start < timeout:
-            if self.health_check():
-                return True
-            time.sleep(interval)
+        start = time.monotonic()
+        last_error = None
+        while True:
+            remaining = timeout - (time.monotonic() - start)
+            if remaining <= 0:
+                break
+            try:
+                if self._health_stub is None:
+                    last_error = "Gateway client not connected"
+                else:
+                    response = self._health_stub.Check(
+                        health_pb2.HealthCheckRequest(service=""),
+                        timeout=min(self.config.timeout, remaining),
+                    )
+                    if response.status == health_pb2.HealthCheckResponse.SERVING:
+                        return True
+                    last_error = f"status={response.status}"
+            except grpc.RpcError as e:
+                last_error = str(e)
+            time.sleep(min(interval, max(0, timeout - (time.monotonic() - start))))
+
+        elapsed = time.monotonic() - start
+        logger.error(f"Gateway not ready after {elapsed:.0f}s timeout. Last error: {last_error}")
         return False
 
     def __enter__(self) -> "GatewayClient":

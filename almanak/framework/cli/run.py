@@ -2490,10 +2490,11 @@ def run(
             sys.exit(1)
 
     else:
-        click.echo()
-        click.echo("Starting continuous execution...")
-        click.echo("Press Ctrl+C to stop gracefully.")
-        click.echo()
+        if sys.stdout.isatty():
+            click.echo()
+            click.echo("Starting continuous execution...")
+            click.echo("Press Ctrl+C to stop gracefully.")
+            click.echo()
 
         # Set up signal handlers for graceful shutdown
         runner.setup_signal_handlers()
