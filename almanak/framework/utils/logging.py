@@ -166,6 +166,27 @@ def _order_keys(logger: WrappedLogger, method_name: str, event_dict: EventDict) 
     return ordered
 
 
+def _load_plugin_processors() -> list[Processor]:
+    """Discover extra structlog processors from platform plugins.
+
+    Loads ALL ``almanak.logging`` entry points named ``processors`` and
+    merges their results.  Returns an empty list when no plugin is
+    installed.  Logs a warning on load failure so operators notice when
+    the severity mapping is silently inactive.
+    """
+    from importlib.metadata import entry_points
+
+    eps = entry_points(group="almanak.logging", name="processors")
+    processors: list[Processor] = []
+    for ep in eps:
+        try:
+            get_processors = ep.load()
+            processors.extend(get_processors())
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Failed to load almanak.logging plugin %s: %s", ep.value, exc)
+    return processors
+
+
 def _get_shared_processors() -> list[Processor]:
     """Get processors shared between stdlib and structlog.
 
@@ -181,6 +202,7 @@ def _get_shared_processors() -> list[Processor]:
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.UnicodeDecoder(),
+        *_load_plugin_processors(),
     ]
 
 
