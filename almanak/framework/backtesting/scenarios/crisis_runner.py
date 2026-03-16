@@ -96,11 +96,15 @@ class CrisisBacktestConfig:
     def to_pnl_config(self) -> PnLBacktestConfig:
         """Convert to a PnLBacktestConfig using the scenario date range.
 
+        The start_time is extended backwards by the scenario's warmup_days
+        to allow indicator-based strategies (RSI, MACD, etc.) to compute
+        their values before the crisis window begins.
+
         Returns:
-            PnLBacktestConfig with start/end times from the scenario
+            PnLBacktestConfig with warmup-extended start and scenario end
         """
         return PnLBacktestConfig(
-            start_time=self.scenario.start_date,
+            start_time=self.scenario.warmup_start_date,
             end_time=self.scenario.end_date,
             interval_seconds=self.interval_seconds,
             initial_capital_usd=self.initial_capital_usd,
@@ -270,6 +274,9 @@ def _validate_scenario_date_range(scenario: CrisisScenario, backtester: PnLBackt
     Skips validation if: (a) the backtester uses a non-CoinGecko data provider,
     or (b) the user has COINGECKO_API_KEY set (pro tier has no limit).
 
+    Uses warmup_start_date (not start_date) since the backtest will fetch
+    data from the warmup start.
+
     Raises:
         CrisisScenarioDateRangeError: If dates exceed free tier limit and no API key
     """
@@ -281,17 +288,16 @@ def _validate_scenario_date_range(scenario: CrisisScenario, backtester: PnLBackt
         return
 
     now = datetime.now(UTC)
-    start = (
-        scenario.start_date.replace(tzinfo=UTC)
-        if scenario.start_date.tzinfo is None
-        else scenario.start_date.astimezone(UTC)
-    )
+    # Use warmup_start_date since data fetching begins from there
+    effective_start = scenario.warmup_start_date
+    start = effective_start.replace(tzinfo=UTC) if effective_start.tzinfo is None else effective_start.astimezone(UTC)
     days_ago = (now.date() - start.date()).days
 
     if days_ago > _COINGECKO_FREE_TIER_MAX_DAYS:
         raise CrisisScenarioDateRangeError(
             f"Crisis scenario '{scenario.name}' requires data from "
-            f"{scenario.start_date.strftime('%Y-%m-%d')} ({days_ago} days ago), "
+            f"{effective_start.strftime('%Y-%m-%d')} ({days_ago} days ago, "
+            f"including {scenario.warmup_days}-day warmup), "
             f"but CoinGecko free tier only provides {_COINGECKO_FREE_TIER_MAX_DAYS} days "
             f"of historical data. To use predefined crisis scenarios, either:\n"
             f"  1. Set COINGECKO_API_KEY environment variable (pro tier has no date limit)\n"
@@ -389,17 +395,34 @@ async def run_crisis_backtest(
             extra_config=extra_config,
         )
 
+    warmup_info = ""
+    if scenario.warmup_days > 0:
+        warmup_info = f", warmup: {scenario.warmup_days} days from {scenario.warmup_start_date.strftime('%Y-%m-%d')}"
     logger.info(
         f"Starting crisis backtest for scenario '{scenario.name}' "
         f"from {scenario.start_date.strftime('%Y-%m-%d')} to "
-        f"{scenario.end_date.strftime('%Y-%m-%d')} ({scenario.duration_days} days)"
+        f"{scenario.end_date.strftime('%Y-%m-%d')} ({scenario.duration_days} days{warmup_info})"
     )
 
     # Convert to PnL config with scenario dates
     pnl_config = crisis_config.to_pnl_config()
 
-    # Run the backtest
+    # Run the backtest (includes warmup period)
     result = await backtester.backtest(strategy, pnl_config)
+
+    # Trim equity curve to crisis window only BEFORE computing metrics (VIB-176)
+    # This must happen before build_crisis_metrics() so metrics reflect
+    # only the crisis window, not the warmup period.
+    if scenario.warmup_days > 0 and result.equity_curve:
+        crisis_start = scenario.start_date
+        # Normalize to UTC-aware for safe comparison with equity curve timestamps
+        if crisis_start.tzinfo is None:
+            crisis_start = crisis_start.replace(tzinfo=UTC)
+        result.equity_curve = [
+            p
+            for p in result.equity_curve
+            if (p.timestamp.replace(tzinfo=UTC) if p.timestamp.tzinfo is None else p.timestamp) >= crisis_start
+        ]
 
     # Build CrisisMetrics and attach to BacktestResult
     crisis_metrics_obj = build_crisis_metrics(result, scenario)

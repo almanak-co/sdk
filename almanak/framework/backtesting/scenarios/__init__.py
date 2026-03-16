@@ -41,6 +41,7 @@ Usage:
 
 from almanak.framework.backtesting.scenarios.crisis import (
     BLACK_THURSDAY,
+    DEFAULT_WARMUP_DAYS,
     FTX_COLLAPSE,
     PREDEFINED_SCENARIOS,
     TERRA_COLLAPSE,
@@ -60,6 +61,7 @@ from almanak.framework.backtesting.scenarios.crisis_runner import (
 
 __all__ = [
     # Crisis scenario definitions
+    "DEFAULT_WARMUP_DAYS",
     "CrisisScenario",
     "BLACK_THURSDAY",
     "TERRA_COLLAPSE",

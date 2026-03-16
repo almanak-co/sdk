@@ -13,8 +13,11 @@ Examples:
 """
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+# Default warmup period in days — sufficient for RSI-14 at daily interval
+DEFAULT_WARMUP_DAYS = 30
 
 
 @dataclass(frozen=True)
@@ -29,9 +32,14 @@ class CrisisScenario:
         start_date: Beginning of the crisis period
         end_date: End of the crisis period
         description: Human-readable description of the crisis event
+        warmup_days: Number of days of price history to pre-load before the crisis
+            window starts. This allows indicator-based strategies (RSI, MACD, etc.)
+            to compute their values before the crisis period begins. Performance
+            metrics are calculated only for the crisis window itself.
 
     Properties:
         duration_days: Number of days in the crisis period
+        warmup_start_date: Start date including warmup window
 
     Example:
         >>> scenario = CrisisScenario(
@@ -48,12 +56,23 @@ class CrisisScenario:
     start_date: datetime
     end_date: datetime
     description: str
+    warmup_days: int = DEFAULT_WARMUP_DAYS
+
+    def __post_init__(self) -> None:
+        """Validate warmup_days is non-negative."""
+        if self.warmup_days < 0:
+            raise ValueError(f"warmup_days must be >= 0, got {self.warmup_days}")
 
     @property
     def duration_days(self) -> int:
         """Calculate the duration of the crisis in days."""
         delta = self.end_date - self.start_date
         return delta.days
+
+    @property
+    def warmup_start_date(self) -> datetime:
+        """Start date including the warmup window for indicator pre-loading."""
+        return self.start_date - timedelta(days=self.warmup_days)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary.
@@ -67,6 +86,7 @@ class CrisisScenario:
             "end_date": self.end_date.isoformat(),
             "description": self.description,
             "duration_days": self.duration_days,
+            "warmup_days": self.warmup_days,
         }
 
     @classmethod
@@ -84,6 +104,7 @@ class CrisisScenario:
             start_date=datetime.fromisoformat(data["start_date"]),
             end_date=datetime.fromisoformat(data["end_date"]),
             description=data["description"],
+            warmup_days=data.get("warmup_days", DEFAULT_WARMUP_DAYS),
         )
 
     def __str__(self) -> str:
