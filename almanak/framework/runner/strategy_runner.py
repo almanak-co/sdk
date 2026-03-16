@@ -32,6 +32,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import signal
 import time
 from collections.abc import Callable
@@ -632,6 +633,8 @@ class StrategyRunner:
         # Shutdown control
         self._shutdown_requested = False
         self._signal_received = False
+        self._terminal_lifecycle_state: str | None = None
+        self._terminal_lifecycle_error_message: str | None = None
         self._current_loop_task: asyncio.Task[None] | None = None
 
         # Metrics tracking
@@ -1440,6 +1443,8 @@ class StrategyRunner:
 
         self._shutdown_requested = False
         self._signal_received = False
+        self._terminal_lifecycle_state = None
+        self._terminal_lifecycle_error_message = None
 
         # Set up dual-write for timeline events (gateway persistence)
         gateway_client = self._get_gateway_client()
@@ -1603,8 +1608,12 @@ class StrategyRunner:
                 if not self._shutdown_requested:
                     await asyncio.sleep(interval)
 
-        # Write TERMINATED state to LifecycleStore
-        self._lifecycle_write_state(strategy_id, "TERMINATED")
+        # Write final state to LifecycleStore (preserve ERROR if set by circuit breaker)
+        self._lifecycle_write_state(
+            strategy_id,
+            self._terminal_lifecycle_state or "TERMINATED",
+            error_message=self._terminal_lifecycle_error_message,
+        )
 
         # Deregister from gateway (mark as INACTIVE)
         self._deregister_from_gateway(strategy_id)
@@ -1706,6 +1715,14 @@ class StrategyRunner:
         """
         logger.info("Shutdown requested for strategy runner")
         self._shutdown_requested = True
+
+    def _is_managed_deployment(self) -> bool:
+        """Return True if running as a deployed agent (not local development).
+
+        The deployer injects AGENT_ID into pod containers. Local runs don't
+        have this env var, so this is a clean, zero-config detection mechanism.
+        """
+        return bool(os.environ.get("AGENT_ID", "").strip())
 
     def setup_signal_handlers(self) -> None:
         """Set up signal handlers for graceful shutdown.
@@ -4485,6 +4502,20 @@ class StrategyRunner:
             )
             # Only mark as triggered after successful emergency stop
             self._emergency_triggered_for_open = True
+
+            # In managed deployments, write ERROR state and exit so the pod
+            # terminates and K8s resources are freed.  Local development keeps
+            # the loop alive for debugging.
+            if self._is_managed_deployment():
+                self._terminal_lifecycle_state = "ERROR"
+                self._terminal_lifecycle_error_message = f"Circuit breaker tripped: {last_result.error or 'unknown'}"
+                self._lifecycle_write_state(
+                    strategy.strategy_id,
+                    "ERROR",
+                    error_message=self._terminal_lifecycle_error_message,
+                )
+                logger.critical("Circuit breaker tripped in managed deployment — exiting process")
+                self.request_shutdown()
         except Exception as e:
             logger.error(f"Failed to trigger emergency stop for {strategy.strategy_id}: {e}")
 
