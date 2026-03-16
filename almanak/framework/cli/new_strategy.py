@@ -458,11 +458,14 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 except ValueError:
                     return Intent.hold(reason="Cannot check balance")
 
-                if collateral_bal.balance_usd < self.collateral_amount:
+                if collateral_bal.balance < self.collateral_amount:
                     return Intent.hold(reason=f"Insufficient {self.collateral_token}")
 
                 # Simple momentum: open long
                 logger.info(f"Opening long {self.perp_market} at {entry_price}")
+                # Capture price at decide time for entry_price fallback
+                # (GMX V2 two-step flow means ResultEnricher may not have entry_price)
+                self._pending_entry_price = entry_price
                 return Intent.perp_open(
                     market=self.perp_market,
                     collateral_token=self.collateral_token,
@@ -503,13 +506,10 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
     elif template == StrategyTemplate.MULTI_STEP:
         return """
             base_price = market.price(self.base_token)
+            range_pct = Decimal(str(self.range_width_pct)) / Decimal("100")
 
             # If we have a position, check for rebalance
             if self._position_id is not None:
-                range_pct = Decimal(str(self.range_width_pct)) / Decimal("100")
-                new_lower = base_price * (Decimal("1") - range_pct)
-                new_upper = base_price * (Decimal("1") + range_pct)
-
                 # Check if price moved enough to rebalance
                 if self._range_lower and self._range_upper:
                     mid = (self._range_lower + self._range_upper) / Decimal("2")
@@ -517,37 +517,37 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     if drift < Decimal("0.03"):
                         return Intent.hold(reason=f"Position in range, drift={drift:.2%}")
 
-                # Atomic rebalance: close -> swap -> reopen
-                logger.info(f"Rebalancing LP around {base_price}")
-                return Intent.sequence([
-                    Intent.lp_close(
-                        position_id=self._position_id,
-                        pool=self.pool_address,
-                        collect_fees=True,
-                        protocol="uniswap_v3",
-                    ),
-                    Intent.swap(
-                        from_token=self.base_token,
-                        to_token=self.quote_token,
-                        amount="all",
-                        max_slippage=Decimal("0.005"),
-                    ),
-                    # Re-open LP with post-swap balances
-                    # TODO: Replace with actual token balances after the swap completes.
-                    # In production, use on_intent_executed() to track swap output,
-                    # then issue a separate lp_open intent with the real amounts.
-                    Intent.lp_open(
-                        pool=self.pool_address,
-                        amount0=market.balance(self.base_token).balance,
-                        amount1=market.balance(self.quote_token).balance,
-                        range_lower=new_lower,
-                        range_upper=new_upper,
-                        protocol="uniswap_v3",
-                    ),
-                ], description="Atomic LP rebalance")
+                # Close LP only -- next iteration will reopen with fresh balances
+                # (avoids stale-balance bug where Intent.sequence() pre-computes amounts)
+                logger.info(f"Closing LP for rebalance around {base_price}")
+                return Intent.lp_close(
+                    position_id=self._position_id,
+                    pool=self.pool_address,
+                    collect_fees=True,
+                    protocol="uniswap_v3",
+                )
 
-            # No position: just hold, waiting for setup
-            return Intent.hold(reason="No LP position -- open one manually or via config")"""
+            # No position -- open one with fresh balances
+            try:
+                base_balance = market.balance(self.base_token)
+                quote_balance = market.balance(self.quote_token)
+            except ValueError:
+                return Intent.hold(reason="Cannot check balances")
+
+            if quote_balance.balance_usd < self.min_position_usd:
+                return Intent.hold(reason=f"Insufficient {self.quote_token} for LP")
+
+            lower_price = base_price * (Decimal("1") - range_pct)
+            upper_price = base_price * (Decimal("1") + range_pct)
+            logger.info(f"Opening LP: {lower_price:.2f} - {upper_price:.2f}")
+            return Intent.lp_open(
+                pool=self.pool_address,
+                amount0=base_balance.balance * Decimal("0.45"),
+                amount1=quote_balance.balance * Decimal("0.45"),
+                range_lower=lower_price,
+                range_upper=upper_price,
+                protocol="uniswap_v3",
+            )"""
 
     elif template == StrategyTemplate.STAKING:
         return """
@@ -627,6 +627,848 @@ def _get_teardown_comment(template: StrategyTemplate) -> str:
     return hints.get(template, "Close all positions and convert to stable")
 
 
+def _get_template_teardown(
+    template: StrategyTemplate,
+    config: TemplateConfig,
+    strategy_name: str,
+) -> str:
+    """Generate template-specific get_open_positions() and generate_teardown_intents() implementations."""
+    teardown_comment = _get_teardown_comment(template)
+
+    if template == StrategyTemplate.BLANK:
+        return f'''    # -------------------------------------------------------------------------
+    # TEARDOWN (required) - implement so operators can safely close positions
+    # Without these methods, operator close-requests are silently ignored.
+    # See: blueprints/14-teardown-system.md
+    # -------------------------------------------------------------------------
+
+    def supports_teardown(self) -> bool:
+        """Indicate this strategy supports safe teardown."""
+        return True
+
+    def get_open_positions(self):
+        """Return all open positions for teardown preview."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.teardown import TeardownPositionSummary
+
+        # Blank template: no positions tracked by default.
+        # Add PositionInfo entries here as you implement your strategy logic.
+        return TeardownPositionSummary(
+            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            timestamp=datetime.now(UTC),
+            positions=[],
+        )
+
+    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+        """Generate intents to close all positions.
+
+        Teardown goal: {teardown_comment}
+        """
+        # Blank template: no teardown intents by default.
+        # Add Intent entries here matching your decide() logic.
+        return []
+
+'''
+
+    elif template == StrategyTemplate.TA_SWAP:
+        return f'''    # -------------------------------------------------------------------------
+    # TEARDOWN (required) - implement so operators can safely close positions
+    # Without these methods, operator close-requests are silently ignored.
+    # See: blueprints/14-teardown-system.md
+    # -------------------------------------------------------------------------
+
+    def supports_teardown(self) -> bool:
+        """Indicate this strategy supports safe teardown."""
+        return True
+
+    def get_open_positions(self):
+        """Return all open positions for teardown preview."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.teardown import (
+            PositionInfo,
+            PositionType,
+            TeardownPositionSummary,
+        )
+
+        positions = []
+
+        if self._holding_base:
+            positions.append(
+                PositionInfo(
+                    position_type=PositionType.TOKEN,
+                    position_id="{strategy_name}_base_token",
+                    chain=self.chain,
+                    protocol="{config.default_protocol}",
+                    value_usd=Decimal("0"),  # Will be enriched by framework
+                    details={{"asset": self.base_token, "quote": self.quote_token}},
+                )
+            )
+
+        return TeardownPositionSummary(
+            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            timestamp=datetime.now(UTC),
+            positions=positions,
+        )
+
+    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+        """Generate intents to close all positions.
+
+        Teardown goal: {teardown_comment}
+        """
+        from almanak.framework.teardown import TeardownMode
+
+        intents: list[Intent] = []
+
+        if self._holding_base:
+            max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
+            intents.append(
+                Intent.swap(
+                    from_token=self.base_token,
+                    to_token=self.quote_token,
+                    amount="all",
+                    max_slippage=max_slippage,
+                )
+            )
+
+        return intents
+
+'''
+
+    elif template == StrategyTemplate.DYNAMIC_LP:
+        return f'''    # -------------------------------------------------------------------------
+    # TEARDOWN (required) - implement so operators can safely close positions
+    # Without these methods, operator close-requests are silently ignored.
+    # See: blueprints/14-teardown-system.md
+    # -------------------------------------------------------------------------
+
+    def supports_teardown(self) -> bool:
+        """Indicate this strategy supports safe teardown."""
+        return True
+
+    def get_open_positions(self):
+        """Return all open positions for teardown preview."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.teardown import (
+            PositionInfo,
+            PositionType,
+            TeardownPositionSummary,
+        )
+
+        positions = []
+
+        if self._position_id is not None:
+            positions.append(
+                PositionInfo(
+                    position_type=PositionType.LP,
+                    position_id=str(self._position_id),
+                    chain=self.chain,
+                    protocol="{config.default_protocol}",
+                    value_usd=Decimal("0"),  # Will be enriched by framework
+                    details={{
+                        "pool": self.pool_address,
+                        "range_lower": str(self._range_lower) if self._range_lower else None,
+                        "range_upper": str(self._range_upper) if self._range_upper else None,
+                    }},
+                )
+            )
+
+        return TeardownPositionSummary(
+            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            timestamp=datetime.now(UTC),
+            positions=positions,
+        )
+
+    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+        """Generate intents to close all positions.
+
+        Teardown goal: {teardown_comment}
+        """
+        from almanak.framework.teardown import TeardownMode
+
+        intents: list[Intent] = []
+        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
+
+        if self._position_id is not None:
+            intents.append(
+                Intent.lp_close(
+                    position_id=self._position_id,
+                    pool=self.pool_address,
+                    collect_fees=True,
+                    protocol="{config.default_protocol}",
+                )
+            )
+            # Swap remaining base tokens back to quote
+            intents.append(
+                Intent.swap(
+                    from_token=self.base_token,
+                    to_token=self.quote_token,
+                    amount="all",
+                    max_slippage=max_slippage,
+                )
+            )
+
+        return intents
+
+'''
+
+    elif template == StrategyTemplate.LENDING_LOOP:
+        return f'''    # -------------------------------------------------------------------------
+    # TEARDOWN (required) - implement so operators can safely close positions
+    # Without these methods, operator close-requests are silently ignored.
+    # See: blueprints/14-teardown-system.md
+    # -------------------------------------------------------------------------
+
+    def supports_teardown(self) -> bool:
+        """Indicate this strategy supports safe teardown."""
+        return True
+
+    def get_open_positions(self):
+        """Return all open positions for teardown preview."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.teardown import (
+            PositionInfo,
+            PositionType,
+            TeardownPositionSummary,
+        )
+
+        positions = []
+
+        if self._loop_state in ("borrowed", "monitoring"):
+            positions.append(
+                PositionInfo(
+                    position_type=PositionType.BORROW,
+                    position_id="{strategy_name}_borrow",
+                    chain=self.chain,
+                    protocol="aave_v3",
+                    value_usd=Decimal("0"),  # Will be enriched by framework
+                    details={{
+                        "borrow_token": self.borrow_token,
+                        "borrow_amount": str(self.borrow_amount),
+                    }},
+                )
+            )
+
+        if self._loop_state in ("supplied", "borrowed", "monitoring"):
+            positions.append(
+                PositionInfo(
+                    position_type=PositionType.SUPPLY,
+                    position_id="{strategy_name}_supply",
+                    chain=self.chain,
+                    protocol="aave_v3",
+                    value_usd=Decimal("0"),  # Will be enriched by framework
+                    details={{
+                        "collateral_token": self.collateral_token,
+                        "supply_amount": str(self.supply_amount),
+                    }},
+                )
+            )
+
+        return TeardownPositionSummary(
+            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            timestamp=datetime.now(UTC),
+            positions=positions,
+        )
+
+    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+        """Generate intents to close all positions.
+
+        Teardown goal: {teardown_comment}
+
+        Priority order: repay borrow first (frees collateral), then withdraw.
+        """
+        from almanak.framework.teardown import TeardownMode
+
+        intents: list[Intent] = []
+        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
+
+        # 1. Repay borrow (if active)
+        if self._loop_state in ("borrowed", "monitoring"):
+            intents.append(
+                Intent.repay(
+                    protocol="aave_v3",
+                    token=self.borrow_token,
+                    amount="all",
+                )
+            )
+
+        # 2. Withdraw collateral (if supplied)
+        if self._loop_state in ("supplied", "borrowed", "monitoring"):
+            intents.append(
+                Intent.withdraw(
+                    protocol="aave_v3",
+                    token=self.collateral_token,
+                    amount="all",
+                )
+            )
+
+        # 3. Swap collateral back to stable if needed
+        if self._loop_state != "idle":
+            intents.append(
+                Intent.swap(
+                    from_token=self.collateral_token,
+                    to_token=self.borrow_token,
+                    amount="all",
+                    max_slippage=max_slippage,
+                )
+            )
+
+        return intents
+
+'''
+
+    elif template == StrategyTemplate.BASIS_TRADE:
+        return f'''    # -------------------------------------------------------------------------
+    # TEARDOWN (required) - implement so operators can safely close positions
+    # Without these methods, operator close-requests are silently ignored.
+    # See: blueprints/14-teardown-system.md
+    # -------------------------------------------------------------------------
+
+    def supports_teardown(self) -> bool:
+        """Indicate this strategy supports safe teardown."""
+        return True
+
+    def get_open_positions(self):
+        """Return all open positions for teardown preview."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.teardown import (
+            PositionInfo,
+            PositionType,
+            TeardownPositionSummary,
+        )
+
+        positions = []
+
+        if self._trade_state == "hedged":
+            # Report PERP first (higher priority for closing)
+            positions.append(
+                PositionInfo(
+                    position_type=PositionType.PERP,
+                    position_id="{strategy_name}_short_perp",
+                    chain=self.chain,
+                    protocol="gmx_v2",
+                    value_usd=self.spot_size_usd * self.hedge_ratio,
+                    details={{
+                        "market": self.perp_market,
+                        "is_long": False,
+                        "collateral_token": self.quote_token,
+                    }},
+                )
+            )
+            positions.append(
+                PositionInfo(
+                    position_type=PositionType.TOKEN,
+                    position_id="{strategy_name}_spot",
+                    chain=self.chain,
+                    protocol="{config.default_protocol}",
+                    value_usd=self.spot_size_usd,
+                    details={{"asset": self.base_token}},
+                )
+            )
+        elif self._trade_state == "spot_bought":
+            positions.append(
+                PositionInfo(
+                    position_type=PositionType.TOKEN,
+                    position_id="{strategy_name}_spot",
+                    chain=self.chain,
+                    protocol="{config.default_protocol}",
+                    value_usd=self.spot_size_usd,
+                    details={{"asset": self.base_token}},
+                )
+            )
+
+        return TeardownPositionSummary(
+            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            timestamp=datetime.now(UTC),
+            positions=positions,
+        )
+
+    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+        """Generate intents to close all positions.
+
+        Teardown goal: {teardown_comment}
+
+        Priority: close short perp first (liquidation risk), then sell spot.
+        """
+        from almanak.framework.teardown import TeardownMode
+
+        intents: list[Intent] = []
+        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
+
+        # 1. Close short perp (if hedged)
+        if self._trade_state == "hedged":
+            intents.append(
+                Intent.perp_close(
+                    market=self.perp_market,
+                    collateral_token=self.quote_token,
+                    is_long=False,
+                    size_usd=self.spot_size_usd * self.hedge_ratio,
+                    max_slippage=max_slippage,
+                    protocol="gmx_v2",
+                )
+            )
+
+        # 2. Sell spot position
+        if self._trade_state in ("spot_bought", "hedged"):
+            intents.append(
+                Intent.swap(
+                    from_token=self.base_token,
+                    to_token=self.quote_token,
+                    amount="all",
+                    max_slippage=max_slippage,
+                )
+            )
+
+        return intents
+
+'''
+
+    elif template == StrategyTemplate.VAULT_YIELD:
+        return f'''    # -------------------------------------------------------------------------
+    # TEARDOWN (required) - implement so operators can safely close positions
+    # Without these methods, operator close-requests are silently ignored.
+    # See: blueprints/14-teardown-system.md
+    # -------------------------------------------------------------------------
+
+    def supports_teardown(self) -> bool:
+        """Indicate this strategy supports safe teardown."""
+        return True
+
+    def get_open_positions(self):
+        """Return all open positions for teardown preview."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.teardown import (
+            PositionInfo,
+            PositionType,
+            TeardownPositionSummary,
+        )
+
+        positions = []
+
+        if self._state == "deposited":
+            positions.append(
+                PositionInfo(
+                    position_type=PositionType.SUPPLY,
+                    position_id="{strategy_name}_vault",
+                    chain=self.chain,
+                    protocol="metamorpho",
+                    value_usd=Decimal("0"),  # Will be enriched by framework
+                    details={{
+                        "vault_address": self.vault_address,
+                        "deposit_token": self.deposit_token,
+                    }},
+                )
+            )
+
+        return TeardownPositionSummary(
+            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            timestamp=datetime.now(UTC),
+            positions=positions,
+        )
+
+    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+        """Generate intents to close all positions.
+
+        Teardown goal: {teardown_comment}
+        """
+        intents: list[Intent] = []
+
+        if self._state == "deposited":
+            intents.append(
+                Intent.vault_redeem(
+                    protocol="metamorpho",
+                    vault_address=self.vault_address,
+                    shares="all",
+                    chain=self.chain,
+                )
+            )
+
+        return intents
+
+'''
+
+    elif template == StrategyTemplate.COPY_TRADER:
+        return f'''    # -------------------------------------------------------------------------
+    # TEARDOWN (required) - implement so operators can safely close positions
+    # Without these methods, operator close-requests are silently ignored.
+    # See: blueprints/14-teardown-system.md
+    # -------------------------------------------------------------------------
+
+    def supports_teardown(self) -> bool:
+        """Indicate this strategy supports safe teardown."""
+        return True
+
+    def get_open_positions(self):
+        """Return all open positions for teardown preview."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.teardown import (
+            PositionInfo,
+            PositionType,
+            TeardownPositionSummary,
+        )
+
+        positions = []
+        _type_map = {{
+            "SWAP": PositionType.TOKEN,
+            "LP_OPEN": PositionType.LP,
+            "SUPPLY": PositionType.SUPPLY,
+            "BORROW": PositionType.BORROW,
+            "PERP_OPEN": PositionType.PERP,
+            "STAKE": PositionType.STAKE,
+        }}
+
+        for i, trade in enumerate(self._open_trades):
+            pos_type = _type_map.get(trade.get("intent_type"), PositionType.TOKEN)
+            positions.append(
+                PositionInfo(
+                    position_type=pos_type,
+                    position_id=f"{strategy_name}_copy_{{i}}",
+                    chain=self.chain,
+                    protocol=trade.get("protocol", "unknown"),
+                    value_usd=Decimal("0"),  # Will be enriched by framework
+                    details=trade,
+                )
+            )
+
+        return TeardownPositionSummary(
+            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            timestamp=datetime.now(UTC),
+            positions=positions,
+        )
+
+    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+        """Generate intents to close all positions.
+
+        Teardown goal: {teardown_comment}
+
+        Reverses each copied trade.
+        """
+        from almanak.framework.teardown import TeardownMode
+
+        intents: list[Intent] = []
+        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
+
+        # Process in reverse order (last opened = first closed)
+        for trade in reversed(self._open_trades):
+            intent_type = trade.get("intent_type")
+            if intent_type == "SWAP":
+                # Reverse swap
+                if trade.get("to_token"):
+                    intents.append(
+                        Intent.swap(
+                            from_token=trade["to_token"],
+                            to_token=trade.get("from_token", "USDC"),
+                            amount="all",
+                            max_slippage=max_slippage,
+                        )
+                    )
+            elif intent_type == "LP_OPEN" and trade.get("position_id"):
+                intents.append(
+                    Intent.lp_close(
+                        position_id=trade["position_id"],
+                        pool=trade.get("pool", ""),
+                        collect_fees=True,
+                        protocol=trade.get("protocol", "uniswap_v3"),
+                    )
+                )
+            elif intent_type == "PERP_OPEN":
+                intents.append(
+                    Intent.perp_close(
+                        market=trade.get("market", ""),
+                        collateral_token=trade.get("collateral_token", "USDC"),
+                        is_long=trade.get("is_long", True),
+                        size_usd=Decimal(str(trade.get("size_usd", "0"))),
+                        max_slippage=max_slippage,
+                        protocol=trade.get("protocol", "gmx_v2"),
+                    )
+                )
+            elif intent_type == "SUPPLY":
+                intents.append(
+                    Intent.withdraw(
+                        protocol=trade.get("protocol", "aave_v3"),
+                        token=trade.get("token", ""),
+                        amount="all",
+                    )
+                )
+            elif intent_type == "BORROW":
+                intents.append(
+                    Intent.repay(
+                        protocol=trade.get("protocol", "aave_v3"),
+                        token=trade.get("borrow_token") or trade.get("token", ""),
+                        amount="all",
+                    )
+                )
+            elif intent_type == "STAKE":
+                intents.append(
+                    Intent.unstake(
+                        protocol=trade.get("protocol", "lido"),
+                        token_in=trade.get("token", ""),
+                        amount="all",
+                    )
+                )
+
+        return intents
+
+'''
+
+    elif template == StrategyTemplate.PERPS:
+        return f'''    # -------------------------------------------------------------------------
+    # TEARDOWN (required) - implement so operators can safely close positions
+    # Without these methods, operator close-requests are silently ignored.
+    # See: blueprints/14-teardown-system.md
+    # -------------------------------------------------------------------------
+
+    def supports_teardown(self) -> bool:
+        """Indicate this strategy supports safe teardown."""
+        return True
+
+    def get_open_positions(self):
+        """Return all open positions for teardown preview."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.teardown import (
+            PositionInfo,
+            PositionType,
+            TeardownPositionSummary,
+        )
+
+        positions = []
+
+        if self._position_state == "open":
+            positions.append(
+                PositionInfo(
+                    position_type=PositionType.PERP,
+                    position_id="{strategy_name}_perp_long",
+                    chain=self.chain,
+                    protocol="gmx_v2",
+                    value_usd=self.position_size_usd,
+                    details={{
+                        "market": self.perp_market,
+                        "collateral_token": self.collateral_token,
+                        "is_long": True,
+                        "entry_price": str(self._entry_price) if self._entry_price else "unknown",
+                    }},
+                )
+            )
+
+        return TeardownPositionSummary(
+            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            timestamp=datetime.now(UTC),
+            positions=positions,
+        )
+
+    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+        """Generate intents to close all positions.
+
+        Teardown goal: {teardown_comment}
+        """
+        from almanak.framework.teardown import TeardownMode
+
+        intents: list[Intent] = []
+
+        if self._position_state == "open":
+            max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
+            intents.append(
+                Intent.perp_close(
+                    market=self.perp_market,
+                    collateral_token=self.collateral_token,
+                    is_long=True,
+                    size_usd=self.position_size_usd,
+                    max_slippage=max_slippage,
+                    protocol="gmx_v2",
+                )
+            )
+
+        return intents
+
+'''
+
+    elif template == StrategyTemplate.MULTI_STEP:
+        return f'''    # -------------------------------------------------------------------------
+    # TEARDOWN (required) - implement so operators can safely close positions
+    # Without these methods, operator close-requests are silently ignored.
+    # See: blueprints/14-teardown-system.md
+    # -------------------------------------------------------------------------
+
+    def supports_teardown(self) -> bool:
+        """Indicate this strategy supports safe teardown."""
+        return True
+
+    def get_open_positions(self):
+        """Return all open positions for teardown preview."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.teardown import (
+            PositionInfo,
+            PositionType,
+            TeardownPositionSummary,
+        )
+
+        positions = []
+
+        if self._position_id is not None:
+            positions.append(
+                PositionInfo(
+                    position_type=PositionType.LP,
+                    position_id=str(self._position_id),
+                    chain=self.chain,
+                    protocol="uniswap_v3",
+                    value_usd=Decimal("0"),  # Will be enriched by framework
+                    details={{
+                        "pool": self.pool_address,
+                        "range_lower": str(self._range_lower) if self._range_lower else None,
+                        "range_upper": str(self._range_upper) if self._range_upper else None,
+                    }},
+                )
+            )
+
+        return TeardownPositionSummary(
+            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            timestamp=datetime.now(UTC),
+            positions=positions,
+        )
+
+    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+        """Generate intents to close all positions.
+
+        Teardown goal: {teardown_comment}
+        """
+        from almanak.framework.teardown import TeardownMode
+
+        intents: list[Intent] = []
+        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
+
+        if self._position_id is not None:
+            intents.append(
+                Intent.lp_close(
+                    position_id=self._position_id,
+                    pool=self.pool_address,
+                    collect_fees=True,
+                    protocol="uniswap_v3",
+                )
+            )
+            # Swap remaining base tokens back to quote
+            intents.append(
+                Intent.swap(
+                    from_token=self.base_token,
+                    to_token=self.quote_token,
+                    amount="all",
+                    max_slippage=max_slippage,
+                )
+            )
+
+        return intents
+
+'''
+
+    elif template == StrategyTemplate.STAKING:
+        return f'''    # -------------------------------------------------------------------------
+    # TEARDOWN (required) - implement so operators can safely close positions
+    # Without these methods, operator close-requests are silently ignored.
+    # See: blueprints/14-teardown-system.md
+    # -------------------------------------------------------------------------
+
+    def supports_teardown(self) -> bool:
+        """Indicate this strategy supports safe teardown."""
+        return True
+
+    def get_open_positions(self):
+        """Return all open positions for teardown preview."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.teardown import (
+            PositionInfo,
+            PositionType,
+            TeardownPositionSummary,
+        )
+
+        positions = []
+
+        if self._stake_state == "staked":
+            staked_amt = self._staked_amount or self.stake_amount
+            positions.append(
+                PositionInfo(
+                    position_type=PositionType.STAKE,
+                    position_id="{strategy_name}_stake",
+                    chain=self.chain,
+                    protocol=self.staking_protocol,
+                    value_usd=Decimal("0"),  # Will be enriched by framework
+                    details={{
+                        "stake_token": self.stake_token,
+                        "staked_amount": str(staked_amt),
+                    }},
+                )
+            )
+
+        return TeardownPositionSummary(
+            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            timestamp=datetime.now(UTC),
+            positions=positions,
+        )
+
+    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+        """Generate intents to close all positions.
+
+        Teardown goal: {teardown_comment}
+        """
+        from almanak.framework.teardown import TeardownMode
+
+        intents: list[Intent] = []
+
+        if self._stake_state == "staked":
+            intents.append(
+                Intent.unstake(
+                    protocol=self.staking_protocol,
+                    token_in=self.stake_token,
+                    amount="all",
+                )
+            )
+            # Optionally swap back to quote token
+            if self.swap_before_stake:
+                max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
+                intents.append(
+                    Intent.swap(
+                        from_token=self.stake_token,
+                        to_token=self.quote_token,
+                        amount="all",
+                        max_slippage=max_slippage,
+                    )
+                )
+
+        return intents
+
+'''
+
+    # Fallback (should not be reached)
+    return f'''    # -------------------------------------------------------------------------
+    # TEARDOWN (required) - implement so operators can safely close positions
+    # See: blueprints/14-teardown-system.md
+    # -------------------------------------------------------------------------
+
+    def supports_teardown(self) -> bool:
+        return True
+
+    def get_open_positions(self):
+        from datetime import UTC, datetime
+        from almanak.framework.teardown import TeardownPositionSummary
+        return TeardownPositionSummary(
+            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
+            timestamp=datetime.now(UTC),
+            positions=[],
+        )
+
+    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+        return []
+
+'''
+
+
 def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig) -> str:
     """Generate template-specific __init__ parameter extraction."""
     if template == StrategyTemplate.TA_SWAP:
@@ -652,7 +1494,10 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
 
         # Token configuration
         self.base_token = get_config("base_token", "WETH")
-        self.quote_token = get_config("quote_token", "USDC")"""
+        self.quote_token = get_config("quote_token", "USDC")
+
+        # Position tracking (restored via load_persistent_state)
+        self._holding_base = False"""
 
     elif template == StrategyTemplate.DYNAMIC_LP:
         return """
@@ -717,7 +1562,10 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self.sizer = CopySizer(config=CopySizingConfig.from_config(sizing_dict, risk_dict))
 
         self.policy_engine = CopyPolicyEngine(config=self.copy_config)
-        self.intent_builder = CopyIntentBuilder(config=self.copy_config, sizer=self.sizer)"""
+        self.intent_builder = CopyIntentBuilder(config=self.copy_config, sizer=self.sizer)
+
+        # Position tracking (restored via load_persistent_state)
+        self._open_trades = []"""
 
     elif template == StrategyTemplate.VAULT_YIELD:
         return '''
@@ -766,7 +1614,7 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self._range_upper = None"""
 
     elif template == StrategyTemplate.STAKING:
-        return '''
+        return """
         # Staking parameters (stake_amount is the canonical amount)
         self.stake_token = get_config("stake_token", "ETH")
         self.stake_amount = Decimal(str(get_config("stake_amount", "1")))
@@ -774,8 +1622,9 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self.quote_token = get_config("quote_token", "USDC")
         self.swap_before_stake = get_config("swap_before_stake", True)
 
-        # State tracking
-        self._stake_state = "idle"'''
+        # State tracking (restored via load_persistent_state)
+        self._stake_state = "idle"
+        self._staked_amount = None"""
 
     else:  # BLANK template
         return """
@@ -917,7 +1766,11 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "            return\n"
             '        if intent_type.value == "PERP_OPEN":\n'
             '            self._position_state = "open"\n'
-            "            self._entry_price = getattr(result, 'entry_price', None)\n"
+            "            # Try ResultEnricher extracted_data first, fall back to pending price\n"
+            "            extracted = getattr(result, 'extracted_data', {}) or {}\n"
+            "            self._entry_price = extracted.get('entry_price')\n"
+            "            if self._entry_price is None:\n"
+            "                self._entry_price = getattr(self, '_pending_entry_price', None)\n"
             '            logger.info(f"Perp opened at {self._entry_price}")\n'
             '        elif intent_type.value == "PERP_CLOSE":\n'
             '            self._position_state = "idle"\n'
@@ -943,7 +1796,7 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
     elif template == StrategyTemplate.STAKING:
         return (
             "    def on_intent_executed(self, intent, success: bool, result):\n"
-            '        """Track staking state."""\n'
+            '        """Track staking state and amount."""\n'
             "        if not success:\n"
             "            return\n"
             '        intent_type = getattr(intent, "intent_type", None)\n'
@@ -951,19 +1804,29 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "            return\n"
             '        if intent_type.value == "STAKE":\n'
             '            self._stake_state = "staked"\n'
-            '            logger.info("Staked -> staked")\n'
+            "            self._staked_amount = getattr(intent, 'amount', self.stake_amount)\n"
+            '            logger.info(f"Staked {self._staked_amount} {self.stake_token}")\n'
             '        elif intent_type.value == "UNSTAKE":\n'
             '            self._stake_state = "idle"\n'
+            "            self._staked_amount = None\n"
             '            logger.info("Unstaked -> idle")\n'
+            '        elif intent_type.value == "SWAP" and self._stake_state == "idle":\n'
+            "            # Track swap-before-stake output\n"
+            '            logger.info("Pre-stake swap completed")\n'
             "\n"
             "    def get_persistent_state(self):\n"
             '        """Save stake state."""\n'
-            '        return {"stake_state": self._stake_state}\n'
+            "        return {\n"
+            '            "stake_state": self._stake_state,\n'
+            '            "staked_amount": str(self._staked_amount) if self._staked_amount else None,\n'
+            "        }\n"
             "\n"
             "    def load_persistent_state(self, state):\n"
             '        """Restore stake state."""\n'
             "        if state:\n"
             '            self._stake_state = state.get("stake_state", "idle")\n'
+            '            sa = state.get("staked_amount")\n'
+            "            self._staked_amount = Decimal(sa) if sa else None\n"
             "\n"
         )
 
@@ -1004,7 +1867,73 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "\n"
         )
 
-    # Templates without state callbacks (BLANK, TA_SWAP, COPY_TRADER)
+    elif template == StrategyTemplate.TA_SWAP:
+        return (
+            "    def on_intent_executed(self, intent, success: bool, result):\n"
+            '        """Track swap executions for position tracking."""\n'
+            "        if not success:\n"
+            "            return\n"
+            '        intent_type = getattr(intent, "intent_type", None)\n'
+            '        if intent_type and intent_type.value == "SWAP":\n'
+            "            from_token = getattr(intent, 'from_token', None)\n"
+            "            to_token = getattr(intent, 'to_token', None)\n"
+            "            if to_token == self.base_token:\n"
+            "                self._holding_base = True\n"
+            '                logger.info(f"Bought {self.base_token}")\n'
+            "            elif from_token == self.base_token:\n"
+            "                self._holding_base = False\n"
+            '                logger.info(f"Sold {self.base_token}")\n'
+            "\n"
+            "    def get_persistent_state(self):\n"
+            '        """Save position state for crash recovery."""\n'
+            '        return {"holding_base": self._holding_base}\n'
+            "\n"
+            "    def load_persistent_state(self, state):\n"
+            '        """Restore position state after restart."""\n'
+            "        if state:\n"
+            '            self._holding_base = state.get("holding_base", False)\n'
+            "\n"
+        )
+
+    elif template == StrategyTemplate.COPY_TRADER:
+        return (
+            "    def on_intent_executed(self, intent, success: bool, result):\n"
+            '        """Track copied trades for position tracking and teardown."""\n'
+            "        if not success:\n"
+            "            return\n"
+            '        intent_type = getattr(intent, "intent_type", None)\n'
+            "        if not intent_type:\n"
+            "            return\n"
+            "        trade_record = {\n"
+            '            "intent_type": intent_type.value,\n'
+            "            \"from_token\": getattr(intent, 'from_token', None),\n"
+            "            \"to_token\": getattr(intent, 'to_token', None),\n"
+            "            \"token\": getattr(intent, 'token', None),\n"
+            "            \"protocol\": getattr(intent, 'protocol', None),\n"
+            "            \"position_id\": getattr(result, 'position_id', None) if result else None,\n"
+            "            # Fields needed for LP/perp/borrow teardown\n"
+            "            \"pool\": getattr(intent, 'pool', None),\n"
+            "            \"market\": getattr(intent, 'market', None),\n"
+            "            \"collateral_token\": getattr(intent, 'collateral_token', None),\n"
+            "            \"is_long\": getattr(intent, 'is_long', None),\n"
+            "            \"size_usd\": str(getattr(intent, 'size_usd', None)) if getattr(intent, 'size_usd', None) else None,\n"
+            "            \"borrow_token\": getattr(intent, 'borrow_token', None),\n"
+            "        }\n"
+            "        self._open_trades.append(trade_record)\n"
+            '        logger.info(f"Tracked copy trade: {intent_type.value}")\n'
+            "\n"
+            "    def get_persistent_state(self):\n"
+            '        """Save copied trades for crash recovery."""\n'
+            '        return {"open_trades": self._open_trades}\n'
+            "\n"
+            "    def load_persistent_state(self, state):\n"
+            '        """Restore copied trades after restart."""\n'
+            "        if state:\n"
+            '            self._open_trades = state.get("open_trades", [])\n'
+            "\n"
+        )
+
+    # BLANK template has no state callbacks
     return ""
 
 
@@ -1041,7 +1970,7 @@ def _build_strategy_content(
         StrategyTemplate.STAKING: '["STAKE", "UNSTAKE", "SWAP", "HOLD"]',
     }
 
-    teardown_comment = _get_teardown_comment(template)
+    teardown_code = _get_template_teardown(template, config, strategy_name)
 
     part1 = f'''"""
 {config.name} Strategy: {name}
@@ -1156,78 +2085,7 @@ class {class_name}(IntentStrategy):
 
 '''
 
-    part2 = f'''    # -------------------------------------------------------------------------
-    # TEARDOWN (required) - implement so operators can safely close positions
-    # Without these methods, operator close-requests are silently ignored.
-    # See: blueprints/14-teardown-system.md
-    # -------------------------------------------------------------------------
-
-    def supports_teardown(self) -> bool:
-        """Indicate this strategy supports safe teardown."""
-        return True
-
-    def get_open_positions(self):
-        """Return all open positions for teardown preview.
-
-        IMPORTANT: Query on-chain state here, not cached values.
-        The framework calls this to show operators what will be closed.
-        """
-        from datetime import UTC, datetime
-
-        from almanak.framework.teardown import (
-            PositionInfo,  # noqa: F401
-            PositionType,  # noqa: F401
-            TeardownPositionSummary,
-        )
-
-        positions = []
-
-        # TODO: Add your open positions here. Example:
-        # positions.append(
-        #     PositionInfo(
-        #         position_type=PositionType.TOKEN,
-        #         position_id="{strategy_name}_token_0",
-        #         chain=self.chain,
-        #         protocol="{config.default_protocol}",
-        #         value_usd=Decimal("0"),  # Query actual on-chain balance
-        #         details={{"asset": "WETH"}},
-        #     )
-        # )
-
-        return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "{strategy_name}"),
-            timestamp=datetime.now(UTC),
-            positions=positions,
-        )
-
-    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
-        """Generate intents to close all positions.
-
-        Teardown goal: {teardown_comment}
-
-        Args:
-            mode: TeardownMode.SOFT (normal slippage) or TeardownMode.HARD (emergency, 3% slippage)
-        """
-        from almanak.framework.teardown import TeardownMode  # noqa: F401
-
-        intents: list[Intent] = []
-
-        # max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
-
-        # TODO: Add teardown intents here. Example for a swap strategy:
-        # intents.append(
-        #     Intent.swap(
-        #         from_token="WETH",
-        #         to_token="USDC",
-        #         amount="all",
-        #         max_slippage=max_slippage,
-        #         protocol="{config.default_protocol}",
-        #     )
-        # )
-
-        return intents
-
-
+    part2 = f'''
 if __name__ == "__main__":
     print("=" * 60)
     print("{class_name}")
@@ -1240,7 +2098,7 @@ if __name__ == "__main__":
     print("  uv run almanak strat run --once")
 '''
 
-    return part1 + callbacks_str + part2
+    return part1 + callbacks_str + teardown_code + part2
 
 
 def generate_strategy_file(
