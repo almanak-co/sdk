@@ -4746,19 +4746,66 @@ def paper_start(
             click.echo("Or use --rpc-url option", err=True)
             raise click.Abort()
 
-    # Parse initial tokens
-    parsed_tokens: dict[str, Decimal] = {}
+    # Parse initial tokens from CLI flags
+    cli_tokens: dict[str, Decimal] = {}
     if initial_tokens:
         try:
             for pair in initial_tokens.split(","):
                 pair = pair.strip()
-                if ":" in pair:
-                    token, amount = pair.split(":", 1)
-                    parsed_tokens[token.strip().upper()] = Decimal(amount.strip())
+                if not pair:
+                    continue
+                if ":" not in pair:
+                    raise ValueError(f"Invalid token entry '{pair}'")
+                token, amount = pair.split(":", 1)
+                token_key = token.strip().upper()
+                amount_str = amount.strip()
+                if not token_key or not amount_str:
+                    raise ValueError(f"Invalid token entry '{pair}'")
+                cli_tokens[token_key] = Decimal(amount_str)
         except Exception as e:
             click.echo(f"Error parsing initial-tokens: {e}", err=True)
             click.echo("Expected format: 'TOKEN:AMOUNT,TOKEN:AMOUNT'", err=True)
             raise click.Abort() from e
+
+    # Load anvil_funding from strategy config.json if available (VIB-202)
+    # CLI flags override config values when both are provided.
+    config_eth: Decimal | None = None
+    config_tokens: dict[str, Decimal] = {}
+    try:
+        strategy_config = load_strategy_config(strategy, chain)
+        anvil_funding = strategy_config.get("anvil_funding", {})
+        if anvil_funding:
+            if not isinstance(anvil_funding, dict):
+                raise ValueError(
+                    f"anvil_funding must be an object mapping TOKEN->AMOUNT, got {type(anvil_funding).__name__}"
+                )
+            click.echo(f"Found anvil_funding in config: {anvil_funding}", err=True)
+            # Use the same native token set as the gateway to correctly route
+            # native gas tokens (ETH, AVAX, MNT, etc.) per chain.
+            from almanak.gateway.managed import ManagedGateway
+
+            native_symbols = ManagedGateway.NATIVE_TOKEN_SYMBOLS
+            for token_name, amount in anvil_funding.items():
+                token_upper = str(token_name).upper()
+                if token_upper in native_symbols:
+                    config_eth = Decimal(str(amount))
+                else:
+                    config_tokens[token_upper] = Decimal(str(amount))
+    except Exception as e:
+        click.echo(
+            f"Warning: ignoring invalid anvil_funding in strategy config: {e}",
+            err=True,
+        )
+
+    # Merge: config provides defaults, CLI flags override
+    # initial_eth default is 10.0 from click — only use config_eth if CLI wasn't explicitly set
+    # We detect "user explicitly passed --initial-eth" by checking the click context
+    ctx = click.get_current_context()
+    cli_eth_explicit = ctx.get_parameter_source("initial_eth") != click.core.ParameterSource.DEFAULT
+    if config_eth is not None and not cli_eth_explicit:
+        initial_eth = float(config_eth)
+    # For tokens: start with config, overlay CLI
+    parsed_tokens: dict[str, Decimal] = {**config_tokens, **cli_tokens}
 
     # Prepare output path
     output_path = Path(output) if output else None
