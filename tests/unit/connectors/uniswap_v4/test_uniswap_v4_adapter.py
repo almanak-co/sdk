@@ -11,6 +11,7 @@ from almanak.framework.connectors.uniswap_v4.adapter import (
     UniswapV4Adapter,
     UniswapV4Config,
 )
+from almanak.framework.data.tokens import TokenNotFoundError
 
 # Known tokens for mock resolver
 _KNOWN_TOKENS = {
@@ -124,9 +125,10 @@ class TestTokenResolution:
         assert addr == "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
         assert dec == 6
 
-    def test_resolve_by_address_requires_resolver(self):
+    def test_resolve_by_address_without_resolver_raises(self):
+        """Raw address without resolver must raise, not fallback to 18 decimals."""
         adapter = UniswapV4Adapter(chain="arbitrum")
-        with pytest.raises(ValueError, match="Cannot resolve decimals"):
+        with pytest.raises(TokenNotFoundError):
             adapter._resolve_token("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
 
     def test_resolve_by_symbol_fallback(self):
@@ -147,10 +149,30 @@ class TestTokenResolution:
         assert addr == "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
         assert dec == 6
 
-    def test_resolve_unknown_token(self):
+    def test_resolve_unknown_token_raises_token_not_found(self):
         adapter = UniswapV4Adapter(chain="arbitrum")
-        with pytest.raises(ValueError, match="Cannot resolve"):
+        with pytest.raises(TokenNotFoundError):
             adapter._resolve_token("UNKNOWN_TOKEN_XYZ")
+
+    def test_resolve_symbol_with_unknown_decimals_raises(self):
+        """Symbol found in UNISWAP_V3_TOKENS but not in decimals_map must raise."""
+        from unittest.mock import patch
+
+        fake_tokens = {"arbitrum": {"FAKECOIN": "0x1234567890123456789012345678901234567890"}}
+        adapter = UniswapV4Adapter(chain="arbitrum")
+        with patch("almanak.core.contracts.UNISWAP_V3_TOKENS", fake_tokens):
+            with pytest.raises(TokenNotFoundError):
+                adapter._resolve_token("FAKECOIN")
+
+    def test_raw_address_without_resolver_raises(self):
+        """Raw addresses without a token_resolver must fail, not assume 18 decimals."""
+        adapter = UniswapV4Adapter(chain="arbitrum")
+        with pytest.raises(TokenNotFoundError):
+            adapter.swap_exact_input(
+                token_in="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+                token_out="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+                amount_in=Decimal("1000"),
+            )
 
 
 class TestCompileSwapIntent:

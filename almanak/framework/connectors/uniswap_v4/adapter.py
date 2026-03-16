@@ -22,6 +22,7 @@ from almanak.framework.connectors.uniswap_v4.sdk import (
     SwapTransaction,
     UniswapV4SDK,
 )
+from almanak.framework.data.tokens import TokenNotFoundError
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver
@@ -265,14 +266,16 @@ class UniswapV4Adapter:
         Returns:
             Tuple of (address, decimals).
         """
-        # If already an address, try to get decimals
+        # If already an address, resolve decimals (never assume 18)
         if token.startswith("0x") and len(token) == 42:
             if self._token_resolver:
                 resolved = self._token_resolver.resolve(token, self.chain)
                 return resolved.address, resolved.decimals
-            raise ValueError(
-                f"Cannot resolve decimals for address '{token}' without a token_resolver. "
-                "Provide a TokenResolver to the adapter."
+            raise TokenNotFoundError(
+                token=token,
+                chain=self.chain,
+                reason="Cannot resolve decimals without a token_resolver",
+                suggestions=["Provide a token_resolver or use token symbols instead"],
             )
 
         # Resolve by symbol
@@ -286,7 +289,7 @@ class UniswapV4Adapter:
         chain_tokens = UNISWAP_V3_TOKENS.get(self.chain, {})
         address = chain_tokens.get(token.upper())
         if address:
-            # Common decimals
+            # Known decimals only — never assume 18
             decimals_map = {
                 "USDC": 6,
                 "USDT": 6,
@@ -299,18 +302,25 @@ class UniswapV4Adapter:
                 "LINK": 18,
                 "UNI": 18,
                 "WAVAX": 18,
+                "AVAX": 18,
                 "WMATIC": 18,
                 "WBNB": 18,
             }
             decimals = decimals_map.get(token.upper())
             if decimals is None:
-                raise ValueError(
-                    f"Cannot determine decimals for token '{token}' on {self.chain} without a token_resolver. "
-                    "Provide a TokenResolver to the adapter."
+                raise TokenNotFoundError(
+                    token=token,
+                    chain=self.chain,
+                    reason="Token address found but decimals unknown",
+                    suggestions=["Provide a token_resolver for reliable decimal resolution"],
                 )
             return address, decimals
 
-        raise ValueError(f"Cannot resolve token '{token}' on {self.chain}")
+        raise TokenNotFoundError(
+            token=token,
+            chain=self.chain,
+            reason="Token not in static registry",
+        )
 
 
 # =============================================================================
