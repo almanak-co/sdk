@@ -15,6 +15,7 @@ metadata:
   version: "2.0.0"
   author: Almanak
   license: Apache-2.0
+  type: documentation
 ---
 
 # Almanak Strategy Builder
@@ -22,6 +23,23 @@ metadata:
 You are helping a quant build DeFi strategies using the Almanak SDK.
 Strategies are Python classes that return Intent objects. The framework handles
 compilation to transactions, execution, and state management.
+
+<!-- almanak-sdk-start: security-model -->
+
+## Security Model
+
+This file is **documentation for AI coding assistants** - it contains no executable code or live credentials.
+
+The Almanak SDK uses a **gateway-isolated architecture**:
+- Strategy containers have **no direct access** to secrets, RPC endpoints, or external APIs.
+- All external access is mediated through a gRPC gateway sidecar.
+- In production, secrets are injected by the platform secret manager into the gateway - never into the strategy container.
+- The `.env` file referenced below is for **local development only** and is never deployed to production environments.
+- Private keys in `.env` are used solely for local Anvil fork testing and have no access to mainnet funds in production.
+
+See the [Gateway](#gateway) section for details.
+
+<!-- almanak-sdk-end: security-model -->
 
 **IMPORTANT — Zodiac permissions auto-generation**: Whenever you create a new
 strategy or modify `strategy.py` in a way that changes protocols, intent types,
@@ -66,7 +84,7 @@ my_strategy/
   pyproject.toml     # Dependencies + [tool.almanak] metadata
   uv.lock            # Locked dependencies (created by uv sync)
   .venv/             # Per-strategy virtual environment
-  .env               # Secrets (ALMANAK_PRIVATE_KEY, ALCHEMY_API_KEY)
+  .env               # Local dev credentials (not deployed; see Security Model)
   .gitignore         # Git ignore rules
   .python-version    # Python version pin (3.12)
   __init__.py        # Package exports
@@ -784,20 +802,24 @@ No required fields - all fields are strategy-specific and accessed via `self.con
 The default execution chain comes from `default_chain` in the `@almanak_strategy` decorator
 (falls back to `supported_chains[0]` if omitted).
 
-### .env
+### .env (local development only)
+
+> **Security note**: The `.env` file is for local development and Anvil fork testing only.
+> In production, secrets are managed by the platform and injected into the gateway sidecar -
+> they never reach the strategy container. See [Security Model](#security-model).
 
 ```bash
-# Required
-ALMANAK_PRIVATE_KEY=0x...
+# Required for local development
+ALMANAK_PRIVATE_KEY=<your-private-key>
 
 # RPC access (set at least one)
-ALCHEMY_API_KEY=your_key
+ALCHEMY_API_KEY=<your-alchemy-key>
 # RPC_URL=https://...
 
 # Optional
-# ENSO_API_KEY=
-# COINGECKO_API_KEY=
-# ALMANAK_API_KEY=
+# ENSO_API_KEY=<key>
+# COINGECKO_API_KEY=<key>
+# ALMANAK_API_KEY=<key>
 ```
 
 ### anvil_funding
@@ -1402,8 +1424,8 @@ Before deploying to mainnet:
 |-------|-------|-----|
 | `TokenNotFoundError` | Token symbol not in registry | Use exact symbol (e.g., "WETH" not "ETH" for swaps). Check `resolver.resolve("TOKEN", "chain")`. |
 | `Gateway not available` | Gateway not running | Use `almanak strat run` (auto-starts gateway) or start manually with `almanak gateway`. |
-| `ALMANAK_PRIVATE_KEY not set` | Missing .env | Add `ALMANAK_PRIVATE_KEY=0x...` to your `.env` file. |
-| `Anvil not found` | Foundry not installed | Install: `curl -L https://foundry.paradigm.xyz \| bash && foundryup` |
+| `ALMANAK_PRIVATE_KEY not set` | Missing .env | Set your private key in `.env` (see Configuration section). |
+| `Anvil not found` | Foundry not installed | Install Foundry: see [getfoundry.sh](https://getfoundry.sh) for instructions. |
 | `RSI data unavailable` | Insufficient price history | The gateway needs time to accumulate data. Try a longer timeframe or wait. |
 | `Insufficient balance` | Wallet doesn't have enough tokens | For Anvil: add `anvil_funding` to config.json. For mainnet: fund the wallet. |
 | `Slippage exceeded` | Trade too large or pool illiquid | Increase `max_slippage` or reduce trade size. |
