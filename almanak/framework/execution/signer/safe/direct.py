@@ -12,7 +12,7 @@ Use Cases:
 Requirements:
     - EOA must be an owner of the Safe
     - Safe threshold must be 1 (or EOA has sufficient signing power)
-    - NOT for production use - use ZodiacRolesSigner instead
+    - NOT for production use - use ZodiacSigner instead
 
 Example:
     from almanak.framework.execution.signer.safe import DirectSafeSigner, SafeSignerConfig
@@ -188,7 +188,7 @@ class DirectSafeSigner(SafeSigner):
             raise SigningError(
                 f"Safe {safe_address} has threshold={threshold}. "
                 f"DirectSafeSigner requires threshold=1 for single-sig execution. "
-                f"Use ZodiacRolesSigner for multi-sig Safes."
+                f"Use ZodiacSigner for multi-sig Safes."
             )
 
         logger.debug(f"Safe ownership verified: {self._eoa_address[:10]}... is owner, threshold={threshold}")

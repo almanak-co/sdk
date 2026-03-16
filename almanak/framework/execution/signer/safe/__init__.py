@@ -5,8 +5,9 @@ multisig wallets. Two signing modes are supported:
 
 1. Zodiac Mode (Production):
    - Uses Zodiac Roles module for role-based access control
-   - Delegates signing to a remote signer service
-   - Recommended for production deployments
+   - Base ZodiacSigner signs locally with a private key
+   - Platform plugin (PlatformZodiacSigner) signs via remote signer service
+   - Plugin is discovered automatically via ``almanak.signers`` entry points
 
 2. Direct Mode (Testing):
    - Calls Safe.execTransaction() directly
@@ -42,6 +43,8 @@ Environment Variables:
     ALMANAK_SIGNER_SERVICE_JWT: JWT token for signer service (Zodiac mode)
 """
 
+import logging
+
 from almanak.framework.execution.signer.safe.base import SafeSigner
 from almanak.framework.execution.signer.safe.config import (
     SafeConfigError,
@@ -70,7 +73,32 @@ from almanak.framework.execution.signer.safe.constants import (
 )
 from almanak.framework.execution.signer.safe.direct import DirectSafeSigner
 from almanak.framework.execution.signer.safe.multisend import MultiSendEncoder, MultiSendPayload
-from almanak.framework.execution.signer.safe.zodiac import ZodiacRolesSigner
+from almanak.framework.execution.signer.safe.zodiac import ZodiacRolesSigner, ZodiacSigner
+
+logger = logging.getLogger(__name__)
+
+
+def _discover_zodiac_plugin() -> type[ZodiacSigner] | None:
+    """Discover a platform Zodiac signer plugin via entry points.
+
+    Looks for plugins registered under the ``almanak.signers`` group
+    with the name ``platform_zodiac``.
+
+    Returns:
+        Plugin class if found, None otherwise.
+    """
+    try:
+        from importlib.metadata import entry_points
+
+        eps = entry_points(group="almanak.signers", name="platform_zodiac")
+        ep_list = list(eps) if hasattr(eps, "__iter__") else []
+        if ep_list:
+            plugin_cls = ep_list[0].load()
+            logger.info("Discovered platform Zodiac signer plugin: %s", plugin_cls.__name__)
+            return plugin_cls
+    except Exception:
+        logger.debug("No platform Zodiac signer plugin found", exc_info=True)
+    return None
 
 
 def create_safe_signer(config: SafeSignerConfig) -> SafeSigner:
@@ -79,11 +107,16 @@ def create_safe_signer(config: SafeSignerConfig) -> SafeSigner:
     This is the recommended way to create Safe signers. It automatically
     selects the appropriate implementation based on the configured mode.
 
+    For zodiac mode with ``signer_service_url`` and ``signer_service_jwt``,
+    this function attempts to discover a platform plugin via entry points.
+    If no plugin is installed, falls back to the base ZodiacSigner (which
+    requires a private_key for local signing).
+
     Args:
         config: SafeSignerConfig with mode and wallet configuration
 
     Returns:
-        SafeSigner implementation (DirectSafeSigner or ZodiacRolesSigner)
+        SafeSigner implementation (DirectSafeSigner, ZodiacSigner, or plugin)
 
     Raises:
         ValueError: If mode is not recognized
@@ -100,7 +133,17 @@ def create_safe_signer(config: SafeSignerConfig) -> SafeSigner:
     if config.mode == "direct":
         return DirectSafeSigner(config)
     elif config.mode == "zodiac":
-        return ZodiacRolesSigner(config)
+        # If remote signer credentials are provided, try to load the platform plugin
+        if config.signer_service_url and config.signer_service_jwt:
+            plugin_cls = _discover_zodiac_plugin()
+            if plugin_cls is not None:
+                return plugin_cls(config)
+            logger.warning(
+                "signer_service_url and signer_service_jwt are set but no "
+                "'almanak.signers:platform_zodiac' plugin is installed. "
+                "Falling back to base ZodiacSigner (requires private_key)."
+            )
+        return ZodiacSigner(config)
     else:
         raise ValueError(f"Unknown Safe signer mode: '{config.mode}'. Valid modes: 'direct', 'zodiac'")
 
@@ -159,7 +202,8 @@ __all__ = [
     "SafeSigner",
     # Implementations
     "DirectSafeSigner",
-    "ZodiacRolesSigner",
+    "ZodiacSigner",
+    "ZodiacRolesSigner",  # backward compat alias
     # Configuration
     "SafeConfigError",
     "SafeSignerConfig",

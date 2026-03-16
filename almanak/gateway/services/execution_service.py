@@ -140,7 +140,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         """Create the appropriate signer based on wallet address.
 
         If wallet_address matches the configured Safe address, creates a
-        ZodiacRolesSigner (zodiac mode) or DirectSafeSigner (direct mode).
+        ZodiacSigner or plugin (zodiac mode) or DirectSafeSigner (direct mode).
         Otherwise creates a LocalKeySigner.
         """
         from almanak.framework.execution.signer import LocalKeySigner
@@ -151,11 +151,16 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             safe_mode = self.settings.safe_mode or "direct"
 
             if safe_mode == "zodiac":
-                if not self.settings.eoa_address:
-                    raise ValueError("EOA_ADDRESS must be configured when ALMANAK_GATEWAY_SAFE_MODE=zodiac")
-                if not self.settings.signer_service_url:
-                    raise ValueError("SIGNER_SERVICE_URL must be configured when ALMANAK_GATEWAY_SAFE_MODE=zodiac")
-                eoa_address = self.settings.eoa_address
+                # Derive EOA from private key when available, fall back to explicit EOA_ADDRESS
+                # (platform deployments use remote signer with no local key)
+                if self.settings.private_key:
+                    from eth_account import Account
+
+                    eoa_address = Account.from_key(self.settings.private_key).address
+                elif self.settings.eoa_address:
+                    eoa_address = self.settings.eoa_address
+                else:
+                    raise ValueError("Zodiac mode requires either PRIVATE_KEY (to derive EOA) or explicit EOA_ADDRESS")
             else:
                 private_key = self.settings.private_key
                 if not private_key:
@@ -173,21 +178,16 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             safe_config = SafeSignerConfig(
                 mode=safe_mode,
                 wallet_config=wallet_config,
-                private_key=self.settings.private_key if safe_mode != "zodiac" else None,
+                private_key=self.settings.private_key,
                 signer_service_url=self.settings.signer_service_url if safe_mode == "zodiac" else None,
                 signer_service_jwt=self.settings.signer_service_jwt if safe_mode == "zodiac" else None,
             )
 
-            if safe_mode == "zodiac":
-                from almanak.framework.execution.signer.safe.zodiac import ZodiacRolesSigner
+            from almanak.framework.execution.signer.safe import create_safe_signer
 
-                logger.info("Using ZodiacRolesSigner for wallet %s", wallet_address[:10])
-                return ZodiacRolesSigner(safe_config)
-
-            from almanak.framework.execution.signer.safe.direct import DirectSafeSigner
-
-            logger.info("Using DirectSafeSigner for wallet %s", wallet_address[:10])
-            return DirectSafeSigner(safe_config)
+            signer = create_safe_signer(safe_config)
+            logger.info("Using %s for wallet %s", type(signer).__name__, wallet_address[:10])
+            return signer
 
         # Non-Safe EOA wallet
         private_key = self.settings.private_key

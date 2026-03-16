@@ -48,7 +48,7 @@ class SafeSigner(Signer):
     """Abstract base class for Safe signers.
 
     This class extends the Signer ABC to provide Safe-specific functionality.
-    It serves as the base for both ZodiacRolesSigner (production) and
+    It serves as the base for both ZodiacSigner (production) and
     DirectSafeSigner (testing) implementations.
 
     SECURITY CONTRACT:
@@ -91,8 +91,14 @@ class SafeSigner(Signer):
 
         # Initialize account from private key
         if config.mode == "zodiac":
-            # Zodiac mode: key held by remote signer, skip local key validation
-            self._account: LocalAccount | None = None
+            # Zodiac mode: key may be held by remote signer plugin or provided locally
+            if config.private_key:
+                try:
+                    self._account: LocalAccount | None = Account.from_key(config.private_key)
+                except Exception as e:
+                    raise SigningError(reason=f"Invalid private key format: {type(e).__name__}") from None
+            else:
+                self._account = None
         else:
             try:
                 self._account = Account.from_key(config.private_key)

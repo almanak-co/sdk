@@ -1,31 +1,29 @@
-"""Zodiac Roles signer for production Safe operations.
+"""Zodiac Roles signer for Safe operations.
 
-This module implements the ZodiacRolesSigner for production deployments.
-It wraps transactions with Zodiac.execTransactionWithRole() and uses
-a remote signer service for signing (JWT authentication).
+This module implements the ZodiacSigner for wrapping transactions in
+Zodiac's execTransactionWithRole() call. Signing is handled by the
+``_sign_wrapper_tx()`` hook which can be overridden by plugins (e.g.
+the platform-plugins ``PlatformZodiacSigner`` for remote signing).
 
 Use Cases:
-    - Production deployments with role-based access control
-    - Agent deployments where signing is delegated to a secure service
-    - Multi-chain production infrastructure
+    - Local development with a private key and Zodiac Roles module
+    - Production deployments via platform plugin (remote signer service)
+    - Multi-chain infrastructure with role-based access control
 
 Architecture:
     1. Transaction is wrapped in execTransactionWithRole()
-    2. Wrapper transaction is sent to remote signer service
-    3. Service signs with the EOA private key
-    4. Signed transaction is returned for submission
+    2. _sign_wrapper_tx() signs the wrapper (locally or via plugin override)
+    3. Signed transaction is returned for submission
 
 Example:
-    from almanak.framework.execution.signer.safe import ZodiacRolesSigner, SafeSignerConfig
+    from almanak.framework.execution.signer.safe import ZodiacSigner, SafeSignerConfig
 
     config = SafeSignerConfig(
         mode="zodiac",
         wallet_config=wallet_config,
-        private_key="0x...",  # Local EOA key for gas estimation
-        signer_service_url="https://signer.example.com",
-        signer_service_jwt="eyJ...",
+        private_key="0x...",  # Local signing
     )
-    signer = ZodiacRolesSigner(config)
+    signer = ZodiacSigner(config)
 
     signed = await signer.sign_with_web3(tx, web3, eoa_nonce)
 """
@@ -33,7 +31,6 @@ Example:
 import logging
 from typing import Any, cast
 
-import aiohttp
 from web3 import AsyncWeb3
 from web3.types import TxParams
 
@@ -55,18 +52,18 @@ from almanak.framework.execution.signer.safe.multisend import MultiSendEncoder
 logger = logging.getLogger(__name__)
 
 
-class ZodiacRolesSigner(SafeSigner):
-    """Production signer using Zodiac Roles module.
+class ZodiacSigner(SafeSigner):
+    """Signer using Zodiac Roles module.
 
     This signer wraps transactions in Zodiac's execTransactionWithRole()
-    and delegates signing to a remote signer service. This is the
-    production deployment pattern for secure agent operations.
+    and delegates signing to the ``_sign_wrapper_tx()`` hook. The base
+    implementation signs locally when a private key is available; the
+    platform plugin overrides this hook for remote signing.
 
     The signing flow:
     1. Build execTransactionWithRole() wrapper with role key
-    2. Send wrapper to remote signer service (POST with JWT)
-    3. Service signs with EOA private key
-    4. Return signed transaction for submission
+    2. Call _sign_wrapper_tx() to sign the wrapper transaction
+    3. Return signed transaction for submission
 
     Attributes:
         address: Safe wallet address
@@ -83,10 +80,8 @@ class ZodiacRolesSigner(SafeSigner):
                 zodiac_roles_address="0xZodiac...",
             ),
             private_key="0x...",
-            signer_service_url="https://signer.example.com",
-            signer_service_jwt="eyJ...",
         )
-        signer = ZodiacRolesSigner(config)
+        signer = ZodiacSigner(config)
 
         signed = await signer.sign_with_web3(tx, web3, eoa_nonce)
     """
@@ -102,28 +97,18 @@ class ZodiacRolesSigner(SafeSigner):
             ValueError: If mode is not "zodiac" or required fields missing
         """
         if config.mode != "zodiac":
-            raise ValueError(f"ZodiacRolesSigner requires mode='zodiac', got '{config.mode}'")
+            raise ValueError(f"ZodiacSigner requires mode='zodiac', got '{config.mode}'")
 
         if not config.wallet_config.zodiac_roles_address:
-            raise ValueError("ZodiacRolesSigner requires zodiac_roles_address")
-
-        if not config.signer_service_url:
-            raise ValueError("ZodiacRolesSigner requires signer_service_url")
-
-        if not config.signer_service_jwt:
-            raise ValueError("ZodiacRolesSigner requires signer_service_jwt")
+            raise ValueError("ZodiacSigner requires zodiac_roles_address")
 
         super().__init__(config)
 
         self._zodiac_roles_address = config.wallet_config.zodiac_roles_address
         self._role_key = config.wallet_config.role_key
         self._role_key_bytes = role_key_to_bytes32(self._role_key)
-        self._signer_service_url = config.signer_service_url
-        self._signer_service_jwt = config.signer_service_jwt
 
-        logger.info(
-            f"ZodiacRolesSigner initialized: zodiac={self._zodiac_roles_address[:10]}..., role={self._role_key}"
-        )
+        logger.info(f"ZodiacSigner initialized: zodiac={self._zodiac_roles_address[:10]}..., role={self._role_key}")
 
     # =========================================================================
     # Properties
@@ -140,63 +125,51 @@ class ZodiacRolesSigner(SafeSigner):
         return self._role_key
 
     # =========================================================================
-    # Remote Signer Service
+    # Signing Hook
     # =========================================================================
 
-    async def _sign_via_service(
+    async def _sign_wrapper_tx(
         self,
-        tx_dict: dict[str, Any],
+        wrapper_tx_dict: dict[str, Any],
+        web3: AsyncWeb3,
     ) -> str:
-        """Sign a transaction via the remote signer service.
+        """Sign a wrapper transaction and return the raw signed hex.
+
+        Base implementation signs locally using ``self._account``. Platform
+        plugins override this method for remote signing via a signer service.
+
+        The wrapper_tx_dict uses ``gasLimit`` (not ``gas``) as the gas key.
 
         Args:
-            tx_dict: Transaction dictionary to sign
+            wrapper_tx_dict: Transaction dictionary to sign (uses gasLimit key)
+            web3: AsyncWeb3 instance
 
         Returns:
-            Signed transaction hex string
+            Signed transaction hex string (with or without 0x prefix)
 
         Raises:
-            SigningError: If signing fails
+            SigningError: If no private key is available and no plugin override
         """
-        endpoint = f"{self._signer_service_url}/sign/transaction"
+        if self._account is None:
+            raise SigningError(
+                reason="ZodiacSigner has no private key for local signing. "
+                "Either provide a private_key in SafeSignerConfig or install "
+                "the platform plugin (almanak-platform-plugins) for remote signing."
+            )
 
-        request_payload = {
-            "eoa_address": self._eoa_address,
-            "transaction_payload": [tx_dict],
-            "signing_type": "EVM",
-        }
-
-        headers = {
-            "Authorization": f"Bearer {self._signer_service_jwt}",
-            "Content-Type": "application/json",
-        }
+        # Local signing: convert gasLimit -> gas for eth_account
+        tx_for_signing = dict(wrapper_tx_dict)
+        if "gasLimit" in tx_for_signing:
+            tx_for_signing["gas"] = tx_for_signing.pop("gasLimit")
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    endpoint,
-                    json=request_payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if not 200 <= response.status < 300:
-                        error_text = await response.text()
-                        raise SigningError(reason=f"Signer service error (HTTP {response.status}): {error_text}")
-
-                    response_data = await response.json()
-                    signed_transactions = response_data.get("signed_transactions", [])
-
-                    if not signed_transactions:
-                        raise SigningError(reason="Signer service returned no signed transactions")
-
-                    return signed_transactions[0]
-
-        except aiohttp.ClientError as e:
-            raise SigningError(reason=f"Failed to connect to signer service: {type(e).__name__}: {e}") from None
-        except SigningError:
-            raise
+            signed = self._account.sign_transaction(tx_for_signing)
+            raw_tx_hex = signed.raw_transaction.hex()
+            if not raw_tx_hex.startswith("0x"):
+                raw_tx_hex = "0x" + raw_tx_hex
+            return raw_tx_hex
         except Exception as e:
-            raise SigningError(reason=f"Signer service error: {type(e).__name__}: {e}") from None
+            raise SigningError(reason=f"Failed to sign Zodiac wrapper transaction: {type(e).__name__}: {e}") from None
 
     def _compute_tx_hash(self, signed_tx_hex: str, web3: AsyncWeb3) -> str:
         """Compute transaction hash from signed transaction.
@@ -232,7 +205,7 @@ class ZodiacRolesSigner(SafeSigner):
 
         This method:
         1. Builds execTransactionWithRole() wrapper
-        2. Sends to remote signer service
+        2. Signs via _sign_wrapper_tx() hook
         3. Returns signed transaction
 
         Args:
@@ -304,7 +277,7 @@ class ZodiacRolesSigner(SafeSigner):
             )
         )
 
-        # Estimate gas and set gasLimit (signer service expects gasLimit, not gas)
+        # Estimate gas and set gasLimit
         estimated_gas = await self._estimate_wrapper_gas(web3, wrapper_tx, tx.gas_limit)
         wrapper_tx_dict = cast(dict[str, Any], wrapper_tx)
         del wrapper_tx_dict["gas"]
@@ -312,8 +285,8 @@ class ZodiacRolesSigner(SafeSigner):
 
         logger.debug(f"Wrapper tx: nonce={wrapper_tx_dict['nonce']}, gasLimit={estimated_gas}")
 
-        # Sign via remote service
-        signed_tx_hex = await self._sign_via_service(wrapper_tx_dict)
+        # Sign via hook (local or plugin override)
+        signed_tx_hex = await self._sign_wrapper_tx(wrapper_tx_dict, web3)
 
         # Ensure 0x prefix
         if not signed_tx_hex.startswith("0x"):
@@ -340,7 +313,7 @@ class ZodiacRolesSigner(SafeSigner):
         """Sign multiple transactions as an atomic MultiSend bundle.
 
         For Zodiac mode, the MultiSend is wrapped in execTransactionWithRole
-        and sent to the remote signer service.
+        and signed via the _sign_wrapper_tx() hook.
 
         Args:
             txs: List of transactions to bundle
@@ -463,14 +436,14 @@ class ZodiacRolesSigner(SafeSigner):
             )
         )
 
-        # Estimate gas and set gasLimit (signer service expects gasLimit, not gas)
+        # Estimate gas and set gasLimit
         estimated_gas = await self._estimate_wrapper_gas(web3, wrapper_tx, tx.gas_limit)
         wrapper_tx_dict = cast(dict[str, Any], wrapper_tx)
         del wrapper_tx_dict["gas"]
         wrapper_tx_dict["gasLimit"] = estimated_gas
 
-        # Sign via remote service
-        signed_tx_hex = await self._sign_via_service(wrapper_tx_dict)
+        # Sign via hook (local or plugin override)
+        signed_tx_hex = await self._sign_wrapper_tx(wrapper_tx_dict, web3)
 
         if not signed_tx_hex.startswith("0x"):
             signed_tx_hex = "0x" + signed_tx_hex
@@ -486,11 +459,15 @@ class ZodiacRolesSigner(SafeSigner):
         )
 
 
+# Backward compatibility alias
+ZodiacRolesSigner = ZodiacSigner
+
 # =============================================================================
 # Exports
 # =============================================================================
 
 
 __all__ = [
+    "ZodiacSigner",
     "ZodiacRolesSigner",
 ]

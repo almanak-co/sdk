@@ -7,7 +7,8 @@ Available Signers:
     - LocalKeySigner: Signs transactions using a local private key
     - SafeSigner: Base class for Safe wallet signers
     - DirectSafeSigner: Direct Safe signing for testing (Anvil)
-    - ZodiacRolesSigner: Production Safe signing via Zodiac Roles
+    - ZodiacSigner: Safe signing via Zodiac Roles module
+    - ZodiacRolesSigner: Backward-compatible alias for ZodiacSigner
 
 Example:
     # EOA signing
@@ -40,6 +41,7 @@ from almanak.framework.execution.signer.safe import (
     SafeWalletConfig,
     SafeWalletMapping,
     ZodiacRolesSigner,
+    ZodiacSigner,
     create_safe_signer,
     create_safe_signer_from_env,
 )
@@ -50,7 +52,8 @@ __all__ = [
     # Safe signers
     "SafeSigner",
     "DirectSafeSigner",
-    "ZodiacRolesSigner",
+    "ZodiacSigner",
+    "ZodiacRolesSigner",  # backward compat alias
     # Safe configuration
     "SafeConfigError",
     "SafeSignerConfig",

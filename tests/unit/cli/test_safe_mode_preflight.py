@@ -8,9 +8,23 @@ from almanak.framework.cli.run import _validate_safe_mode_preflight
 
 SAFE_ADDR = "0xSafe1234567890abcdef1234567890abcdef1234"
 
+# Env vars read by _validate_safe_mode_preflight (including fallbacks)
+_SAFE_ENV_VARS = (
+    "ALMANAK_GATEWAY_SAFE_MODE",
+    "ALMANAK_GATEWAY_SAFE_ADDRESS",
+    "ALMANAK_SAFE_ADDRESS",
+    "ALMANAK_EXECUTION_MODE",
+)
+
 
 class TestValidateSafeModePreflight:
     """Tests for _validate_safe_mode_preflight()."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Remove all Safe-related env vars so tests are isolated from local env."""
+        for var in _SAFE_ENV_VARS:
+            monkeypatch.delenv(var, raising=False)
 
     def test_success_direct_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ALMANAK_GATEWAY_SAFE_MODE", "direct")

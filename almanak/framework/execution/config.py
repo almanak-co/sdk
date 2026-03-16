@@ -1474,16 +1474,16 @@ class MultiChainRuntimeConfig:
             )
         """
         from almanak.framework.execution.signer.safe import (
-            DirectSafeSigner,
+            SafeSigner,
             SafeSignerConfig,
             SafeWalletConfig,
-            ZodiacRolesSigner,
+            create_safe_signer,
         )
 
         mode = ExecutionMode.from_string(execution_mode)
 
         # Create Safe signer if needed
-        safe_signer: DirectSafeSigner | ZodiacRolesSigner | None = None
+        safe_signer: SafeSigner | None = None
 
         if mode == ExecutionMode.SAFE_DIRECT:
             if not safe_address:
@@ -1502,7 +1502,7 @@ class MultiChainRuntimeConfig:
                 wallet_config=wallet_config,
                 private_key=private_key,
             )
-            safe_signer = DirectSafeSigner(signer_config)
+            safe_signer = create_safe_signer(signer_config)
 
         elif mode == ExecutionMode.SAFE_ZODIAC:
             if not safe_address:
@@ -1515,20 +1515,19 @@ class MultiChainRuntimeConfig:
                     field="zodiac_address",
                     reason="zodiac_address is required for safe_zodiac mode",
                 )
-            if not signer_service_url:
-                raise ConfigurationError(
-                    field="signer_service_url",
-                    reason="signer_service_url is required for safe_zodiac mode",
-                )
-            if not signer_service_jwt:
-                raise ConfigurationError(
-                    field="signer_service_jwt",
-                    reason="signer_service_jwt is required for safe_zodiac mode",
-                )
+            # Derive EOA from private key when available, fall back to explicit eoa_address
+            if not eoa_address and private_key:
+                try:
+                    eoa_address = Account.from_key(private_key).address
+                except Exception:
+                    raise ConfigurationError(
+                        field="private_key",
+                        reason="Invalid private key format for safe_zodiac mode",
+                    ) from None
             if not eoa_address:
                 raise ConfigurationError(
                     field="eoa_address",
-                    reason="eoa_address is required for safe_zodiac mode",
+                    reason="eoa_address is required for safe_zodiac mode when no private_key is provided",
                 )
 
             wallet_config = SafeWalletConfig(
@@ -1543,7 +1542,7 @@ class MultiChainRuntimeConfig:
                 signer_service_url=signer_service_url,
                 signer_service_jwt=signer_service_jwt,
             )
-            safe_signer = ZodiacRolesSigner(signer_config)
+            safe_signer = create_safe_signer(signer_config)
 
         return cls(
             chains=chains,
@@ -1981,17 +1980,16 @@ def _create_safe_signer_from_env(
         prefix: Environment variable prefix
 
     Returns:
-        SafeSigner instance (DirectSafeSigner or ZodiacRolesSigner)
+        SafeSigner instance
 
     Raises:
         MissingEnvironmentVariableError: If required env vars are missing
         ConfigurationError: If configuration is invalid
     """
     from almanak.framework.execution.signer.safe import (
-        DirectSafeSigner,
         SafeSignerConfig,
         SafeWalletConfig,
-        ZodiacRolesSigner,
+        create_safe_signer,
     )
 
     def get_required(name: str) -> str:
@@ -2011,8 +2009,19 @@ def _create_safe_signer_from_env(
     safe_address = get_required("SAFE_ADDRESS")
 
     if execution_mode == ExecutionMode.SAFE_ZODIAC:
-        # Zodiac mode: EOA address provided directly (key held by signer service)
-        eoa_address = get_required("EOA_ADDRESS")
+        # Derive EOA from private key when available, fall back to explicit EOA_ADDRESS
+        # (platform deployments use remote signer with no local key)
+        if private_key:
+            try:
+                account = Account.from_key(private_key)
+                eoa_address = account.address
+            except Exception:
+                raise ConfigurationError(
+                    field="private_key",
+                    reason="Invalid private key format for safe_zodiac mode",
+                ) from None
+        else:
+            eoa_address = get_required("EOA_ADDRESS")
     else:
         # Direct mode: derive EOA from private key
         account = Account.from_key(private_key)
@@ -2029,14 +2038,15 @@ def _create_safe_signer_from_env(
             wallet_config=wallet_config,
             private_key=private_key,
         )
-        logger.info(f"Creating DirectSafeSigner: safe={safe_address[:10]}..., eoa={eoa_address[:10]}...")
-        return DirectSafeSigner(signer_config)
+        logger.info(f"Creating Safe signer (direct): safe={safe_address[:10]}..., eoa={eoa_address[:10]}...")
+        return create_safe_signer(signer_config)
 
     elif execution_mode == ExecutionMode.SAFE_ZODIAC:
-        # Zodiac mode - remote signing for production
+        # Zodiac mode - signing via factory (local or plugin)
         zodiac_address = get_required("ZODIAC_ADDRESS")
-        signer_service_url = get_required("SIGNER_SERVICE_URL")
-        signer_service_jwt = get_required("SIGNER_SERVICE_JWT")
+        # Service URL/JWT are optional — zodiac mode also works with just a private_key
+        signer_service_url = get_optional("SIGNER_SERVICE_URL")
+        signer_service_jwt = get_optional("SIGNER_SERVICE_JWT")
 
         wallet_config = SafeWalletConfig(
             safe_address=safe_address,
@@ -2050,8 +2060,8 @@ def _create_safe_signer_from_env(
             signer_service_url=signer_service_url,
             signer_service_jwt=signer_service_jwt,
         )
-        logger.info(f"Creating ZodiacRolesSigner: safe={safe_address[:10]}..., zodiac={zodiac_address[:10]}...")
-        return ZodiacRolesSigner(signer_config)
+        logger.info(f"Creating Safe signer (zodiac): safe={safe_address[:10]}..., zodiac={zodiac_address[:10]}...")
+        return create_safe_signer(signer_config)
 
     else:
         raise ConfigurationError(

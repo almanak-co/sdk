@@ -142,10 +142,15 @@ class SafeSignerConfig:
         if self.mode == "zodiac":
             if not self.wallet_config.zodiac_roles_address:
                 raise SafeConfigError("zodiac_roles_address is required for Zodiac mode")
-            if not self.signer_service_url:
-                raise SafeConfigError("signer_service_url is required for Zodiac mode")
-            if not self.signer_service_jwt:
-                raise SafeConfigError("signer_service_jwt is required for Zodiac mode")
+            # Zodiac mode requires either a private_key (local signing) or
+            # signer_service_url + signer_service_jwt (remote signing via plugin)
+            has_local_key = bool(self.private_key)
+            has_remote_signer = bool(self.signer_service_url) and bool(self.signer_service_jwt)
+            if not has_local_key and not has_remote_signer:
+                raise SafeConfigError(
+                    "Zodiac mode requires either private_key (local signing) or "
+                    "signer_service_url + signer_service_jwt (remote signing via plugin)"
+                )
         else:
             if not self.private_key:
                 raise SafeConfigError("private_key is required for direct mode")
