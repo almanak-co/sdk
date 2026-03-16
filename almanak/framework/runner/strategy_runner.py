@@ -1819,13 +1819,16 @@ class StrategyRunner:
         price_oracle = None
         if market is not None and hasattr(market, "get_price_oracle_dict"):
             price_oracle = market.get_price_oracle_dict()
-            # If empty (e.g. strategy didn't call market.price() in decide()),
-            # try to pre-fetch prices for the intent's tokens so the compiler
-            # gets real prices instead of placeholders.
-            if not price_oracle and hasattr(market, "price"):
+            # Pre-fetch prices for intent tokens that aren't already in the oracle.
+            # This covers two cases:
+            # 1. Oracle is empty (strategy didn't call market.price() in decide())
+            # 2. Oracle has some tokens but FlashLoanIntent callbacks reference
+            #    additional tokens (e.g., WETH) not fetched by decide().
+            if hasattr(market, "price"):
                 intent_tokens = _extract_tokens_from_intent(intent)
-                if intent_tokens:
-                    for token in intent_tokens:
+                missing_tokens = [t for t in intent_tokens if not price_oracle or t not in price_oracle]
+                if missing_tokens:
+                    for token in missing_tokens:
                         try:
                             market.price(token)
                         except Exception:
@@ -2550,17 +2553,22 @@ class StrategyRunner:
         price_map = None
         if market is not None and hasattr(market, "get_price_oracle_dict"):
             price_oracle = market.get_price_oracle_dict()
-            # Pre-fetch prices for intent tokens if cache is empty
-            if not price_oracle and hasattr(market, "price"):
-                all_tokens: set[str] = set()
+            # Pre-fetch prices for intent tokens missing from the oracle.
+            # MultiChainMarketSnapshot.price() requires chain=, so we derive
+            # the chain from each intent to avoid TypeError.
+            if hasattr(market, "price"):
+                fetched_any = False
                 for i in intents:
-                    all_tokens.update(_extract_tokens_from_intent(i))
-                for token in all_tokens:
-                    try:
-                        market.price(token)
-                    except Exception:
-                        pass
-                price_oracle = market.get_price_oracle_dict()
+                    intent_chain = getattr(i, "chain", None) or orchestrator.primary_chain
+                    for token in _extract_tokens_from_intent(i):
+                        if not price_oracle or token not in price_oracle:
+                            try:
+                                market.price(token, chain=intent_chain)
+                                fetched_any = True
+                            except Exception:
+                                pass
+                if fetched_any:
+                    price_oracle = market.get_price_oracle_dict()
             if price_oracle:
                 price_map = {k: str(v) for k, v in price_oracle.items()}
                 logger.debug(f"Multi-chain: using real prices for {list(price_oracle.keys())}")
