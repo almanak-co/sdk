@@ -31,6 +31,7 @@ from almanak.framework.cli.status import (
 from almanak.framework.cli.status import (
     strategy_status as framework_status_cmd,
 )
+from almanak.framework.cli.support_matrix import support_matrix as framework_support_matrix_cmd
 from almanak.framework.cli.teardown import teardown as framework_teardown_group
 
 DEFAULT_STRAT_RUN_INTERVAL = 60
@@ -507,6 +508,15 @@ def mcp_serve(
 
 
 almanak.add_command(mcp, name="mcp")
+
+
+@almanak.group()
+def info():
+    """SDK information and capabilities."""
+    pass
+
+
+info.add_command(framework_support_matrix_cmd, name="matrix")
 
 
 @almanak.group()
