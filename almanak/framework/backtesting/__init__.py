@@ -36,6 +36,12 @@ Usage:
 """
 
 # Shared models
+# LP Performance Tracking
+from .lp_performance import (
+    LPPerformanceReport,
+    LPPerformanceTracker,
+    LPSnapshot,
+)
 from .models import (
     BacktestEngine as BacktestEngineType,
 )
@@ -171,6 +177,10 @@ __all__ = [
     "generate_equity_chart_html",
     "generate_pnl_distribution_html",
     "generate_drawdown_chart_html",
+    # LP Performance Tracking
+    "LPPerformanceTracker",
+    "LPPerformanceReport",
+    "LPSnapshot",
     # Report generation
     "ReportResult",
     "generate_report",
