@@ -8553,9 +8553,14 @@ class IntentCompiler:
                 # Lazy import to avoid circular import
                 from ..connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
 
+                # Resolve RPC URL with compiler's chain-aware fallback logic
+                # (explicit rpc_url -> managed Anvil fork -> configured provider)
+                morpho_rpc_url = self._get_chain_rpc_url()
+
                 morpho_config = MorphoBlueConfig(
                     chain=self.chain,
                     wallet_address=self.wallet_address,
+                    rpc_url=morpho_rpc_url,  # Pass RPC URL for on-chain queries (e.g., withdraw_all)
                 )
                 morpho_adapter = MorphoBlueAdapter(morpho_config)
 

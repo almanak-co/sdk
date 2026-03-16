@@ -924,9 +924,16 @@ class MorphoBlueAdapter:
             owner = on_behalf_of or self.wallet_address
 
             if withdraw_all:
-                # Use max uint256 for shares to withdraw all
+                # Query actual supply shares from position (MAX_UINT256 causes
+                # overflow in Morpho's mulDiv and uint128 cast, same as repay_all)
+                position = self.get_position_on_chain(market_id, owner)
+                if position.supply_shares <= 0:
+                    return TransactionResult(
+                        success=False,
+                        error="No supply position to withdraw",
+                    )
                 assets_wei = 0
-                shares_wei = MAX_UINT256
+                shares_wei = int(position.supply_shares)
             elif shares_mode:
                 assets_wei = 0
                 shares_wei = int(amount * Decimal(10**18))
@@ -1050,7 +1057,18 @@ class MorphoBlueAdapter:
             recipient = receiver or self.wallet_address
             owner = on_behalf_of or self.wallet_address
 
-            amount_wei = MAX_UINT256 if withdraw_all else int(amount * Decimal(10**decimals))
+            if withdraw_all:
+                # Query actual collateral from position (MAX_UINT256 exceeds
+                # Morpho's internal uint128 cast, causing revert)
+                position = self.get_position_on_chain(market_id, owner)
+                if position.collateral <= 0:
+                    return TransactionResult(
+                        success=False,
+                        error="No collateral position to withdraw",
+                    )
+                amount_wei = int(position.collateral)
+            else:
+                amount_wei = int(amount * Decimal(10**decimals))
 
             # Build calldata: withdrawCollateral(MarketParams,uint256,address,address)
             calldata = self._build_withdraw_collateral_calldata(market_params, amount_wei, owner, recipient)
