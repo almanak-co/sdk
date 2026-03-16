@@ -1047,7 +1047,8 @@ def run(
         gateway_client = GatewayClient(gateway_config)
         gateway_client.connect()
 
-        if not gateway_client.health_check():
+        click.echo("Waiting for gateway to become ready...")
+        if not gateway_client.wait_for_ready(timeout=60.0, interval=5.0):
             gateway_client.disconnect()
             click.echo()
             click.secho("ERROR: Gateway is not running or not healthy", fg="red", bold=True)
@@ -1292,7 +1293,8 @@ def run(
         gateway_client = GatewayClient(gateway_config)
         gateway_client.connect()
 
-        if not gateway_client.health_check():
+        click.echo("Waiting for gateway to become ready...")
+        if not gateway_client.wait_for_ready(timeout=60.0, interval=5.0):
             managed_gateway.stop()
             gateway_client.disconnect()
             raise click.ClickException(
