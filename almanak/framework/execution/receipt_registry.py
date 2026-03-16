@@ -32,6 +32,7 @@ Registered Protocols:
     - spark: SparkReceiptParser (Aave V3 fork for DAI)
     - morpho_blue / morpho: MorphoBlueReceiptParser
     - compound_v3: CompoundV3ReceiptParser
+    - benqi: BenqiReceiptParser (Compound V2 fork on Avalanche)
 
     Perpetuals:
     - gmx_v2: GMXv2ReceiptParser (Arbitrum perps)
@@ -170,6 +171,10 @@ class ReceiptParserRegistry:
         "compound_v3": (
             "almanak.framework.connectors.compound_v3.receipt_parser",
             "CompoundV3ReceiptParser",
+        ),
+        "benqi": (
+            "almanak.framework.connectors.benqi.receipt_parser",
+            "BenqiReceiptParser",
         ),
         # Perpetuals
         "drift": (

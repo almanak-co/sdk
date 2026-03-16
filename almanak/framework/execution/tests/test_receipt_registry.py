@@ -63,6 +63,7 @@ class TestReceiptParserRegistry:
         assert registry.is_registered("pancakeswap_v3")
         assert registry.is_registered("lido")
         assert registry.is_registered("ethena")
+        assert registry.is_registered("benqi")
 
     def test_is_registered_case_insensitive(self, registry: ReceiptParserRegistry) -> None:
         """Test is_registered handles case insensitivity."""
@@ -106,6 +107,17 @@ class TestReceiptParserRegistry:
 
         assert parser is not None
         assert hasattr(parser, "parse_receipt")
+
+    def test_get_benqi_parser(self, registry: ReceiptParserRegistry) -> None:
+        """Test getting BenqiReceiptParser."""
+        parser = registry.get("benqi")
+
+        assert parser is not None
+        assert hasattr(parser, "parse_receipt")
+
+        # Verify it's cached
+        parser2 = registry.get("benqi")
+        assert parser is parser2
 
     def test_get_unknown_protocol_raises_error(self, registry: ReceiptParserRegistry) -> None:
         """Test that getting unknown protocol raises ValueError."""
@@ -315,6 +327,21 @@ class TestParserIntegration:
 
         assert result.success is True
         assert result.stakes == []
+
+    def test_benqi_parser_parses_empty_receipt(self) -> None:
+        """Test BenqiReceiptParser handles empty receipt."""
+        parser = get_parser("benqi")
+
+        result = parser.parse_receipt(
+            {
+                "transactionHash": "0x123",
+                "blockNumber": 12345,
+                "logs": [],
+            }
+        )
+
+        assert result.success is True
+        assert result.events == []
 
     def test_ethena_parser_parses_empty_receipt(self) -> None:
         """Test EthenaReceiptParser handles empty receipt."""
