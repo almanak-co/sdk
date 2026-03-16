@@ -1398,10 +1398,6 @@ class PnLBacktester:
         backtest_id = str(uuid.uuid4())
         self._current_backtest_id = backtest_id  # Store for use in _execute_intent
 
-        # Initialize parameter_sources early so it's available in error handling
-        # It will be populated with proper values in the initialization phase
-        parameter_sources: ParameterSourceTracker | None = None
-
         # Create backtest logger with phase timing support
         bt_logger = BacktestLogger(
             backtest_id=backtest_id,
@@ -1414,6 +1410,32 @@ class PnLBacktester:
             f"from {config.start_time} to {config.end_time} "
             f"with ${config.initial_capital_usd:,.2f} capital"
         )
+
+        # Wrap entire backtest body in try/finally to guarantee async resource cleanup.
+        # Without this, exceptions from the data quality gate (ValueError) or preflight
+        # validation (PreflightValidationError) can exit without closing the aiohttp
+        # session, causing "RuntimeError: Event loop is closed" when GC collects the
+        # leaked session after asyncio.run() shuts down the event loop.
+        try:
+            return await self._run_backtest(strategy, config, backtest_id, bt_logger, run_started_at)
+        finally:
+            try:
+                await self.close()
+            except (OSError, RuntimeError):
+                logger.debug("Error during async resource cleanup", exc_info=True)
+
+    async def _run_backtest(
+        self,
+        strategy: BacktestableStrategy,
+        config: PnLBacktestConfig,
+        backtest_id: str,
+        bt_logger: BacktestLogger,
+        run_started_at: datetime,
+    ) -> BacktestResult:
+        """Internal backtest implementation. Called by backtest() with guaranteed cleanup."""
+        # Initialize parameter_sources early so it's available in error handling
+        # It will be populated with proper values in the initialization phase
+        parameter_sources: ParameterSourceTracker | None = None
 
         # Run preflight validation if enabled
         preflight_report: PreflightReport | None = None
@@ -1714,7 +1736,6 @@ class PnLBacktester:
             # On error, compliance is False and we add the error as a violation
             error_compliance_violations = compliance_violations + [f"Backtest failed with error: {e}"]
             error_fallback_usage = self._fallback_usage.copy() if self._fallback_usage else {}
-            await self.close()
             return BacktestResult(
                 engine=BacktestEngine.PNL,
                 strategy_id=strategy.strategy_id,
@@ -1832,7 +1853,6 @@ class PnLBacktester:
         # Compliance is True only if there are no violations
         institutional_compliance = len(compliance_violations) == 0
 
-        await self.close()
         return BacktestResult(
             engine=BacktestEngine.PNL,
             strategy_id=strategy.strategy_id,
