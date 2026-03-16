@@ -1686,3 +1686,137 @@ class TestRegisterToken:
                 address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 decimals=-1,
             )
+
+
+class TestGatewayIntegrityCheck:
+    """Tests for gateway response integrity validation (VIB-1018).
+
+    A faulty gateway returning wrong decimals could permanently poison the cache
+    and cause 10^12x amount miscalculations. These tests verify that the resolver
+    rejects invalid or mismatched gateway responses.
+    """
+
+    def test_cross_check_rejects_decimals_mismatch(self):
+        """If static registry says USDC=6 decimals, gateway returning 18 is rejected."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        # Get USDC address on arbitrum from static registry
+        usdc_address = resolver.get_address("arbitrum", "USDC")
+        assert usdc_address is not None
+
+        # Cross-check: gateway claims 18 decimals, static says 6
+        result = resolver._cross_check_decimals_with_static(usdc_address, "arbitrum", 18)
+        assert result == 6  # Returns the static decimals (indicating mismatch)
+
+    def test_cross_check_accepts_matching_decimals(self):
+        """If gateway decimals match static registry, no rejection."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        usdc_address = resolver.get_address("arbitrum", "USDC")
+        assert usdc_address is not None
+
+        # Cross-check: gateway says 6, static says 6 -> no conflict
+        result = resolver._cross_check_decimals_with_static(usdc_address, "arbitrum", 6)
+        assert result is None
+
+    def test_cross_check_unknown_token_passes(self):
+        """Unknown tokens not in static registry should pass cross-check."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        # Random address not in registry
+        result = resolver._cross_check_decimals_with_static(
+            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum", 18,
+        )
+        assert result is None  # No conflict — token not in static registry
+
+    def test_gateway_response_invalid_decimals_rejected(self):
+        """Gateway responses with out-of-range decimals should be rejected."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        # Mock gateway stub + response with negative decimals
+        mock_stub = MagicMock()
+        mock_response = MagicMock()
+        mock_response.success = True
+        mock_response.decimals = -1
+        mock_response.symbol = "BAD"
+        mock_response.address = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        mock_response.name = "Bad Token"
+        mock_stub.GetTokenMetadata.return_value = mock_response
+
+        resolver._gateway_channel = MagicMock()
+        resolver._gateway_available = True
+        resolver._gateway_stub = mock_stub
+
+        result = resolver._resolve_via_gateway(
+            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum", Chain.ARBITRUM,
+        )
+        assert result is None  # Rejected due to invalid decimals
+
+    def test_gateway_response_too_high_decimals_rejected(self):
+        """Gateway responses with decimals > 77 should be rejected."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        mock_stub = MagicMock()
+        mock_response = MagicMock()
+        mock_response.success = True
+        mock_response.decimals = 78
+        mock_response.symbol = "BAD"
+        mock_response.address = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        mock_response.name = "Bad Token"
+        mock_stub.GetTokenMetadata.return_value = mock_response
+
+        resolver._gateway_channel = MagicMock()
+        resolver._gateway_available = True
+        resolver._gateway_stub = mock_stub
+
+        result = resolver._resolve_via_gateway(
+            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum", Chain.ARBITRUM,
+        )
+        assert result is None
+
+    def test_gateway_response_address_mismatch_rejected(self):
+        """Gateway returning metadata for a different address should be rejected."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        mock_stub = MagicMock()
+        mock_response = MagicMock()
+        mock_response.success = True
+        mock_response.decimals = 18
+        mock_response.symbol = "WRONG"
+        # Gateway returns a different address than what was requested
+        mock_response.address = "0x1111111111111111111111111111111111111111"
+        mock_response.name = "Wrong Token"
+        mock_stub.GetTokenMetadata.return_value = mock_response
+
+        resolver._gateway_channel = MagicMock()
+        resolver._gateway_available = True
+        resolver._gateway_stub = mock_stub
+
+        result = resolver._resolve_via_gateway(
+            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum", Chain.ARBITRUM,
+        )
+        assert result is None  # Rejected due to address mismatch
+
+    def test_gateway_response_matching_address_accepted(self):
+        """Gateway returning the same address (different case) should be accepted."""
+        resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
+
+        mock_stub = MagicMock()
+        mock_response = MagicMock()
+        mock_response.success = True
+        mock_response.decimals = 18
+        mock_response.symbol = "TEST"
+        # Same address, different case (EVM addresses are case-insensitive)
+        mock_response.address = "0xDeadBeefDeadBeefDeadBeefDeadBeefDeadBeef"
+        mock_response.name = "Test Token"
+        mock_stub.GetTokenMetadata.return_value = mock_response
+
+        resolver._gateway_channel = MagicMock()
+        resolver._gateway_available = True
+        resolver._gateway_stub = mock_stub
+
+        result = resolver._resolve_via_gateway(
+            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum", Chain.ARBITRUM,
+        )
+        assert result is not None
+        assert result.symbol == "TEST"

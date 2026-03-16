@@ -651,6 +651,30 @@ class TokenResolver:
         self._gateway_check_time = now
         return True
 
+    def _cross_check_decimals_with_static(self, address: str, chain_lower: str, gateway_decimals: int) -> int | None:
+        """Cross-check gateway decimals against static registry.
+
+        If the address exists in the static registry with known decimals,
+        and the gateway returned different decimals, return the static
+        decimals (indicating a mismatch). Returns None if no conflict.
+
+        Args:
+            address: Token contract address
+            chain_lower: Chain name (lowercase)
+            gateway_decimals: Decimals value returned by the gateway
+
+        Returns:
+            Static decimals if there's a mismatch, None if OK or not in registry
+        """
+        addr_key = _normalize_address_for_chain(address, chain_lower)
+        chain_index = self._static_address_index.get(chain_lower, {})
+        static_token = chain_index.get(addr_key)
+        if static_token is not None:
+            static_decimals = static_token.get_decimals(chain_lower)
+            if static_decimals != gateway_decimals:
+                return static_decimals
+        return None
+
     def _resolve_via_gateway(self, address: str, chain_lower: str, chain_enum: Chain) -> ResolvedToken | None:
         """Attempt to resolve token via gateway on-chain lookup.
 
@@ -714,11 +738,70 @@ class TokenResolver:
                 _try_record_metric("record_token_resolution_onchain_lookup", chain_lower, "not_found")
                 return None
 
+            # Validate gateway response before creating ResolvedToken.
+            # A gateway misconfiguration returning wrong decimals (e.g., 18 instead of 6
+            # for USDC) would cause 10^12x amount miscalculation. Reject obviously
+            # invalid data before it can poison the cache.
+            decimals = response.decimals
+            if not isinstance(decimals, int) or decimals < 0 or decimals > 77:
+                logger.warning(
+                    "token_gateway_integrity_rejected: decimals out of range (address=%s, chain=%s, decimals=%s)",
+                    address,
+                    chain_lower,
+                    decimals,
+                )
+                _try_record_metric("record_token_resolution_onchain_lookup", chain_lower, "integrity_rejected")
+                return None
+
+            # Validate the returned address: reject if it doesn't match the
+            # requested address (a faulty gateway could return metadata for a
+            # different token, poisoning the cache under the wrong key).
+            resolved_address = response.address or address
+            try:
+                _validate_address(resolved_address, chain_lower)
+            except InvalidTokenAddressError:
+                logger.warning(
+                    "token_gateway_integrity_rejected: invalid returned address (requested=%s, returned=%s, chain=%s)",
+                    address,
+                    resolved_address,
+                    chain_lower,
+                )
+                _try_record_metric("record_token_resolution_onchain_lookup", chain_lower, "integrity_rejected")
+                return None
+
+            if _normalize_address_for_chain(resolved_address, chain_lower) != _normalize_address_for_chain(
+                address, chain_lower
+            ):
+                logger.warning(
+                    "token_gateway_integrity_rejected: returned address mismatch (requested=%s, returned=%s, chain=%s)",
+                    address,
+                    resolved_address,
+                    chain_lower,
+                )
+                _try_record_metric("record_token_resolution_onchain_lookup", chain_lower, "integrity_rejected")
+                return None
+
+            # Cross-check against static registry: if we have a known decimals value
+            # for this address, reject the gateway response if it disagrees.
+            # This prevents a faulty gateway from overwriting trusted static data.
+            static_check = self._cross_check_decimals_with_static(resolved_address, chain_lower, decimals)
+            if static_check is not None:
+                logger.warning(
+                    "token_gateway_integrity_rejected: decimals mismatch with static registry "
+                    "(address=%s, chain=%s, gateway_decimals=%d, static_decimals=%d)",
+                    address,
+                    chain_lower,
+                    decimals,
+                    static_check,
+                )
+                _try_record_metric("record_token_resolution_onchain_lookup", chain_lower, "integrity_rejected")
+                return None
+
             # Convert response to ResolvedToken
             resolved = ResolvedToken(
                 symbol=response.symbol,
-                address=response.address or address,
-                decimals=response.decimals,
+                address=resolved_address,
+                decimals=decimals,
                 chain=chain_enum,
                 chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
                 name=response.name or None,
