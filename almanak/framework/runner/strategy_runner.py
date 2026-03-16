@@ -753,8 +753,16 @@ class StrategyRunner:
         except Exception as e:
             logger.debug(f"Failed to deregister from gateway (non-fatal): {e}")
 
-    def _gateway_heartbeat(self, strategy_id: str) -> None:
+    def _gateway_heartbeat(
+        self,
+        strategy_id: str,
+        positions: list | None = None,
+    ) -> None:
         """Send a heartbeat to the gateway for this strategy instance.
+
+        Args:
+            strategy_id: Strategy instance ID.
+            positions: Optional list of StrategyPosition protos to cache in the dashboard.
 
         Non-fatal: catches all exceptions.
         """
@@ -769,9 +777,68 @@ class StrategyRunner:
                 strategy_id=strategy_id,
                 heartbeat_only=True,
             )
+            if positions:
+                request.positions.extend(positions)
             client.dashboard.UpdateStrategyInstanceStatus(request)
         except Exception as e:
             logger.debug(f"Failed to send heartbeat to gateway (non-fatal): {e}")
+
+    def _collect_position_snapshot(self, strategy: "StrategyProtocol") -> list | None:
+        """Call strategy.get_open_positions() and convert to proto messages.
+
+        Non-fatal: returns None on any error so heartbeat still fires.
+        """
+        if self._get_gateway_client() is None:
+            return None
+        if not hasattr(strategy, "get_open_positions"):
+            return None
+
+        try:
+            summary = strategy.get_open_positions()
+            if summary is None or not hasattr(summary, "positions") or not summary.positions:
+                return None
+
+            from almanak.gateway.proto import gateway_pb2
+
+            protos = []
+            for pos in summary.positions:
+                sp = gateway_pb2.StrategyPosition(
+                    position_type=str(pos.position_type.value)
+                    if hasattr(pos.position_type, "value")
+                    else str(pos.position_type),
+                    position_id=str(pos.position_id),
+                    chain=str(pos.chain.value) if hasattr(pos.chain, "value") else str(pos.chain),
+                    protocol=str(pos.protocol),
+                    value_usd=str(pos.value_usd),
+                    liquidation_risk=bool(pos.liquidation_risk),
+                )
+                if pos.health_factor is not None:
+                    sp.health_factor = str(pos.health_factor)
+                if pos.details:
+                    for k, v in pos.details.items():
+                        sp.details[str(k)] = str(v)
+                # Optional monitoring fields
+                if pos.entry_price is not None:
+                    sp.entry_price = str(pos.entry_price)
+                if pos.current_price is not None:
+                    sp.current_price = str(pos.current_price)
+                if pos.unrealized_pnl_usd is not None:
+                    sp.unrealized_pnl_usd = str(pos.unrealized_pnl_usd)
+                if pos.unrealized_pnl_pct is not None:
+                    sp.unrealized_pnl_pct = str(pos.unrealized_pnl_pct)
+                if pos.direction is not None:
+                    sp.direction = str(pos.direction)
+                if pos.size_usd is not None:
+                    sp.size_usd = str(pos.size_usd)
+                if pos.collateral_usd is not None:
+                    sp.collateral_usd = str(pos.collateral_usd)
+                if pos.leverage is not None:
+                    sp.leverage = str(pos.leverage)
+                protos.append(sp)
+            return protos
+        except Exception as e:
+            logger.debug(f"Failed to collect position snapshot (non-fatal): {e}")
+            return None
 
     def _lifecycle_write_state(self, agent_id: str, state: str, error_message: str | None = None) -> None:
         """Write agent state to LifecycleStore via gateway.
@@ -1485,8 +1552,9 @@ class StrategyRunner:
                         if self._circuit_breaker.state != CircuitBreakerState.OPEN:
                             self._emergency_triggered_for_open = False
 
-                # Send heartbeat to gateway after each iteration
-                self._gateway_heartbeat(strategy_id)
+                # Report positions and send heartbeat to gateway after each iteration
+                position_protos = self._collect_position_snapshot(strategy)
+                self._gateway_heartbeat(strategy_id, positions=position_protos)
 
                 # Send lifecycle heartbeat
                 self._lifecycle_heartbeat(strategy_id)

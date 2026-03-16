@@ -106,7 +106,11 @@ class PositionType(StrEnum):
 
 @dataclass
 class PositionInfo:
-    """A single position to be closed during teardown."""
+    """A single position to be closed during teardown.
+
+    Also used for monitoring — optional fields (entry_price, unrealized_pnl_usd, etc.)
+    are populated by strategies that support position exposure reporting.
+    """
 
     position_type: PositionType
     position_id: str
@@ -121,12 +125,35 @@ class PositionInfo:
     # Protocol-specific details
     details: dict[str, Any] = field(default_factory=dict)
 
+    # Optional monitoring fields (populated for position exposure reporting)
+    entry_price: Decimal | None = None
+    current_price: Decimal | None = None
+    unrealized_pnl_usd: Decimal | None = None
+    unrealized_pnl_pct: Decimal | None = None
+    direction: str | None = None  # "LONG" / "SHORT" for perps
+    size_usd: Decimal | None = None  # Notional size (perps)
+    collateral_usd: Decimal | None = None  # Collateral value
+    leverage: Decimal | None = None  # Current leverage
+
     def __post_init__(self) -> None:
         """Validate and normalize fields."""
         if isinstance(self.value_usd, int | float | str):
             self.value_usd = Decimal(str(self.value_usd))
         if self.health_factor is not None and isinstance(self.health_factor, int | float | str):
             self.health_factor = Decimal(str(self.health_factor))
+        # Normalize optional Decimal fields
+        for attr in (
+            "entry_price",
+            "current_price",
+            "unrealized_pnl_usd",
+            "unrealized_pnl_pct",
+            "size_usd",
+            "collateral_usd",
+            "leverage",
+        ):
+            value = getattr(self, attr)
+            if value is not None and isinstance(value, int | float | str):
+                setattr(self, attr, Decimal(str(value)))
 
 
 def calculate_max_acceptable_loss(position_value_usd: Decimal) -> Decimal:

@@ -2416,6 +2416,7 @@ class PositionInfo(_message.Message):
     TOTAL_LP_VALUE_USD_FIELD_NUMBER: _builtins.int
     HEALTH_FACTOR_FIELD_NUMBER: _builtins.int
     LEVERAGE_FIELD_NUMBER: _builtins.int
+    STRATEGY_POSITIONS_FIELD_NUMBER: _builtins.int
     total_lp_value_usd: _builtins.str
     health_factor: _builtins.str
     leverage: _builtins.str
@@ -2423,6 +2424,8 @@ class PositionInfo(_message.Message):
     def token_balances(self) -> _containers.RepeatedCompositeFieldContainer[Global___TokenBalanceInfo]: ...
     @_builtins.property
     def lp_positions(self) -> _containers.RepeatedCompositeFieldContainer[Global___LPPositionInfo]: ...
+    @_builtins.property
+    def strategy_positions(self) -> _containers.RepeatedCompositeFieldContainer[Global___StrategyPosition]: ...
     def __init__(
         self,
         *,
@@ -2431,11 +2434,87 @@ class PositionInfo(_message.Message):
         total_lp_value_usd: _builtins.str = ...,
         health_factor: _builtins.str = ...,
         leverage: _builtins.str = ...,
+        strategy_positions: _abc.Iterable[Global___StrategyPosition] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["health_factor", b"health_factor", "leverage", b"leverage", "lp_positions", b"lp_positions", "token_balances", b"token_balances", "total_lp_value_usd", b"total_lp_value_usd"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["health_factor", b"health_factor", "leverage", b"leverage", "lp_positions", b"lp_positions", "strategy_positions", b"strategy_positions", "token_balances", b"token_balances", "total_lp_value_usd", b"total_lp_value_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PositionInfo: _TypeAlias = PositionInfo  # noqa: Y015
+
+@_typing.final
+class StrategyPosition(_message.Message):
+    """A single position reported by a strategy via get_open_positions()."""
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    class DetailsEntry(_message.Message):
+        DESCRIPTOR: _descriptor.Descriptor
+
+        KEY_FIELD_NUMBER: _builtins.int
+        VALUE_FIELD_NUMBER: _builtins.int
+        key: _builtins.str
+        value: _builtins.str
+        def __init__(self, *, key: _builtins.str = ..., value: _builtins.str = ...) -> None: ...
+        _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
+        def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+    POSITION_TYPE_FIELD_NUMBER: _builtins.int
+    POSITION_ID_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    VALUE_USD_FIELD_NUMBER: _builtins.int
+    LIQUIDATION_RISK_FIELD_NUMBER: _builtins.int
+    HEALTH_FACTOR_FIELD_NUMBER: _builtins.int
+    DETAILS_FIELD_NUMBER: _builtins.int
+    ENTRY_PRICE_FIELD_NUMBER: _builtins.int
+    CURRENT_PRICE_FIELD_NUMBER: _builtins.int
+    UNREALIZED_PNL_USD_FIELD_NUMBER: _builtins.int
+    UNREALIZED_PNL_PCT_FIELD_NUMBER: _builtins.int
+    DIRECTION_FIELD_NUMBER: _builtins.int
+    SIZE_USD_FIELD_NUMBER: _builtins.int
+    COLLATERAL_USD_FIELD_NUMBER: _builtins.int
+    LEVERAGE_FIELD_NUMBER: _builtins.int
+    position_type: _builtins.str
+    position_id: _builtins.str
+    chain: _builtins.str
+    protocol: _builtins.str
+    value_usd: _builtins.str
+    liquidation_risk: _builtins.bool
+    health_factor: _builtins.str
+    entry_price: _builtins.str
+    current_price: _builtins.str
+    unrealized_pnl_usd: _builtins.str
+    unrealized_pnl_pct: _builtins.str
+    direction: _builtins.str
+    size_usd: _builtins.str
+    collateral_usd: _builtins.str
+    leverage: _builtins.str
+    @_builtins.property
+    def details(self) -> _containers.ScalarMap[_builtins.str, _builtins.str]: ...
+    def __init__(
+        self,
+        *,
+        position_type: _builtins.str = ...,
+        position_id: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        protocol: _builtins.str = ...,
+        value_usd: _builtins.str = ...,
+        liquidation_risk: _builtins.bool = ...,
+        health_factor: _builtins.str = ...,
+        details: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
+        entry_price: _builtins.str = ...,
+        current_price: _builtins.str = ...,
+        unrealized_pnl_usd: _builtins.str = ...,
+        unrealized_pnl_pct: _builtins.str = ...,
+        direction: _builtins.str = ...,
+        size_usd: _builtins.str = ...,
+        collateral_usd: _builtins.str = ...,
+        leverage: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "collateral_usd", b"collateral_usd", "current_price", b"current_price", "details", b"details", "direction", b"direction", "entry_price", b"entry_price", "health_factor", b"health_factor", "leverage", b"leverage", "liquidation_risk", b"liquidation_risk", "position_id", b"position_id", "position_type", b"position_type", "protocol", b"protocol", "size_usd", b"size_usd", "unrealized_pnl_pct", b"unrealized_pnl_pct", "unrealized_pnl_usd", b"unrealized_pnl_usd", "value_usd", b"value_usd"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___StrategyPosition: _TypeAlias = StrategyPosition  # noqa: Y015
 
 @_typing.final
 class TokenBalanceInfo(_message.Message):
@@ -2907,12 +2986,17 @@ class UpdateInstanceStatusRequest(_message.Message):
     STATUS_FIELD_NUMBER: _builtins.int
     REASON_FIELD_NUMBER: _builtins.int
     HEARTBEAT_ONLY_FIELD_NUMBER: _builtins.int
+    POSITIONS_FIELD_NUMBER: _builtins.int
     strategy_id: _builtins.str
     status: _builtins.str
     """RUNNING, INACTIVE, ERROR, PAUSED"""
     reason: _builtins.str
     heartbeat_only: _builtins.bool
     """If true, only update last_heartbeat_at"""
+    @_builtins.property
+    def positions(self) -> _containers.RepeatedCompositeFieldContainer[Global___StrategyPosition]:
+        """Strategy-reported positions (cached by DashboardService for strat status display)"""
+
     def __init__(
         self,
         *,
@@ -2920,8 +3004,9 @@ class UpdateInstanceStatusRequest(_message.Message):
         status: _builtins.str = ...,
         reason: _builtins.str = ...,
         heartbeat_only: _builtins.bool = ...,
+        positions: _abc.Iterable[Global___StrategyPosition] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["heartbeat_only", b"heartbeat_only", "reason", b"reason", "status", b"status", "strategy_id", b"strategy_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["heartbeat_only", b"heartbeat_only", "positions", b"positions", "reason", b"reason", "status", b"status", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___UpdateInstanceStatusRequest: _TypeAlias = UpdateInstanceStatusRequest  # noqa: Y015

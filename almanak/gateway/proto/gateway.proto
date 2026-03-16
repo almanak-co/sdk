@@ -772,6 +772,30 @@ message PositionInfo {
   string total_lp_value_usd = 3;
   string health_factor = 4;
   string leverage = 5;
+  // Strategy-reported positions from get_open_positions()
+  repeated StrategyPosition strategy_positions = 6;
+}
+
+// A single position reported by a strategy via get_open_positions().
+// Carries both teardown-critical fields and optional monitoring fields.
+message StrategyPosition {
+  string position_type = 1;       // PERP, SUPPLY, BORROW, LP, STAKE, TOKEN, etc.
+  string position_id = 2;
+  string chain = 3;
+  string protocol = 4;
+  string value_usd = 5;
+  bool liquidation_risk = 6;
+  string health_factor = 7;
+  map<string, string> details = 8;
+  // Optional monitoring fields
+  string entry_price = 9;
+  string current_price = 10;
+  string unrealized_pnl_usd = 11;
+  string unrealized_pnl_pct = 12;
+  string direction = 13;          // "LONG" / "SHORT"
+  string size_usd = 14;
+  string collateral_usd = 15;
+  string leverage = 16;
 }
 
 message TokenBalanceInfo {
@@ -899,6 +923,8 @@ message UpdateInstanceStatusRequest {
   string status = 2;               // RUNNING, INACTIVE, ERROR, PAUSED
   string reason = 3;
   bool heartbeat_only = 4;         // If true, only update last_heartbeat_at
+  // Strategy-reported positions (cached by DashboardService for strat status display)
+  repeated StrategyPosition positions = 5;
 }
 
 message UpdateInstanceStatusResponse {

@@ -55,6 +55,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         self._state_manager: StateManager | None = None
         self._initialized = False
         self._strategies_root: Path | None = None
+        # In-memory cache of strategy positions reported via heartbeat
+        self._cached_positions: dict[str, list[gateway_pb2.StrategyPosition]] = {}
 
     async def _ensure_initialized(self) -> None:
         """Lazy initialization of dependencies."""
@@ -578,6 +580,11 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             if "leverage" in state:
                 position.leverage = str(state["leverage"])
 
+        # Include cached strategy positions from heartbeat
+        cached = self._cached_positions.get(strategy_id)
+        if cached:
+            position.strategy_positions.extend(cached)
+
         # Get timeline events if requested
         timeline = []
         if request.include_timeline:
@@ -977,6 +984,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     error=f"Instance not found: {strategy_id}",
                 )
 
+            # Cache strategy positions (clear stale data when none reported)
+            if request.positions:
+                self._cached_positions[strategy_id] = list(request.positions)
+            else:
+                self._cached_positions.pop(strategy_id, None)
+
             return gateway_pb2.UpdateInstanceStatusResponse(success=True)
         except Exception as e:
             logger.error(f"Failed to update instance status {request.strategy_id}: {e}")
@@ -1002,6 +1015,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     error=f"Instance not found: {strategy_id}",
                 )
 
+            self._cached_positions.pop(strategy_id, None)
             logger.info(f"Archived instance {strategy_id}: {request.reason}")
             return gateway_pb2.ArchiveInstanceResponse(success=True)
         except Exception as e:
@@ -1043,6 +1057,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             except Exception as e:
                 logger.debug(f"Failed to clear timeline cache for {strategy_id} (non-fatal): {e}")
 
+            self._cached_positions.pop(strategy_id, None)
             logger.info(f"Purged instance {strategy_id}: {request.reason}")
             return gateway_pb2.PurgeInstanceResponse(success=True)
         except Exception as e:

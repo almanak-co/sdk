@@ -333,6 +333,36 @@ def strategy_status(strategy_id, timeline, timeline_limit, as_json, gateway_host
                 ]
             if details.position.health_factor is not None:
                 pos_data["health_factor"] = float(details.position.health_factor)
+            if details.position.strategy_positions:
+                sp_list = []
+                for sp in details.position.strategy_positions:
+                    sp_dict: dict[str, Any] = {
+                        "position_type": sp.position_type,
+                        "position_id": sp.position_id,
+                        "chain": sp.chain,
+                        "protocol": sp.protocol,
+                        "value_usd": sp.value_usd,
+                        "liquidation_risk": sp.liquidation_risk,
+                    }
+                    # Include optional monitoring fields when present
+                    for field in (
+                        "direction",
+                        "entry_price",
+                        "current_price",
+                        "unrealized_pnl_usd",
+                        "unrealized_pnl_pct",
+                        "size_usd",
+                        "collateral_usd",
+                        "leverage",
+                        "health_factor",
+                    ):
+                        val = getattr(sp, field, "")
+                        if val != "":
+                            sp_dict[field] = val
+                    if sp.details:
+                        sp_dict["details"] = dict(sp.details)
+                    sp_list.append(sp_dict)
+                pos_data["strategy_positions"] = sp_list
             if pos_data:
                 result["position"] = pos_data
         if details.timeline:
@@ -415,6 +445,57 @@ def strategy_status(strategy_id, timeline, timeline_limit, as_json, gateway_host
                 click.echo(f"    LP: {lp.pool} ({lp.token0}/{lp.token1}) ${lp.liquidity_usd}")
         if pos.health_factor is not None:
             click.echo(f"    Health Factor: {pos.health_factor}")
+
+    # Strategy positions (from get_open_positions())
+    if pos and pos.strategy_positions:
+        click.echo()
+        click.echo(click.style("  Positions:", bold=True))
+        for sp in pos.strategy_positions:
+            # Header line: PERP LONG ETH/USD (gmx_v2) on arbitrum
+            direction_str = f" {sp.direction}" if sp.direction else ""
+            click.echo(
+                f"    {click.style(sp.position_type, bold=True)}"
+                f"{direction_str} {sp.position_id} ({sp.protocol}) on {sp.chain}"
+            )
+            # Size / collateral / leverage line (for perps/borrows)
+            parts = []
+            if sp.size_usd:
+                parts.append(f"Size: ${sp.size_usd}")
+            elif sp.value_usd:
+                parts.append(f"Value: ${sp.value_usd}")
+            if sp.collateral_usd:
+                parts.append(f"Collateral: ${sp.collateral_usd}")
+            if sp.leverage:
+                parts.append(f"Leverage: {sp.leverage}x")
+            if sp.health_factor:
+                parts.append(f"HF: {sp.health_factor}")
+            if parts:
+                click.echo(f"      {' | '.join(parts)}")
+            # PnL line
+            if sp.entry_price != "" or sp.current_price != "" or sp.unrealized_pnl_usd != "":
+                pnl_parts = []
+                if sp.entry_price != "":
+                    pnl_parts.append(f"Entry: ${sp.entry_price}")
+                if sp.current_price != "":
+                    pnl_parts.append(f"Current: ${sp.current_price}")
+                if sp.unrealized_pnl_usd != "":
+                    pnl_val = sp.unrealized_pnl_usd
+                    pnl_pct = f" ({sp.unrealized_pnl_pct}%)" if sp.unrealized_pnl_pct else ""
+                    try:
+                        pnl_num = float(pnl_val)
+                    except (ValueError, TypeError):
+                        pnl_num = 0.0
+                    if pnl_num > 0:
+                        pnl_prefix, pnl_color = "+", "green"
+                    elif pnl_num < 0:
+                        pnl_prefix, pnl_color = "", "red"
+                    else:
+                        pnl_prefix, pnl_color = "", "white"
+                    pnl_parts.append(f"PnL: {click.style(f'{pnl_prefix}${pnl_val}{pnl_pct}', fg=pnl_color)}")
+                if pnl_parts:
+                    click.echo(f"      {' | '.join(pnl_parts)}")
+            if sp.liquidation_risk:
+                click.echo(click.style("      ! Liquidation risk", fg="red", bold=True))
 
     # Chain health
     if details.chain_health:
