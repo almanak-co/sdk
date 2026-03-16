@@ -14,7 +14,8 @@ Key Contracts:
 - Factory: Creates new pools
 
 Function Selectors:
-- exchange(int128,int128,uint256,uint256): 0x3df02124
+- exchange(int128,int128,uint256,uint256): 0x3df02124 (StableSwap)
+- exchange(uint256,uint256,uint256,uint256): 0x5b41b908 (CryptoSwap/Tricrypto)
 - add_liquidity(uint256[2],uint256): varies by pool size
 - remove_liquidity(uint256,uint256[2]): varies by pool size
 - remove_liquidity_one_coin(uint256,int128,uint256): 0x1a4d01d2
@@ -160,7 +161,8 @@ CURVE_GAS_ESTIMATES: dict[str, int] = {
 }
 
 # Function selectors
-EXCHANGE_SELECTOR = "0x3df02124"  # exchange(int128,int128,uint256,uint256)
+EXCHANGE_SELECTOR = "0x3df02124"  # exchange(int128,int128,uint256,uint256) - StableSwap
+EXCHANGE_UINT256_SELECTOR = "0x5b41b908"  # exchange(uint256,uint256,uint256,uint256) - CryptoSwap/Tricrypto
 EXCHANGE_UNDERLYING_SELECTOR = "0xa6417ed6"  # exchange_underlying(int128,int128,uint256,uint256)
 ADD_LIQUIDITY_2_SELECTOR = "0x0b4c7e4d"  # add_liquidity(uint256[2],uint256)
 ADD_LIQUIDITY_3_SELECTOR = "0x4515cef3"  # add_liquidity(uint256[3],uint256)
@@ -596,6 +598,7 @@ class CurveAdapter:
                 value=amount_in_wei if is_native_input else 0,
                 token_in_symbol=token_in_symbol,
                 token_out_symbol=pool_info.coins[j],
+                pool_type=pool_info.pool_type,
             )
             transactions.append(swap_tx)
 
@@ -890,17 +893,24 @@ class CurveAdapter:
         value: int = 0,
         token_in_symbol: str = "",
         token_out_symbol: str = "",
+        pool_type: PoolType = PoolType.STABLESWAP,
     ) -> TransactionData:
         """Build exchange transaction.
 
-        exchange(int128 i, int128 j, uint256 dx, uint256 min_dy)
+        StableSwap:          exchange(int128 i, int128 j, uint256 dx, uint256 min_dy)
+        CryptoSwap/Tricrypto: exchange(uint256 i, uint256 j, uint256 dx, uint256 min_dy)
         """
+        if pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO):
+            # CryptoSwap and Tricrypto pools use uint256 indices
+            selector = EXCHANGE_UINT256_SELECTOR
+            pad_index = self._pad_uint256
+        else:
+            # StableSwap pools use int128 indices
+            selector = EXCHANGE_SELECTOR
+            pad_index = self._pad_int128
+
         calldata = (
-            EXCHANGE_SELECTOR
-            + self._pad_int128(i)
-            + self._pad_int128(j)
-            + self._pad_uint256(amount_in)
-            + self._pad_uint256(min_amount_out)
+            selector + pad_index(i) + pad_index(j) + self._pad_uint256(amount_in) + self._pad_uint256(min_amount_out)
         )
 
         return TransactionData(
