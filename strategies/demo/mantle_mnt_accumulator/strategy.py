@@ -1,7 +1,8 @@
 """Mantle MNT Accumulator Strategy.
 
 Multi-signal accumulation strategy that builds a WMNT position on Mantle
-using Uniswap V3 for swap execution.
+using Agni Finance (a Uniswap V3 fork, the primary V3 DEX on Mantle) for
+swap execution.
 
 Thesis:
     MNT is Mantle's native token. This strategy accumulates WMNT from USDT
@@ -18,7 +19,7 @@ State machine:
     accumulating -> (dip_buy | heavy_dip | profit_take | regular_buy) -> accumulating
 
 Usage:
-    almanak strat run -d strategies/incubating/mantle_mnt_accumulator --network anvil --once
+    almanak strat run -d strategies/demo/mantle_mnt_accumulator --network anvil --once
 """
 
 import logging
@@ -43,16 +44,16 @@ def _cfg(config, key: str, default: Any = None) -> Any:
 
 @almanak_strategy(
     name="mantle_mnt_accumulator",
-    description="Multi-signal MNT accumulation with Uniswap V3 on Mantle",
+    description="Multi-signal MNT accumulation with Agni Finance (Uniswap V3 fork) on Mantle",
     version="1.0.0",
     author="Almanak",
-    tags=["mantle", "accumulation", "rsi", "dip-buying", "enso", "aggregator"],
+    tags=["mantle", "accumulation", "rsi", "dip-buying", "agni"],
     supported_chains=["mantle"],
     supported_protocols=["uniswap_v3"],
     intent_types=["SWAP", "HOLD"],
 )
 class MantleMntAccumulator(IntentStrategy):
-    """Accumulates WMNT on Mantle via multi-signal RSI entries and Uniswap V3.
+    """Accumulates WMNT on Mantle via multi-signal RSI entries and Agni Finance (Uniswap V3 fork).
 
     Three buy tiers based on RSI conviction, plus periodic small buys and
     profit-taking on overbought conditions. Position size is capped to avoid

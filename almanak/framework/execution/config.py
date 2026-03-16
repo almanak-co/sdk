@@ -165,10 +165,9 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
         "linea",
         "plasma",
         "blast",
-        "mantle",
         "berachain",
         "sonic",
-    },  # Aggregator
+    },  # Aggregator (Mantle excluded: Enso client/gateway CHAIN_MAPPING do not support it)
     "traderjoe_v2": {"avalanche"},  # TraderJoe Liquidity Book V2 on Avalanche
     "spark": {"ethereum"},  # Spark is an Aave V3 fork on Ethereum
     "pancakeswap_v3": {"bsc", "ethereum", "arbitrum"},  # PancakeSwap V3 DEX

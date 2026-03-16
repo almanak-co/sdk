@@ -41,7 +41,7 @@ EVENT_TOPICS: dict[str, str] = {
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
 }
 
-# Uniswap V3 NonfungiblePositionManager addresses (same on all EVM chains)
+# Uniswap V3 NonfungiblePositionManager addresses (varies by chain; forks use different addresses)
 POSITION_MANAGER_ADDRESSES: dict[str, str] = {
     "ethereum": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
     "arbitrum": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
@@ -51,6 +51,7 @@ POSITION_MANAGER_ADDRESSES: dict[str, str] = {
     "avalanche": "0x655C406EBFa14EE2006250925e54ec43AD184f8B",
     "bnb": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
     "bsc": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
+    "mantle": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni Finance NonfungiblePositionManager
     "monad": "0x7197e214c0b767cfb76fb734ab638e2c192f4e53",
 }
 
