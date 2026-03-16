@@ -5862,10 +5862,26 @@ class IntentCompiler:
 
             slippage_bps = int(intent.max_slippage * Decimal("10000"))
 
-            # Pass raw 1:1 estimate as min_amount_out -- the Pendle SDK methods
-            # (build_swap_exact_token_for_pt, etc.) apply slippage_bps internally.
+            # The Pendle SDK methods apply slippage_bps internally on top of min_amount_out.
             # Previously this line also reduced by slippage, causing double-count (VIB-576).
-            min_amount_out = amount_in
+            #
+            # For BUY directions (token_to_pt, token_to_yt): PT/YT is cheaper than the
+            # underlying, so output >= input. A 1:1 estimate is a safe conservative minimum.
+            #
+            # For SELL directions (pt_to_token, yt_to_token): PT/YT trades at a DISCOUNT
+            # to the underlying (depends on implied yield + time to maturity). Output < input.
+            # A 1:1 estimate causes INSUFFICIENT_TOKEN_OUT reverts (VIB-1366).
+            #
+            # PT holds most of the underlying's value (typically 90-99%), so a 50% haircut
+            # is a safe floor even for long-dated maturities.
+            # YT represents only the remaining yield and can approach zero near expiry,
+            # so we use a 1% floor to avoid reverts on near-maturity YT sells.
+            if swap_type == "yt_to_token":
+                min_amount_out = amount_in // 100
+            elif swap_type == "pt_to_token":
+                min_amount_out = amount_in // 2
+            else:
+                min_amount_out = amount_in
 
             # Look up the token that mints SY for this market
             # For yield-bearing token markets (like fUSDT0), this is the yield-bearing token
@@ -6000,7 +6016,13 @@ class IntentCompiler:
                 amount_in = buffered_mint_sy_amount
                 token_mint_sy = None  # tokenIn now equals tokenMintSy
                 # Don't apply slippage here -- the SDK applies it internally (VIB-576).
-                min_amount_out = amount_in
+                # For sell directions, use discounted estimate (VIB-1366).
+                if swap_type == "yt_to_token":
+                    min_amount_out = amount_in // 100
+                elif swap_type == "pt_to_token":
+                    min_amount_out = amount_in // 2
+                else:
+                    min_amount_out = amount_in
 
             # Resolve token_out to an address
             # For buying PT/YT, token_out is the PT/YT (use PT_TOKEN_INFO/YT_TOKEN_INFO)

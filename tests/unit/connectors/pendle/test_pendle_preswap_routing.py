@@ -58,6 +58,29 @@ def compiler_arbitrum():
     return compiler
 
 
+@pytest.fixture
+def compiler_ethereum():
+    """Create an IntentCompiler for Ethereum with mocked dependencies."""
+    from almanak.framework.intents.compiler import IntentCompilerConfig
+
+    price_oracle = {
+        "sUSDe": Decimal("1.10"),
+        "SUSDE": Decimal("1.10"),
+        "USDC": Decimal("1.00"),
+    }
+    config = IntentCompilerConfig(allow_placeholder_prices=True)
+
+    compiler = IntentCompiler(
+        chain="ethereum",
+        wallet_address="0x" + "11" * 20,
+        rpc_url="http://localhost:8545",
+        price_oracle=price_oracle,
+        config=config,
+    )
+    compiler._query_allowance = MagicMock(return_value=0)
+    return compiler
+
+
 # ============================================================================
 # Direct mint path (no routing needed) -- regression test
 # ============================================================================
@@ -317,6 +340,120 @@ class TestSellingPTNoPreSwap:
         descriptions = [tx.get("description", "") for tx in txs]
         assert not any("Pre-swap" in d for d in descriptions), (
             f"Selling PT should not have pre-swap. Got: {descriptions}"
+        )
+
+
+# ============================================================================
+# Sell direction min_amount_out discount (VIB-1366)
+# ============================================================================
+
+
+class TestSellDirectionMinAmountDiscount:
+    """PT/YT sell directions should use a discounted min_amount_out (VIB-1366).
+
+    PT/YT trades at a discount to the underlying token. Using a 1:1 estimate
+    for min_amount_out causes all sell transactions to revert with
+    INSUFFICIENT_TOKEN_OUT because the actual output is less than the input.
+    """
+
+    def test_pt_sell_min_amount_out_is_discounted(self, compiler_arbitrum):
+        """PT-wstETH -> wstETH should use min_amount_out = amount_in // 2, not amount_in."""
+        from almanak.framework.connectors.pendle.adapter import PendleSwapParams
+
+        captured_params = []
+        original_init = PendleSwapParams.__init__
+
+        def capturing_init(self, **kwargs):
+            captured_params.append(kwargs)
+            original_init(self, **kwargs)
+
+        intent = SwapIntent(
+            from_token="PT-wstETH-25JUN2026",
+            to_token="wstETH",
+            amount=Decimal("1"),
+            max_slippage=Decimal("0.01"),
+            protocol="pendle",
+        )
+
+        with patch.object(PendleSwapParams, "__init__", capturing_init):
+            result = compiler_arbitrum.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS, f"Compilation failed: {result.error}"
+        assert len(captured_params) == 1, f"Expected 1 PendleSwapParams, got {len(captured_params)}"
+
+        params = captured_params[0]
+        assert params["swap_type"] == "pt_to_token"
+        assert params["min_amount_out"] == params["amount_in"] // 2, (
+            f"Sell direction min_amount_out should be amount_in // 2 "
+            f"(got {params['min_amount_out']}, expected {params['amount_in'] // 2})"
+        )
+
+    def test_pt_buy_min_amount_out_is_1to1(self, compiler_arbitrum):
+        """wstETH -> PT-wstETH should use min_amount_out = amount_in (1:1 estimate)."""
+        from almanak.framework.connectors.pendle.adapter import PendleSwapParams
+
+        captured_params = []
+        original_init = PendleSwapParams.__init__
+
+        def capturing_init(self, **kwargs):
+            captured_params.append(kwargs)
+            original_init(self, **kwargs)
+
+        intent = SwapIntent(
+            from_token="wstETH",
+            to_token="PT-wstETH-25JUN2026",
+            amount=Decimal("1"),
+            max_slippage=Decimal("0.01"),
+            protocol="pendle",
+        )
+
+        with patch.object(PendleSwapParams, "__init__", capturing_init):
+            result = compiler_arbitrum.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS, f"Compilation failed: {result.error}"
+        assert len(captured_params) == 1, f"Expected 1 PendleSwapParams, got {len(captured_params)}"
+
+        params = captured_params[0]
+        assert params["swap_type"] == "token_to_pt"
+        assert params["min_amount_out"] == params["amount_in"], (
+            f"Buy direction min_amount_out should equal amount_in "
+            f"(got {params['min_amount_out']}, expected {params['amount_in']})"
+        )
+
+    def test_yt_sell_min_amount_out_uses_deeper_discount(self, compiler_ethereum):
+        """YT-sUSDe -> sUSDe should use min_amount_out = amount_in // 100 (1% floor).
+
+        YT represents only yield, which can approach zero near maturity.
+        A 50% floor (used for PT) would still cause reverts for YT sells.
+        """
+        from almanak.framework.connectors.pendle.adapter import PendleSwapParams
+
+        captured_params = []
+        original_init = PendleSwapParams.__init__
+
+        def capturing_init(self, **kwargs):
+            captured_params.append(kwargs)
+            original_init(self, **kwargs)
+
+        intent = SwapIntent(
+            from_token="YT-sUSDe-7MAY2026",
+            to_token="sUSDe",
+            amount=Decimal("100"),
+            max_slippage=Decimal("0.01"),
+            protocol="pendle",
+        )
+
+        with patch.object(PendleSwapParams, "__init__", capturing_init):
+            result = compiler_ethereum.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS, f"Compilation failed: {result.error}"
+        assert len(captured_params) == 1, f"Expected 1 PendleSwapParams, got {len(captured_params)}"
+
+        params = captured_params[0]
+        assert params["swap_type"] == "yt_to_token"
+        assert params["min_amount_out"] == params["amount_in"] // 100, (
+            f"YT sell min_amount_out should be amount_in // 100 "
+            f"(got {params['min_amount_out']}, expected {params['amount_in'] // 100})"
         )
 
 
