@@ -84,7 +84,7 @@ GMX_V2_ADDRESSES: dict[str, dict[str, str]] = {
         "deposit_vault": "0x90c670825d0C62ede1c5ee9571d6d9a17A722DFF",
         "withdrawal_vault": "0xf5F30B10141E1F63FC11eD772931A8294a591996",
         "router": "0x820F5FfC5b525cD4d88Cd91aCf2c28F16530Cc68",
-        "event_emitter": "0x0000000000000000000000000000000000000000",  # TODO: Find Avalanche event emitter
+        "event_emitter": "0xDb17B211c34240B014ab6d61d4A31FA0C0e20c26",
     },
 }
 
