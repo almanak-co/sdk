@@ -826,10 +826,17 @@ def pnl_backtest(
         else:
             strategy_instance.strategy_id = fallback_id
 
-    # Create data provider
+    # Create data provider — enable persistent SQLite cache and resilient retry
+    # for backtest workloads to survive CoinGecko 429 rate limits on free tier
     click.echo()
     click.echo("Initializing CoinGecko data provider...")
-    data_provider = CoinGeckoDataProvider()
+    from ..backtesting.pnl.providers.coingecko import RetryConfig
+
+    data_provider = CoinGeckoDataProvider(
+        retry_config=RetryConfig.for_backtest(),
+        persistent_cache=True,
+        historical_cache_ttl=0,  # No TTL — historical prices are immutable
+    )
 
     # Initialize data cache for tracking stats
     cache: DataCache | None = None
@@ -890,7 +897,11 @@ def pnl_backtest(
 
         # Create fresh data provider — warm_cache_async closed the previous one
         # to avoid "Event loop is closed" errors from stale aiohttp sessions
-        data_provider = CoinGeckoDataProvider()
+        data_provider = CoinGeckoDataProvider(
+            retry_config=RetryConfig.for_backtest(),
+            persistent_cache=True,
+            historical_cache_ttl=0,
+        )
 
     # Create backtester
     backtester = PnLBacktester(

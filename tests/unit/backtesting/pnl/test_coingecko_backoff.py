@@ -33,17 +33,17 @@ from almanak.framework.backtesting.pnl.providers.coingecko import (
 class TestRateLimitStateBackoffCap:
     """Tests for backoff capping in RateLimitState."""
 
-    def test_backoff_capped_at_10s(self) -> None:
-        """Backoff should never exceed 10s (the default max)."""
+    def test_backoff_capped_at_30s(self) -> None:
+        """Backoff should never exceed 30s (the default max)."""
         state = RateLimitState()
         for _ in range(20):
             state.record_rate_limit()
-        assert state.backoff_seconds <= 10.0
+        assert state.backoff_seconds <= 30.0
 
     def test_backoff_sequence_is_capped(self) -> None:
-        """Verify the full backoff sequence: 1s, 2s, 4s, 8s, 10s, 10s, ..."""
+        """Verify the full backoff sequence: 1s, 2s, 4s, 8s, 16s, 30s, 30s, ..."""
         state = RateLimitState()
-        expected = [1.0, 2.0, 4.0, 8.0, 10.0, 10.0, 10.0]
+        expected = [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0]
         for i, expected_backoff in enumerate(expected):
             state.record_rate_limit()
             assert state.backoff_seconds == expected_backoff, (
@@ -64,7 +64,7 @@ class TestRateLimitStateBackoffCap:
         for i in range(10):
             state.record_rate_limit()
         assert state.consecutive_429s == 10
-        assert state.backoff_seconds == 10.0
+        assert state.backoff_seconds == 30.0
 
 
 class TestRateLimitStateReset:
@@ -116,7 +116,7 @@ class TestRateLimitStateReset:
         # Build up backoff to cap
         for _ in range(10):
             state.record_rate_limit()
-        assert state.backoff_seconds == 10.0
+        assert state.backoff_seconds == 30.0
 
         # Reset
         state.record_success()

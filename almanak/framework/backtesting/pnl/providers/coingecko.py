@@ -31,11 +31,13 @@ import asyncio
 import logging
 import os
 import random
+import sqlite3
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -129,6 +131,16 @@ class RetryConfig:
         delay = self.base_delay * (self.exponential_base ** (attempt - 1))
         return min(delay, self.max_delay)
 
+    @classmethod
+    def for_backtest(cls) -> "RetryConfig":
+        """Create a retry config tuned for sustained backtest workloads.
+
+        Free-tier CoinGecko allows ~10-30 req/min. Long backtests (14+ days)
+        can easily exceed this, so we need more retries with longer backoff
+        to ride out rate-limit windows without failing the entire backtest.
+        """
+        return cls(max_retries=6, base_delay=2.0, max_delay=30.0, exponential_base=2)
+
 
 @dataclass
 class RateLimitState:
@@ -139,13 +151,13 @@ class RateLimitState:
     consecutive_429s: int = 0
     requests_this_minute: int = 0
     minute_start: float = 0.0
-    max_backoff_seconds: float = 10.0
+    max_backoff_seconds: float = 30.0
 
     def record_rate_limit(self) -> None:
         """Record a rate limit hit and increase backoff."""
         self.last_429_time = time.time()
         self.consecutive_429s += 1
-        # Exponential backoff: 1s, 2s, 4s, 8s, max 10s (capped to prevent timeouts)
+        # Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 30s
         self.backoff_seconds = min(self.max_backoff_seconds, 2 ** (self.consecutive_429s - 1))
 
     def record_success(self) -> None:
@@ -240,6 +252,7 @@ class HistoricalPriceCache:
     Key features:
         - Cache key is (token, date_str) for date-level granularity
         - Default TTL of 1 hour (3600 seconds) for historical data
+        - Optional SQLite persistence (survives process restarts)
         - Statistics tracking for monitoring cache hit rates
         - Cache warming support for pre-fetching date ranges
 
@@ -249,18 +262,72 @@ class HistoricalPriceCache:
         price = cache.get("WETH", datetime(2024, 1, 15))
         stats = cache.get_stats()
         print(f"Cache hit rate: {stats.hit_rate:.1f}%")
+
+    Persistent mode:
+        cache = HistoricalPriceCache(ttl_seconds=0, persistent=True)
+        # Data survives across backtest runs — zero API calls on rerun
     """
 
-    def __init__(self, ttl_seconds: int = 3600) -> None:
+    _DEFAULT_DB_NAME = "historical_prices.db"
+
+    def __init__(
+        self,
+        ttl_seconds: int = 3600,
+        persistent: bool = False,
+        db_path: str | None = None,
+    ) -> None:
         """Initialize the historical price cache.
 
         Args:
             ttl_seconds: Time-to-live for cache entries in seconds.
-                        Default 3600 (1 hour) for historical data.
+                        Default 3600 (1 hour). Use 0 to disable TTL
+                        (recommended for persistent backtesting cache since
+                        historical prices are immutable).
+            persistent: If True, back the cache with SQLite for cross-run
+                       persistence. Default False (in-memory only).
+            db_path: Optional explicit path for the SQLite database.
+                    Only used when persistent=True. Default:
+                    ~/.almanak/cache/historical_prices.db
         """
         self._ttl_seconds = ttl_seconds
         self._cache: dict[str, HistoricalCacheEntry] = {}
         self._stats = HistoricalCacheStats()
+        self._persistent = persistent
+        self._db: sqlite3.Connection | None = None
+
+        if persistent:
+            self._init_db(db_path)
+
+    def _init_db(self, db_path: str | None = None) -> None:
+        """Initialize SQLite database for persistent cache.
+
+        Falls back to in-memory-only mode if the database cannot be opened
+        (e.g. read-only filesystem, missing HOME in containers).
+        """
+        try:
+            if db_path is None:
+                default_dir = Path.home() / ".almanak" / "cache"
+                default_dir.mkdir(parents=True, exist_ok=True)
+                db_path = str(default_dir / self._DEFAULT_DB_NAME)
+
+            self._db = sqlite3.connect(db_path)
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS historical_prices (
+                    token TEXT NOT NULL,
+                    date_str TEXT NOT NULL,
+                    price TEXT NOT NULL,
+                    cached_at TEXT NOT NULL,
+                    PRIMARY KEY (token, date_str)
+                )
+                """
+            )
+            self._db.commit()
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            logger.warning("Could not open persistent cache (%s), falling back to in-memory only", exc)
+            self._db = None
+            self._persistent = False
 
     def _make_key(self, token: str, timestamp: datetime) -> str:
         """Create cache key from token and timestamp.
@@ -289,23 +356,48 @@ class HistoricalPriceCache:
         """
         self._stats.total_requests += 1
         key = self._make_key(token, timestamp)
+
+        # Check in-memory first
         entry = self._cache.get(key)
+        if entry is not None:
+            if self._ttl_seconds > 0:
+                age_seconds = (datetime.now(UTC) - entry.cached_at).total_seconds()
+                if age_seconds > self._ttl_seconds:
+                    del self._cache[key]
+                    self._stats.cache_entries = len(self._cache)
+                    # Fall through to check persistent store (another run may
+                    # have refreshed the key in SQLite)
+                else:
+                    self._stats.cache_hits += 1
+                    return entry.price
+            else:
+                self._stats.cache_hits += 1
+                return entry.price
 
-        if entry is None:
-            self._stats.cache_misses += 1
-            return None
+        # Check persistent store
+        if self._persistent and self._db is not None:
+            token_upper = token.upper()
+            date_str = timestamp.strftime("%Y-%m-%d")
+            row = self._db.execute(
+                "SELECT price, cached_at FROM historical_prices WHERE token = ? AND date_str = ?",
+                (token_upper, date_str),
+            ).fetchone()
+            if row is not None:
+                price = Decimal(row[0])
+                cached_at = datetime.fromisoformat(row[1])
+                if self._ttl_seconds > 0:
+                    age_seconds = (datetime.now(UTC) - cached_at).total_seconds()
+                    if age_seconds > self._ttl_seconds:
+                        self._stats.cache_misses += 1
+                        return None
+                # Promote to in-memory cache
+                self._cache[key] = HistoricalCacheEntry(price=price, cached_at=cached_at)
+                self._stats.cache_entries = len(self._cache)
+                self._stats.cache_hits += 1
+                return price
 
-        # Check if expired
-        age_seconds = (datetime.now(UTC) - entry.cached_at).total_seconds()
-        if age_seconds > self._ttl_seconds:
-            self._stats.cache_misses += 1
-            # Remove expired entry
-            del self._cache[key]
-            self._stats.cache_entries = len(self._cache)
-            return None
-
-        self._stats.cache_hits += 1
-        return entry.price
+        self._stats.cache_misses += 1
+        return None
 
     def set(self, token: str, timestamp: datetime, price: Decimal) -> None:
         """Store a price in the cache.
@@ -316,11 +408,19 @@ class HistoricalPriceCache:
             price: Price to cache
         """
         key = self._make_key(token, timestamp)
-        self._cache[key] = HistoricalCacheEntry(
-            price=price,
-            cached_at=datetime.now(UTC),
-        )
+        now = datetime.now(UTC)
+        self._cache[key] = HistoricalCacheEntry(price=price, cached_at=now)
         self._stats.cache_entries = len(self._cache)
+
+        if self._persistent and self._db is not None:
+            token_upper = token.upper()
+            date_str = timestamp.strftime("%Y-%m-%d")
+            self._db.execute(
+                """INSERT OR REPLACE INTO historical_prices (token, date_str, price, cached_at)
+                   VALUES (?, ?, ?, ?)""",
+                (token_upper, date_str, str(price), now.isoformat()),
+            )
+            self._db.commit()
 
     def get_stats(self) -> HistoricalCacheStats:
         """Get current cache statistics.
@@ -343,11 +443,25 @@ class HistoricalPriceCache:
         """Clear all cached data and reset statistics."""
         self._cache.clear()
         self._stats = HistoricalCacheStats()
+        if self._persistent and self._db is not None:
+            self._db.execute("DELETE FROM historical_prices")
+            self._db.commit()
 
     @property
     def ttl_seconds(self) -> int:
         """Get the cache TTL in seconds."""
         return self._ttl_seconds
+
+    @property
+    def persistent(self) -> bool:
+        """Whether this cache is using SQLite persistence."""
+        return self._persistent
+
+    def close(self) -> None:
+        """Close the SQLite connection if persistent."""
+        if self._db is not None:
+            self._db.close()
+            self._db = None
 
     def __len__(self) -> int:
         """Return number of entries in cache."""
@@ -458,6 +572,7 @@ class CoinGeckoDataProvider:
         retry_config: RetryConfig | None = None,
         historical_cache_ttl: int = 3600,  # 1 hour default for historical data
         data_config: BacktestDataConfig | None = None,
+        persistent_cache: bool = False,
     ) -> None:
         """Initialize the CoinGecko data provider.
 
@@ -472,9 +587,14 @@ class CoinGeckoDataProvider:
             historical_cache_ttl: Time-to-live for historical price cache in seconds.
                                   Default 3600 (1 hour). Historical data is immutable,
                                   so longer TTL reduces API calls dramatically.
+                                  Use 0 with persistent_cache=True to cache forever.
             data_config: Optional BacktestDataConfig for configuring rate limits.
                          If provided, uses coingecko_rate_limit_per_minute from config.
                          If not provided, uses default rates (10/min free, 500/min pro).
+            persistent_cache: If True, back the historical price cache with SQLite
+                            at ~/.almanak/cache/historical_prices.db. Cached prices
+                            survive across process restarts, eliminating redundant
+                            API calls on repeated backtests.
         """
         self._api_key = api_key or os.environ.get("COINGECKO_API_KEY", "")
         self._request_timeout = request_timeout
@@ -522,7 +642,10 @@ class CoinGeckoDataProvider:
 
         # Historical price cache (persistent across calls, keyed by token+date)
         # Uses 1-hour TTL by default since historical data is immutable
-        self._historical_cache = HistoricalPriceCache(ttl_seconds=historical_cache_ttl)
+        self._historical_cache = HistoricalPriceCache(
+            ttl_seconds=historical_cache_ttl,
+            persistent=persistent_cache,
+        )
 
         # HTTP session (created on first request)
         self._session: aiohttp.ClientSession | None = None
@@ -555,10 +678,11 @@ class CoinGeckoDataProvider:
         return self._session
 
     async def close(self) -> None:
-        """Close the HTTP session."""
+        """Close the HTTP session and persistent cache."""
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+        self._historical_cache.close()
 
     def _resolve_token_id(self, token: str) -> str | None:
         """Resolve token symbol to CoinGecko ID."""

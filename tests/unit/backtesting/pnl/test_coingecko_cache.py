@@ -4,20 +4,24 @@ This module tests the aggressive caching feature for the CoinGeckoDataProvider,
 including:
 - HistoricalCacheStats dataclass
 - HistoricalPriceCache with (token, date) keys and 1-hour TTL
+- Persistent SQLite-backed cache for cross-run persistence
 - Cache warming with pre-fetch capability
 - Cache hit rate logging and statistics
 - Target: >90% cache hit rate for repeated backtests
 """
 
 import logging
-from datetime import UTC, datetime
+import tempfile
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from almanak.framework.backtesting.pnl.providers.coingecko import (
     CoinGeckoDataProvider,
+    HistoricalCacheEntry,
     HistoricalCacheStats,
     HistoricalPriceCache,
     RetryConfig,
@@ -234,15 +238,30 @@ class TestHistoricalPriceCache:
 
     def test_expired_entry_returns_none(self):
         """Test expired entries are not returned."""
-        # Use very short TTL for testing
-        cache = HistoricalPriceCache(ttl_seconds=0)  # Immediate expiry
+        cache = HistoricalPriceCache(ttl_seconds=1)
         timestamp = datetime(2024, 1, 15, tzinfo=UTC)
 
         cache.set("WETH", timestamp, Decimal("2500.00"))
 
-        # Entry should be expired immediately
+        # Force expiry without sleeping
+        key = cache._make_key("WETH", timestamp)
+        cache._cache[key] = HistoricalCacheEntry(
+            price=Decimal("2500.00"),
+            cached_at=datetime.now(UTC) - timedelta(seconds=2),
+        )
+
+        # Entry should be expired
         result = cache.get("WETH", timestamp)
         assert result is None
+
+    def test_ttl_zero_means_no_expiry(self):
+        """TTL=0 means cache forever (no expiry), useful for immutable historical data."""
+        cache = HistoricalPriceCache(ttl_seconds=0)
+        timestamp = datetime(2024, 1, 15, tzinfo=UTC)
+
+        cache.set("WETH", timestamp, Decimal("2500.00"))
+        result = cache.get("WETH", timestamp)
+        assert result == Decimal("2500.00")
 
     def test_hit_rate_target_achievable(self):
         """Test that >90% cache hit rate is achievable with caching."""
@@ -631,3 +650,117 @@ class TestCacheWarming:
             assert stats["hit_rate_percent"] > 90.0  # Explicit check for >90%
 
         await provider.close()
+
+
+class TestPersistentHistoricalPriceCache:
+    """Tests for SQLite-backed persistent HistoricalPriceCache."""
+
+    def test_persistent_cache_survives_recreation(self):
+        """Data written to persistent cache is available in a new instance."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "test_prices.db")
+            ts = datetime(2024, 1, 15, tzinfo=UTC)
+
+            # Write to first instance
+            cache1 = HistoricalPriceCache(ttl_seconds=0, persistent=True, db_path=db_path)
+            cache1.set("WETH", ts, Decimal("2500.00"))
+            cache1.close()
+
+            # Read from a fresh instance (simulates new process)
+            cache2 = HistoricalPriceCache(ttl_seconds=0, persistent=True, db_path=db_path)
+            price = cache2.get("WETH", ts)
+            cache2.close()
+
+            assert price == Decimal("2500.00")
+
+    def test_persistent_cache_stats_track_disk_hits(self):
+        """Disk-promoted entries count as cache hits in stats."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "test_prices.db")
+            ts = datetime(2024, 1, 15, tzinfo=UTC)
+
+            cache1 = HistoricalPriceCache(ttl_seconds=0, persistent=True, db_path=db_path)
+            cache1.set("WETH", ts, Decimal("2500.00"))
+            cache1.close()
+
+            cache2 = HistoricalPriceCache(ttl_seconds=0, persistent=True, db_path=db_path)
+            cache2.get("WETH", ts)
+
+            stats = cache2.get_stats()
+            assert stats.cache_hits == 1
+            assert stats.cache_misses == 0
+            cache2.close()
+
+    def test_persistent_cache_clear_removes_db_rows(self):
+        """clear() removes both in-memory and SQLite data."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "test_prices.db")
+            ts = datetime(2024, 1, 15, tzinfo=UTC)
+
+            cache = HistoricalPriceCache(ttl_seconds=0, persistent=True, db_path=db_path)
+            cache.set("WETH", ts, Decimal("2500.00"))
+            cache.clear()
+            cache.close()
+
+            # Even a new instance should see nothing
+            cache2 = HistoricalPriceCache(ttl_seconds=0, persistent=True, db_path=db_path)
+            assert cache2.get("WETH", ts) is None
+            cache2.close()
+
+    def test_persistent_flag_property(self):
+        """persistent property reports storage mode."""
+        assert HistoricalPriceCache().persistent is False
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "test.db")
+            cache = HistoricalPriceCache(persistent=True, db_path=db_path)
+            assert cache.persistent is True
+            cache.close()
+
+    def test_non_persistent_cache_does_not_create_db(self):
+        """Non-persistent cache should not touch the filesystem."""
+        cache = HistoricalPriceCache()
+        assert cache._db is None
+
+    def test_close_releases_db_connection(self):
+        """close() should release the SQLite connection."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "test_close.db")
+            cache = HistoricalPriceCache(ttl_seconds=0, persistent=True, db_path=db_path)
+            ts = datetime(2024, 1, 15, tzinfo=UTC)
+            cache.set("WETH", ts, Decimal("2500.00"))
+            assert cache._db is not None
+
+            cache.close()
+            assert cache._db is None
+
+    def test_close_idempotent_on_non_persistent(self):
+        """close() on non-persistent cache is a no-op."""
+        cache = HistoricalPriceCache()
+        cache.close()  # should not raise
+        assert cache._db is None
+
+
+class TestRetryConfigForBacktest:
+    """Tests for RetryConfig.for_backtest() factory."""
+
+    def test_more_retries_than_default(self):
+        """Backtest config should have more retries than default."""
+        default = RetryConfig()
+        backtest = RetryConfig.for_backtest()
+        assert backtest.max_retries > default.max_retries
+
+    def test_longer_max_delay_than_default(self):
+        """Backtest config should tolerate longer backoff delays."""
+        default = RetryConfig()
+        backtest = RetryConfig.for_backtest()
+        assert backtest.max_delay > default.max_delay
+
+    def test_backoff_sequence_reasonable(self):
+        """Backoff sequence should ramp up then cap."""
+        cfg = RetryConfig.for_backtest()
+        delays = [cfg.get_delay_for_attempt(i) for i in range(1, cfg.max_retries + 1)]
+        # Each delay should be >= previous (monotonically increasing until cap)
+        for i in range(1, len(delays)):
+            assert delays[i] >= delays[i - 1]
+        # Last delay should be capped at max_delay
+        assert delays[-1] <= cfg.max_delay
