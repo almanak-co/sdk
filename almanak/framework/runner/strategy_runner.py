@@ -130,14 +130,13 @@ def _extract_tokens_from_intent(intent: "AnyIntent") -> list[str]:
 
     Returns a list of token symbols mentioned in the intent. Used to
     pre-populate the price cache when decide() doesn't call market.price().
+
+    Delegates to the shared ``extract_token_symbols`` utility which handles
+    all token fields and recurses into ``callback_intents`` for FlashLoanIntent.
     """
-    tokens: list[str] = []
-    # SwapIntent
-    for attr in ("from_token", "to_token", "token_in", "token_out", "token"):
-        val = getattr(intent, attr, None)
-        if val and isinstance(val, str) and len(val) < 20:  # symbols only, not addresses
-            tokens.append(val)
-    return list(dict.fromkeys(tokens))  # dedupe preserving order
+    from almanak.framework.runner.token_extraction import extract_token_symbols
+
+    return extract_token_symbols(intent)
 
 
 def _format_intent_for_log(intent: "AnyIntent") -> str:

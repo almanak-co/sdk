@@ -210,14 +210,12 @@ class IntentExecutionService:
         compute accurate slippage amounts. This extracts token symbols from
         the intent params and queries the gateway MarketService.
         """
+        # Extract token symbols from intent params using the shared utility
+        # (handles all token fields + callback_intents recursion)
+        from almanak.framework.runner.token_extraction import extract_token_symbols
         from almanak.gateway.proto import gateway_pb2
 
-        # Extract token symbols from intent params
-        symbols: set[str] = set()
-        for key in ("from_token", "to_token", "token", "token_a", "token_b", "borrow_token", "collateral_token"):
-            val = intent_params.get(key)
-            if val and not val.startswith("0x"):
-                symbols.add(val)
+        symbols = set(extract_token_symbols(intent_params))
 
         price_map: dict[str, str] = {}
         for symbol in symbols:
