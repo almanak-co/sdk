@@ -1,0 +1,13 @@
+{
+    "trade_size_usd": "3",
+    "rsi_oversold": 30,
+    "rsi_overbought": 70,
+    "max_slippage_pct": 1.0,
+    "base_token": "WBERA",
+    "quote_token": "HONEY",
+    "anvil_funding": {
+        "BERA": 100,
+        "WBERA": 10,
+        "HONEY": 10000
+    }
+}
