@@ -193,6 +193,72 @@ UNISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
 }
 
 # =============================================================================
+# Uniswap V4
+# =============================================================================
+
+# Uniswap V4 uses a singleton PoolManager deployed via CREATE2 (same address across chains).
+# The Universal Router V2 supports both V3 and V4 swaps.
+# V4SwapRouter is the dedicated V4 swap router.
+UNISWAP_V4: dict[str, dict[str, str]] = {
+    "ethereum": {
+        "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "position_manager": "0xbD216513d74C8cf14cf4747e6AaE6fDf64e83B24",
+        "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+        "v4_swap_router": "0x3a9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52f0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7fFa62d1F57A97A4A4A35C6DDf1f9e36bCbBBE8a",
+    },
+    "arbitrum": {
+        "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "position_manager": "0xbD216513d74C8cf14cf4747e6AaE6fDf64e83B24",
+        "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+        "v4_swap_router": "0x3a9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52f0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7fFa62d1F57A97A4A4A35C6DDf1f9e36bCbBBE8a",
+    },
+    "base": {
+        "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "position_manager": "0xbD216513d74C8cf14cf4747e6AaE6fDf64e83B24",
+        "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+        "v4_swap_router": "0x3a9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52f0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7fFa62d1F57A97A4A4A35C6DDf1f9e36bCbBBE8a",
+    },
+    "optimism": {
+        "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "position_manager": "0xbD216513d74C8cf14cf4747e6AaE6fDf64e83B24",
+        "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+        "v4_swap_router": "0x3a9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52f0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7fFa62d1F57A97A4A4A35C6DDf1f9e36bCbBBE8a",
+    },
+    "polygon": {
+        "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "position_manager": "0xbD216513d74C8cf14cf4747e6AaE6fDf64e83B24",
+        "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+        "v4_swap_router": "0x3a9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52f0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7fFa62d1F57A97A4A4A35C6DDf1f9e36bCbBBE8a",
+    },
+    "avalanche": {
+        "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "position_manager": "0xbD216513d74C8cf14cf4747e6AaE6fDf64e83B24",
+        "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+        "v4_swap_router": "0x3a9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52f0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7fFa62d1F57A97A4A4A35C6DDf1f9e36bCbBBE8a",
+    },
+    "bsc": {
+        "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "position_manager": "0xbD216513d74C8cf14cf4747e6AaE6fDf64e83B24",
+        "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+        "v4_swap_router": "0x3a9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52f0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7fFa62d1F57A97A4A4A35C6DDf1f9e36bCbBBE8a",
+    },
+}
+
+# =============================================================================
 # PancakeSwap V3
 # =============================================================================
 
