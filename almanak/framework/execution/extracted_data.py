@@ -52,6 +52,15 @@ class SwapAmounts:
     token_in: str | None = None
     token_out: str | None = None
 
+    # Aliases: amount_in_human / amount_out_human (VIB-295)
+    # Strategy authors naturally reach for _human instead of _decimal.
+    def __getattr__(self, name: str) -> Any:
+        if name == "amount_in_human":
+            return self.amount_in_decimal
+        if name == "amount_out_human":
+            return self.amount_out_decimal
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
