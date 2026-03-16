@@ -310,6 +310,7 @@ if TYPE_CHECKING:
     from .rates.history import FundingRateSnapshot, LendingRateSnapshot, RateHistoryReader
     from .risk.metrics import PortfolioRisk, PortfolioRiskCalculator, RollingSharpeResult
     from .routing.router import DataRouter
+    from .staking.solana_lst_provider import LSTExchangeRate, SolanaLSTProvider
     from .volatility.realized import RealizedVolatilityCalculator, VolatilityResult, VolConeResult
     from .wallet_activity import WalletActivityProvider
     from .yields.aggregator import YieldAggregator, YieldOpportunity
@@ -547,6 +548,15 @@ class YieldOpportunitiesUnavailableError(MarketSnapshotError):
         super().__init__(f"Yield opportunities unavailable for {token}: {reason}")
 
 
+class LSTDataUnavailableError(MarketSnapshotError):
+    """Raised when Solana LST exchange rate or APY data cannot be retrieved."""
+
+    def __init__(self, symbol: str, reason: str) -> None:
+        self.symbol = symbol
+        self.reason = reason
+        super().__init__(f"LST data unavailable for {symbol}: {reason}")
+
+
 # =============================================================================
 # RSI Calculator Protocol
 # =============================================================================
@@ -628,6 +638,7 @@ class MarketSnapshot:
         risk_calculator: Optional["PortfolioRiskCalculator"] = None,
         pool_analytics_reader: Optional["PoolAnalyticsReader"] = None,
         yield_aggregator: Optional["YieldAggregator"] = None,
+        solana_lst_provider: Optional["SolanaLSTProvider"] = None,
         wallet_activity_provider: Optional["WalletActivityProvider"] = None,
         gateway_client: Optional["GatewayClient"] = None,
     ) -> None:
@@ -664,6 +675,7 @@ class MarketSnapshot:
             risk_calculator: PortfolioRiskCalculator for portfolio risk metrics
             pool_analytics_reader: PoolAnalyticsReader for pool TVL, volume, fee APR
             yield_aggregator: YieldAggregator for cross-protocol yield comparison
+            solana_lst_provider: SolanaLSTProvider for Solana LST exchange rates and APY
         """
         self._chain = chain
         self._wallet_address = wallet_address
@@ -693,6 +705,7 @@ class MarketSnapshot:
         self._risk_calculator = risk_calculator
         self._pool_analytics_reader = pool_analytics_reader
         self._yield_aggregator = yield_aggregator
+        self._solana_lst_provider = solana_lst_provider
         self._wallet_activity_provider = wallet_activity_provider
         self._gateway_client = gateway_client
 
@@ -3747,6 +3760,54 @@ class MarketSnapshot:
                 f"Failed to fetch yield opportunities: {e}",
             ) from e
 
+    def lst_exchange_rate(self, symbol: str) -> "LSTExchangeRate":
+        """Get Solana LST exchange rate vs SOL.
+
+        Args:
+            symbol: LST symbol (e.g. "jitoSOL", "mSOL", "bSOL", "INF").
+                Case-insensitive aliases are supported.
+
+        Returns:
+            LSTExchangeRate with rate vs SOL and APY data.
+
+        Raises:
+            LSTDataUnavailableError: If data cannot be retrieved.
+            ValueError: If no LST provider is configured or symbol is unknown.
+        """
+        if self._solana_lst_provider is None:
+            raise ValueError("No Solana LST provider configured for MarketSnapshot")
+
+        try:
+            return self._run_async(self._solana_lst_provider.get_exchange_rate(symbol))
+        except ValueError:
+            raise
+        except Exception as e:
+            raise LSTDataUnavailableError(
+                symbol,
+                f"Failed to fetch LST exchange rate: {e}",
+            ) from e
+
+    def lst_all_rates(self) -> dict[str, "LSTExchangeRate"]:
+        """Get exchange rates for all tracked Solana LSTs.
+
+        Returns:
+            Dict mapping symbol -> LSTExchangeRate.
+
+        Raises:
+            LSTDataUnavailableError: If data cannot be retrieved.
+            ValueError: If no LST provider is configured.
+        """
+        if self._solana_lst_provider is None:
+            raise ValueError("No Solana LST provider configured for MarketSnapshot")
+
+        try:
+            return self._run_async(self._solana_lst_provider.get_all_rates())
+        except Exception as e:
+            raise LSTDataUnavailableError(
+                "all",
+                f"Failed to fetch LST rates: {e}",
+            ) from e
+
     def _fetch_candles_for_vol(
         self,
         token: str,
@@ -3943,4 +4004,5 @@ __all__ = [
     "PortfolioRiskUnavailableError",
     "RollingSharpeUnavailableError",
     "YieldOpportunitiesUnavailableError",
+    "LSTDataUnavailableError",
 ]

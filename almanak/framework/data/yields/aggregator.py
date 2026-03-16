@@ -49,6 +49,7 @@ _CHAIN_TO_LLAMA_DISPLAY: dict[str, str] = {
     "avalanche": "Avalanche",
     "bsc": "BSC",
     "sonic": "Sonic",
+    "solana": "Solana",
 }
 
 # Protocol -> DeFi Llama project slug
@@ -60,6 +61,11 @@ _PROTOCOL_TO_LLAMA: dict[str, str] = {
     "aerodrome": "aerodrome-v2",
     "lido": "lido",
     "pancakeswap_v3": "pancakeswap-amm-v3",
+    "jito": "jito",
+    "marinade": "marinade-finance",
+    "sanctum": "sanctum-infinity",
+    "kamino": "kamino-lending",
+    "raydium": "raydium",
 }
 
 # DeFi Llama project slug -> our yield type classification
@@ -75,6 +81,11 @@ _PROJECT_TYPE: dict[str, str] = {
     "lido": "staking",
     "rocket-pool": "staking",
     "frax-ether": "staking",
+    "jito": "staking",
+    "marinade-finance": "staking",
+    "sanctum-infinity": "staking",
+    "kamino-lending": "lending",
+    "raydium": "lp",
 }
 
 

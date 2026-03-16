@@ -128,6 +128,7 @@ from .market_snapshot import (
     LendingRateHistoryUnavailableError,
     LendingRateUnavailableError,
     LiquidityDepthUnavailableError,
+    LSTDataUnavailableError,
     MarketSnapshot,
     MarketSnapshotError,
     PoolAnalyticsUnavailableError,
@@ -230,6 +231,13 @@ from .routing import (
     QuotaConfig,
 )
 
+# --- Quant Data Layer: Staking ---
+from .staking import (
+    LSTExchangeRate,
+    LSTProtocol,
+    SolanaLSTProvider,
+)
+
 # --- Quant Data Layer: Volatility ---
 from .volatility import (
     RealizedVolatilityCalculator,
@@ -294,6 +302,7 @@ __all__ = [
     "PortfolioRiskUnavailableError",
     "RollingSharpeUnavailableError",
     "YieldOpportunitiesUnavailableError",
+    "LSTDataUnavailableError",
     # Quant Data Layer - Core models
     "DataEnvelope",
     "DataMeta",
@@ -331,6 +340,10 @@ __all__ = [
     "RollingSharpeEntry",
     "RollingSharpeResult",
     "VaRMethod",
+    # Quant Data Layer - Staking
+    "SolanaLSTProvider",
+    "LSTExchangeRate",
+    "LSTProtocol",
     # Quant Data Layer - Yield comparison
     "YieldOpportunity",
     "YieldAggregator",
