@@ -1,0 +1,14 @@
+{
+    "trade_size_usd": 3,
+    "rsi_period": 14,
+    "rsi_oversold": 40,
+    "rsi_overbought": 70,
+    "max_slippage_bps": 100,
+    "base_token": "WETH",
+    "quote_token": "USDC",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}
