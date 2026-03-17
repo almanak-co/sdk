@@ -1,13 +1,12 @@
 """Mantle Swap Demo Strategy.
 
 A simple RSI-based swap strategy running on Mantle (L2). Demonstrates how to
-build and run a strategy on the Mantle chain using Agni Finance (a Uniswap V3
-fork and the primary V3 DEX on Mantle).
+build and run a strategy on the Mantle chain using Uniswap V3.
 
 What this strategy does:
     1. Monitors RSI of WETH on Mantle
-    2. RSI < oversold  -> buys WETH with USDT via Agni Finance
-    3. RSI > overbought -> sells WETH for USDT via Agni Finance
+    2. RSI < oversold  -> buys WETH with USDT via Uniswap V3
+    3. RSI > overbought -> sells WETH for USDT via Uniswap V3
     4. Otherwise -> holds
 
 Mantle specifics:
@@ -15,7 +14,6 @@ Mantle specifics:
     - WETH is bridged at 0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111
     - USDT is the primary stablecoin with deep liquidity
     - Low gas fees (OP Stack L2)
-    - Agni Finance is a Uniswap V3 fork (same ABI, different contract addresses)
 
 Usage:
     almanak strat run -d strategies/demo/mantle_swap --network anvil --once
@@ -35,10 +33,10 @@ logger = logging.getLogger(__name__)
 
 @almanak_strategy(
     name="demo_mantle_swap",
-    description="Simple RSI swap strategy on Mantle L2 via Agni Finance (Uniswap V3 fork)",
+    description="Simple RSI swap strategy on Mantle L2 via Uniswap V3",
     version="1.0.0",
     author="Almanak",
-    tags=["demo", "mantle", "swap", "rsi", "agni"],
+    tags=["demo", "mantle", "swap", "rsi", "uniswap"],
     supported_chains=["mantle"],
     supported_protocols=["uniswap_v3"],
     intent_types=["SWAP", "HOLD"],
@@ -157,14 +155,6 @@ class MantleSwapStrategy(IntentStrategy):
 
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
-        value_usd = Decimal("0")
-        try:
-            market = self.create_market_snapshot()
-            base_bal = market.balance(self.base_token)
-            value_usd = base_bal.balance_usd
-        except Exception:
-            logger.warning("Failed to query balance for teardown valuation, defaulting to $0")
-
         return TeardownPositionSummary(
             strategy_id=getattr(self, "strategy_id", "demo_mantle_swap"),
             timestamp=datetime.now(UTC),
@@ -174,7 +164,7 @@ class MantleSwapStrategy(IntentStrategy):
                     position_id="mantle_swap_token_0",
                     chain=self.chain,
                     protocol="uniswap_v3",
-                    value_usd=value_usd,
+                    value_usd=self.trade_size_usd,
                     details={"asset": self.base_token},
                 )
             ],

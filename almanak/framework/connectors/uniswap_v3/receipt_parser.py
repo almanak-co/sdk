@@ -51,7 +51,7 @@ POSITION_MANAGER_ADDRESSES: dict[str, str] = {
     "avalanche": "0x655C406EBFa14EE2006250925e54ec43AD184f8B",
     "bnb": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
     "bsc": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
-    "mantle": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni Finance NonfungiblePositionManager
+    "mantle": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni Finance fork
     "monad": "0x7197e214c0b767cfb76fb734ab638e2c192f4e53",
 }
 
