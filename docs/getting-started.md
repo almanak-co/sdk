@@ -287,7 +287,7 @@ almanak strat permissions -d strategies/demo/uniswap_rsi
 almanak strat permissions --chain base
 
 # Write to file
-almanak strat permissions -o manifest.json
+almanak strat permissions -o permissions.json
 ```
 
 The command reads `supported_protocols` and `intent_types` from your `@almanak_strategy` decorator, compiles synthetic intents through the real compiler, and extracts the minimum set of contract addresses and function selectors needed. The output is a JSON manifest you can apply to a Zodiac Roles module. If the strategy supports multiple chains, the output is a JSON array with one manifest per chain; use `--chain` to generate for a single chain.

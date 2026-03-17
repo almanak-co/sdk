@@ -46,8 +46,8 @@ logger = logging.getLogger(__name__)
     "--format",
     "output_format",
     type=click.Choice(["manifest", "zodiac"]),
-    default="manifest",
-    help="Output format: 'manifest' (SDK format) or 'zodiac' (Zodiac Roles Target[]).",
+    default="zodiac",
+    help="Output format: 'zodiac' (Zodiac Roles Target[], default) or 'manifest' (SDK format).",
 )
 def permissions(working_dir: str, chain: str | None, output: str | None, output_format: str) -> None:
     """Generate a Zodiac Roles permission manifest for a strategy.

@@ -44,7 +44,7 @@ See the [Gateway](#gateway) section for details.
 **IMPORTANT — Zodiac permissions auto-generation**: Whenever you create a new
 strategy or modify `strategy.py` in a way that changes protocols, intent types,
 tokens, or chains, you MUST regenerate the Zodiac Roles permission manifest
-by running `almanak strat permissions --format zodiac -o zodiac_permissions.json`
+by running `almanak strat permissions -o permissions.json`
 from the strategy directory. This ensures the Safe wallet permissions stay in
 sync with the strategy's actual contract interactions. Always do this as a
 final step after writing or editing strategy code.
@@ -784,6 +784,7 @@ the `@almanak_strategy` decorator on your strategy class.
 
 ```json
 {
+    "chain": "arbitrum",
     "base_token": "WETH",
     "quote_token": "USDC",
     "rsi_period": 14,
@@ -798,9 +799,9 @@ the `@almanak_strategy` decorator on your strategy class.
 }
 ```
 
-No required fields - all fields are strategy-specific and accessed via `self.config.get(key, default)`.
-The default execution chain comes from `default_chain` in the `@almanak_strategy` decorator
-(falls back to `supported_chains[0]` if omitted).
+The `chain` field sets the execution chain for the strategy and is read by the platform at deployment
+time. It should match one of the values in `supported_chains` from the `@almanak_strategy` decorator.
+All other fields are strategy-specific and accessed via `self.config.get(key, default)`.
 
 ### .env (local development only)
 
@@ -974,14 +975,13 @@ almanak strat teardown execute        # Execute teardown
 ### Permissions
 
 ```bash
-almanak strat permissions                          # SDK manifest format (default)
-almanak strat permissions --format zodiac           # Zodiac Roles Target[] format
-almanak strat permissions --format zodiac -o zodiac_permissions.json  # Write to file
+almanak strat permissions                          # Zodiac Roles Target[] format (default)
+almanak strat permissions -o permissions.json      # Write to file
 almanak strat permissions -d path/to/strat          # Explicit directory
 almanak strat permissions --chain base              # Override chain
 ```
 
-Generates a JSON manifest of minimum-privilege contract permissions needed for Safe wallet deployments with Zodiac Roles. Reads `supported_protocols` and `intent_types` from `@almanak_strategy` metadata and compiles synthetic intents to discover required contract addresses and function selectors. Non-EVM chains are automatically skipped when using `--format zodiac`.
+Generates a JSON manifest of minimum-privilege contract permissions needed for Safe wallet deployments with Zodiac Roles. Reads `supported_protocols` and `intent_types` from `@almanak_strategy` metadata and compiles synthetic intents to discover required contract addresses and function selectors. Non-EVM chains are automatically skipped. The default output format is Zodiac Roles Target[].
 
 ### Gateway
 
@@ -1040,13 +1040,13 @@ Regenerate permissions whenever you:
 
 ```bash
 # Generate Zodiac permissions and write to file (recommended)
-almanak strat permissions --format zodiac -o zodiac_permissions.json
+almanak strat permissions -o permissions.json
 
 # Preview on stdout
-almanak strat permissions --format zodiac
+almanak strat permissions
 
 # Single chain override
-almanak strat permissions --format zodiac --chain arbitrum -o zodiac_permissions.json
+almanak strat permissions --chain arbitrum -o permissions.json
 ```
 
 ### Output Format
@@ -1408,7 +1408,7 @@ Before deploying to mainnet:
 - [ ] Run `--dry-run --once` on mainnet to verify compilation without submitting transactions
 - [ ] Use `amount=` (token units) for swaps if `amount_usd=` causes reverts (see swap reference above)
 - [ ] Override `get_persistent_state()` / `load_persistent_state()` if your strategy tracks positions or phase state
-- [ ] Generate Zodiac permissions: `almanak strat permissions --format zodiac -o zodiac_permissions.json`
+- [ ] Generate Zodiac permissions: `almanak strat permissions -o permissions.json`
 - [ ] Verify token approvals for all protocols used (auto-handled for most, but verify on first run)
 - [ ] Fund wallet on the correct chain with sufficient tokens plus gas (ETH/AVAX/MATIC)
 - [ ] Note your instance ID after first successful iteration (needed for `--id` resume)

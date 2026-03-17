@@ -218,7 +218,7 @@ almanak strat permissions -d strategies/demo/uniswap_rsi
 almanak strat permissions --chain base
 
 # 写入文件
-almanak strat permissions -o manifest.json
+almanak strat permissions -o permissions.json
 ```
 
 该命令从 `@almanak_strategy` 装饰器读取 `supported_protocols` 和 `intent_types`，通过真实编译器编译合成 intent，并提取所需的最小合约地址和函数选择器集合。输出为 JSON 清单，可应用于 Zodiac Roles 模块。如果策略支持多条链，输出为 JSON 数组，每条链一个清单；使用 `--chain` 可生成单条链的清单。
