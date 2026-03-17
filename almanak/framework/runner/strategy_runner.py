@@ -664,6 +664,40 @@ class StrategyRunner:
             f"session_store={'enabled' if session_store else 'disabled'}"
         )
 
+    def _query_portfolio_value(self, strategy: Any) -> tuple[Decimal, Decimal]:
+        """Query actual portfolio value from the strategy, with graceful fallback.
+
+        Attempts to call strategy.get_portfolio_snapshot() to get real exposure data.
+        Falls back to (Decimal("0"), Decimal("0")) if the query fails for any reason.
+
+        Args:
+            strategy: The strategy instance to query
+
+        Returns:
+            Tuple of (total_value_usd, available_balance_usd)
+        """
+
+        def _safe_decimal(value: Any) -> Decimal:
+            if isinstance(value, Decimal):
+                return value
+            if value is None:
+                return Decimal("0")
+            try:
+                return Decimal(str(value))
+            except Exception:  # noqa: BLE001
+                return Decimal("0")
+
+        try:
+            if hasattr(strategy, "get_portfolio_snapshot"):
+                snapshot = strategy.get_portfolio_snapshot()
+                return (
+                    _safe_decimal(getattr(snapshot, "total_value_usd", None)),
+                    _safe_decimal(getattr(snapshot, "available_cash_usd", None)),
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Could not query portfolio value for OperatorCard: {e}")
+        return (Decimal("0"), Decimal("0"))
+
     def _get_gateway_client(self) -> Any | None:
         """Get the gateway gRPC client from the execution orchestrator.
 
@@ -3950,11 +3984,12 @@ class StrategyRunner:
             # Generate OperatorCard
             from ..services.operator_card_generator import ErrorContext, StrategyState
 
+            total_value, available_balance = self._query_portfolio_value(strategy)
             strategy_state = StrategyState(
                 strategy_id=strategy.strategy_id,
                 status="stuck",
-                total_value_usd=Decimal("0"),
-                available_balance_usd=Decimal("0"),
+                total_value_usd=total_value,
+                available_balance_usd=available_balance,
                 stuck_since=state_entered_at,
             )
             error_context = ErrorContext(
@@ -4255,6 +4290,7 @@ class StrategyRunner:
             return
 
         try:
+            exec_total_value, exec_available = self._query_portfolio_value(strategy)
             if self._operator_card_generator is not None:
                 from ..services.operator_card_generator import ErrorContext, StrategyState
 
@@ -4267,8 +4303,8 @@ class StrategyRunner:
                 strategy_state = StrategyState(
                     strategy_id=strategy.strategy_id,
                     status="error",
-                    total_value_usd=Decimal("0"),
-                    available_balance_usd=Decimal("0"),
+                    total_value_usd=exec_total_value,
+                    available_balance_usd=exec_available,
                     stuck_since=self._first_error_at,
                     last_successful_action=None,
                 )
@@ -4290,8 +4326,8 @@ class StrategyRunner:
                     },
                     severity=Severity.HIGH,
                     position_summary=PositionSummary(
-                        total_value_usd=Decimal("0"),
-                        available_balance_usd=Decimal("0"),
+                        total_value_usd=exec_total_value,
+                        available_balance_usd=exec_available,
                     ),
                     risk_description="Strategy execution failed - positions may be at risk",
                     suggested_actions=[
@@ -4325,6 +4361,7 @@ class StrategyRunner:
             return
 
         try:
+            consec_total_value, consec_available = self._query_portfolio_value(strategy)
             if self._operator_card_generator is not None:
                 from ..services.operator_card_generator import ErrorContext, StrategyState
 
@@ -4338,8 +4375,8 @@ class StrategyRunner:
                 strategy_state = StrategyState(
                     strategy_id=strategy.strategy_id,
                     status="stuck" if self._consecutive_errors >= self.config.max_consecutive_errors else "error",
-                    total_value_usd=Decimal("0"),
-                    available_balance_usd=Decimal("0"),
+                    total_value_usd=consec_total_value,
+                    available_balance_usd=consec_available,
                     stuck_since=self._first_error_at,
                     last_successful_action=None,
                 )
@@ -4396,8 +4433,8 @@ class StrategyRunner:
                     },
                     severity=Severity.MEDIUM,
                     position_summary=PositionSummary(
-                        total_value_usd=Decimal("0"),
-                        available_balance_usd=Decimal("0"),
+                        total_value_usd=consec_total_value,
+                        available_balance_usd=consec_available,
                     ),
                     risk_description=(f"Strategy has failed {self._consecutive_errors} consecutive times"),
                     suggested_actions=[
