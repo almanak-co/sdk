@@ -2006,6 +2006,23 @@ def run(
                 except Exception as e:
                     logger.debug(f"Rate monitor not available: {e}")
 
+            # Initialize funding rate provider for perpetual venue rates
+            if hasattr(strategy_instance, "_funding_rate_provider"):
+                try:
+                    from ..data.funding import GatewayFundingRateProvider
+
+                    primary_chain = strategy_chains[0]
+                    funding_provider = GatewayFundingRateProvider(gateway_client=gateway_client, chain=primary_chain)
+                    strategy_instance._funding_rate_provider = funding_provider
+                    click.echo(f"  Funding rate provider initialized (chain={primary_chain})")
+                except (ImportError, ValueError, RuntimeError) as e:
+                    logger.warning(
+                        "Funding rate provider init failed for chain=%s: %s",
+                        strategy_chains[0],
+                        e,
+                        exc_info=True,
+                    )
+
             click.echo(f"  Multi-chain orchestrator created for {len(strategy_chains)} chains")
         else:
             # Single-chain setup - always use gateway-backed providers
@@ -2096,6 +2113,24 @@ def run(
                     click.echo(f"  Rate monitor initialized (chain={runtime_config.chain})")
                 except Exception as e:
                     logger.debug(f"Rate monitor not available: {e}")
+
+            # Initialize funding rate provider for perpetual venue rates
+            if hasattr(strategy_instance, "_funding_rate_provider"):
+                try:
+                    from ..data.funding import GatewayFundingRateProvider
+
+                    funding_provider = GatewayFundingRateProvider(
+                        gateway_client=gateway_client, chain=runtime_config.chain
+                    )
+                    strategy_instance._funding_rate_provider = funding_provider
+                    click.echo(f"  Funding rate provider initialized (chain={runtime_config.chain})")
+                except (ImportError, ValueError, RuntimeError) as e:
+                    logger.warning(
+                        "Funding rate provider init failed for chain=%s: %s",
+                        runtime_config.chain,
+                        e,
+                        exc_info=True,
+                    )
 
             # Initialize copy trading components if configured
             if strategy_config.get("copy_trading"):

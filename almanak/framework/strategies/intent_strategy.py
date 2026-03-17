@@ -38,6 +38,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Optional, TypeVar
 
 if TYPE_CHECKING:
+    from ..data.funding import FundingRate, FundingRateSpread
     from ..data.wallet_activity import WalletActivityProvider
     from ..portfolio.models import PortfolioSnapshot
     from ..teardown.models import (
@@ -767,6 +768,7 @@ class MarketSnapshot:
         indicator_provider: IndicatorProvider | None = None,
         multi_dex_service: Any | None = None,
         rate_monitor: Any | None = None,
+        funding_rate_provider: Any | None = None,
     ) -> None:
         """Initialize market snapshot.
 
@@ -782,6 +784,7 @@ class MarketSnapshot:
             indicator_provider: IndicatorProvider for calculator-backed TA indicators
             multi_dex_service: MultiDexService for cross-DEX price comparison
             rate_monitor: RateMonitor instance for lending rate queries
+            funding_rate_provider: FundingRateProvider for perpetual funding rate queries
         """
         self._chain = chain
         self._wallet_address = wallet_address
@@ -794,6 +797,7 @@ class MarketSnapshot:
         self._indicator_provider = indicator_provider
         self._multi_dex_service = multi_dex_service
         self._rate_monitor = rate_monitor
+        self._funding_rate_provider = funding_rate_provider
 
         # Cache for fetched data
         self._price_cache: dict[str, PriceData] = {}
@@ -1987,6 +1991,52 @@ class MarketSnapshot:
         """
         cache_key = self._lending_cache_key(protocol, token, side)
         self._lending_rate_cache[cache_key] = rate
+
+    def funding_rate(self, venue: str, market: str) -> "FundingRate":
+        """Get the current funding rate for a perpetual market on a specific venue.
+
+        Args:
+            venue: Venue identifier (e.g., "gmx_v2", "hyperliquid")
+            market: Market symbol (e.g., "ETH-USD")
+
+        Returns:
+            FundingRate dataclass with rate_hourly, rate_8h, rate_annualized, etc.
+
+        Raises:
+            ValueError: If no funding rate provider is configured or venue is unsupported
+        """
+        if self._funding_rate_provider is None:
+            raise ValueError("No funding rate provider configured for MarketSnapshot")
+
+        from almanak.framework.data.funding import Venue
+
+        venue_enum = Venue(venue)
+        return self._run_async_bridged(self._funding_rate_provider.get_funding_rate(venue_enum, market))
+
+    def funding_rate_spread(self, market: str, venue_a: str, venue_b: str) -> "FundingRateSpread":
+        """Get the funding rate spread between two venues.
+
+        Args:
+            market: Market symbol (e.g., "ETH-USD")
+            venue_a: First venue identifier
+            venue_b: Second venue identifier
+
+        Returns:
+            FundingRateSpread dataclass with spread_hourly, spread_annualized, rate_a, rate_b
+
+        Raises:
+            ValueError: If no funding rate provider is configured or venue is unsupported
+        """
+        if self._funding_rate_provider is None:
+            raise ValueError("No funding rate provider configured for MarketSnapshot")
+
+        from almanak.framework.data.funding import Venue
+
+        venue_a_enum = Venue(venue_a)
+        venue_b_enum = Venue(venue_b)
+        return self._run_async_bridged(
+            self._funding_rate_provider.get_funding_rate_spread(market, venue_a_enum, venue_b_enum)
+        )
 
     def wallet_activity(
         self,
@@ -3685,6 +3735,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         self._indicator_provider: IndicatorProvider | None = None
         self._multi_dex_service: Any | None = None
         self._rate_monitor: Any | None = None
+        self._funding_rate_provider: Any | None = None
 
         # Multi-chain providers (set by set_multi_chain_providers)
         self._multi_chain_price_oracle: MultiChainPriceOracle | None = None
@@ -4060,6 +4111,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
             indicator_provider=self._indicator_provider,
             multi_dex_service=self._multi_dex_service,
             rate_monitor=self._rate_monitor,
+            funding_rate_provider=self._funding_rate_provider,
         )
 
     def run(self) -> ActionBundle | None:
