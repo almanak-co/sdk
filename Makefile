@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage test-nightly-visual test-gateway test-demo-strategies test-demo-quick test-demo-single list-demo-strategies set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop
+.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop
 
 # Load .env file if it exists
 -include .env
@@ -272,6 +272,10 @@ test-network-isolation:
 # Gateway unit tests (excludes docker-only network isolation tests)
 test-gateway:
 	uv run pytest tests/gateway/ -v --import-mode=importlib -m "not docker"
+
+# BacktestService tests (HTTP API lifecycle, fee models, paper trading)
+test-backtest-service:
+	uv run pytest tests/unit/services/backtest/ -v --import-mode=importlib
 
 # Demo strategy tests through gateway (run on Anvil forks)
 # These tests verify strategies work correctly through the gateway architecture
