@@ -71,9 +71,6 @@ class SolanaSwapStrategy(IntentStrategy):
 
     # -- Teardown (required by framework) --
 
-    def supports_teardown(self) -> bool:
-        return True
-
     def get_open_positions(self):
         from datetime import UTC, datetime
 

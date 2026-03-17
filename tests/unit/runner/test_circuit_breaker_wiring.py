@@ -42,7 +42,6 @@ def _make_strategy(decide_return=None):
     strategy.decide.return_value = decide_return
 
     # Teardown: strategy doesn't support teardown
-    strategy.supports_teardown.return_value = False
     strategy.generate_teardown_intents.side_effect = NotImplementedError
 
     return strategy

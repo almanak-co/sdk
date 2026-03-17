@@ -15,8 +15,8 @@ from typing import Any
 
 from almanak.framework.intents import Intent
 from almanak.framework.strategies import (
-    IntentStrategy,
     MarketSnapshot,
+    StatelessStrategy,
     almanak_strategy,
 )
 
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=["uniswap_v3"],
     intent_types=["SWAP", "HOLD"],
 )
-class MACrossoverStrategy(IntentStrategy):
+class MACrossoverStrategy(StatelessStrategy):
     """Moving Average crossover strategy for testing."""
 
     def __init__(self, *args, **kwargs):

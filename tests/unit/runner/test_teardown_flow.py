@@ -48,7 +48,6 @@ def _make_strategy(
     chain: str = "arbitrum",
     wallet_address: str = "0x1234",
     should_teardown: bool = False,
-    supports_teardown: bool = True,
     teardown_intents: list | None = None,
     market_snapshot: object | None = None,
 ) -> MagicMock:
@@ -58,7 +57,6 @@ def _make_strategy(
     strategy.chain = chain
     strategy.wallet_address = wallet_address
     strategy.should_teardown.return_value = should_teardown
-    strategy.supports_teardown.return_value = supports_teardown
 
     if teardown_intents is not None:
         strategy.generate_teardown_intents.return_value = teardown_intents
@@ -99,19 +97,6 @@ class TestCheckTeardownRequested:
     def test_returns_none_when_should_teardown_false(self):
         runner = _make_runner()
         strategy = _make_strategy(should_teardown=False)
-        assert runner._check_teardown_requested(strategy) is None
-
-    def test_returns_none_when_supports_teardown_false(self):
-        runner = _make_runner()
-        strategy = _make_strategy(should_teardown=True, supports_teardown=False)
-        assert runner._check_teardown_requested(strategy) is None
-
-    def test_returns_none_when_no_generate_teardown_intents(self):
-        runner = _make_runner()
-        strategy = MagicMock(spec=["strategy_id", "should_teardown", "supports_teardown"])
-        strategy.strategy_id = "strat"
-        strategy.should_teardown.return_value = True
-        strategy.supports_teardown.return_value = True
         assert runner._check_teardown_requested(strategy) is None
 
     @patch("almanak.framework.teardown.get_teardown_state_manager")

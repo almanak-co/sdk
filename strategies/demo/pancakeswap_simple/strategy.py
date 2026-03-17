@@ -86,6 +86,17 @@ class PancakeSwapSimpleStrategy(IntentStrategy):
             protocol="pancakeswap_v3",
         )
 
+    def get_open_positions(self):
+        """Return open positions for teardown."""
+        from almanak.framework.teardown import TeardownPositionSummary
+
+        return TeardownPositionSummary.empty(self.strategy_id or self.STRATEGY_NAME)
+
+    def generate_teardown_intents(self, mode=None, market=None):
+        """Return intents to close all positions."""
+        return []
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("PancakeSwapSimpleStrategy - Debug Strategy")
@@ -95,3 +106,4 @@ if __name__ == "__main__":
     print(f"Supported Protocols: {PancakeSwapSimpleStrategy.SUPPORTED_PROTOCOLS}")
     print("\nTo test on Anvil:")
     print("  python strategies/demo/pancakeswap_simple/run_anvil.py")
+

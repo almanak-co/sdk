@@ -130,6 +130,13 @@ class _ConcreteStrategy(IntentStrategy):
     def decide(self, market):
         return None
 
+    def get_open_positions(self):
+        from almanak.framework.teardown.models import TeardownPositionSummary
+        return TeardownPositionSummary.empty(getattr(self, "_strategy_id", "test"))
+
+    def generate_teardown_intents(self, mode=None, market=None):
+        return []
+
 
 def _make_strategy(config):
     """Create a strategy instance with minimal mocking."""

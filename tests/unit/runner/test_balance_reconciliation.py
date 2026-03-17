@@ -37,7 +37,6 @@ def _make_strategy(decide_return=None):
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.create_market_snapshot.return_value = MagicMock()
-    strategy.supports_teardown.return_value = False
     strategy.generate_teardown_intents.side_effect = NotImplementedError
 
     if decide_return is None:

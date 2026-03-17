@@ -94,10 +94,6 @@ class IntentStrategy(Protocol):
         """Check if strategy uses a Safe wallet."""
         ...
 
-    def supports_teardown(self) -> bool:
-        """Check if strategy supports teardown."""
-        ...
-
     def get_open_positions(self) -> TeardownPositionSummary:
         """Get all open positions."""
         ...

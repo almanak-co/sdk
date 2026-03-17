@@ -122,6 +122,13 @@ def _make_strategy_class(
         def on_step_failed(self, step_name, intent, result, will_retry):
             self.failed_steps.append((step_name, will_retry))
 
+        def get_open_positions(self):
+            from almanak.framework.teardown.models import TeardownPositionSummary
+            return TeardownPositionSummary.empty(self._strategy_id or "test")
+
+        def generate_teardown_intents(self, mode=None, market=None):
+            return []
+
     if terminal_check_fn is not None:
         TestStrategy.is_done = terminal_check_fn
 

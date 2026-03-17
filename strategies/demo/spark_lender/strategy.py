@@ -320,6 +320,21 @@ class SparkLenderStrategy(IntentStrategy):
             self._supplied_amount = Decimal(str(state["supplied_amount"]))
             logger.info(f"Restored supplied_amount: {self._supplied_amount}")
 
+    def get_open_positions(self):
+        """Return open positions for teardown."""
+        from almanak.framework.teardown import TeardownPositionSummary
+
+        logger.warning(
+            "%s: teardown not yet implemented — positions may remain open. "
+            "Implement get_open_positions() and generate_teardown_intents() for real teardown.",
+            self.__class__.__name__,
+        )
+        return TeardownPositionSummary.empty(self.strategy_id or self.STRATEGY_NAME)
+
+    def generate_teardown_intents(self, mode=None, market=None):
+        """Return intents to close all positions."""
+        return []
+
 
 # =============================================================================
 # TESTING
@@ -337,3 +352,4 @@ if __name__ == "__main__":
     print(f"\nDescription: {SparkLenderStrategy.STRATEGY_METADATA.description}")
     print("\nTo run this strategy:")
     print("  python -m src.cli.run --strategy demo_spark_lender --once")
+

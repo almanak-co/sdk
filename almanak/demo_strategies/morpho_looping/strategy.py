@@ -755,10 +755,6 @@ class MorphoLoopingStrategy(IntentStrategy):
     # TEARDOWN INTERFACE
     # =========================================================================
 
-    def supports_teardown(self) -> bool:
-        """This strategy supports the teardown system."""
-        return True
-
     def get_open_positions(self) -> "TeardownPositionSummary":  # noqa: F821
         """Get all open positions for teardown.
 

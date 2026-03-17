@@ -126,6 +126,7 @@ from .framework import (
     SlippageEstimate,
     StateConflictError,
     StateData,
+    StatelessStrategy,
     # State management
     StateManager,
     StateManagerConfig,
@@ -203,6 +204,7 @@ __all__ = [
     # V2 Framework - Strategy base classes
     "Strategy",  # Alias for IntentStrategy
     "IntentStrategy",
+    "StatelessStrategy",
     "MultiStepStrategy",
     "StrategyBase",
     "MarketSnapshot",

@@ -212,9 +212,6 @@ class RSIMACDLPStrategy(IntentStrategy):
 
     # Teardown support
 
-    def supports_teardown(self) -> bool:
-        return True
-
     def _estimate_lp_value_usd(self) -> Decimal:
         """Estimate LP position value using live prices."""
         try:

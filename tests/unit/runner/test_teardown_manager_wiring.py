@@ -39,7 +39,6 @@ def _make_teardown_strategy():
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.create_market_snapshot.return_value = MagicMock()
-    strategy.supports_teardown.return_value = True
     strategy.should_teardown.return_value = True
 
     # Teardown methods

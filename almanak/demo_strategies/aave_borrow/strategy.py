@@ -514,10 +514,6 @@ class AaveBorrowStrategy(IntentStrategy):
     # These methods enable safe strategy teardown.
     # For Aave borrow, teardown order is: REPAY -> WITHDRAW
 
-    def supports_teardown(self) -> bool:
-        """This strategy supports the teardown system."""
-        return True
-
     def _get_gateway_client(self) -> Any:
         """Get the gateway client for on-chain queries, if available.
 

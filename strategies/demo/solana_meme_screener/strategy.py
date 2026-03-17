@@ -267,9 +267,6 @@ class SolanaMemeScreenerStrategy(IntentStrategy):
 
     # -- Teardown --
 
-    def supports_teardown(self) -> bool:
-        return True
-
     def get_open_positions(self):
         from almanak.framework.teardown import PositionInfo, PositionType
 

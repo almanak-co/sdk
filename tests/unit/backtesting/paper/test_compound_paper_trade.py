@@ -273,10 +273,6 @@ class TestPersistence:
 class TestTeardown:
     """Test teardown support."""
 
-    def test_supports_teardown(self):
-        strat = _make_strategy()
-        assert strat.supports_teardown() is True
-
     def test_no_positions_when_idle(self):
         strat = _make_strategy()
         summary = strat.get_open_positions()

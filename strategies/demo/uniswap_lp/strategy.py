@@ -565,15 +565,6 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
     # TEARDOWN SUPPORT
     # =========================================================================
 
-    def supports_teardown(self) -> bool:
-        """
-        Indicate that this strategy supports safe teardown.
-
-        Returns:
-            True - this strategy can be safely torn down
-        """
-        return True
-
     def get_open_positions(self) -> "TeardownPositionSummary":
         """
         Get summary of open LP positions for teardown preview.

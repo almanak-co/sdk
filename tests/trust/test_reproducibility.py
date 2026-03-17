@@ -50,6 +50,13 @@ class SimpleStrategy(IntentStrategy):
     def decide(self, market: MarketSnapshot):  # noqa: ARG002
         return HoldIntent(reason="Reproducibility test: hold only")
 
+    def get_open_positions(self):
+        from almanak.framework.teardown.models import TeardownPositionSummary
+        return TeardownPositionSummary.empty(self.strategy_id)
+
+    def generate_teardown_intents(self, mode=None, market=None):
+        return []
+
 
 @pytest.mark.asyncio
 async def test_bit_for_bit_reproducibility():

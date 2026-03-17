@@ -642,10 +642,6 @@ def _get_template_teardown(
     # See: blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
-    def supports_teardown(self) -> bool:
-        """Indicate this strategy supports safe teardown."""
-        return True
-
     def get_open_positions(self):
         """Return all open positions for teardown preview."""
         from datetime import UTC, datetime
@@ -677,10 +673,6 @@ def _get_template_teardown(
     # Without these methods, operator close-requests are silently ignored.
     # See: blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
-
-    def supports_teardown(self) -> bool:
-        """Indicate this strategy supports safe teardown."""
-        return True
 
     def get_open_positions(self):
         """Return all open positions for teardown preview."""
@@ -742,10 +734,6 @@ def _get_template_teardown(
     # Without these methods, operator close-requests are silently ignored.
     # See: blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
-
-    def supports_teardown(self) -> bool:
-        """Indicate this strategy supports safe teardown."""
-        return True
 
     def get_open_positions(self):
         """Return all open positions for teardown preview."""
@@ -820,10 +808,6 @@ def _get_template_teardown(
     # Without these methods, operator close-requests are silently ignored.
     # See: blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
-
-    def supports_teardown(self) -> bool:
-        """Indicate this strategy supports safe teardown."""
-        return True
 
     def get_open_positions(self):
         """Return all open positions for teardown preview."""
@@ -926,10 +910,6 @@ def _get_template_teardown(
     # Without these methods, operator close-requests are silently ignored.
     # See: blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
-
-    def supports_teardown(self) -> bool:
-        """Indicate this strategy supports safe teardown."""
-        return True
 
     def get_open_positions(self):
         """Return all open positions for teardown preview."""
@@ -1034,10 +1014,6 @@ def _get_template_teardown(
     # See: blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
-    def supports_teardown(self) -> bool:
-        """Indicate this strategy supports safe teardown."""
-        return True
-
     def get_open_positions(self):
         """Return all open positions for teardown preview."""
         from datetime import UTC, datetime
@@ -1098,10 +1074,6 @@ def _get_template_teardown(
     # Without these methods, operator close-requests are silently ignored.
     # See: blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
-
-    def supports_teardown(self) -> bool:
-        """Indicate this strategy supports safe teardown."""
-        return True
 
     def get_open_positions(self):
         """Return all open positions for teardown preview."""
@@ -1224,10 +1196,6 @@ def _get_template_teardown(
     # See: blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
-    def supports_teardown(self) -> bool:
-        """Indicate this strategy supports safe teardown."""
-        return True
-
     def get_open_positions(self):
         """Return all open positions for teardown preview."""
         from datetime import UTC, datetime
@@ -1295,10 +1263,6 @@ def _get_template_teardown(
     # Without these methods, operator close-requests are silently ignored.
     # See: blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
-
-    def supports_teardown(self) -> bool:
-        """Indicate this strategy supports safe teardown."""
-        return True
 
     def get_open_positions(self):
         """Return all open positions for teardown preview."""
@@ -1374,10 +1338,6 @@ def _get_template_teardown(
     # See: blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
-    def supports_teardown(self) -> bool:
-        """Indicate this strategy supports safe teardown."""
-        return True
-
     def get_open_positions(self):
         """Return all open positions for teardown preview."""
         from datetime import UTC, datetime
@@ -1450,9 +1410,6 @@ def _get_template_teardown(
     # TEARDOWN (required) - implement so operators can safely close positions
     # See: blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
-
-    def supports_teardown(self) -> bool:
-        return True
 
     def get_open_positions(self):
         from datetime import UTC, datetime

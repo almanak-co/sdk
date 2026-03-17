@@ -302,10 +302,6 @@ class PendleBasicsStrategy(IntentStrategy):
             },
         }
 
-    def supports_teardown(self) -> bool:
-        """Indicate this strategy supports safe teardown."""
-        return True
-
     def get_open_positions(self) -> "TeardownPositionSummary":
         """Get summary of open positions for teardown."""
         from datetime import datetime

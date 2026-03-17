@@ -99,9 +99,6 @@ def test_execute_teardown_restores_state_before_position_detection(
             self.state_manager_strategy_ids: list[str] = []
             type(self).last_instance = self
 
-        def supports_teardown(self) -> bool:
-            return True
-
         def set_state_manager(self, _state_manager, strategy_id: str) -> None:
             self.events.append(f"set_state_manager:{strategy_id}")
             self.state_manager_strategy_ids.append(strategy_id)

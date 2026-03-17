@@ -294,14 +294,6 @@ def _get_strategy_data(strategy_id: str) -> dict[str, Any]:
             detail=f"Strategy {strategy_id} not found. Available: {available}",
         )
 
-    # Check if strategy supports teardown
-    if not strategy.supports_teardown():
-        raise HTTPException(
-            status_code=400,
-            detail=f"Strategy {strategy_id} does not support teardown. "
-            f"Implement supports_teardown(), get_open_positions(), and generate_teardown_intents().",
-        )
-
     # Get real position data from the strategy
     try:
         position_summary = strategy.get_open_positions()

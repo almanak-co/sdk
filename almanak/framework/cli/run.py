@@ -2392,11 +2392,7 @@ def run(
 
                 # --- teardown-after: signal + second iteration ---
                 teardown_result = None
-                if (
-                    teardown_after
-                    and hasattr(strategy_instance, "supports_teardown")
-                    and strategy_instance.supports_teardown()
-                ):
+                if teardown_after:
                     click.echo()
                     click.echo("Teardown requested -- closing positions...")
 

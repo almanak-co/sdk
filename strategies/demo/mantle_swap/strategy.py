@@ -152,9 +152,6 @@ class MantleSwapStrategy(IntentStrategy):
 
     # -- Teardown --
 
-    def supports_teardown(self) -> bool:
-        return True
-
     def get_open_positions(self):
         from datetime import datetime
 

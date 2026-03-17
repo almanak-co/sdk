@@ -129,7 +129,7 @@ def test_strategy_file_has_teardown_methods(template: StrategyTemplate) -> None:
         method_names = [
             n.name for n in ast.walk(strategy_class) if isinstance(n, ast.FunctionDef)
         ]
-        for required in ("supports_teardown", "get_open_positions", "generate_teardown_intents"):
+        for required in ("get_open_positions", "generate_teardown_intents"):
             assert required in method_names, f"{required}() missing from {strategy_class.name}"
 
 

@@ -294,9 +294,6 @@ class AerodromePaperTradeStrategy(IntentStrategy):
     # TEARDOWN
     # =========================================================================
 
-    def supports_teardown(self) -> bool:
-        return True
-
     def get_open_positions(self) -> "TeardownPositionSummary":
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 

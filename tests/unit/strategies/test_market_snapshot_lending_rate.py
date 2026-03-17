@@ -225,6 +225,13 @@ class _StubStrategy:
             def decide(self, market):
                 return None
 
+            def get_open_positions(self):
+                from almanak.framework.teardown.models import TeardownPositionSummary
+                return TeardownPositionSummary.empty(self._strategy_id or "test")
+
+            def generate_teardown_intents(self, mode=None, market=None):
+                return []
+
         return _Stub(config={}, chain=chain, wallet_address=wallet_address)
 
 
@@ -342,6 +349,13 @@ class TestRateMonitorIntegration:
                     return Intent.hold(reason=f"Good rate: {rate.apy_percent}%")
                 return None
 
+            def get_open_positions(self):
+                from almanak.framework.teardown.models import TeardownPositionSummary
+                return TeardownPositionSummary.empty(self._strategy_id or "test")
+
+            def generate_teardown_intents(self, mode=None, market=None):
+                return []
+
         strategy = LendingRateStrategy(config={}, chain="ethereum", wallet_address="0xtest")
         monitor = RateMonitor(chain="ethereum")
         monitor.set_mock_rate("aave_v3", "USDC", "supply", Decimal("4.25"))
@@ -366,6 +380,13 @@ class TestRateMonitorIntegration:
                 if result.best_rate and result.best_rate.apy_percent > Decimal("4.0"):
                     return Intent.hold(reason=f"Best rate: {result.best_rate.protocol}")
                 return None
+
+            def get_open_positions(self):
+                from almanak.framework.teardown.models import TeardownPositionSummary
+                return TeardownPositionSummary.empty(self._strategy_id or "test")
+
+            def generate_teardown_intents(self, mode=None, market=None):
+                return []
 
         strategy = BestRateStrategy(config={}, chain="ethereum", wallet_address="0xtest")
         monitor = RateMonitor(chain="ethereum")

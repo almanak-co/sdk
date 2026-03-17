@@ -236,6 +236,11 @@ class TeardownPositionSummary:
         """Get positions sorted by close order priority."""
         return sorted(self.positions, key=lambda p: p.position_type.priority)
 
+    @classmethod
+    def empty(cls, strategy_id: str) -> "TeardownPositionSummary":
+        """Create an empty position summary (no open positions)."""
+        return cls(strategy_id=strategy_id, timestamp=datetime.now(UTC), positions=[])
+
 
 @dataclass
 class TeardownPreview:

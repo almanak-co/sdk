@@ -32,7 +32,6 @@ def _make_strategy(intents=None):
     strategy.name = "Test Strategy"
     strategy.chain = "arbitrum"
     strategy.uses_safe_wallet = False
-    strategy.supports_teardown.return_value = True
     strategy.pause = AsyncMock()
 
     positions = MagicMock(spec=TeardownPositionSummary)

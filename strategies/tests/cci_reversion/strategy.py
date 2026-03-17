@@ -18,7 +18,7 @@ from typing import Any
 
 from almanak.framework.intents import Intent
 from almanak.framework.strategies import (
-    IntentStrategy,
+    StatelessStrategy,
     MarketSnapshot,
     almanak_strategy,
 )
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=["uniswap_v3"],
     intent_types=["SWAP", "HOLD"],
 )
-class CCIReversionStrategy(IntentStrategy):
+class CCIReversionStrategy(StatelessStrategy):
     """CCI-based mean reversion strategy for testing."""
 
     def __init__(self, *args, **kwargs):

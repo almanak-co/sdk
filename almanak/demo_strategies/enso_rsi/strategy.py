@@ -352,17 +352,6 @@ class EnsoRSIStrategy(IntentStrategy):
     # TEARDOWN SUPPORT
     # =========================================================================
 
-    def supports_teardown(self) -> bool:
-        """Indicate this strategy supports safe teardown.
-
-        Swap-based strategies have simple teardown:
-        - Convert any base token holdings back to quote token (stable)
-
-        Returns:
-            True - this strategy can be safely torn down
-        """
-        return True
-
     def get_open_positions(self) -> "TeardownPositionSummary":
         """Get summary of open positions for teardown preview.
 

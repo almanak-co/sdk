@@ -168,9 +168,6 @@ class TestFailureRecovery:
 
 
 class TestTeardown:
-    def test_supports_teardown(self, strategy):
-        assert strategy.supports_teardown() is True
-
     def test_teardown_with_supply_only(self, strategy):
         """Teardown with only supply generates withdraw intent."""
         strategy._state = "supplied"

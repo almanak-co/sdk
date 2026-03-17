@@ -246,9 +246,6 @@ class AavePnLLendingStrategy(IntentStrategy):
             self._reference_price = Decimal(str(state["reference_price"]))
 
     # Teardown interface
-    def supports_teardown(self) -> bool:
-        return True
-
     def get_open_positions(self) -> "TeardownPositionSummary":
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 

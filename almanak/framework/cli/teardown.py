@@ -554,13 +554,6 @@ def execute_teardown(
         # Without this, custom strategies that check balances during teardown crash.
         _inject_balance_provider(strategy, gateway_client, chain, wallet_address)
 
-        # Check if strategy supports teardown
-        if not hasattr(strategy, "supports_teardown") or not strategy.supports_teardown():
-            raise click.ClickException(
-                f"Strategy {strategy_class.__name__} does not support teardown. "
-                "Implement supports_teardown() and generate_teardown_intents() methods."
-            )
-
         _restore_strategy_state_for_teardown(
             strategy=strategy,
             strategy_class=strategy_class,

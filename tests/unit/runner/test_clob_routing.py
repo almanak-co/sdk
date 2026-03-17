@@ -92,7 +92,6 @@ def _make_strategy(intent):
     strategy.create_market_snapshot.return_value = MagicMock(
         get_price_oracle_dict=MagicMock(return_value={"ETH": 3000}),
     )
-    strategy.supports_teardown.return_value = False
     return strategy
 
 

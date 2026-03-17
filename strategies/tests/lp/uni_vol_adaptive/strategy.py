@@ -508,10 +508,6 @@ class UniVolAdaptiveStrategy(IntentStrategy[UniVolAdaptiveConfig]):
     # TEARDOWN SUPPORT
     # =========================================================================
 
-    def supports_teardown(self) -> bool:
-        """Indicate that this strategy supports safe teardown."""
-        return True
-
     def get_open_positions(self) -> TeardownPositionSummary:
         """Get summary of open LP positions for teardown preview."""
         positions: list[PositionInfo] = []

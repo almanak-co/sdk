@@ -52,6 +52,14 @@ class DoNothingStrategy(IntentStrategy):
     def decide(self, market: MarketSnapshot):
         return HoldIntent(reason="Trust test: do nothing")
 
+    def get_open_positions(self):
+        from almanak.framework.teardown import TeardownPositionSummary
+
+        return TeardownPositionSummary.empty(self.strategy_id)
+
+    def generate_teardown_intents(self, mode=None, market=None):
+        return []
+
 
 class SingleTradeStrategy(IntentStrategy):
     """Strategy that makes exactly one trade and then holds."""
@@ -80,6 +88,14 @@ class SingleTradeStrategy(IntentStrategy):
                 )
 
         return HoldIntent(reason="Trust test: single trade made")
+
+    def get_open_positions(self):
+        from almanak.framework.teardown import TeardownPositionSummary
+
+        return TeardownPositionSummary.empty(self.strategy_id)
+
+    def generate_teardown_intents(self, mode=None, market=None):
+        return []
 
 
 @pytest.mark.asyncio

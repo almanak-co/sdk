@@ -488,10 +488,6 @@ class AlmanakRSIStrategy(IntentStrategy):
     # TEARDOWN SUPPORT
     # =========================================================================
 
-    def supports_teardown(self) -> bool:
-        """Indicate this strategy supports safe teardown."""
-        return True
-
     def get_open_positions(self):
         """Get summary of open positions for teardown preview."""
         from almanak.framework.teardown import (

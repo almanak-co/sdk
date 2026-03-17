@@ -916,9 +916,9 @@ class StrategyRunner:
         Shared by both the normal STOP path and the STOP-while-paused path.
         """
         self._lifecycle_write_state(strategy_id, "STOPPING")
-        if hasattr(strategy, "supports_teardown") and strategy.supports_teardown():
-            from almanak.framework.teardown import TeardownMode, TeardownRequest, get_teardown_state_manager
+        from almanak.framework.teardown import TeardownMode, TeardownRequest, get_teardown_state_manager
 
+        try:
             manager = get_teardown_state_manager()
             teardown_request = TeardownRequest(
                 strategy_id=strategy_id,
@@ -928,13 +928,12 @@ class StrategyRunner:
             )
             manager.create_request(teardown_request)
             logger.info("Created teardown request for %s from STOP command", strategy_id)
-            # Don't break -- let the next iteration pick up the teardown request
-            # via _check_teardown_requested(), which will execute teardown intents
-            # and then call request_shutdown()
-        else:
-            # Strategy doesn't support teardown -- hard stop
-            logger.info("Strategy %s doesn't support teardown, stopping immediately", strategy_id)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Failed to create teardown request for %s: %s; hard-stopping", strategy_id, e)
             self._shutdown_requested = True
+        # Don't break -- let the next iteration pick up the teardown request
+        # via _check_teardown_requested(), which will execute teardown intents
+        # and then call request_shutdown()
 
     def set_gateway_client(self, client: Any) -> None:
         """Explicitly set the gateway client for instance registration.
@@ -2477,36 +2476,13 @@ class StrategyRunner:
         if not should_teardown:
             return None
 
-        # Teardown requested - check if strategy implements it
-        if not hasattr(strategy, "supports_teardown"):
-            logger.warning(
-                f"Teardown requested for {strategy_id} but strategy doesn't have "
-                f"supports_teardown() method. Continuing normal operation."
-            )
-            return None
-
-        if not strategy.supports_teardown():  # type: ignore[attr-defined]
-            logger.warning(
-                f"Teardown requested for {strategy_id} but strategy reports "
-                f"supports_teardown()=False. Continuing normal operation."
-            )
-            return None
-
-        # Strategy supports teardown - acknowledge request
+        # Acknowledge teardown request
         if hasattr(strategy, "acknowledge_teardown_request"):
             try:
                 strategy.acknowledge_teardown_request()
                 logger.info(f"Acknowledged teardown request for {strategy_id}")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Failed to acknowledge teardown request: {e}")
-
-        # Verify generate_teardown_intents exists
-        if not hasattr(strategy, "generate_teardown_intents"):
-            logger.error(
-                f"Strategy {strategy_id} supports_teardown()=True but doesn't "
-                f"implement generate_teardown_intents(). Cannot proceed with teardown."
-            )
-            return None
 
         # Import TeardownMode here to avoid circular imports
         from ..teardown import TeardownMode, get_teardown_state_manager
@@ -3278,19 +3254,6 @@ class StrategyRunner:
                 # Backward compat: old-style signature def generate_teardown_intents(self, mode)
                 logger.debug(f"Strategy {strategy_id} uses old teardown signature (no market param), falling back")
                 teardown_intents = strategy.generate_teardown_intents(teardown_mode)
-        except NotImplementedError:
-            logger.error(
-                f"Strategy {strategy_id} supports_teardown()=True but "
-                f"generate_teardown_intents() raises NotImplementedError"
-            )
-            if request:
-                manager.mark_failed(strategy_id, error="generate_teardown_intents not implemented")
-            return self._create_error_result(
-                strategy_id,
-                IterationStatus.STRATEGY_ERROR,
-                "generate_teardown_intents not implemented",
-                start_time,
-            )
         except Exception as e:
             logger.error(f"Failed to generate teardown intents for {strategy_id}: {e}")
             if request:

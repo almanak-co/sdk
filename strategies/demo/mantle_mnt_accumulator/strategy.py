@@ -313,9 +313,6 @@ class MantleMntAccumulator(IntentStrategy):
             "last_signal": self._last_rsi_signal,
         }
 
-    def supports_teardown(self) -> bool:
-        return True
-
     def get_open_positions(self) -> "TeardownPositionSummary":
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 

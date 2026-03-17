@@ -272,9 +272,6 @@ class MorphoPaperTradeStrategy(IntentStrategy):
             self._reference_price = Decimal(str(state["reference_price"]))
 
     # Teardown interface
-    def supports_teardown(self) -> bool:
-        return True
-
     def _get_collateral_price(self) -> Decimal:
         """Fetch live collateral price for teardown valuation."""
         try:

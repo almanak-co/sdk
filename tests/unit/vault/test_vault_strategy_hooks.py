@@ -85,11 +85,23 @@ def _make_strategy(cls):
 # --- IntentStrategy.valuate() tests ---
 
 
+def _teardown_mixin_get_open_positions(self):
+    from almanak.framework.teardown.models import TeardownPositionSummary
+    return TeardownPositionSummary.empty(getattr(self, "_strategy_id", "test"))
+
+
+def _teardown_mixin_generate_teardown_intents(self, mode=None, market=None):
+    return []
+
+
 class ConcreteStrategy(IntentStrategy):
     """Minimal concrete strategy for testing."""
 
     def decide(self, market):
         return None
+
+    get_open_positions = _teardown_mixin_get_open_positions
+    generate_teardown_intents = _teardown_mixin_generate_teardown_intents
 
 
 class CustomValuateStrategy(IntentStrategy):
@@ -97,6 +109,9 @@ class CustomValuateStrategy(IntentStrategy):
 
     def decide(self, market):
         return None
+
+    get_open_positions = _teardown_mixin_get_open_positions
+    generate_teardown_intents = _teardown_mixin_generate_teardown_intents
 
     def valuate(self, market: MarketSnapshot) -> Decimal:
         try:
@@ -167,6 +182,9 @@ class TestIntentStrategyOnVaultSettled:
         class TrackingStrategy(IntentStrategy):
             def decide(self, market):
                 return None
+
+            get_open_positions = _teardown_mixin_get_open_positions
+            generate_teardown_intents = _teardown_mixin_generate_teardown_intents
 
             def on_vault_settled(self, settlement):
                 callback_data["epoch"] = settlement.epoch_id

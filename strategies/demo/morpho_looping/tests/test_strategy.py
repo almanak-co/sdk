@@ -343,10 +343,6 @@ class TestStatus:
 class TestTeardown:
     """Tests for teardown functionality."""
 
-    def test_supports_teardown(self, strategy: MorphoLoopingStrategy) -> None:
-        """Test that strategy supports teardown."""
-        assert strategy.supports_teardown() is True
-
     def test_generate_teardown_intents(self, strategy: MorphoLoopingStrategy) -> None:
         """Test teardown intent generation."""
         from almanak.framework.teardown import TeardownMode

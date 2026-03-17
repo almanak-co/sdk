@@ -4396,22 +4396,6 @@ class IntentStrategy(StrategyBase[ConfigT]):
     # These methods enable safe strategy teardown (closing all positions).
     # Override these in your strategy to support the teardown system.
 
-    def supports_teardown(self) -> bool:
-        """Check if this strategy supports the teardown system.
-
-        Override to return True when your strategy implements:
-        - get_open_positions()
-        - generate_teardown_intents()
-
-        Returns:
-            True if teardown is supported, False otherwise
-
-        Example:
-            def supports_teardown(self) -> bool:
-                return True  # Enable teardown for this strategy
-        """
-        return False
-
     async def pause(self) -> None:
         """Pause the strategy during teardown.
 
@@ -4488,28 +4472,26 @@ class IntentStrategy(StrategyBase[ConfigT]):
             # Step 1: Get position values via existing teardown infrastructure
             positions: list[PositionValue] = []
             position_value = Decimal("0")
+            positions_unavailable = False
 
-            if self.supports_teardown():
-                try:
-                    position_summary = self.get_open_positions()
-                    for p in position_summary.positions:
-                        positions.append(
-                            PositionValue(
-                                position_type=p.position_type,
-                                protocol=p.protocol,
-                                chain=p.chain,
-                                value_usd=p.value_usd,
-                                label=f"{p.protocol} {p.position_type.value}",
-                                tokens=p.details.get("tokens", []),
-                                details=p.details,
-                            )
+            try:
+                position_summary = self.get_open_positions()
+                for p in position_summary.positions:
+                    positions.append(
+                        PositionValue(
+                            position_type=p.position_type,
+                            protocol=p.protocol,
+                            chain=p.chain,
+                            value_usd=p.value_usd,
+                            label=f"{p.protocol} {p.position_type.value}",
+                            tokens=p.details.get("tokens", []),
+                            details=p.details,
                         )
-                    position_value = position_summary.total_value_usd
-                except NotImplementedError:
-                    # Strategy says it supports teardown but hasn't implemented get_open_positions
-                    pass
-                except Exception as e:  # noqa: BLE001  # Intentional graceful degradation
-                    logger.warning(f"Failed to get open positions: {e}")
+                    )
+                position_value = position_summary.total_value_usd
+            except Exception as e:  # noqa: BLE001  # Intentional graceful degradation
+                logger.warning(f"Failed to get open positions: {e}")
+                positions_unavailable = True
 
             # Step 2: Add wallet balances (uninvested funds)
             wallet_balances: list[TokenBalance] = []
@@ -4540,7 +4522,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 strategy_id=self._strategy_id or self.STRATEGY_NAME,
                 total_value_usd=position_value + wallet_value,
                 available_cash_usd=wallet_value,
-                value_confidence=ValueConfidence.HIGH,
+                value_confidence=ValueConfidence.ESTIMATED if positions_unavailable else ValueConfidence.HIGH,
                 positions=positions,
                 wallet_balances=wallet_balances,
                 chain=self._chain,
@@ -4654,6 +4636,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
 
         return tokens
 
+    @abstractmethod
     def get_open_positions(self) -> "TeardownPositionSummary":
         """Get all open positions for this strategy.
 
@@ -4661,11 +4644,11 @@ class IntentStrategy(StrategyBase[ConfigT]):
         Called during teardown preview and execution to determine what
         positions need to be closed.
 
+        For strategies with no positions, use StatelessStrategy as your base
+        class, or return TeardownPositionSummary.empty(self.strategy_id).
+
         Returns:
             TeardownPositionSummary with all current positions
-
-        Raises:
-            NotImplementedError: If teardown is not implemented
 
         Example:
             from almanak.framework.teardown import TeardownPositionSummary, PositionInfo, PositionType
@@ -4690,11 +4673,9 @@ class IntentStrategy(StrategyBase[ConfigT]):
                     positions=positions,
                 )
         """
-        raise NotImplementedError(
-            f"Strategy {self.__class__.__name__} does not implement get_open_positions(). "
-            "Override this method to support teardown."
-        )
+        ...
 
+    @abstractmethod
     def generate_teardown_intents(self, mode: "TeardownMode", market: "MarketSnapshot | None" = None) -> list[Intent]:
         """Generate intents to close all positions.
 
@@ -4705,6 +4686,9 @@ class IntentStrategy(StrategyBase[ConfigT]):
         4. LP - Close LP positions and collect fees
         5. TOKEN - Swap all tokens to target token (USDC)
 
+        For strategies with no positions, use StatelessStrategy as your base
+        class, or return an empty list.
+
         Args:
             mode: TeardownMode.SOFT (graceful) or TeardownMode.HARD (emergency)
             market: Optional market snapshot with real prices. When called from the
@@ -4713,9 +4697,6 @@ class IntentStrategy(StrategyBase[ConfigT]):
 
         Returns:
             List of intents to execute in order
-
-        Raises:
-            NotImplementedError: If teardown is not implemented
 
         Example:
             from almanak.framework.teardown import TeardownMode
@@ -4749,10 +4730,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
 
                 return intents
         """
-        raise NotImplementedError(
-            f"Strategy {self.__class__.__name__} does not implement generate_teardown_intents(). "
-            "Override this method to support teardown."
-        )
+        ...
 
     def on_teardown_started(self, mode: "TeardownMode") -> None:
         """Hook called when teardown starts.

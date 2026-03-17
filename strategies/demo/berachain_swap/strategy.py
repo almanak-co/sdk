@@ -175,9 +175,6 @@ class BerachainSwapStrategy(IntentStrategy):
     # TEARDOWN
     # =========================================================================
 
-    def supports_teardown(self) -> bool:
-        return True
-
     def get_open_positions(self) -> "TeardownPositionSummary":
         from datetime import datetime
 

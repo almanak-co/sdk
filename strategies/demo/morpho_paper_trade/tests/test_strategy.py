@@ -165,9 +165,6 @@ class TestFailureRecovery:
 
 
 class TestTeardown:
-    def test_supports_teardown(self, strategy):
-        assert strategy.supports_teardown() is True
-
     def test_teardown_repay_then_withdraw(self, strategy):
         """Teardown with borrow + supply: repay first, then withdraw."""
         strategy._state = "borrowed"
