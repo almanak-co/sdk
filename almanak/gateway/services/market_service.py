@@ -195,7 +195,15 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 response.outliers.extend(details.get("outliers", []))
             return response
         except Exception as e:
-            logger.error(f"GetPrice failed for {token}/{quote}: {e}")
+            from almanak.framework.data.interfaces import AllDataSourcesFailed
+            from almanak.gateway.data.price.aggregator import _is_known_unpriceable
+
+            # Only downgrade to WARNING for known-unpriceable tokens when the failure
+            # is "all sources failed" (expected). Keep ERROR for infra/unexpected failures.
+            if isinstance(e, AllDataSourcesFailed) and _is_known_unpriceable(token):
+                logger.warning(f"GetPrice failed for {token}/{quote}: {e}")
+            else:
+                logger.error(f"GetPrice failed for {token}/{quote}: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return gateway_pb2.PriceResponse()

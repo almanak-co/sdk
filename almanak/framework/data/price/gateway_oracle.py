@@ -90,14 +90,20 @@ class GatewayPriceOracle(PriceOracle):
 
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"Gateway price request failed for {token}/{quote}: {error_msg}")
 
             if "UNAVAILABLE" in error_msg or "DEADLINE_EXCEEDED" in error_msg:
+                logger.error(f"Gateway price request failed for {token}/{quote}: {error_msg}")
                 raise DataSourceUnavailable(
                     source="gateway",
                     reason=error_msg,
                 ) from e
 
+            from almanak.gateway.data.price.aggregator import _is_known_unpriceable
+
+            # Only downgrade to WARNING when the token is known-unpriceable (expected failure).
+            # Keep ERROR for unexpected exceptions to preserve observability.
+            log_fn = logger.warning if _is_known_unpriceable(token) else logger.error
+            log_fn(f"Gateway price request failed for {token}/{quote}: {error_msg}")
             raise AllDataSourcesFailed(errors={"gateway": error_msg}) from e
 
     def get_source_health(self, source_name: str) -> dict | None:

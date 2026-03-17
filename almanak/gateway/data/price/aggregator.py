@@ -65,6 +65,17 @@ DEFAULT_SINGLE_SOURCE_PRICE_CEILING = Decimal("10_000_000")  # $10M per token
 # Stablecoins that fall back to $1.00 when all price sources fail
 STABLECOIN_FALLBACK_TOKENS = frozenset({"USDC", "USDT", "DAI", "FRAX", "LUSD", "USDC.E", "USDT.E"})
 
+# Prefixes for derivative tokens that are known to be unpriceable on standard feeds.
+# These tokens (PT, YT, LP, etc.) don't have Chainlink/Binance/CoinGecko listings,
+# so "all sources failed" is expected -- log at WARNING, not ERROR.
+KNOWN_UNPRICEABLE_PREFIXES = ("PT-", "YT-", "LP-", "SY-", "aToken-", "vToken-", "sToken-")
+
+
+def _is_known_unpriceable(token: str) -> bool:
+    """Check if a token is known to be unpriceable on standard price feeds."""
+    upper = token.upper()
+    return any(upper.startswith(prefix.upper()) for prefix in KNOWN_UNPRICEABLE_PREFIXES)
+
 
 @dataclass
 class SourceHealthMetrics:
@@ -302,7 +313,8 @@ class PriceAggregator:
                     stale=False,
                 )
 
-            logger.error(
+            log_fn = logger.warning if _is_known_unpriceable(token) else logger.error
+            log_fn(
                 "All data sources failed for %s/%s: %s",
                 token,
                 quote,
