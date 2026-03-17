@@ -140,17 +140,26 @@ def _extract_tokens_from_intent(intent: "AnyIntent") -> list[str]:
     return extract_token_symbols(intent)
 
 
-def _format_intent_for_log(intent: "AnyIntent") -> str:
+def _format_intent_for_log(intent: "AnyIntent", chain: str = "") -> str:
     """Format an intent for user-friendly logging.
 
     Args:
         intent: The intent to format
+        chain: Chain name for protocol display name resolution (e.g., "mantle")
 
     Returns:
         Human-readable string describing the intent with amounts and tokens
     """
+    from almanak.framework.connectors.protocol_aliases import display_protocol
+
     intent_type = intent.intent_type.value
     emoji_type = format_intent_type_emoji(intent_type)
+
+    def _display(protocol: str | None) -> str:
+        """Resolve protocol to display name if chain context is available."""
+        if not protocol:
+            return ""
+        return display_protocol(chain, protocol) if chain else protocol
 
     # SwapIntent
     if hasattr(intent, "from_token") and hasattr(intent, "to_token"):
@@ -171,7 +180,8 @@ def _format_intent_for_log(intent: "AnyIntent") -> str:
         slippage_str = f" (slippage: {format_percentage(slippage)})" if slippage else ""
 
         protocol = getattr(intent, "protocol", None)
-        protocol_str = f" via {protocol}" if protocol else ""
+        display_name = _display(protocol)
+        protocol_str = f" via {display_name}" if display_name else ""
 
         return f"{emoji_type}: {amount_str} {from_token} → {to_token}{slippage_str}{protocol_str}"
 
@@ -180,7 +190,7 @@ def _format_intent_for_log(intent: "AnyIntent") -> str:
         token = getattr(intent, "token", "")
         amount = getattr(intent, "amount", None)
         amount_usd = getattr(intent, "amount_usd", None)
-        protocol = getattr(intent, "protocol", "")
+        protocol = _display(getattr(intent, "protocol", ""))
 
         if amount_usd:
             amount_str = format_usd(amount_usd)
@@ -200,7 +210,7 @@ def _format_intent_for_log(intent: "AnyIntent") -> str:
         borrow_amount = getattr(intent, "borrow_amount", None)
         collateral_token = getattr(intent, "collateral_token", "")
         collateral_amount = getattr(intent, "collateral_amount", None)
-        protocol = getattr(intent, "protocol", "")
+        protocol = _display(getattr(intent, "protocol", ""))
 
         if borrow_amount:
             amount_str = f"{borrow_amount} {borrow_token}"
@@ -219,7 +229,7 @@ def _format_intent_for_log(intent: "AnyIntent") -> str:
     if intent_type == "WITHDRAW":
         token = getattr(intent, "token", "")
         amount = getattr(intent, "amount", None)
-        protocol = getattr(intent, "protocol", "")
+        protocol = _display(getattr(intent, "protocol", ""))
 
         if amount == "all":
             amount_str = f"ALL {token}"
@@ -234,7 +244,7 @@ def _format_intent_for_log(intent: "AnyIntent") -> str:
     if intent_type == "REPAY":
         token = getattr(intent, "token", "")
         amount = getattr(intent, "amount", None)
-        protocol = getattr(intent, "protocol", "")
+        protocol = _display(getattr(intent, "protocol", ""))
 
         if amount == "all":
             amount_str = f"ALL {token}"
@@ -252,7 +262,7 @@ def _format_intent_for_log(intent: "AnyIntent") -> str:
         amount1 = getattr(intent, "amount1", Decimal("0"))
         range_lower = getattr(intent, "range_lower", None)
         range_upper = getattr(intent, "range_upper", None)
-        protocol = getattr(intent, "protocol", "")
+        protocol = _display(getattr(intent, "protocol", ""))
 
         range_str = ""
         if range_lower and range_upper:
@@ -263,7 +273,7 @@ def _format_intent_for_log(intent: "AnyIntent") -> str:
     # LPCloseIntent
     if intent_type == "LP_CLOSE":
         position_id = getattr(intent, "position_id", "")
-        protocol = getattr(intent, "protocol", "")
+        protocol = _display(getattr(intent, "protocol", ""))
         return f"{emoji_type}: position {position_id[:8]}... via {protocol}"
 
     # PerpOpenIntent
@@ -272,7 +282,7 @@ def _format_intent_for_log(intent: "AnyIntent") -> str:
         direction = getattr(intent, "direction", "")
         size_usd = getattr(intent, "size_usd", None)
         leverage = getattr(intent, "leverage", None)
-        protocol = getattr(intent, "protocol", "")
+        protocol = _display(getattr(intent, "protocol", ""))
 
         size_str = format_usd(size_usd) if size_usd else "N/A"
         leverage_str = f" ({leverage}x)" if leverage else ""
@@ -283,7 +293,7 @@ def _format_intent_for_log(intent: "AnyIntent") -> str:
     if intent_type == "PERP_CLOSE":
         market = getattr(intent, "market", "")
         position_id = getattr(intent, "position_id", "")
-        protocol = getattr(intent, "protocol", "")
+        protocol = _display(getattr(intent, "protocol", ""))
         return f"{emoji_type}: {market} position {position_id[:8] if position_id else 'N/A'}... via {protocol}"
 
     # BridgeIntent
@@ -1252,14 +1262,15 @@ class StrategyRunner:
                 )
 
             # Step 5: Log intent(s) with detailed information
+            _chain = getattr(strategy, "chain", "")
             if len(intents) == 1:
-                intent_summary = _format_intent_for_log(intents[0])
+                intent_summary = _format_intent_for_log(intents[0], chain=_chain)
                 logger.info(f"📈 {strategy_id} intent: {intent_summary}")
             else:
                 # Log intent sequence with details for each step
                 logger.info(f"📈 {strategy_id} intent sequence ({len(intents)} steps):")
                 for i, intent in enumerate(intents, 1):
-                    intent_summary = _format_intent_for_log(intent)
+                    intent_summary = _format_intent_for_log(intent, chain=_chain)
                     logger.info(f"   {i}. {intent_summary}")
 
             # Step 5.5: Circuit breaker gate — block execution if breaker is open
@@ -1355,7 +1366,7 @@ class StrategyRunner:
 
                     if is_multi_intent:
                         logger.info(
-                            f"  Executing intent {idx + 1}/{len(intents)}: {_format_intent_for_log(intent_to_execute)}"
+                            f"  Executing intent {idx + 1}/{len(intents)}: {_format_intent_for_log(intent_to_execute, chain=_chain)}"
                         )
 
                     intent_result = await self._execute_single_chain(

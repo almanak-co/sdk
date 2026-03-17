@@ -1,7 +1,7 @@
 """Mantle MNT Accumulator Strategy.
 
 Multi-signal accumulation strategy that builds a WMNT position on Mantle
-using Uniswap V3 for swap execution.
+using Agni Finance for swap execution.
 
 Thesis:
     MNT is Mantle's native token. This strategy accumulates WMNT from USDT
@@ -43,16 +43,16 @@ def _cfg(config, key: str, default: Any = None) -> Any:
 
 @almanak_strategy(
     name="mantle_mnt_accumulator",
-    description="Multi-signal MNT accumulation with Uniswap V3 on Mantle",
+    description="Multi-signal MNT accumulation with Agni Finance on Mantle",
     version="1.0.0",
     author="Almanak",
-    tags=["mantle", "accumulation", "rsi", "dip-buying", "uniswap_v3"],
+    tags=["mantle", "accumulation", "rsi", "dip-buying", "agni"],
     supported_chains=["mantle"],
-    supported_protocols=["uniswap_v3"],
+    supported_protocols=["agni"],
     intent_types=["SWAP", "HOLD"],
 )
 class MantleMntAccumulator(IntentStrategy):
-    """Accumulates WMNT on Mantle via multi-signal RSI entries and Uniswap V3.
+    """Accumulates WMNT on Mantle via multi-signal RSI entries and Agni Finance.
 
     Three buy tiers based on RSI conviction, plus periodic small buys and
     profit-taking on overbought conditions. Position size is capped to avoid
@@ -66,7 +66,7 @@ class MantleMntAccumulator(IntentStrategy):
         # Tokens
         self.target_token: str = _cfg(c, "target_token", "WMNT")
         self.stable_token: str = _cfg(c, "stable_token", "USDT")
-        self.protocol: str = _cfg(c, "protocol", "uniswap_v3")
+        self.protocol: str = _cfg(c, "protocol", "agni")
 
         # RSI
         self.rsi_period: int = int(_cfg(c, "rsi_period", 14))

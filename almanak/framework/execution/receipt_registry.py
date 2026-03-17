@@ -289,8 +289,10 @@ class ReceiptParserRegistry:
         Raises:
             ValueError: If protocol is not registered
         """
-        # Normalize protocol name
-        protocol_lower = protocol.lower()
+        # Normalize protocol name (resolve aliases like "agni" -> "uniswap_v3")
+        from almanak.framework.connectors.protocol_aliases import normalize_protocol
+
+        protocol_lower = normalize_protocol(kwargs.get("chain", ""), protocol)
 
         # Check cache first (only for parsers without custom kwargs)
         if not kwargs and protocol_lower in self._parsers:

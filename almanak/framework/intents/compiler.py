@@ -169,14 +169,22 @@ CHAIN_GAS_OVERRIDES: dict[str, dict[str, int]] = {
         "lp_burn": 150000,
     },
     "mantle": {
-        # Mantle uses modified gas metering where gas units are ~250-300x higher
-        # than standard EVM chains. Gas prices are proportionally lower, so actual
-        # cost in MNT is comparable to other L2s.
-        "approve": 30_000_000,
-        "swap_simple": 80_000_000,
-        "swap_multi_hop": 120_000_000,
-        "wrap_eth": 10_000_000,
-        "unwrap_eth": 10_000_000,
+        # Mantle gas units are ~2000x higher than L1 equivalents (a Uniswap V3 swap
+        # uses ~150k on L1 but ~340M on Mantle). Gas prices are proportionally lower
+        # (~0.02 Gwei), so actual cost in MNT is comparable to other L2s (~$0.006/swap).
+        "approve": 50_000_000,
+        "swap_simple": 500_000_000,
+        "swap_multi_hop": 800_000_000,
+        "wrap_eth": 50_000_000,
+        "unwrap_eth": 50_000_000,
+        "lp_mint": 1_000_000_000,
+        "lp_increase_liquidity": 400_000_000,
+        "lp_decrease_liquidity": 500_000_000,
+        "lp_collect": 400_000_000,
+        "lp_burn": 200_000_000,
+        "lending_supply": 600_000_000,
+        "lending_borrow": 900_000_000,
+        "vault_deposit": 400_000_000,
     },
 }
 
@@ -361,6 +369,12 @@ SWAP_FEE_TIERS: dict[str, tuple[int, ...]] = {
     "uniswap_v3": (100, 500, 3000, 10000),
     "sushiswap_v3": (100, 500, 3000, 10000),
     "pancakeswap_v3": (100, 500, 2500, 10000),
+}
+
+# Chain-specific fee tier overrides. Uniswap V3 forks on some chains support
+# additional fee tiers (e.g., Agni on Mantle supports 2500 bps).
+SWAP_FEE_TIERS_CHAIN: dict[tuple[str, str], tuple[int, ...]] = {
+    ("mantle", "uniswap_v3"): (100, 500, 2500, 3000, 10000),
 }
 
 DEFAULT_SWAP_FEE_TIER: dict[str, int] = {
@@ -835,8 +849,9 @@ class DefaultSwapAdapter:
         return bytes.fromhex(selector[2:] + params)
 
     def _supported_fee_tiers(self) -> tuple[int, ...]:
-        """Return supported fee tiers for current protocol."""
-        return SWAP_FEE_TIERS.get(self.protocol, ())
+        """Return supported fee tiers for current protocol, with chain-specific overrides."""
+        chain_key = (str(self.chain).lower(), self.protocol)
+        return SWAP_FEE_TIERS_CHAIN.get(chain_key, SWAP_FEE_TIERS.get(self.protocol, ()))
 
     def _select_fee_tier(self, from_token: str, to_token: str, amount_in: int) -> int:
         """Select fee tier using fixed mode, on-chain quotes, or safe heuristic fallback."""
@@ -1264,8 +1279,8 @@ class UniswapV3LPAdapter:
         return bytes.fromhex(selector[2:] + params)
 
     def estimate_mint_gas(self) -> int:
-        """Estimate gas for minting a new position."""
-        return DEFAULT_GAS_ESTIMATES["lp_mint"]
+        """Estimate gas for minting a new position (chain-aware)."""
+        return get_gas_estimate(self.chain, "lp_mint")
 
     def estimate_close_gas(self, collect_fees: bool) -> int:
         """Estimate gas for closing a position (decrease + collect + optional burn).
@@ -1274,12 +1289,12 @@ class UniswapV3LPAdapter:
             collect_fees: Whether fees will be collected (always True for close)
 
         Returns:
-            Total estimated gas for the close operation
+            Total estimated gas for the close operation (chain-aware)
         """
         # decreaseLiquidity + collect + burn
-        gas = DEFAULT_GAS_ESTIMATES["lp_decrease_liquidity"]
-        gas += DEFAULT_GAS_ESTIMATES["lp_collect"]
-        gas += DEFAULT_GAS_ESTIMATES["lp_burn"]
+        gas = get_gas_estimate(self.chain, "lp_decrease_liquidity")
+        gas += get_gas_estimate(self.chain, "lp_collect")
+        gas += get_gas_estimate(self.chain, "lp_burn")
         return gas
 
     @staticmethod
@@ -1968,7 +1983,10 @@ class IntentCompiler:
         except (ValueError, ImportError):
             self.chain = chain
         self.wallet_address = wallet_address
-        self.default_protocol = default_protocol
+        # Normalize protocol alias (e.g., "agni" -> "uniswap_v3" on mantle)
+        from ..connectors.protocol_aliases import normalize_protocol
+
+        self.default_protocol = normalize_protocol(self.chain, default_protocol)
         self.default_deadline_seconds = default_deadline_seconds
         self.rpc_url = rpc_url
         self.rpc_timeout = rpc_timeout
@@ -2032,6 +2050,18 @@ class IntentCompiler:
         """Restore prices to a previous state (used after temporary override)."""
         self.price_oracle = original_oracle
         self._using_placeholders = original_using_placeholders
+
+    def _resolve_protocol(self, intent_protocol: str | None) -> str:
+        """Resolve intent protocol to canonical key, falling back to default.
+
+        Normalizes aliases (e.g., "agni" -> "uniswap_v3" on mantle) and falls
+        back to self.default_protocol if intent_protocol is None.
+        """
+        if intent_protocol is None:
+            return self.default_protocol
+        from ..connectors.protocol_aliases import normalize_protocol
+
+        return normalize_protocol(self.chain, intent_protocol)
 
     def _init_polymarket_adapter(self) -> None:
         """Initialize Polymarket adapter if on Polygon and config is available.
@@ -2899,14 +2929,18 @@ class IntentCompiler:
             return self._compile_jupiter_swap(intent)
 
         # Check for cross-chain swap - route to appropriate aggregator
+        # Preserve historical behavior: protocol=None defaults to Enso for cross-chain swaps.
         if intent.is_cross_chain:
-            protocol = intent.protocol or self.default_protocol
-            if protocol == "lifi":
-                return self._compile_lifi_swap(intent)
+            if intent.protocol is not None:
+                from ..connectors.protocol_aliases import normalize_protocol
+
+                protocol = normalize_protocol(self.chain, intent.protocol)
+                if protocol == "lifi":
+                    return self._compile_lifi_swap(intent)
             return self._compile_cross_chain_swap(intent)
 
         # Check for aggregator protocols
-        protocol = intent.protocol or self.default_protocol
+        protocol = self._resolve_protocol(intent.protocol)
         if protocol == "enso":
             return self._compile_enso_swap(intent)
         if protocol == "lifi":
@@ -2992,7 +3026,7 @@ class IntentCompiler:
                 )
 
             # Step 4: Get protocol adapter
-            protocol = intent.protocol or self.default_protocol
+            protocol = self._resolve_protocol(intent.protocol)
             adapter = DefaultSwapAdapter(
                 self.chain,
                 protocol,
@@ -3741,14 +3775,15 @@ class IntentCompiler:
         warnings: list[str] = []
 
         try:
-            # Step 1: Get LP adapter
-            adapter = UniswapV3LPAdapter(self.chain, intent.protocol)
+            # Step 1: Get LP adapter (resolve alias e.g. "agni" -> "uniswap_v3")
+            protocol = self._resolve_protocol(intent.protocol)
+            adapter = UniswapV3LPAdapter(self.chain, protocol)
             position_manager = adapter.get_position_manager_address()
 
             if position_manager == "0x0000000000000000000000000000000000000000":
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=(f"Unknown position manager for protocol {intent.protocol} on {self.chain}"),
+                    error=(f"Unknown position manager for protocol {protocol} on {self.chain}"),
                     intent_id=intent.intent_id,
                 )
 
@@ -3791,7 +3826,7 @@ class IntentCompiler:
 
             pool_check = validate_v3_pool(
                 self.chain,
-                intent.protocol,
+                protocol,
                 token0_info.address,
                 token1_info.address,
                 fee_tier,
@@ -3924,7 +3959,7 @@ class IntentCompiler:
                     "amount1_desired": str(amount1_desired),
                     "amount0_min": str(amount0_min),
                     "amount1_min": str(amount1_min),
-                    "protocol": intent.protocol,
+                    "protocol": protocol,
                     "position_manager": position_manager,
                     "deadline": deadline,
                     "chain": self.chain,
@@ -4204,14 +4239,15 @@ class IntentCompiler:
         warnings: list[str] = []
 
         try:
-            # Step 1: Get LP adapter
-            adapter = UniswapV3LPAdapter(self.chain, intent.protocol)
+            # Step 1: Get LP adapter (resolve alias e.g. "agni" -> "uniswap_v3")
+            protocol = self._resolve_protocol(intent.protocol)
+            adapter = UniswapV3LPAdapter(self.chain, protocol)
             position_manager = adapter.get_position_manager_address()
 
             if position_manager == "0x0000000000000000000000000000000000000000":
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=(f"Unknown position manager for protocol {intent.protocol} on {self.chain}"),
+                    error=(f"Unknown position manager for protocol {protocol} on {self.chain}"),
                     intent_id=intent.intent_id,
                 )
 
@@ -4267,7 +4303,7 @@ class IntentCompiler:
                     to=position_manager,
                     value=0,
                     data="0x" + decrease_calldata.hex(),
-                    gas_estimate=DEFAULT_GAS_ESTIMATES["lp_decrease_liquidity"],
+                    gas_estimate=get_gas_estimate(self.chain, "lp_decrease_liquidity"),
                     description=f"Decrease liquidity: position #{token_id} (remove all)",
                     tx_type="lp_decrease_liquidity",
                 )
@@ -4319,7 +4355,7 @@ class IntentCompiler:
                     to=position_manager,
                     value=0,
                     data="0x" + burn_calldata.hex(),
-                    gas_estimate=DEFAULT_GAS_ESTIMATES["lp_burn"],
+                    gas_estimate=get_gas_estimate(self.chain, "lp_burn"),
                     description=f"Burn position NFT: #{token_id}",
                     tx_type="lp_burn",
                 )
@@ -4340,7 +4376,7 @@ class IntentCompiler:
                     "token_id": token_id,
                     "pool": intent.pool,
                     "collect_fees": intent.collect_fees,
-                    "protocol": intent.protocol,
+                    "protocol": protocol,
                     "position_manager": position_manager,
                     "deadline": deadline,
                     "chain": self.chain,
@@ -11109,6 +11145,7 @@ class IntentCompiler:
         "WMATIC": "MATIC",
         "WAVAX": "AVAX",
         "WBNB": "BNB",
+        "WMNT": "MNT",
         "WS": "S",
         "WXPL": "XPL",
         "WPOL": "POL",
@@ -11212,6 +11249,8 @@ class IntentCompiler:
             "WBNB": Decimal("600"),
             "S": Decimal("0.50"),
             "WS": Decimal("0.50"),
+            "MNT": Decimal("0.80"),
+            "WMNT": Decimal("0.80"),
         }
 
     @staticmethod

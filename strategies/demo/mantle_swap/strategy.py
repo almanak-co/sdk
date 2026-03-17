@@ -1,12 +1,12 @@
 """Mantle Swap Demo Strategy.
 
 A simple RSI-based swap strategy running on Mantle (L2). Demonstrates how to
-build and run a strategy on the Mantle chain using Uniswap V3.
+build and run a strategy on the Mantle chain using Agni Finance.
 
 What this strategy does:
-    1. Monitors RSI of WETH on Mantle
-    2. RSI < oversold  -> buys WETH with USDT via Uniswap V3
-    3. RSI > overbought -> sells WETH for USDT via Uniswap V3
+    1. Monitors RSI of WMNT on Mantle
+    2. RSI < oversold  -> buys WMNT with USDT via Agni Finance
+    3. RSI > overbought -> sells WMNT for USDT via Agni Finance
     4. Otherwise -> holds
 
 Mantle specifics:
@@ -33,12 +33,12 @@ logger = logging.getLogger(__name__)
 
 @almanak_strategy(
     name="demo_mantle_swap",
-    description="Simple RSI swap strategy on Mantle L2 via Uniswap V3",
+    description="Simple RSI swap strategy on Mantle L2 via Agni Finance",
     version="1.0.0",
     author="Almanak",
-    tags=["demo", "mantle", "swap", "rsi", "uniswap"],
+    tags=["demo", "mantle", "swap", "rsi", "agni"],
     supported_chains=["mantle"],
-    supported_protocols=["uniswap_v3"],
+    supported_protocols=["agni"],
     intent_types=["SWAP", "HOLD"],
 )
 class MantleSwapStrategy(IntentStrategy):
@@ -111,7 +111,7 @@ class MantleSwapStrategy(IntentStrategy):
                     to_token=self.base_token,
                     amount_usd=self.trade_size_usd,
                     max_slippage=max_slippage,
-                    protocol="uniswap_v3",
+                    protocol="agni",
                 )
 
             # SELL: RSI overbought
@@ -133,7 +133,7 @@ class MantleSwapStrategy(IntentStrategy):
                     to_token=self.quote_token,
                     amount_usd=self.trade_size_usd,
                     max_slippage=max_slippage,
-                    protocol="uniswap_v3",
+                    protocol="agni",
                 )
 
             # HOLD: neutral zone
@@ -163,7 +163,7 @@ class MantleSwapStrategy(IntentStrategy):
                     position_type=PositionType.TOKEN,
                     position_id="mantle_swap_token_0",
                     chain=self.chain,
-                    protocol="uniswap_v3",
+                    protocol="agni",
                     value_usd=self.trade_size_usd,
                     details={"asset": self.base_token},
                 )
@@ -184,7 +184,7 @@ class MantleSwapStrategy(IntentStrategy):
                 to_token=self.quote_token,
                 amount="all",
                 max_slippage=max_slippage,
-                protocol="uniswap_v3",
+                protocol="agni",
             )
         ]
 

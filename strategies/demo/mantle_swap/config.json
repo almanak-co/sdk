@@ -1,18 +1,19 @@
 {
     "strategy_id": "demo_mantle_swap",
     "strategy_name": "demo_mantle_swap",
-    "description": "Simple RSI swap strategy on Mantle (MNT L2)",
-    "trade_size_usd": 2,
+    "description": "RSI swap strategy on Mantle - WMNT/USDT via Agni",
+    "trade_size_usd": 0.30,
     "rsi_period": 14,
-    "rsi_oversold": 60,
-    "rsi_overbought": 65,
-    "max_slippage_bps": 100,
-    "base_token": "WETH",
+    "rsi_oversold": 48,
+    "rsi_overbought": 52,
+    "protocol": "agni",
+    "max_slippage_bps": 300,
+    "base_token": "WMNT",
     "quote_token": "USDT",
     "chain": "mantle",
     "anvil_funding": {
         "MNT": 1000,
-        "WETH": 0.1,
+        "WMNT": 100,
         "USDT": 10000
     }
 }
