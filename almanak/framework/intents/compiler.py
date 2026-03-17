@@ -2958,6 +2958,10 @@ class IntentCompiler:
         if protocol == "curve":
             return self._compile_swap_curve(intent)
 
+        # Handle Uniswap V4 separately (PoolManager-based singleton with different interface)
+        if protocol == "uniswap_v4":
+            return self._compile_swap_uniswap_v4(intent)
+
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
             intent_id=intent.intent_id,
@@ -5429,6 +5433,52 @@ class IntentCompiler:
 
         except Exception as e:
             logger.exception("Failed to compile Curve SWAP intent")
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+
+        return result
+
+    def _compile_swap_uniswap_v4(self, intent: SwapIntent) -> CompilationResult:
+        """Compile SWAP intent for Uniswap V4.
+
+        Delegates to the UniswapV4Adapter which uses the V4 PoolManager
+        singleton and V4SwapRouter for swap execution.
+        """
+        result = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=intent.intent_id,
+        )
+
+        try:
+            from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4Adapter
+            from almanak.framework.data.tokens import get_token_resolver
+
+            adapter = UniswapV4Adapter(chain=self.chain, token_resolver=get_token_resolver())
+            adapter.wallet_address = self.wallet_address
+
+            action_bundle = adapter.compile_swap_intent(
+                intent=intent,
+                price_oracle=self.price_oracle,
+            )
+
+            if not action_bundle.transactions:
+                result.status = CompilationStatus.FAILED
+                error_msg = action_bundle.metadata.get("error", "No transactions generated")
+                result.error = f"Uniswap V4 compilation failed: {error_msg}"
+                return result
+
+            result.action_bundle = action_bundle
+            result.total_gas_estimate = action_bundle.metadata.get("gas_estimate", 0)
+
+            logger.info(
+                "Compiled Uniswap V4 SWAP intent: %s -> %s, %d txs",
+                intent.from_token,
+                intent.to_token,
+                len(action_bundle.transactions),
+            )
+
+        except Exception as e:
+            logger.exception("Failed to compile Uniswap V4 SWAP intent")
             result.status = CompilationStatus.FAILED
             result.error = str(e)
 

@@ -21,6 +21,7 @@ Example:
 Registered Protocols:
     DEX/AMM:
     - uniswap_v3: UniswapV3ReceiptParser
+    - uniswap_v4: UniswapV4ReceiptParser (V4 PoolManager singleton)
     - pancakeswap_v3: PancakeSwapV3ReceiptParser (Uniswap V3 fork on BSC)
     - sushiswap_v3: SushiSwapV3ReceiptParser (Uniswap V3 fork)
     - aerodrome: AerodromeReceiptParser (Base DEX)
@@ -130,6 +131,10 @@ class ReceiptParserRegistry:
         "uniswap_v3": (
             "almanak.framework.connectors.uniswap_v3.receipt_parser",
             "UniswapV3ReceiptParser",
+        ),
+        "uniswap_v4": (
+            "almanak.framework.connectors.uniswap_v4.receipt_parser",
+            "UniswapV4ReceiptParser",
         ),
         "pancakeswap_v3": (
             "almanak.framework.connectors.pancakeswap_v3.receipt_parser",

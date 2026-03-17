@@ -105,6 +105,8 @@ class ParsedSwapResult:
 
     amount_in: int
     amount_out: int
+    amount_in_decimal: Decimal = Decimal(0)
+    amount_out_decimal: Decimal = Decimal(0)
     token_in: str | None = None
     token_out: str | None = None
     effective_price: Decimal | None = None
@@ -144,8 +146,10 @@ class UniswapV4ReceiptParser:
         self,
         chain: str = "ethereum",
         pool_manager_address: str | None = None,
+        token_resolver: Any | None = None,
     ) -> None:
         self.chain = chain.lower()
+        self._token_resolver = token_resolver
         if pool_manager_address:
             self.pool_manager = pool_manager_address.lower()
         else:
@@ -213,11 +217,12 @@ class UniswapV4ReceiptParser:
             return None
 
         sr = parsed.swap_result
+
         return SwapAmounts(
             amount_in=sr.amount_in,
             amount_out=sr.amount_out,
-            amount_in_decimal=Decimal(sr.amount_in),
-            amount_out_decimal=Decimal(sr.amount_out),
+            amount_in_decimal=sr.amount_in_decimal,
+            amount_out_decimal=sr.amount_out_decimal,
             effective_price=sr.effective_price or Decimal(0),
             slippage_bps=sr.slippage_bps,
             token_in=sr.token_in,
@@ -317,14 +322,76 @@ class UniswapV4ReceiptParser:
             slippage = (quoted_amount_out - amount_out) / quoted_amount_out
             slippage_bps = int(slippage * 10000)
 
-        # Effective price
+        # Resolve token decimals from Transfer events for proper decimal conversion
+        token_in_addr = None
+        token_out_addr = None
+        token_in_decimals = None
+        token_out_decimals = None
+
+        # Identify token addresses from Transfer events
+        # In a swap: one Transfer goes TO the pool (token_in), one comes FROM the pool (token_out)
+        pool_manager = self.pool_manager
+        for transfer in transfer_events:
+            if transfer.to_address.lower() == pool_manager:
+                token_in_addr = transfer.token
+            elif transfer.from_address.lower() == pool_manager:
+                token_out_addr = transfer.token
+
+        # Resolve decimals via token_resolver (lazy-load if not injected)
+        resolver = self._token_resolver
+        if resolver is None:
+            try:
+                from almanak.framework.data.tokens import get_token_resolver
+
+                resolver = get_token_resolver()
+            except Exception:
+                logger.debug("Could not load token_resolver for decimal conversion")
+
+        if resolver and token_in_addr:
+            try:
+                resolved = resolver.resolve(token_in_addr, self.chain)
+                token_in_decimals = resolved.decimals
+            except Exception:
+                logger.warning(
+                    "Could not resolve decimals for token_in %s — decimal amounts will be zero", token_in_addr
+                )
+        if resolver and token_out_addr:
+            try:
+                resolved = resolver.resolve(token_out_addr, self.chain)
+                token_out_decimals = resolved.decimals
+            except Exception:
+                logger.warning(
+                    "Could not resolve decimals for token_out %s — decimal amounts will be zero", token_out_addr
+                )
+
+        # Compute human-readable decimal amounts
+        # When decimals are not resolved, fall back to Decimal(0) rather than raw integer
+        # amounts — a raw integer (e.g. 2000000000 for 2000 USDC) in a field documented as
+        # "human-readable" would silently corrupt downstream financial logic.
+        both_decimals_resolved = token_in_decimals is not None and token_out_decimals is not None
+        if token_in_decimals is not None:
+            amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
+        else:
+            amount_in_decimal = Decimal(0)
+        if token_out_decimals is not None:
+            amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
+        else:
+            amount_out_decimal = Decimal(0)
+
+        # Effective price: only compute when BOTH decimals are resolved to avoid
+        # mixing raw integer amounts with human-readable decimals (would produce
+        # prices off by orders of magnitude for cross-decimal pairs like USDC/WETH).
         effective_price = None
-        if amount_in > 0 and amount_out > 0:
-            effective_price = Decimal(amount_out) / Decimal(amount_in)
+        if both_decimals_resolved and amount_in_decimal > 0 and amount_out_decimal > 0:
+            effective_price = amount_out_decimal / amount_in_decimal
 
         return ParsedSwapResult(
             amount_in=amount_in,
             amount_out=amount_out,
+            amount_in_decimal=amount_in_decimal,
+            amount_out_decimal=amount_out_decimal,
+            token_in=token_in_addr,
+            token_out=token_out_addr,
             effective_price=effective_price,
             slippage_bps=slippage_bps,
             tick_after=swap.tick,

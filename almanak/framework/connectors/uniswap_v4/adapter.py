@@ -108,6 +108,7 @@ class UniswapV4Adapter:
         amount_in: Decimal,
         slippage_bps: int | None = None,
         fee_tier: int | None = None,
+        price_ratio: Decimal | None = None,
     ) -> SwapResult:
         """Build swap transactions for exact input amount.
 
@@ -117,6 +118,7 @@ class UniswapV4Adapter:
             amount_in: Input amount in human-readable units.
             slippage_bps: Slippage tolerance in bps. Default from config.
             fee_tier: Fee tier. Default from config.
+            price_ratio: Price ratio (token_out per token_in) for cross-decimal quotes.
 
         Returns:
             SwapResult with transactions list.
@@ -139,6 +141,7 @@ class UniswapV4Adapter:
             fee_tier=fee_tier,
             token_in_decimals=token_in_dec,
             token_out_decimals=token_out_dec,
+            price_ratio=price_ratio,
         )
 
         # Build transactions
@@ -222,11 +225,19 @@ class UniswapV4Adapter:
 
         slippage_bps = int(intent.max_slippage * 10000)
 
+        # Compute price ratio for cross-decimal quote accuracy
+        computed_price_ratio = None
+        from_price = price_oracle.get(intent.from_token.upper())
+        to_price = price_oracle.get(intent.to_token.upper())
+        if from_price and to_price and to_price > 0:
+            computed_price_ratio = Decimal(str(from_price)) / Decimal(str(to_price))
+
         result = self.swap_exact_input(
             token_in=intent.from_token,
             token_out=intent.to_token,
             amount_in=amount_in,
             slippage_bps=slippage_bps,
+            price_ratio=computed_price_ratio,
         )
 
         if not result.success:
@@ -239,13 +250,46 @@ class UniswapV4Adapter:
                 },
             )
 
+        # Resolve token metadata for orchestrator compatibility
+        # (orchestrator expects from_token/to_token as dicts with address, symbol, decimals, is_native)
+        from_addr, from_dec = self._resolve_token(intent.from_token)
+        to_addr, to_dec = self._resolve_token(intent.to_token)
+
+        def _check_native(symbol: str) -> bool:
+            """Check if token is native using token resolver.
+
+            Uses resolve_for_swap() to match _resolve_token() behavior — ensures
+            native tokens like ETH are wrapped (ETH->WETH) so is_native=False,
+            preventing the orchestrator from incorrectly skipping balance checks.
+            """
+            if self._token_resolver:
+                try:
+                    resolved = self._token_resolver.resolve_for_swap(symbol, self.chain)
+                    return resolved.is_native
+                except Exception as e:
+                    logger.debug("Could not resolve is_native for %s: %s", symbol, e)
+            return False
+
+        from_token_dict = {
+            "symbol": intent.from_token,
+            "address": from_addr,
+            "decimals": from_dec,
+            "is_native": _check_native(intent.from_token),
+        }
+        to_token_dict = {
+            "symbol": intent.to_token,
+            "address": to_addr,
+            "decimals": to_dec,
+            "is_native": _check_native(intent.to_token),
+        }
+
         return ActionBundle(
             intent_type=IntentType.SWAP.value,
             transactions=[tx_to_dict(tx) for tx in result.transactions],
             metadata={
                 "intent_id": intent.intent_id,
-                "from_token": intent.from_token,
-                "to_token": intent.to_token,
+                "from_token": from_token_dict,
+                "to_token": to_token_dict,
                 "amount_in": str(result.amount_in),
                 "amount_out_minimum": str(result.amount_out_minimum),
                 "slippage_bps": slippage_bps,

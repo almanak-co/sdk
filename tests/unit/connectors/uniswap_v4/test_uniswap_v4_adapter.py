@@ -193,8 +193,10 @@ class TestCompileSwapIntent:
         assert bundle.intent_type == "SWAP"
         assert len(bundle.transactions) > 0
         assert bundle.metadata["protocol_version"] == "v4"
-        assert bundle.metadata["from_token"] == "USDC"
-        assert bundle.metadata["to_token"] == "WETH"
+        assert bundle.metadata["from_token"]["symbol"] == "USDC"
+        assert bundle.metadata["from_token"]["address"] is not None
+        assert bundle.metadata["to_token"]["symbol"] == "WETH"
+        assert bundle.metadata["to_token"]["address"] is not None
 
     def test_compile_with_amount_usd(self):
         config = UniswapV4Config(chain="arbitrum", wallet_address=_TEST_WALLET)
@@ -240,3 +242,56 @@ class TestCompileSwapIntent:
 
         with pytest.raises(ValueError, match="amount or amount_usd"):
             adapter.compile_swap_intent(intent)
+
+
+class TestIntentCompilerV4Routing:
+    """Test that IntentCompiler routes protocol='uniswap_v4' to V4 adapter."""
+
+    def test_compiler_routes_to_v4(self):
+        """Verify IntentCompiler._compile_swap delegates to V4 adapter."""
+        from almanak.framework.intents import SwapIntent
+        from almanak.framework.intents.compiler import IntentCompiler
+
+        compiler = IntentCompiler(
+            chain="arbitrum",
+            wallet_address=_TEST_WALLET,
+            price_oracle={"USDC": Decimal("1.0"), "WETH": Decimal("2500.0")},
+        )
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="WETH",
+            amount=Decimal("100"),
+            max_slippage=Decimal("0.20"),
+            protocol="uniswap_v4",
+            chain="arbitrum",
+        )
+
+        result = compiler.compile(intent)
+        assert result.status.value == "SUCCESS", f"V4 compilation failed: {result.error}"
+        assert result.action_bundle is not None
+        assert len(result.action_bundle.transactions) > 0
+        # Verify it used V4 adapter (metadata has protocol_version)
+        assert result.action_bundle.metadata.get("protocol_version") == "v4"
+
+    def test_compiler_v4_unsupported_chain_fails(self):
+        """Verify compilation fails gracefully on unsupported chain."""
+        from almanak.framework.intents import SwapIntent
+        from almanak.framework.intents.compiler import IntentCompiler
+
+        compiler = IntentCompiler(
+            chain="sonic",
+            wallet_address=_TEST_WALLET,
+            price_oracle={"USDC": Decimal("1.0"), "WETH": Decimal("2500.0")},
+        )
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="WETH",
+            amount=Decimal("100"),
+            max_slippage=Decimal("0.20"),
+            protocol="uniswap_v4",
+            chain="sonic",
+        )
+
+        result = compiler.compile(intent)
+        assert result.status.value == "FAILED"
+        assert "not supported" in result.error.lower()

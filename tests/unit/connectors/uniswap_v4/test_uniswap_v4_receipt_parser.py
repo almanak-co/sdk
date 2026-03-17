@@ -198,7 +198,8 @@ class TestParseReceipt:
         assert result.swap_result.slippage_bps is not None
         assert result.swap_result.slippage_bps > 0
 
-    def test_effective_price(self):
+    def test_effective_price_without_transfers(self):
+        """Without Transfer events, token decimals can't be resolved so effective_price is None."""
         parser = UniswapV4ReceiptParser(chain="arbitrum")
 
         swap_log = _build_swap_log(
@@ -210,8 +211,11 @@ class TestParseReceipt:
         result = parser.parse_receipt(receipt)
 
         assert result.swap_result is not None
-        assert result.swap_result.effective_price is not None
-        assert result.swap_result.effective_price > Decimal(0)
+        # effective_price requires Transfer events to identify token addresses for decimal resolution
+        assert result.swap_result.effective_price is None
+        # Raw amounts are still populated
+        assert result.swap_result.amount_in == 2000 * 10**6
+        assert result.swap_result.amount_out == 1 * 10**18
 
 
 class TestExtractSwapAmounts:
@@ -229,7 +233,8 @@ class TestExtractSwapAmounts:
         assert amounts is not None
         assert amounts.amount_in == 1000 * 10**6
         assert amounts.amount_out == 5 * 10**17
-        assert amounts.effective_price > Decimal(0)
+        # Without Transfer events, decimals can't be resolved so effective_price falls back to 0
+        assert amounts.effective_price == Decimal(0)
 
     def test_extract_no_swap(self):
         parser = UniswapV4ReceiptParser(chain="arbitrum")
