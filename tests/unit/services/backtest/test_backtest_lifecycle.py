@@ -201,6 +201,40 @@ class TestBuildBacktestConfig:
         assert config.include_gas_costs is False
 
 
+class TestBuildBacktestConfigNamedStrategy:
+    """Tests for build_backtest_config with named strategies."""
+
+    def test_named_strategy_requires_chain(self):
+        from almanak.services.backtest.models import TimeframeSpec
+
+        timeframe = TimeframeSpec(start="2025-01-01", end="2025-01-08")
+        with pytest.raises(ValueError, match="chain is required"):
+            build_backtest_config(spec=None, timeframe=timeframe)
+
+    def test_named_strategy_requires_tokens(self):
+        from almanak.services.backtest.models import TimeframeSpec
+
+        timeframe = TimeframeSpec(start="2025-01-01", end="2025-01-08")
+        with pytest.raises(ValueError, match="tokens is required"):
+            build_backtest_config(spec=None, timeframe=timeframe, chain="arbitrum")
+
+    def test_named_strategy_builds_config(self):
+        from almanak.services.backtest.models import TimeframeSpec
+
+        timeframe = TimeframeSpec(start="2025-01-01", end="2025-01-08")
+        config = build_backtest_config(
+            spec=None,
+            timeframe=timeframe,
+            chain="arbitrum",
+            tokens=["WETH", "USDC"],
+            initial_capital_usd=Decimal("5000"),
+        )
+        assert config.chain == "arbitrum"
+        assert config.tokens == ["WETH", "USDC"]
+        assert config.initial_capital_usd == Decimal("5000")
+        assert config.fee_model == "realistic"
+
+
 class TestBuildQuickTimeframe:
     """Tests for build_quick_timeframe."""
 
@@ -290,6 +324,38 @@ class TestJobManager:
         assert job.progress.percent == 50.0
         assert job.progress.current_step == "Halfway there"
         assert job.progress.eta_seconds == 30
+
+    def test_eviction_of_completed_jobs(self):
+        """Completed jobs are evicted when max_total is exceeded."""
+        jm = JobManager(max_concurrent=10, max_total=3)
+        ids = []
+        for _ in range(3):
+            jid = jm.create_job()
+            jm.mark_running(jid)
+            jm.complete_job(jid, {})
+            ids.append(jid)
+
+        # All 3 exist
+        assert all(jm.get_job(jid) is not None for jid in ids)
+
+        # Creating a 4th triggers eviction of the oldest completed
+        j4 = jm.create_job()
+        assert jm.get_job(j4) is not None
+        assert jm.get_job(ids[0]) is None  # oldest evicted
+
+    def test_get_nonexistent_job_returns_none(self):
+        jm = JobManager(max_concurrent=4)
+        assert jm.get_job("bt_does_not_exist") is None
+
+    def test_complete_sets_progress_to_100(self):
+        jm = JobManager(max_concurrent=4)
+        job_id = jm.create_job()
+        jm.mark_running(job_id)
+        jm.update_progress(job_id, 50.0, "Halfway")
+        jm.complete_job(job_id, {"metrics": {}})
+        job = jm.get_job(job_id)
+        assert job.progress.percent == 100.0
+        assert job.progress.current_step == "Done"
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -26,6 +25,11 @@ VALID_BACKTEST_REQUEST = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Submit endpoint
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
 async def test_submit_backtest_returns_202(client):
     """POST /backtest returns 202 with a job_id."""
@@ -42,6 +46,30 @@ async def test_submit_backtest_invalid_spec(client):
     """POST /backtest with missing fields returns 422."""
     resp = await client.post("/api/v1/backtest", json={"strategy_spec": {}})
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_submit_backtest_no_strategy(client):
+    """POST /backtest with neither strategy_name nor strategy_spec returns 422."""
+    resp = await client.post(
+        "/api/v1/backtest",
+        json={"timeframe": {"start": "2025-01-01", "end": "2025-01-08"}},
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_submit_backtest_created_at_present(client):
+    """Submit response includes created_at timestamp."""
+    resp = await client.post("/api/v1/backtest", json=VALID_BACKTEST_REQUEST)
+    data = resp.json()
+    assert "created_at" in data
+    assert data["created_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Poll endpoint
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -82,6 +110,11 @@ async def test_poll_has_structured_progress(client):
     assert "eta_seconds" in progress
 
 
+# ---------------------------------------------------------------------------
+# Capacity / throttling
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
 async def test_job_manager_capacity_limit(client):
     """Submitting more than max_concurrent_jobs returns 429."""
@@ -99,8 +132,67 @@ async def test_job_manager_capacity_limit(client):
         assert resp.status_code == 429
 
 
+# ---------------------------------------------------------------------------
+# Quick backtest
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
 async def test_quick_backtest_validation_error(client):
     """POST /backtest/quick with missing fields returns 422."""
     resp = await client.post("/api/v1/backtest/quick", json={"strategy_spec": {}})
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_quick_backtest_named_strategy_requires_chain(client):
+    """POST /backtest/quick with strategy_name but no chain returns 422."""
+    resp = await client.post(
+        "/api/v1/backtest/quick",
+        json={"strategy_name": "demo_uniswap_rsi", "tokens": ["WETH", "USDC"]},
+    )
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# List strategies endpoint
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_strategies_returns_list(client):
+    """GET /strategies returns a list with a count."""
+    resp = await client.get("/api/v1/strategies")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "strategies" in data
+    assert "count" in data
+    assert isinstance(data["strategies"], list)
+    assert data["count"] == len(data["strategies"])
+
+
+@pytest.mark.asyncio
+async def test_list_strategies_sorted(client):
+    """GET /strategies returns strategies in sorted order."""
+    resp = await client.get("/api/v1/strategies")
+    data = resp.json()
+    strategies = data["strategies"]
+    assert strategies == sorted(strategies)
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI schema
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_backtest_endpoints_in_openapi(client):
+    """All backtest endpoints appear in OpenAPI schema."""
+    resp = await client.get("/openapi.json")
+    assert resp.status_code == 200
+    schema = resp.json()
+    paths = schema["paths"]
+    assert "/api/v1/backtest" in paths
+    assert "/api/v1/backtest/{job_id}" in paths
+    assert "/api/v1/backtest/quick" in paths
+    assert "/api/v1/strategies" in paths
