@@ -132,6 +132,11 @@ TENDERLY_NETWORK_IDS: dict[str, str] = {
     "bsc": "56",
     "linea": "59144",
     "plasma": "9745",
+    "sonic": "146",
+    "blast": "81457",
+    "mantle": "5000",
+    "berachain": "80094",
+    "monad": "143",
 }
 
 # Alchemy network names for supported chains
