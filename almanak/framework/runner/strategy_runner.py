@@ -1897,7 +1897,10 @@ class StrategyRunner:
                     price_oracle = market.get_price_oracle_dict()
                     if price_oracle:
                         logger.debug(f"Pre-fetched prices for intent tokens: {list(price_oracle.keys())}")
-            if not price_oracle:
+            if price_oracle is None:
+                pass  # No oracle available
+            elif not price_oracle:
+                # Oracle exists but empty after pre-fetch — no usable prices
                 price_oracle = None
             else:
                 logger.debug(f"Using real prices from market snapshot: {list(price_oracle.keys())}")
@@ -3753,13 +3756,12 @@ class StrategyRunner:
         fetched: dict[str, Decimal] | None = None
         if market is not None and hasattr(market, "get_price_oracle_dict"):
             fetched = market.get_price_oracle_dict()
-
         # Merge fallback prices (stablecoins + major tokens) into the fetched
         # oracle.  This ensures partially-populated caches (e.g. only USDC)
         # still get WETH/WBTC fallback prices instead of $1 placeholders.
         fallback = self._get_fallback_teardown_prices(market)
-        merged = {**(fallback or {}), **(fetched or {})}
-        price_oracle = merged or None
+        merged = {**(fallback or {}), **(fetched if fetched is not None else {})}
+        price_oracle = merged if merged else None
 
         has_prices = bool(price_oracle)
         if not has_prices:
@@ -3791,8 +3793,8 @@ class StrategyRunner:
 
         MarketSnapshot uses lazy loading — prices only populate when market.price()
         is called. During teardown, generate_teardown_intents() typically doesn't call
-        market.price(), so get_price_oracle_dict() returns {} and the compiler falls
-        back to placeholder prices. This method pre-populates the cache.
+        market.price(), so get_price_oracle_dict() returns {} until this method
+        pre-populates the cache with real prices for the teardown tokens.
 
         Teardown intents often reference tokens by address (e.g. 0xdefa1d...) rather
         than symbol. market.price() expects a symbol, so we resolve addresses to

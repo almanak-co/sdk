@@ -352,7 +352,8 @@ class TeardownManager:
             # Extract real prices from market for accurate compilation
             price_oracle = None
             if market is not None and hasattr(market, "get_price_oracle_dict"):
-                price_oracle = market.get_price_oracle_dict() or None
+                fetched = market.get_price_oracle_dict()
+                price_oracle = fetched if fetched is not None else None
 
             # Step 6: Execute intents with safety guardrails
             result = await self._execute_intents(
@@ -489,7 +490,8 @@ class TeardownManager:
         # Extract real prices from market
         price_oracle = None
         if market is not None and hasattr(market, "get_price_oracle_dict"):
-            price_oracle = market.get_price_oracle_dict() or None
+            fetched = market.get_price_oracle_dict()
+            price_oracle = fetched if fetched is not None else None
 
         # Continue execution from where we left off
         positions = strategy.get_open_positions()

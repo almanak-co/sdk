@@ -186,6 +186,78 @@ async def test_resume_applies_prices_when_regenerating():
 
 
 @pytest.mark.asyncio
+async def test_execute_empty_dict_oracle_not_coerced_to_none():
+    """Empty dict {} from get_price_oracle_dict() must NOT be coerced to None.
+
+    Regression test for VIB-1408: `x or None` converts {} to None, which
+    triggers $1 placeholder prices on mainnet teardowns. The fix uses
+    `is not None` checks to preserve the semantic distinction.
+    """
+    market = MagicMock()
+    market.get_price_oracle_dict.return_value = {}  # empty but not None
+    strategy = _make_strategy(intents=[])
+
+    manager = TeardownManager()
+
+    # Patch _execute_intents to capture the price_oracle arg
+    captured_oracle = []
+    original_execute = manager._execute_intents
+
+    async def spy_execute(*args, **kwargs):
+        captured_oracle.append(kwargs.get("price_oracle"))
+        return MagicMock(success=True, results=[], error=None)
+
+    manager._execute_intents = spy_execute
+    manager.cancel_window.run_cancel_window = AsyncMock(return_value=MagicMock(was_cancelled=False))
+    manager.safety_guard.validate_teardown_request = MagicMock(return_value=MagicMock(all_passed=True))
+
+    # Give it an intent so it reaches _execute_intents
+    intent = MagicMock()
+    intent.intent_type = "SWAP"
+    intent.chain = "arbitrum"
+    intent.to_dict.return_value = {"type": "swap"}
+    strategy.generate_teardown_intents.return_value = [intent]
+
+    await manager.execute(strategy=strategy, mode="graceful", market=market)
+
+    # price_oracle should be {} (empty dict), NOT None
+    assert len(captured_oracle) == 1
+    assert captured_oracle[0] == {}
+    assert captured_oracle[0] is not None
+
+
+@pytest.mark.asyncio
+async def test_execute_none_oracle_stays_none():
+    """get_price_oracle_dict() returning None should remain None."""
+    market = MagicMock()
+    market.get_price_oracle_dict.return_value = None
+    strategy = _make_strategy(intents=[])
+
+    manager = TeardownManager()
+
+    captured_oracle = []
+
+    async def spy_execute(*args, **kwargs):
+        captured_oracle.append(kwargs.get("price_oracle"))
+        return MagicMock(success=True, results=[], error=None)
+
+    manager._execute_intents = spy_execute
+    manager.cancel_window.run_cancel_window = AsyncMock(return_value=MagicMock(was_cancelled=False))
+    manager.safety_guard.validate_teardown_request = MagicMock(return_value=MagicMock(all_passed=True))
+
+    intent = MagicMock()
+    intent.intent_type = "SWAP"
+    intent.chain = "arbitrum"
+    intent.to_dict.return_value = {"type": "swap"}
+    strategy.generate_teardown_intents.return_value = [intent]
+
+    await manager.execute(strategy=strategy, mode="graceful", market=market)
+
+    assert len(captured_oracle) == 1
+    assert captured_oracle[0] is None
+
+
+@pytest.mark.asyncio
 async def test_execute_typeerror_fallback_only_catches_market_keyword():
     """TypeError from real strategy bugs is NOT silently swallowed as a fallback.
 
