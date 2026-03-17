@@ -306,6 +306,176 @@ class TestBenqiBorrowIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.asyncio
+    async def test_borrow_only_usdc_against_existing_collateral(
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+    ):
+        """Test borrow-only path: BorrowIntent with collateral_amount=0.
+
+        This exercises the compiler codepath where BORROW is generated WITHOUT
+        a preceding SUPPLY action in the same ActionBundle. The wallet must
+        already have collateral supplied and entered as collateral.
+
+        Flow:
+        1. Setup: Supply AVAX + enterMarkets via BorrowIntent with collateral
+        2. Record balances
+        3. Create BorrowIntent with collateral_amount=0
+        4. Compile (verify only BORROW tx, no SUPPLY/enterMarkets)
+        5. Execute
+        6. Parse receipt for Borrow event
+        7. Verify USDC increased, AVAX unchanged (no collateral spent)
+
+        VIB-1381: This is the untested borrow-only codepath found in iter 88.
+        """
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdc = tokens["USDC"]
+        usdc_decimals = get_token_decimals(web3, usdc)
+
+        # ── Step 1: Setup — supply collateral via a regular BorrowIntent ──
+        # This supplies AVAX, enters markets, and borrows a small amount.
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+
+        setup_intent = BorrowIntent(
+            protocol="benqi",
+            collateral_token="AVAX",
+            collateral_amount=Decimal("10"),  # ~$200 collateral
+            borrow_token="USDC",
+            borrow_amount=Decimal("10"),  # Small initial borrow
+            chain=CHAIN_NAME,
+        )
+
+        setup_result = compiler.compile(setup_intent)
+        assert setup_result.status.value == "SUCCESS", f"Setup compilation failed: {setup_result.error}"
+        assert setup_result.action_bundle is not None
+        setup_exec = await orchestrator.execute(setup_result.action_bundle)
+        assert setup_exec.success, f"Setup execution failed: {setup_exec.error}"
+        print("Setup complete: 10 AVAX supplied, markets entered, 10 USDC borrowed")
+
+        # ── Step 2: Record balances BEFORE borrow-only ──
+        avax_before = web3.eth.get_balance(funded_wallet)
+        usdc_before = get_token_balance(web3, usdc, funded_wallet)
+
+        borrow_amount = Decimal("20")  # Borrow more against existing collateral
+
+        print(f"\n{'='*80}")
+        print(f"Test: Borrow-only {borrow_amount} USDC (collateral_amount=0) using BorrowIntent")
+        print(f"{'='*80}")
+        print(f"Native AVAX before: {format_token_amount(avax_before, 18)}")
+        print(f"USDC before: {format_token_amount(usdc_before, usdc_decimals)}")
+
+        # ── Step 3: Create BorrowIntent with collateral_amount=0 ──
+        intent = BorrowIntent(
+            protocol="benqi",
+            collateral_token="AVAX",
+            collateral_amount=Decimal("0"),  # No new collateral — borrow-only
+            borrow_token="USDC",
+            borrow_amount=borrow_amount,
+            chain=CHAIN_NAME,
+        )
+
+        print("\nCreated BorrowIntent (borrow-only):")
+        print(f"  Collateral: {intent.collateral_amount} {intent.collateral_token} (none — existing)")
+        print(f"  Borrow: {intent.borrow_amount} {intent.borrow_token}")
+
+        # ── Layer 1: Compilation ──
+        print("\nCompiling intent to ActionBundle...")
+        compilation_result = compiler.compile(intent)
+
+        assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
+        assert compilation_result.action_bundle is not None
+
+        # Verify the borrow-only path: should have only 1 tx (borrow), no supply or enterMarkets
+        bundle = compilation_result.action_bundle
+        num_txs = len(bundle.transactions)
+        print(f"ActionBundle created with {num_txs} transaction(s)")
+        assert num_txs == 1, (
+            f"Borrow-only path (collateral_amount=0) should produce exactly 1 transaction "
+            f"(just the borrow), but got {num_txs}. The compiler may be generating "
+            f"unnecessary supply/enterMarkets transactions."
+        )
+
+        # Verify the warning about existing collateral
+        if compilation_result.warnings:
+            print(f"Warnings: {compilation_result.warnings}")
+            assert any("existing collateral" in w.lower() for w in compilation_result.warnings), (
+                "Compiler should warn about borrowing against existing collateral"
+            )
+
+        # ── Layer 2: Execution ──
+        print("\nExecuting via ExecutionOrchestrator...")
+        execution_result = await orchestrator.execute(bundle)
+
+        assert execution_result.success, f"Execution failed: {execution_result.error}"
+        print(f"Execution successful! {len(execution_result.transaction_results)} transaction(s) confirmed")
+
+        # ── Layer 3: Receipt Parsing ──
+        found_borrow_event = False
+        for tx_result in execution_result.transaction_results:
+            print("\nTransaction:")
+            print(f"  Hash: {tx_result.tx_hash[:16]}...")
+            print(f"  Gas used: {tx_result.gas_used}")
+
+            if tx_result.receipt:
+                parser = BenqiReceiptParser(underlying_decimals=usdc_decimals)
+                parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+
+                if parse_result.success and parse_result.borrow_amount > 0:
+                    print(f"  Borrow amount: {parse_result.borrow_amount}")
+                    assert parse_result.borrow_amount > 0, "Borrow amount must be positive"
+                    found_borrow_event = True
+
+                # Verify NO supply event (borrow-only path must not supply)
+                assert parse_result.supply_amount == 0, (
+                    f"Borrow-only path must NOT produce supply events, "
+                    f"but found supply_amount={parse_result.supply_amount}"
+                )
+
+        assert found_borrow_event, "Receipt parser must find at least one Borrow event"
+
+        # ── Layer 4: Balance Deltas ──
+        avax_after = web3.eth.get_balance(funded_wallet)
+        usdc_after = get_token_balance(web3, usdc, funded_wallet)
+
+        # Calculate gas cost
+        total_gas_cost = sum(
+            tx.gas_used * tx.receipt.effective_gas_price
+            for tx in execution_result.transaction_results
+            if tx.receipt
+        )
+
+        usdc_received = usdc_after - usdc_before
+        avax_spent_excluding_gas = (avax_before - avax_after) - total_gas_cost
+
+        print("\n--- Results ---")
+        print(f"USDC received (borrowed): {format_token_amount(usdc_received, usdc_decimals)}")
+        print(f"Native AVAX spent (excluding gas): {format_token_amount(avax_spent_excluding_gas, 18)}")
+        print(f"Gas cost: {format_token_amount(total_gas_cost, 18)}")
+
+        # Verify USDC received matches borrow amount exactly
+        expected_usdc = int(borrow_amount * Decimal(10**usdc_decimals))
+        assert usdc_received == expected_usdc, (
+            f"USDC received must EXACTLY equal borrow amount. "
+            f"Expected: {expected_usdc}, Got: {usdc_received}"
+        )
+
+        # Verify NO native AVAX was spent as collateral (only gas)
+        assert avax_spent_excluding_gas == 0, (
+            f"Borrow-only path must NOT spend native AVAX as collateral. "
+            f"AVAX spent (excluding gas): {avax_spent_excluding_gas}"
+        )
+
+        print("\nALL CHECKS PASSED — borrow-only path verified")
+
     @pytest.mark.xfail(
         reason="BENQI Comptroller on Anvil fork does not reliably enforce borrow limits. "
         "The oracle price feed on the fork may return values that allow excessive borrows.",
