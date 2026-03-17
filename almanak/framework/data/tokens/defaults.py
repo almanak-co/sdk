@@ -786,6 +786,30 @@ WSOL = Token(
     is_stablecoin=False,
 )
 
+# Marinade Staked SOL (liquid staking derivative)
+MSOL = Token(
+    symbol="mSOL",
+    name="Marinade Staked SOL",
+    decimals=9,
+    addresses={
+        "solana": "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
+    },
+    coingecko_id="msol",
+    is_stablecoin=False,
+)
+
+# Jito Staked SOL (liquid staking derivative with MEV rewards)
+JITOSOL = Token(
+    symbol="JitoSOL",
+    name="Jito Staked SOL",
+    decimals=9,
+    addresses={
+        "solana": "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",
+    },
+    coingecko_id="jito-staked-sol",
+    is_stablecoin=False,
+)
+
 # Jupiter governance token
 JUP = Token(
     symbol="JUP",
@@ -1085,6 +1109,8 @@ DEFAULT_TOKENS: list[Token] = [
     # Solana chain tokens
     SOL,
     WSOL,
+    MSOL,
+    JITOSOL,
     JUP,
     # NOTE: USDC_SOL and USDT_SOL are intentionally excluded from DEFAULT_TOKENS.
     # The main USDC and USDT Token definitions already include "solana" addresses,
@@ -1221,6 +1247,8 @@ __all__ = [
     # Solana chain tokens
     "SOL",
     "WSOL",
+    "MSOL",
+    "JITOSOL",
     "JUP",
     # Mantle chain tokens
     "MNT",
