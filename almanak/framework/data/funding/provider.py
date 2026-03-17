@@ -109,7 +109,7 @@ GMX_V2_READER_ABI = [
 # GMX V2 contract addresses
 GMX_V2_READER_ADDRESSES: dict[str, str] = {
     "arbitrum": "0xf60becbba223EEA9495Da3f606753867eC10d139",
-    "avalanche": "0x1D5d64d691FBcD9C5B0aAb9f0f78A5F2B3898E63",
+    "avalanche": "0x2eFEE1950ededC65De687b40Fd30a7B5f4544aBd",
 }
 
 GMX_V2_DATA_STORE_ADDRESSES: dict[str, str] = {

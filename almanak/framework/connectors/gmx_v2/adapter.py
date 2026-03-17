@@ -54,7 +54,7 @@ def _normalize_datetime_to_utc(dt: datetime) -> datetime:
 # Constants
 # =============================================================================
 
-# GMX v2 contract addresses per chain (updated Jan 2026)
+# GMX v2 contract addresses per chain (updated Mar 2026)
 # Source: https://github.com/gmx-io/gmx-interface/blob/master/sdk/src/configs/contracts.ts
 #
 # Note on GMX V2 architecture:
@@ -78,8 +78,8 @@ GMX_V2_ADDRESSES: dict[str, dict[str, str]] = {
         "exchange_router": "0x8f550E53DFe96C055D5Bdb267c21F268fCAF63B2",
         "order_handler": "0x823b558B4bC0a2C4974a0d8D7885AA1102D15dEC",
         "data_store": "0x2F0b22339414ADeD7D5F06f9D604c7fF5b2fe3f6",
-        "reader": "0x1D5d64d691FBcD9C5B0aAb9f0f78A5F2B3898E63",
-        "synthetics_reader": "0x1D5d64d691FBcD9C5B0aAb9f0f78A5F2B3898E63",  # Same as reader on Avalanche
+        "reader": "0x2eFEE1950ededC65De687b40Fd30a7B5f4544aBd",
+        "synthetics_reader": "0x62Cb8740E6986B29dC671B2EB596676f60590A5B",
         "order_vault": "0xEE7d43517A62fa0aC642e22Eb93a93f82D0D3df6",
         "deposit_vault": "0x90c670825d0C62ede1c5ee9571d6d9a17A722DFF",
         "withdrawal_vault": "0xf5F30B10141E1F63FC11eD772931A8294a591996",

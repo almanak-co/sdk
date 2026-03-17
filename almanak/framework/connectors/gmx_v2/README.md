@@ -271,7 +271,8 @@ pytest src/connectors/gmx_v2/tests/ -v
 ### Avalanche
 - Exchange Router: `0x8f550E53DFe96C055D5Bdb267c21F268fCAF63B2`
 - Data Store: `0x2F0b22339414ADeD7D5F06f9D604c7fF5b2fe3f6`
-- Reader: `0x1D5d64d691FBcD9C5B0aAb9f0f78A5F2B3898E63`
+- Reader: `0x2eFEE1950ededC65De687b40Fd30a7B5f4544aBd`
+- SyntheticsReader: `0x62Cb8740E6986B29dC671B2EB596676f60590A5B`
 
 ## Resources
 
