@@ -3878,8 +3878,8 @@ class StrategyRunner:
                     price = market.price(symbol)
                     if price and price > 0:
                         fallback[symbol] = price
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Could not fetch fallback teardown price for %s: %s", symbol, exc)
 
         # If we only have stablecoins, still return — it's better than $1 for everything
         return fallback if fallback else None
