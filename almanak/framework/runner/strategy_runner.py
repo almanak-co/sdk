@@ -88,7 +88,7 @@ from ..intents.state_machine import (
     StateMachineConfig,
     TransactionReceipt,
 )
-from ..intents.vocabulary import AnyIntent, DecideResult, HoldIntent, Intent, IntentSequence
+from ..intents.vocabulary import AnyIntent, DecideResult, HoldIntent, Intent, IntentSequence, IntentType
 from ..models.actions import AvailableAction, SuggestedAction
 from ..models.operator_card import EventType, OperatorCard, PositionSummary, Severity
 from ..models.stuck_reason import StuckReason
@@ -1324,19 +1324,24 @@ class StrategyRunner:
                 is_multi_intent = len(intents) > 1
                 previous_amount_received: Decimal | None = None
                 for idx, intent in enumerate(intents):
-                    # Resolve amount="all" from previous step's output
+                    # Resolve amount="all" from previous step's output or wallet balance
                     intent_to_execute = intent
-                    if is_multi_intent and Intent.has_chained_amount(intent):
-                        if previous_amount_received is None:
+                    if Intent.has_chained_amount(intent):
+                        if is_multi_intent and previous_amount_received is not None:
+                            # Multi-intent chain: resolve from previous step output
+                            logger.info(
+                                f"  Resolving amount='all' to {previous_amount_received} "
+                                f"for intent {idx + 1}/{len(intents)}"
+                            )
+                            intent_to_execute = Intent.set_resolved_amount(intent, previous_amount_received)
+                        elif is_multi_intent and previous_amount_received is None and idx > 0:
+                            # Multi-intent but no previous output (dry-run or error)
                             if self.config.dry_run:
                                 logger.warning(
                                     f"  Intent {idx + 1}/{len(intents)} uses amount='all' "
                                     "but no previous step output available (dry-run mode). "
                                     "Skipping compilation of this step."
                                 )
-                                # In dry-run mode, the previous step didn't execute so
-                                # there's no output amount to chain. Skip compilation
-                                # (compiler rejects unresolved 'all') and mark as DRY_RUN.
                                 intent_result = IterationResult(
                                     status=IterationStatus.DRY_RUN,
                                     intent=intent,
@@ -1358,11 +1363,74 @@ class StrategyRunner:
                                 )
                                 break
                         else:
-                            logger.info(
-                                f"  Resolving amount='all' to {previous_amount_received} "
-                                f"for intent {idx + 1}/{len(intents)}"
-                            )
-                            intent_to_execute = Intent.set_resolved_amount(intent, previous_amount_received)
+                            # Single intent or first intent in multi-sequence:
+                            # resolve amount='all' from wallet balance for wallet-funded intents.
+                            # Protocol-position intents (withdraw, repay, unstake) use amount='all'
+                            # to mean "all from the protocol position" — let the compiler handle those.
+                            _WALLET_FUNDED_TYPES = {
+                                IntentType.SWAP,
+                                IntentType.SUPPLY,
+                                IntentType.BORROW,
+                                IntentType.STAKE,
+                                IntentType.LP_OPEN,
+                                IntentType.PERP_OPEN,
+                                IntentType.VAULT_DEPOSIT,
+                                IntentType.BRIDGE,
+                            }
+                            intent_type = getattr(intent, "intent_type", None)
+                            if intent_type not in _WALLET_FUNDED_TYPES:
+                                # Protocol-position or unknown intent — let compiler handle natively
+                                logger.debug(f"  amount='all' for {intent_type} — passing to compiler as-is")
+                            else:
+                                balance_token = (
+                                    getattr(intent, "from_token", None)
+                                    or getattr(intent, "token", None)
+                                    or getattr(intent, "token_in", None)
+                                    or getattr(intent, "collateral_token", None)
+                                )
+                                if balance_token and market is not None:
+                                    try:
+                                        bal = market.balance(balance_token)
+                                        # market.balance() may return TokenBalance or Decimal
+                                        balance_value = bal.balance if hasattr(bal, "balance") else bal
+                                        if balance_value <= 0:
+                                            logger.warning(f"  amount='all' for {balance_token} but balance is 0")
+                                            intent_result = IterationResult(
+                                                status=IterationStatus.COMPILATION_FAILED,
+                                                intent=intent,
+                                                error=f"amount='all' for {balance_token} but balance is 0",
+                                                strategy_id=strategy.strategy_id,
+                                                duration_ms=self._calculate_duration_ms(start_time),
+                                            )
+                                            break
+                                        intent_to_execute = Intent.set_resolved_amount(intent, balance_value)
+                                        logger.info(
+                                            f"  Resolved amount='all' for {balance_token} from wallet: {balance_value}"
+                                        )
+                                    except Exception as e:  # noqa: BLE001
+                                        logger.error(f"  Failed to resolve amount='all' for {balance_token}: {e}")
+                                        intent_result = IterationResult(
+                                            status=IterationStatus.COMPILATION_FAILED,
+                                            intent=intent,
+                                            error=f"Cannot resolve amount='all' for {balance_token}: {e}",
+                                            strategy_id=strategy.strategy_id,
+                                            duration_ms=self._calculate_duration_ms(start_time),
+                                        )
+                                        break
+                                elif balance_token is None:
+                                    # No token field found — let compiler handle
+                                    logger.debug("  amount='all' with no token field, passing to compiler as-is")
+                                else:
+                                    # Have token but no market — cannot resolve
+                                    logger.error(f"  amount='all' for {balance_token} but no market context available")
+                                    intent_result = IterationResult(
+                                        status=IterationStatus.COMPILATION_FAILED,
+                                        intent=intent,
+                                        error=(f"amount='all' for {balance_token} but no market context available"),
+                                        strategy_id=strategy.strategy_id,
+                                        duration_ms=self._calculate_duration_ms(start_time),
+                                    )
+                                    break
 
                     if is_multi_intent:
                         logger.info(

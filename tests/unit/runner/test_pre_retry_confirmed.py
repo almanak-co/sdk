@@ -55,6 +55,7 @@ def _make_swap_intent():
     intent.amount_usd = None  # avoid Decimal conversion issues
     intent.max_slippage = None
     intent.protocol = None
+    intent.is_chained_amount = False  # not amount='all'
     return intent
 
 
