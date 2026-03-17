@@ -236,6 +236,7 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
     },
     "optimism": {
         "uniswap_v3": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",  # SwapRouter02
+        "sushiswap_v3": "0x8516944E89f296eb6473d79aED1Ba12088016c9e",  # SushiSwap V3 SwapRouter
         "velodrome": "0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858",
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
     },
