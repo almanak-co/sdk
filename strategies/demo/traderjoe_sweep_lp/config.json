@@ -1,0 +1,22 @@
+{
+    "strategy_id": "demo_traderjoe_sweep_lp",
+    "strategy_name": "demo_traderjoe_sweep_lp",
+    "description": "TraderJoe V2 LP strategy for parameter sweep backtesting on Avalanche",
+    "pool": "WAVAX/USDC/20",
+    "range_width_pct": "0.10",
+    "amount_x": "0.5",
+    "amount_y": "15",
+    "num_bins": 11,
+    "rsi_period": 14,
+    "rsi_oversold": "30",
+    "rsi_overbought": "70",
+    "reentry_cooldown": 2,
+    "max_lp_cycles": 5,
+    "chain": "avalanche",
+    "network": "mainnet",
+    "anvil_funding": {
+        "AVAX": 100,
+        "WAVAX": 50,
+        "USDC": 10000
+    }
+}
