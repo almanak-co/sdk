@@ -191,6 +191,17 @@ def _build_matrix() -> dict:
         agg_protocols["1inch"] = oneinch_chains
         all_chains.update(oneinch_chains)
 
+    # --- Curve (from connector adapter, supports swap + LP) ---
+    try:
+        from almanak.framework.connectors.curve.adapter import CURVE_ADDRESSES
+
+        for chain in CURVE_ADDRESSES:
+            all_chains.add(chain)
+            swap_protocols.setdefault("curve", set()).add(chain)
+            lp_protocols.setdefault("curve", set()).add(chain)
+    except ImportError:
+        pass
+
     # --- DEX-specific additions from contracts ---
     # Aerodrome/Velodrome
     for chain in AERODROME:

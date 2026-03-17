@@ -185,3 +185,42 @@ class TestSupportMatrixCLI:
         for p in data["protocols"]:
             assert p["category"] == "swap"
             assert "ethereum" in p["chains"]
+
+
+# =============================================================================
+# Curve Matrix Entry Tests
+# =============================================================================
+
+
+class TestCurveMatrixEntry:
+    """Tests for Curve appearing in the support matrix (swap + LP)."""
+
+    def test_curve_in_swap_category(self, matrix_data: dict) -> None:
+        """Curve should appear as a swap protocol."""
+        swap_protos = [p for p in matrix_data["protocols"] if p["name"] == "curve" and p["category"] == "swap"]
+        assert len(swap_protos) == 1, "Curve should appear exactly once in swap category"
+        assert len(swap_protos[0]["chains"]) > 0, "Curve swap should support at least one chain"
+
+    def test_curve_in_lp_category(self, matrix_data: dict) -> None:
+        """Curve should appear as an LP protocol."""
+        lp_protos = [p for p in matrix_data["protocols"] if p["name"] == "curve" and p["category"] == "lp"]
+        assert len(lp_protos) == 1, "Curve should appear exactly once in lp category"
+        assert len(lp_protos[0]["chains"]) > 0, "Curve LP should support at least one chain"
+
+    def test_curve_chains_match_addresses(self, matrix_data: dict) -> None:
+        """Curve chains in matrix should match CURVE_ADDRESSES keys."""
+        from almanak.framework.connectors.curve.adapter import CURVE_ADDRESSES
+
+        expected_chains = set(CURVE_ADDRESSES.keys())
+        swap_protos = [p for p in matrix_data["protocols"] if p["name"] == "curve" and p["category"] == "swap"]
+        actual_chains = set(swap_protos[0]["chains"])
+        assert actual_chains == expected_chains, f"Expected {expected_chains}, got {actual_chains}"
+
+    def test_curve_filter_by_protocol(self, cli_runner: CliRunner) -> None:
+        """Filtering by curve protocol should return swap and lp entries."""
+        result = cli_runner.invoke(support_matrix, ["--json", "-p", "curve"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        categories = {p["category"] for p in data["protocols"]}
+        assert "swap" in categories, "Curve should have swap category"
+        assert "lp" in categories, "Curve should have lp category"
