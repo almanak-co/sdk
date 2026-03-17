@@ -89,6 +89,7 @@ SYMBOL_ALIASES: dict[tuple[str, str], str] = {
     ("avalanche", "USDC.E"): "0xa7d7079b0fead91f3e65f86e8915cb59c1a4c664",  # Bridged USDC
     ("avalanche", "USDT.E"): "0xc7198437980c041c805a1edcba50c1ce5db95118",  # Bridged USDT
     ("avalanche", "WETH.E"): "0x49d5c2bdffac6ce2bfdb6640f4f80f226bc10bab",  # Bridged WETH
+    ("avalanche", "BTCB"): "0x152b9d0fdc40c096de20232db1e35ae6a57fa6c0",  # BTC.b alias (no dot)
     # Berachain bridged tokens
     ("berachain", "USDC.E"): "0x549943e04f40284185054145c6e4e9568c1d3241",  # Bridged USDC (Stargate)
     ("berachain", "USDC"): "0x549943e04f40284185054145c6e4e9568c1d3241",  # USDC -> bridged USDC on Berachain
@@ -459,6 +460,18 @@ WBTC = Token(
     is_stablecoin=False,
 )
 
+# BTC.b (Avalanche bridged BTC via Bitcoin Bridge, 8 decimals)
+BTC_B = Token(
+    symbol="BTC.B",
+    name="Bitcoin (BTC.b)",
+    decimals=8,
+    addresses={
+        "avalanche": "0x152b9d0FdC40C096DE20232Db1E35AE6A57FA6c0",
+    },
+    coingecko_id="bitcoin-avalanche-bridged-btc-b",
+    is_stablecoin=False,
+)
+
 # =============================================================================
 # L2 / CHAIN TOKENS
 # =============================================================================
@@ -650,6 +663,18 @@ WEETH = Token(
         "arbitrum": "0x35751007a407ca6feffe80b3cb397736d2cf4dbe",
     },
     coingecko_id="wrapped-eeth",
+    is_stablecoin=False,
+)
+
+# BENQI Staked AVAX (liquid staking token on Avalanche)
+SAVAX = Token(
+    symbol="SAVAX",
+    name="Staked AVAX",
+    decimals=18,
+    addresses={
+        "avalanche": "0x2b2C81e08f1Af8835a78Bb2A90AE924ACE0eA4bE",
+    },
+    coingecko_id="benqi-liquid-staked-avax",
     is_stablecoin=False,
 )
 
@@ -1031,6 +1056,7 @@ DEFAULT_TOKENS: list[Token] = [
     WETH_E_AVALANCHE,
     # Wrapped Bitcoin
     WBTC,
+    BTC_B,
     # L2/Chain tokens
     ARB,
     OP,
@@ -1047,6 +1073,7 @@ DEFAULT_TOKENS: list[Token] = [
     # LST/LRT tokens
     wstETH,
     WEETH,
+    SAVAX,
     # Base chain tokens
     ALMANAK,
     # Plasma chain tokens
@@ -1167,6 +1194,7 @@ __all__ = [
     "WETH_E_AVALANCHE",
     # Wrapped Bitcoin
     "WBTC",
+    "BTC_B",
     # L2/Chain tokens
     "ARB",
     "OP",
@@ -1183,6 +1211,7 @@ __all__ = [
     # LST/LRT tokens
     "wstETH",
     "WEETH",
+    "SAVAX",
     # Plasma chain tokens
     "XPL",
     "WXPL",

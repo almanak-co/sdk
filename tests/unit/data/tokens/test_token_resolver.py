@@ -970,6 +970,36 @@ class TestBridgedTokenAliases:
         # Native USDC address on Avalanche
         assert token.address.lower() == "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e"
 
+    def test_btc_b_resolves_on_avalanche(self, temp_cache_file):
+        """Test BTC.b resolves to bridged BTC on Avalanche (VIB-1362)."""
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        token = resolver.resolve("BTC.b", "avalanche")
+
+        assert token.symbol == "BTC.B"
+        assert token.decimals == 8
+        assert token.chain == Chain.AVALANCHE
+        assert token.address.lower() == "0x152b9d0fdc40c096de20232db1e35ae6a57fa6c0"
+
+    def test_btcb_alias_resolves_on_avalanche(self, temp_cache_file):
+        """Test BTCB alias resolves to BTC.b on Avalanche (VIB-1362)."""
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        token = resolver.resolve("BTCB", "avalanche")
+
+        assert token.symbol == "BTC.B"
+        assert token.decimals == 8
+        assert token.chain == Chain.AVALANCHE
+        assert token.address.lower() == "0x152b9d0fdc40c096de20232db1e35ae6a57fa6c0"
+
+    def test_savax_resolves_on_avalanche(self, temp_cache_file):
+        """Test sAVAX resolves to BENQI staked AVAX on Avalanche (VIB-1362)."""
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        token = resolver.resolve("sAVAX", "avalanche")
+
+        assert token.symbol == "SAVAX"
+        assert token.decimals == 18
+        assert token.chain == Chain.AVALANCHE
+        assert token.address.lower() == "0x2b2c81e08f1af8835a78bb2a90ae924ace0ea4be"
+
     # =========================================================================
     # Cross-chain consistency
     # =========================================================================
