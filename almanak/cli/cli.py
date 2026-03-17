@@ -1197,6 +1197,12 @@ def new(ctx, name, working_dir, template, chain):
     help="After --once iteration, automatically teardown (close all positions). "
     "Useful for CI/testing to avoid accumulating stale positions on-chain.",
 )
+@click.option(
+    "--anvil-port",
+    "anvil_ports",
+    multiple=True,
+    help="Use existing Anvil instance: CHAIN=PORT (e.g., --anvil-port arbitrum=8545). Repeatable.",
+)
 @click.pass_context
 def strategy_run(
     ctx,
@@ -1223,6 +1229,7 @@ def strategy_run(
     reset_fork,
     max_iterations,
     teardown_after,
+    anvil_ports,
 ):
     """Run a strategy from its working directory.
 
@@ -1324,6 +1331,7 @@ def strategy_run(
             teardown_after=teardown_after,
             working_dir=working_dir,
             strategy_id_override=id,
+            anvil_ports=anvil_ports,
         )
     except click.Abort:
         sys.exit(1)
