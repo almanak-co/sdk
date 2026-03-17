@@ -115,8 +115,8 @@ class UniswapPaperTradeOptimismStrategy(IntentStrategy):
             rsi_value = rsi.value
             logger.info(f"RSI({self.rsi_period}) = {rsi_value:.1f}")
         except (ValueError, KeyError, AttributeError) as e:
-            logger.warning(f"Could not get RSI: {e}. Defaulting to neutral (50).")
-            rsi_value = Decimal("50")
+            logger.warning(f"RSI data unavailable: {e}")
+            return Intent.hold(reason=f"RSI data unavailable: {e}")
 
         try:
             base_price = market.price(self.base_token)
