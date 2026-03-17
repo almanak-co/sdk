@@ -4101,9 +4101,12 @@ class IntentCompiler:
             )
             tj_adapter = TraderJoeV2Adapter(config)
 
-            # Calculate bin range from price range
-            # Number of bins on each side of active bin (default to 5)
-            bin_range = 5  # 5 bins on each side = 11 total bins
+            # Number of bins on each side of active bin
+            # Read from intent's protocol_params if provided, otherwise default to 5
+            params = intent.protocol_params or {}
+            bin_range = int(params.get("bin_range", 5))
+            if bin_range < 1 or bin_range > 100:
+                raise ValueError(f"bin_range must be between 1 and 100, got {bin_range}")
 
             # Build add liquidity transaction
             lp_tx = tj_adapter.build_add_liquidity_transaction(

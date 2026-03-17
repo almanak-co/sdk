@@ -424,6 +424,7 @@ class LPOpenIntent(AlmanakImmutableModel):
         range_upper: Upper price bound for concentrated liquidity
         protocol: LP protocol (e.g., "uniswap_v3", "camelot")
         chain: Optional target chain for execution (defaults to strategy's primary chain)
+        protocol_params: Optional protocol-specific parameters (e.g., {"bin_range": 10} for TraderJoe V2)
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
     """
@@ -435,6 +436,7 @@ class LPOpenIntent(AlmanakImmutableModel):
     range_upper: SafeDecimal
     protocol: str = "uniswap_v3"
     chain: str | None = None
+    protocol_params: dict[str, Any] | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
 
@@ -451,6 +453,13 @@ class LPOpenIntent(AlmanakImmutableModel):
             raise ValueError("range_lower must be less than range_upper")
         if self.range_lower <= 0:
             raise ValueError("range_lower must be positive")
+        if self.protocol_params is not None:
+            if not isinstance(self.protocol_params, dict):
+                raise ValueError("protocol_params must be a dict")
+            if "bin_range" in self.protocol_params:
+                br = self.protocol_params["bin_range"]
+                if isinstance(br, bool) or not isinstance(br, int) or br < 1 or br > 100:
+                    raise ValueError(f"protocol_params.bin_range must be an integer between 1 and 100, got {br}")
         return self
 
     @property
@@ -2219,6 +2228,7 @@ class Intent:
         range_upper: Decimal,
         protocol: str = "uniswap_v3",
         chain: str | None = None,
+        protocol_params: dict[str, Any] | None = None,
     ) -> LPOpenIntent:
         """Create an LP open intent.
 
@@ -2230,6 +2240,7 @@ class Intent:
             range_upper: Upper price bound for concentrated liquidity
             protocol: LP protocol (default "uniswap_v3")
             chain: Target chain for execution (defaults to strategy's primary chain)
+            protocol_params: Optional protocol-specific parameters (e.g., {"bin_range": 10} for TraderJoe V2)
 
         Returns:
             LPOpenIntent: The created LP open intent
@@ -2252,6 +2263,7 @@ class Intent:
             range_upper=range_upper,
             protocol=protocol,
             chain=chain,
+            protocol_params=protocol_params,
         )
 
     @staticmethod
