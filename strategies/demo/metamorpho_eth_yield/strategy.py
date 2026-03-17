@@ -141,6 +141,7 @@ class MetaMorphoEthYield(IntentStrategy):
             protocol="metamorpho",
             vault_address=self.vault_address,
             amount=deposit_amount,
+            deposit_token=self.deposit_token,
             chain=self.chain,
         )
 
@@ -290,6 +291,7 @@ class MetaMorphoEthYield(IntentStrategy):
                     protocol="metamorpho",
                     vault_address=self.vault_address,
                     shares="all",
+                    deposit_token=self.deposit_token,
                     chain=self.chain,
                 )
             )

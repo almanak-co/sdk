@@ -1837,6 +1837,7 @@ class VaultDepositIntent(AlmanakImmutableModel):
     protocol: str
     vault_address: str
     amount: PydanticChainedAmount
+    deposit_token: str | None = None
     chain: str | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
@@ -1913,6 +1914,7 @@ class VaultRedeemIntent(AlmanakImmutableModel):
     protocol: str
     vault_address: str
     shares: PydanticChainedAmount
+    deposit_token: str | None = None
     chain: str | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
@@ -3170,6 +3172,7 @@ class Intent:
         protocol: str,
         vault_address: str,
         amount: ChainedAmount,
+        deposit_token: str | None = None,
         chain: str | None = None,
     ) -> VaultDepositIntent:
         """Create a vault deposit intent for MetaMorpho ERC-4626 vaults.
@@ -3181,6 +3184,7 @@ class Intent:
             protocol: Vault protocol (must be "metamorpho")
             vault_address: MetaMorpho vault contract address
             amount: Amount of underlying assets to deposit, or "all"
+            deposit_token: Underlying token symbol (e.g. "USDC") for backtesting
             chain: Target chain (defaults to strategy's primary chain)
 
         Returns:
@@ -3192,6 +3196,7 @@ class Intent:
                 protocol="metamorpho",
                 vault_address="0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB",
                 amount=Decimal("1000"),
+                deposit_token="USDC",
                 chain="ethereum",
             )
         """
@@ -3199,6 +3204,7 @@ class Intent:
             protocol=protocol,
             vault_address=vault_address,
             amount=amount,
+            deposit_token=deposit_token,
             chain=chain,
         )
 
@@ -3207,6 +3213,7 @@ class Intent:
         protocol: str,
         vault_address: str,
         shares: ChainedAmount,
+        deposit_token: str | None = None,
         chain: str | None = None,
     ) -> VaultRedeemIntent:
         """Create a vault redeem intent for MetaMorpho ERC-4626 vaults.
@@ -3218,6 +3225,7 @@ class Intent:
             protocol: Vault protocol (must be "metamorpho")
             vault_address: MetaMorpho vault contract address
             shares: Number of shares to redeem, or "all" to redeem all
+            deposit_token: Underlying token symbol (e.g. "USDC") for backtesting
             chain: Target chain (defaults to strategy's primary chain)
 
         Returns:
@@ -3229,6 +3237,7 @@ class Intent:
                 protocol="metamorpho",
                 vault_address="0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB",
                 shares="all",
+                deposit_token="USDC",
                 chain="ethereum",
             )
         """
@@ -3236,6 +3245,7 @@ class Intent:
             protocol=protocol,
             vault_address=vault_address,
             shares=shares,
+            deposit_token=deposit_token,
             chain=chain,
         )
 

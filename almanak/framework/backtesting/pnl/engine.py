@@ -187,6 +187,8 @@ _ZERO_SLIPPAGE_INTENTS: frozenset[IntentType] = frozenset(
         IntentType.WITHDRAW,
         IntentType.REPAY,
         IntentType.BORROW,
+        IntentType.VAULT_DEPOSIT,
+        IntentType.VAULT_REDEEM,
     }
 )
 
@@ -2517,6 +2519,10 @@ class PnLBacktester:
             return IntentType.REPAY
         if "BRIDGE" in class_name:
             return IntentType.BRIDGE
+        if "VAULTDEPOSIT" in class_name or "VAULT_DEPOSIT" in class_name:
+            return IntentType.VAULT_DEPOSIT
+        if "VAULTREDEEM" in class_name or "VAULT_REDEEM" in class_name:
+            return IntentType.VAULT_REDEEM
         if "HOLD" in class_name:
             return IntentType.HOLD
 
@@ -2576,6 +2582,7 @@ class PnLBacktester:
             "collateral",
             "borrow_token",
             "supply_token",
+            "deposit_token",
         ]:
             if hasattr(intent, attr):
                 value = getattr(intent, attr)
@@ -2624,14 +2631,20 @@ class PnLBacktester:
         amount: Decimal | None = None
         token: str | None = None
 
-        for amount_attr in ["amount", "amount_in", "amount_out", "collateral", "size"]:
+        for amount_attr in ["amount", "amount_in", "amount_out", "collateral", "size", "shares"]:
             if hasattr(intent, amount_attr):
                 value = getattr(intent, amount_attr)
                 if value is not None:
-                    amount = Decimal(str(value))
+                    str_value = str(value)
+                    if str_value.lower() == "all":
+                        continue
+                    try:
+                        amount = Decimal(str_value)
+                    except Exception:
+                        continue
                     break
 
-        for token_attr in ["token", "from_token", "asset", "collateral_token"]:
+        for token_attr in ["token", "from_token", "asset", "collateral_token", "deposit_token"]:
             if hasattr(intent, token_attr):
                 value = getattr(intent, token_attr)
                 if value and isinstance(value, str):
@@ -2714,6 +2727,8 @@ class PnLBacktester:
             IntentType.PERP_OPEN: 450000,  # GMX V2 market increase
             IntentType.PERP_CLOSE: 350000,  # GMX V2 market decrease
             IntentType.BRIDGE: 200000,  # Cross-chain bridge
+            IntentType.VAULT_DEPOSIT: 250000,  # ERC-4626 deposit (approve + deposit)
+            IntentType.VAULT_REDEEM: 200000,  # ERC-4626 redeem
             IntentType.HOLD: 0,  # No execution
             IntentType.UNKNOWN: 200000,  # Conservative default
         }
@@ -2923,6 +2938,29 @@ class PnLBacktester:
             except KeyError:
                 tokens_in[token1] = half_amount
 
+        elif intent_type in {IntentType.VAULT_DEPOSIT, IntentType.VAULT_REDEEM}:
+            # Vault deposit/redeem: underlying asset flows to/from vault
+            token = getattr(intent, "deposit_token", None)
+            if not token:
+                token = "USDC"
+                logger.warning(
+                    "Vault intent missing deposit_token, defaulting to USDC"
+                    " — set deposit_token for accurate backtesting"
+                )
+            if isinstance(token, str):
+                token = token.upper()
+
+            try:
+                price = market_state.get_price(token)
+                amount = amount_usd / price if price > 0 else amount_usd
+            except KeyError:
+                amount = amount_usd
+
+            if intent_type == IntentType.VAULT_DEPOSIT:
+                tokens_out[token] = amount
+            else:
+                tokens_in[token] = amount
+
         # For PERP and other types, token flows are handled via collateral
 
         return tokens_in, tokens_out
@@ -3017,6 +3055,44 @@ class PnLBacktester:
                 amount = amount_usd
 
             # Get APY if available
+            apy = getattr(intent, "apy", Decimal("0.05"))
+            if isinstance(apy, int | float):
+                apy = Decimal(str(apy))
+
+            return SimulatedPosition.supply(
+                token=token,
+                amount=amount,
+                apy=apy,
+                entry_price=executed_price,
+                entry_time=timestamp,
+                protocol=protocol,
+            )
+
+        elif intent_type == IntentType.VAULT_DEPOSIT:
+            # Create vault supply position (similar to SUPPLY)
+            deposit_tok = getattr(intent, "deposit_token", None)
+            if deposit_tok:
+                token = str(deposit_tok)
+            else:
+                token = tokens[0] if tokens else "USDC"
+                logger.warning(
+                    "Vault deposit missing deposit_token, defaulting to %s"
+                    " — set deposit_token for accurate backtesting",
+                    token,
+                )
+            if isinstance(token, str):
+                token = token.upper()
+            amount_usd = self._get_intent_amount_usd(
+                intent, market_state, strict_reproducibility=strict_reproducibility
+            )
+
+            try:
+                price = market_state.get_price(token)
+                amount = amount_usd / price if price > 0 else amount_usd
+            except KeyError:
+                amount = amount_usd
+
+            # MetaMorpho vaults typically yield ~3-8% APY
             apy = getattr(intent, "apy", Decimal("0.05"))
             if isinstance(apy, int | float):
                 apy = Decimal(str(apy))
