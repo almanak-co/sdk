@@ -1,0 +1,16 @@
+{
+    "pool": "WAVAX/USDC/20",
+    "range_width_pct": "0.10",
+    "amount_x": "0.5",
+    "amount_y": "10",
+    "rsi_period": 14,
+    "rsi_oversold": "35",
+    "rsi_overbought": "65",
+    "chain": "avalanche",
+    "network": "mainnet",
+    "anvil_funding": {
+        "AVAX": 100,
+        "WAVAX": 100,
+        "USDC": 10000
+    }
+}
