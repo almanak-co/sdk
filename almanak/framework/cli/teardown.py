@@ -597,7 +597,8 @@ def execute_teardown(
             if hasattr(strategy, "create_market_snapshot"):
                 market = strategy.create_market_snapshot()
                 if hasattr(market, "get_price_oracle_dict"):
-                    price_oracle = market.get_price_oracle_dict() or None
+                    fetched = market.get_price_oracle_dict()
+                    price_oracle = fetched if fetched is not None else None
                     if price_oracle:
                         click.echo(f"\n  Using real prices for {len(price_oracle)} tokens")
         except Exception as e:

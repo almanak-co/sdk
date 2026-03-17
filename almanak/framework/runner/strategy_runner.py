@@ -3504,10 +3504,15 @@ class StrategyRunner:
             if teardown_mgr.state_manager:
                 await teardown_mgr.state_manager.save_teardown_state(teardown_state)
 
-            # Extract price oracle for accurate compilation during execution
+            # Extract price oracle for accurate compilation during execution.
+            # Do NOT use `or None` — an empty dict {} should stay as-is,
+            # not collapse to None (which triggers placeholder prices).
             price_oracle = None
             if teardown_market is not None and hasattr(teardown_market, "get_price_oracle_dict"):
-                price_oracle = teardown_market.get_price_oracle_dict() or None
+                fetched = teardown_market.get_price_oracle_dict()
+                price_oracle = fetched if fetched is not None else None
+            if not price_oracle:
+                price_oracle = self._get_fallback_teardown_prices(teardown_market)
 
             # Execute intents with escalating slippage
             teardown_result = await teardown_mgr._execute_intents(
@@ -3740,14 +3745,33 @@ class StrategyRunner:
         else:
             rpc_url = getattr(self.execution_orchestrator, "rpc_url", None)
 
-        # Extract prices from market snapshot
-        price_oracle = None
+        # Extract prices from market snapshot.
+        # IMPORTANT: do NOT convert {} to None via `or None` — an empty dict
+        # is distinct from None.  With None the compiler falls back to $1
+        # placeholder prices, producing wildly wrong slippage calculations
+        # and silent None action bundles on mainnet (VIB-1386..1391).
+        fetched: dict[str, Decimal] | None = None
         if market is not None and hasattr(market, "get_price_oracle_dict"):
-            price_oracle = market.get_price_oracle_dict() or None
+            fetched = market.get_price_oracle_dict()
+
+        # Merge fallback prices (stablecoins + major tokens) into the fetched
+        # oracle.  This ensures partially-populated caches (e.g. only USDC)
+        # still get WETH/WBTC fallback prices instead of $1 placeholders.
+        fallback = self._get_fallback_teardown_prices(market)
+        merged = {**(fallback or {}), **(fetched or {})}
+        price_oracle = merged or None
+
+        has_prices = bool(price_oracle)
+        if not has_prices:
+            logger.warning(
+                "No token prices available for teardown compiler — "
+                "compilation will use placeholder prices ($1 for all tokens). "
+                "This is likely a gateway connectivity issue."
+            )
 
         try:
             compiler_config = IntentCompilerConfig(
-                allow_placeholder_prices=price_oracle is None,
+                allow_placeholder_prices=not has_prices,
             )
             return IntentCompiler(
                 chain=strategy.chain,
@@ -3825,6 +3849,40 @@ class StrategyRunner:
 
         if fetched:
             logger.info(f"Pre-fetched {len(fetched)} teardown prices: {fetched}")
+
+    @staticmethod
+    def _get_fallback_teardown_prices(market: Any) -> dict[str, Decimal] | None:
+        """Build a minimal fallback price oracle when the market snapshot has no cached prices.
+
+        This prevents the compiler from using $1 placeholder prices for ALL tokens
+        on mainnet, which causes wildly wrong slippage calculations and silent
+        compilation failures (None action bundles).
+
+        Returns a dict with at least stablecoin prices, or None if nothing can be
+        determined.
+        """
+        # Start with stablecoin fallbacks (always ~$1, safe to assume)
+        fallback: dict[str, Decimal] = {
+            "USDC": Decimal("1"),
+            "USDT": Decimal("1"),
+            "DAI": Decimal("1"),
+            "USDC.e": Decimal("1"),
+            "USDbC": Decimal("1"),
+        }
+
+        # Try to get real prices from the market one more time — the gateway
+        # may have recovered since the prefetch attempt.
+        if market is not None and hasattr(market, "price"):
+            for symbol in ("ETH", "WETH", "WBTC", "AVAX", "WAVAX", "MATIC", "WMATIC"):
+                try:
+                    price = market.price(symbol)
+                    if price and price > 0:
+                        fallback[symbol] = price
+                except Exception:
+                    pass
+
+        # If we only have stablecoins, still return — it's better than $1 for everything
+        return fallback if fallback else None
 
     def _create_error_result(
         self,

@@ -195,7 +195,8 @@ class RSIMACDLPStrategy(IntentStrategy):
         if self._current_position_id:
             state["current_position_id"] = self._current_position_id
         if self._prev_macd_histogram is not None:
-            state["prev_macd_histogram"] = self._prev_macd_histogram
+            # Convert Decimal to float for JSON serialization (VIB-1387)
+            state["prev_macd_histogram"] = float(self._prev_macd_histogram)
         if self._signal_log:
             state["signal_log"] = self._signal_log
         return state

@@ -774,11 +774,13 @@ class AaveBorrowStrategy(IntentStrategy):
             )
 
         # Step 2: Withdraw supplied collateral (if any)
+        # Note: withdraw_all=True means "withdraw max" — amount="all" is a
+        # required placeholder (the actual on-chain amount is computed by the adapter).
         if self._supplied_amount > 0:
             intents.append(
                 Intent.withdraw(
                     token=self.collateral_token,
-                    amount=self._supplied_amount,
+                    amount="all",
                     protocol="aave_v3",
                     withdraw_all=True,  # Withdraw everything
                 )

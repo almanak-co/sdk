@@ -628,7 +628,9 @@ class TestTeardownViaManager:
         mock_compiler_cls.assert_called_once()
         call_kwargs = mock_compiler_cls.call_args[1]
         assert call_kwargs["gateway_client"] is mock_orch._client
-        assert call_kwargs["price_oracle"] == {"ETH": Decimal("3000")}
+        # Fetched prices are merged with stablecoin fallbacks
+        assert call_kwargs["price_oracle"]["ETH"] == Decimal("3000")
+        assert "USDC" in call_kwargs["price_oracle"]  # fallback stablecoin
 
     @pytest.mark.asyncio
     async def test_build_teardown_compiler_returns_none_on_failure(self):
