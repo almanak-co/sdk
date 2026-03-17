@@ -288,6 +288,10 @@ class FeeModelDetail(BaseModel):
     supported_intent_types: list[str] = Field(default_factory=list)
     supported_chains: list[str] = Field(default_factory=list)
     gas_estimates: dict[str, int] = Field(default_factory=dict)
+    raw_config: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Protocol-specific configuration from the fee model's to_dict()",
+    )
 
 
 class FeeModelListResponse(BaseModel):
