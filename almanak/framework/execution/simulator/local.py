@@ -376,6 +376,40 @@ class LocalSimulator(Simulator):
                             )
                     continue
 
+                # For approve-family TXs, skip gas estimation entirely and use
+                # the compiler-provided gas_limit. This avoids hangs caused by
+                # Anvil failing to fetch contract storage (e.g., TraderJoe V2
+                # LBPair on Avalanche — approveForAll hangs indefinitely while
+                # Anvil tries to retrieve hundreds of bin storage slots).
+                # Approve gas is well-known (~30-55K) so compiler limits are safe.
+                if is_approve:
+                    if not tx.gas_limit or tx.gas_limit <= 0:
+                        logger.warning(
+                            f"Transaction {i + 1}/{tx_count}: approve TX but no compiler gas_limit, "
+                            "falling back to eth_estimateGas",
+                            extra={"tx_index": i, "to": tx.to},
+                        )
+                    else:
+                        gas_estimates.append(tx.gas_limit)
+                        logger.info(
+                            f"Transaction {i + 1}/{tx_count}: approve TX, skipping simulation, "
+                            f"using compiler gas_limit={tx.gas_limit}",
+                            extra={"tx_index": i, "to": tx.to, "gas_limit": tx.gas_limit},
+                        )
+
+                        # Execute for state setup if not last (e.g., approve before swap)
+                        if not is_last and snapshot_id is not None:
+                            success, exec_error = await self._execute_tx(tx, tx.gas_limit)
+                            if not success:
+                                logger.warning(f"Failed to execute approve tx {i + 1} for state setup: {exec_error}")
+                                return SimulationResult(
+                                    success=False,
+                                    simulated=True,
+                                    gas_estimates=gas_estimates,
+                                    revert_reason=f"Approve transaction {i + 1} execution failed: {exec_error}",
+                                )
+                        continue
+
                 gas_estimate, error = await self._estimate_gas(tx)
 
                 if error and is_approve:
