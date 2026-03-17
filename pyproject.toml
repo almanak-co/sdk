@@ -1,6 +1,6 @@
 [project]
 name = "almanak"
-version = "2.3.0"
+version = "2.4.0"
 description = "A powerful Python SDK for developing and deploying autonomous DeFi agents. Features agent-based modeling, state machine architecture, and non-custodial execution through Safe smart accounts"
 authors = [
     {name = "engineering@almanak.co"}
