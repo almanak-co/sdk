@@ -78,26 +78,40 @@ class JupiterLendReceiptParser:
             result["withdraw_amounts"] = self.extract_withdraw_amounts(receipt)
         return result
 
-    def extract_supply_amounts(self, receipt: dict[str, Any]) -> LendingAmounts | None:
-        """Extract supply (deposit) amounts from receipt."""
-        return self._extract_balance_delta(receipt, action="deposit")
+    def extract_supply_amounts(self, receipt: dict[str, Any], token_mint: str | None = None) -> LendingAmounts | None:
+        """Extract supply (deposit) amounts from receipt.
 
-    def extract_borrow_amounts(self, receipt: dict[str, Any]) -> LendingAmounts | None:
-        """Extract borrow amounts from receipt."""
-        return self._extract_balance_delta(receipt, action="borrow")
+        Supply = tokens leaving the wallet (pre > post).
+        """
+        return self._extract_balance_delta(receipt, action="deposit", direction="outflow", token_mint=token_mint)
 
-    def extract_repay_amounts(self, receipt: dict[str, Any]) -> LendingAmounts | None:
-        """Extract repay amounts from receipt."""
-        return self._extract_balance_delta(receipt, action="repay")
+    def extract_borrow_amounts(self, receipt: dict[str, Any], token_mint: str | None = None) -> LendingAmounts | None:
+        """Extract borrow amounts from receipt.
 
-    def extract_withdraw_amounts(self, receipt: dict[str, Any]) -> LendingAmounts | None:
-        """Extract withdraw amounts from receipt."""
-        return self._extract_balance_delta(receipt, action="withdraw")
+        Borrow = tokens arriving at the wallet (post > pre).
+        """
+        return self._extract_balance_delta(receipt, action="borrow", direction="inflow", token_mint=token_mint)
+
+    def extract_repay_amounts(self, receipt: dict[str, Any], token_mint: str | None = None) -> LendingAmounts | None:
+        """Extract repay amounts from receipt.
+
+        Repay = tokens leaving the wallet (pre > post).
+        """
+        return self._extract_balance_delta(receipt, action="repay", direction="outflow", token_mint=token_mint)
+
+    def extract_withdraw_amounts(self, receipt: dict[str, Any], token_mint: str | None = None) -> LendingAmounts | None:
+        """Extract withdraw amounts from receipt.
+
+        Withdraw = tokens arriving at the wallet (post > pre).
+        """
+        return self._extract_balance_delta(receipt, action="withdraw", direction="inflow", token_mint=token_mint)
 
     def _extract_balance_delta(
         self,
         receipt: dict[str, Any],
         action: str = "",
+        direction: str = "",
+        token_mint: str | None = None,
     ) -> LendingAmounts | None:
         """Extract amounts by comparing pre/post token balances.
 
@@ -108,9 +122,13 @@ class JupiterLendReceiptParser:
         Args:
             receipt: Solana transaction receipt dict
             action: The lending action for labeling
+            direction: "inflow" for tokens arriving (post > pre),
+                       "outflow" for tokens leaving (pre > post),
+                       "" for largest absolute delta (legacy fallback)
+            token_mint: Optional specific token mint to extract delta for
 
         Returns:
-            LendingAmounts with the largest balance change, or None
+            LendingAmounts with the largest directional balance change, or None
         """
         # Support both raw RPC receipts (meta.preTokenBalances) and
         # TransactionReceipt.to_dict() format (top-level pre_token_balances)
@@ -148,8 +166,7 @@ class JupiterLendReceiptParser:
                         decimals_map[mint] = ui_amt.get("decimals", 0)
 
         # Find the largest normalized (decimal-adjusted) balance change
-        # Using normalized amounts avoids the raw-units bias where e.g.
-        # 1 SOL (1e9 raw) would incorrectly "win" over 100 USDC (1e8 raw)
+        # filtered by direction and optional token_mint
         all_keys = set(pre_map.keys()) | set(post_map.keys())
         max_normalized_delta = Decimal(0)
         max_delta = 0
@@ -157,13 +174,28 @@ class JupiterLendReceiptParser:
         max_delta_decimals = 0
 
         for key in all_keys:
+            mint = key[1]
+
+            # Filter by specific token mint if requested
+            if token_mint and mint != token_mint:
+                continue
+
             pre_amount = pre_map.get(key, 0)
             post_amount = post_map.get(key, 0)
-            delta = abs(post_amount - pre_amount)
+            signed_delta = post_amount - pre_amount
+
+            # Filter by direction:
+            # inflow = tokens arriving (post > pre, positive delta)
+            # outflow = tokens leaving (pre > post, negative delta)
+            if direction == "inflow" and signed_delta <= 0:
+                continue
+            if direction == "outflow" and signed_delta >= 0:
+                continue
+
+            delta = abs(signed_delta)
             if delta == 0:
                 continue
 
-            mint = key[1]
             token_decimals = decimals_map.get(mint, 0)
             normalized = Decimal(delta) / Decimal(10**token_decimals) if token_decimals > 0 else Decimal(delta)
 
@@ -174,7 +206,7 @@ class JupiterLendReceiptParser:
                 max_delta_decimals = token_decimals
 
         if max_delta == 0:
-            logger.debug("No balance changes detected in receipt")
+            logger.debug("No balance changes detected in receipt (direction=%s)", direction)
             return None
 
         # Convert raw amount to human-readable

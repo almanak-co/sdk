@@ -62,60 +62,50 @@ class KaminoReceiptParser:
         """
         supply = self.extract_supply_amounts(receipt)
         borrow = self.extract_borrow_amounts(receipt)
+        repay = self.extract_repay_amounts(receipt)
+        withdraw = self.extract_withdraw_amounts(receipt)
         return {
             "supply_amounts": supply,
             "borrow_amounts": borrow,
+            "repay_amounts": repay,
+            "withdraw_amounts": withdraw,
             "success": receipt.get("success", True),
         }
 
-    def extract_supply_amounts(self, receipt: dict[str, Any]) -> LendingAmounts | None:
+    def extract_supply_amounts(self, receipt: dict[str, Any], token_mint: str | None = None) -> LendingAmounts | None:
         """Extract supply (deposit) amounts from receipt.
 
-        Args:
-            receipt: Solana transaction receipt dict
-
-        Returns:
-            LendingAmounts if extraction succeeds, None otherwise
+        Supply = tokens leaving the wallet (pre > post).
         """
-        return self._extract_balance_delta(receipt, action="deposit")
+        return self._extract_balance_delta(receipt, action="deposit", direction="outflow", token_mint=token_mint)
 
-    def extract_borrow_amounts(self, receipt: dict[str, Any]) -> LendingAmounts | None:
+    def extract_borrow_amounts(self, receipt: dict[str, Any], token_mint: str | None = None) -> LendingAmounts | None:
         """Extract borrow amounts from receipt.
 
-        Args:
-            receipt: Solana transaction receipt dict
-
-        Returns:
-            LendingAmounts if extraction succeeds, None otherwise
+        Borrow = tokens arriving at the wallet (post > pre).
         """
-        return self._extract_balance_delta(receipt, action="borrow")
+        return self._extract_balance_delta(receipt, action="borrow", direction="inflow", token_mint=token_mint)
 
-    def extract_repay_amounts(self, receipt: dict[str, Any]) -> LendingAmounts | None:
+    def extract_repay_amounts(self, receipt: dict[str, Any], token_mint: str | None = None) -> LendingAmounts | None:
         """Extract repay amounts from receipt.
 
-        Args:
-            receipt: Solana transaction receipt dict
-
-        Returns:
-            LendingAmounts if extraction succeeds, None otherwise
+        Repay = tokens leaving the wallet (pre > post).
         """
-        return self._extract_balance_delta(receipt, action="repay")
+        return self._extract_balance_delta(receipt, action="repay", direction="outflow", token_mint=token_mint)
 
-    def extract_withdraw_amounts(self, receipt: dict[str, Any]) -> LendingAmounts | None:
+    def extract_withdraw_amounts(self, receipt: dict[str, Any], token_mint: str | None = None) -> LendingAmounts | None:
         """Extract withdraw amounts from receipt.
 
-        Args:
-            receipt: Solana transaction receipt dict
-
-        Returns:
-            LendingAmounts if extraction succeeds, None otherwise
+        Withdraw = tokens arriving at the wallet (post > pre).
         """
-        return self._extract_balance_delta(receipt, action="withdraw")
+        return self._extract_balance_delta(receipt, action="withdraw", direction="inflow", token_mint=token_mint)
 
     def _extract_balance_delta(
         self,
         receipt: dict[str, Any],
         action: str = "",
+        direction: str = "",
+        token_mint: str | None = None,
     ) -> LendingAmounts | None:
         """Extract amounts by comparing pre/post token balances.
 
@@ -126,9 +116,13 @@ class KaminoReceiptParser:
         Args:
             receipt: Solana transaction receipt dict
             action: The lending action for labeling
+            direction: "inflow" for tokens arriving (post > pre),
+                       "outflow" for tokens leaving (pre > post),
+                       "" for largest absolute delta (legacy fallback)
+            token_mint: Optional specific token mint to extract delta for
 
         Returns:
-            LendingAmounts with the largest balance change, or None
+            LendingAmounts with the largest directional balance change, or None
         """
         meta = receipt.get("meta", {})
         if not meta:
@@ -155,31 +149,53 @@ class KaminoReceiptParser:
             amount_str = bal.get("uiTokenAmount", {}).get("amount", "0")
             post_map[key] = int(amount_str)
 
-        # Find the largest absolute balance change
+        # Build decimals lookup: mint -> decimals
+        decimals_map: dict[str, int] = {}
+        for bal_list in (post_balances, pre_balances):
+            for bal in bal_list:
+                mint = bal.get("mint", "")
+                if mint and mint not in decimals_map:
+                    decimals_map[mint] = bal.get("uiTokenAmount", {}).get("decimals", 0)
+
+        # Find the largest normalized balance change filtered by direction
         all_keys = set(pre_map.keys()) | set(post_map.keys())
+        max_normalized_delta = Decimal(0)
         max_delta = 0
         max_delta_mint = ""
         max_delta_decimals = 0
 
         for key in all_keys:
+            mint = key[1]
+
+            # Filter by specific token mint if requested
+            if token_mint and mint != token_mint:
+                continue
+
             pre_amount = pre_map.get(key, 0)
             post_amount = post_map.get(key, 0)
-            delta = abs(post_amount - pre_amount)
+            signed_delta = post_amount - pre_amount
 
-            if delta > max_delta:
+            # Filter by direction
+            if direction == "inflow" and signed_delta <= 0:
+                continue
+            if direction == "outflow" and signed_delta >= 0:
+                continue
+
+            delta = abs(signed_delta)
+            if delta == 0:
+                continue
+
+            token_decimals = decimals_map.get(mint, 0)
+            normalized = Decimal(delta) / Decimal(10**token_decimals) if token_decimals > 0 else Decimal(delta)
+
+            if normalized > max_normalized_delta:
+                max_normalized_delta = normalized
                 max_delta = delta
-                max_delta_mint = key[1]
-                # Get decimals from post_balances or pre_balances
-                for bal_list in (post_balances, pre_balances):
-                    for bal in bal_list:
-                        if bal.get("mint", "") == max_delta_mint:
-                            max_delta_decimals = bal.get("uiTokenAmount", {}).get("decimals", 0)
-                            break
-                    if max_delta_decimals:
-                        break
+                max_delta_mint = mint
+                max_delta_decimals = token_decimals
 
         if max_delta == 0:
-            logger.debug("No balance changes detected in receipt")
+            logger.debug("No balance changes detected in receipt (direction=%s)", direction)
             return None
 
         # Convert raw amount to human-readable

@@ -90,10 +90,12 @@ class ResultEnricher:
         # === LP Fee Collection ===
         "LP_COLLECT_FEES": ["fees0", "fees1", "bin_ids"],
         # === Lending ===
-        "BORROW": ["borrow_amount", "borrow_rate", "debt_token"],
-        "REPAY": ["repay_amount", "remaining_debt"],
-        "SUPPLY": ["supply_amount", "a_token_received", "supply_rate"],
-        "WITHDRAW": ["withdraw_amount", "a_token_burned"],
+        # Singular forms used by EVM parsers (Aave, Morpho, etc.)
+        # Plural forms used by Solana parsers (Jupiter Lend, Kamino)
+        "BORROW": ["borrow_amount", "borrow_amounts", "borrow_rate", "debt_token"],
+        "REPAY": ["repay_amount", "repay_amounts", "remaining_debt"],
+        "SUPPLY": ["supply_amount", "supply_amounts", "a_token_received", "supply_rate"],
+        "WITHDRAW": ["withdraw_amount", "withdraw_amounts", "a_token_burned"],
         # === Perpetuals ===
         "PERP_OPEN": [
             "position_id",
@@ -171,13 +173,6 @@ class ResultEnricher:
         # Don't enrich failed executions
         if not result.success:
             logger.debug("Enrichment skipped: execution failed")
-            return result
-
-        # Skip EVM receipt parsing for Solana chains — Solana logs are
-        # program log strings, not EVM-structured dicts with topics/data.
-        chain = getattr(context, "chain", None)
-        if chain and chain.lower() == "solana":
-            logger.debug("Skipping EVM receipt parsing for Solana chain")
             return result
 
         # Get intent type

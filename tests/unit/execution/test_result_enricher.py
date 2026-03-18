@@ -398,3 +398,98 @@ class TestEnrichmentDiagnosticLogging:
             enricher.enrich(result, intent, context)
 
         assert any("protocol=None" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# VIB-1446: Solana lending enrichment (no longer blanket-skipped)
+# ---------------------------------------------------------------------------
+
+
+class TestSolanaLendingEnrichment:
+    """Verify that Solana lending receipts are enriched instead of skipped."""
+
+    def _make_solana_receipt(self, pre_balances, post_balances):
+        """Build a fake Solana receipt dict (no to_dict, just a raw dict)."""
+        return {
+            "meta": {
+                "preTokenBalances": pre_balances,
+                "postTokenBalances": post_balances,
+            },
+            "success": True,
+        }
+
+    def test_solana_supply_enriched(self):
+        """Jupiter Lend supply_amounts is populated via enrichment on Solana chain."""
+        usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        solana_receipt = self._make_solana_receipt(
+            pre_balances=[
+                {"accountIndex": 0, "mint": usdc_mint, "uiTokenAmount": {"amount": "100000000", "decimals": 6}},
+            ],
+            post_balances=[
+                {"accountIndex": 0, "mint": usdc_mint, "uiTokenAmount": {"amount": "0", "decimals": 6}},
+            ],
+        )
+        # Use raw dict receipt (Solana receipts don't have to_dict)
+        tx_result = _FakeTxResult(success=True, receipt=solana_receipt)
+        # Override: receipt is a dict, so enricher's _collect_receipts handles it
+        result = _FakeExecResult(transaction_results=[tx_result])
+        intent = _FakeIntent(intent_type="SUPPLY", protocol="jupiter_lend")
+        context = _FakeContext(chain="solana")
+
+        enricher = ResultEnricher()
+        enriched = enricher.enrich(result, intent, context)
+
+        assert "supply_amounts" in enriched.extracted_data
+        supply = enriched.extracted_data["supply_amounts"]
+        assert supply is not None
+        assert supply.token == usdc_mint
+        assert supply.amount == Decimal("100")
+
+    def test_solana_borrow_enriched(self):
+        """Jupiter Lend borrow_amounts is populated via enrichment on Solana chain."""
+        sol_mint = "So11111111111111111111111111111111111111112"
+        solana_receipt = self._make_solana_receipt(
+            pre_balances=[
+                {"accountIndex": 0, "mint": sol_mint, "uiTokenAmount": {"amount": "0", "decimals": 9}},
+            ],
+            post_balances=[
+                {"accountIndex": 0, "mint": sol_mint, "uiTokenAmount": {"amount": "2000000000", "decimals": 9}},
+            ],
+        )
+        tx_result = _FakeTxResult(success=True, receipt=solana_receipt)
+        result = _FakeExecResult(transaction_results=[tx_result])
+        intent = _FakeIntent(intent_type="BORROW", protocol="jupiter_lend")
+        context = _FakeContext(chain="solana")
+
+        enricher = ResultEnricher()
+        enriched = enricher.enrich(result, intent, context)
+
+        assert "borrow_amounts" in enriched.extracted_data
+        borrow = enriched.extracted_data["borrow_amounts"]
+        assert borrow is not None
+        assert borrow.token == sol_mint
+        assert borrow.amount == Decimal("2")
+
+    def test_kamino_supply_enriched(self):
+        """Kamino supply_amounts is also enriched on Solana chain."""
+        usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        solana_receipt = self._make_solana_receipt(
+            pre_balances=[
+                {"accountIndex": 0, "mint": usdc_mint, "uiTokenAmount": {"amount": "50000000", "decimals": 6}},
+            ],
+            post_balances=[
+                {"accountIndex": 0, "mint": usdc_mint, "uiTokenAmount": {"amount": "0", "decimals": 6}},
+            ],
+        )
+        tx_result = _FakeTxResult(success=True, receipt=solana_receipt)
+        result = _FakeExecResult(transaction_results=[tx_result])
+        intent = _FakeIntent(intent_type="SUPPLY", protocol="kamino")
+        context = _FakeContext(chain="solana")
+
+        enricher = ResultEnricher()
+        enriched = enricher.enrich(result, intent, context)
+
+        assert "supply_amounts" in enriched.extracted_data
+        supply = enriched.extracted_data["supply_amounts"]
+        assert supply is not None
+        assert supply.amount == Decimal("50")
