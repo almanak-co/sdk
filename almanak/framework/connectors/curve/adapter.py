@@ -149,7 +149,7 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
 
 # Gas estimates for Curve operations
 CURVE_GAS_ESTIMATES: dict[str, int] = {
-    "approve": 46000,
+    "approve": 65000,  # 65K to accommodate proxy tokens (USDC FiatTokenProxy ~56-65K)
     "exchange": 500000,
     "exchange_underlying": 300000,
     "add_liquidity_2": 250000,
@@ -763,6 +763,15 @@ class CurveAdapter:
             min_amounts = self._estimate_remove_liquidity(pool_info, lp_amount_wei)
             min_amounts = [int(a * (10000 - slippage_bps) // 10000) for a in min_amounts]
 
+            # Guard: very small LP amounts can produce all-zero min_amounts via integer division.
+            # _estimate_remove_liquidity returns a 1% floor but it can still round to 0 for tiny positions.
+            if all(a == 0 for a in min_amounts):
+                logger.warning(
+                    "remove_liquidity has zero min_amounts (no slippage protection) -- "
+                    "LP amount may be too small for the 1% floor estimate, or use on-chain "
+                    "calc_token_amount for production strategies"
+                )
+
             # Build transactions
             transactions: list[TransactionData] = []
 
@@ -1057,11 +1066,8 @@ class CurveAdapter:
         # Update cache
         self._allowance_cache[cache_key] = MAX_UINT256
 
-        try:
-            token_symbol = self._get_token_symbol(token_address)
-        except TokenResolutionError:
-            # LP tokens (e.g. 3CRV) may not be in the resolver -- use shortened address
-            token_symbol = f"{token_address[:10]}..."
+        # _get_token_symbol falls back to truncated address for unresolved tokens (e.g., 3CRV)
+        token_symbol = self._get_token_symbol(token_address)
 
         return TransactionData(
             to=token_address,
@@ -1164,27 +1170,38 @@ class CurveAdapter:
         return total
 
     def _estimate_remove_liquidity(self, pool_info: PoolInfo, lp_amount: int) -> list[int]:
-        """Estimate tokens from remove_liquidity (proportional).
+        """Estimate min_amounts for remove_liquidity (proportional).
 
-        Accounts for virtual_price: LP tokens are worth virtual_price underlying,
-        so we multiply by virtual_price to get a realistic estimate of tokens out.
+        Returns a conservative lower bound: 1% of the equal-distribution estimate
+        per coin. This is intentionally very loose to avoid reverts on imbalanced
+        pools (e.g., 3pool where DAI is ~7% of pool, not 33%). It provides a floor
+        against near-total MEV extraction while tolerating pools up to ~99% imbalance.
+
+        Production strategies requiring precise slippage control should call
+        calc_token_amount on-chain for accurate min_amounts before executing.
         """
-        # Adjust LP amount by virtual_price to get underlying value
-        adjusted_lp = int(Decimal(lp_amount) * pool_info.virtual_price)
-        per_coin = adjusted_lp // pool_info.n_coins
+        # Total underlying value at fair price (in 18-decimal units)
+        total_18 = int(Decimal(lp_amount) * pool_info.virtual_price)
+        # Equal share per coin, then take 1% as the conservative floor
+        per_coin_18 = total_18 // pool_info.n_coins // 100
         amounts = []
         for i in range(pool_info.n_coins):
             decimals = self._get_token_decimals(pool_info.coins[i])
             # Convert from 18 decimals to token decimals
-            amount = per_coin // (10 ** (18 - decimals))
+            amount = per_coin_18 // (10 ** (18 - decimals))
             amounts.append(amount)
         return amounts
 
     def _estimate_remove_liquidity_one(self, pool_info: PoolInfo, lp_amount: int, coin_index: int) -> int:
         """Estimate tokens from remove_liquidity_one_coin.
 
-        Accounts for virtual_price: LP tokens are worth virtual_price underlying,
-        so we multiply by virtual_price to get a realistic estimate of tokens out.
+        Multiplies by virtual_price because LP tokens are worth virtual_price
+        underlying value. This is different from _estimate_remove_liquidity
+        (proportional): single-sided withdrawal doesn't have balance-ratio issues,
+        so virtual_price adjustment is both safe and necessary.
+
+        Applies 1% penalty for single-sided removal (pool charges a fee for
+        imbalanced withdrawals).
         """
         # Adjust LP amount by virtual_price to get underlying value
         adjusted_lp = int(Decimal(lp_amount) * pool_info.virtual_price)
@@ -1212,19 +1229,20 @@ class CurveAdapter:
             ) from e
 
     def _get_token_symbol(self, address: str) -> str:
-        """Get token symbol from address using TokenResolver."""
+        """Get token symbol from address using TokenResolver.
+
+        Falls back to truncated address if token is not in registry
+        (e.g., Curve LP tokens like 3Crv). This is used only for log
+        descriptions, not for transaction logic.
+        """
         if not address.startswith("0x"):
             return address
         try:
             resolved = self._token_resolver.resolve(address, self.chain)
             return resolved.symbol
-        except TokenResolutionError as e:
-            raise TokenResolutionError(
-                token=address,
-                chain=str(self.chain),
-                reason=f"[CurveAdapter] Cannot resolve symbol: {e.reason}",
-                suggestions=e.suggestions,
-            ) from e
+        except TokenResolutionError:
+            logger.debug(f"Cannot resolve symbol for {address}, using truncated address")
+            return f"{address[:10]}..."
 
     def _get_token_decimals(self, symbol: str) -> int:
         """Get token decimals from symbol using TokenResolver."""
