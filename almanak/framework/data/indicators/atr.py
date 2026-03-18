@@ -68,7 +68,7 @@ class ATRCalculator:
             ohlcv_provider: Provider implementing OHLCVProvider protocol
         """
         self._ohlcv_provider = ohlcv_provider
-        logger.info("Initialized ATRCalculator")
+        logger.debug("Initialized ATRCalculator")
 
     @property
     def name(self) -> str:

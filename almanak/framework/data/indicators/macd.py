@@ -70,7 +70,7 @@ class MACDCalculator:
             ohlcv_provider: Provider implementing OHLCVProvider protocol
         """
         self._ohlcv_provider = ohlcv_provider
-        logger.info("Initialized MACDCalculator")
+        logger.debug("Initialized MACDCalculator")
 
     @property
     def name(self) -> str:

@@ -3928,7 +3928,11 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 self.load_persistent_state(state_data.state)
                 # Store version for CAS updates
                 self._state_version = state_data.version
-                logger.info(f"Loaded state for {self._strategy_id}: {list(state_data.state.keys())}")
+                # Log state keys with summarized values for operator visibility
+                state_summary = {
+                    k: (f"{v:.6g}" if isinstance(v, float) else str(v)[:80]) for k, v in state_data.state.items()
+                }
+                logger.info(f"Loaded state for {self._strategy_id}: {state_summary}")
                 return True
             return False
         except Exception as e:

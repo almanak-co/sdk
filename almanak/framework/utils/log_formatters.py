@@ -36,6 +36,7 @@ Usage:
     '+2.00% (better)'
 """
 
+import os
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -516,15 +517,25 @@ def format_address(address: str, truncate: bool = True) -> str:
     return format_tx_hash(address, truncate)
 
 
+def _emojis_enabled() -> bool:
+    """Check if emoji log output is enabled via ALMANAK_LOG_EMOJIS env var."""
+    return os.environ.get("ALMANAK_LOG_EMOJIS", "true").strip().lower() not in ("false", "0", "no")
+
+
 def format_intent_type_emoji(intent_type: str) -> str:
     """Get emoji prefix for intent type.
+
+    When ALMANAK_LOG_EMOJIS=false, uses text tags like [SWAP] instead.
 
     Args:
         intent_type: The intent type string (e.g., "SWAP", "SUPPLY")
 
     Returns:
-        Emoji-prefixed intent type
+        Emoji-prefixed or text-tagged intent type
     """
+    if not _emojis_enabled():
+        return f"[{intent_type.upper()}]"
+
     emoji_map = {
         "SWAP": "🔄",
         "SUPPLY": "📥",
@@ -546,7 +557,7 @@ def format_intent_type_emoji(intent_type: str) -> str:
 
 
 def format_execution_status(success: bool) -> str:
-    """Format execution status with emoji.
+    """Format execution status with emoji or text tag.
 
     Args:
         success: Whether execution succeeded
@@ -554,14 +565,13 @@ def format_execution_status(success: bool) -> str:
     Returns:
         Status string like '✅ SUCCESS' or '❌ FAILED'
     """
-    if success:
-        return "✅ SUCCESS"
-    else:
-        return "❌ FAILED"
+    if _emojis_enabled():
+        return "✅ SUCCESS" if success else "❌ FAILED"
+    return "[SUCCESS]" if success else "[FAILED]"
 
 
 def format_warning(message: str) -> str:
-    """Format warning message with emoji.
+    """Format warning message with emoji or text tag.
 
     Args:
         message: Warning message
@@ -569,11 +579,12 @@ def format_warning(message: str) -> str:
     Returns:
         Warning string like '⚠️ message'
     """
-    return f"⚠️ {message}"
+    prefix = "⚠️" if _emojis_enabled() else "[WARN]"
+    return f"{prefix} {message}"
 
 
 def format_error(message: str) -> str:
-    """Format error message with emoji.
+    """Format error message with emoji or text tag.
 
     Args:
         message: Error message
@@ -581,11 +592,12 @@ def format_error(message: str) -> str:
     Returns:
         Error string like '❌ message'
     """
-    return f"❌ {message}"
+    prefix = "❌" if _emojis_enabled() else "[ERROR]"
+    return f"{prefix} {message}"
 
 
 def format_info(message: str) -> str:
-    """Format info message with emoji.
+    """Format info message with emoji or text tag.
 
     Args:
         message: Info message
@@ -593,7 +605,8 @@ def format_info(message: str) -> str:
     Returns:
         Info string like 'ℹ️ message'
     """
-    return f"ℹ️ {message}"
+    prefix = "ℹ️" if _emojis_enabled() else "[INFO]"
+    return f"{prefix} {message}"
 
 
 def wei_to_human(amount_wei: int, decimals: int = 18) -> Decimal:

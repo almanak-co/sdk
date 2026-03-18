@@ -57,6 +57,15 @@ def extract_token_symbols(intent: Any, *, _depth: int = 0) -> list[str]:
         if _is_symbol(val):
             symbols.append(val.strip())
 
+    # Parse pool name (e.g., "WETH/USDC") for LP intents
+    pool = _get("pool")
+    if isinstance(pool, str) and "/" in pool:
+        for part in pool.split("/"):
+            # Strip whitespace and common pool decorations (e.g., "USDC (0.05%)")
+            part = part.strip().split("(")[0].split(" ")[0].strip()
+            if _is_symbol(part):
+                symbols.append(part)
+
     # Recurse into callback_intents (FlashLoanIntent)
     callbacks = _get("callback_intents")
     if callbacks and isinstance(callbacks, list):

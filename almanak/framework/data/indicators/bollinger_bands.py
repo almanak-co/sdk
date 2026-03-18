@@ -68,7 +68,7 @@ class BollingerBandsCalculator:
             ohlcv_provider: Provider implementing OHLCVProvider protocol
         """
         self._ohlcv_provider = ohlcv_provider
-        logger.info("Initialized BollingerBandsCalculator")
+        logger.debug("Initialized BollingerBandsCalculator")
 
     @property
     def name(self) -> str:

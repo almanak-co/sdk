@@ -66,7 +66,7 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
         self._thegraph = TheGraphIntegration()
 
         self._initialized = True
-        logger.info("IntegrationService initialized with Binance, CoinGecko, TheGraph")
+        logger.debug("IntegrationService initialized with Binance, CoinGecko, TheGraph")
 
     # =========================================================================
     # Binance endpoints

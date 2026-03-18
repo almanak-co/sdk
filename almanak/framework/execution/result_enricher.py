@@ -227,17 +227,18 @@ class ResultEnricher:
         for field in spec:
             self._extract_field(result, parser, receipts, field, intent_type)
 
-        # Log enrichment summary
-        extracted_fields = []
+        # Log enrichment summary with actual extracted values
+        extracted_parts = []
         missing_fields = []
         for f in spec:
             if self._has_extracted(result, f):
-                extracted_fields.append(f)
+                val = self._get_extracted_value(result, f)
+                extracted_parts.append(f"{f}={val}")
             else:
                 missing_fields.append(f)
-        if extracted_fields:
+        if extracted_parts:
             logger.info(
-                f"Enriched {intent_type} result with: {', '.join(extracted_fields)} "
+                f"Enriched {intent_type} result: {', '.join(extracted_parts)} "
                 f"(protocol={protocol}, chain={context.chain})"
             )
         if missing_fields:
@@ -355,6 +356,26 @@ class ResultEnricher:
 
         # Check extracted_data
         return field in result.extracted_data
+
+    def _get_extracted_value(self, result: ExecutionResult, field: str) -> Any:
+        """Get the extracted value for a field, formatted for logging.
+
+        Args:
+            result: ExecutionResult to read
+            field: Field name
+
+        Returns:
+            The extracted value (summarized for complex types)
+        """
+        if field == "position_id":
+            return result.position_id
+        if field == "swap_amounts" and result.swap_amounts:
+            sa = result.swap_amounts
+            return f"{sa.amount_in_decimal} -> {sa.amount_out_decimal}"
+        if field == "lp_close_data" and result.lp_close_data:
+            return f"amount0={result.lp_close_data.amount0_collected}, amount1={result.lp_close_data.amount1_collected}"
+        val = result.extracted_data.get(field)
+        return str(val)[:100] if val is not None else val
 
     def _get_intent_type(self, intent: Any) -> str:
         """Get intent type string from intent object.

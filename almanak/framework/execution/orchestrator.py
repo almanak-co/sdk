@@ -50,7 +50,7 @@ from almanak.framework.execution.signer.safe.base import SafeSigner
 from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 from ..models.reproduction_bundle import ActionBundle
 from ..strategies.base import RiskGuard, RiskGuardResult
-from ..utils.log_formatters import format_gas_cost, format_tx_hash
+from ..utils.log_formatters import _emojis_enabled, format_gas_cost, format_tx_hash
 from .extracted_data import LPCloseData, SwapAmounts
 
 if TYPE_CHECKING:
@@ -1494,7 +1494,8 @@ class ExecutionOrchestrator:
             tx_hashes = [format_tx_hash(tr.tx_hash) for tr in result.transaction_results]
             gas_fmt = format_gas_cost(result.total_gas_used)
 
-            logger.info(f"✅ EXECUTED: {intent_type} completed successfully")
+            ok_prefix = "✅" if _emojis_enabled() else "[OK]"
+            logger.info(f"{ok_prefix} EXECUTED: {intent_type} completed successfully")
             logger.info(f"   Txs: {len(result.transaction_results)} ({', '.join(tx_hashes)}) | {gas_fmt}")
 
             return result

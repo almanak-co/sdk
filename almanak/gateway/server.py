@@ -209,27 +209,27 @@ class GatewayServer:
         # Initialize TimelineStore with persistent path
         # This must happen before services are created so they all share the same store
         get_timeline_store(db_path=effective_timeline_db)
-        logger.info(f"TimelineStore initialized with persistent storage: {effective_timeline_db}")
+        logger.debug(f"TimelineStore initialized with persistent storage: {effective_timeline_db}")
 
         # Initialize InstanceRegistry with the same gateway DB
         from almanak.gateway.registry import get_instance_registry
 
         get_instance_registry(db_path=self.settings.gateway_db_path)
-        logger.info(f"InstanceRegistry initialized with persistent storage: {self.settings.gateway_db_path}")
+        logger.debug(f"InstanceRegistry initialized with persistent storage: {self.settings.gateway_db_path}")
 
         # Ensure PostgreSQL schema is up-to-date (idempotent, runs once)
         if self.settings.database_url:
             from almanak.gateway.database import ensure_schema
 
             await ensure_schema(self.settings.database_url)
-            logger.info("PostgreSQL schema initialized")
+            logger.debug("PostgreSQL schema initialized")
 
         # Initialize LifecycleStore (uses same gateway DB or database_url for platform)
         lifecycle_store = get_lifecycle_store(
             database_url=self.settings.database_url,
             sqlite_path=self.settings.gateway_db_path,
         )
-        logger.info("LifecycleStore initialized")
+        logger.debug("LifecycleStore initialized")
 
         # Log pricing source configuration
         if not self.settings.coingecko_api_key:
@@ -298,9 +298,9 @@ class GatewayServer:
         self._lifecycle_servicer = LifecycleServiceServicer(store=lifecycle_store)
         gateway_pb2_grpc.add_LifecycleServiceServicer_to_server(self._lifecycle_servicer, self.server)
 
-        logger.info("Registered Phase 2 services: Market, State, Execution, Observe")
-        logger.info("Registered Phase 3 services: Rpc, Integration, FundingRate, Simulation, Polymarket, Enso")
-        logger.info("Registered Dashboard, Token, and Lifecycle services")
+        logger.debug("Registered Phase 2 services: Market, State, Execution, Observe")
+        logger.debug("Registered Phase 3 services: Rpc, Integration, FundingRate, Simulation, Polymarket, Enso")
+        logger.debug("Registered Dashboard, Token, and Lifecycle services")
 
         # Enable reflection for debugging and development
         # Service names must match the proto package (almanak.gateway.proto)

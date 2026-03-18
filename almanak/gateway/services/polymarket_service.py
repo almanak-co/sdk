@@ -118,7 +118,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         self._available = bool(self._private_key and self._wallet_address)
         self._credentials_available = bool(self._api_key and self._api_secret and self._api_passphrase)
 
-        logger.info(
+        logger.debug(
             "PolymarketService initialized: available=%s, credentials=%s",
             self._available,
             self._credentials_available,

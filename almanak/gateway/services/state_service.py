@@ -74,7 +74,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         await self._state_manager.initialize()
 
         self._initialized = True
-        logger.info(f"StateService initialized with {backend_type.name} backend")
+        logger.debug(f"StateService initialized with {backend_type.name} backend")
 
     async def LoadState(
         self,

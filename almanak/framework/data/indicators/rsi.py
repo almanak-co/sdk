@@ -513,7 +513,7 @@ class RSICalculator:
         self._ohlcv_provider = ohlcv_provider
         self._default_period = default_period
 
-        logger.info(
+        logger.debug(
             "Initialized RSICalculator with default_period=%d",
             default_period,
         )

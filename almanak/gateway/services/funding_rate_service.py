@@ -202,7 +202,7 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
         self._http_session: aiohttp.ClientSession | None = None
         self._web3_cache: dict[str, AsyncWeb3] = {}
 
-        logger.info("Initialized FundingRateService")
+        logger.debug("Initialized FundingRateService")
 
     async def _get_http_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""

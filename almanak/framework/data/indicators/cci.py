@@ -22,7 +22,7 @@ class CCICalculator:
 
     def __init__(self, ohlcv_provider: OHLCVProvider) -> None:
         self._ohlcv_provider = ohlcv_provider
-        logger.info("Initialized CCICalculator")
+        logger.debug("Initialized CCICalculator")
 
     @property
     def name(self) -> str:

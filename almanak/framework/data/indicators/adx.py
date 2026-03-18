@@ -22,7 +22,7 @@ class ADXCalculator:
 
     def __init__(self, ohlcv_provider: OHLCVProvider) -> None:
         self._ohlcv_provider = ohlcv_provider
-        logger.info("Initialized ADXCalculator")
+        logger.debug("Initialized ADXCalculator")
 
     @property
     def name(self) -> str:

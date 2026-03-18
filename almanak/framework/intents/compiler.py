@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 # (compiler -> data/__init__ -> prediction_provider -> connectors/__init__ -> ... -> compiler)
 from ..models.reproduction_bundle import ActionBundle
 from ..utils.log_formatters import (
+    _emojis_enabled,
     format_percentage,
     format_slippage_bps,
     format_token_amount,
@@ -3296,7 +3297,8 @@ class IntentCompiler:
             min_out_fmt = format_token_amount(min_output, to_token.symbol, to_token.decimals)
             slippage_fmt = format_percentage(intent.max_slippage)
 
-            logger.info(f"✅ Compiled SWAP: {amount_in_fmt} → {expected_out_fmt} (min: {min_out_fmt})")
+            ok = "✅" if _emojis_enabled() else "[OK]"
+            logger.info(f"{ok} Compiled SWAP: {amount_in_fmt} → {expected_out_fmt} (min: {min_out_fmt})")
             logger.info(f"   Slippage: {slippage_fmt} | Txs: {len(transactions)} | Gas: {total_gas:,}")
 
         except Exception as e:
@@ -3444,7 +3446,8 @@ class IntentCompiler:
             slippage_fmt = format_percentage(intent.max_slippage)
             price_impact_fmt = format_slippage_bps(route.price_impact) if route.price_impact else "N/A"
 
-            logger.info(f"✅ Compiled SWAP (Enso): {amount_in_fmt} → {amount_out_fmt} (min: {min_out_fmt})")
+            ok = "✅" if _emojis_enabled() else "[OK]"
+            logger.info(f"{ok} Compiled SWAP (Enso): {amount_in_fmt} → {amount_out_fmt} (min: {min_out_fmt})")
             logger.info(
                 f"   Slippage: {slippage_fmt} | Impact: {price_impact_fmt} | Txs: {len(transactions)} | Gas: {total_gas:,}"
             )

@@ -62,7 +62,7 @@ class MovingAverageCalculator:
             ohlcv_provider: Provider implementing OHLCVProvider protocol
         """
         self._ohlcv_provider = ohlcv_provider
-        logger.info("Initialized MovingAverageCalculator")
+        logger.debug("Initialized MovingAverageCalculator")
 
     @property
     def name(self) -> str:

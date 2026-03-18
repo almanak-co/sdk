@@ -1136,12 +1136,17 @@ class HoldIntent(AlmanakImmutableModel):
 
     Attributes:
         reason: Optional reason for holding (for logging/debugging)
+        reason_code: Optional structured reason code for alerting/filtering
+            (e.g., "INSUFFICIENT_BALANCE", "RSI_NEUTRAL", "PRICE_BELOW_THRESHOLD")
+        reason_details: Optional structured details for the hold reason
         chain: Optional target chain for execution (defaults to strategy's primary chain)
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
     """
 
     reason: str | None = None
+    reason_code: str | None = None
+    reason_details: dict[str, Any] | None = None
     chain: str | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
@@ -2775,12 +2780,17 @@ class Intent:
     def hold(
         reason: str | None = None,
         chain: str | None = None,
+        reason_code: str | None = None,
+        reason_details: dict[str, Any] | None = None,
     ) -> HoldIntent:
         """Create a hold intent (no action).
 
         Args:
             reason: Optional reason for holding (for logging/debugging)
             chain: Target chain for execution (defaults to strategy's primary chain)
+            reason_code: Optional structured reason code for alerting/filtering
+                (e.g., "INSUFFICIENT_BALANCE", "RSI_NEUTRAL")
+            reason_details: Optional structured details for the hold reason
 
         Returns:
             HoldIntent: The created hold intent
@@ -2791,8 +2801,15 @@ class Intent:
 
             # Hold with a reason for logging
             intent = Intent.hold(reason="RSI in neutral zone, waiting for signal")
+
+            # Hold with structured reason for alerting
+            intent = Intent.hold(
+                reason="RSI neutral",
+                reason_code="RSI_NEUTRAL",
+                reason_details={"rsi": 52.3, "oversold": 30, "overbought": 70},
+            )
         """
-        return HoldIntent(reason=reason, chain=chain)
+        return HoldIntent(reason=reason, chain=chain, reason_code=reason_code, reason_details=reason_details)
 
     @staticmethod
     def stake(

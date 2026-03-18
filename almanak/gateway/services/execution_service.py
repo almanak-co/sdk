@@ -76,7 +76,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             return
 
         self._initialized = True
-        logger.info("ExecutionService initialized")
+        logger.debug("ExecutionService initialized")
 
     def _get_compiler(self, chain: str, wallet_address: str):
         """Get or create IntentCompiler for a chain/wallet pair.

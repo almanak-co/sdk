@@ -88,7 +88,7 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
         self._tenderly_available = bool(self._tenderly_account and self._tenderly_project and self._tenderly_key)
         self._alchemy_available = bool(self._alchemy_key)
 
-        logger.info(
+        logger.debug(
             "SimulationService initialized: tenderly=%s, alchemy=%s",
             self._tenderly_available,
             self._alchemy_available,

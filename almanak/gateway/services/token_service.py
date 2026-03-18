@@ -145,7 +145,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         # Get the shared TokenResolver instance (no gateway client for circular ref)
         self._resolver = get_token_resolver()
 
-        logger.info(
+        logger.debug(
             "TokenService initialized",
             extra={
                 "onchain_timeout": onchain_timeout,

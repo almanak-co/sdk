@@ -80,7 +80,7 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
         self._slack_available = bool(settings.slack_webhook_url)
         self._telegram_available = bool(settings.telegram_bot_token and settings.telegram_chat_id)
 
-        logger.info(
+        logger.debug(
             "ObserveService initialized: slack=%s, telegram=%s",
             self._slack_available,
             self._telegram_available,

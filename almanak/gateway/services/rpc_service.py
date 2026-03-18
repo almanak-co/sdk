@@ -139,7 +139,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         self._rate_limiters: dict[str, ChainRateLimiter] = {}
         self._metrics = RpcMetrics()
 
-        logger.info("Initialized RpcService with allowed chains: %s", ALLOWED_CHAINS)
+        logger.debug("Initialized RpcService with allowed chains: %s", ALLOWED_CHAINS)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""

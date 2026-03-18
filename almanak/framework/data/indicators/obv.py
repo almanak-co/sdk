@@ -18,7 +18,7 @@ class OBVCalculator:
 
     def __init__(self, ohlcv_provider: OHLCVProvider) -> None:
         self._ohlcv_provider = ohlcv_provider
-        logger.info("Initialized OBVCalculator")
+        logger.debug("Initialized OBVCalculator")
 
     @property
     def name(self) -> str:

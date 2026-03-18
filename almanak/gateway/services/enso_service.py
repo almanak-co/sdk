@@ -133,7 +133,7 @@ class EnsoServiceServicer(gateway_pb2_grpc.EnsoServiceServicer):
 
         self._available = bool(self._api_key)
 
-        logger.info("EnsoService initialized: available=%s", self._available)
+        logger.debug("EnsoService initialized: available=%s", self._available)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""

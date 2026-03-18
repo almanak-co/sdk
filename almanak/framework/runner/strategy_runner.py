@@ -95,10 +95,12 @@ from ..models.stuck_reason import StuckReason
 from ..portfolio import PortfolioMetrics, PortfolioSnapshot, ValueConfidence
 from ..state.state_manager import StateData, StateManager, StateNotFoundError
 from ..utils.log_formatters import (
+    _emojis_enabled,
     format_intent_type_emoji,
     format_percentage,
     format_usd,
 )
+from ..utils.logging import add_context, clear_context
 
 logger = logging.getLogger(__name__)
 
@@ -1029,6 +1031,10 @@ class StrategyRunner:
         start_time = datetime.now(UTC)
         strategy_id = strategy.strategy_id
 
+        # Bind correlation ID for all log messages during this iteration
+        iteration_id = f"{strategy_id}_{self._total_iterations + 1}_{int(start_time.timestamp())}"
+        add_context(correlation_id=iteration_id, strategy_id=strategy_id)
+
         logger.info(f"Starting iteration for strategy: {strategy_id}")
 
         try:
@@ -1037,7 +1043,8 @@ class StrategyRunner:
             if paused:
                 if strategy_id not in self._logged_paused_strategy_ids:
                     logger.info(
-                        "⏸️ %s is paused by operator%s",
+                        "%s %s is paused by operator%s",
+                        "[PAUSED]" if not _emojis_enabled() else "⏸️",
                         strategy_id,
                         f" ({pause_reason})" if pause_reason else "",
                     )
@@ -1252,7 +1259,8 @@ class StrategyRunner:
             if not intents or (len(intents) == 1 and isinstance(intents[0], HoldIntent)):
                 hold_intent = intents[0] if intents else None
                 reason = hold_intent.reason if isinstance(hold_intent, HoldIntent) else "No action"
-                logger.info(f"⏸️ {strategy_id} HOLD: {reason}")
+                hold_prefix = "⏸️" if _emojis_enabled() else "[HOLD]"
+                logger.info(f"{hold_prefix} {strategy_id} HOLD: {reason}")
                 self._record_success()
                 return IterationResult(
                     status=IterationStatus.HOLD,
@@ -1265,10 +1273,12 @@ class StrategyRunner:
             _chain = getattr(strategy, "chain", "")
             if len(intents) == 1:
                 intent_summary = _format_intent_for_log(intents[0], chain=_chain)
-                logger.info(f"📈 {strategy_id} intent: {intent_summary}")
+                intent_prefix = "📈" if _emojis_enabled() else "[INTENT]"
+                logger.info(f"{intent_prefix} {strategy_id} intent: {intent_summary}")
             else:
                 # Log intent sequence with details for each step
-                logger.info(f"📈 {strategy_id} intent sequence ({len(intents)} steps):")
+                intent_prefix = "📈" if _emojis_enabled() else "[INTENT]"
+                logger.info(f"{intent_prefix} {strategy_id} intent sequence ({len(intents)} steps):")
                 for i, intent in enumerate(intents, 1):
                     intent_summary = _format_intent_for_log(intent, chain=_chain)
                     logger.info(f"   {i}. {intent_summary}")
@@ -1304,6 +1314,23 @@ class StrategyRunner:
                         strategy_id=strategy_id,
                         duration_ms=self._calculate_duration_ms(start_time),
                     )
+
+            # Step 5.9: Snapshot balances before execution for delta tracking
+            pre_balances: dict[str, Decimal] = {}
+            intent_tokens: list[str] = []
+            try:
+                for _intent in intents:
+                    intent_tokens.extend(_extract_tokens_from_intent(_intent))
+                intent_tokens = list(set(intent_tokens))  # dedupe
+                if intent_tokens:
+                    for token in intent_tokens:
+                        try:
+                            bal = await self.balance_provider.get_balance(token)
+                            pre_balances[token] = bal.balance
+                        except Exception:
+                            pass  # Token balance unavailable, skip delta for this token
+            except Exception:
+                logger.debug("Failed to snapshot pre-execution balances", exc_info=True)
 
             # Step 6: Execute based on orchestrator type
             if self._is_multi_chain:
@@ -1484,6 +1511,29 @@ class StrategyRunner:
                         # already handled by run_loop when result.success is False
                         self._total_iterations += 1
 
+                # Step 6.9: Compute and log balance deltas after execution
+                if pre_balances and intent_result is not None and intent_result.success:
+                    try:
+                        self.balance_provider.invalidate_cache()
+                        post_balances: dict[str, Decimal] = {}
+                        for token in intent_tokens:
+                            try:
+                                bal = await self.balance_provider.get_balance(token)
+                                post_balances[token] = bal.balance
+                            except Exception:
+                                pass
+                        deltas = {}
+                        for token in intent_tokens:
+                            if token in pre_balances and token in post_balances:
+                                delta = post_balances[token] - pre_balances[token]
+                                if delta != 0:
+                                    deltas[token] = f"{delta:+.6g}"
+                        if deltas:
+                            delta_str = ", ".join(f"{t}: {v}" for t, v in deltas.items())
+                            logger.info(f"Balance delta: {delta_str}")
+                    except Exception:
+                        logger.debug("Failed to compute balance deltas", exc_info=True)
+
                 return intent_result  # type: ignore[return-value]
 
         except Exception as e:
@@ -1494,6 +1544,9 @@ class StrategyRunner:
                 f"Unexpected error: {e}",
                 start_time,
             )
+        finally:
+            # Clear correlation context to prevent bleed across iterations
+            clear_context()
 
     async def run_loop(
         self,
@@ -4164,17 +4217,24 @@ class StrategyRunner:
         # Extract intent info
         intent_type = None
         intents_serialized: list[dict[str, Any]] = []
+        hold_reason_code: str | None = None
+        hold_reason: str | None = None
         if result.intent:
             intent_type = result.intent.intent_type.value if hasattr(result.intent, "intent_type") else None
             try:
                 intents_serialized = [result.intent.serialize()] if hasattr(result.intent, "serialize") else []
             except Exception:  # noqa: BLE001
                 logger.debug("Failed to serialize intent for iteration_summary", exc_info=True)
+            # Extract HOLD reason fields
+            if isinstance(result.intent, HoldIntent):
+                hold_reason = result.intent.reason
+                hold_reason_code = result.intent.reason_code
 
         # Extract execution info
         tx_hashes: list[str] = []
         txs_planned = 0
         txs_sent = 0
+        gas_used = 0
         if result.execution_result:
             er = result.execution_result
             if hasattr(er, "transaction_results") and er.transaction_results:
@@ -4187,6 +4247,13 @@ class StrategyRunner:
             if hasattr(er, "receipts"):
                 txs_planned = max(txs_planned, len(er.receipts))
             txs_planned = max(txs_planned, txs_sent)
+            gas_used = getattr(er, "total_gas_used", 0) or 0
+
+        # Extract reconciliation status (tri-state: None=unchecked, True=clean, False=mismatch)
+        reconciliation_ok: bool | None = None
+        if result.balance_reconciliation is not None:
+            warnings = result.balance_reconciliation.get("warnings", [])
+            reconciliation_ok = len(warnings) == 0
 
         logger.info(
             "iteration_summary",
@@ -4201,8 +4268,12 @@ class StrategyRunner:
                 "txs_planned": txs_planned,
                 "txs_sent": txs_sent,
                 "tx_hashes": tx_hashes,
+                "gas_used": gas_used,
                 "status": result.status.value,
                 "duration_ms": round(result.duration_ms, 1),
+                "hold_reason": hold_reason,
+                "hold_reason_code": hold_reason_code,
+                "reconciliation_ok": reconciliation_ok,
                 "error": result.error,
             },
         )

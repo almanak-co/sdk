@@ -492,6 +492,7 @@ class LocalSimulator(Simulator):
                 simulated=True,
                 gas_estimates=gas_estimates,
                 warnings=warnings,
+                simulator_name=self._name,
             )
 
         finally:

@@ -66,7 +66,7 @@ class StochasticCalculator:
             ohlcv_provider: Provider implementing OHLCVProvider protocol
         """
         self._ohlcv_provider = ohlcv_provider
-        logger.info("Initialized StochasticCalculator")
+        logger.debug("Initialized StochasticCalculator")
 
     @property
     def name(self) -> str:

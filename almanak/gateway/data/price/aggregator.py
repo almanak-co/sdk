@@ -328,26 +328,30 @@ class PriceAggregator:
         # Determine staleness
         stale = any(r.stale for r in results.valid_results)
 
-        # Log aggregation result
+        # Log aggregation result (round price to 6 significant figures for readability)
+        display_price = f"{results.price:.6g}" if results.price else str(results.price)
         logger.info(
             "Aggregated price for %s/%s: %s (confidence: %.2f, sources: %d/%d, outliers: %d)",
             token,
             quote,
-            results.price,
+            display_price,
             confidence,
             len(results.valid_results),
             len(self._sources),
             len(results.outliers),
         )
 
-        # Log outliers if any
+        # Log outliers with structured fields for alerting
         if results.outliers:
             for outlier in results.outliers:
+                median = results.price
+                deviation_pct = abs(outlier.price - median) / median * 100 if median else 0
                 logger.warning(
-                    "Outlier detected from %s: %s (median: %s)",
+                    "Outlier detected from %s: %s (median: %s, deviation: %.1f%%)",
                     outlier.source,
                     outlier.price,
                     results.price,
+                    deviation_pct,
                 )
 
         return PriceResult(
