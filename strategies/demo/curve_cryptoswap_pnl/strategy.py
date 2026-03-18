@@ -84,6 +84,7 @@ class CurveCryptoSwapPnLStrategy(IntentStrategy):
         self.quote_token = self.get_config("quote_token", "USDT")
 
         self._consecutive_holds = 0
+        self._has_position = False
 
         logger.info(
             f"CurveCryptoSwapPnL initialized: trade_size={format_usd(self.trade_size_usd)}, "
@@ -170,6 +171,52 @@ class CurveCryptoSwapPnLStrategy(IntentStrategy):
             )
 
     # =========================================================================
+    # LIFECYCLE HOOKS
+    # =========================================================================
+
+    def on_intent_executed(self, intent: Any, success: bool, result: Any) -> None:
+        """Track position state from execution results."""
+        if not success:
+            return
+
+        intent_type = getattr(intent, "intent_type", None)
+        if intent_type is None:
+            return
+
+        intent_type_val = intent_type.value if hasattr(intent_type, "value") else str(intent_type)
+        if intent_type_val != "SWAP":
+            return
+
+        from_token = getattr(intent, "from_token", None)
+        to_token = getattr(intent, "to_token", None)
+
+        if from_token == self.quote_token and to_token == self.base_token:
+            # BUY: acquired base token position
+            self._has_position = True
+            logger.info(f"Position opened: bought {self.base_token} with {self.quote_token}")
+        elif from_token == self.base_token and to_token == self.quote_token:
+            # SELL: exited base token position
+            self._has_position = False
+            logger.info(f"Position closed: sold {self.base_token} for {self.quote_token}")
+
+    # =========================================================================
+    # STATE PERSISTENCE
+    # =========================================================================
+
+    def get_persistent_state(self) -> dict[str, Any]:
+        return {
+            "has_position": self._has_position,
+            "consecutive_holds": self._consecutive_holds,
+        }
+
+    def load_persistent_state(self, state: dict[str, Any]) -> None:
+        if "has_position" in state:
+            self._has_position = bool(state["has_position"])
+        if "consecutive_holds" in state:
+            self._consecutive_holds = int(state["consecutive_holds"])
+        logger.info(f"Restored state: has_position={self._has_position}")
+
+    # =========================================================================
     # TEARDOWN
     # =========================================================================
 
@@ -179,27 +226,34 @@ class CurveCryptoSwapPnLStrategy(IntentStrategy):
     def get_open_positions(self) -> "TeardownPositionSummary":
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
-        return TeardownPositionSummary(
-            strategy_id=getattr(self, "strategy_id", "demo_curve_cryptoswap_pnl"),
-            timestamp=datetime.now(UTC),
-            positions=[
+        positions = []
+        if self._has_position:
+            positions.append(
                 PositionInfo(
                     position_type=PositionType.TOKEN,
                     position_id="curve_cryptoswap_pnl_base_token",
                     chain=self.chain,
                     protocol="curve",
-                    value_usd=self.trade_size_usd,
+                    value_usd=Decimal("0"),
                     details={
                         "asset": self.base_token,
                         "base_token": self.base_token,
                         "quote_token": self.quote_token,
                     },
                 )
-            ],
+            )
+
+        return TeardownPositionSummary(
+            strategy_id=getattr(self, "strategy_id", "demo_curve_cryptoswap_pnl"),
+            timestamp=datetime.now(UTC),
+            positions=positions,
         )
 
     def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
         from almanak.framework.teardown import TeardownMode
+
+        if not self._has_position:
+            return []
 
         if mode == TeardownMode.HARD:
             max_slippage = Decimal("0.03")
@@ -228,5 +282,8 @@ class CurveCryptoSwapPnLStrategy(IntentStrategy):
                 "rsi_period": self.rsi_period,
                 "pair": f"{self.base_token}/{self.quote_token}",
             },
-            "state": {"consecutive_holds": self._consecutive_holds},
+            "state": {
+                "has_position": self._has_position,
+                "consecutive_holds": self._consecutive_holds,
+            },
         }

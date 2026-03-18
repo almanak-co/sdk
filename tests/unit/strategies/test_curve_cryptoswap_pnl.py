@@ -31,6 +31,7 @@ def strategy():
     strat.base_token = "WETH"
     strat.quote_token = "USDT"
     strat._consecutive_holds = 0
+    strat._has_position = False
     return strat
 
 
@@ -166,13 +167,73 @@ class TestDecision:
         assert strategy._consecutive_holds == 0
 
 
+class TestOnIntentExecuted:
+    def test_buy_sets_has_position(self, strategy):
+        intent = MagicMock()
+        intent.intent_type.value = "SWAP"
+        intent.from_token = "USDT"
+        intent.to_token = "WETH"
+
+        assert strategy._has_position is False
+        strategy.on_intent_executed(intent, success=True, result=None)
+        assert strategy._has_position is True
+
+    def test_sell_clears_has_position(self, strategy):
+        strategy._has_position = True
+        intent = MagicMock()
+        intent.intent_type.value = "SWAP"
+        intent.from_token = "WETH"
+        intent.to_token = "USDT"
+
+        strategy.on_intent_executed(intent, success=True, result=None)
+        assert strategy._has_position is False
+
+    def test_failed_intent_does_not_change_state(self, strategy):
+        intent = MagicMock()
+        intent.intent_type.value = "SWAP"
+        intent.from_token = "USDT"
+        intent.to_token = "WETH"
+
+        strategy.on_intent_executed(intent, success=False, result=None)
+        assert strategy._has_position is False
+
+
+class TestStatePersistence:
+    def test_get_persistent_state(self, strategy):
+        strategy._has_position = True
+        strategy._consecutive_holds = 5
+        state = strategy.get_persistent_state()
+        assert state["has_position"] is True
+        assert state["consecutive_holds"] == 5
+
+    def test_load_persistent_state(self, strategy):
+        strategy.load_persistent_state({"has_position": True, "consecutive_holds": 3})
+        assert strategy._has_position is True
+        assert strategy._consecutive_holds == 3
+
+
 class TestTeardown:
     def test_supports_teardown(self, strategy):
         assert strategy.supports_teardown() is True
 
-    def test_teardown_intents(self, strategy):
+    def test_no_positions_when_no_trades(self, strategy):
+        """get_open_positions() returns empty when no position is held."""
+        summary = strategy.get_open_positions()
+        assert len(summary.positions) == 0
+
+    def test_positions_reported_after_buy(self, strategy):
+        """get_open_positions() returns position after a buy."""
+        strategy._has_position = True
+        summary = strategy.get_open_positions()
+        assert len(summary.positions) == 1
+        assert summary.positions[0].protocol == "curve"
+        assert summary.positions[0].chain == "ethereum"
+        assert summary.positions[0].value_usd == Decimal("0")
+
+    def test_teardown_intents_when_has_position(self, strategy):
         from almanak.framework.teardown import TeardownMode
 
+        strategy._has_position = True
         intents = strategy.generate_teardown_intents(TeardownMode.SOFT)
         assert len(intents) == 1
         assert intents[0].intent_type.value == "SWAP"
@@ -180,23 +241,26 @@ class TestTeardown:
         assert intents[0].to_token == "USDT"
         assert intents[0].protocol == "curve"
 
+    def test_teardown_intents_empty_when_no_position(self, strategy):
+        from almanak.framework.teardown import TeardownMode
+
+        strategy._has_position = False
+        intents = strategy.generate_teardown_intents(TeardownMode.SOFT)
+        assert len(intents) == 0
+
     def test_teardown_hard_slippage(self, strategy):
         from almanak.framework.teardown import TeardownMode
 
+        strategy._has_position = True
         intents = strategy.generate_teardown_intents(TeardownMode.HARD)
         assert intents[0].max_slippage == Decimal("0.03")
 
     def test_teardown_soft_slippage(self, strategy):
         from almanak.framework.teardown import TeardownMode
 
+        strategy._has_position = True
         intents = strategy.generate_teardown_intents(TeardownMode.SOFT)
         assert intents[0].max_slippage == Decimal("0.01")  # 100 bps
-
-    def test_get_open_positions(self, strategy):
-        summary = strategy.get_open_positions()
-        assert len(summary.positions) == 1
-        assert summary.positions[0].protocol == "curve"
-        assert summary.positions[0].chain == "ethereum"
 
 
 class TestStatus:
