@@ -140,8 +140,13 @@ YT_TOKEN_INFO: dict[str, dict[str, tuple[str, int]]] = {
         "YT-sUSDE-5FEB2026": ("0xe36c6c271779C080Ba2e68E1E68410291a1b3F7A", 18),
         "YT-sUSDe-5FEB2026": ("0xe36c6c271779C080Ba2e68E1E68410291a1b3F7A", 18),
     },
-    # NOTE: Arbitrum YT addresses must be verified against Pendle deployments
-    # before being added here. Do not use placeholder addresses.
+    "arbitrum": {
+        # YT-wstETH-25JUN2026: verified via readTokens() on market 0xf78452e...
+        "YT-WSTETH-25JUN2026": ("0x25bda1edd6af17c61399aa0eb84b93daa3069764", 18),
+        "YT-wstETH-25JUN2026": ("0x25bda1edd6af17c61399aa0eb84b93daa3069764", 18),
+        "YT-WSTETH": ("0x25bda1edd6af17c61399aa0eb84b93daa3069764", 18),
+        "YT-wstETH": ("0x25bda1edd6af17c61399aa0eb84b93daa3069764", 18),
+    },
 }
 
 # Mapping of YT token names to market addresses (canonical lookup)
@@ -150,6 +155,13 @@ MARKET_BY_YT_TOKEN: dict[str, dict[str, str]] = {
     "plasma": {
         "YT-FUSDT0": "0x0cb289E9df2d0dCFe13732638C89655fb80C2bE2",
         "YT-fUSDT0": "0x0cb289E9df2d0dCFe13732638C89655fb80C2bE2",
+    },
+    "arbitrum": {
+        # YT-wstETH-25JUN2026 shares the same market as PT-wstETH-25JUN2026
+        "YT-WSTETH-25JUN2026": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
+        "YT-wstETH-25JUN2026": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
+        "YT-WSTETH": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
+        "YT-wstETH": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
     },
     "ethereum": {
         "YT-SUSDE-7MAY2026": "0x8dAe8ECe668cf80d348873F23D456448E8694883",

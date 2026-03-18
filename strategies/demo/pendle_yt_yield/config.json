@@ -1,0 +1,17 @@
+{
+    "market": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
+    "market_name": "wstETH-25JUN2026",
+    "trade_size_token": 0.01,
+    "max_slippage_bps": 200,
+    "base_token": "WSTETH",
+    "base_token_symbol": "WSTETH",
+    "base_token_decimals": 18,
+    "yt_token": "YT-wstETH-25JUN2026",
+    "yt_token_symbol": "YT-wstETH",
+    "yt_token_address": "0x25bda1edd6af17c61399aa0eb84b93daa3069764",
+    "stop_loss_pct": 50,
+    "anvil_funding": {
+        "ETH": 10,
+        "WSTETH": 1
+    }
+}
