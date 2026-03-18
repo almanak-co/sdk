@@ -648,7 +648,14 @@ def docs_agent_skill(dump):
     type=str,
     help="Comma-separated chains to pre-initialize (e.g., 'arbitrum,base').",
 )
-def gateway(port, network, metrics, metrics_port, log_level, chains):
+@click.option(
+    "--insecure",
+    is_flag=True,
+    default=False,
+    envvar="ALMANAK_GATEWAY_ALLOW_INSECURE",
+    help="Disable auth token requirement for local development. Also set via ALMANAK_GATEWAY_ALLOW_INSECURE env var.",
+)
+def gateway(port, network, metrics, metrics_port, log_level, chains, insecure):
     """Start the Almanak Gateway gRPC server.
 
     The gateway is a sidecar service that mediates all external access for
@@ -704,22 +711,22 @@ def gateway(port, network, metrics, metrics_port, log_level, chains):
 
     # Build settings
     effective_network = network if network else "mainnet"
-    # allow_insecure: auto-enabled for anvil, otherwise respect env var
-    env_allow_insecure = os.environ.get("ALMANAK_GATEWAY_ALLOW_INSECURE", "").lower() in ("true", "1", "yes")
+    # allow_insecure: auto-enabled for anvil, or via --insecure flag / env var
+    allow_insecure = (effective_network == "anvil") or insecure
     settings = GatewaySettings(
         grpc_port=port,
         metrics_enabled=metrics,
         metrics_port=metrics_port,
         network=effective_network,
         chains=parsed_chains,
-        allow_insecure=(effective_network == "anvil") or env_allow_insecure,
+        allow_insecure=allow_insecure,
     )
 
-    if env_allow_insecure and effective_network not in ("anvil", "sepolia"):
+    if insecure and effective_network not in ("anvil", "sepolia"):
         click.echo(
             click.style(
-                f"SECURITY WARNING: ALMANAK_GATEWAY_ALLOW_INSECURE is set on network '{effective_network}'. "
-                "Gateway authentication is DISABLED. Remove this env var for production use.",
+                f"SECURITY WARNING: Insecure mode is active on network '{effective_network}'. "
+                "Gateway authentication is DISABLED. Remove the --insecure flag (or ALMANAK_GATEWAY_ALLOW_INSECURE env var) for production use.",
                 fg="red",
                 bold=True,
             ),

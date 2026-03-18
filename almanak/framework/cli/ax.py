@@ -18,6 +18,28 @@ if TYPE_CHECKING:
     from almanak.gateway.managed import ManagedGateway
 
 
+def _action_options(fn):
+    """Add hidden --yes/--dry-run/--json to action subcommands.
+
+    Allows users to place these flags after the subcommand name
+    (e.g. ``almanak ax unwrap WETH 0.001 --yes``) in addition to the
+    canonical group-level position. The subcommand value is OR-merged
+    with the group value so either placement works.
+    """
+    fn = click.option("--yes", "-y", "sub_yes", is_flag=True, default=False, hidden=True)(fn)
+    fn = click.option("--dry-run", "sub_dry_run", is_flag=True, default=False, hidden=True)(fn)
+    fn = click.option("--json", "sub_json_output", is_flag=True, default=False, hidden=True)(fn)
+    return fn
+
+
+def _merge_flags(ctx, sub_yes=False, sub_dry_run=False, sub_json_output=False):
+    """Merge subcommand-level flags with group-level flags."""
+    yes = ctx.obj["yes"] or sub_yes
+    dry_run = ctx.obj["dry_run"] or sub_dry_run
+    json_output = ctx.obj["json_output"] or sub_json_output
+    return yes, dry_run, json_output
+
+
 @click.group(invoke_without_command=True)
 @click.option(
     "--gateway-host",
@@ -277,7 +299,15 @@ def _get_executor(ctx: click.Context):
     port = ctx.obj["gateway_port"]
     network = ctx.obj.get("network")
 
-    # Try connecting to an existing gateway first
+    # Try connecting to an existing gateway first.
+    # Suppress gateway_client logger during the quick probe so users don't
+    # see scary "Gateway not ready / connection refused" messages when no
+    # gateway is running yet (expected path before auto-start).
+    import logging as _logging
+
+    gc_logger = _logging.getLogger("almanak.framework.gateway_client")
+    prev_level = gc_logger.level
+    gc_logger.setLevel(_logging.CRITICAL)
     try:
         executor, client = create_cli_executor(
             gateway_host=host,
@@ -292,6 +322,8 @@ def _get_executor(ctx: click.Context):
         return executor, client
     except click.ClickException:
         pass  # No gateway running -- auto-start one below
+    finally:
+        gc_logger.setLevel(prev_level)
 
     # Auto-start a managed gateway (mainnet or anvil)
     managed = _start_managed_gateway(ctx, host, port, network)
@@ -503,8 +535,9 @@ def balance(ctx, token):
     default=None,
     help="Specific DEX protocol (default: best available).",
 )
+@_action_options
 @click.pass_context
-def swap(ctx, from_token, to_token, amount, slippage, protocol):
+def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_yes, sub_dry_run, sub_json_output):
     """Swap tokens on a DEX.
 
     \b
@@ -521,9 +554,7 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol):
         render_simulation,
     )
 
-    json_output = ctx.obj["json_output"]
-    dry_run = ctx.obj["dry_run"]
-    yes = ctx.obj["yes"]
+    yes, dry_run, json_output = _merge_flags(ctx, sub_yes, sub_dry_run, sub_json_output)
 
     action_desc = f"Swap {amount} {from_token.upper()} -> {to_token.upper()} on {ctx.obj['chain']}"
 
@@ -584,8 +615,9 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol):
     default=False,
     help="Skip collecting accrued fees.",
 )
+@_action_options
 @click.pass_context
-def lp_close(ctx, position_id, protocol, no_collect_fees):
+def lp_close(ctx, position_id, protocol, no_collect_fees, sub_yes, sub_dry_run, sub_json_output):
     """Close (fully withdraw) a liquidity position.
 
     Removes all liquidity and collects accrued fees by default.
@@ -605,9 +637,7 @@ def lp_close(ctx, position_id, protocol, no_collect_fees):
         render_simulation,
     )
 
-    json_output = ctx.obj["json_output"]
-    dry_run = ctx.obj["dry_run"]
-    yes = ctx.obj["yes"]
+    yes, dry_run, json_output = _merge_flags(ctx, sub_yes, sub_dry_run, sub_json_output)
 
     action_desc = f"Close LP position #{position_id} ({protocol}) on {ctx.obj['chain']}"
 
@@ -781,8 +811,9 @@ def pool(ctx, token_a, token_b, fee_tier, protocol):
     default=None,
     help="Preferred bridge adapter (e.g. 'across', 'stargate').",
 )
+@_action_options
 @click.pass_context
-def bridge(ctx, token, amount, from_chain, to_chain, slippage, preferred_bridge):
+def bridge(ctx, token, amount, from_chain, to_chain, slippage, preferred_bridge, sub_yes, sub_dry_run, sub_json_output):
     """Bridge tokens from one chain to another.
 
     \b
@@ -799,9 +830,7 @@ def bridge(ctx, token, amount, from_chain, to_chain, slippage, preferred_bridge)
         render_simulation,
     )
 
-    json_output = ctx.obj["json_output"]
-    dry_run = ctx.obj["dry_run"]
-    yes = ctx.obj["yes"]
+    yes, dry_run, json_output = _merge_flags(ctx, sub_yes, sub_dry_run, sub_json_output)
 
     action_desc = f"Bridge {amount} {token.upper()} from {from_chain} to {to_chain}"
 
@@ -851,8 +880,9 @@ def bridge(ctx, token, amount, from_chain, to_chain, slippage, preferred_bridge)
 @ax.command()
 @click.argument("token")
 @click.argument("amount")
+@_action_options
 @click.pass_context
-def unwrap(ctx, token, amount):
+def unwrap(ctx, token, amount, sub_yes, sub_dry_run, sub_json_output):
     """Unwrap wrapped native tokens (e.g. WETH -> ETH, WMATIC -> MATIC).
 
     \b
@@ -869,9 +899,7 @@ def unwrap(ctx, token, amount):
         render_simulation,
     )
 
-    json_output = ctx.obj["json_output"]
-    dry_run = ctx.obj["dry_run"]
-    yes = ctx.obj["yes"]
+    yes, dry_run, json_output = _merge_flags(ctx, sub_yes, sub_dry_run, sub_json_output)
 
     action_desc = f"Unwrap {amount} {token.upper()} to native on {ctx.obj['chain']}"
 
@@ -1107,8 +1135,9 @@ def _format_type(field_schema: dict, defs: dict | None = None) -> str:
 @ax.command("run")
 @click.argument("tool_name")
 @click.argument("args_json", default="{}")
+@_action_options
 @click.pass_context
-def run_tool(ctx, tool_name, args_json):
+def run_tool(ctx, tool_name, args_json, sub_yes, sub_dry_run, sub_json_output):
     """Run any tool from the catalog by name.
 
     Generic fallback for tools without a dedicated subcommand.
@@ -1131,9 +1160,7 @@ def run_tool(ctx, tool_name, args_json):
         render_simulation,
     )
 
-    json_output = ctx.obj["json_output"]
-    dry_run = ctx.obj["dry_run"]
-    yes = ctx.obj["yes"]
+    yes, dry_run, json_output = _merge_flags(ctx, sub_yes, sub_dry_run, sub_json_output)
 
     # Validate tool exists
     catalog = get_default_catalog()
