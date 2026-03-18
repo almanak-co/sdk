@@ -430,6 +430,193 @@ class TestInstanceRegistryThreadSafety:
             assert errors == [], f"Errors during concurrent heartbeats: {errors}"
 
 
+class TestInstanceRegistryStartupReconciliation:
+    """Tests for VIB-1279: startup reconciliation marks RUNNING entries as STALE."""
+
+    def test_reconcile_stale_on_startup_marks_running_as_stale(self):
+        """RUNNING instances become STALE after startup reconciliation."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            registry = InstanceRegistry(db_path=db_path)
+            registry.initialize()
+
+            registry.register(_make_instance("strat1:aaa", status="RUNNING"))
+            registry.register(_make_instance("strat2:bbb", status="RUNNING"))
+            registry.register(_make_instance("strat3:ccc", status="INACTIVE"))
+
+            count = registry.reconcile_stale_on_startup()
+            assert count == 2
+
+            assert registry.get("strat1:aaa").status == "STALE"
+            assert registry.get("strat2:bbb").status == "STALE"
+            assert registry.get("strat3:ccc").status == "INACTIVE"  # unchanged
+
+    def test_reconcile_persists_to_sqlite(self):
+        """Startup reconciliation persists STALE status to SQLite."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+
+            registry1 = InstanceRegistry(db_path=db_path)
+            registry1.initialize()
+            registry1.register(_make_instance("strat1:aaa", status="RUNNING"))
+            registry1.reconcile_stale_on_startup()
+            registry1.close()
+
+            # Reload from DB - should see STALE not RUNNING
+            registry2 = InstanceRegistry(db_path=db_path)
+            registry2.initialize()
+            assert registry2.get("strat1:aaa").status == "STALE"
+
+    def test_reconcile_returns_zero_when_no_running(self):
+        """Returns 0 when no RUNNING instances exist."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            registry = InstanceRegistry(db_path=db_path)
+            registry.initialize()
+
+            registry.register(_make_instance("strat1:aaa", status="INACTIVE"))
+            count = registry.reconcile_stale_on_startup()
+            assert count == 0
+
+    def test_reconcile_empty_registry(self):
+        """Returns 0 on empty registry."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            registry = InstanceRegistry(db_path=db_path)
+            registry.initialize()
+
+            count = registry.reconcile_stale_on_startup()
+            assert count == 0
+
+    def test_heartbeat_recovers_stale_to_running(self):
+        """A heartbeat from a STALE instance recovers it back to RUNNING (VIB-1279)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            registry = InstanceRegistry(db_path=db_path)
+            registry.initialize()
+
+            registry.register(_make_instance("strat1:aaa", status="RUNNING"))
+            registry.reconcile_stale_on_startup()
+            assert registry.get("strat1:aaa").status == "STALE"
+
+            # Strategy sends a heartbeat — should recover to RUNNING
+            result = registry.heartbeat("strat1:aaa")
+            assert result is True
+            assert registry.get("strat1:aaa").status == "RUNNING"
+
+    def test_heartbeat_recovery_persists_to_sqlite(self):
+        """STALE -> RUNNING recovery via heartbeat persists to SQLite."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+
+            registry1 = InstanceRegistry(db_path=db_path)
+            registry1.initialize()
+            registry1.register(_make_instance("strat1:aaa", status="RUNNING"))
+            registry1.reconcile_stale_on_startup()
+            registry1.heartbeat("strat1:aaa")
+            registry1.close()
+
+            registry2 = InstanceRegistry(db_path=db_path)
+            registry2.initialize()
+            assert registry2.get("strat1:aaa").status == "RUNNING"
+
+
+class TestInstanceRegistryHeartbeatTTL:
+    """Tests for VIB-1280: background heartbeat TTL enforcement."""
+
+    def test_enforce_heartbeat_ttl_marks_stale_entries(self):
+        """RUNNING instances with expired heartbeats are marked STALE."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            registry = InstanceRegistry(db_path=db_path)
+            registry.initialize()
+
+            now = datetime.now(UTC)
+            old_heartbeat = now - timedelta(seconds=400)  # 400s ago, threshold is 300s
+
+            inst = _make_instance("strat1:aaa", status="RUNNING")
+            inst.last_heartbeat_at = old_heartbeat
+            registry.register(inst)
+
+            count = registry.enforce_heartbeat_ttl(stale_threshold_seconds=300)
+            assert count == 1
+            assert registry.get("strat1:aaa").status == "STALE"
+
+    def test_enforce_heartbeat_ttl_skips_fresh_entries(self):
+        """RUNNING instances with fresh heartbeats are NOT marked STALE."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            registry = InstanceRegistry(db_path=db_path)
+            registry.initialize()
+
+            inst = _make_instance("strat1:aaa", status="RUNNING")
+            # last_heartbeat_at is set to now() by _make_instance -- well within threshold
+            registry.register(inst)
+
+            count = registry.enforce_heartbeat_ttl(stale_threshold_seconds=300)
+            assert count == 0
+            assert registry.get("strat1:aaa").status == "RUNNING"
+
+    def test_enforce_heartbeat_ttl_skips_non_running(self):
+        """INACTIVE/PAUSED/ERROR instances are never marked STALE by TTL enforcement."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            registry = InstanceRegistry(db_path=db_path)
+            registry.initialize()
+
+            now = datetime.now(UTC)
+            old_heartbeat = now - timedelta(seconds=600)
+
+            for status in ("INACTIVE", "PAUSED", "ERROR"):
+                inst = _make_instance(f"strat:{status}", status=status)
+                inst.last_heartbeat_at = old_heartbeat
+                registry.register(inst)
+
+            count = registry.enforce_heartbeat_ttl(stale_threshold_seconds=300)
+            assert count == 0
+
+    def test_enforce_heartbeat_ttl_persists_to_sqlite(self):
+        """TTL enforcement persists STALE status to SQLite."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+
+            registry1 = InstanceRegistry(db_path=db_path)
+            registry1.initialize()
+
+            now = datetime.now(UTC)
+            inst = _make_instance("strat1:aaa", status="RUNNING")
+            inst.last_heartbeat_at = now - timedelta(seconds=400)
+            registry1.register(inst)
+            registry1.enforce_heartbeat_ttl(stale_threshold_seconds=300)
+            registry1.close()
+
+            registry2 = InstanceRegistry(db_path=db_path)
+            registry2.initialize()
+            assert registry2.get("strat1:aaa").status == "STALE"
+
+    def test_enforce_heartbeat_ttl_only_marks_expired(self):
+        """Only expired instances are marked STALE, fresh ones stay RUNNING."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            registry = InstanceRegistry(db_path=db_path)
+            registry.initialize()
+
+            now = datetime.now(UTC)
+
+            fresh = _make_instance("fresh:aaa", status="RUNNING")
+            # last_heartbeat_at is now by default
+            registry.register(fresh)
+
+            stale = _make_instance("stale:bbb", status="RUNNING")
+            stale.last_heartbeat_at = now - timedelta(seconds=400)
+            registry.register(stale)
+
+            count = registry.enforce_heartbeat_ttl(stale_threshold_seconds=300)
+            assert count == 1
+            assert registry.get("fresh:aaa").status == "RUNNING"
+            assert registry.get("stale:bbb").status == "STALE"
+
+
 class TestInstanceRegistrySingleton:
     """Tests for singleton accessor functions."""
 

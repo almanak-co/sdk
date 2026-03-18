@@ -155,6 +155,33 @@ class GatewayServer:
         self._token_servicer: TokenServiceServicer | None = None
         self._lifecycle_servicer: LifecycleServiceServicer | None = None
 
+        # VIB-1280: background heartbeat TTL enforcer task
+        self._heartbeat_ttl_task: asyncio.Task | None = None
+
+    async def _heartbeat_ttl_loop(self, interval_seconds: int = 60, stale_threshold_seconds: int = 300) -> None:
+        """Background task that persistently marks stale RUNNING entries as STALE.
+
+        Runs every ``interval_seconds`` and marks any RUNNING instance whose
+        last_heartbeat_at is older than ``stale_threshold_seconds`` as STALE in
+        SQLite.  This catches mid-session crashes that startup reconciliation
+        cannot see (VIB-1280).
+        """
+        from almanak.gateway.registry import get_instance_registry
+
+        registry = get_instance_registry()
+        while True:
+            try:
+                await asyncio.sleep(interval_seconds)
+                try:
+                    await asyncio.to_thread(
+                        registry.enforce_heartbeat_ttl,
+                        stale_threshold_seconds=stale_threshold_seconds,
+                    )
+                except Exception:
+                    logger.exception("Heartbeat TTL enforcement failed, will retry next cycle")
+            except asyncio.CancelledError:
+                return
+
     async def start(self) -> None:
         """Start the gRPC server."""
         # Create interceptors list
@@ -214,8 +241,14 @@ class GatewayServer:
         # Initialize InstanceRegistry with the same gateway DB
         from almanak.gateway.registry import get_instance_registry
 
-        get_instance_registry(db_path=self.settings.gateway_db_path)
+        registry = get_instance_registry(db_path=self.settings.gateway_db_path)
         logger.debug(f"InstanceRegistry initialized with persistent storage: {self.settings.gateway_db_path}")
+
+        # VIB-1279: Startup reconciliation — mark any leftover RUNNING entries as STALE.
+        # Strategies that are still alive will heartbeat back to RUNNING shortly.
+        stale_count = registry.reconcile_stale_on_startup()
+        if stale_count:
+            logger.warning("Gateway startup: reconciled %d ghost RUNNING instance(s) -> STALE", stale_count)
 
         # Ensure PostgreSQL schema is up-to-date (idempotent, runs once)
         if self.settings.database_url:
@@ -338,6 +371,13 @@ class GatewayServer:
         await self.server.start()
         logger.info(f"Gateway gRPC server started on {listen_addr}")
 
+        # VIB-1280: start background heartbeat TTL enforcer
+        self._heartbeat_ttl_task = asyncio.create_task(
+            self._heartbeat_ttl_loop(interval_seconds=60, stale_threshold_seconds=300),
+            name="heartbeat-ttl-enforcer",
+        )
+        logger.debug("Heartbeat TTL enforcer task started (interval=60s, threshold=300s)")
+
         # Pre-warm orchestrators if chains are configured
         if self.settings.chains:
             await self._prewarm_chains()
@@ -374,6 +414,14 @@ class GatewayServer:
         Args:
             grace: Grace period in seconds for in-flight requests.
         """
+        # Cancel background heartbeat TTL enforcer (VIB-1280)
+        if self._heartbeat_ttl_task and not self._heartbeat_ttl_task.done():
+            self._heartbeat_ttl_task.cancel()
+            try:
+                await self._heartbeat_ttl_task
+            except asyncio.CancelledError:
+                pass
+
         if self._metrics_server:
             self._metrics_server.stop()
         if self.server:

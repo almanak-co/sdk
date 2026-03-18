@@ -33,7 +33,7 @@ class StrategyInstance:
     protocol: str
     wallet_address: str
     config_json: str
-    status: str  # RUNNING | INACTIVE | ERROR | PAUSED
+    status: str  # RUNNING | INACTIVE | ERROR | PAUSED | STALE
     archived: bool  # Hidden from dashboard, data retained
     created_at: datetime
     updated_at: datetime
@@ -249,6 +249,7 @@ class InstanceRegistry:
         if not self._initialized:
             self.initialize()
 
+        recovered = False
         with self._lock:
             instance = self._cache.get(strategy_id)
             if instance is None:
@@ -258,19 +259,125 @@ class InstanceRegistry:
             instance.last_heartbeat_at = now
             instance.updated_at = now
 
-            # Persist heartbeat to DB
+            # Recover STALE -> RUNNING: a heartbeat proves the strategy is alive.
+            # This is the recovery path after startup reconciliation (VIB-1279).
+            recovered = instance.status == "STALE"
+            if recovered:
+                instance.status = "RUNNING"
+
+            # Persist heartbeat (and status recovery if applicable) to DB
             with sqlite3.connect(str(self._db_path)) as conn:
                 conn.execute(
                     """
                     UPDATE strategy_instances
-                    SET last_heartbeat_at = ?, updated_at = ?
+                    SET last_heartbeat_at = ?, updated_at = ?, status = ?
                     WHERE strategy_id = ?
                     """,
-                    (now.isoformat(), now.isoformat(), strategy_id),
+                    (now.isoformat(), now.isoformat(), instance.status, strategy_id),
                 )
                 conn.commit()
 
+        if recovered:
+            logger.info("Heartbeat received from STALE instance %s — recovered to RUNNING", strategy_id)
         return True
+
+    def reconcile_stale_on_startup(self) -> int:
+        """Mark all RUNNING entries as STALE on gateway startup.
+
+        Called once during gateway boot to clear stale RUNNING entries from
+        a previous session. Strategies that are actually running will re-register
+        on their next heartbeat and transition back to RUNNING.
+
+        Returns:
+            Number of entries marked STALE.
+        """
+        if not self._initialized:
+            self.initialize()
+
+        with self._lock:
+            now = datetime.now(UTC)
+            stale_ids = [sid for sid, inst in self._cache.items() if inst.status == "RUNNING"]
+
+            if not stale_ids:
+                return 0
+
+            # Batch UPDATE in SQLite
+            placeholders = ",".join("?" * len(stale_ids))
+            with sqlite3.connect(str(self._db_path)) as conn:
+                conn.execute(
+                    f"UPDATE strategy_instances SET status = 'STALE', updated_at = ?"
+                    f" WHERE strategy_id IN ({placeholders}) AND status = 'RUNNING'",
+                    [now.isoformat(), *stale_ids],
+                )
+                conn.commit()
+
+            # Update in-memory cache
+            for sid in stale_ids:
+                self._cache[sid].status = "STALE"
+                self._cache[sid].updated_at = now
+
+        logger.warning(
+            "Startup reconciliation: marked %d RUNNING instance(s) as STALE "
+            "(they will recover on next heartbeat if still running): %s",
+            len(stale_ids),
+            stale_ids,
+        )
+        return len(stale_ids)
+
+    def enforce_heartbeat_ttl(self, stale_threshold_seconds: int = 300) -> int:
+        """Mark RUNNING entries with expired heartbeats as STALE persistently.
+
+        Called periodically by the gateway background TTL enforcer task to
+        catch mid-session crashes. Unlike `_compute_effective_status()` in
+        DashboardService (which is read-time only), this persists the STALE
+        status to SQLite so it survives across queries.
+
+        Args:
+            stale_threshold_seconds: Seconds without heartbeat before marking STALE.
+                Defaults to 300 (5 minutes, matching DashboardService's threshold).
+
+        Returns:
+            Number of entries newly marked STALE.
+        """
+        if not self._initialized:
+            self.initialize()
+
+        with self._lock:
+            now = datetime.now(UTC)
+            stale_ids = []
+            for sid, inst in self._cache.items():
+                if inst.status != "RUNNING":
+                    continue
+                heartbeat = inst.last_heartbeat_at
+                if heartbeat.tzinfo is None:
+                    heartbeat = heartbeat.replace(tzinfo=UTC)
+                age = (now - heartbeat).total_seconds()
+                if age > stale_threshold_seconds:
+                    stale_ids.append(sid)
+
+            if not stale_ids:
+                return 0
+
+            placeholders = ",".join("?" * len(stale_ids))
+            with sqlite3.connect(str(self._db_path)) as conn:
+                conn.execute(
+                    f"UPDATE strategy_instances SET status = 'STALE', updated_at = ?"
+                    f" WHERE strategy_id IN ({placeholders}) AND status = 'RUNNING'",
+                    [now.isoformat(), *stale_ids],
+                )
+                conn.commit()
+
+            for sid in stale_ids:
+                self._cache[sid].status = "STALE"
+                self._cache[sid].updated_at = now
+
+        logger.warning(
+            "Heartbeat TTL enforcer: marked %d RUNNING instance(s) as STALE (no heartbeat for >%ds): %s",
+            len(stale_ids),
+            stale_threshold_seconds,
+            stale_ids,
+        )
+        return len(stale_ids)
 
     def archive(self, strategy_id: str) -> bool:
         """Archive a strategy instance (hidden from dashboard, data retained).

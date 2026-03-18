@@ -92,3 +92,19 @@ async def test_server_settings_from_environment(monkeypatch):
 
     # Clean up
     get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_ttl_task_lifecycle():
+    """GatewayServer starts the heartbeat TTL task on start() and cancels it on stop() (VIB-1280)."""
+    settings = GatewaySettings(grpc_port=50056, metrics_enabled=False, audit_enabled=False, allow_insecure=True)
+    server = GatewayServer(settings)
+
+    assert server._heartbeat_ttl_task is None
+
+    await server.start()
+    assert server._heartbeat_ttl_task is not None
+    assert not server._heartbeat_ttl_task.done()
+
+    await server.stop()
+    assert server._heartbeat_ttl_task.done()
