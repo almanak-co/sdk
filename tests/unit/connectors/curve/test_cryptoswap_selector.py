@@ -104,15 +104,11 @@ class TestCalldataEncoding:
 
     def test_tricrypto_swap_passes_pool_type(self, adapter: CurveAdapter) -> None:
         """Full swap() on a tricrypto pool should use the uint256 selector."""
-        from decimal import Decimal
-
         result = adapter.swap(
             pool_address="0xD51a44d3FaE010294C616388b506AcdA1bfAAE46",
             token_in="USDT",
             token_out="WBTC",
             amount_in=1000,
-            # price_ratio required for CryptoSwap (USDT at $1, WBTC at $60000)
-            price_ratio=Decimal("1") / Decimal("60000"),
         )
         assert result.success is True
         # Find the swap tx (last one, after approve)

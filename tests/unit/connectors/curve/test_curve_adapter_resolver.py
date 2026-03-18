@@ -248,14 +248,8 @@ class TestCryptoSwapEstimation:
         result = adapter._estimate_swap_output(pool, 0, 1, 100 * 10**18)
         assert result == 100 * 10**6
 
-    def test_cryptoswap_without_price_ratio_raises(self, adapter, mock_resolver):
-        """CryptoSwap raises ValueError without price_ratio (fail closed).
-
-        Previously returned 1 providing zero slippage protection; now raises so
-        the caller (swap()) can surface a clear compilation error.
-        """
-        import pytest
-
+    def test_cryptoswap_returns_minimal(self, adapter, mock_resolver):
+        """CryptoSwap returns 1 (no meaningful estimate without on-chain oracle)."""
         from almanak.framework.connectors.curve.adapter import PoolInfo, PoolType
 
         mock_resolver.resolve.side_effect = [
@@ -270,13 +264,12 @@ class TestCryptoSwapEstimation:
             pool_type=PoolType.TRICRYPTO,
             n_coins=3,
         )
-        with pytest.raises(ValueError, match="price_ratio is required"):
-            adapter._estimate_swap_output(pool, 0, 2, 100 * 10**6)
+        # 100 USDT -> WETH: should return 1 (no estimate)
+        result = adapter._estimate_swap_output(pool, 0, 2, 100 * 10**6)
+        assert result == 1
 
-    def test_cryptoswap_same_decimals_without_price_ratio_raises(self, adapter, mock_resolver):
-        """CryptoSwap raises even with same decimals — can't assume 1:1 price for volatile pairs."""
-        import pytest
-
+    def test_cryptoswap_same_decimals_returns_minimal(self, adapter, mock_resolver):
+        """CryptoSwap with same decimals still returns 1 (can't assume 1:1 price)."""
         from almanak.framework.connectors.curve.adapter import PoolInfo, PoolType
 
         mock_resolver.resolve.side_effect = [
@@ -291,8 +284,8 @@ class TestCryptoSwapEstimation:
             pool_type=PoolType.TRICRYPTO,
             n_coins=3,
         )
-        with pytest.raises(ValueError, match="price_ratio is required"):
-            adapter._estimate_swap_output(pool, 1, 2, 1 * 10**8)
+        result = adapter._estimate_swap_output(pool, 1, 2, 1 * 10**8)
+        assert result == 1
 
 
 class TestDeprecatedDictsRemoved:

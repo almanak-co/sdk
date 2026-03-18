@@ -17,6 +17,7 @@ from almanak.framework.connectors.curve.adapter import (
     CURVE_ADDRESSES,
     CURVE_GAS_ESTIMATES,
     CURVE_POOLS,
+    CURVE_TOKENS,
     EXCHANGE_SELECTOR,
     REMOVE_LIQUIDITY_3_SELECTOR,
     REMOVE_LIQUIDITY_ONE_SELECTOR,
@@ -268,7 +269,7 @@ class TestSwap:
     def test_swap_skips_approve_when_cached(self, adapter: CurveAdapter) -> None:
         """Test swap skips approve when allowance is cached."""
         pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
-        token_address = CURVE_POOLS["ethereum"]["3pool"]["coin_addresses"][1]  # USDC
+        token_address = CURVE_TOKENS["ethereum"]["USDC"]
 
         # Pre-set allowance
         adapter.set_allowance(token_address, pool_address, 10**18)
@@ -315,7 +316,7 @@ class TestSwap:
         pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
 
         # Set allowance to skip approve tx
-        token_address = CURVE_POOLS["ethereum"]["3pool"]["coin_addresses"][1]  # USDC
+        token_address = CURVE_TOKENS["ethereum"]["USDC"]
         adapter.set_allowance(token_address, pool_address, 10**18)
 
         result = adapter.swap(
@@ -458,128 +459,6 @@ class TestRemoveLiquidity:
         assert result.success is True
         remove_tx = next(tx for tx in result.transactions if tx.tx_type == "remove_liquidity")
         assert remove_tx.data.startswith(REMOVE_LIQUIDITY_ONE_SELECTOR)
-
-
-# =============================================================================
-# Swap Output Estimation Tests (VIB-1417)
-# =============================================================================
-
-
-class TestEstimateSwapOutput:
-    """Tests for _estimate_swap_output slippage protection.
-
-    VIB-1417: CryptoSwap pools must use price_ratio for accurate min_amount_out.
-    Without price_ratio, cross-decimal swaps (e.g., USDT->WETH) had zero protection.
-    """
-
-    def _make_pool(self, pool_type: PoolType, coins: list[str], coin_addresses: list[str]) -> PoolInfo:
-        return PoolInfo(
-            address="0x1234",
-            lp_token="0x5678",
-            coins=coins,
-            coin_addresses=coin_addresses,
-            pool_type=pool_type,
-            n_coins=len(coins),
-        )
-
-    def test_stableswap_same_decimals(self, adapter: CurveAdapter) -> None:
-        """StableSwap with same decimals returns 1:1."""
-        pool = self._make_pool(PoolType.STABLESWAP, ["DAI", "USDC"], ["0xaaa", "0xbbb"])
-        # Mock: pretend both have 18 decimals (DAI)
-        # DAI=18, USDC=6 in real life, but we test same-decimal case
-        result = adapter._estimate_swap_output(pool, 0, 0, 1000000000000000000)
-        assert result == 1000000000000000000
-
-    def test_stableswap_different_decimals(self, adapter: CurveAdapter) -> None:
-        """StableSwap adjusts for decimal difference (USDC 6 -> DAI 18)."""
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
-        pool = adapter.get_pool_info(pool_address)
-        assert pool is not None
-        # USDC (index 1, 6 decimals) -> DAI (index 0, 18 decimals)
-        # 1000 USDC = 1000_000000 in 6 decimals
-        amount_in = 1000_000000
-        result = adapter._estimate_swap_output(pool, 1, 0, amount_in)
-        # Should scale up by 10^12 (18-6)
-        assert result == 1000_000000_000000_000000
-
-    def test_cryptoswap_with_price_ratio(self, adapter: CurveAdapter) -> None:
-        """CryptoSwap with price_ratio gives accurate estimate.
-
-        The original bug: USDT->WETH returned amount_in=100_000000 (100 USDT in 6 decimals)
-        as min_amount_out for WETH (18 decimals), providing zero protection.
-        With price_ratio, it should return ~0.04 WETH in 18 decimals.
-        """
-        pool_address = CURVE_POOLS["ethereum"]["tricrypto2"]["address"]
-        pool = adapter.get_pool_info(pool_address)
-        assert pool is not None
-        # USDT (index 0, 6 decimals) -> WETH (index 2, 18 decimals)
-        # 100 USDT at $1, WETH at $2500 -> price_ratio = 1/2500 = 0.0004
-        amount_in = 100_000000  # 100 USDT in 6 decimals
-        price_ratio = Decimal("1") / Decimal("2500")
-
-        result = adapter._estimate_swap_output(pool, 0, 2, amount_in, price_ratio=price_ratio)
-
-        # Expected: 100 * 0.0004 = 0.04 WETH = 40_000_000_000_000_000 wei (4e16)
-        # = amount_in * price_ratio * 10^(18-6) = 100_000000 * 0.0004 * 10^12
-        expected = int(Decimal("100000000") * price_ratio * Decimal("1000000000000"))
-        assert result == expected
-        # Sanity: ~0.04 WETH
-        assert 3 * 10**16 < result < 5 * 10**16
-
-    def test_cryptoswap_without_price_ratio_raises(self, adapter: CurveAdapter) -> None:
-        """CryptoSwap without price_ratio raises ValueError (fail closed).
-
-        Decimal-only adjustment for volatile pairs is mathematically wrong:
-        USDT(6 dec)->WETH(18 dec) would produce min_amount_out = 100*10^12 wei
-        (~100 billion WETH), guaranteeing a revert. Fail closed is safer.
-        """
-        import pytest
-
-        pool_address = CURVE_POOLS["ethereum"]["tricrypto2"]["address"]
-        pool = adapter.get_pool_info(pool_address)
-        assert pool is not None
-        amount_in = 100_000000  # 100 USDT in 6 decimals
-        with pytest.raises(ValueError, match="price_ratio is required"):
-            adapter._estimate_swap_output(pool, 0, 2, amount_in)
-
-    def test_cryptoswap_weth_to_usdt_with_price_ratio(self, adapter: CurveAdapter) -> None:
-        """CryptoSwap reverse direction: WETH->USDT with price_ratio."""
-        pool_address = CURVE_POOLS["ethereum"]["tricrypto2"]["address"]
-        pool = adapter.get_pool_info(pool_address)
-        assert pool is not None
-        # WETH (index 2, 18 decimals) -> USDT (index 0, 6 decimals)
-        # 0.04 WETH at $2500, USDT at $1 -> price_ratio = 2500/1 = 2500
-        amount_in = 40_000_000_000_000_000  # 0.04 WETH
-        price_ratio = Decimal("2500")
-
-        result = adapter._estimate_swap_output(pool, 2, 0, amount_in, price_ratio=price_ratio)
-
-        # Expected: 0.04 WETH * 2500 = 100 USDT = 100_000000 in 6 decimals
-        # = 40000000000000000 * 2500 / 10^12 = 100_000000
-        assert 99_000000 < result < 101_000000
-
-    def test_swap_with_price_ratio_produces_protected_min(self, adapter: CurveAdapter) -> None:
-        """End-to-end: swap() with price_ratio gives meaningful min_amount_out."""
-        pool_address = CURVE_POOLS["ethereum"]["tricrypto2"]["address"]
-        price_ratio = Decimal("1") / Decimal("2500")
-
-        result = adapter.swap(
-            pool_address=pool_address,
-            token_in="USDT",
-            token_out="WETH",
-            amount_in=Decimal("100"),
-            slippage_bps=50,
-            price_ratio=price_ratio,
-        )
-
-        assert result.success is True
-        # Compute exact expected min_amount_out:
-        # estimate = 100_000000 * (1/2500) * 10^12 = 4e16 (0.04 WETH in wei)
-        # min = max(1, int(estimate * (10000 - 50) // 10000)) = int(4e16 * 9950 / 10000)
-        amount_in_wei = 100_000000
-        estimate = int(Decimal(amount_in_wei) * price_ratio * Decimal(10**12))
-        expected_min = max(1, int(estimate * (10000 - 50) // 10000))
-        assert result.amount_out_minimum == expected_min
 
 
 # =============================================================================

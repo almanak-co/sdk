@@ -5544,32 +5544,12 @@ class IntentCompiler:
             )
             adapter = CurveAdapter(config)
 
-            # Compute price ratio for CryptoSwap/Tricrypto slippage protection.
-            # price_ratio = price_in / price_out so that:
-            # expected_output_tokens = amount_in_tokens * price_ratio
-            price_ratio: Decimal | None = None
-            try:
-                price_in = self._require_token_price(from_token.symbol)
-                price_out = self._require_token_price(to_token.symbol)
-                if price_out > 0:
-                    price_ratio = price_in / price_out
-            except (ValueError, ZeroDivisionError):
-                # Price unavailable — adapter will reject CryptoSwap swaps (fail closed)
-                # and accept StableSwap swaps (price_ratio not needed for 1:1 pairs)
-                logger.warning(
-                    "Could not compute price_ratio for Curve swap %s -> %s; "
-                    "CryptoSwap pools will fail, StableSwap pools will proceed safely.",
-                    from_token.symbol,
-                    to_token.symbol,
-                )
-
             swap_result = adapter.swap(
                 pool_address=pool_address,
                 token_in=from_token.symbol,
                 token_out=to_token.symbol,
                 amount_in=amount_decimal,
                 slippage_bps=slippage_bps,
-                price_ratio=price_ratio,
             )
 
             if not swap_result.success:

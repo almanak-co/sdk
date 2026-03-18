@@ -524,7 +524,6 @@ class CurveAdapter:
         amount_in: Decimal,
         slippage_bps: int | None = None,
         recipient: str | None = None,
-        price_ratio: Decimal | None = None,
     ) -> SwapResult:
         """Build a swap transaction on a Curve pool.
 
@@ -535,19 +534,11 @@ class CurveAdapter:
             amount_in: Amount of input token (in token units, not wei)
             slippage_bps: Slippage tolerance in basis points (default from config)
             recipient: Address to receive output tokens (default: wallet_address)
-            price_ratio: Price of input token / price of output token (e.g., if
-                swapping USDT at $1 for WETH at $2500, price_ratio = 1/2500 = 0.0004).
-                Required for CryptoSwap/Tricrypto pools; StableSwap pools ignore it.
-                When None and pool is CryptoSwap, the swap fails (fail-closed) rather
-                than executing with inaccurate slippage protection.
 
         Returns:
             SwapResult with transaction data
         """
         try:
-            if price_ratio is not None and price_ratio <= 0:
-                raise ValueError(f"price_ratio must be positive, got {price_ratio}")
-
             slippage_bps = slippage_bps or self.config.default_slippage_bps
             recipient = recipient or self.wallet_address
 
@@ -577,8 +568,8 @@ class CurveAdapter:
             # Convert amount to wei
             amount_in_wei = int(amount_in * Decimal(10**token_in_decimals))
 
-            # Estimate output for min_amount_out slippage protection
-            amount_out_estimate = self._estimate_swap_output(pool_info, i, j, amount_in_wei, price_ratio=price_ratio)
+            # Estimate output (simplified - in production would call get_dy)
+            amount_out_estimate = self._estimate_swap_output(pool_info, i, j, amount_in_wei)
             amount_out_minimum = max(1, int(amount_out_estimate * (10000 - slippage_bps) // 10000))
 
             # Build transactions
@@ -1076,70 +1067,43 @@ class CurveAdapter:
     # Estimation Methods
     # =========================================================================
 
-    def _estimate_swap_output(
-        self,
-        pool_info: PoolInfo,
-        i: int,
-        j: int,
-        amount_in: int,
-        price_ratio: Decimal | None = None,
-    ) -> int:
-        """Estimate swap output amount for min_amount_out calculation.
+    def _estimate_swap_output(self, pool_info: PoolInfo, i: int, j: int, amount_in: int) -> int:
+        """Estimate swap output amount.
 
-        For StableSwap pools: assumes 1:1 price ratio, adjusts for decimals.
-        For CryptoSwap/Tricrypto pools: requires price_ratio from the compiler
-        (which has access to oracle prices). If price_ratio is not provided,
-        raises ValueError (fail closed) — decimal-only adjustment is wrong for
-        volatile pairs and would produce astronomically incorrect min_amount_out.
-
-        Args:
-            pool_info: Pool metadata
-            i: Input coin index
-            j: Output coin index
-            amount_in: Input amount in wei (input token decimals)
-            price_ratio: price_in / price_out ratio. E.g., USDT($1)->WETH($2500)
-                gives price_ratio=0.0004. When provided, the estimate is:
-                amount_in * price_ratio * (10^(out_decimals - in_decimals))
-
-        Returns:
-            Estimated output amount in wei (output token decimals)
+        In production, this would call get_dy on the pool contract.
+        For now, uses a simplified 1:1 estimate for stablecoins.
         """
+        # Get decimals for input and output
         in_decimals = self._get_token_decimals(pool_info.coins[i])
         out_decimals = self._get_token_decimals(pool_info.coins[j])
-        decimal_diff = out_decimals - in_decimals
 
+        # Simplified: assume 1:1 for stablecoins, adjust for decimals
         if pool_info.pool_type == PoolType.STABLESWAP:
-            # Stablecoins: assume 1:1, adjust for decimals only
+            # Adjust for decimal difference
+            decimal_diff = out_decimals - in_decimals
             if decimal_diff > 0:
                 return amount_in * (10**decimal_diff)
             elif decimal_diff < 0:
                 return amount_in // (10 ** abs(decimal_diff))
             return amount_in
-
-        # CryptoSwap / Tricrypto: volatile pairs need price-based estimation
-        if price_ratio is not None:
-            # price_ratio = price_in / price_out
-            # expected_output_tokens = amount_in_tokens * price_ratio
-            # Convert: amount_in is in input wei, output must be in output wei
-            # amount_out_wei = amount_in_wei * price_ratio * 10^(out_decimals - in_decimals)
-            estimate = Decimal(amount_in) * price_ratio
-            if decimal_diff > 0:
-                estimate = estimate * Decimal(10**decimal_diff)
-            elif decimal_diff < 0:
-                estimate = estimate / Decimal(10 ** abs(decimal_diff))
-            return int(estimate)
-
-        # Fail closed: CryptoSwap pools swap volatile assets with very different prices.
-        # Without price_ratio, decimal-only adjustment produces astronomically wrong
-        # min_amount_out values (e.g. 100 USDT -> WETH would set min_amount_out to
-        # 100*10^12 wei = ~100 billion WETH, guaranteeing a revert). The compiler
-        # always provides price_ratio from oracle prices; reaching this path means
-        # the price oracle was unavailable. Fail closed rather than execute unprotected.
-        raise ValueError(
-            f"CryptoSwap pool {pool_info.name} ({pool_info.coins[i]} -> {pool_info.coins[j]}): "
-            "price_ratio is required for accurate slippage protection but was not provided. "
-            "Ensure price oracle data is available for both tokens before swapping volatile pairs."
-        )
+        else:
+            # TECH_DEBT: CryptoSwap/Tricrypto pools swap volatile assets (e.g. USDT<->WETH)
+            # with wildly different prices. Without on-chain get_dy() or a price oracle,
+            # we cannot compute a meaningful min_amount_out. Returning amount_in raw
+            # (the old behavior) was wrong: it causes reverts for high-to-low decimal
+            # swaps (e.g. WETH->USDT) and zero protection for the reverse.
+            #
+            # We return 1 (minimal output) so swaps always execute, but this provides
+            # no slippage protection for CryptoSwap pools. Proper fix requires adding
+            # on-chain get_dy() calls via gateway RPC or passing price data to the adapter.
+            logger.warning(
+                "CryptoSwap min_amount_out set to 1 (no slippage protection). "
+                "Pool %s coins[%d]->coins[%d]. Use on-chain get_dy() for proper estimates.",
+                pool_info.address,
+                i,
+                j,
+            )
+            return 1
 
     def _estimate_add_liquidity(self, pool_info: PoolInfo, amounts: list[int]) -> int:
         """Estimate LP tokens from add_liquidity.
