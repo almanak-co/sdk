@@ -168,7 +168,7 @@ class GatewayCoinGeckoDataProvider:
     _SUPPORTED_TOKENS: ClassVar[list[str]] = list(TOKEN_IDS.keys())
 
     # Supported chains
-    _SUPPORTED_CHAINS: ClassVar[list[str]] = ["arbitrum", "ethereum", "base", "optimism", "avalanche", "bnb"]
+    _SUPPORTED_CHAINS: ClassVar[list[str]] = ["arbitrum", "ethereum", "base", "optimism", "avalanche", "bnb", "bsc"]
 
     def __init__(self, gateway_client: "GatewayClient") -> None:
         """Initialize the gateway-backed CoinGecko data provider.

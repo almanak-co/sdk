@@ -64,6 +64,7 @@ EVENT_NAME_TO_TYPE: dict[str, PancakeSwapV3EventType] = {
 # PancakeSwap V3 NonfungiblePositionManager addresses
 POSITION_MANAGER_ADDRESSES: dict[str, str] = {
     "bsc": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
+    "bnb": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
     "ethereum": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
     "arbitrum": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
     "base": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",

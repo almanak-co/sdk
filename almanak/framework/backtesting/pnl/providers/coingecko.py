@@ -557,7 +557,7 @@ class CoinGeckoDataProvider:
     _SUPPORTED_TOKENS = list(TOKEN_IDS.keys())
 
     # Supported chains
-    _SUPPORTED_CHAINS = ["arbitrum", "ethereum", "base", "optimism", "avalanche", "bnb"]
+    _SUPPORTED_CHAINS = ["arbitrum", "ethereum", "base", "optimism", "avalanche", "bnb", "bsc"]
 
     # Rate limits (requests per minute)
     # Free tier: ~10-30 calls/min, Pro tier: ~500 calls/min

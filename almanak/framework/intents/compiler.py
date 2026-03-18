@@ -455,6 +455,11 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
         "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",  # PCS V3 Quoter
         "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",  # SushiSwap V3 Quoter
     },
+    "bnb": {  # Alias for "bsc" (VIB-708 unification)
+        "uniswap_v3": "0x78D78E420Da98ad378D7799bE8f4AF69033EB077",
+        "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
+        "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
+    },
     "linea": {
         "uniswap_v3": "0x42bE4D6527829FeFA1493e1fb9F3676d2425C3C1",
         "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
