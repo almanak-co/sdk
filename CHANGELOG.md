@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-03-18
+
+### Added
+- Jupiter Lend connector for Solana lending (#785)
+- Uniswap V4 wired into IntentCompiler with intent tests (#746)
+- Vault intent support in PnL backtester (#778)
+- Wrapped token OHLCV proxy fallback with explicit logging (#815)
+- Production-ready logging improvements (#799)
+- Protocol x chain support matrix expanded: 113 to 131 pairs (#798)
+- CI test for adapter config completeness + fix 6 config gaps (#802)
+- Pendle min_amount_out logged during swap compilation (#789)
+- New demo strategies: Pendle YT yield (#806), Aerodrome RSI (#761), Curve CryptoSwap PnL (#782), Aave V3 PnL lending Polygon (#795), Uniswap V3 RSI sweep (#794), TraderJoe paper trade LP (#783), TraderJoe sweep LP (#766), Solana LST depeg arb (#784)
+- `make test-backtest-service` target (#774)
+
+### Fixed
+- Tenderly/Alchemy gas estimation: dynamic instead of capping (#817)
+- Nonce drift on failed transactions (#805)
+- EIP-55 checksums enforced on all static contract addresses (#788)
+- Skip simulation for approve-family TXs to prevent Anvil hangs (#775)
+- Resolve amount='all' for single intents from decide() (#779)
+- Teardown CLI chain config + deterministic retry guard (#821)
+- Auto-generate session auth token for standalone gateway on mainnet (#808)
+- BSC chain aliases for DexScreener and OHLCV provider (#809)
+- Normalize hyphens to underscores in protocol alias resolution (#810)
+- Chain added to unwrap intent params (#803)
+- Pass --anvil-port through almanak strat run wrapper (#780)
+- Wire TraderJoe bin_range from LPOpenIntent protocol_params to compiler (#772)
+- Log fallback teardown price failures instead of silently swallowing (#777)
+- Explicit is-not-None check for price oracle in all teardown sites (#771)
+- Stale GMX V2 Avalanche Reader/SyntheticsReader addresses updated (#787)
+- Missing Curve in almanak info matrix (#790)
+- ax CLI bugs: gateway noise, --yes flag, standalone crash (#800)
+- LP_CLOSE intent added to Aave+Uniswap yield stack teardown (#760)
+
 ## [2.4.0] - 2026-03-17
 
 ### Added
