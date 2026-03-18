@@ -2029,6 +2029,7 @@ class IntentCompiler:
         self._cached_jupiter_adapter: Any = None
         self._cached_kamino_adapter: Any = None
         self._cached_kamino_adapter_with_rpc: Any = None
+        self._cached_jupiter_lend_adapter: Any = None
         self._cached_raydium_adapter: Any = None
         self._cached_raydium_adapter_with_rpc: Any = None
         self._cached_meteora_adapter: Any = None
@@ -2656,6 +2657,103 @@ class IntentCompiler:
                 result.action_bundle = bundle
         except Exception as e:
             logger.exception(f"Kamino withdraw compilation failed: {e}")
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+        return result
+
+    # ==========================================================================
+    # JUPITER LEND (Solana)
+    # ==========================================================================
+
+    def _get_jupiter_lend_adapter(self) -> Any:
+        """Get or create a cached JupiterLendAdapter instance."""
+        if self._cached_jupiter_lend_adapter is None:
+            from almanak.framework.connectors.jupiter_lend import JupiterLendAdapter, JupiterLendConfig
+
+            config = JupiterLendConfig(wallet_address=self.wallet_address)
+            self._cached_jupiter_lend_adapter = JupiterLendAdapter(config=config, token_resolver=self._token_resolver)
+        return self._cached_jupiter_lend_adapter
+
+    def _compile_jupiter_lend_supply(self, intent: SupplyIntent) -> CompilationResult:
+        """Compile a SUPPLY intent using Jupiter Lend for Solana chains."""
+        result = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=intent.intent_id,
+        )
+        try:
+            adapter = self._get_jupiter_lend_adapter()
+            bundle = adapter.compile_supply_intent(intent)
+
+            if bundle.metadata.get("error"):
+                result.status = CompilationStatus.FAILED
+                result.error = bundle.metadata["error"]
+            else:
+                result.action_bundle = bundle
+        except Exception as e:
+            logger.exception(f"Jupiter Lend supply compilation failed: {e}")
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+        return result
+
+    def _compile_jupiter_lend_borrow(self, intent: BorrowIntent) -> CompilationResult:
+        """Compile a BORROW intent using Jupiter Lend for Solana chains."""
+        result = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=intent.intent_id,
+        )
+        try:
+            adapter = self._get_jupiter_lend_adapter()
+            bundle = adapter.compile_borrow_intent(intent)
+
+            if bundle.metadata.get("error"):
+                result.status = CompilationStatus.FAILED
+                result.error = bundle.metadata["error"]
+            else:
+                result.action_bundle = bundle
+        except Exception as e:
+            logger.exception(f"Jupiter Lend borrow compilation failed: {e}")
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+        return result
+
+    def _compile_jupiter_lend_repay(self, intent: RepayIntent) -> CompilationResult:
+        """Compile a REPAY intent using Jupiter Lend for Solana chains."""
+        result = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=intent.intent_id,
+        )
+        try:
+            adapter = self._get_jupiter_lend_adapter()
+            bundle = adapter.compile_repay_intent(intent)
+
+            if bundle.metadata.get("error"):
+                result.status = CompilationStatus.FAILED
+                result.error = bundle.metadata["error"]
+            else:
+                result.action_bundle = bundle
+        except Exception as e:
+            logger.exception(f"Jupiter Lend repay compilation failed: {e}")
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+        return result
+
+    def _compile_jupiter_lend_withdraw(self, intent: WithdrawIntent) -> CompilationResult:
+        """Compile a WITHDRAW intent using Jupiter Lend for Solana chains."""
+        result = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=intent.intent_id,
+        )
+        try:
+            adapter = self._get_jupiter_lend_adapter()
+            bundle = adapter.compile_withdraw_intent(intent)
+
+            if bundle.metadata.get("error"):
+                result.status = CompilationStatus.FAILED
+                result.error = bundle.metadata["error"]
+            else:
+                result.action_bundle = bundle
+        except Exception as e:
+            logger.exception(f"Jupiter Lend withdraw compilation failed: {e}")
             result.status = CompilationStatus.FAILED
             result.error = str(e)
         return result
@@ -6653,16 +6751,24 @@ class IntentCompiler:
             protocol_lower = intent.protocol.lower()
 
             # =================================================================
-            # KAMINO PATH (Solana lending)
+            # SOLANA LENDING PATH (Kamino / Jupiter Lend)
             # =================================================================
+            if protocol_lower == "jupiter_lend":
+                if not self._is_solana_chain():
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        intent_id=intent.intent_id,
+                        error="Protocol 'jupiter_lend' is only available on Solana chains.",
+                    )
+                return self._compile_jupiter_lend_borrow(intent)
             if protocol_lower == "kamino" or (
-                self._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue")
+                self._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend")
             ):
                 if self._is_solana_chain() and protocol_lower not in ("kamino", ""):
                     return CompilationResult(
                         status=CompilationStatus.FAILED,
                         intent_id=intent.intent_id,
-                        error=f"Protocol '{intent.protocol}' is not supported for BORROW on Solana. Supported: kamino",
+                        error=f"Protocol '{intent.protocol}' is not supported for BORROW on Solana. Supported: kamino, jupiter_lend",
                     )
                 return self._compile_kamino_borrow(intent)
 
@@ -7431,16 +7537,24 @@ class IntentCompiler:
             protocol_lower = intent.protocol.lower()
 
             # =================================================================
-            # KAMINO PATH (Solana lending)
+            # SOLANA LENDING PATH (Kamino / Jupiter Lend)
             # =================================================================
+            if protocol_lower == "jupiter_lend":
+                if not self._is_solana_chain():
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        intent_id=intent.intent_id,
+                        error="Protocol 'jupiter_lend' is only available on Solana chains.",
+                    )
+                return self._compile_jupiter_lend_repay(intent)
             if protocol_lower == "kamino" or (
-                self._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue")
+                self._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend")
             ):
                 if self._is_solana_chain() and protocol_lower not in ("kamino", ""):
                     return CompilationResult(
                         status=CompilationStatus.FAILED,
                         intent_id=intent.intent_id,
-                        error=f"Protocol '{intent.protocol}' is not supported for REPAY on Solana. Supported: kamino",
+                        error=f"Protocol '{intent.protocol}' is not supported for REPAY on Solana. Supported: kamino, jupiter_lend",
                     )
                 return self._compile_kamino_repay(intent)
 
@@ -8013,16 +8127,24 @@ class IntentCompiler:
             protocol_lower = intent.protocol.lower()
 
             # =================================================================
-            # KAMINO PATH (Solana lending)
+            # SOLANA LENDING PATH (Kamino / Jupiter Lend)
             # =================================================================
+            if protocol_lower == "jupiter_lend":
+                if not self._is_solana_chain():
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        intent_id=intent.intent_id,
+                        error="Protocol 'jupiter_lend' is only available on Solana chains.",
+                    )
+                return self._compile_jupiter_lend_supply(intent)
             if protocol_lower == "kamino" or (
-                self._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue")
+                self._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend")
             ):
                 if self._is_solana_chain() and protocol_lower not in ("kamino", ""):
                     return CompilationResult(
                         status=CompilationStatus.FAILED,
                         intent_id=intent.intent_id,
-                        error=f"Protocol '{intent.protocol}' is not supported for SUPPLY on Solana. Supported: kamino",
+                        error=f"Protocol '{intent.protocol}' is not supported for SUPPLY on Solana. Supported: kamino, jupiter_lend",
                     )
                 return self._compile_kamino_supply(intent)
 
@@ -8615,16 +8737,24 @@ class IntentCompiler:
             protocol_lower = intent.protocol.lower()
 
             # =================================================================
-            # KAMINO PATH (Solana lending)
+            # SOLANA LENDING PATH (Kamino / Jupiter Lend)
             # =================================================================
+            if protocol_lower == "jupiter_lend":
+                if not self._is_solana_chain():
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        intent_id=intent.intent_id,
+                        error="Protocol 'jupiter_lend' is only available on Solana chains.",
+                    )
+                return self._compile_jupiter_lend_withdraw(intent)
             if protocol_lower == "kamino" or (
-                self._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue")
+                self._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend")
             ):
                 if self._is_solana_chain() and protocol_lower not in ("kamino", ""):
                     return CompilationResult(
                         status=CompilationStatus.FAILED,
                         intent_id=intent.intent_id,
-                        error=f"Protocol '{intent.protocol}' is not supported for WITHDRAW on Solana. Supported: kamino",
+                        error=f"Protocol '{intent.protocol}' is not supported for WITHDRAW on Solana. Supported: kamino, jupiter_lend",
                     )
                 return self._compile_kamino_withdraw(intent)
 

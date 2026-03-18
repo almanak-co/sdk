@@ -241,6 +241,10 @@ class ReceiptParserRegistry:
             "almanak.framework.connectors.kamino.receipt_parser",
             "KaminoReceiptParser",
         ),  # Alias for kamino
+        "jupiter_lend": (
+            "almanak.framework.connectors.jupiter_lend.receipt_parser",
+            "JupiterLendReceiptParser",
+        ),
         # Solana LP
         "raydium_clmm": (
             "almanak.framework.connectors.raydium.receipt_parser",
