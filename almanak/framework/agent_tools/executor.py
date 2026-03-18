@@ -1070,6 +1070,7 @@ class ToolExecutor:
             return "unwrap_native", {
                 "token": args["token"],
                 "amount": args["amount"],
+                "chain": args.get("chain", self._default_chain),
             }
 
         raise ToolValidationError(f"Unknown action tool: {tool_name}", tool_name=tool_name)
