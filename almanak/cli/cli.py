@@ -711,8 +711,11 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure):
 
     # Build settings
     effective_network = network if network else "mainnet"
+    is_test_network = effective_network in ("anvil", "sepolia")
     # allow_insecure: auto-enabled for anvil, or via --insecure flag / env var
-    allow_insecure = (effective_network == "anvil") or insecure
+    allow_insecure = is_test_network or insecure
+
+    # Build GatewaySettings first so it picks up auth_token from env vars AND .env file
     settings = GatewaySettings(
         grpc_port=port,
         metrics_enabled=metrics,
@@ -722,7 +725,17 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure):
         allow_insecure=allow_insecure,
     )
 
-    if insecure and effective_network not in ("anvil", "sepolia"):
+    # Security: for non-test networks, auto-generate a session auth token when
+    # none is explicitly configured (mirrors the strat-run managed gateway pattern).
+    # For test networks, use allow_insecure for convenience.
+    session_auth_token = None
+    if not settings.auth_token and not is_test_network and not insecure:
+        import uuid
+
+        session_auth_token = uuid.uuid4().hex
+        settings.auth_token = session_auth_token
+
+    if insecure and not is_test_network:
         click.echo(
             click.style(
                 f"SECURITY WARNING: Insecure mode is active on network '{effective_network}'. "
@@ -733,18 +746,27 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure):
             err=True,
         )
 
+    info_pairs = {
+        "gRPC Port": port,
+        "Network": settings.network,
+        "Chains": ", ".join(parsed_chains) if parsed_chains else "(on-demand)",
+        "Metrics": "enabled" if metrics else "disabled",
+        "Metrics Port": metrics_port if metrics else "N/A",
+        "Log Level": log_level,
+    }
+    if session_auth_token:
+        info_pairs["Auth"] = "auto-generated session token (see below)"
+
     format_output(
         status="info",
         title="Starting Almanak Gateway",
-        key_value_pairs={
-            "gRPC Port": port,
-            "Network": settings.network,
-            "Chains": ", ".join(parsed_chains) if parsed_chains else "(on-demand)",
-            "Metrics": "enabled" if metrics else "disabled",
-            "Metrics Port": metrics_port if metrics else "N/A",
-            "Log Level": log_level,
-        },
+        key_value_pairs=info_pairs,
     )
+
+    if session_auth_token:
+        click.echo()
+        click.echo(click.style("Session auth token (pass to clients via GATEWAY_AUTH_TOKEN env var):", fg="yellow"))
+        click.echo(f"  export GATEWAY_AUTH_TOKEN={session_auth_token}")
 
     click.echo()
     click.echo("Press Ctrl+C to stop the gateway.")
