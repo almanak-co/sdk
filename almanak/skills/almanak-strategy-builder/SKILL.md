@@ -1124,6 +1124,7 @@ class MyStrategy(IntentStrategy):
 | SushiSwap V3 | `SUSHISWAP_V3` | DEX / LP | `sushiswap_v3` |
 | TraderJoe V2 | `TRADERJOE_V2` | DEX / LP | `traderjoe_v2` |
 | Aerodrome | `AERODROME` | DEX / LP | `aerodrome` |
+| Agni Finance | `AGNI_FINANCE` | DEX / LP | `agni_finance` |
 | Enso | `ENSO` | Aggregator | `enso` |
 | Pendle | `PENDLE` | Yield | `pendle` |
 | MetaMorpho | `METAMORPHO` | Lending | `metamorpho` |

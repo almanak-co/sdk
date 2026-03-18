@@ -149,9 +149,9 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
         "bsc",
         "linea",
         "blast",
-        "mantle",
         "monad",
     },
+    "agni_finance": {"mantle"},  # Agni Finance (Uniswap V3 fork, primary DEX on Mantle)
     "gmx_v2": {"arbitrum", "avalanche"},
     "hyperliquid": {"arbitrum"},  # Hyperliquid is on its own L1 but accessed via Arbitrum
     "enso": {

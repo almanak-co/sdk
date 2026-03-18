@@ -275,8 +275,7 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "pancakeswap_v3": "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86",  # SmartRouter
     },
     "mantle": {
-        # Agni Finance (Uniswap V3 fork, same ABI) - the native V3 DEX on Mantle
-        "uniswap_v3": "0x319B69888b0d11cEC22caA5034e25FfFBDc88421",  # Agni SwapRouter
+        "agni_finance": "0x319B69888b0d11cEC22caA5034e25FfFBDc88421",  # Agni Finance SwapRouter
     },
 }
 
@@ -329,7 +328,7 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
     },
     "mantle": {
-        "uniswap_v3": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni NFT Position Manager
+        "agni_finance": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni Finance NFT Position Manager
     },
 }
 
@@ -398,18 +397,18 @@ SWAP_FEE_TIERS: dict[str, tuple[int, ...]] = {
     "uniswap_v3": (100, 500, 3000, 10000),
     "sushiswap_v3": (100, 500, 3000, 10000),
     "pancakeswap_v3": (100, 500, 2500, 10000),
+    "agni_finance": (100, 500, 2500, 3000, 10000),
 }
 
 # Chain-specific fee tier overrides. Uniswap V3 forks on some chains support
-# additional fee tiers (e.g., Agni on Mantle supports 2500 bps).
-SWAP_FEE_TIERS_CHAIN: dict[tuple[str, str], tuple[int, ...]] = {
-    ("mantle", "uniswap_v3"): (100, 500, 2500, 3000, 10000),
-}
+# additional fee tiers beyond their base protocol definition.
+SWAP_FEE_TIERS_CHAIN: dict[tuple[str, str], tuple[int, ...]] = {}
 
 DEFAULT_SWAP_FEE_TIER: dict[str, int] = {
     "uniswap_v3": 3000,
     "sushiswap_v3": 3000,
     "pancakeswap_v3": 2500,
+    "agni_finance": 3000,
 }
 
 # Protocols using the original SwapRouter interface (8-param exactInputSingle WITH deadline).
@@ -419,7 +418,7 @@ SWAP_ROUTER_V1_PROTOCOLS: frozenset[str] = frozenset({"sushiswap_v3"})
 # Chain-specific overrides: some chains use V3 forks with V1-style routers (e.g., Agni on Mantle).
 # Maps chain -> set of protocols that use the V1 router interface on that chain.
 SWAP_ROUTER_V1_CHAIN_OVERRIDES: dict[str, frozenset[str]] = {
-    "mantle": frozenset({"uniswap_v3"}),  # Agni Finance uses original SwapRouter (with deadline)
+    "mantle": frozenset({"agni_finance"}),  # Agni Finance uses original SwapRouter (with deadline)
 }
 
 # Quoter addresses used for AUTO fee tier selection.
@@ -465,7 +464,7 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
         "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
     },
     "mantle": {
-        "uniswap_v3": "0xc4aaDc921E1cdb66c5300Bc158a313292923C0cb",  # Agni QuoterV2
+        "agni_finance": "0xc4aaDc921E1cdb66c5300Bc158a313292923C0cb",  # Agni Finance QuoterV2
     },
 }
 
@@ -2040,7 +2039,7 @@ class IntentCompiler:
         except (ValueError, ImportError):
             self.chain = chain
         self.wallet_address = wallet_address
-        # Normalize protocol alias (e.g., "agni" -> "uniswap_v3" on mantle)
+        # Normalize protocol alias (e.g., "agni" -> "agni_finance" on mantle)
         from ..connectors.protocol_aliases import normalize_protocol
 
         self.default_protocol = normalize_protocol(self.chain, default_protocol)
@@ -2112,7 +2111,7 @@ class IntentCompiler:
     def _resolve_protocol(self, intent_protocol: str | None) -> str:
         """Resolve intent protocol to canonical key, falling back to default.
 
-        Normalizes aliases (e.g., "agni" -> "uniswap_v3" on mantle) and falls
+        Normalizes aliases (e.g., "agni" -> "agni_finance" on mantle) and falls
         back to self.default_protocol if intent_protocol is None.
         """
         if intent_protocol is None:
@@ -6161,13 +6160,28 @@ class IntentCompiler:
                         intent_id=intent.intent_id,
                     )
 
-                # Check if Uniswap V3 is available on this chain for the pre-swap
-                uniswap_router = PROTOCOL_ROUTERS.get(self.chain, {}).get("uniswap_v3")
-                if not uniswap_router:
+                # Check if a V3-compatible DEX is available on this chain for the pre-swap.
+                # Prefer the chain's default protocol (may be a V3 fork like Agni Finance).
+                from almanak.framework.connectors.protocol_aliases import display_protocol, is_uniswap_v3_fork
+
+                chain_routers = PROTOCOL_ROUTERS.get(self.chain, {})
+                v3_pre_swap_protocol = None
+                v3_pre_swap_router = None
+                # Prefer self.default_protocol if it's a V3 fork on this chain
+                if self.default_protocol in chain_routers and is_uniswap_v3_fork(self.default_protocol):
+                    v3_pre_swap_protocol = self.default_protocol
+                    v3_pre_swap_router = chain_routers[self.default_protocol]
+                else:
+                    for proto_key, router_addr in chain_routers.items():
+                        if is_uniswap_v3_fork(proto_key):
+                            v3_pre_swap_protocol = proto_key
+                            v3_pre_swap_router = router_addr
+                            break
+                if not v3_pre_swap_router or not v3_pre_swap_protocol:
                     return CompilationResult(
                         status=CompilationStatus.FAILED,
                         error=f"Pre-swap routing from {from_token.symbol} to {mint_sy_token.symbol} requires "
-                        f"Uniswap V3, but no router is configured for {self.chain}. "
+                        f"a V3-compatible DEX, but none is configured for {self.chain}. "
                         f"Use {mint_sy_token.symbol} directly as from_token instead.",
                         intent_id=intent.intent_id,
                     )
@@ -6204,19 +6218,19 @@ class IntentCompiler:
                         )
                     actual_from_address = weth_address
 
-                # Build approval for Uniswap V3 router (skip for native token)
+                # Build approval for V3 DEX router (skip for native token)
                 if not from_token.is_native:
                     approve_txs = self._build_approve_tx(
                         from_token.address,
-                        uniswap_router,
+                        v3_pre_swap_router,
                         amount_in,
                     )
                     transactions.extend(approve_txs)
 
-                # Build pre-swap calldata via Uniswap V3
+                # Build pre-swap calldata via V3-compatible DEX
                 pre_swap_adapter = DefaultSwapAdapter(
                     chain=self.chain,
-                    protocol="uniswap_v3",
+                    protocol=v3_pre_swap_protocol,
                     pool_selection_mode=self._config.swap_pool_selection_mode,
                     fixed_fee_tier=self._config.fixed_swap_fee_tier,
                     rpc_url=self._get_chain_rpc_url(),
@@ -6225,7 +6239,7 @@ class IntentCompiler:
 
                 pre_swap_min_out = int(Decimal(str(estimated_mint_sy_output)) * (Decimal("1") - intent.max_slippage))
                 # Cap Pendle input to the guaranteed pre-swap minimum.
-                # When max_slippage > 2%, the Uniswap swap may legally return
+                # When max_slippage > 2%, the V3 DEX swap may legally return
                 # less than the 2%-buffered estimate, so the Pendle step must
                 # not try to spend more than the swap guarantees.
                 buffered_mint_sy_amount = min(buffered_mint_sy_amount, pre_swap_min_out)
@@ -6251,11 +6265,11 @@ class IntentCompiler:
                 )
 
                 pre_swap_tx = TransactionData(
-                    to=uniswap_router,
+                    to=v3_pre_swap_router,
                     value=pre_swap_value,
                     data="0x" + pre_swap_calldata.hex(),
                     gas_estimate=200_000,
-                    description=f"Pre-swap: {from_token.symbol} -> {mint_sy_token.symbol} via Uniswap V3",
+                    description=f"Pre-swap: {from_token.symbol} -> {mint_sy_token.symbol} via {display_protocol(self.chain, v3_pre_swap_protocol)}",
                     tx_type="swap",
                 )
                 transactions.append(pre_swap_tx)

@@ -12,6 +12,7 @@ from almanak.core.constants import resolve_chain_name
 from almanak.core.contracts import (
     AAVE_V3,
     AERODROME,
+    AGNI_FINANCE,
     GMX_V2,
     MORPHO_BLUE,
     PANCAKESWAP_V3,
@@ -110,6 +111,14 @@ _PROTOCOL_DEFS: tuple[_ProtocolDef, ...] = (
         ("SWAP",),
     ),
     _ProtocolDef(
+        AGNI_FINANCE,
+        "swap_router",
+        "agni_finance",
+        "almanak.framework.connectors.uniswap_v3.receipt_parser",
+        "UniswapV3ReceiptParser",
+        ("SWAP",),
+    ),
+    _ProtocolDef(
         PANCAKESWAP_V3,
         "swap_router",
         "pancakeswap_v3",
@@ -154,6 +163,14 @@ _PROTOCOL_DEFS: tuple[_ProtocolDef, ...] = (
         UNISWAP_V3,
         "position_manager",
         "uniswap_v3",
+        "almanak.framework.connectors.uniswap_v3.receipt_parser",
+        "UniswapV3ReceiptParser",
+        ("LP_OPEN", "LP_CLOSE"),
+    ),
+    _ProtocolDef(
+        AGNI_FINANCE,
+        "position_manager",
+        "agni_finance",
         "almanak.framework.connectors.uniswap_v3.receipt_parser",
         "UniswapV3ReceiptParser",
         ("LP_OPEN", "LP_CLOSE"),

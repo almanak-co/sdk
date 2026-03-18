@@ -82,14 +82,6 @@ UNISWAP_V3: dict[str, dict[str, str]] = {
         "position_manager": "0xB218e4f7cF0533d4696fDfC419A0023D33345F28",
         "quoter_v2": "0x6Cdcd65e03c1CEc3730AeeCd45bc140D57A25C77",
     },
-    "mantle": {
-        # Agni Finance (Uniswap V3 fork) — the primary V3 DEX on Mantle
-        "swap_router": "0x319B69888b0d11cEC22caA5034e25FfFBDc88421",  # Agni SwapRouter (V1 style, with deadline)
-        "swap_router_02": "0x319B69888b0d11cEC22caA5034e25FfFBDc88421",
-        "factory": "0x25780dc8Fc3cfBD75F33bFDAB65e969b603b2035",  # Agni Factory
-        "position_manager": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni NonfungiblePositionManager
-        "quoter_v2": "0xc4aaDc921E1cdb66c5300Bc158a313292923C0cb",  # Agni QuoterV2
-    },
     "monad": {
         # Provisional — Monad testnet (chain 143) addresses; verify before mainnet launch
         "swap_router": "0xfE31F71C1b106EAc32F1A19239c9a9A72ddfb900",  # SwapRouter02
@@ -189,6 +181,20 @@ UNISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
         "USDC": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
         "USDT0": "0xe7cd86e13AC4309349F30B3435a9d337750fC82D",
         "WBTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
+    },
+}
+
+# =============================================================================
+# Agni Finance (Uniswap V3 fork on Mantle)
+# =============================================================================
+
+AGNI_FINANCE: dict[str, dict[str, str]] = {
+    "mantle": {
+        "swap_router": "0x319B69888b0d11cEC22caA5034e25FfFBDc88421",  # Agni SwapRouter (V1 style, with deadline)
+        "swap_router_02": "0x319B69888b0d11cEC22caA5034e25FfFBDc88421",
+        "factory": "0x25780dc8Fc3cfBD75F33bFDAB65e969b603b2035",  # Agni Factory
+        "position_manager": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni NonfungiblePositionManager
+        "quoter_v2": "0xc4aaDc921E1cdb66c5300Bc158a313292923C0cb",  # Agni QuoterV2
     },
 }
 

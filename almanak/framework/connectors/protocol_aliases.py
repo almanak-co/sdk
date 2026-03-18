@@ -4,10 +4,11 @@ Maps user-facing protocol names (aliases) to canonical internal protocol keys,
 and canonical keys to human-readable display names for logging/UI.
 
 Many chains have Uniswap V3 forks that use identical bytecode but different
-branding (e.g., Agni Finance on Mantle). Internally the SDK routes these
-through the same connector code using the canonical key (e.g., "uniswap_v3").
-This module provides the translation layer so strategy authors can write
-``protocol="agni"`` and see "Agni Finance" in logs.
+branding (e.g., Agni Finance on Mantle). These forks are registered as
+first-class protocols with their own canonical key (e.g., "agni_finance")
+and share the underlying Uniswap V3 connector code. This module provides
+aliases so strategy authors can write ``protocol="agni"`` or even
+``protocol="uniswap_v3"`` on Mantle and have it resolve correctly.
 
 Design principles:
     - Aliases are always (chain, alias) -> canonical (chain-scoped, never global)
@@ -19,8 +20,10 @@ Design principles:
 Example:
     >>> from almanak.framework.connectors.protocol_aliases import normalize_protocol, display_protocol
     >>> normalize_protocol("mantle", "agni")
-    'uniswap_v3'
-    >>> display_protocol("mantle", "uniswap_v3")
+    'agni_finance'
+    >>> normalize_protocol("mantle", "uniswap_v3")
+    'agni_finance'
+    >>> display_protocol("mantle", "agni_finance")
     'Agni Finance'
     >>> normalize_protocol("arbitrum", "uniswap_v3")
     'uniswap_v3'
@@ -31,9 +34,10 @@ Example:
 # =============================================================================
 
 PROTOCOL_ALIASES: dict[tuple[str, str], str] = {
-    # Mantle — Agni Finance is the primary Uniswap V3 fork
-    ("mantle", "agni"): "uniswap_v3",
-    ("mantle", "agni_finance"): "uniswap_v3",
+    # Mantle — Agni Finance is the primary Uniswap V3 fork.
+    # It is a first-class protocol; "uniswap_v3" on Mantle resolves to it.
+    ("mantle", "agni"): "agni_finance",
+    ("mantle", "uniswap_v3"): "agni_finance",
 }
 
 # ---------------------------------------------------------------------------
@@ -51,8 +55,25 @@ _GLOBAL_ALIASES: dict[str, str] = {
 # =============================================================================
 
 PROTOCOL_DISPLAY_NAMES: dict[tuple[str, str], str] = {
-    ("mantle", "uniswap_v3"): "Agni Finance",
+    ("mantle", "agni_finance"): "Agni Finance",
 }
+
+
+# =============================================================================
+# V3 fork registry: canonical keys that use the Uniswap V3 connector code.
+#
+# The compiler and receipt registry check this set to route V3 forks through
+# the shared UniswapV3 adapter / receipt parser without hard-coding each name.
+# =============================================================================
+
+UNISWAP_V3_FORKS: frozenset[str] = frozenset(
+    {
+        "uniswap_v3",
+        "sushiswap_v3",
+        "pancakeswap_v3",
+        "agni_finance",
+    }
+)
 
 
 # =============================================================================
@@ -64,14 +85,14 @@ def normalize_protocol(chain: str, protocol: str) -> str:
     """Resolve a protocol alias to its canonical internal key.
 
     If no alias exists, returns the protocol as-is (lowercased).
-    This is safe to call on already-canonical values — it's a no-op.
+    This is safe to call on already-canonical values -- it's a no-op.
 
     Args:
         chain: Chain name (e.g., "mantle", "arbitrum"). Accepts Chain enum or string.
         protocol: User-supplied protocol name (e.g., "agni", "uniswap_v3").
 
     Returns:
-        Canonical protocol key (e.g., "uniswap_v3").
+        Canonical protocol key (e.g., "agni_finance").
     """
     chain_lower = str(chain).lower()
     # Normalize hyphens to underscores: "uniswap-v4" -> "uniswap_v4"
@@ -97,3 +118,15 @@ def display_protocol(chain: str, protocol: str) -> str:
     chain_lower = str(chain).lower()
     canonical = normalize_protocol(chain_lower, protocol)
     return PROTOCOL_DISPLAY_NAMES.get((chain_lower, canonical), canonical)
+
+
+def is_uniswap_v3_fork(protocol: str) -> bool:
+    """Check if a protocol uses the Uniswap V3 connector code.
+
+    Args:
+        protocol: Canonical protocol key (e.g., "agni_finance", "uniswap_v3").
+
+    Returns:
+        True if the protocol should be routed through UniswapV3 adapter/parser.
+    """
+    return protocol.lower() in UNISWAP_V3_FORKS

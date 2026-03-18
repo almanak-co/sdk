@@ -13,7 +13,9 @@ from almanak import IntentCompiler, IntentCompilerConfig, SwapIntent
 from almanak.framework.connectors.protocol_aliases import (
     PROTOCOL_ALIASES,
     PROTOCOL_DISPLAY_NAMES,
+    UNISWAP_V3_FORKS,
     display_protocol,
+    is_uniswap_v3_fork,
     normalize_protocol,
 )
 
@@ -21,13 +23,23 @@ from almanak.framework.connectors.protocol_aliases import (
 class TestNormalizeProtocol:
     """Tests for normalize_protocol() function."""
 
-    def test_agni_resolves_to_uniswap_v3_on_mantle(self):
-        """Agni alias should resolve to uniswap_v3 on Mantle."""
-        assert normalize_protocol("mantle", "agni") == "uniswap_v3"
+    def test_agni_resolves_to_agni_finance_on_mantle(self):
+        """Agni alias should resolve to agni_finance on Mantle."""
+        assert normalize_protocol("mantle", "agni") == "agni_finance"
 
-    def test_agni_finance_resolves_to_uniswap_v3_on_mantle(self):
-        """agni_finance alias should also resolve to uniswap_v3 on Mantle."""
-        assert normalize_protocol("mantle", "agni_finance") == "uniswap_v3"
+    def test_agni_finance_is_canonical_on_mantle(self):
+        """agni_finance should be the canonical key on Mantle."""
+        assert normalize_protocol("mantle", "agni_finance") == "agni_finance"
+
+    def test_uniswap_v3_resolves_to_agni_finance_on_mantle(self):
+        """uniswap_v3 on Mantle should resolve to agni_finance (the local V3 fork)."""
+        assert normalize_protocol("mantle", "uniswap_v3") == "agni_finance"
+
+    def test_uniswap_v3_canonical_on_other_chains(self):
+        """uniswap_v3 should remain canonical on non-Mantle chains."""
+        assert normalize_protocol("arbitrum", "uniswap_v3") == "uniswap_v3"
+        assert normalize_protocol("ethereum", "uniswap_v3") == "uniswap_v3"
+        assert normalize_protocol("base", "uniswap_v3") == "uniswap_v3"
 
     def test_alias_is_chain_scoped(self):
         """Agni alias should NOT resolve on non-Mantle chains."""
@@ -37,8 +49,6 @@ class TestNormalizeProtocol:
 
     def test_canonical_protocol_passes_through(self):
         """Already-canonical protocol names should pass through unchanged."""
-        assert normalize_protocol("mantle", "uniswap_v3") == "uniswap_v3"
-        assert normalize_protocol("arbitrum", "uniswap_v3") == "uniswap_v3"
         assert normalize_protocol("base", "aerodrome") == "aerodrome"
 
     def test_unknown_protocol_passes_through(self):
@@ -47,15 +57,16 @@ class TestNormalizeProtocol:
 
     def test_case_insensitive(self):
         """Alias lookup should be case-insensitive."""
-        assert normalize_protocol("Mantle", "AGNI") == "uniswap_v3"
-        assert normalize_protocol("MANTLE", "Agni") == "uniswap_v3"
-        assert normalize_protocol("mantle", "Agni_Finance") == "uniswap_v3"
+        assert normalize_protocol("Mantle", "AGNI") == "agni_finance"
+        assert normalize_protocol("MANTLE", "Agni") == "agni_finance"
+        assert normalize_protocol("mantle", "Agni_Finance") == "agni_finance"
+        assert normalize_protocol("Mantle", "UNISWAP_V3") == "agni_finance"
 
     def test_chain_enum_string(self):
         """Should accept Chain enum-style strings."""
         assert normalize_protocol("Chain.MANTLE", "agni") == "agni"  # str(Chain.MANTLE) != "mantle"
         # But lowercased chain names work
-        assert normalize_protocol("mantle", "agni") == "uniswap_v3"
+        assert normalize_protocol("mantle", "agni") == "agni_finance"
 
     def test_hyphen_to_underscore_normalization(self):
         """Hyphens in protocol names should be normalized to underscores (VIB-1463)."""
@@ -67,19 +78,23 @@ class TestNormalizeProtocol:
     def test_idempotent(self):
         """Calling normalize on an already-normalized value should be a no-op."""
         result = normalize_protocol("mantle", "agni")
-        assert result == "uniswap_v3"
+        assert result == "agni_finance"
         result2 = normalize_protocol("mantle", result)
-        assert result2 == "uniswap_v3"
+        assert result2 == "agni_finance"
 
 
 class TestDisplayProtocol:
     """Tests for display_protocol() function."""
 
-    def test_display_name_for_uniswap_v3_on_mantle(self):
+    def test_display_name_for_agni_finance_on_mantle(self):
+        """agni_finance on Mantle should display as 'Agni Finance'."""
+        assert display_protocol("mantle", "agni_finance") == "Agni Finance"
+
+    def test_display_name_via_uniswap_v3_alias_on_mantle(self):
         """uniswap_v3 on Mantle should display as 'Agni Finance'."""
         assert display_protocol("mantle", "uniswap_v3") == "Agni Finance"
 
-    def test_display_name_via_alias(self):
+    def test_display_name_via_agni_alias(self):
         """Passing an alias should also resolve to display name."""
         assert display_protocol("mantle", "agni") == "Agni Finance"
 
@@ -93,6 +108,25 @@ class TestDisplayProtocol:
         assert display_protocol("mantle", "unknown_proto") == "unknown_proto"
 
 
+class TestIsUniswapV3Fork:
+    """Tests for is_uniswap_v3_fork() function."""
+
+    def test_known_v3_forks(self):
+        assert is_uniswap_v3_fork("uniswap_v3")
+        assert is_uniswap_v3_fork("sushiswap_v3")
+        assert is_uniswap_v3_fork("pancakeswap_v3")
+        assert is_uniswap_v3_fork("agni_finance")
+
+    def test_non_v3_protocols(self):
+        assert not is_uniswap_v3_fork("aerodrome")
+        assert not is_uniswap_v3_fork("curve")
+        assert not is_uniswap_v3_fork("enso")
+
+    def test_case_insensitive(self):
+        assert is_uniswap_v3_fork("AGNI_FINANCE")
+        assert is_uniswap_v3_fork("Uniswap_V3")
+
+
 class TestRegistryConsistency:
     """Verify internal consistency of the alias and display name registries."""
 
@@ -104,11 +138,7 @@ class TestRegistryConsistency:
 
     def test_display_names_use_canonical_keys(self):
         """Display name keys should use canonical protocol keys, not aliases."""
-        alias_keys = set(PROTOCOL_ALIASES.keys())
         for (chain, protocol), _display_name in PROTOCOL_DISPLAY_NAMES.items():
-            assert (chain, protocol) not in alias_keys, (
-                f"Display name ({chain}, {protocol}) uses an alias instead of canonical key"
-            )
             assert normalize_protocol(chain, protocol) == protocol, (
                 f"Display name ({chain}, {protocol}) should be canonical (not an alias)"
             )
@@ -125,9 +155,13 @@ class TestCompilerResolveProtocol:
             config=IntentCompilerConfig(allow_placeholder_prices=True),
         )
 
-    def test_resolve_agni_to_uniswap_v3(self, mantle_compiler):
-        """Compiler should resolve 'agni' to 'uniswap_v3' on mantle."""
-        assert mantle_compiler._resolve_protocol("agni") == "uniswap_v3"
+    def test_resolve_agni_to_agni_finance(self, mantle_compiler):
+        """Compiler should resolve 'agni' to 'agni_finance' on mantle."""
+        assert mantle_compiler._resolve_protocol("agni") == "agni_finance"
+
+    def test_resolve_uniswap_v3_to_agni_finance(self, mantle_compiler):
+        """Compiler should resolve 'uniswap_v3' to 'agni_finance' on mantle."""
+        assert mantle_compiler._resolve_protocol("uniswap_v3") == "agni_finance"
 
     def test_resolve_none_returns_default(self, mantle_compiler):
         """None protocol should return the compiler's default_protocol."""
@@ -136,16 +170,25 @@ class TestCompilerResolveProtocol:
 
     def test_resolve_canonical_unchanged(self, mantle_compiler):
         """Canonical protocol name should pass through unchanged."""
-        assert mantle_compiler._resolve_protocol("uniswap_v3") == "uniswap_v3"
+        assert mantle_compiler._resolve_protocol("agni_finance") == "agni_finance"
 
     def test_default_protocol_normalized_in_init(self):
-        """When default_protocol='agni' on mantle, __init__ should normalize to uniswap_v3."""
+        """When default_protocol='agni' on mantle, __init__ should normalize to agni_finance."""
         compiler = IntentCompiler(
             chain="mantle",
             default_protocol="agni",
             config=IntentCompilerConfig(allow_placeholder_prices=True),
         )
-        assert compiler.default_protocol == "uniswap_v3"
+        assert compiler.default_protocol == "agni_finance"
+
+    def test_default_protocol_uniswap_v3_normalized_on_mantle(self):
+        """When default_protocol='uniswap_v3' on mantle, __init__ should normalize to agni_finance."""
+        compiler = IntentCompiler(
+            chain="mantle",
+            default_protocol="uniswap_v3",
+            config=IntentCompilerConfig(allow_placeholder_prices=True),
+        )
+        assert compiler.default_protocol == "agni_finance"
 
 
 class TestWrappedNativeMNT:

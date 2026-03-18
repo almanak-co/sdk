@@ -33,6 +33,7 @@ def _build_matrix() -> dict:
     from almanak.core.contracts import (
         AAVE_V3,
         AERODROME,
+        AGNI_FINANCE,
         GMX_V2,
         MORPHO_BLUE,
         PENDLE,
@@ -213,6 +214,12 @@ def _build_matrix() -> dict:
     for chain in TRADERJOE_V2:
         all_chains.add(chain)
         lp_protocols.setdefault("traderjoe_v2", set()).add(chain)
+
+    # Agni Finance (Uniswap V3 fork on Mantle)
+    for chain in AGNI_FINANCE:
+        all_chains.add(chain)
+        swap_protocols.setdefault("agni_finance", set()).add(chain)
+        lp_protocols.setdefault("agni_finance", set()).add(chain)
 
     # --- Solana protocols ---
     solana_swap: list[str] = []

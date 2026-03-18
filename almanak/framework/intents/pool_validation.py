@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from almanak.core.contracts import AERODROME, PANCAKESWAP_V3, SUSHISWAP_V3, TRADERJOE_V2, UNISWAP_V3
+from almanak.core.contracts import AERODROME, AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, TRADERJOE_V2, UNISWAP_V3
 from almanak.framework.data.pools.reader import GET_POOL_SELECTOR
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,7 @@ _V3_PROTOCOL_REGISTRY: dict[str, dict[str, dict[str, str]]] = {
     "uniswap_v3": UNISWAP_V3,
     "sushiswap_v3": SUSHISWAP_V3,
     "pancakeswap_v3": PANCAKESWAP_V3,
+    "agni_finance": AGNI_FINANCE,
 }
 
 # Aerodrome Classic getPool(address,address,bool) selector

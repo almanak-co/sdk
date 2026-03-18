@@ -141,8 +141,8 @@ class TestPreSwapRouting:
         pre_swap_txs = [d for d in descriptions if "Pre-swap" in d]
         assert len(pre_swap_txs) == 1, f"Expected 1 pre-swap TX, got {len(pre_swap_txs)}: {descriptions}"
 
-        # Pre-swap should mention Uniswap V3
-        assert "Uniswap V3" in pre_swap_txs[0]
+        # Pre-swap on Arbitrum should use uniswap_v3 specifically
+        assert "uniswap_v3" in pre_swap_txs[0].lower()
 
     def test_preswap_has_correct_tx_count(self, compiler_arbitrum):
         """WETH -> PT-wstETH should have: approve WETH + pre-swap + approve wstETH + Pendle swap."""
@@ -509,7 +509,7 @@ class TestPreSwapErrors:
             result = compiler_arbitrum.compile(intent)
 
             assert result.status == CompilationStatus.FAILED
-            assert "uniswap" in result.error.lower() or "router" in result.error.lower()
+            assert "v3-compatible dex" in result.error.lower()
 
     def test_extreme_slippage_fails_gracefully(self, compiler_arbitrum):
         """If max_slippage >= 100%, the buffered amount would be zero -- should fail cleanly."""

@@ -132,6 +132,10 @@ class ReceiptParserRegistry:
             "almanak.framework.connectors.uniswap_v3.receipt_parser",
             "UniswapV3ReceiptParser",
         ),
+        "agni_finance": (
+            "almanak.framework.connectors.uniswap_v3.receipt_parser",
+            "UniswapV3ReceiptParser",
+        ),
         "uniswap_v4": (
             "almanak.framework.connectors.uniswap_v4.receipt_parser",
             "UniswapV4ReceiptParser",
