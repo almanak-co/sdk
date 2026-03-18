@@ -150,7 +150,7 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
 # Gas estimates for Curve operations
 CURVE_GAS_ESTIMATES: dict[str, int] = {
     "approve": 46000,
-    "exchange": 200000,
+    "exchange": 500000,
     "exchange_underlying": 300000,
     "add_liquidity_2": 250000,
     "add_liquidity_3": 350000,

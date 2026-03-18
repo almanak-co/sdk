@@ -25,7 +25,10 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 EVENT_TOPICS: dict[str, str] = {
+    # StableSwap: TokenExchange(address,int128,uint256,int128,uint256)
     "TokenExchange": "0x8b3e96f2b889fa771c53c981b40daf005f63f637f1869f707052d15a3dd97140",
+    # CryptoSwap/Tricrypto: TokenExchange(address,uint256,uint256,uint256,uint256)
+    "TokenExchangeCrypto": "0xb2e76ae99761dc136e598d4a629bb347eccb9532a5f8bbd72e18467c3c34cc98",
     "TokenExchangeUnderlying": "0xd013ca23e77a65003c2c659c5442c00c805371b7fc1ebd4c206c41d1536bd90b",
     "AddLiquidity2": "0x26f55a85081d24974e85c6c00045d0f0453991e95873f52bff0d21af4079a768",
     "AddLiquidity3": "0x423f6495a08fc652425cf4ed0d1f9e37e571d9b9529b1c1c23cce780b2e7df0d",
@@ -63,6 +66,7 @@ class CurveEventType(Enum):
 
 EVENT_NAME_TO_TYPE: dict[str, CurveEventType] = {
     "TokenExchange": CurveEventType.TOKEN_EXCHANGE,
+    "TokenExchangeCrypto": CurveEventType.TOKEN_EXCHANGE,
     "TokenExchangeUnderlying": CurveEventType.TOKEN_EXCHANGE_UNDERLYING,
     "AddLiquidity2": CurveEventType.ADD_LIQUIDITY,
     "AddLiquidity3": CurveEventType.ADD_LIQUIDITY,
@@ -363,7 +367,7 @@ class CurveReceiptParser:
                     topics_str.append(str(topic))
 
             # Parse log data
-            parsed_data = self._decode_log_data(event_type, topics, data, contract_address)
+            parsed_data = self._decode_log_data(event_type, topics, data, contract_address, event_name=event_name)
 
             return CurveEvent(
                 event_type=event_type,
@@ -387,6 +391,7 @@ class CurveReceiptParser:
         topics: list[Any],
         data: str,
         address: str,
+        event_name: str = "",
     ) -> dict[str, Any]:
         """Decode log data based on event type.
 
@@ -395,12 +400,13 @@ class CurveReceiptParser:
             topics: List of topics
             data: Hex-encoded event data
             address: Contract address
+            event_name: Original event name (e.g. "TokenExchange" vs "TokenExchangeCrypto")
 
         Returns:
             Decoded event data dict
         """
         if event_type in (CurveEventType.TOKEN_EXCHANGE, CurveEventType.TOKEN_EXCHANGE_UNDERLYING):
-            return self._decode_swap_data(topics, data, address)
+            return self._decode_swap_data(topics, data, address, event_name=event_name)
         elif event_type == CurveEventType.ADD_LIQUIDITY:
             return self._decode_add_liquidity_data(topics, data, address)
         elif event_type == CurveEventType.REMOVE_LIQUIDITY:
@@ -413,20 +419,26 @@ class CurveReceiptParser:
         topics: list[Any],
         data: str,
         address: str,
+        event_name: str = "",
     ) -> dict[str, Any]:
         """Decode TokenExchange event data.
 
-        TokenExchange(address indexed buyer, int128 sold_id, uint256 tokens_sold,
-                      int128 bought_id, uint256 tokens_bought)
+        StableSwap: TokenExchange(address indexed buyer, int128 sold_id, uint256 tokens_sold,
+                                  int128 bought_id, uint256 tokens_bought)
+        CryptoSwap: TokenExchange(address indexed buyer, uint256 sold_id, uint256 tokens_sold,
+                                  uint256 bought_id, uint256 tokens_bought)
         """
         try:
             # Indexed: buyer
             buyer = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
 
-            # Non-indexed: sold_id (int128), tokens_sold, bought_id (int128), tokens_bought
-            sold_id = HexDecoder.decode_int128(data, 0)
+            # CryptoSwap uses uint256 for token indices; StableSwap uses int128
+            is_crypto = event_name == "TokenExchangeCrypto"
+            decode_index = HexDecoder.decode_uint256 if is_crypto else HexDecoder.decode_int128
+
+            sold_id = decode_index(data, 0)
             tokens_sold = HexDecoder.decode_uint256(data, 32)
-            bought_id = HexDecoder.decode_int128(data, 64)
+            bought_id = decode_index(data, 64)
             tokens_bought = HexDecoder.decode_uint256(data, 96)
 
             pool_address = address.lower() if isinstance(address, str) else ""

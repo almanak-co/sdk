@@ -224,3 +224,130 @@ class TestExtractSwapAmountsDecimals:
         assert result.amount_in_decimal == Decimal("2000")
         assert result.amount_out_decimal == Decimal("1")
         assert result.effective_price == Decimal("0.0005")
+
+
+def _build_cryptoswap_receipt(
+    wallet: str = "0xaabbccddee1122334455667788990011aabbccdd",
+    pool: str = "0xd51a44d3fae010294c616388b506acda1bfaae46",  # tricrypto2
+    token_in: str = "0xdac17f958d2ee523a2206206994597c13d831ec7",  # USDT
+    token_out: str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",  # WETH
+    sold_id: int = 0,
+    bought_id: int = 2,
+    tokens_sold: int = 500_000_000,  # 500 USDT (6 decimals)
+    tokens_bought: int = 215_700_000_000_000_000,  # ~0.2157 WETH (18 decimals)
+) -> dict:
+    """Build a synthetic Curve CryptoSwap receipt with TokenExchangeCrypto + Transfer events.
+
+    CryptoSwap uses uint256 indices and a different keccak256 topic than StableSwap.
+    """
+    buyer_topic = "0x" + "00" * 12 + wallet[2:]
+    # CryptoSwap encodes indices as uint256 (same byte layout as int128 for small values)
+    exchange_data = (
+        "0x"
+        + _pad_hex(sold_id)  # uint256 sold_id
+        + _pad_hex(tokens_sold)  # uint256 tokens_sold
+        + _pad_hex(bought_id)  # uint256 bought_id
+        + _pad_hex(tokens_bought)  # uint256 tokens_bought
+    )
+
+    transfer_topic = _make_topic(EVENT_TOPICS["Transfer"])
+    wallet_topic = "0x" + "00" * 12 + wallet[2:]
+    pool_topic = "0x" + "00" * 12 + pool[2:]
+
+    return {
+        "status": 1,
+        "from": wallet,
+        "transactionHash": "0x" + "cd" * 32,
+        "blockNumber": 19_500_000,
+        "gasUsed": 320_000,
+        "logs": [
+            # Transfer: wallet -> pool (token_in = USDT)
+            {
+                "address": token_in,
+                "topics": [transfer_topic, wallet_topic, pool_topic],
+                "data": "0x" + _pad_hex(tokens_sold),
+                "logIndex": 0,
+            },
+            # TokenExchange event from CryptoSwap pool (different topic than StableSwap)
+            {
+                "address": pool,
+                "topics": [_make_topic(EVENT_TOPICS["TokenExchangeCrypto"]), buyer_topic],
+                "data": exchange_data,
+                "logIndex": 1,
+            },
+            # Transfer: pool -> wallet (token_out = WETH)
+            {
+                "address": token_out,
+                "topics": [transfer_topic, pool_topic, wallet_topic],
+                "data": "0x" + _pad_hex(tokens_bought),
+                "logIndex": 2,
+            },
+        ],
+    }
+
+
+class TestCryptoSwapReceiptParsing:
+    """Test that CryptoSwap (TokenExchangeCrypto) receipts are parsed correctly.
+
+    CryptoSwap pools use a different keccak256 topic than StableSwap pools.
+    This was added in iter-95 to fix missing swap_amounts enrichment for tricrypto pools.
+    """
+
+    USDT = "0xdac17f958d2ee523a2206206994597c13d831ec7"
+    WETH = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    WBTC = "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+
+    def test_cryptoswap_usdt_to_weth(self):
+        """USDT (6 dec) -> WETH (18 dec) via CryptoSwap should produce correct swap_amounts."""
+        receipt = _build_cryptoswap_receipt(
+            token_in=self.USDT,
+            token_out=self.WETH,
+            tokens_sold=500_000_000,  # 500 USDT
+            tokens_bought=215_700_000_000_000_000,  # ~0.2157 WETH
+        )
+        resolver = _mock_resolver({
+            self.USDT: 6,
+            self.WETH: 18,
+        })
+
+        parser = CurveReceiptParser(chain="ethereum")
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
+            result = parser.extract_swap_amounts(receipt)
+
+        assert result is not None, "CryptoSwap receipt must be parsed (TokenExchangeCrypto topic)"
+        assert result.amount_in == 500_000_000
+        assert result.amount_out == 215_700_000_000_000_000
+        assert result.amount_in_decimal == Decimal("500")
+        assert Decimal("0.21") < result.amount_out_decimal < Decimal("0.22")
+        # effective_price = amount_out / amount_in ~= 0.000431 WETH per USDT
+        assert result.effective_price > Decimal("0")
+        assert result.token_in == self.USDT
+        assert result.token_out == self.WETH
+
+    def test_cryptoswap_topic_distinct_from_stableswap(self):
+        """Verify the two event topics are different (regression guard for the fix)."""
+        assert EVENT_TOPICS["TokenExchange"] != EVENT_TOPICS["TokenExchangeCrypto"], (
+            "StableSwap and CryptoSwap TokenExchange events have different keccak256 topics"
+        )
+        assert EVENT_TOPICS["TokenExchange"] == "0x8b3e96f2b889fa771c53c981b40daf005f63f637f1869f707052d15a3dd97140"
+        assert EVENT_TOPICS["TokenExchangeCrypto"] == "0xb2e76ae99761dc136e598d4a629bb347eccb9532a5f8bbd72e18467c3c34cc98"
+
+    def test_stableswap_receipt_still_works_after_cryptoswap_addition(self):
+        """Adding TokenExchangeCrypto must not break StableSwap parsing."""
+        receipt = _build_swap_receipt(
+            token_in="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",  # USDC
+            token_out="0x6b175474e89094c44da98b954eedeac495271d0f",  # DAI
+            tokens_sold=100_000_000,
+            tokens_bought=99_984_871_483_550_784_213,
+        )
+        usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        dai = "0x6b175474e89094c44da98b954eedeac495271d0f"
+        resolver = _mock_resolver({usdc: 6, dai: 18})
+
+        parser = CurveReceiptParser(chain="ethereum")
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
+            result = parser.extract_swap_amounts(receipt)
+
+        assert result is not None
+        assert result.amount_in_decimal == Decimal("100")
+        assert Decimal("99") < result.amount_out_decimal < Decimal("100")
