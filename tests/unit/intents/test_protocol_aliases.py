@@ -57,6 +57,13 @@ class TestNormalizeProtocol:
         # But lowercased chain names work
         assert normalize_protocol("mantle", "agni") == "uniswap_v3"
 
+    def test_hyphen_to_underscore_normalization(self):
+        """Hyphens in protocol names should be normalized to underscores (VIB-1463)."""
+        assert normalize_protocol("base", "uniswap-v4") == "uniswap_v4"
+        assert normalize_protocol("arbitrum", "uniswap-v3") == "uniswap_v3"
+        assert normalize_protocol("base", "pancakeswap-v3") == "pancakeswap_v3"
+        assert normalize_protocol("avalanche", "trader-joe-v2") == "traderjoe_v2"
+
     def test_idempotent(self):
         """Calling normalize on an already-normalized value should be a no-op."""
         result = normalize_protocol("mantle", "agni")

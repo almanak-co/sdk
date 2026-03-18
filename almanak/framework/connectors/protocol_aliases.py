@@ -36,6 +36,16 @@ PROTOCOL_ALIASES: dict[tuple[str, str], str] = {
     ("mantle", "agni_finance"): "uniswap_v3",
 }
 
+# ---------------------------------------------------------------------------
+# Global aliases: applied on ALL chains after hyphen->underscore normalization.
+# These handle cases where hyphen normalization produces a key that differs
+# from the canonical registry key (e.g., "trader-joe-v2" -> "trader_joe_v2"
+# but canonical is "traderjoe_v2").
+# ---------------------------------------------------------------------------
+_GLOBAL_ALIASES: dict[str, str] = {
+    "trader_joe_v2": "traderjoe_v2",
+}
+
 # =============================================================================
 # Display Name Registry: (chain, canonical_protocol) -> human_readable_name
 # =============================================================================
@@ -64,8 +74,12 @@ def normalize_protocol(chain: str, protocol: str) -> str:
         Canonical protocol key (e.g., "uniswap_v3").
     """
     chain_lower = str(chain).lower()
-    protocol_lower = protocol.lower()
-    return PROTOCOL_ALIASES.get((chain_lower, protocol_lower), protocol_lower)
+    # Normalize hyphens to underscores: "uniswap-v4" -> "uniswap_v4"
+    # SDK protocol keys use underscores, but users/configs often use hyphens.
+    protocol_lower = protocol.lower().replace("-", "_")
+    # Chain-scoped alias first, then global alias fallback
+    resolved = PROTOCOL_ALIASES.get((chain_lower, protocol_lower), protocol_lower)
+    return _GLOBAL_ALIASES.get(resolved, resolved)
 
 
 def display_protocol(chain: str, protocol: str) -> str:
