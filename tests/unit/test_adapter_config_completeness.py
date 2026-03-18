@@ -56,6 +56,12 @@ _SWAP_ROUTER_KNOWN_GAPS: set[tuple[str, str]] = {
     ("uniswap_v3", "monad"),
     # Aerodrome on Optimism uses Velodrome alias in PROTOCOL_ROUTERS
     ("aerodrome", "optimism"),
+    # TraderJoe V2 uses LBRouter2 (bin-based AMM) incompatible with DefaultSwapAdapter (VIB-1406).
+    # Swaps are blocked at compiler level; LP operations still work via LP_POSITION_MANAGERS.
+    ("traderjoe_v2", "avalanche"),
+    ("traderjoe_v2", "arbitrum"),
+    ("traderjoe_v2", "bsc"),
+    ("traderjoe_v2", "ethereum"),
 }
 
 

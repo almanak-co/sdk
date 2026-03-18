@@ -46,10 +46,14 @@ class TestSwapIntents:
         assert isinstance(intents[0], SwapIntent)
 
     def test_traderjoe_v2_avalanche(self):
-        """traderjoe_v2 on avalanche should produce a SwapIntent."""
+        """traderjoe_v2 swap on avalanche returns empty -- blocked at compiler (VIB-1406).
+
+        LBRouter2 interface is incompatible with DefaultSwapAdapter. Swaps must
+        fail-closed; build_synthetic_intents reflects PROTOCOL_ROUTERS which no
+        longer includes traderjoe_v2.
+        """
         intents = build_synthetic_intents("traderjoe_v2", "SWAP", "avalanche")
-        assert len(intents) == 1
-        assert isinstance(intents[0], SwapIntent)
+        assert intents == []
 
     def test_protocol_not_on_chain_returns_empty(self):
         """Protocol without a router on this chain returns empty."""

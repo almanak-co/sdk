@@ -211,3 +211,59 @@ class TestDeprecatedDictsRemoved:
 
         assert not hasattr(adapter_module, "TOKEN_DECIMALS")
         assert not hasattr(adapter_module, "TRADERJOE_V2_TOKENS")
+
+
+class TestTraderJoeV2SwapGuard:
+    """Verify TraderJoe V2 swap is blocked at compiler level (VIB-1406).
+
+    LBRouter2 uses a bin-based AMM interface incompatible with DefaultSwapAdapter's
+    Uniswap V3 exactInputSingle calldata. Swaps must fail-closed with clear error.
+    """
+
+    def test_traderjoe_v2_swap_blocked(self):
+        """SwapIntent(protocol='traderjoe_v2') fails with clear error."""
+        from decimal import Decimal
+
+        from almanak.framework.intents import SwapIntent
+        from almanak.framework.intents.compiler import IntentCompiler
+
+        compiler = IntentCompiler(
+            chain="avalanche",
+            wallet_address=TEST_WALLET,
+            price_oracle={"USDC": Decimal("1.0"), "WAVAX": Decimal("25.0")},
+        )
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="WAVAX",
+            amount=Decimal("100"),
+            max_slippage=Decimal("0.01"),
+            protocol="traderjoe_v2",
+            chain="avalanche",
+        )
+
+        result = compiler.compile(intent)
+        assert result.status.value == "FAILED"
+        assert "VIB-1406" in result.error
+        assert "LBRouter2" in result.error
+        assert "uniswap_v3" in result.error  # Suggests alternative
+
+    def test_traderjoe_v2_removed_from_protocol_routers(self):
+        """Verify traderjoe_v2 is not in PROTOCOL_ROUTERS (swap routing)."""
+        from almanak.framework.intents.compiler import PROTOCOL_ROUTERS
+
+        for chain, routers in PROTOCOL_ROUTERS.items():
+            assert "traderjoe_v2" not in routers, (
+                f"traderjoe_v2 still in PROTOCOL_ROUTERS['{chain}'] — "
+                f"DefaultSwapAdapter generates incompatible Uniswap V3 calldata"
+            )
+
+    def test_traderjoe_v2_still_in_lp_position_managers(self):
+        """Verify traderjoe_v2 LP operations still work (not removed from LP routing)."""
+        from almanak.framework.intents.compiler import LP_POSITION_MANAGERS
+
+        # TraderJoe V2 LP should still be available on all supported chains
+        expected_chains = {"ethereum", "arbitrum", "avalanche", "bsc"}
+        for chain in expected_chains:
+            assert "traderjoe_v2" in LP_POSITION_MANAGERS.get(chain, {}), (
+                f"traderjoe_v2 should be present in LP_POSITION_MANAGERS for '{chain}'"
+            )

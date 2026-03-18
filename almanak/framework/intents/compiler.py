@@ -227,14 +227,14 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "uniswap_v2": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
         "sushiswap_v3": "0x2E6cd2d30aa43f40aa81619ff4b6E0a41479B13F",  # SushiSwap V3 SwapRouter
         "pancakeswap_v3": "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",  # SmartRouter (7-param)
-        "traderjoe_v2": "0x9A93a421b74F1c5755b83dD2C211614dC419C44b",  # LBRouter v2.1
+        # traderjoe_v2 removed (VIB-1406): LBRouter2 incompatible with DefaultSwapAdapter
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
     },
     "arbitrum": {
         "uniswap_v3": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",  # SwapRouter02
         "sushiswap_v3": "0x8A21F6768C1f8075791D08546Dadf6daA0bE820c",  # SushiSwap V3 SwapRouter
         "pancakeswap_v3": "0x32226588378236Fd0c7c4053999F88aC0e5cAc77",  # SmartRouter (7-param)
-        "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter v2.1
+        # traderjoe_v2 removed (VIB-1406): LBRouter2 incompatible with DefaultSwapAdapter
         "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
         "camelot": "0xc873fEcbd354f5A56E00E710B90EF4201db2448d",
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
@@ -258,7 +258,7 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "pancakeswap_v3": "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86",  # SmartRouter (7-param)
     },
     "avalanche": {
-        "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter2
+        # traderjoe_v2 removed (VIB-1406): LBRouter2 incompatible with DefaultSwapAdapter
         "uniswap_v3": "0xbb00FF08d01D300023C629E8fFfFcb65A5a578cE",  # SwapRouter02
         "sushiswap_v3": "0x717b7948AA264DeCf4D780aa6914482e5F46Da3e",  # SushiSwap V3 SwapRouter
     },
@@ -267,7 +267,7 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "pancakeswap_v2": "0x10ED43C718714eb63d5aA57B78B54704E256024E",
         "uniswap_v3": "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2",  # SwapRouter02
         "sushiswap_v3": "0xB45e53277a7e0F1D35f2a77160e91e25507f1763",  # SushiSwap V3 SwapRouter
-        "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter v2.1
+        # traderjoe_v2 removed (VIB-1406): LBRouter2 incompatible with DefaultSwapAdapter
         "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
     },
     "linea": {
@@ -3116,6 +3116,21 @@ class IntentCompiler:
         if protocol == "uniswap_v4":
             return self._compile_swap_uniswap_v4(intent)
 
+        # Guard: TraderJoe V2 uses LBRouter2 (bin-based AMM), NOT Uniswap V3 interface.
+        # DefaultSwapAdapter generates exactInputSingle calldata which reverts on LBRouter2.
+        # LP operations still work via the dedicated TraderJoe V2 connector. (VIB-1406)
+        if protocol == "traderjoe_v2":
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=(
+                    "TraderJoe V2 swap is not yet supported (VIB-1406): LBRouter2 uses a "
+                    "bin-based AMM interface incompatible with the default swap adapter. "
+                    "Use protocol='uniswap_v3' or protocol='enso' for swaps on Avalanche/Arbitrum. "
+                    "TraderJoe V2 LP operations (LPOpenIntent/LPCloseIntent) still work."
+                ),
+            )
+
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
             intent_id=intent.intent_id,
@@ -5544,12 +5559,32 @@ class IntentCompiler:
             )
             adapter = CurveAdapter(config)
 
+            # Compute price ratio for CryptoSwap/Tricrypto slippage protection.
+            # price_ratio = price_in / price_out so that:
+            # expected_output_tokens = amount_in_tokens * price_ratio
+            price_ratio: Decimal | None = None
+            try:
+                price_in = self._require_token_price(from_token.symbol)
+                price_out = self._require_token_price(to_token.symbol)
+                if price_out > 0:
+                    price_ratio = price_in / price_out
+            except (ValueError, ZeroDivisionError):
+                # Price unavailable — adapter will reject CryptoSwap swaps (fail closed)
+                # and accept StableSwap swaps (price_ratio not needed for 1:1 pairs)
+                logger.warning(
+                    "Could not compute price_ratio for Curve swap %s -> %s; "
+                    "CryptoSwap pools will fail, StableSwap pools will proceed safely.",
+                    from_token.symbol,
+                    to_token.symbol,
+                )
+
             swap_result = adapter.swap(
                 pool_address=pool_address,
                 token_in=from_token.symbol,
                 token_out=to_token.symbol,
                 amount_in=amount_decimal,
                 slippage_bps=slippage_bps,
+                price_ratio=price_ratio,
             )
 
             if not swap_result.success:
