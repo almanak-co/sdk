@@ -6066,10 +6066,19 @@ class IntentCompiler:
             # so we use a 1% floor to avoid reverts on near-maturity YT sells.
             if swap_type == "yt_to_token":
                 min_amount_out = amount_in // 100
+                estimation_method = "1% floor (YT near-expiry safe)"
             elif swap_type == "pt_to_token":
                 min_amount_out = amount_in // 2
+                estimation_method = "50% floor (PT discount safe)"
             else:
                 min_amount_out = amount_in
+                estimation_method = "1:1 estimate (BUY direction)"
+
+            logger.info(
+                f"Pendle slippage params: swap_type={swap_type}, amount_in={amount_in}, "
+                f"min_amount_out={min_amount_out}, slippage_bps={slippage_bps}, "
+                f"estimation={estimation_method}"
+            )
 
             # Look up the token that mints SY for this market
             # For yield-bearing token markets (like fUSDT0), this is the yield-bearing token
@@ -6207,10 +6216,19 @@ class IntentCompiler:
                 # For sell directions, use discounted estimate (VIB-1366).
                 if swap_type == "yt_to_token":
                     min_amount_out = amount_in // 100
+                    estimation_method = "1% floor (YT near-expiry safe, post-pre-swap)"
                 elif swap_type == "pt_to_token":
                     min_amount_out = amount_in // 2
+                    estimation_method = "50% floor (PT discount safe, post-pre-swap)"
                 else:
                     min_amount_out = amount_in
+                    estimation_method = "1:1 estimate (BUY direction, post-pre-swap)"
+
+                logger.info(
+                    f"Pendle slippage params (post-pre-swap): swap_type={swap_type}, amount_in={amount_in}, "
+                    f"min_amount_out={min_amount_out}, slippage_bps={slippage_bps}, "
+                    f"estimation={estimation_method}"
+                )
 
             # Resolve token_out to an address
             # For buying PT/YT, token_out is the PT/YT (use PT_TOKEN_INFO/YT_TOKEN_INFO)
