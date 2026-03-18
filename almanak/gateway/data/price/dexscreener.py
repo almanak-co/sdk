@@ -44,6 +44,7 @@ CHAIN_TO_DEXSCREENER_PLATFORM: dict[str, str] = {
     "optimism": "optimism",
     "polygon": "polygon",
     "bsc": "bsc",
+    "bnb": "bsc",
     "avalanche": "avalanche",
     "sonic": "sonic",
     "mantle": "mantle",

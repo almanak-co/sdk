@@ -38,6 +38,8 @@ TOKEN_TO_BINANCE_SYMBOL = {
     "OP": "OPUSDT",
     "AVAX": "AVAXUSDT",
     "WAVAX": "AVAXUSDT",
+    "BNB": "BNBUSDT",
+    "WBNB": "BNBUSDT",
     "MATIC": "MATICUSDT",
     "WMATIC": "MATICUSDT",
     "SOL": "SOLUSDT",
