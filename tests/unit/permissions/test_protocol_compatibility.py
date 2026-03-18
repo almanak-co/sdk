@@ -60,6 +60,8 @@ _KNOWN_GAPS: set[tuple[str, str, str]] = {
     ("aave_v3", "SUPPLY", "linea"),
     ("aave_v3", "SUPPLY", "sonic"),
     ("aave_v3", "SUPPLY", "mantle"),
+    # Aave V3 on plasma: lending pool address added but permission hints not yet implemented
+    ("aave_v3", "SUPPLY", "plasma"),
 }
 
 

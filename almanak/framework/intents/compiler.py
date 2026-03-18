@@ -263,6 +263,7 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "pancakeswap_v3": "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",  # SmartRouter (7-param)
         "pancakeswap_v2": "0x10ED43C718714eb63d5aA57B78B54704E256024E",
         "uniswap_v3": "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2",  # SwapRouter02
+        "sushiswap_v3": "0xB45e53277a7e0F1D35f2a77160e91e25507f1763",  # SushiSwap V3 SwapRouter
         "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter v2.1
         "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
     },
@@ -446,6 +447,11 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
         "uniswap_v3": "0xbe0F5544EC67e9B3b2D979aaA43f18Fd87E6257F",
         "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
     },
+    "bsc": {
+        "uniswap_v3": "0x78D78E420Da98ad378D7799bE8f4AF69033EB077",  # QuoterV2
+        "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",  # PCS V3 Quoter
+        "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",  # SushiSwap V3 Quoter
+    },
     "linea": {
         "uniswap_v3": "0x42bE4D6527829FeFA1493e1fb9F3676d2425C3C1",
         "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
@@ -483,6 +489,9 @@ LENDING_POOL_ADDRESSES: dict[str, dict[str, str]] = {
     },
     "linea": {
         "aave_v3": "0xc47b8C00b0f69a36fa203Ffeac0334874574a8Ac",
+    },
+    "plasma": {
+        "aave_v3": "0x925a2A7214Ed92428B5b1B090F80b25700095e12",
     },
     "mantle": {
         "aave_v3": "0x458F293454fE0d67EC0655f3672301301DD51422",
