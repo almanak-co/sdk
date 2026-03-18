@@ -76,6 +76,7 @@ class DataMeta:
     latency_ms: int = 0
     confidence: float = 1.0
     cache_hit: bool = False
+    proxy_source: str | None = None
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence <= 1.0:
@@ -148,8 +149,33 @@ _NATIVE_TO_WRAPPED: dict[str, str] = {
     "MATIC": "WMATIC",
     "AVAX": "WAVAX",
     "BNB": "WBNB",
+    "MNT": "WMNT",
     "S": "WS",
     "XPL": "WXPL",
+}
+
+
+# ---------------------------------------------------------------------------
+# OHLCV Proxy Map — wrapped token -> unwrapped token for data fallback
+# ---------------------------------------------------------------------------
+
+# Curated allowlist of wrapped tokens whose OHLCV data can be proxied from
+# the unwrapped (native) token. ONLY includes 1:1 pegged canonical wrapped
+# natives where the smart contract guarantees equal value.
+#
+# This map is intentionally flat (not chain-keyed) because wrapping semantics
+# are a property of the token contract, not the chain.
+#
+# Do NOT add rebasing tokens, fee-on-wrap tokens, or liquid staking
+# derivatives (stETH, wstETH) to this map.
+OHLCV_PROXY_MAP: dict[str, str] = {
+    "WMNT": "MNT",
+    "WS": "S",
+    "WXPL": "XPL",
+    "WETH": "ETH",
+    "WAVAX": "AVAX",
+    "WMATIC": "MATIC",
+    "WBNB": "BNB",
 }
 
 

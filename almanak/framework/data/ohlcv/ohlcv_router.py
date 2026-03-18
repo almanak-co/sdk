@@ -48,6 +48,7 @@ from typing import Any
 from almanak.framework.data.interfaces import DataSourceUnavailable, OHLCVCandle
 from almanak.framework.data.models import (
     CEX_SYMBOL_MAP,
+    OHLCV_PROXY_MAP,
     DataClassification,
     DataEnvelope,
     DataMeta,
@@ -209,6 +210,7 @@ class OHLCVRouter:
     disk_cache_dir: Path | None = None
     _providers: dict[str, DataProvider] = field(default_factory=dict, init=False, repr=False)
     _disk_cache: _OHLCVDiskCache = field(init=False, repr=False)
+    _proxy_warned: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._disk_cache = _OHLCVDiskCache(self.disk_cache_dir)
@@ -232,6 +234,7 @@ class OHLCVRouter:
         pool_address: str | None = None,
         force_provider: str | None = None,
         quote: str | None = None,
+        _is_proxy_retry: bool = False,
     ) -> DataEnvelope[list[OHLCVCandle]]:
         """Fetch OHLCV candles with multi-provider routing.
 
@@ -377,6 +380,57 @@ class OHLCVRouter:
                     elapsed,
                 )
                 continue
+
+        # ---------------------------------------------------------------
+        # Wrapped token proxy fallback: if all providers failed and the
+        # token has a known unwrapped equivalent, retry with the proxy.
+        # ---------------------------------------------------------------
+        if not _is_proxy_retry:
+            proxy_symbol = OHLCV_PROXY_MAP.get(instrument.base)
+            if proxy_symbol:
+                original_symbol = instrument.base
+                if original_symbol not in self._proxy_warned:
+                    self._proxy_warned.add(original_symbol)
+                    logger.warning(
+                        "ohlcv_proxy_fallback using %s as proxy for %s (1:1 wrapped native, no direct data source)",
+                        proxy_symbol,
+                        original_symbol,
+                    )
+                else:
+                    logger.debug(
+                        "ohlcv_proxy_fallback using %s as proxy for %s",
+                        proxy_symbol,
+                        original_symbol,
+                    )
+
+                # Build Instrument directly to bypass _canonicalize_symbol
+                # which would map MNT -> WMNT (the token we're falling back FROM)
+                proxy_instrument = Instrument(
+                    base=proxy_symbol,
+                    quote=instrument.quote,
+                    chain=instrument.chain,
+                    venue=instrument.venue,
+                )
+                proxy_envelope = self.get_ohlcv(
+                    token=proxy_instrument,
+                    chain=target_chain,
+                    timeframe=timeframe,
+                    limit=limit,
+                    pool_address=pool_address,
+                    force_provider=force_provider,
+                    quote=quote,
+                    _is_proxy_retry=True,
+                )
+
+                # Tag the returned data with proxy provenance
+                from dataclasses import replace
+
+                proxied_meta = replace(proxy_envelope.meta, proxy_source=original_symbol)
+                return DataEnvelope(
+                    value=proxy_envelope.value,
+                    meta=proxied_meta,
+                    classification=proxy_envelope.classification,
+                )
 
         raise DataSourceUnavailable(
             source="ohlcv_router",
