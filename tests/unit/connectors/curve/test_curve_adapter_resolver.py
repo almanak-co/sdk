@@ -168,6 +168,126 @@ class TestCurveMultiChain:
         mock_resolver.resolve.assert_called_once_with("USDC", "arbitrum")
 
 
+class TestApprovalLPTokenFallback:
+    """Test _build_approve_tx graceful fallback for LP tokens (VIB-1501)."""
+
+    def test_approval_lp_token_no_crash(self, adapter, mock_resolver):
+        """LP token addresses not in resolver should fallback to truncated address."""
+        # First call succeeds (for checking allowance is irrelevant here)
+        # _build_approve_tx calls _get_token_symbol which calls resolve
+        mock_resolver.resolve.side_effect = TokenResolutionError(
+            token="0x6c3F90f043a72FA612cbac8115EE7e52BDe6E490",
+            chain="ethereum",
+            reason="Not found",
+        )
+        lp_address = "0x6c3F90f043a72FA612cbac8115EE7e52BDe6E490"
+        spender = "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7"
+        result = adapter._build_approve_tx(lp_address, spender, 1000)
+        assert result is not None
+        assert "0x6c3F90f0..." in result.description
+
+    def test_approval_known_token_uses_symbol(self, adapter, mock_resolver):
+        """Known tokens should still use their symbol in the description."""
+        mock_resolver.resolve.return_value = ResolvedToken(
+            symbol="USDC",
+            address="0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            decimals=6,
+            chain="ethereum",
+            chain_id=1,
+        )
+        result = adapter._build_approve_tx(
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7",
+            1000,
+        )
+        assert result is not None
+        assert "USDC" in result.description
+
+
+class TestCryptoSwapEstimation:
+    """Test _estimate_swap_output for CryptoSwap pools (VIB-1417)."""
+
+    def test_stableswap_same_decimals(self, adapter, mock_resolver):
+        """StableSwap with same decimals returns 1:1."""
+        from almanak.framework.connectors.curve.adapter import PoolInfo, PoolType
+
+        mock_resolver.resolve.return_value = ResolvedToken(
+            symbol="DAI", address="0x" + "0" * 40, decimals=18, chain="ethereum", chain_id=1
+        )
+        pool = PoolInfo(
+            address="0x" + "0" * 40,
+            lp_token="0x" + "0" * 40,
+            coins=["DAI", "USDC"],
+            coin_addresses=["0x" + "0" * 40, "0x" + "1" * 40],
+            pool_type=PoolType.STABLESWAP,
+            n_coins=2,
+        )
+        result = adapter._estimate_swap_output(pool, 0, 1, 1000000000000000000)
+        # Same decimals => same amount
+        assert result == 1000000000000000000
+
+    def test_stableswap_cross_decimals(self, adapter, mock_resolver):
+        """StableSwap adjusts for decimal differences (DAI 18 -> USDC 6)."""
+        from almanak.framework.connectors.curve.adapter import PoolInfo, PoolType
+
+        # First call for coins[0] (DAI, 18 decimals)
+        # Second call for coins[1] (USDC, 6 decimals)
+        mock_resolver.resolve.side_effect = [
+            ResolvedToken(symbol="DAI", address="0x" + "0" * 40, decimals=18, chain="ethereum", chain_id=1),
+            ResolvedToken(symbol="USDC", address="0x" + "1" * 40, decimals=6, chain="ethereum", chain_id=1),
+        ]
+        pool = PoolInfo(
+            address="0x" + "0" * 40,
+            lp_token="0x" + "0" * 40,
+            coins=["DAI", "USDC"],
+            coin_addresses=["0x" + "0" * 40, "0x" + "1" * 40],
+            pool_type=PoolType.STABLESWAP,
+            n_coins=2,
+        )
+        # 100 DAI (18 decimals) -> USDC (6 decimals)
+        result = adapter._estimate_swap_output(pool, 0, 1, 100 * 10**18)
+        assert result == 100 * 10**6
+
+    def test_cryptoswap_returns_minimal(self, adapter, mock_resolver):
+        """CryptoSwap returns 1 (no meaningful estimate without on-chain oracle)."""
+        from almanak.framework.connectors.curve.adapter import PoolInfo, PoolType
+
+        mock_resolver.resolve.side_effect = [
+            ResolvedToken(symbol="USDT", address="0x" + "0" * 40, decimals=6, chain="ethereum", chain_id=1),
+            ResolvedToken(symbol="WETH", address="0x" + "1" * 40, decimals=18, chain="ethereum", chain_id=1),
+        ]
+        pool = PoolInfo(
+            address="0xD51a44d3FaE010294C616388b506AcdA1bfAAE46",
+            lp_token="0x" + "0" * 40,
+            coins=["USDT", "WBTC", "WETH"],
+            coin_addresses=["0x" + "0" * 40, "0x" + "1" * 40, "0x" + "2" * 40],
+            pool_type=PoolType.TRICRYPTO,
+            n_coins=3,
+        )
+        # 100 USDT -> WETH: should return 1 (no estimate)
+        result = adapter._estimate_swap_output(pool, 0, 2, 100 * 10**6)
+        assert result == 1
+
+    def test_cryptoswap_same_decimals_returns_minimal(self, adapter, mock_resolver):
+        """CryptoSwap with same decimals still returns 1 (can't assume 1:1 price)."""
+        from almanak.framework.connectors.curve.adapter import PoolInfo, PoolType
+
+        mock_resolver.resolve.side_effect = [
+            ResolvedToken(symbol="WBTC", address="0x" + "0" * 40, decimals=8, chain="ethereum", chain_id=1),
+            ResolvedToken(symbol="WETH", address="0x" + "1" * 40, decimals=18, chain="ethereum", chain_id=1),
+        ]
+        pool = PoolInfo(
+            address="0xD51a44d3FaE010294C616388b506AcdA1bfAAE46",
+            lp_token="0x" + "0" * 40,
+            coins=["USDT", "WBTC", "WETH"],
+            coin_addresses=["0x" + "0" * 40, "0x" + "1" * 40, "0x" + "2" * 40],
+            pool_type=PoolType.TRICRYPTO,
+            n_coins=3,
+        )
+        result = adapter._estimate_swap_output(pool, 1, 2, 1 * 10**8)
+        assert result == 1
+
+
 class TestDeprecatedDictsRemoved:
     """Verify deprecated token dicts have been removed (US-028)."""
 

@@ -570,7 +570,7 @@ class CurveAdapter:
 
             # Estimate output (simplified - in production would call get_dy)
             amount_out_estimate = self._estimate_swap_output(pool_info, i, j, amount_in_wei)
-            amount_out_minimum = int(amount_out_estimate * (10000 - slippage_bps) // 10000)
+            amount_out_minimum = max(1, int(amount_out_estimate * (10000 - slippage_bps) // 10000))
 
             # Build transactions
             transactions: list[TransactionData] = []
@@ -1048,7 +1048,11 @@ class CurveAdapter:
         # Update cache
         self._allowance_cache[cache_key] = MAX_UINT256
 
-        token_symbol = self._get_token_symbol(token_address)
+        try:
+            token_symbol = self._get_token_symbol(token_address)
+        except TokenResolutionError:
+            # LP tokens (e.g. 3CRV) may not be in the resolver -- use shortened address
+            token_symbol = f"{token_address[:10]}..."
 
         return TransactionData(
             to=token_address,
@@ -1083,8 +1087,23 @@ class CurveAdapter:
                 return amount_in // (10 ** abs(decimal_diff))
             return amount_in
         else:
-            # For crypto pools, use price oracle in production
-            return amount_in
+            # TECH_DEBT: CryptoSwap/Tricrypto pools swap volatile assets (e.g. USDT<->WETH)
+            # with wildly different prices. Without on-chain get_dy() or a price oracle,
+            # we cannot compute a meaningful min_amount_out. Returning amount_in raw
+            # (the old behavior) was wrong: it causes reverts for high-to-low decimal
+            # swaps (e.g. WETH->USDT) and zero protection for the reverse.
+            #
+            # We return 1 (minimal output) so swaps always execute, but this provides
+            # no slippage protection for CryptoSwap pools. Proper fix requires adding
+            # on-chain get_dy() calls via gateway RPC or passing price data to the adapter.
+            logger.warning(
+                "CryptoSwap min_amount_out set to 1 (no slippage protection). "
+                "Pool %s coins[%d]->coins[%d]. Use on-chain get_dy() for proper estimates.",
+                pool_info.address,
+                i,
+                j,
+            )
+            return 1
 
     def _estimate_add_liquidity(self, pool_info: PoolInfo, amounts: list[int]) -> int:
         """Estimate LP tokens from add_liquidity.
