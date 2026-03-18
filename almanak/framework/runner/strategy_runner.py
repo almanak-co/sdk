@@ -2248,6 +2248,10 @@ class StrategyRunner:
                             compiler.clear_allowance_cache()
                         else:
                             logger.info("Timeout error -- preserving allowance cache for retry")
+                        # Reset nonce cache on failure to force fresh on-chain
+                        # query on retry. Prevents nonce drift. (VIB-1449)
+                        if hasattr(self.execution_orchestrator, "reset_nonce_cache"):
+                            self.execution_orchestrator.reset_nonce_cache()
 
                 except Exception as e:
                     logger.error(f"Execution error: {e}", exc_info=True)

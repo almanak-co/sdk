@@ -787,6 +787,24 @@ class ExecutionOrchestrator:
             f"session_store={'enabled' if session_store else 'disabled'}"
         )
 
+    def reset_nonce_cache(self, wallet_address: str | None = None) -> None:
+        """Reset the local nonce cache, forcing fresh on-chain query on next execution.
+
+        Call this after a nonce-related error to recover from nonce drift.
+
+        Args:
+            wallet_address: Specific address to reset. If None, clears all cached nonces.
+        """
+        if wallet_address:
+            key = wallet_address.lower()
+            if key in self._local_nonce:
+                logger.info(f"Reset nonce cache for {key[:10]}... (was {self._local_nonce[key]})")
+                del self._local_nonce[key]
+        else:
+            if self._local_nonce:
+                logger.info(f"Cleared nonce cache for {len(self._local_nonce)} address(es)")
+            self._local_nonce.clear()
+
     async def _get_web3(self) -> AsyncWeb3:
         """Get or create Web3 instance."""
         if self._web3 is None:
@@ -1444,6 +1462,20 @@ class ExecutionOrchestrator:
             result.phase = ExecutionPhase.COMPLETE
             result.completed_at = datetime.now(UTC)
 
+            # Update local nonce cache ONLY after confirmed on-chain success.
+            # This prevents nonce drift when transactions fail. (VIB-1449)
+            confirmed_count = len([tr for tr in result.transaction_results if tr.success])
+            if confirmed_count > 0:
+                wallet_key = context.wallet_address.lower()
+                # Set nonce to chain_nonce + confirmed_count (or use the
+                # highest confirmed nonce + 1 from the transaction results).
+                web3 = await self._get_web3()
+                fresh_nonce = await web3.eth.get_transaction_count(
+                    web3.to_checksum_address(context.wallet_address), "pending"
+                )
+                self._local_nonce[wallet_key] = fresh_nonce
+                logger.debug(f"Updated local nonce cache to {fresh_nonce} after {confirmed_count} confirmed TXs")
+
             # Mark session complete on success
             self._complete_session(session, success=True)
 
@@ -2019,8 +2051,8 @@ class ExecutionOrchestrator:
             # Atomic MultiSend bundle -- all txs succeed or fail together
             signed = await self.signer.sign_bundle_with_web3(unsigned_txs, web3, eoa_nonce, context.chain)
 
-        # Update local nonce tracker (Safe wrapper uses 1 EOA nonce)
-        self._local_nonce[eoa_address.lower()] = eoa_nonce + 1
+        # NOTE: Do NOT update _local_nonce here. Updated only after
+        # confirmed on-chain success in execute(). (VIB-1449)
         return [signed]
 
     async def _assign_nonces(
@@ -2068,8 +2100,11 @@ class ExecutionOrchestrator:
             )
             result_txs.append(tx_with_nonce)
 
-        # Update local tracker to next unused nonce
-        self._local_nonce[wallet_addr.lower()] = current_nonce + len(unsigned_txs)
+        # NOTE: Do NOT update _local_nonce here. The nonce cache is only
+        # updated after confirmed on-chain success (in execute()). Optimistic
+        # pre-update caused nonce drift when transactions failed — the cache
+        # kept the inflated value while on-chain nonce stayed unchanged,
+        # leading to "nonce too high" on subsequent calls. (VIB-1449)
         logger.debug(
             f"Assigned nonces {current_nonce} to {current_nonce + len(unsigned_txs) - 1} (chain={chain_nonce}, local={local_nonce})"
         )
