@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 # RouterStatic addresses per chain
 ROUTER_STATIC_ADDRESSES: dict[str, str] = {
     "ethereum": "0x263833d47eA3fA4a30f269323aba6a107f9eB14C",
-    "arbitrum": "0xAdB09F65bd90d19e3148DB7B340e4B65d6063a90",
+    "arbitrum": "0xADB09F65Bd90D19e3148Db7b340e4B65D6063a90",
 }
 
 # Function selectors (keccak256 of canonical signatures, first 4 bytes)

@@ -159,7 +159,7 @@ _PANCAKESWAP_KNOWN_POOLS: dict[str, dict[tuple[str, str, int], str]] = {
             "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
             "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
             500,
-        ): "0xd9e2a1a61B6E61b275cEc326465d417e52C1a621",
+        ): "0xd9E2A1A61B6e61b275ceC326465D417E52c1A621",
     },
     "ethereum": {
         # USDC/WETH 0.05%
@@ -167,7 +167,7 @@ _PANCAKESWAP_KNOWN_POOLS: dict[str, dict[tuple[str, str, int], str]] = {
             "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
             "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
             500,
-        ): "0x6CA298D2983aB03Aa1da7679389D955A4eFEE15C",
+        ): "0x6CA298D2983aB03Aa1dA7679389D955A4eFEE15C",
     },
 }
 

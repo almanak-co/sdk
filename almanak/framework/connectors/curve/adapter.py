@@ -427,7 +427,7 @@ class CurveAdapter:
 
         # Execute a swap on 3pool
         result = adapter.swap(
-            pool_address="0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7",
+            pool_address="0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7",
             token_in="USDC",
             token_out="DAI",
             amount_in=Decimal("1000"),

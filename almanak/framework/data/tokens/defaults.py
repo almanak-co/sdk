@@ -46,7 +46,7 @@ WRAPPED_NATIVE: dict[str, str] = {
     "avalanche": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",  # WAVAX
     "bsc": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
     "sonic": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",  # wS (Wrapped Sonic)
-    "plasma": "0x6100e367285b01f48d07953803a2d8dca5d19873",  # WXPL
+    "plasma": "0x6100E367285b01F48D07953803A2d8dCA5D19873",  # WXPL
     "solana": "So11111111111111111111111111111111111111112",  # WSOL
     "mantle": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",  # WMNT
     "berachain": "0x6969696969696969696969696969696969696969",  # WBERA
@@ -78,21 +78,21 @@ STABLECOINS: set[str] = {
 
 SYMBOL_ALIASES: dict[tuple[str, str], str] = {
     # Arbitrum bridged tokens
-    ("arbitrum", "USDC.E"): "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8",  # Bridged USDC
+    ("arbitrum", "USDC.E"): "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",  # Bridged USDC
     # Optimism bridged tokens
-    ("optimism", "USDC.E"): "0x7f5c764cbc14f9669b88837ca1490cca17c31607",  # Bridged USDC
+    ("optimism", "USDC.E"): "0x7F5c764cBc14f9669B88837ca1490cCa17c31607",  # Bridged USDC
     # Base bridged tokens
-    ("base", "USDBC"): "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca",  # USD Base Coin
+    ("base", "USDBC"): "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",  # USD Base Coin
     # Polygon bridged tokens
-    ("polygon", "USDC.E"): "0x2791bca1f2de4661ed88a30c99a7a9449aa84174",  # Bridged USDC (PoS Bridge)
+    ("polygon", "USDC.E"): "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",  # Bridged USDC (PoS Bridge)
     # Avalanche bridged tokens
-    ("avalanche", "USDC.E"): "0xa7d7079b0fead91f3e65f86e8915cb59c1a4c664",  # Bridged USDC
-    ("avalanche", "USDT.E"): "0xc7198437980c041c805a1edcba50c1ce5db95118",  # Bridged USDT
-    ("avalanche", "WETH.E"): "0x49d5c2bdffac6ce2bfdb6640f4f80f226bc10bab",  # Bridged WETH
-    ("avalanche", "BTCB"): "0x152b9d0fdc40c096de20232db1e35ae6a57fa6c0",  # BTC.b alias (no dot)
+    ("avalanche", "USDC.E"): "0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664",  # Bridged USDC
+    ("avalanche", "USDT.E"): "0xc7198437980c041c805A1EDcbA50c1Ce5db95118",  # Bridged USDT
+    ("avalanche", "WETH.E"): "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",  # Bridged WETH
+    ("avalanche", "BTCB"): "0x152b9D0fDC40c096DE20232db1E35ae6A57fa6C0",  # BTC.b alias (no dot)
     # Berachain bridged tokens
-    ("berachain", "USDC.E"): "0x549943e04f40284185054145c6e4e9568c1d3241",  # Bridged USDC (Stargate)
-    ("berachain", "USDC"): "0x549943e04f40284185054145c6e4e9568c1d3241",  # USDC -> bridged USDC on Berachain
+    ("berachain", "USDC.E"): "0x549943e04f40284185054145c6E4e9568C1D3241",  # Bridged USDC (Stargate)
+    ("berachain", "USDC"): "0x549943e04f40284185054145c6E4e9568C1D3241",  # USDC -> bridged USDC on Berachain
 }
 
 # =============================================================================
@@ -166,7 +166,7 @@ WETH = Token(
         "optimism": "0x4200000000000000000000000000000000000006",
         "base": "0x4200000000000000000000000000000000000006",
         "polygon": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",  # Bridged WETH on Polygon
-        "avalanche": "0x49D5c2BdFfac6CE2BFDb6640F4F80f226bc10bAB",  # WETH.e on Avalanche
+        "avalanche": "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",  # WETH.e on Avalanche
         "bsc": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",  # Binance-Peg ETH
         "mantle": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",  # Bridged WETH on Mantle
         "berachain": "0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590",  # Bridged WETH on Berachain
@@ -423,13 +423,13 @@ WETH_E_AVALANCHE = Token(
     name="Bridged WETH (Avalanche)",
     decimals=18,
     addresses={
-        "avalanche": "0x49D5c2BdFfac6CE2BFDb6640F4F80f226bc10bAB",
+        "avalanche": "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",
     },
     coingecko_id="weth",
     is_stablecoin=False,
     chain_overrides={
         "avalanche": ChainTokenConfig(
-            address="0x49D5c2BdFfac6CE2BFDb6640F4F80f226bc10bAB",
+            address="0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",
             decimals=18,
             is_native=False,
             bridge_type=BridgeType.BRIDGED,
@@ -466,7 +466,7 @@ BTC_B = Token(
     name="Bitcoin (BTC.b)",
     decimals=8,
     addresses={
-        "avalanche": "0x152b9d0FdC40C096DE20232Db1E35AE6A57FA6c0",
+        "avalanche": "0x152b9D0fDC40c096DE20232db1E35ae6A57fa6C0",
     },
     coingecko_id="bitcoin-avalanche-bridged-btc-b",
     is_stablecoin=False,
@@ -645,7 +645,7 @@ wstETH = Token(
     addresses={
         "ethereum": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
         "arbitrum": "0x5979D7b546E38E414F7E9822514be443A4800529",
-        "optimism": "0x1F32b1c2345538c0c6f582fB0220c6c2C0C9C6C6",
+        "optimism": "0x1f32B1C2345538c0C6F582FB0220C6C2C0C9c6c6",
         "base": "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452",
         "polygon": "0x03b54A6e9a984069379fae1a4fC4dBAE93B3bCCD",
     },
@@ -660,7 +660,7 @@ WEETH = Token(
     decimals=18,
     addresses={
         "ethereum": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
-        "arbitrum": "0x35751007a407ca6feffe80b3cb397736d2cf4dbe",
+        "arbitrum": "0x35751007a407ca6FEFfE80b3cB397736D2cf4dbe",
     },
     coingecko_id="wrapped-eeth",
     is_stablecoin=False,
@@ -688,7 +688,7 @@ ALMANAK = Token(
     name="Almanak",
     decimals=18,
     addresses={
-        "base": "0xdefa1d21c5f1cbeac00eeb54b44c7d86467cc3a3",
+        "base": "0xDeFA1D21c5F1cbeac00eeB54B44C7D86467cc3a3",
     },
     coingecko_id="almanak",
     is_stablecoin=False,
@@ -716,7 +716,7 @@ WXPL = Token(
     name="Wrapped XPL",
     decimals=18,
     addresses={
-        "plasma": "0x6100e367285b01f48d07953803a2d8dca5d19873",
+        "plasma": "0x6100E367285b01F48D07953803A2d8dCA5D19873",
     },
     coingecko_id=None,
     is_stablecoin=False,
@@ -728,7 +728,7 @@ USDT0 = Token(
     name="USDT Zero",
     decimals=6,  # USDT-like stablecoin
     addresses={
-        "plasma": "0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb",
+        "plasma": "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb",
     },
     coingecko_id=None,
     is_stablecoin=True,
@@ -740,7 +740,7 @@ FUSDT0 = Token(
     name="Fluid USDT Zero",
     decimals=6,
     addresses={
-        "plasma": "0x1dd4b13fcae900c60a350589be8052959d2ed27b",
+        "plasma": "0x1DD4b13fcAE900C60a350589BE8052959D2Ed27B",
     },
     coingecko_id=None,
     is_stablecoin=True,
@@ -752,7 +752,7 @@ PENDLE_PLASMA = Token(
     name="Pendle (Plasma)",
     decimals=18,
     addresses={
-        "plasma": "0x17bac5f906c9a0282ac06a59958d85796c831f24",
+        "plasma": "0x17Bac5F906c9A0282aC06a59958D85796c831f24",
     },
     coingecko_id="pendle",
     is_stablecoin=False,
@@ -1009,7 +1009,7 @@ PT_eUSDe = Token(
     name="Pendle PT eUSDe",
     decimals=18,
     addresses={
-        "ethereum": "0x308C36BaF407f543DaC3a6340B7B6B31079e8e0d",
+        "ethereum": "0x308c36baF407f543DaC3A6340b7b6B31079e8e0D",
     },
     coingecko_id=None,
     is_stablecoin=False,
@@ -1020,7 +1020,7 @@ PT_USDe = Token(
     name="Pendle PT USDe",
     decimals=18,
     addresses={
-        "ethereum": "0x8a47b431A7D947c6a3ED6E42d501803615a97EAa",
+        "ethereum": "0x8A47b431A7D947c6a3ED6E42d501803615a97EAa",
     },
     coingecko_id=None,
     is_stablecoin=False,
@@ -1031,7 +1031,7 @@ PT_USDai = Token(
     name="Pendle PT USDai",
     decimals=18,
     addresses={
-        "arbitrum": "0x3b0C5ef8D4c8Ae6db1A3E3B9c876a53f3fe8C0b1",
+        "arbitrum": "0x3B0C5Ef8D4c8aE6Db1A3E3b9c876A53f3fe8C0b1",
     },
     coingecko_id=None,
     is_stablecoin=False,
@@ -1042,7 +1042,7 @@ PT_wstETH = Token(
     name="Pendle PT wstETH",  # Maturity: 25-JUN-2026
     decimals=18,
     addresses={
-        "arbitrum": "0x71fbf40651e9d4278a74586afc99f307f369ce9a",
+        "arbitrum": "0x71fBF40651E9D4278a74586AfC99F307f369Ce9A",
     },
     coingecko_id=None,
     is_stablecoin=False,

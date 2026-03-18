@@ -1260,7 +1260,7 @@ class TokenResolver:
             resolver.register_token(
                 symbol="PT-wstETH-25JUN2026",
                 chain="arbitrum",
-                address="0x71fbf40651e9d4bc027876e5aa4a3806d8e0b243",
+                address="0x71FBF40651E9d4bC027876E5aA4a3806d8E0B243",
                 decimals=18,
             )
             # Now works:

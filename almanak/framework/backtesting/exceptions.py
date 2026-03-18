@@ -42,7 +42,7 @@ class HistoricalDataUnavailableError(BacktestError):
     Example:
         raise HistoricalDataUnavailableError(
             data_type="volume",
-            identifier="0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+            identifier="0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
             timestamp=datetime(2024, 1, 15, 12, 0, 0),
             message="No volume data available from Uniswap V3 subgraph for USDC/ETH pool",
             chain="ethereum",

@@ -84,19 +84,19 @@ UNISWAP_V3: dict[str, dict[str, str]] = {
     },
     "mantle": {
         # Agni Finance (Uniswap V3 fork) — the primary V3 DEX on Mantle
-        "swap_router": "0x319B69888b0d11cec22caA5034e25FfFBDc88421",  # Agni SwapRouter (V1 style, with deadline)
-        "swap_router_02": "0x319B69888b0d11cec22caA5034e25FfFBDc88421",
+        "swap_router": "0x319B69888b0d11cEC22caA5034e25FfFBDc88421",  # Agni SwapRouter (V1 style, with deadline)
+        "swap_router_02": "0x319B69888b0d11cEC22caA5034e25FfFBDc88421",
         "factory": "0x25780dc8Fc3cfBD75F33bFDAB65e969b603b2035",  # Agni Factory
         "position_manager": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni NonfungiblePositionManager
-        "quoter_v2": "0xc4aaDC921E1cdb66c5300Bc158a313292923C0cb",  # Agni QuoterV2
+        "quoter_v2": "0xc4aaDc921E1cdb66c5300Bc158a313292923C0cb",  # Agni QuoterV2
     },
     "monad": {
         # Provisional — Monad testnet (chain 143) addresses; verify before mainnet launch
-        "swap_router": "0xfe31f71c1b106eac32f1a19239c9a9a72ddfb900",  # SwapRouter02
-        "swap_router_02": "0xfe31f71c1b106eac32f1a19239c9a9a72ddfb900",
-        "factory": "0x204faca1764b154221e35c0d20abb3c525710498",
-        "position_manager": "0x7197e214c0b767cfb76fb734ab638e2c192f4e53",
-        "quoter_v2": "0x661e93cca42afacb172121ef892830ca3b70f08d",
+        "swap_router": "0xfE31F71C1b106EAc32F1A19239c9a9A72ddfb900",  # SwapRouter02
+        "swap_router_02": "0xfE31F71C1b106EAc32F1A19239c9a9A72ddfb900",
+        "factory": "0x204FAca1764B154221e35c0d20aBb3c525710498",
+        "position_manager": "0x7197E214c0b767cFB76Fb734ab638E2c192F4E53",
+        "quoter_v2": "0x661E93cca42AfacB172121EF892830cA3b70F08d",
     },
 }
 
@@ -202,59 +202,59 @@ UNISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
 UNISWAP_V4: dict[str, dict[str, str]] = {
     "ethereum": {
         "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
-        "position_manager": "0xbD216513d74C8cf14cf4747e6AaE6fDf64e83B24",
+        "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
         "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
-        "v4_swap_router": "0x3a9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
-        "quoter": "0x52f0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
-        "state_view": "0x7fFa62d1F57A97A4A4A35C6DDf1f9e36bCbBBE8a",
+        "v4_swap_router": "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
     },
     "arbitrum": {
         "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
-        "position_manager": "0xbD216513d74C8cf14cf4747e6AaE6fDf64e83B24",
+        "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
         "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
-        "v4_swap_router": "0x3a9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
-        "quoter": "0x52f0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
-        "state_view": "0x7fFa62d1F57A97A4A4A35C6DDf1f9e36bCbBBE8a",
+        "v4_swap_router": "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
     },
     "base": {
         "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
-        "position_manager": "0xbD216513d74C8cf14cf4747e6AaE6fDf64e83B24",
+        "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
         "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
-        "v4_swap_router": "0x3a9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
-        "quoter": "0x52f0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
-        "state_view": "0x7fFa62d1F57A97A4A4A35C6DDf1f9e36bCbBBE8a",
+        "v4_swap_router": "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
     },
     "optimism": {
         "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
-        "position_manager": "0xbD216513d74C8cf14cf4747e6AaE6fDf64e83B24",
+        "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
         "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
-        "v4_swap_router": "0x3a9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
-        "quoter": "0x52f0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
-        "state_view": "0x7fFa62d1F57A97A4A4A35C6DDf1f9e36bCbBBE8a",
+        "v4_swap_router": "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
     },
     "polygon": {
         "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
-        "position_manager": "0xbD216513d74C8cf14cf4747e6AaE6fDf64e83B24",
+        "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
         "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
-        "v4_swap_router": "0x3a9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
-        "quoter": "0x52f0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
-        "state_view": "0x7fFa62d1F57A97A4A4A35C6DDf1f9e36bCbBBE8a",
+        "v4_swap_router": "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
     },
     "avalanche": {
         "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
-        "position_manager": "0xbD216513d74C8cf14cf4747e6AaE6fDf64e83B24",
+        "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
         "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
-        "v4_swap_router": "0x3a9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
-        "quoter": "0x52f0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
-        "state_view": "0x7fFa62d1F57A97A4A4A35C6DDf1f9e36bCbBBE8a",
+        "v4_swap_router": "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
     },
     "bsc": {
         "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
-        "position_manager": "0xbD216513d74C8cf14cf4747e6AaE6fDf64e83B24",
+        "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
         "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
-        "v4_swap_router": "0x3a9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
-        "quoter": "0x52f0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
-        "state_view": "0x7fFa62d1F57A97A4A4A35C6DDf1f9e36bCbBBE8a",
+        "v4_swap_router": "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
     },
 }
 
@@ -353,7 +353,7 @@ AAVE_V3: dict[str, dict[str, str]] = {
     },
     "linea": {
         "pool": "0xc47b8C00b0f69a36fa203Ffeac0334874574a8Ac",
-        "pool_data_provider": "0x2d97F8FA96886Fd923c065F5457F9DDd494e3877",
+        "pool_data_provider": "0x2D97F8FA96886Fd923c065F5457F9DDd494e3877",
         "oracle": "0x3c6Cd9Cc7c7a4c2Cf5a82734CD249D7D593354dA",
     },
     "plasma": {
@@ -462,7 +462,7 @@ SUSHISWAP_V3: dict[str, dict[str, str]] = {
         "quoter_v2": "0x0524E833cCD057e4d7A296e3aaAb9f7675964Ce1",
     },
     "base": {
-        "swap_router": "0xFB7eF66a7e61fF9e400671e4b5BfBaBE2ea025b4",
+        "swap_router": "0xfB7ef66A7e61fF9e400671e4b5BFbaBE2ea025B4",
         "factory": "0xc35DADB65012eC5796536bD9864eD8773aBc74C4",
         "position_manager": "0x80C7DD17B01855a6D2347444a0FCC36136a314de",
         "quoter_v2": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
@@ -695,29 +695,29 @@ PENDLE: dict[str, dict[str, str]] = {
         "router": "0x888888888889758F76e7103c6CbF23ABbF58F946",
         "router_static": "0x263833d47eA3fA4a30f269323aba6a107f9eB14C",
         "market_factory": "0x2FCb47B58350cD377f94d3821e7373Df60bD9Ced",
-        "yt_factory": "0x28D4CE244fce6F26C6a4a0447ffe8a4cCf9F1ccC",
+        "yt_factory": "0x28d4cE244fCE6f26C6A4A0447fFe8A4ccf9F1CcC",
         "pt_oracle": "0x1Fd95db7B7C0067De8D45C0cb35D59796adfD187",
         # Popular markets
-        "market_wsteth_26dec2024": "0xF769035A247AF48bF55BaA82D8b5e14E02E49a25",
+        "market_wsteth_26dec2024": "0xf769035a247af48bf55BaA82d8b5e14E02E49A25",
         "market_wsteth_26jun2025": "0x08a152834de126d2ef83D612ff36e4523FD0017F",  # Expired
-        "market_wsteth_active": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
+        "market_wsteth_active": "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B",
         "market_eeth_26dec2024": "0x952083cde7aaa11AB8449057F7de23A970AA8472",
-        "market_rseth_26dec2024": "0x6Ae79089b2CF4be441480801F9F1Ca1a54E3cE9C",
+        "market_rseth_26dec2024": "0x6ae79089b2CF4be441480801F9f1CA1a54e3ce9C",
     },
     "ethereum": {
         "router": "0x888888888889758F76e7103c6CbF23ABbF58F946",
         "router_static": "0x263833d47eA3fA4a30f269323aba6a107f9eB14C",
         "market_factory": "0x1A6fCc85557BC4fB7B534ed835a03EF056552D52",
-        "yt_factory": "0xEa1ce3FD2dA6C6BD47c227526bE5e54E4e12fe00",
+        "yt_factory": "0xeA1CE3Fd2da6C6BD47C227526be5e54e4E12fE00",
         "pt_oracle": "0x66a1096C6366b2529274dF4f5D8247827fe4CEA8",
     },
     "plasma": {
         "router": "0x888888888889758F76e7103c6CbF23ABbF58F946",
         # fUSDT0 market (Fluid) - expires 26 Feb 2026
-        "market_fusdt0_26feb2026": "0x0cb289e9df2d0dcfe13732638c89655fb80c2be2",
-        "pt_fusdt0_26feb2026": "0xbe45f6f17b81571fc30253bdae0a2a6f7b04d60f",
-        "yt_fusdt0_26feb2026": "0xc0f6a41a9837c4d824bc8d346341db77e634ae69",
-        "sy_fusdt0": "0xff3ccc1245d59b21b6ec4a597557e748f8311e8c",
+        "market_fusdt0_26feb2026": "0x0cb289E9df2d0dCFe13732638C89655fb80C2bE2",
+        "pt_fusdt0_26feb2026": "0xbE45F6F17b81571fC30253BDaE0A2A6f7b04D60F",
+        "yt_fusdt0_26feb2026": "0xC0f6a41a9837C4d824Bc8d346341DB77e634ae69",
+        "sy_fusdt0": "0xfF3CCC1245D59B21B6EC4A597557E748f8311E8c",
     },
 }
 
@@ -736,10 +736,10 @@ PENDLE_TOKENS: dict[str, dict[str, str]] = {
         "PENDLE": "0x808507121B80c02388fAd14726482e061B8da827",
     },
     "plasma": {
-        "USDT0": "0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb",
-        "FUSDT0": "0x1dd4b13fcae900c60a350589be8052959d2ed27b",
-        "PENDLE": "0x17bac5f906c9a0282ac06a59958d85796c831f24",
-        "WXPL": "0x6100e367285b01f48d07953803a2d8dca5d19873",
+        "USDT0": "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb",
+        "FUSDT0": "0x1DD4b13fcAE900C60a350589BE8052959D2Ed27B",
+        "PENDLE": "0x17Bac5F906c9A0282aC06a59958D85796c831f24",
+        "WXPL": "0x6100E367285b01F48D07953803A2d8dCA5D19873",
     },
 }
 
@@ -755,12 +755,12 @@ METAMORPHO_VAULTS: dict[str, dict[str, str]] = {
         "flagship_eth": "0x38989BBA00BDF8181F4082995b3DEAe96163aC5D",  # Flagship ETH (wETH)
         "flagship_usdc": "0x186514400e52270cef3D80e1c6F8d10A75d47344",  # Flagship USDC
         "gauntlet_usdc_core": "0x8eB67A509616cd6A7c1B3c8C21D48FF57df3d458",  # Gauntlet USDC Core
-        "re7_weth": "0x78Fc2c2eD71dAb0491d268b4E2B4A14cAE2a5C90",  # Re7 WETH
+        "re7_weth": "0x78FC2c2ed71dAb0491d268b4E2B4A14CaE2a5c90",  # Re7 WETH
         "gauntlet_weth_prime": "0x4881Ef0BF6d2365D3dd6499ccd7532bcdBCE0658",  # Gauntlet WETH Prime
     },
     "base": {
         "moonwell_flagship_usdc": "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca",  # Moonwell Flagship USDC
-        "moonwell_flagship_eth": "0xa0E430870c4604CcfC7B38Ca7845B1F882eB5860",  # Moonwell Flagship ETH
+        "moonwell_flagship_eth": "0xa0E430870C4604Ccfc7b38ca7845b1F882eb5860",  # Moonwell Flagship ETH
     },
 }
 

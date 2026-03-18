@@ -122,7 +122,7 @@ class TestChainlinkFeedConfig:
 
         assert "base" in ETH_DENOMINATED_FEEDS
         assert "WSTETH/ETH" in ETH_DENOMINATED_FEEDS["base"]
-        assert ETH_DENOMINATED_FEEDS["base"]["WSTETH/ETH"] == "0x43a5C292A453A3bF3606fa856197F09D7B74251a"
+        assert ETH_DENOMINATED_FEEDS["base"]["WSTETH/ETH"] == "0x43a5C292A453A3bF3606fa856197f09D7B74251a"
 
     def test_arbitrum_wsteth_in_eth_denominated_feeds(self):
         """Arbitrum should also use ETH-denominated wstETH feed."""

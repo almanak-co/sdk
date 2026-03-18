@@ -222,7 +222,7 @@ MORPHO_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
             "loan_token": "USDe",
             "loan_token_address": "0x4c9EDD5852cd905f086C759E8383e09bff1E68B3",
             "collateral_token": "PT-eUSDe",
-            "collateral_token_address": "0x308C36BaF407f543DaC3a6340B7B6B31079e8e0d",
+            "collateral_token_address": "0x308c36baF407f543DaC3A6340b7b6B31079e8e0D",
             "oracle": "0x5D916980D5Ae1737a8330Bf24dF812b2911Aae25",
             "irm": "0x870aC11D48B15DB9a138Cf899d20F13F79Ba00BC",
             "lltv": 860000000000000000,  # 86%
@@ -236,7 +236,7 @@ MORPHO_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
             "loan_token": "USDC",
             "loan_token_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
             "collateral_token": "PT-USDai",
-            "collateral_token_address": "0x3b0C5ef8D4c8Ae6db1A3E3B9c876a53f3fe8C0b1",
+            "collateral_token_address": "0x3B0C5Ef8D4c8aE6Db1A3E3b9c876A53f3fe8C0b1",
             "oracle": "0x2a01EB9496094dA03c4E364Def50f5aD1280AD72",
             "irm": "0x870aC11D48B15DB9a138Cf899d20F13F79Ba00BC",
             "lltv": 860000000000000000,  # 86%

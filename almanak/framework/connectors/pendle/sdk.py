@@ -71,27 +71,27 @@ for _chain, _addrs in _PENDLE_REGISTRY.items():
 # This provides a direct, unambiguous mapping from PT token names to market contracts
 MARKET_BY_PT_TOKEN: dict[str, dict[str, str]] = {
     "plasma": {
-        "PT-FUSDT0": "0x0cb289e9df2d0dcfe13732638c89655fb80c2be2",
-        "PT-fUSDT0": "0x0cb289e9df2d0dcfe13732638c89655fb80c2be2",  # Case-insensitive support
+        "PT-FUSDT0": "0x0cb289E9df2d0dCFe13732638C89655fb80C2bE2",
+        "PT-fUSDT0": "0x0cb289E9df2d0dCFe13732638C89655fb80C2bE2",  # Case-insensitive support
     },
     "arbitrum": {
         # PT-wstETH-25JUN2026 (active, wstETH PT on Arbitrum)
-        "PT-WSTETH-25JUN2026": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",  # Fully uppercase for compiler lookup
-        "PT-wstETH-25JUN2026": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
-        "PT-WSTETH": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
-        "PT-wstETH": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",  # Case-insensitive support
+        "PT-WSTETH-25JUN2026": "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B",  # Fully uppercase for compiler lookup
+        "PT-wstETH-25JUN2026": "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B",
+        "PT-WSTETH": "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B",
+        "PT-wstETH": "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B",  # Case-insensitive support
     },
     "ethereum": {
         # PT-sUSDe-7MAY2026 (active, 91.5% LLTV on Morpho when market available)
-        "PT-SUSDE-7MAY2026": "0x8dae8ece668cf80d348873f23d456448e8694883",  # Fully uppercase for compiler lookup
-        "PT-sUSDE-7MAY2026": "0x8dae8ece668cf80d348873f23d456448e8694883",
-        "PT-sUSDe-7MAY2026": "0x8dae8ece668cf80d348873f23d456448e8694883",
-        "PT-SUSDE": "0x8dae8ece668cf80d348873f23d456448e8694883",
-        "PT-sUSDe": "0x8dae8ece668cf80d348873f23d456448e8694883",
+        "PT-SUSDE-7MAY2026": "0x8dAe8ECe668cf80d348873F23D456448E8694883",  # Fully uppercase for compiler lookup
+        "PT-sUSDE-7MAY2026": "0x8dAe8ECe668cf80d348873F23D456448E8694883",
+        "PT-sUSDe-7MAY2026": "0x8dAe8ECe668cf80d348873F23D456448E8694883",
+        "PT-SUSDE": "0x8dAe8ECe668cf80d348873F23D456448E8694883",
+        "PT-sUSDe": "0x8dAe8ECe668cf80d348873F23D456448E8694883",
         # PT-sUSDe-5FEB2026 (expired, but Morpho market exists for testing)
-        "PT-SUSDE-5FEB2026": "0xed81f8ba2941c3979de2265c295748a6b6956567",  # Fully uppercase for compiler lookup
-        "PT-sUSDE-5FEB2026": "0xed81f8ba2941c3979de2265c295748a6b6956567",
-        "PT-sUSDe-5FEB2026": "0xed81f8ba2941c3979de2265c295748a6b6956567",
+        "PT-SUSDE-5FEB2026": "0xed81f8bA2941C3979de2265C295748a6b6956567",  # Fully uppercase for compiler lookup
+        "PT-sUSDE-5FEB2026": "0xed81f8bA2941C3979de2265C295748a6b6956567",
+        "PT-sUSDe-5FEB2026": "0xed81f8bA2941C3979de2265C295748a6b6956567",
     },
 }
 
@@ -100,27 +100,27 @@ MARKET_BY_PT_TOKEN: dict[str, dict[str, str]] = {
 PT_TOKEN_INFO: dict[str, dict[str, tuple[str, int]]] = {
     "plasma": {
         # PT-fUSDT0: (address, decimals)
-        "PT-FUSDT0": ("0xbe45f6f17b81571fc30253bdae0a2a6f7b04d60f", 6),
-        "PT-fUSDT0": ("0xbe45f6f17b81571fc30253bdae0a2a6f7b04d60f", 6),
+        "PT-FUSDT0": ("0xbE45F6F17b81571fC30253BDaE0A2A6f7b04D60F", 6),
+        "PT-fUSDT0": ("0xbE45F6F17b81571fC30253BDaE0A2A6f7b04D60F", 6),
     },
     "arbitrum": {
         # PT-wstETH-25JUN2026: (address, decimals) - wstETH PT uses 18 decimals
-        "PT-WSTETH-25JUN2026": ("0x71fbf40651e9d4278a74586afc99f307f369ce9a", 18),  # Fully uppercase for compiler
-        "PT-wstETH-25JUN2026": ("0x71fbf40651e9d4278a74586afc99f307f369ce9a", 18),
-        "PT-WSTETH": ("0x71fbf40651e9d4278a74586afc99f307f369ce9a", 18),
-        "PT-wstETH": ("0x71fbf40651e9d4278a74586afc99f307f369ce9a", 18),
+        "PT-WSTETH-25JUN2026": ("0x71fBF40651E9D4278a74586AfC99F307f369Ce9A", 18),  # Fully uppercase for compiler
+        "PT-wstETH-25JUN2026": ("0x71fBF40651E9D4278a74586AfC99F307f369Ce9A", 18),
+        "PT-WSTETH": ("0x71fBF40651E9D4278a74586AfC99F307f369Ce9A", 18),
+        "PT-wstETH": ("0x71fBF40651E9D4278a74586AfC99F307f369Ce9A", 18),
     },
     "ethereum": {
         # PT-sUSDe-7MAY2026: (address, decimals) - active sUSDe PT
-        "PT-SUSDE-7MAY2026": ("0x3de0ff76e8b528c092d47b9dac775931cef80f49", 18),  # Fully uppercase for compiler
-        "PT-sUSDE-7MAY2026": ("0x3de0ff76e8b528c092d47b9dac775931cef80f49", 18),
-        "PT-sUSDe-7MAY2026": ("0x3de0ff76e8b528c092d47b9dac775931cef80f49", 18),
-        "PT-SUSDE": ("0x3de0ff76e8b528c092d47b9dac775931cef80f49", 18),
-        "PT-sUSDe": ("0x3de0ff76e8b528c092d47b9dac775931cef80f49", 18),
+        "PT-SUSDE-7MAY2026": ("0x3de0ff76E8b528C092d47b9DaC775931cef80F49", 18),  # Fully uppercase for compiler
+        "PT-sUSDE-7MAY2026": ("0x3de0ff76E8b528C092d47b9DaC775931cef80F49", 18),
+        "PT-sUSDe-7MAY2026": ("0x3de0ff76E8b528C092d47b9DaC775931cef80F49", 18),
+        "PT-SUSDE": ("0x3de0ff76E8b528C092d47b9DaC775931cef80F49", 18),
+        "PT-sUSDe": ("0x3de0ff76E8b528C092d47b9DaC775931cef80F49", 18),
         # PT-sUSDe-5FEB2026: expired but usable for testing
-        "PT-SUSDE-5FEB2026": ("0xe8483517077afa11a9b07f849cee2552f040d7b2", 18),  # Fully uppercase for compiler
-        "PT-sUSDE-5FEB2026": ("0xe8483517077afa11a9b07f849cee2552f040d7b2", 18),
-        "PT-sUSDe-5FEB2026": ("0xe8483517077afa11a9b07f849cee2552f040d7b2", 18),
+        "PT-SUSDE-5FEB2026": ("0xE8483517077afa11A9B07f849cee2552f040d7b2", 18),  # Fully uppercase for compiler
+        "PT-sUSDE-5FEB2026": ("0xE8483517077afa11A9B07f849cee2552f040d7b2", 18),
+        "PT-sUSDe-5FEB2026": ("0xE8483517077afa11A9B07f849cee2552f040d7b2", 18),
     },
 }
 
@@ -131,14 +131,14 @@ PT_TOKEN_INFO: dict[str, dict[str, tuple[str, int]]] = {
 # Used for resolving YT tokens when trading (token -> YT, YT -> token)
 YT_TOKEN_INFO: dict[str, dict[str, tuple[str, int]]] = {
     "plasma": {
-        "YT-FUSDT0": ("0x7b6ad25e30ab1e7f5393e26c3f6bf1f4e8c0138a", 6),
-        "YT-fUSDT0": ("0x7b6ad25e30ab1e7f5393e26c3f6bf1f4e8c0138a", 6),
+        "YT-FUSDT0": ("0x7B6aD25E30AB1E7F5393E26C3F6bF1f4e8C0138A", 6),
+        "YT-fUSDT0": ("0x7B6aD25E30AB1E7F5393E26C3F6bF1f4e8C0138A", 6),
     },
     "ethereum": {
-        "YT-sUSDE-7MAY2026": ("0x30775b422b9c7415349855346352faa61fd97e41", 18),
-        "YT-sUSDe-7MAY2026": ("0x30775b422b9c7415349855346352faa61fd97e41", 18),
-        "YT-sUSDE-5FEB2026": ("0xe36c6c271779c080ba2e68e1e68410291a1b3f7a", 18),
-        "YT-sUSDe-5FEB2026": ("0xe36c6c271779c080ba2e68e1e68410291a1b3f7a", 18),
+        "YT-sUSDE-7MAY2026": ("0x30775B422b9c7415349855346352FAA61fD97E41", 18),
+        "YT-sUSDe-7MAY2026": ("0x30775B422b9c7415349855346352FAA61fD97E41", 18),
+        "YT-sUSDE-5FEB2026": ("0xe36c6c271779C080Ba2e68E1E68410291a1b3F7A", 18),
+        "YT-sUSDe-5FEB2026": ("0xe36c6c271779C080Ba2e68E1E68410291a1b3F7A", 18),
     },
     # NOTE: Arbitrum YT addresses must be verified against Pendle deployments
     # before being added here. Do not use placeholder addresses.
@@ -148,27 +148,27 @@ YT_TOKEN_INFO: dict[str, dict[str, tuple[str, int]]] = {
 # YT tokens share the same market as their corresponding PT tokens
 MARKET_BY_YT_TOKEN: dict[str, dict[str, str]] = {
     "plasma": {
-        "YT-FUSDT0": "0x0cb289e9df2d0dcfe13732638c89655fb80c2be2",
-        "YT-fUSDT0": "0x0cb289e9df2d0dcfe13732638c89655fb80c2be2",
+        "YT-FUSDT0": "0x0cb289E9df2d0dCFe13732638C89655fb80C2bE2",
+        "YT-fUSDT0": "0x0cb289E9df2d0dCFe13732638C89655fb80C2bE2",
     },
     "ethereum": {
-        "YT-SUSDE-7MAY2026": "0x8dae8ece668cf80d348873f23d456448e8694883",
-        "YT-sUSDE-7MAY2026": "0x8dae8ece668cf80d348873f23d456448e8694883",
-        "YT-sUSDe-7MAY2026": "0x8dae8ece668cf80d348873f23d456448e8694883",
-        "YT-SUSDE-5FEB2026": "0xed81f8ba2941c3979de2265c295748a6b6956567",
-        "YT-sUSDE-5FEB2026": "0xed81f8ba2941c3979de2265c295748a6b6956567",
-        "YT-sUSDe-5FEB2026": "0xed81f8ba2941c3979de2265c295748a6b6956567",
+        "YT-SUSDE-7MAY2026": "0x8dAe8ECe668cf80d348873F23D456448E8694883",
+        "YT-sUSDE-7MAY2026": "0x8dAe8ECe668cf80d348873F23D456448E8694883",
+        "YT-sUSDe-7MAY2026": "0x8dAe8ECe668cf80d348873F23D456448E8694883",
+        "YT-SUSDE-5FEB2026": "0xed81f8bA2941C3979de2265C295748a6b6956567",
+        "YT-sUSDE-5FEB2026": "0xed81f8bA2941C3979de2265C295748a6b6956567",
+        "YT-sUSDe-5FEB2026": "0xed81f8bA2941C3979de2265C295748a6b6956567",
     },
 }
 
 MARKET_TOKEN_MINT_SY: dict[str, dict[str, str]] = {
     "plasma": {
         # fUSDT0 market - SY is minted from FUSDT0, not USDT0
-        "0x0cb289e9df2d0dcfe13732638c89655fb80c2be2": "0x1dd4b13fcae900c60a350589be8052959d2ed27b",  # FUSDT0
+        "0x0cb289e9df2d0dcfe13732638c89655fb80c2be2": "0x1DD4b13fcAE900C60a350589BE8052959D2Ed27B",  # FUSDT0
     },
     "arbitrum": {
         # wstETH market - SY is minted from wstETH directly
-        "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b": "0x5979d7b546e38e414f7e9822514be443a4800529",  # wstETH
+        "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b": "0x5979D7b546E38E414F7E9822514be443A4800529",  # wstETH
     },
     "ethereum": {
         # sUSDe-7MAY2026 market - SY is minted from sUSDe

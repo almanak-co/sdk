@@ -248,7 +248,7 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
     },
     "base": {
         "uniswap_v3": "0x2626664c2603336E57B271c5C0b26F421741e481",
-        "sushiswap_v3": "0xFB7eF66a7e61fF9e400671e4b5BfBaBE2ea025b4",  # SushiSwap V3 SwapRouter
+        "sushiswap_v3": "0xfB7ef66A7e61fF9e400671e4b5BFbaBE2ea025B4",  # SushiSwap V3 SwapRouter
         "aerodrome": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
         "pancakeswap_v3": "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86",  # SmartRouter (7-param)
     },
@@ -265,7 +265,7 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
     },
     "mantle": {
         # Agni Finance (Uniswap V3 fork, same ABI) - the native V3 DEX on Mantle
-        "uniswap_v3": "0x319B69888b0d11cec22caA5034e25FfFBDc88421",  # Agni SwapRouter
+        "uniswap_v3": "0x319B69888b0d11cEC22caA5034e25FfFBDc88421",  # Agni SwapRouter
     },
 }
 
@@ -423,7 +423,7 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
         "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
     },
     "mantle": {
-        "uniswap_v3": "0xc4aaDC921E1cdb66c5300Bc158a313292923C0cb",  # Agni QuoterV2
+        "uniswap_v3": "0xc4aaDc921E1cdb66c5300Bc158a313292923C0cb",  # Agni QuoterV2
     },
 }
 

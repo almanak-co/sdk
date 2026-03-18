@@ -48,12 +48,12 @@ def _make_market(
 
 MOCK_MARKETS = [
     _make_market(
-        market_address="0x8dae8ece668cf80d348873f23d456448e8694883",
-        pt_address="0x3de0ff76e8b528c092d47b9dac775931cef80f49",
+        market_address="0x8dAe8ECe668cf80d348873F23D456448E8694883",
+        pt_address="0x3de0ff76E8b528C092d47b9DaC775931cef80F49",
         pt_symbol="PT-sUSDe-7MAY2026",
-        yt_address="0x30775b422b9c7415349855346352faa61fd97e41",
+        yt_address="0x30775B422b9c7415349855346352FAA61fD97E41",
         yt_symbol="YT-sUSDe-7MAY2026",
-        underlying_address="0x9d39a5de30e57443bff2a8307a4256c8797a3497",
+        underlying_address="0x9D39A5DE30e57443BfF2A8307A4256c8797A3497",
         underlying_symbol="sUSDe",
         liquidity_usd="5000000",
     ),
@@ -63,7 +63,7 @@ MOCK_MARKETS = [
         pt_symbol="PT-wstETH-25JUN2026",
         yt_address="0xyt_wsteth",
         yt_symbol="YT-wstETH-25JUN2026",
-        underlying_address="0x5979d7b546e38e414f7e9822514be443a4800529",
+        underlying_address="0x5979D7b546E38E414F7E9822514be443A4800529",
         underlying_symbol="wstETH",
         liquidity_usd="2000000",
     ),
@@ -71,7 +71,7 @@ MOCK_MARKETS = [
         market_address="0xmarket_expired",
         pt_address="0xpt_expired",
         pt_symbol="PT-sUSDe-5FEB2026",
-        underlying_address="0x9d39a5de30e57443bff2a8307a4256c8797a3497",
+        underlying_address="0x9D39A5DE30e57443BfF2A8307A4256c8797A3497",
         underlying_symbol="sUSDe",
         expiry=1000000000,  # past
         is_expired=True,
@@ -116,7 +116,7 @@ class TestFindMarkets:
 
     def test_filter_by_underlying_address(self, resolver):
         markets = resolver.find_markets(
-            underlying="0x9d39a5de30e57443bff2a8307a4256c8797a3497",
+            underlying="0x9D39A5DE30e57443BfF2A8307A4256c8797A3497",
             active_only=True,
         )
         assert len(markets) == 1
@@ -165,7 +165,7 @@ class TestResolveByPtSymbol:
     def test_resolve_by_api_symbol(self, resolver):
         market = resolver.resolve_by_pt_symbol("PT-sUSDe-7MAY2026")
         assert market is not None
-        assert market.market_address == "0x8dae8ece668cf80d348873f23d456448e8694883"
+        assert market.market_address == "0x8dAe8ECe668cf80d348873F23D456448E8694883"
 
     def test_case_insensitive_resolve(self, resolver):
         market = resolver.resolve_by_pt_symbol("pt-susde-7may2026")
@@ -185,7 +185,7 @@ class TestResolveByPtSymbol:
 
 class TestResolveByMarketAddress:
     def test_resolve_known_address(self, resolver):
-        market = resolver.resolve_by_market_address("0x8dae8ece668cf80d348873f23d456448e8694883")
+        market = resolver.resolve_by_market_address("0x8dAe8ECe668cf80d348873F23D456448E8694883")
         assert market is not None
         assert market.pt_symbol == "PT-sUSDe-7MAY2026"
 
@@ -211,7 +211,7 @@ class TestResolvePtTokenInfo:
         info = resolver.resolve_pt_token_info("PT-sUSDe-7MAY2026")
         assert info is not None
         addr, decimals = info
-        assert addr == "0x3de0ff76e8b528c092d47b9dac775931cef80f49"
+        assert addr == "0x3de0ff76E8b528C092d47b9DaC775931cef80F49"
         assert decimals == 18
 
 
@@ -225,7 +225,7 @@ class TestResolveYtTokenInfo:
         info = resolver.resolve_yt_token_info("YT-sUSDe-7MAY2026")
         assert info is not None
         addr, decimals = info
-        assert addr == "0x30775b422b9c7415349855346352faa61fd97e41"
+        assert addr == "0x30775B422b9c7415349855346352FAA61fD97E41"
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +236,7 @@ class TestResolveYtTokenInfo:
 class TestResolveMarketAddressFromPtSymbol:
     def test_resolve_from_api(self, resolver):
         addr = resolver.resolve_market_address_from_pt_symbol("PT-sUSDe-7MAY2026")
-        assert addr == "0x8dae8ece668cf80d348873f23d456448e8694883"
+        assert addr == "0x8dAe8ECe668cf80d348873F23D456448E8694883"
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +248,7 @@ class TestResolveMintSyToken:
     def test_falls_back_to_api_underlying(self, resolver):
         # No static dict entry for this market, so falls back to API underlying
         token = resolver.resolve_mint_sy_token("0xmarket_wsteth")
-        assert token == "0x5979d7b546e38e414f7e9822514be443a4800529"
+        assert token == "0x5979D7b546E38E414F7E9822514be443A4800529"
 
 
 # ---------------------------------------------------------------------------

@@ -23,7 +23,7 @@ Example:
 
     # Execute a swap
     result = adapter.swap(
-        pool_address="0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7",  # 3pool
+        pool_address="0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7",  # 3pool
         token_in="USDC",
         token_out="DAI",
         amount_in=Decimal("1000"),
@@ -31,7 +31,7 @@ Example:
 
     # Add liquidity
     lp_result = adapter.add_liquidity(
-        pool_address="0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7",
+        pool_address="0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7",
         amounts=[Decimal("1000"), Decimal("1000"), Decimal("1000")],  # DAI, USDC, USDT
     )
 """

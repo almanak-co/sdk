@@ -157,7 +157,7 @@ class PendleMarketResolver:
         """
         addr_lower = market_address.lower()
         for market in self._get_markets():
-            if market.market_address == addr_lower:
+            if market.market_address and market.market_address.lower() == addr_lower:
                 return market
 
         # Try direct API fetch for addresses not in the top-100 list
@@ -285,8 +285,8 @@ class PendleMarketResolver:
 
     def _matches_underlying(self, market: PendleMarketData, query: str) -> bool:
         """Check if a market's underlying matches a query string."""
-        # Match by address
-        if query.startswith("0x") and market.underlying_address == query:
+        # Match by address (case-insensitive — addresses may be EIP-55 or lowercase)
+        if query.startswith("0x") and market.underlying_address and market.underlying_address.lower() == query.lower():
             return True
         # Match by underlying symbol (if available from API)
         if market.underlying_symbol and query in market.underlying_symbol.lower():

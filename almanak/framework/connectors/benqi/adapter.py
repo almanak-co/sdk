@@ -75,7 +75,7 @@ BENQI_QI_TOKENS: dict[str, dict[str, Any]] = {
     },
     "BTC.b": {
         "qi_token": "0x89a415b3D20098E6A6C8f7a59001C67BD3129821",
-        "underlying": "0x152b9d0FdC40C096DE20232Db1E35AE6A57FA6c0",
+        "underlying": "0x152b9D0fDC40c096DE20232db1E35ae6A57fa6C0",
         "decimals": 8,
         "is_native": False,
     },
