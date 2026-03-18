@@ -114,7 +114,7 @@ def copy():
     pass
 
 
-# Add v2 backtest command group to strat
+# Add backtest command group to strat
 strat.add_command(framework_backtest_group, name="backtest")
 
 # Note: strat run is registered via @strat.command("run") on strategy_run() below,
@@ -1032,30 +1032,32 @@ def dashboard(port, gateway_host, gateway_port, no_browser):
 )
 @click.pass_context
 def new(ctx, name, working_dir, template, chain):
-    """Create a new v2 IntentStrategy from template.
+    """Create a new strategy from template.
 
-    This creates a strategy using the v2 intent-based framework with:
+    \b
+    This scaffolds a strategy project with:
     - strategy.py: Main strategy with decide() method
     - config.json: Runtime configuration
     - tests/: Test scaffolding
 
+    \b
     Templates:
-    - blank: Minimal template for custom implementations
-    - ta_swap: Technical analysis swap (RSI, Bollinger, or combined)
-    - dynamic_lp: Price-based LP range management
-    - lending_loop: Supply/borrow leverage loop (Aave V3)
-    - basis_trade: Spot+perp funding rate arbitrage (GMX V2)
-    - vault_yield: Vault deposit/redeem yield farming (MetaMorpho)
-    - copy_trader: Copy trading from leader wallets
-    - perps: Perpetual futures with TP/SL (GMX V2)
-    - multi_step: Atomic multi-step via IntentSequence
-    - staking: Liquid staking (Lido)
+      blank          Minimal starting point for custom implementations
+      ta_swap        Technical analysis swap (RSI, Bollinger, or combined)
+      dynamic_lp     Price-based LP range management
+      lending_loop   Supply/borrow leverage loop (Aave V3)
+      basis_trade    Spot+perp funding rate arbitrage (GMX V2)
+      vault_yield    Vault deposit/redeem yield farming (MetaMorpho)
+      copy_trader    Copy trading from leader wallets
+      perps          Perpetual futures with TP/SL (GMX V2)
+      multi_step     Atomic multi-step via IntentSequence
+      staking        Liquid staking (Lido)
     """
     try:
         # Use provided name or prompt interactively
         strategy_name = name if name else click.prompt("Enter a name for your strategy")
 
-        # Invoke the v2 framework's new-strategy command
+        # Invoke the framework's new-strategy command
         ctx.invoke(
             framework_new_strategy_cmd,
             name=strategy_name,
@@ -1330,7 +1332,7 @@ def strategy_run(
     # before the gateway starts, so we install here too.)
     install_redaction()
 
-    # Invoke the v2 framework's run command
+    # Invoke the framework's run command
     try:
         ctx.invoke(
             framework_run_cmd,
