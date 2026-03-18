@@ -356,3 +356,205 @@ class TestFallbackSimulatorCascade:
         assert len(fallback._fallbacks) == 2
         assert fallback._fallbacks[0] is secondary
         assert fallback._fallbacks[1] is extra
+
+
+# =============================================================================
+# Simulator payload tests — gas field omission (PR #817)
+# =============================================================================
+
+
+class TestSimulatorPayloadNoGasCap:
+    """Verify Tenderly/Alchemy simulators do NOT send gas_limit in their payloads.
+
+    Simulators should let the API estimate gas freely rather than capping at
+    our hardcoded values, which fail on chains with non-standard gas models
+    (e.g. Mantle where approve costs 203M gas).
+    """
+
+    @pytest.mark.asyncio
+    async def test_tenderly_payload_omits_gas_field(self):
+        """Tenderly simulation payload should not include 'gas' key.
+
+        Patches aiohttp to capture the actual JSON payload sent to the
+        Tenderly API and asserts no 'gas' field is present in any
+        simulation entry — even when the UnsignedTransaction has a
+        non-zero gas_limit.
+        """
+        import json as json_mod
+
+        from almanak.framework.execution.interfaces import TransactionType, UnsignedTransaction
+
+        sim = TenderlySimulator(
+            account_slug="test",
+            project_slug="test",
+            access_key="fake-key",
+        )
+
+        tx = UnsignedTransaction(
+            to="0x" + "ab" * 20,
+            value=0,
+            data="0x095ea7b3" + "00" * 64,
+            chain_id=42161,
+            gas_limit=75_000_000,  # Must NOT appear in the API payload
+            tx_type=TransactionType.EIP_1559,
+            from_address="0x" + "cd" * 20,
+            max_fee_per_gas=1000000000,
+            max_priority_fee_per_gas=0,
+        )
+
+        captured_payload = {}
+
+        # Mock the aiohttp session to capture the outgoing JSON
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.text = AsyncMock(
+            return_value=json_mod.dumps(
+                {
+                    "simulation_results": [
+                        {
+                            "simulation": {"status": True},
+                            "transaction": {"gas_used": 119925407},
+                        }
+                    ]
+                }
+            )
+        )
+
+        mock_post_cm = AsyncMock()
+        mock_post_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_post_cm.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.post = MagicMock(return_value=mock_post_cm)
+
+        mock_session_cm = AsyncMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session_cm):
+            result = await sim.simulate([tx], "arbitrum")
+
+        # Extract the JSON payload that was sent to Tenderly
+        call_args = mock_session.post.call_args
+        assert call_args is not None, "aiohttp post was never called"
+        captured_payload = call_args.kwargs.get("json") or call_args[1].get("json", {})
+
+        # Assert no simulation entry contains a 'gas' field
+        for i, sim_entry in enumerate(captured_payload.get("simulations", [])):
+            assert "gas" not in sim_entry, (
+                f"Tenderly simulation[{i}] should NOT include 'gas' field — "
+                f"let the API estimate gas freely (PR #817). Found: gas={sim_entry.get('gas')}"
+            )
+
+        assert result.success is True
+        assert result.gas_estimates == [119925407]
+
+    @pytest.mark.asyncio
+    async def test_alchemy_payload_omits_gas_field(self):
+        """Alchemy simulation payload should not include 'gas' key.
+
+        Patches aiohttp to capture the actual JSON payload sent to the
+        Alchemy API and asserts no 'gas' field is present in any
+        transaction entry.
+        """
+        import json as json_mod
+
+        from almanak.framework.execution.interfaces import TransactionType, UnsignedTransaction
+
+        sim = AlchemySimulator(api_key="fake-key")
+
+        tx = UnsignedTransaction(
+            to="0x" + "ab" * 20,
+            value=0,
+            data="0x095ea7b3" + "00" * 64,
+            chain_id=42161,
+            gas_limit=75_000_000,  # Must NOT appear in the API payload
+            tx_type=TransactionType.EIP_1559,
+            from_address="0x" + "cd" * 20,
+            max_fee_per_gas=1000000000,
+            max_priority_fee_per_gas=0,
+        )
+
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.text = AsyncMock(
+            return_value=json_mod.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": [
+                        {
+                            "calls": [
+                                {
+                                    "status": "0x1",
+                                    "gasUsed": hex(119925407),
+                                    "returnValue": "0x",
+                                }
+                            ]
+                        }
+                    ],
+                }
+            )
+        )
+
+        mock_post_cm = AsyncMock()
+        mock_post_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_post_cm.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.post = MagicMock(return_value=mock_post_cm)
+
+        mock_session_cm = AsyncMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session_cm):
+            result = await sim.simulate([tx], "arbitrum")
+
+        # Extract the JSON payload sent to Alchemy
+        call_args = mock_session.post.call_args
+        assert call_args is not None, "aiohttp post was never called"
+        captured_payload = call_args.kwargs.get("json") or call_args[1].get("json", {})
+
+        # Assert no transaction entry contains a 'gas' field
+        raw_txs = captured_payload.get("params", [None])[0] or []
+        for i, tx_entry in enumerate(raw_txs):
+            assert "gas" not in tx_entry, (
+                f"Alchemy tx[{i}] should NOT include 'gas' field — "
+                f"let the API estimate gas freely (PR #817). Found: gas={tx_entry.get('gas')}"
+            )
+
+
+class TestMantleFallbackGasEstimates:
+    """Verify Mantle fallback gas estimates are calibrated to measured on-chain values.
+
+    These constants are only used when Tenderly/Alchemy simulation is unavailable.
+    """
+
+    def test_mantle_approve_gas_covers_usdc_proxy(self):
+        """Mantle approve estimate must cover USDC proxy (~203M measured)."""
+        from almanak.framework.intents.compiler import get_gas_estimate
+
+        gas = get_gas_estimate("mantle", "approve")
+        assert gas >= 203_000_000, (
+            f"Mantle approve fallback ({gas}) too low for USDC proxy (~203M). "
+            "This will cause 'out of gas' when simulation is unavailable."
+        )
+
+    def test_mantle_wrap_gas_covers_wmnt_deposit(self):
+        """Mantle wrap estimate must cover WMNT deposit() (~118M measured)."""
+        from almanak.framework.intents.compiler import get_gas_estimate
+
+        gas = get_gas_estimate("mantle", "wrap_eth")
+        assert gas >= 118_000_000, (
+            f"Mantle wrap fallback ({gas}) too low for WMNT deposit (~118M)."
+        )
+
+    def test_mantle_unwrap_gas_covers_wmnt_withdraw(self):
+        """Mantle unwrap estimate must cover WMNT withdraw() (~146M measured)."""
+        from almanak.framework.intents.compiler import get_gas_estimate
+
+        gas = get_gas_estimate("mantle", "unwrap_eth")
+        assert gas >= 146_000_000, (
+            f"Mantle unwrap fallback ({gas}) too low for WMNT withdraw (~146M)."
+        )

@@ -249,9 +249,11 @@ class TenderlySimulator(Simulator):
             if tx.value and tx.value > 0:
                 simulation["value"] = hex(tx.value)
 
-            # Add gas limit if set (for validation, not estimation)
-            if tx.gas_limit and tx.gas_limit > 0:
-                simulation["gas"] = tx.gas_limit
+            # Do NOT send gas_limit to Tenderly. Let it simulate with an
+            # unlimited gas budget so it reports the actual gas used. The
+            # orchestrator applies the chain-specific buffer afterward.
+            # Sending our hardcoded estimate as a cap causes false "out of
+            # gas" failures on chains with unusual gas models (e.g. Mantle).
 
             # Add state_objects only to first simulation (applies to entire bundle)
             if i == 0 and state_overrides:

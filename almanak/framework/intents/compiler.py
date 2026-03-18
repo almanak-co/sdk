@@ -173,11 +173,13 @@ CHAIN_GAS_OVERRIDES: dict[str, dict[str, int]] = {
         # Mantle gas units are ~2000x higher than L1 equivalents (a Uniswap V3 swap
         # uses ~150k on L1 but ~340M on Mantle). Gas prices are proportionally lower
         # (~0.02 Gwei), so actual cost in MNT is comparable to other L2s (~$0.006/swap).
-        "approve": 50_000_000,
+        # Fallback values when simulation (Tenderly/Alchemy) is unavailable.
+        # Measured via cast estimate: USDC approve ~203M, wrap ~118M, unwrap ~146M.
+        "approve": 250_000_000,
         "swap_simple": 500_000_000,
         "swap_multi_hop": 800_000_000,
-        "wrap_eth": 50_000_000,
-        "unwrap_eth": 50_000_000,
+        "wrap_eth": 200_000_000,
+        "unwrap_eth": 200_000_000,
         "lp_mint": 1_000_000_000,
         "lp_increase_liquidity": 400_000_000,
         "lp_decrease_liquidity": 500_000_000,

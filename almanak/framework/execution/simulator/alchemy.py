@@ -246,9 +246,10 @@ class AlchemySimulator(Simulator):
             if tx.value and tx.value > 0:
                 tx_dict["value"] = hex(tx.value)
 
-            # Add gas if set
-            if tx.gas_limit and tx.gas_limit > 0:
-                tx_dict["gas"] = hex(tx.gas_limit)
+            # Do NOT send gas_limit to Alchemy. Let it estimate the actual
+            # gas used. The orchestrator applies the buffer afterward.
+            # Sending hardcoded estimates as caps causes false "out of gas"
+            # on chains with unusual gas models (e.g. Mantle).
 
             raw_transactions.append(tx_dict)
 
