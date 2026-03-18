@@ -23,6 +23,7 @@ from almanak.framework.teardown.models import (
     TeardownStatus,
 )
 from almanak.framework.teardown.config import TeardownConfig
+from almanak.framework.intents.compiler import CompilationStatus
 
 
 def _make_strategy(intents=None):
@@ -105,7 +106,7 @@ async def test_execute_applies_prices_to_compiler():
     def mock_compile(intent_arg):
         seen_prices.append(dict(compiler.price_oracle) if compiler.price_oracle else None)
         result = MagicMock()
-        result.status.value = "success"
+        result.status.value = "SUCCESS"
         result.action_bundle = MagicMock()
         return result
 
@@ -300,3 +301,98 @@ async def test_execute_typeerror_fallback_catches_old_signature():
 
     # Should have been called twice: once with market (TypeError), once without
     assert call_count == 2
+
+
+def _make_compiler_with_status(status_value: str, error: str | None = None):
+    """Create a mock compiler that returns a compilation result with the given status."""
+    compiler = MagicMock()
+    compiler.price_oracle = None
+    compiler._using_placeholders = False
+
+    compilation_result = MagicMock()
+    compilation_result.status.value = status_value
+    compilation_result.action_bundle = MagicMock() if status_value == "SUCCESS" else None
+    compilation_result.error = error
+
+    compiler.compile = MagicMock(return_value=compilation_result)
+    return compiler
+
+
+@pytest.mark.asyncio
+async def test_execute_at_slippage_compilation_success_proceeds_to_orchestrator():
+    """CompilationStatus.SUCCESS causes the orchestrator to be invoked."""
+    market = _make_market()
+    intent = MagicMock()
+    intent.intent_type = "SWAP"
+    intent.chain = "arbitrum"
+    intent.to_dict.return_value = {"type": "swap"}
+    del intent.max_slippage  # skip slippage cloning
+    strategy = _make_strategy(intents=[intent])
+
+    compiler = _make_compiler_with_status("SUCCESS")
+    orchestrator = MagicMock()
+    orchestrator.execute = AsyncMock(return_value=MagicMock(success=True, transaction_results=[], total_gas_used=0))
+
+    manager = TeardownManager(orchestrator=orchestrator, compiler=compiler)
+    manager.cancel_window.run_cancel_window = AsyncMock(return_value=MagicMock(was_cancelled=False))
+    manager.safety_guard.validate_teardown_request = MagicMock(return_value=MagicMock(all_passed=True))
+    manager._verify_closure = AsyncMock(return_value=True)
+
+    result = await manager.execute(strategy=strategy, mode="graceful", market=market)
+
+    # Orchestrator must have been called (compilation succeeded)
+    orchestrator.execute.assert_called_once()
+    assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_execute_at_slippage_compilation_failed_returns_failure():
+    """CompilationStatus.FAILED causes ExecutionAttempt(success=False) with error message."""
+    market = _make_market()
+    intent = MagicMock()
+    intent.intent_type = "SWAP"
+    intent.chain = "arbitrum"
+    intent.to_dict.return_value = {"type": "swap"}
+    del intent.max_slippage
+    strategy = _make_strategy(intents=[intent])
+
+    compiler = _make_compiler_with_status("FAILED", error="No route found for WETH -> USDC")
+    orchestrator = MagicMock()
+    orchestrator.execute = AsyncMock(return_value=MagicMock(success=True))
+
+    manager = TeardownManager(orchestrator=orchestrator, compiler=compiler)
+    manager.cancel_window.run_cancel_window = AsyncMock(return_value=MagicMock(was_cancelled=False))
+    manager.safety_guard.validate_teardown_request = MagicMock(return_value=MagicMock(all_passed=True))
+    manager._verify_closure = AsyncMock(return_value=True)
+
+    result = await manager.execute(strategy=strategy, mode="graceful", market=market)
+
+    # Orchestrator must NOT have been called (compilation failed)
+    orchestrator.execute.assert_not_called()
+    assert result.success is False
+
+
+@pytest.mark.asyncio
+async def test_execute_at_slippage_compilation_partial_returns_failure():
+    """CompilationStatus.PARTIAL causes ExecutionAttempt(success=False)."""
+    market = _make_market()
+    intent = MagicMock()
+    intent.intent_type = "SWAP"
+    intent.chain = "arbitrum"
+    intent.to_dict.return_value = {"type": "swap"}
+    del intent.max_slippage
+    strategy = _make_strategy(intents=[intent])
+
+    compiler = _make_compiler_with_status("PARTIAL", error="Only 1 of 2 transactions compiled")
+    orchestrator = MagicMock()
+    orchestrator.execute = AsyncMock(return_value=MagicMock(success=True))
+
+    manager = TeardownManager(orchestrator=orchestrator, compiler=compiler)
+    manager.cancel_window.run_cancel_window = AsyncMock(return_value=MagicMock(was_cancelled=False))
+    manager.safety_guard.validate_teardown_request = MagicMock(return_value=MagicMock(all_passed=True))
+    manager._verify_closure = AsyncMock(return_value=True)
+
+    result = await manager.execute(strategy=strategy, mode="graceful", market=market)
+
+    orchestrator.execute.assert_not_called()
+    assert result.success is False

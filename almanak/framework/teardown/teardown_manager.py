@@ -661,7 +661,7 @@ class TeardownManager:
                         if hasattr(self.compiler, "restore_prices"):
                             self.compiler.restore_prices(original_oracle, original_placeholders)
 
-                    if compilation_result.status.value != "success":
+                    if compilation_result.status.value != "SUCCESS":
                         logger.error(f"Intent compilation failed: {compilation_result.error}")
                         return ExecutionAttempt(
                             success=False,
