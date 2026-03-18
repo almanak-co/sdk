@@ -5597,48 +5597,30 @@ class IntentCompiler:
     def _compile_swap_uniswap_v4(self, intent: SwapIntent) -> CompilationResult:
         """Compile SWAP intent for Uniswap V4.
 
-        Delegates to the UniswapV4Adapter which uses the V4 PoolManager
-        singleton and V4SwapRouter for swap execution.
+        QUARANTINED (VIB-1462): The V4SwapRouter address used by the connector
+        is fabricated (empty EOA on all chains). Swaps silently succeed as no-ops
+        because the EVM treats calldata sent to an EOA as a success. This is a
+        capital-destroying false positive. V4 compilation is blocked until the
+        connector is rewritten to use the Universal Router.
+
+        Use uniswap_v3 as a drop-in alternative for swap intents.
         """
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
+        logger.warning(
+            "Uniswap V4 swap BLOCKED (VIB-1462): V4SwapRouter address is fabricated. "
+            "Use protocol='uniswap_v3' instead. Tokens: %s -> %s",
+            intent.from_token,
+            intent.to_token,
         )
-
-        try:
-            from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4Adapter
-            from almanak.framework.data.tokens import get_token_resolver
-
-            adapter = UniswapV4Adapter(chain=self.chain, token_resolver=get_token_resolver())
-            adapter.wallet_address = self.wallet_address
-
-            action_bundle = adapter.compile_swap_intent(
-                intent=intent,
-                price_oracle=self.price_oracle,
-            )
-
-            if not action_bundle.transactions:
-                result.status = CompilationStatus.FAILED
-                error_msg = action_bundle.metadata.get("error", "No transactions generated")
-                result.error = f"Uniswap V4 compilation failed: {error_msg}"
-                return result
-
-            result.action_bundle = action_bundle
-            result.total_gas_estimate = action_bundle.metadata.get("gas_estimate", 0)
-
-            logger.info(
-                "Compiled Uniswap V4 SWAP intent: %s -> %s, %d txs",
-                intent.from_token,
-                intent.to_token,
-                len(action_bundle.transactions),
-            )
-
-        except Exception as e:
-            logger.exception("Failed to compile Uniswap V4 SWAP intent")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            intent_id=intent.intent_id,
+            error=(
+                "Uniswap V4 is quarantined (VIB-1462): The V4SwapRouter contract address "
+                "is fabricated and does not exist on any chain. Swaps would silently succeed "
+                "as no-ops (tokens don't move). Use protocol='uniswap_v3' as a drop-in "
+                "alternative until the V4 connector is rewritten to use the Universal Router."
+            ),
+        )
 
     def _compile_lp_open_curve(self, intent: LPOpenIntent) -> CompilationResult:
         """Compile LP_OPEN intent for Curve Finance.

@@ -54,7 +54,7 @@ class TestUniswapV4SwapIntent:
     - Balance changes match expected amounts
     """
 
-    @pytest.mark.xfail(reason="V4 PoolManager singleton state does not fork correctly on Anvil", strict=False)
+    @pytest.mark.xfail(reason="V4 quarantined (VIB-1462): V4SwapRouter address is fabricated — compilation blocked", strict=False)
     @pytest.mark.asyncio
     async def test_swap_usdc_to_weth_using_intent(
         self,
@@ -172,7 +172,7 @@ class TestUniswapV4SwapIntent:
 
         print("\nALL CHECKS PASSED")
 
-    @pytest.mark.xfail(reason="V4 PoolManager singleton state does not fork correctly on Anvil", strict=False)
+    @pytest.mark.xfail(reason="V4 quarantined (VIB-1462): V4SwapRouter address is fabricated — compilation blocked", strict=False)
     @pytest.mark.asyncio
     async def test_swap_weth_to_usdc_using_intent(
         self,
