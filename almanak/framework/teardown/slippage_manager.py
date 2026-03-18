@@ -45,13 +45,20 @@ class Intent(Protocol):
 
 @dataclass
 class ExecutionAttempt:
-    """Result of a single execution attempt."""
+    """Result of a single execution attempt.
+
+    Callers MUST set ``retryable=False`` for deterministic failures (e.g.,
+    compilation errors, missing prices, unknown tokens) so the slippage
+    manager skips further escalation.  The default ``True`` is correct for
+    transient errors (RPC timeout, nonce conflict, gas estimation).
+    """
 
     success: bool
     slippage_used: Decimal
     actual_slippage: Decimal | None = None
     error: str | None = None
     retry_count: int = 0
+    retryable: bool = True
 
 
 @dataclass
@@ -257,6 +264,20 @@ class EscalatingSlippageManager:
 
                 # Failed - log and potentially retry
                 logger.warning(f"Execution failed at {slippage:.1%}: {attempt.error}")
+
+                # Don't retry deterministic failures (missing price, unknown token, etc.)
+                if not attempt.retryable:
+                    logger.info(
+                        f"Non-retryable failure at {slippage:.1%}: {attempt.error}. Skipping further escalation."
+                    )
+                    return ExecutionResult(
+                        success=False,
+                        final_slippage=slippage,
+                        status="failed_non_retryable",
+                        attempts=attempts,
+                        current_level=level_config.level,
+                        message=f"Non-retryable error: {attempt.error}",
+                    )
 
                 if retry < level_config.retries - 1:
                     await asyncio.sleep(self.config.retry_delay_seconds)

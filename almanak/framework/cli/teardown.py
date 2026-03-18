@@ -481,16 +481,24 @@ def execute_teardown(
             click.echo()
             raise click.ClickException(str(e)) from None
 
+        # Security: generate a random session token for the managed gateway so it
+        # is never running without authentication on mainnet (matching run.py pattern).
+        import uuid
+
+        session_auth_token = uuid.uuid4().hex
+
         gateway_settings = GatewaySettings(
             grpc_host=effective_host,
             grpc_port=gateway_port,
             network="mainnet",
-            allow_insecure=True,
+            allow_insecure=False,
             metrics_enabled=False,
             audit_enabled=False,
+            chains=[chain] if chain else [],
+            auth_token=session_auth_token,
         )
 
-        click.echo(f"Starting managed gateway on {effective_host}:{gateway_port} (network=mainnet)...")
+        click.echo(f"Starting managed gateway on {effective_host}:{gateway_port} (network=mainnet, chain={chain})...")
         managed_gateway = ManagedGateway(gateway_settings)
         try:
             managed_gateway.start(timeout=10.0)
@@ -506,7 +514,7 @@ def execute_teardown(
         click.secho(f"Managed gateway started on {effective_host}:{gateway_port}", fg="green")
 
         # Connect client to the managed gateway
-        gateway_config = GatewayClientConfig(host=effective_host, port=gateway_port)
+        gateway_config = GatewayClientConfig(host=effective_host, port=gateway_port, auth_token=session_auth_token)
         gateway_client = GatewayClient(gateway_config)
         gateway_client.connect()
 

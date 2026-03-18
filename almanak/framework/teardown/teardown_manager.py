@@ -668,6 +668,7 @@ class TeardownManager:
                             slippage_used=slippage,
                             actual_slippage=Decimal("0"),
                             error=f"Compilation failed: {compilation_result.error}",
+                            retryable=False,
                         )
 
                     if not compilation_result.action_bundle:
@@ -677,6 +678,7 @@ class TeardownManager:
                             slippage_used=slippage,
                             actual_slippage=Decimal("0"),
                             error="No action bundle produced",
+                            retryable=False,
                         )
 
                     # Create execution context
