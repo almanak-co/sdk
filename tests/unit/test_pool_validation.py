@@ -165,7 +165,7 @@ class TestTraderJoePoolValidation:
         assert "No RPC URL" in result.warning
 
     def test_unsupported_chain_returns_none(self):
-        result = validate_traderjoe_pool("ethereum", "0xabc", "0xdef", 20, "http://localhost:8545")
+        result = validate_traderjoe_pool("polygon", "0xabc", "0xdef", 20, "http://localhost:8545")
         assert result.exists is None
         assert "No TraderJoe V2 factory" in result.warning
 

@@ -283,6 +283,11 @@ PANCAKESWAP_V3: dict[str, dict[str, str]] = {
         "factory": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
         "quoter": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
     },
+    "linea": {
+        "swap_router": "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86",  # SmartRouter
+        "factory": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
+        "quoter": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
+    },
 }
 
 PANCAKESWAP_V3_TOKENS: dict[str, dict[str, str]] = {
@@ -308,6 +313,11 @@ PANCAKESWAP_V3_TOKENS: dict[str, dict[str, str]] = {
         "USDT": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
         "WBTC": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
         "ARB": "0x912CE59144191C1204E64559FE8253a0e49E6548",
+    },
+    "linea": {
+        "WETH": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",
+        "USDC": "0x176211869cA2b568f2A7D4EE941E073a821EE1ff",
+        "USDT": "0xA219439258ca9da29E9Cc4cE5596924745e12B93",
     },
 }
 
@@ -360,6 +370,16 @@ AAVE_V3: dict[str, dict[str, str]] = {
         "pool": "0x925a2A7214Ed92428B5b1B090F80b25700095e12",
         "pool_data_provider": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
         "oracle": "0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7",
+    },
+    "sonic": {
+        "pool": "0x5362dBb1e601abF3a4c14c22ffEdA64042E5eAA3",
+        "pool_data_provider": "0xc0a344397cfa89dF1e1d3e4fb330834D789cF2CD",
+        "oracle": "0xD63f7658C66B2934Bd234D79D06aEF5290734B30",
+    },
+    "mantle": {
+        "pool": "0x458F293454fE0d67EC0655f3672301301DD51422",
+        "pool_data_provider": "0x487c5c669D9eee6057C44973207101276cf73b68",
+        "oracle": "0x47a063CfDa980532267970d478EC340C0F80E8df",
     },
 }
 
@@ -441,6 +461,17 @@ AAVE_V3_TOKENS: dict[str, dict[str, str]] = {
     },
     "plasma": {
         "WETH": "0x9895D81bB462A195b4922ED7De0e3ACD007c32CB",
+    },
+    "sonic": {
+        "wS": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",
+        "WETH": "0x50c42dEAcD8Fc9773493ED674b675bE577f2634b",
+        "USDC": "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",
+        "USDT": "0x6047828dc181963ba44974801FF68e538dA5eaF9",
+    },
+    "mantle": {
+        "WMNT": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
+        "WETH": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",
+        "USDT0": "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE",
     },
 }
 
@@ -628,6 +659,18 @@ TRADERJOE_V2: dict[str, dict[str, str]] = {
         "factory": "0x8e42f2F4101563bF679975178e880FD87d3eFd4e",
         "router": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter v2.1
     },
+    "arbitrum": {
+        "factory": "0x8e42f2F4101563bF679975178e880FD87d3eFd4e",
+        "router": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter v2.1 (CREATE2 — same address)
+    },
+    "bsc": {
+        "factory": "0x8e42f2F4101563bF679975178e880FD87d3eFd4e",
+        "router": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter v2.1 (CREATE2 — same address)
+    },
+    "ethereum": {
+        "factory": "0xDC8d77b69155c7E68A95a4fb0f06a71FF90B943a",
+        "router": "0x9A93a421b74F1c5755b83dD2C211614dC419C44b",  # LBRouter v2.1
+    },
 }
 
 TRADERJOE_V2_TOKENS: dict[str, dict[str, str]] = {
@@ -639,6 +682,24 @@ TRADERJOE_V2_TOKENS: dict[str, dict[str, str]] = {
         "JOE": "0x6e84a6216eA6dACC71eE8E6b0a5B7322EEbC0fDd",
         "WETH.e": "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",
         "BTC.b": "0x152b9d0FdC40C096757F570A51E494bd4b943E50",
+    },
+    "arbitrum": {
+        "ETH": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+        "WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+        "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        "USDT": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
+    },
+    "bsc": {
+        "BNB": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+        "WBNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+        "USDC": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+        "USDT": "0x55d398326f99059fF775485246999027B3197955",
+    },
+    "ethereum": {
+        "ETH": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+        "WETH": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        "USDC": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "USDT": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
     },
 }
 
@@ -719,6 +780,26 @@ PENDLE: dict[str, dict[str, str]] = {
         "yt_fusdt0_26feb2026": "0xC0f6a41a9837C4d824Bc8d346341DB77e634ae69",
         "sy_fusdt0": "0xfF3CCC1245D59B21B6EC4A597557E748f8311E8c",
     },
+    "sonic": {
+        "router": "0x888888888889758F76e7103c6CbF23ABbF58F946",
+        "router_static": "0x0013ACc071f732fd6BF8210AB46A3794a7D8945e",
+        "market_factory": "0x0AB3ae25c42a2f3748a018556989355D568Fa6d6",  # V6
+    },
+    "base": {
+        "router": "0x888888888889758F76e7103c6CbF23ABbF58F946",
+        "router_static": "0xB4205a645c7e920BD8504181B1D7f2c5C955C3e7",
+        "market_factory": "0x81E80A50E56d10C501fF17B5Fe2F662bd9EA4590",  # V6
+    },
+    "mantle": {
+        "router": "0x888888888889758F76e7103c6CbF23ABbF58F946",
+        "router_static": "0xCAd502Bb55d1A3F79952F969BFF3f011CF30a94a",
+        "market_factory": "0xa35AE21a593CB06959978E20b33Db34163166C79",  # V6
+    },
+    "bsc": {
+        "router": "0x888888888889758F76e7103c6CbF23ABbF58F946",
+        "router_static": "0x2700ADB035F82a11899ce1D3f1BF8451c296eABb",
+        "market_factory": "0x80cE46449DF1c977f6ba60495125ce282F83DdFB",  # V6
+    },
 }
 
 PENDLE_TOKENS: dict[str, dict[str, str]] = {
@@ -740,6 +821,25 @@ PENDLE_TOKENS: dict[str, dict[str, str]] = {
         "FUSDT0": "0x1DD4b13fcAE900C60a350589BE8052959D2Ed27B",
         "PENDLE": "0x17Bac5F906c9A0282aC06a59958D85796c831f24",
         "WXPL": "0x6100E367285b01F48D07953803A2d8dCA5D19873",
+    },
+    "sonic": {
+        "wS": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",
+        "WETH": "0x50c42dEAcD8Fc9773493ED674b675bE577f2634b",
+        "USDC": "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",
+    },
+    "base": {
+        "WETH": "0x4200000000000000000000000000000000000006",
+        "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    },
+    "mantle": {
+        "WMNT": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
+        "WETH": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",
+        "USDC": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",
+    },
+    "bsc": {
+        "WBNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+        "USDC": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+        "USDT": "0x55d398326f99059fF775485246999027B3197955",
     },
 }
 

@@ -224,12 +224,14 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "uniswap_v2": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
         "sushiswap_v3": "0x2E6cd2d30aa43f40aa81619ff4b6E0a41479B13F",  # SushiSwap V3 SwapRouter
         "pancakeswap_v3": "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",  # SmartRouter (7-param)
+        "traderjoe_v2": "0x9A93a421b74F1c5755b83dD2C211614dC419C44b",  # LBRouter v2.1
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
     },
     "arbitrum": {
         "uniswap_v3": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",  # SwapRouter02
         "sushiswap_v3": "0x8A21F6768C1f8075791D08546Dadf6daA0bE820c",  # SushiSwap V3 SwapRouter
         "pancakeswap_v3": "0x32226588378236Fd0c7c4053999F88aC0e5cAc77",  # SmartRouter (7-param)
+        "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter v2.1
         "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
         "camelot": "0xc873fEcbd354f5A56E00E710B90EF4201db2448d",
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
@@ -261,7 +263,12 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "pancakeswap_v3": "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",  # SmartRouter (7-param)
         "pancakeswap_v2": "0x10ED43C718714eb63d5aA57B78B54704E256024E",
         "uniswap_v3": "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2",  # SwapRouter02
+        "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter v2.1
         "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
+    },
+    "linea": {
+        "uniswap_v3": "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",  # SwapRouter02
+        "pancakeswap_v3": "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86",  # SmartRouter
     },
     "mantle": {
         # Agni Finance (Uniswap V3 fork, same ABI) - the native V3 DEX on Mantle
@@ -275,12 +282,14 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
         "sushiswap_v3": "0x2214A42d8e2A1d20635c2cb0664422c528B6A432",
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
+        "traderjoe_v2": "0x9A93a421b74F1c5755b83dD2C211614dC419C44b",  # LBRouter v2.1
     },
     "arbitrum": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
         "sushiswap_v3": "0xF0cBce1942A68BEB3d1b73F0dd86C8DCc363eF49",
         "camelot": "0x00c7f3082833e796A5b3e4Bd59f6642FF44DCD15",
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
+        "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter v2.1
     },
     "optimism": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
@@ -308,6 +317,11 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     "bsc": {
         "uniswap_v3": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
         "sushiswap_v3": "0xF70c086618dcf2b1A461311275e00D6B722ef914",
+        "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
+        "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter v2.1
+    },
+    "linea": {
+        "uniswap_v3": "0x4615C383F85D0a2BbED973d83ccecf5CB7121463",
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
     },
     "mantle": {
@@ -356,6 +370,16 @@ CHAIN_TOKENS: dict[str, dict[str, str]] = {
         "usdt": "0x55d398326f99059fF775485246999027B3197955",
         "wbnb": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
         "weth": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
+    },
+    "linea": {
+        "usdc": "0x176211869cA2b568f2A7D4EE941E073a821EE1ff",
+        "usdt": "0xA219439258ca9da29E9Cc4cE5596924745e12B93",
+        "weth": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",
+    },
+    "sonic": {
+        "usdc": "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",
+        "weth": "0x50c42dEAcD8Fc9773493ED674b675bE577f2634b",
+        "ws": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",
     },
     "mantle": {
         "usdc": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",
@@ -422,6 +446,10 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
         "uniswap_v3": "0xbe0F5544EC67e9B3b2D979aaA43f18Fd87E6257F",
         "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
     },
+    "linea": {
+        "uniswap_v3": "0x42bE4D6527829FeFA1493e1fb9F3676d2425C3C1",
+        "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
+    },
     "mantle": {
         "uniswap_v3": "0xc4aaDc921E1cdb66c5300Bc158a313292923C0cb",  # Agni QuoterV2
     },
@@ -449,6 +477,15 @@ LENDING_POOL_ADDRESSES: dict[str, dict[str, str]] = {
     },
     "bsc": {
         "aave_v3": "0x6807dc923806fE8Fd134338EABCA509979a7e0cB",
+    },
+    "sonic": {
+        "aave_v3": "0x5362dBb1e601abF3a4c14c22ffEdA64042E5eAA3",
+    },
+    "linea": {
+        "aave_v3": "0xc47b8C00b0f69a36fa203Ffeac0334874574a8Ac",
+    },
+    "mantle": {
+        "aave_v3": "0x458F293454fE0d67EC0655f3672301301DD51422",
     },
 }
 
@@ -528,6 +565,7 @@ BALANCER_VAULT_ADDRESSES: dict[str, str] = {
     "optimism": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
     "polygon": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
     "base": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
+    "avalanche": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
 }
 
 # Max uint256 for unlimited approvals
@@ -946,6 +984,7 @@ class DefaultSwapAdapter:
             "plasma": "WXPL",
             "bsc": "WBNB",
             "mantle": "WMNT",
+            "sonic": "WS",
         }
         _wn_symbol = _wrapped_symbols.get(self.chain)
         wrapped_native_addr = resolve_address(_wn_symbol) if _wn_symbol else None

@@ -43,7 +43,24 @@ from almanak.framework.permissions.synthetic_intents import (
 # When a gap is fixed upstream, remove it here - the test will then
 # assert that permissions are actually produced.
 # ---------------------------------------------------------------------------
-_KNOWN_GAPS: set[tuple[str, str, str]] = set()
+_KNOWN_GAPS: set[tuple[str, str, str]] = {
+    # New protocol x chain pairs added in protocol-chain-gaps PR — addresses only,
+    # permission discovery not yet wired up.
+    ("traderjoe_v2", "SWAP", "ethereum"),
+    ("traderjoe_v2", "SWAP", "arbitrum"),
+    ("traderjoe_v2", "SWAP", "bsc"),
+    ("traderjoe_v2", "LP_OPEN", "ethereum"),
+    ("traderjoe_v2", "LP_OPEN", "arbitrum"),
+    ("traderjoe_v2", "LP_OPEN", "bsc"),
+    # Linea chain not yet in Chain enum — token resolver can't resolve
+    ("uniswap_v3", "SWAP", "linea"),
+    ("pancakeswap_v3", "SWAP", "linea"),
+    ("uniswap_v3", "LP_OPEN", "linea"),
+    ("pancakeswap_v3", "LP_OPEN", "linea"),
+    ("aave_v3", "SUPPLY", "linea"),
+    ("aave_v3", "SUPPLY", "sonic"),
+    ("aave_v3", "SUPPLY", "mantle"),
+}
 
 
 def _is_known_gap(protocol: str, intent_type: str, chain: str) -> bool:
