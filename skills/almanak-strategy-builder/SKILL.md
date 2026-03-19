@@ -1367,15 +1367,14 @@ def generate_teardown_intents(self, mode, market=None) -> list[Intent]:
 
 ### Error Handling
 
-Always wrap `decide()` in try/except and return `Intent.hold()` on error:
+Let exceptions propagate from `decide()`. The framework catches them and feeds
+them into its built-in circuit breaker, which tracks consecutive failures and
+stops the strategy after a threshold is reached.
 
 ```python
 def decide(self, market):
-    try:
-        # ... strategy logic
-    except Exception as e:
-        logger.exception(f"Error in decide(): {e}")
-        return Intent.hold(reason=f"Error: {e}")
+    rsi = market.rsi("WETH", period=14)
+    # ... strategy logic — no try/except needed
 ```
 
 ### Execution Failure Tracking (Circuit Breaker)
