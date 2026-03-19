@@ -372,6 +372,19 @@ class ManagedGateway:
             try:
                 # Only fund the native token that matches this chain
                 chain_native = self.CHAIN_NATIVE_SYMBOL.get(chain)
+                # Warn if the user specified "ETH" but this chain uses a different native token.
+                # This is a common footgun: BSC/Avalanche/Polygon use BNB/AVAX/MATIC, not ETH.
+                if chain_native and chain_native != "ETH" and "ETH" in native_amounts:
+                    eth_amount = native_amounts["ETH"]
+                    logger.warning(
+                        "anvil_funding contains 'ETH' (%.4f) but chain='%s' uses '%s' as native token. "
+                        "Did you mean '%s'? The 'ETH' entry will NOT fund native gas on this chain. "
+                        "Update your config.json anvil_funding key.",
+                        eth_amount,
+                        chain,
+                        chain_native,
+                        chain_native,
+                    )
                 native_amount = native_amounts.get(chain_native, Decimal("0")) if chain_native else Decimal("0")
                 if native_amount > 0:
                     await manager.fund_wallet(wallet, native_amount)

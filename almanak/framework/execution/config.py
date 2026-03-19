@@ -57,6 +57,20 @@ from almanak.framework.execution.gas.constants import (
 )
 from almanak.framework.execution.interfaces import Chain
 
+
+# Imported here so callers can reference without touching chain_executor directly.
+# Populated after chain_executor module is available (lazy import to avoid circular deps).
+def _default_receipt_timeout(chain: str) -> int:
+    """Return the default receipt timeout in seconds for a given chain.
+
+    Slow chains (BSC, Avalanche) need longer timeouts on Anvil forks.
+    Users can still override per-strategy with TX_TIMEOUT_SECONDS.
+    """
+    from almanak.framework.execution.chain_executor import CHAIN_RECEIPT_TIMEOUTS, DEFAULT_RECEIPT_TIMEOUT
+
+    return CHAIN_RECEIPT_TIMEOUTS.get(chain.lower(), DEFAULT_RECEIPT_TIMEOUT)
+
+
 if TYPE_CHECKING:
     from almanak.framework.execution.signer.safe import SafeSigner
 
@@ -752,7 +766,7 @@ class LocalRuntimeConfig:
             max_gas_cost_native=get_optional_float("MAX_GAS_COST_NATIVE", 0.0),
             max_gas_cost_usd=get_optional_float("MAX_GAS_COST_USD", 0.0),
             max_slippage_bps=get_optional_int("MAX_SLIPPAGE_BPS", 0),
-            tx_timeout_seconds=get_optional_int("TX_TIMEOUT_SECONDS", 120),
+            tx_timeout_seconds=get_optional_int("TX_TIMEOUT_SECONDS", _default_receipt_timeout(resolved_chain)),
             simulation_enabled=get_optional_bool("SIMULATION_ENABLED", True),
             max_tx_value_eth=get_optional_float("MAX_TX_VALUE_ETH", 10.0),
             base_retry_delay=get_optional_float("BASE_RETRY_DELAY", 1.0),
@@ -808,15 +822,16 @@ class LocalRuntimeConfig:
                 reason="private_key must be provided in data dictionary",
             )
 
+        chain_str = data.get("chain", "").lower()
         return cls(
-            chain=data.get("chain", ""),
+            chain=chain_str,
             rpc_url=data.get("rpc_url", ""),
             private_key=data["private_key"],
             max_gas_price_gwei=data.get("max_gas_price_gwei", 100),
             max_gas_cost_native=data.get("max_gas_cost_native", 0.0),
             max_gas_cost_usd=data.get("max_gas_cost_usd", 0.0),
             max_slippage_bps=data.get("max_slippage_bps", 0),
-            tx_timeout_seconds=data.get("tx_timeout_seconds", 120),
+            tx_timeout_seconds=data.get("tx_timeout_seconds", _default_receipt_timeout(chain_str)),
             simulation_enabled=data.get("simulation_enabled", True),
             max_tx_value_eth=data.get("max_tx_value_eth", 10.0),
             base_retry_delay=data.get("base_retry_delay", 1.0),

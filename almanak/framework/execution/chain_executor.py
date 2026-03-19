@@ -106,6 +106,17 @@ def _parse_insufficient_funds_error(error_msg: str) -> tuple[int, int]:
     return 0, 0
 
 
+# Per-chain receipt confirmation timeout overrides (seconds).
+# These chains are significantly slower than L2s on Anvil forks.
+# Users can override per-strategy with TX_TIMEOUT_SECONDS env var or
+# tx_timeout_seconds in the runtime config.
+CHAIN_RECEIPT_TIMEOUTS: dict[str, int] = {
+    "bsc": 300,  # BSC Anvil forks: quoter ~60-80s, gas estimate ~155s
+    "avalanche": 180,  # Avalanche also slower than L2s
+}
+DEFAULT_RECEIPT_TIMEOUT: int = 120
+
+
 _CHAIN_NATIVE_SYMBOL: dict[str, str] = {
     "ethereum": "ETH",
     "arbitrum": "ETH",
@@ -156,7 +167,7 @@ class ChainExecutorConfig:
 
     gas_buffer_multiplier: float | None = None
     max_gas_price_gwei: int = 100
-    tx_timeout_seconds: int = 120
+    tx_timeout_seconds: int | None = None  # None = use chain-specific default
     max_retries: int = 3
     base_retry_delay: float = 1.0
     max_retry_delay: float = 32.0
@@ -187,6 +198,11 @@ class ChainExecutorConfig:
         # Set default gas buffer multiplier based on chain
         if self.gas_buffer_multiplier is None:
             self.gas_buffer_multiplier = GAS_BUFFER_MULTIPLIERS.get(self.chain, DEFAULT_GAS_BUFFER)
+
+        # Apply chain-specific receipt timeout default when not explicitly set.
+        # Slow chains (BSC, Avalanche) need longer timeouts on Anvil forks.
+        if self.tx_timeout_seconds is None:
+            self.tx_timeout_seconds = CHAIN_RECEIPT_TIMEOUTS.get(self.chain, DEFAULT_RECEIPT_TIMEOUT)
 
 
 @dataclass

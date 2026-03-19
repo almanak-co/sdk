@@ -1,9 +1,11 @@
 """Tests for managed gateway (background thread gateway for strat run)."""
 
+import asyncio
 import os
 import socket
 import threading
 import time
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
@@ -529,3 +531,77 @@ class TestAnvilWatchdog:
 
         # Should not have tried to restart since stop was requested immediately
         mock_manager.reset_to_latest.assert_not_called()
+
+
+class TestAnvilFundingNativeTokenWarning:
+    """VIB-1579: warn when anvil_funding uses 'ETH' on non-ETH chains."""
+
+    def _make_gateway(self, chain: str, anvil_funding: dict) -> "ManagedGateway":
+        from almanak.gateway.core.settings import GatewaySettings
+        from almanak.gateway.managed import ManagedGateway
+
+        settings = GatewaySettings(
+            host="127.0.0.1",
+            port=59990,
+            rpc_url=f"http://localhost:8545",
+            chain=chain,
+        )
+        gw = ManagedGateway(settings, anvil_chains=[chain], anvil_funding=anvil_funding)
+        gw._wallet_address = "0x" + "a" * 40
+        return gw
+
+    @pytest.mark.asyncio
+    async def test_eth_key_on_bsc_emits_warning(self):
+        """Using 'ETH' in anvil_funding on BSC should log a warning."""
+        gw = self._make_gateway("bsc", {"ETH": 10, "USDC": 1000})
+
+        mock_manager = AsyncMock()
+        mock_manager.fund_wallet = AsyncMock()
+        mock_manager.fund_tokens = AsyncMock()
+        gw._anvil_managers["bsc"] = mock_manager
+
+        with patch("almanak.gateway.managed.logger") as mock_logger:
+            await gw._fund_anvil_wallets()
+
+        # Should have warned about ETH on BSC
+        warning_calls = [str(call) for call in mock_logger.warning.call_args_list]
+        assert any("ETH" in w and "BNB" in w for w in warning_calls), (
+            f"Expected warning about ETH on BSC, got: {warning_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_bnb_key_on_bsc_no_warning(self):
+        """Using 'BNB' in anvil_funding on BSC should not warn."""
+        gw = self._make_gateway("bsc", {"BNB": 10, "USDC": 1000})
+
+        mock_manager = AsyncMock()
+        mock_manager.fund_wallet = AsyncMock()
+        mock_manager.fund_tokens = AsyncMock()
+        gw._anvil_managers["bsc"] = mock_manager
+
+        with patch("almanak.gateway.managed.logger") as mock_logger:
+            await gw._fund_anvil_wallets()
+
+        # Should NOT have warned about native token mismatch
+        warning_calls = [str(call) for call in mock_logger.warning.call_args_list]
+        assert not any("BNB" in w and "ETH" in w for w in warning_calls), (
+            f"Unexpected native token mismatch warning: {warning_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_eth_key_on_arbitrum_no_warning(self):
+        """Using 'ETH' in anvil_funding on Arbitrum (ETH-native) should not warn."""
+        gw = self._make_gateway("arbitrum", {"ETH": 1, "USDC": 1000})
+
+        mock_manager = AsyncMock()
+        mock_manager.fund_wallet = AsyncMock()
+        mock_manager.fund_tokens = AsyncMock()
+        gw._anvil_managers["arbitrum"] = mock_manager
+
+        with patch("almanak.gateway.managed.logger") as mock_logger:
+            await gw._fund_anvil_wallets()
+
+        # Arbitrum is ETH-native -- no warning expected
+        warning_calls = [str(call) for call in mock_logger.warning.call_args_list]
+        native_mismatch = [w for w in warning_calls if "Did you mean" in w]
+        assert not native_mismatch, f"Unexpected mismatch warning: {native_mismatch}"
