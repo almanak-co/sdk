@@ -110,7 +110,7 @@ TEMPLATE_CONFIGS: dict[StrategyTemplate, TemplateConfig] = {
         description="ERC-4626 vault deposit/redeem strategy for optimized DeFi lending yield",
         default_protocol="metamorpho",
         config_params={
-            "vault_address": "0x_SET_VAULT_ADDRESS",
+            "vault_address": "0x0000000000000000000000000000000000000000",
             "deposit_token": "USDC",
         },
     ),
@@ -415,6 +415,10 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
 
     elif template == StrategyTemplate.VAULT_YIELD:
         return """
+            # Guard: ensure vault_address has been configured
+            if self.vault_address == "0x0000000000000000000000000000000000000000":
+                return Intent.hold(reason="vault_address not configured: update config.json with a valid vault address")
+
             # Check available balance for deposit
             try:
                 balance_info = market.balance(self.deposit_token)
@@ -1527,7 +1531,7 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
     elif template == StrategyTemplate.VAULT_YIELD:
         return '''
         # Vault parameters
-        self.vault_address = get_config("vault_address", "0x_SET_VAULT_ADDRESS")
+        self.vault_address = get_config("vault_address", "0x0000000000000000000000000000000000000000")
         self.deposit_token = get_config("deposit_token", "USDC")
         self.deposit_amount = Decimal(str(get_config("deposit_amount", "1000")))
         self.min_deposit_usd = Decimal(str(get_config("min_deposit_usd", "100")))
@@ -1948,7 +1952,7 @@ Strategy Pattern:
 """
 
 import logging
-from decimal import Decimal  # noqa: F401
+from decimal import Decimal  # noqa: F401 (used by most templates, not blank)
 from typing import Any, Optional
 
 # Core strategy framework imports
@@ -2139,7 +2143,7 @@ def generate_config_json(
     elif template == StrategyTemplate.VAULT_YIELD:
         data.update(
             {
-                "vault_address": "0x_SET_VAULT_ADDRESS",
+                "vault_address": "0x0000000000000000000000000000000000000000",
                 "deposit_token": "USDC",
                 "deposit_amount": 1000,
                 "min_deposit_usd": 100,
@@ -2150,9 +2154,9 @@ def generate_config_json(
         data.update(
             {
                 "copy_trading": {
-                    "leaders": [{"address": "0x_LEADER_WALLET_ADDRESS", "chain": chain.value}],
+                    "leaders": [{"address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8", "chain": chain.value}],
                     "sizing": {"mode": "fixed_usd", "fixed_usd": 100},
-                    "risk": {"max_trade_usd": 1000, "max_slippage": 0.01},
+                    "risk": {"max_trade_usd": 1000, "max_slippage": "0.01"},
                 },
             }
         )
@@ -2215,7 +2219,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 from decimal import Decimal
 
-from ..strategy import {class_name}
+from strategy import {class_name}
 
 
 @pytest.fixture
@@ -2280,8 +2284,10 @@ class Test{class_name}:
 
     def test_decide_handles_errors(self, strategy: {class_name}, mock_market: MagicMock) -> None:
         """Test that decide() handles errors gracefully."""
-        # Cause an error by making price() raise
+        # Cause an error by making balance(), price(), and wallet_activity() raise
+        mock_market.balance.side_effect = ValueError("Balance unavailable")
         mock_market.price.side_effect = ValueError("Price unavailable")
+        mock_market.wallet_activity.side_effect = ValueError("Wallet activity unavailable")
 
         result = strategy.decide(mock_market)
 
@@ -2532,6 +2538,15 @@ def new_strategy(
     template_enum = StrategyTemplate(template)
     chain_enum = SupportedChain(chain)
     snake_name = to_snake_case(name)
+
+    # Validate template-chain compatibility
+    if template_enum == StrategyTemplate.STAKING and chain_enum != SupportedChain.ETHEREUM:
+        click.echo(
+            f"Error: The staking template (Lido) only supports Ethereum, got: {chain_enum.value}. "
+            "Use --chain ethereum or choose a different template.",
+            err=True,
+        )
+        raise click.Abort()
 
     # Determine output directory
     if output_dir:

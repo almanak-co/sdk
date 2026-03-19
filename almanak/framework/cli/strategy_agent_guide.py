@@ -24,11 +24,12 @@ class StrategyGuideConfig:
 
 # Maps template -> list of intent types the template actually uses
 TEMPLATE_INTENT_MAP: dict[str, list[str]] = {
+    "blank": ["SWAP", "HOLD"],
+    "ta_swap": ["SWAP", "HOLD"],
     "dynamic_lp": ["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES", "HOLD"],
-    "mean_reversion": ["SWAP", "HOLD"],
-    "bollinger": ["SWAP", "HOLD"],
-    "basis_trade": ["SWAP", "PERP_OPEN", "PERP_CLOSE", "HOLD"],
     "lending_loop": ["SUPPLY", "BORROW", "REPAY", "WITHDRAW", "HOLD"],
+    "basis_trade": ["SWAP", "PERP_OPEN", "PERP_CLOSE", "HOLD"],
+    "vault_yield": ["VAULT_DEPOSIT", "VAULT_REDEEM", "HOLD"],
     "copy_trader": [
         "SWAP",
         "LP_OPEN",
@@ -41,7 +42,9 @@ TEMPLATE_INTENT_MAP: dict[str, list[str]] = {
         "PERP_CLOSE",
         "HOLD",
     ],
-    "blank": ["SWAP", "HOLD"],
+    "perps": ["PERP_OPEN", "PERP_CLOSE", "HOLD"],
+    "multi_step": ["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
+    "staking": ["STAKE", "UNSTAKE", "SWAP", "HOLD"],
 }
 
 # Maps intent type -> the Intent factory method signature (simplified)
@@ -56,6 +59,10 @@ _INTENT_QUICK_REF: dict[str, str] = {
     "WITHDRAW": "Intent.withdraw(protocol, token, amount, withdraw_all=False)",
     "PERP_OPEN": "Intent.perp_open(market, collateral_token, collateral_amount, size_usd, is_long=True)",
     "PERP_CLOSE": "Intent.perp_close(market, collateral_token, is_long, size_usd=None)",
+    "STAKE": "Intent.stake(protocol, token_in, amount)",
+    "UNSTAKE": "Intent.unstake(protocol, token_in, amount)",
+    "VAULT_DEPOSIT": "Intent.vault_deposit(protocol, vault_address, amount, deposit_token=None)",
+    "VAULT_REDEEM": "Intent.vault_redeem(protocol, vault_address, shares)",
     "HOLD": 'Intent.hold(reason="...")',
 }
 
@@ -146,12 +153,11 @@ All intents are created via `from almanak.framework.intents import Intent`.
 
 ## Teardown (Required)
 
-Every strategy **must** implement three teardown methods. Without them, operator
-close-requests are silently ignored and positions remain open.
+Every `IntentStrategy` **must** implement two abstract teardown methods.
+Strategies that hold no positions can extend `StatelessStrategy` instead.
 
 | Method | Purpose |
 |--------|---------|
-| `supports_teardown() -> bool` | Return `True` to enable teardown |
 | `get_open_positions() -> TeardownPositionSummary` | List positions to close (query on-chain state, not cache) |
 | `generate_teardown_intents(mode, market) -> list[Intent]` | Return ordered intents to unwind positions |
 
