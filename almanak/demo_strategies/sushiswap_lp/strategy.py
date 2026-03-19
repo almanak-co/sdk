@@ -35,10 +35,10 @@ Fee Tiers:
 USAGE:
 ------
     # Test on Anvil (local Arbitrum fork)
-    python strategies/demo/sushiswap_lp/run_anvil.py
+    almanak strat run -d sushiswap_lp --network anvil --once
 
     # Run once to open a position
-    almanak strat run -d strategies/demo/sushiswap_lp --once
+    almanak strat run -d sushiswap_lp --once
 
 ===============================================================================
 """
@@ -287,92 +287,92 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
         Returns:
             Intent: LP_OPEN, LP_CLOSE, or HOLD
         """
+        # =================================================================
+        # STEP 1.5: Handle forced close before price lookup (does not need price)
+        # =================================================================
+
+        if self.force_action == "close":
+            if not self._position_id:
+                logger.warning("force_action=close but no position tracked")
+                return Intent.hold(reason="Close requested but no position tracked")
+            logger.info("Forced action: CLOSE LP position")
+            return self._create_close_intent()
+
+        # =================================================================
+        # STEP 1: Get current market price
+        # =================================================================
+        # Price is expressed as token1 per token0 (USDC per WETH for WETH/USDC pool)
+        # This gives us the ETH price in USD terms (e.g., ~3400)
+
         try:
-            # =================================================================
-            # STEP 1: Get current market price
-            # =================================================================
-            # Price is expressed as token1 per token0 (USDC per WETH for WETH/USDC pool)
-            # This gives us the ETH price in USD terms (e.g., ~3400)
+            token0_price_usd = market.price(self.token0_symbol)
+            token1_price_usd = market.price(self.token1_symbol)
+            # Guard against zero or invalid prices before computing ratio
+            if token0_price_usd == Decimal("0"):
+                logger.warning(f"Token0 price is zero for {self.token0_symbol}")
+                return Intent.hold(reason=f"Price data unavailable: {self.token0_symbol} price is zero")
+            if token1_price_usd == Decimal("0"):
+                logger.warning(f"Token1 price is zero for {self.token1_symbol}")
+                return Intent.hold(reason=f"Price data unavailable: {self.token1_symbol} price is zero")
+            # V3 pool price = token1 per token0 (e.g., USDC per WETH)
+            # To get this from USD prices: token0_usd / token1_usd
+            current_price = token0_price_usd / token1_price_usd
+            logger.debug(f"Current price: {current_price:.4f} {self.token1_symbol}/{self.token0_symbol}")
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Could not get price: {e}")
+            return Intent.hold(reason=f"Price data unavailable: {e}")
 
-            try:
-                token0_price_usd = market.price(self.token0_symbol)
-                token1_price_usd = market.price(self.token1_symbol)
-                # Guard against division by zero
-                if token1_price_usd == Decimal("0"):
-                    logger.warning(f"Token1 price is zero for {self.token1_symbol}, using default price")
-                    current_price = Decimal("3400")
-                else:
-                    # V3 pool price = token1 per token0 (e.g., USDC per WETH)
-                    # To get this from USD prices: token0_usd / token1_usd
-                    current_price = token0_price_usd / token1_price_usd
-                logger.debug(f"Current price: {current_price:.4f} {self.token1_symbol}/{self.token0_symbol}")
-            except (ValueError, KeyError) as e:
-                logger.warning(f"Could not get price: {e}")
-                # Use a reasonable default for ETH/USDC testing (~$3400 per ETH)
-                current_price = Decimal("3400")
+        # =================================================================
+        # STEP 2: Handle forced open (needs price for intent)
+        # =================================================================
 
-            # =================================================================
-            # STEP 2: Handle forced actions (for testing)
-            # =================================================================
-
-            if self.force_action == "open":
-                logger.info("Forced action: OPEN LP position")
-                return self._create_open_intent(current_price)
-
-            elif self.force_action == "close":
-                if not self._position_id:
-                    logger.warning("force_action=close but no position tracked")
-                    return Intent.hold(reason="Close requested but no position tracked")
-                logger.info("Forced action: CLOSE LP position")
-                return self._create_close_intent()
-
-            # =================================================================
-            # STEP 3: Check current position status
-            # =================================================================
-
-            if self._position_id:
-                # We have a position - check if it's still in range
-                # In production, you would query the pool's current tick
-                return Intent.hold(
-                    reason=f"Position {self._position_id} exists in range [{self._tick_lower}, {self._tick_upper}] - monitoring"
-                )
-
-            # =================================================================
-            # STEP 4: No position - decide whether to open one
-            # =================================================================
-
-            # Check we have sufficient balance
-            try:
-                token0_balance = market.balance(self.token0_symbol)
-                token1_balance = market.balance(self.token1_symbol)
-
-                if token0_balance.balance < self.amount0:
-                    return Intent.hold(
-                        reason=f"Insufficient {self.token0_symbol}: {token0_balance.balance} < {self.amount0}"
-                    )
-                if token1_balance.balance < self.amount1:
-                    return Intent.hold(
-                        reason=f"Insufficient {self.token1_symbol}: {token1_balance.balance} < {self.amount1}"
-                    )
-            except (ValueError, KeyError):
-                logger.warning("Could not verify balances, proceeding anyway")
-
-            # Open new position centered on current price
-            logger.info("No position found - opening new LP position")
-            add_event(
-                TimelineEvent(
-                    timestamp=datetime.now(UTC),
-                    event_type=TimelineEventType.STATE_CHANGE,
-                    description="No position found - opening new SushiSwap V3 LP position",
-                    strategy_id=self.strategy_id,
-                    details={"action": "opening_new_position", "pool": self.pool},
-                )
-            )
+        if self.force_action == "open":
+            logger.info("Forced action: OPEN LP position")
             return self._create_open_intent(current_price)
 
-        except Exception as e:
-            logger.exception("Error in decide()")
-            return Intent.hold(reason=f"Error: {e!s}")
+        # =================================================================
+        # STEP 3: Check current position status
+        # =================================================================
+
+        if self._position_id:
+            # We have a position - check if it's still in range
+            # In production, you would query the pool's current tick
+            return Intent.hold(
+                reason=f"Position {self._position_id} exists in range [{self._tick_lower}, {self._tick_upper}] - monitoring"
+            )
+
+        # =================================================================
+        # STEP 4: No position - decide whether to open one
+        # =================================================================
+
+        # Check we have sufficient balance
+        try:
+            token0_balance = market.balance(self.token0_symbol)
+            token1_balance = market.balance(self.token1_symbol)
+
+            if token0_balance.balance < self.amount0:
+                return Intent.hold(
+                    reason=f"Insufficient {self.token0_symbol}: {token0_balance.balance} < {self.amount0}"
+                )
+            if token1_balance.balance < self.amount1:
+                return Intent.hold(
+                    reason=f"Insufficient {self.token1_symbol}: {token1_balance.balance} < {self.amount1}"
+                )
+        except (ValueError, KeyError):
+            logger.warning("Could not verify balances, proceeding anyway")
+
+        # Open new position centered on current price
+        logger.info("No position found - opening new LP position")
+        add_event(
+            TimelineEvent(
+                timestamp=datetime.now(UTC),
+                event_type=TimelineEventType.STATE_CHANGE,
+                description="No position found - opening new SushiSwap V3 LP position",
+                strategy_id=self.strategy_id,
+                details={"action": "opening_new_position", "pool": self.pool},
+            )
+        )
+        return self._create_open_intent(current_price)
 
     # =========================================================================
     # INTENT CREATION HELPERS
@@ -602,9 +602,21 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
         positions: list[PositionInfo] = []
 
         if self._position_id:
-            # Calculate estimated value (for WETH/USDC: token0=WETH, token1=USDC)
-            token0_price_usd = Decimal("3400")  # Default WETH price
-            token1_price_usd = Decimal("1")  # Assume USDC
+            # Calculate estimated value using live prices
+            try:
+                snapshot = self.create_market_snapshot()
+                token0_price_usd = snapshot.price(self.token0_symbol)
+                token1_price_usd = snapshot.price(self.token1_symbol)
+            except Exception:  # noqa: BLE001
+                logger.debug("Could not get live prices for LP value estimate, using heuristic fallback")
+                _heuristic_prices = {
+                    "WETH": Decimal("3400"),
+                    "USDC": Decimal("1"),
+                    "USDT": Decimal("1"),
+                    "DAI": Decimal("1"),
+                }
+                token0_price_usd = _heuristic_prices.get(self.token0_symbol, Decimal("0"))
+                token1_price_usd = _heuristic_prices.get(self.token1_symbol, Decimal("0"))
 
             estimated_value = self.amount0 * token0_price_usd + self.amount1 * token1_price_usd
 
@@ -668,9 +680,9 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"\nStrategy Name: {SushiSwapLPStrategy.STRATEGY_NAME}")
     print(f"Version: {SushiSwapLPStrategy.STRATEGY_METADATA.version}")
-    print(f"Supported Chains: {SushiSwapLPStrategy.SUPPORTED_CHAINS}")
-    print(f"Supported Protocols: {SushiSwapLPStrategy.SUPPORTED_PROTOCOLS}")
-    print(f"Intent Types: {SushiSwapLPStrategy.INTENT_TYPES}")
+    print(f"Supported Chains: {SushiSwapLPStrategy.STRATEGY_METADATA.supported_chains}")
+    print(f"Supported Protocols: {SushiSwapLPStrategy.STRATEGY_METADATA.supported_protocols}")
+    print(f"Intent Types: {SushiSwapLPStrategy.STRATEGY_METADATA.intent_types}")
     print(f"\nDescription: {SushiSwapLPStrategy.STRATEGY_METADATA.description}")
     print("\nTo test on Anvil:")
-    print("  python strategies/demo/sushiswap_lp/run_anvil.py")
+    print("  almanak strat run -d sushiswap_lp --network anvil --once")

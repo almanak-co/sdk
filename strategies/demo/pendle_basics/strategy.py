@@ -60,7 +60,13 @@ logger = logging.getLogger(__name__)
 # Pendle market addresses by chain
 PENDLE_MARKETS = {
     # Arbitrum markets (active)
-    "PT-wstETH-25JUN2026": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
+    "PT-wstETH-25JUN2026": "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B",
+    # Arbitrum markets (expired)
+    "PT-wstETH-26JUN2025": "0x08a152834de126d2ef83D612ff36e4523FD0017F",
+    "PT-wstETH-26DEC2024": "0xf769035a247af48bf55BaA82d8b5e14E02E49A25",
+    "PT-eETH-26DEC2024": "0x952083cde7aaa11AB8449057F7de23A970AA8472",
+    # Plasma markets (expired 2026-02-26)
+    "PT-fUSDT0-26FEB2026": "0x0cb289E9df2d0dCFe13732638C89655fb80C2bE2",
 }
 
 

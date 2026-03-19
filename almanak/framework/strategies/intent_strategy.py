@@ -3951,23 +3951,37 @@ class IntentStrategy(StrategyBase[ConfigT]):
         """
         if not self._state_manager or not self._strategy_id:
             return False
+        from ..state.state_manager import StateNotFoundError
+
         try:
             state_data = await self._state_manager.load_state(self._strategy_id)
-            if state_data and state_data.state:
-                self.load_persistent_state(state_data.state)
-                self._state_version = state_data.version
-                state_summary = {
-                    k: (f"{v:.6g}" if isinstance(v, float) else str(v)[:80]) for k, v in state_data.state.items()
-                }
-                logger.info(f"Loaded state for {self._strategy_id}: {state_summary}")
-                return True
+        except StateNotFoundError:
+            # Expected on fresh starts — backend confirmed state does not exist.
+            logger.debug(f"No existing state for {self._strategy_id}")
             return False
         except Exception as e:
+            # Degrade gracefully for transient backend errors (match sync load_state() behavior).
+            # A startup failure must never silently restart a stateful strategy from defaults,
+            # so we log as warning and let the caller decide whether to proceed.
             if "not found" in str(e).lower():
+                # Fallback for backends that raise generic exceptions instead of StateNotFoundError.
                 logger.debug(f"No existing state for {self._strategy_id}")
             else:
-                logger.warning(f"Failed to load state: {e}")
+                logger.warning(f"Failed to load state for {self._strategy_id}: {e}")
             return False
+
+        if state_data is None:
+            logger.debug(f"No existing state for {self._strategy_id}")
+            return False
+        if state_data.state:
+            self.load_persistent_state(state_data.state)
+            self._state_version = state_data.version
+            state_summary = {
+                k: (f"{v:.6g}" if isinstance(v, float) else str(v)[:80]) for k, v in state_data.state.items()
+            }
+            logger.info(f"Loaded state for {self._strategy_id}: {state_summary}")
+            return True
+        return False
 
     @abstractmethod
     def decide(self, market: MarketSnapshot) -> DecideResult:

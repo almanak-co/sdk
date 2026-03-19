@@ -56,13 +56,13 @@ For safety with leverage, maintain HF > 1.5 (this strategy targets 1.8)
 USAGE:
 ------
     # Run once (execute one loop iteration)
-    python -m almanak.cli.run --strategy demo_morpho_looping --once
+    almanak strat run -d morpho_looping --once
 
     # Run continuously (monitor and rebalance)
-    python -m almanak.cli.run --strategy demo_morpho_looping
+    almanak strat run -d morpho_looping --interval 60
 
     # Test on Anvil
-    python strategies/demo/morpho_looping/run_anvil.py
+    almanak strat run -d morpho_looping --network anvil --once
 
 ===============================================================================
 """
@@ -168,10 +168,10 @@ class MorphoLoopingStrategy(IntentStrategy):
     Example::
 
         # Full lifecycle on Anvil (clears stale state, runs continuously)
-        almanak strat run -d strategies/demo/morpho_looping --fresh --interval 15 --network anvil
+        almanak strat run -d morpho_looping --fresh --interval 15 --network anvil
 
         # Single step for debugging
-        almanak strat run -d strategies/demo/morpho_looping --fresh --once --network anvil
+        almanak strat run -d morpho_looping --fresh --once --network anvil
     """
 
     # =========================================================================
@@ -191,46 +191,40 @@ class MorphoLoopingStrategy(IntentStrategy):
         # Extract configuration
         # =====================================================================
 
-        def get_config(key: str, default: Any) -> Any:
-            if isinstance(self.config, dict):
-                return self.config.get(key, default)
-            if hasattr(self.config, "get"):
-                return self.config.get(key, default)
-            return getattr(self.config, key, default)
-
         # Market configuration (required)
         # Default: wstETH/USDC market on Ethereum (86% LLTV)
-        self.market_id = get_config(
+        self.market_id = self.get_config(
             "market_id",
             "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
         )
 
         # Token configuration
-        self.collateral_token = get_config("collateral_token", "wstETH")
-        self.borrow_token = get_config("borrow_token", "USDC")
+        self.collateral_token = self.get_config("collateral_token", "wstETH")
+        self.borrow_token = self.get_config("borrow_token", "USDC")
 
         # Collateral amount
-        self.initial_collateral = Decimal(str(get_config("initial_collateral", "1.0")))
+        self.initial_collateral = Decimal(str(self.get_config("initial_collateral", "1.0")))
 
         # Looping parameters
-        self.target_loops = int(get_config("target_loops", 3))
-        self.target_ltv = Decimal(str(get_config("target_ltv", "0.75")))  # 75% LTV per loop
+        self.target_loops = int(self.get_config("target_loops", 3))
+        self.target_ltv = Decimal(str(self.get_config("target_ltv", "0.75")))  # 75% LTV per loop
 
         # Risk parameters
-        self.min_health_factor = Decimal(str(get_config("min_health_factor", "1.5")))
+        self.min_health_factor = Decimal(str(self.get_config("min_health_factor", "1.5")))
 
         # Swap parameters
-        self.swap_slippage = Decimal(str(get_config("swap_slippage", "0.005")))  # 0.5%
+        self.swap_slippage = Decimal(str(self.get_config("swap_slippage", "0.005")))  # 0.5%
 
         # Force action for testing
-        self.force_action = str(get_config("force_action", "")).lower()
+        self.force_action = str(self.get_config("force_action", "")).lower()
 
         # =====================================================================
         # Internal state tracking
         # =====================================================================
 
-        # Loop state machine: idle -> supplying -> borrowing -> swapping -> (repeat) -> complete
+        # Loop state machine: idle -> supplying -> supplied -> borrowing -> borrowed -> swapping -> swapped -> (repeat) -> complete
         self._loop_state = "idle"
+        self._previous_stable_state = "idle"  # Revert target on intent failure
         self._current_loop = 0
         self._loops_completed = 0
 
@@ -274,77 +268,85 @@ class MorphoLoopingStrategy(IntentStrategy):
         Returns:
             Intent: SUPPLY_COLLATERAL, BORROW, SWAP, or HOLD
         """
+        # =================================================================
+        # STEP 1: Handle force_action="supply"/"repay" before price lookup
+        # =================================================================
+        # These actions do not need price data; guard here so that smoke-tests
+        # on Anvil (which may lack price feeds) can still force supply/repay.
+
+        if self.force_action == "supply":
+            logger.info("Forced action: SUPPLY collateral")
+            return self._create_supply_intent(self.initial_collateral)
+
+        elif self.force_action == "repay":
+            logger.info("Forced action: REPAY borrowed amount")
+            return self._create_repay_intent()
+
+        # =================================================================
+        # STEP 2: Get current market prices (needed for borrow/swap/state logic)
+        # =================================================================
+
         try:
-            # =================================================================
-            # STEP 1: Get current market prices
-            # =================================================================
+            collateral_price = market.price(self.collateral_token)
+            borrow_price = market.price(self.borrow_token)
+            logger.debug(
+                f"Prices: {self.collateral_token}=${collateral_price:.2f}, {self.borrow_token}=${borrow_price:.2f}"
+            )
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Could not get prices: {e}")
+            return Intent.hold(reason=f"Price data unavailable: {e}")
 
-            try:
-                collateral_price = market.price(self.collateral_token)
-                borrow_price = market.price(self.borrow_token)
-                logger.debug(
-                    f"Prices: {self.collateral_token}=${collateral_price:.2f}, {self.borrow_token}=${borrow_price:.2f}"
+        # =================================================================
+        # STEP 3: Handle remaining forced actions (need prices)
+        # =================================================================
+
+        if self.force_action == "borrow":
+            logger.info("Forced action: BORROW")
+            # For force_action testing, assume initial_collateral was supplied
+            # This allows testing borrow independently without needing internal state
+            self._total_collateral = self.initial_collateral
+            return self._create_borrow_intent(collateral_price, borrow_price)
+
+        elif self.force_action == "swap":
+            logger.info("Forced action: SWAP borrowed to collateral")
+            return self._create_swap_intent(Decimal("1000"), borrow_price)
+
+        # =================================================================
+        # STEP 4: State machine logic
+        # =================================================================
+
+        # State: IDLE - Start the first supply
+        if self._loop_state == "idle":
+            return self._handle_idle_state(market)
+
+        # State: SUPPLIED - Borrow against collateral
+        elif self._loop_state == "supplied":
+            return self._handle_supplied_state(collateral_price, borrow_price)
+
+        # State: BORROWED - Swap borrowed tokens to collateral
+        elif self._loop_state == "borrowed":
+            return self._handle_borrowed_state(borrow_price)
+
+        # State: SWAPPED - Check if more loops needed
+        elif self._loop_state == "swapped":
+            return self._handle_swapped_state(market)
+
+        # State: COMPLETE - All loops done
+        elif self._loop_state == "complete":
+            return self._handle_complete_state(collateral_price, borrow_price)
+
+        # Safety net: if we're in a transitional state (supplying, borrowing, swapping)
+        # it means the previous intent failed and on_intent_executed didn't fire.
+        # Revert to the last known stable state.
+        else:
+            if self._loop_state in ("supplying", "borrowing", "swapping"):
+                revert_to = self._previous_stable_state
+                logger.warning(
+                    f"Stuck in transitional state '{self._loop_state}' — reverting to '{revert_to}'"
                 )
-            except (ValueError, KeyError) as e:
-                logger.warning(f"Could not get prices: {e}")
-                # Use reasonable defaults for testing
-                collateral_price = Decimal("3400")  # wstETH ~= ETH price
-                borrow_price = Decimal("1")  # USDC = $1
+                self._loop_state = revert_to
+            return Intent.hold(reason=f"Waiting for state transition (current: {self._loop_state})")
 
-            # =================================================================
-            # STEP 2: Handle forced actions (for testing)
-            # =================================================================
-
-            if self.force_action == "supply":
-                logger.info("Forced action: SUPPLY collateral")
-                return self._create_supply_intent(self.initial_collateral)
-
-            elif self.force_action == "borrow":
-                logger.info("Forced action: BORROW")
-                # For force_action testing, assume initial_collateral was supplied
-                # This allows testing borrow independently without needing internal state
-                self._total_collateral = self.initial_collateral
-                return self._create_borrow_intent(collateral_price, borrow_price)
-
-            elif self.force_action == "swap":
-                logger.info("Forced action: SWAP borrowed to collateral")
-                return self._create_swap_intent(Decimal("1000"), borrow_price)
-
-            elif self.force_action == "repay":
-                logger.info("Forced action: REPAY borrowed amount")
-                return self._create_repay_intent()
-
-            # =================================================================
-            # STEP 3: State machine logic
-            # =================================================================
-
-            # State: IDLE - Start the first supply
-            if self._loop_state == "idle":
-                return self._handle_idle_state(market)
-
-            # State: SUPPLIED - Borrow against collateral
-            elif self._loop_state == "supplied":
-                return self._handle_supplied_state(collateral_price, borrow_price)
-
-            # State: BORROWED - Swap borrowed tokens to collateral
-            elif self._loop_state == "borrowed":
-                return self._handle_borrowed_state(borrow_price)
-
-            # State: SWAPPED - Check if more loops needed
-            elif self._loop_state == "swapped":
-                return self._handle_swapped_state(market)
-
-            # State: COMPLETE - All loops done
-            elif self._loop_state == "complete":
-                return self._handle_complete_state(collateral_price, borrow_price)
-
-            # Default: Hold during transitions
-            else:
-                return Intent.hold(reason=f"Waiting for state transition (current: {self._loop_state})")
-
-        except Exception as e:
-            logger.exception(f"Error in decide(): {e}")
-            return Intent.hold(reason=f"Error: {str(e)}")
 
     # =========================================================================
     # STATE HANDLERS
@@ -365,6 +367,7 @@ class MorphoLoopingStrategy(IntentStrategy):
 
         logger.info(f"State: IDLE -> SUPPLYING (loop {self._current_loop + 1}/{self.target_loops})")
         self._emit_state_change("idle", "supplying")
+        self._previous_stable_state = self._loop_state
         self._loop_state = "supplying"
         return self._create_supply_intent(self.initial_collateral)
 
@@ -372,6 +375,7 @@ class MorphoLoopingStrategy(IntentStrategy):
         """Handle SUPPLIED state - borrow against collateral."""
         logger.info(f"State: SUPPLIED -> BORROWING (loop {self._current_loop + 1}/{self.target_loops})")
         self._emit_state_change("supplied", "borrowing")
+        self._previous_stable_state = self._loop_state
         self._loop_state = "borrowing"
         return self._create_borrow_intent(collateral_price, borrow_price)
 
@@ -384,28 +388,36 @@ class MorphoLoopingStrategy(IntentStrategy):
 
         logger.info(f"State: BORROWED -> SWAPPING (loop {self._current_loop + 1}/{self.target_loops})")
         self._emit_state_change("borrowed", "swapping")
+        self._previous_stable_state = self._loop_state
         self._loop_state = "swapping"
         return self._create_swap_intent(self._pending_swap_amount, borrow_price)
 
     def _handle_swapped_state(self, market: MarketSnapshot) -> Intent:
-        """Handle SWAPPED state - check if more loops needed."""
-        self._loops_completed += 1
-        self._current_loop += 1
+        """Handle SWAPPED state - check if more loops needed.
 
+        Note: Loop counters (_loops_completed, _current_loop) are incremented
+        in on_intent_executed(success=True) for SWAP, not here. This prevents
+        double-counting if a subsequent supply fails and we revert to this state.
+        """
         if self._current_loop < self.target_loops:
             # More loops needed - supply the swapped collateral
             logger.info(
                 f"Loop {self._loops_completed} complete. Starting loop {self._current_loop + 1}/{self.target_loops}"
             )
-            self._loop_state = "supplying"
 
             # The collateral to supply is what we got from the swap
             # For now, supply the pending amount (set by on_intent_executed)
             supply_amount = self._pending_swap_amount
             if supply_amount <= 0:
-                # Estimate based on last borrow
-                supply_amount = self._total_borrowed / Decimal("3400")  # Rough estimate
+                # Do not transition state until we have a valid swap amount; returning HOLD
+                # here avoids getting stuck in a transitional "supplying" state.
+                return Intent.hold(
+                    reason="Swap output amount unavailable; cannot size the next supply safely"
+                )
 
+            # Guard passed — commit the state transition before returning the intent.
+            self._previous_stable_state = self._loop_state
+            self._loop_state = "supplying"
             return self._create_supply_intent(supply_amount)
         else:
             # All loops complete
@@ -645,9 +657,13 @@ class MorphoLoopingStrategy(IntentStrategy):
 
             elif intent_type == "SWAP":
                 self._loop_state = "swapped"
+                # Increment loop counters here (not in _handle_swapped_state) to prevent
+                # double-counting if a subsequent supply fails and reverts to "swapped"
+                self._loops_completed += 1
+                self._current_loop += 1
                 # The swap result should contain the output amount
                 # For now, estimate based on prices
-                logger.info(f"Swap successful - Loop {self._current_loop + 1} swap complete")
+                logger.info(f"Swap successful - Loop {self._current_loop} swap complete")
                 add_event(
                     TimelineEvent(
                         timestamp=datetime.now(UTC),
@@ -658,14 +674,19 @@ class MorphoLoopingStrategy(IntentStrategy):
                             "action": "swap",
                             "from_token": self.borrow_token,
                             "to_token": self.collateral_token,
-                            "loop": self._current_loop + 1,
+                            "loop": self._current_loop,
                         },
                     )
                 )
 
         else:
-            # On failure, stay in current state for retry
-            logger.warning(f"{intent_type} failed - will retry")
+            # On failure, revert to previous stable state so decide() can retry
+            # (staying in the transitional state would permanently stuck the strategy)
+            revert_to = self._previous_stable_state
+            logger.warning(
+                f"{intent_type} failed in state '{self._loop_state}' — reverting to '{revert_to}'"
+            )
+            self._loop_state = revert_to
 
     def _emit_state_change(self, old_state: str, new_state: str) -> None:
         """Emit a state change event to the timeline."""
@@ -721,6 +742,7 @@ class MorphoLoopingStrategy(IntentStrategy):
         """Get state to persist for crash recovery."""
         return {
             "loop_state": self._loop_state,
+            "previous_stable_state": self._previous_stable_state,
             "current_loop": self._current_loop,
             "loops_completed": self._loops_completed,
             "total_collateral": str(self._total_collateral),
@@ -733,6 +755,8 @@ class MorphoLoopingStrategy(IntentStrategy):
         """Load persisted state on startup."""
         if "loop_state" in state:
             self._loop_state = state["loop_state"]
+        if "previous_stable_state" in state:
+            self._previous_stable_state = state["previous_stable_state"]
         if "current_loop" in state:
             self._current_loop = int(state["current_loop"])
         if "loops_completed" in state:
@@ -767,7 +791,13 @@ class MorphoLoopingStrategy(IntentStrategy):
 
         # Collateral position
         if self._total_collateral > 0:
-            collateral_value = self._total_collateral * Decimal("3400")  # Estimate
+            try:
+                snapshot = self.create_market_snapshot()
+                collateral_price = snapshot.price(self.collateral_token)
+            except Exception:  # noqa: BLE001
+                logger.debug(f"Could not get live price for {self.collateral_token}, using fallback $1")
+                collateral_price = Decimal("1")
+            collateral_value = self._total_collateral * collateral_price
             positions.append(
                 PositionInfo(
                     position_type=PositionType.SUPPLY,
@@ -898,14 +928,13 @@ if __name__ == "__main__":
     print("=" * 70)
     print("MorphoLoopingStrategy - Leveraged Yield Farming Demo")
     print("=" * 70)
-    meta = MorphoLoopingStrategy.STRATEGY_METADATA
     print(f"\nStrategy Name: {MorphoLoopingStrategy.STRATEGY_NAME}")
-    print(f"Version: {meta.version}")
-    print(f"Supported Chains: {meta.supported_chains}")
-    print(f"Supported Protocols: {meta.supported_protocols}")
-    print(f"Intent Types: {meta.intent_types}")
-    print(f"\nDescription: {meta.description}")
+    print(f"Version: {MorphoLoopingStrategy.STRATEGY_METADATA.version}")
+    print(f"Supported Chains: {MorphoLoopingStrategy.STRATEGY_METADATA.supported_chains}")
+    print(f"Supported Protocols: {MorphoLoopingStrategy.STRATEGY_METADATA.supported_protocols}")
+    print(f"Intent Types: {MorphoLoopingStrategy.STRATEGY_METADATA.intent_types}")
+    print(f"\nDescription: {MorphoLoopingStrategy.STRATEGY_METADATA.description}")
     print("\nTo run this strategy:")
-    print("  almanak strat run --once")
+    print("  almanak strat run -d morpho_looping --once")
     print("\nTo test on Anvil:")
-    print("  almanak strat run --network anvil --once")
+    print("  almanak strat run -d morpho_looping --network anvil --once")

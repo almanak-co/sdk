@@ -17,8 +17,8 @@ WHAT THIS STRATEGY DOES:
 
 TRADING PAIR:
 -------------
-- Base Token: ALMANAK (0xdefa1d21c5f1cbeac00eeb54b44c7d86467cc3a3)
-- Quote Token: USDC (0x833589fcd6edb6e08f4c7c32d4f71b54bda02913)
+- Base Token: ALMANAK (0xDeFA1D21c5F1cbeac00eeB54B44C7D86467cc3a3)
+- Quote Token: USDC (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913)
 - Pool: 0xbDbC38652D78AF0383322bBc823E06FA108d0874
 - Fee Tier: 3000 (0.3%)
 - Chain: Base
@@ -58,8 +58,8 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 # Token addresses on Base
-ALMANAK_ADDRESS = "0xdefa1d21c5f1cbeac00eeb54b44c7d86467cc3a3"
-USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+ALMANAK_ADDRESS = "0xDeFA1D21c5F1cbeac00eeB54B44C7D86467cc3a3"
+USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 POOL_ADDRESS = "0xbDbC38652D78AF0383322bBc823E06FA108d0874"
 
 

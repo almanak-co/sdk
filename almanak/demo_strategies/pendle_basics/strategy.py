@@ -33,7 +33,7 @@ USAGE:
     almanak gateway --network anvil
 
     # Run the strategy (from repo root)
-    almanak strat run -d strategies/demo/pendle_basics --once
+    almanak strat run -d pendle_basics --once
 
 ===============================================================================
 """
@@ -69,17 +69,6 @@ PENDLE_MARKETS = {
     "PT-fUSDT0-26FEB2026": "0x0cb289E9df2d0dCFe13732638C89655fb80C2bE2",
 }
 
-# Token addresses by chain
-TOKEN_ADDRESSES = {
-    # Arbitrum
-    "WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-    "WSTETH": "0x5979D7b546E38E414F7E9822514be443A4800529",
-    "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-    # Plasma
-    "USDT0": "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb",
-    "FUSDT0": "0x1DD4b13fcAE900C60a350589BE8052959D2Ed27B",
-}
-
 
 @almanak_strategy(
     name="demo_pendle_basics",
@@ -87,7 +76,7 @@ TOKEN_ADDRESSES = {
     version="1.0.0",
     author="Almanak",
     tags=["demo", "tutorial", "pendle", "yield", "pt", "fixed-yield"],
-    supported_chains=["arbitrum", "plasma"],
+    supported_chains=["arbitrum"],
     supported_protocols=["pendle"],
     intent_types=["SWAP", "HOLD"],
     default_chain="arbitrum",
@@ -114,8 +103,8 @@ class PendleBasicsStrategy(IntentStrategy):
     Example Config:
     ---------------
     {
-        "market": "0x08a152834de126d2ef83D612ff36e4523FD0017F",
-        "market_name": "PT-wstETH-26JUN2025",
+        "market": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
+        "market_name": "PT-wstETH-25JUN2026",
         "trade_size_token": 0.001,
         "max_slippage_bps": 100,
         "base_token": "WSTETH",
@@ -173,114 +162,109 @@ class PendleBasicsStrategy(IntentStrategy):
         Returns:
             Intent: What action to take (SWAP or HOLD)
         """
+        # =================================================================
+        # STEP 1: Get current market data
+        # =================================================================
+        # For stablecoins (USDT0, USDC, etc), assume $1 if price not available
+        stablecoins = {"USDT0", "USDC", "USDT", "DAI", "FUSDT0"}
+        # Known stablecoin addresses (Plasma)
+        stablecoin_addresses = {
+            "0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb",  # USDT0
+            "0x1dd4b13fcae900c60a350589be8052959d2ed27b",  # fUSDT0
+        }
         try:
-            # =================================================================
-            # STEP 1: Get current market data
-            # =================================================================
-            # For stablecoins (USDT0, USDC, etc), assume $1 if price not available
-            stablecoins = {"USDT0", "USDC", "USDT", "DAI", "FUSDT0"}
-            # Known stablecoin addresses (Plasma)
-            stablecoin_addresses = {
-                "0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb",  # USDT0
-                "0x1dd4b13fcae900c60a350589be8052959d2ed27b",  # fUSDT0
-            }
-            try:
-                base_price = market.price(self.base_token)
-                logger.debug(f"Current {self.base_token_symbol} price: ${base_price:,.2f}")
-            except ValueError:
-                is_stablecoin = (
-                    self.base_token_symbol.upper() in stablecoins
-                    or self.base_token.lower() in stablecoin_addresses
-                )
-                if is_stablecoin:
-                    base_price = 1.0
-                    logger.debug(f"Using $1.00 for stablecoin {self.base_token_symbol}")
-                else:
-                    raise
+            base_price = market.price(self.base_token)
+            logger.debug(f"Current {self.base_token_symbol} price: ${base_price:,.2f}")
+        except ValueError:
+            is_stablecoin = (
+                self.base_token_symbol.upper() in stablecoins
+                or self.base_token.lower() in stablecoin_addresses
+            )
+            if is_stablecoin:
+                base_price = 1.0
+                logger.debug(f"Using $1.00 for stablecoin {self.base_token_symbol}")
+            else:
+                raise
 
-            # =================================================================
-            # STEP 2: Check balances
-            # =================================================================
-            try:
-                base_balance = market.balance(self.base_token)
-                logger.debug(
-                    f"Balance - {self.base_token}: {base_balance.balance:.4f} "
-                    f"(${base_balance.balance_usd:,.2f})"
-                )
-            except ValueError as e:
-                logger.warning(f"Could not get balance: {e}")
-                return Intent.hold(reason="Balance data unavailable")
+        # =================================================================
+        # STEP 2: Check balances
+        # =================================================================
+        try:
+            base_balance = market.balance(self.base_token)
+            logger.debug(
+                f"Balance - {self.base_token}: {base_balance.balance:.4f} "
+                f"(${base_balance.balance_usd:,.2f})"
+            )
+        except ValueError as e:
+            logger.warning(f"Could not get balance: {e}")
+            return Intent.hold(reason="Balance data unavailable")
 
-            # =================================================================
-            # STEP 3: Decision Logic
-            # =================================================================
+        # =================================================================
+        # STEP 3: Decision Logic
+        # =================================================================
 
-            # Check if we have enough balance to trade
-            if self.trade_size_token:
-                # Token-based check
-                if base_balance.balance < self.trade_size_token:
-                    self._consecutive_holds += 1
-                    return Intent.hold(
-                        reason=f"Insufficient {self.base_token} balance "
-                        f"({base_balance.balance:.6f} < {self.trade_size_token})"
-                    )
-            elif base_balance.balance_usd < self.trade_size_usd:
+        # Check if we have enough balance to trade
+        if self.trade_size_token:
+            # Token-based check
+            if base_balance.balance < self.trade_size_token:
                 self._consecutive_holds += 1
                 return Intent.hold(
                     reason=f"Insufficient {self.base_token} balance "
-                    f"(${base_balance.balance_usd:.2f} < ${self.trade_size_usd})"
+                    f"({base_balance.balance:.6f} < {self.trade_size_token})"
                 )
-
-            # If we haven't entered a position yet, buy PT
-            if not self._has_entered_position:
-                if self.trade_size_token:
-                    logger.info(
-                        f"Entering Pendle position: Swapping {self.trade_size_token} "
-                        f"{self.base_token} for {self.pt_token}"
-                    )
-                else:
-                    logger.info(
-                        f"Entering Pendle position: Swapping {format_usd(self.trade_size_usd)} "
-                        f"{self.base_token} for {self.pt_token}"
-                    )
-
-                self._has_entered_position = True
-                self._consecutive_holds = 0
-
-                # Use the standard swap intent with Pendle protocol
-                # The framework will route this through the Pendle adapter
-                if self.trade_size_token:
-                    return Intent.swap(
-                        from_token=self.base_token,
-                        to_token=self.pt_token,
-                        amount=self.trade_size_token,
-                        max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),
-                        protocol="pendle",
-                    )
-                else:
-                    return Intent.swap(
-                        from_token=self.base_token,
-                        to_token=self.pt_token,
-                        amount_usd=self.trade_size_usd,
-                        max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),
-                        protocol="pendle",
-                    )
-
-            # Already in position, hold
+        elif base_balance.balance_usd < self.trade_size_usd:
             self._consecutive_holds += 1
             return Intent.hold(
-                reason=f"Already holding {self.pt_token} position "
-                f"(hold #{self._consecutive_holds})"
+                reason=f"Insufficient {self.base_token} balance "
+                f"(${base_balance.balance_usd:.2f} < ${self.trade_size_usd})"
             )
 
-        except Exception as e:
-            logger.exception(f"Error in decide(): {e}")
-            return Intent.hold(reason=f"Error: {str(e)}")
+        # If we haven't entered a position yet, buy PT
+        if not self._has_entered_position:
+            if self.trade_size_token:
+                logger.info(
+                    f"Entering Pendle position: Swapping {self.trade_size_token} "
+                    f"{self.base_token} for {self.pt_token}"
+                )
+            else:
+                logger.info(
+                    f"Entering Pendle position: Swapping {format_usd(self.trade_size_usd)} "
+                    f"{self.base_token} for {self.pt_token}"
+                )
+
+            self._has_entered_position = True
+            self._consecutive_holds = 0
+
+            # Use the standard swap intent with Pendle protocol
+            # The framework will route this through the Pendle adapter
+            if self.trade_size_token:
+                return Intent.swap(
+                    from_token=self.base_token,
+                    to_token=self.pt_token,
+                    amount=self.trade_size_token,
+                    max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),
+                    protocol="pendle",
+                )
+            else:
+                return Intent.swap(
+                    from_token=self.base_token,
+                    to_token=self.pt_token,
+                    amount_usd=self.trade_size_usd,
+                    max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),
+                    protocol="pendle",
+                )
+
+        # Already in position, hold
+        self._consecutive_holds += 1
+        return Intent.hold(
+            reason=f"Already holding {self.pt_token} position "
+            f"(hold #{self._consecutive_holds})"
+        )
 
     def _get_tracked_tokens(self) -> list[str]:
         """Get list of tokens to track for wallet balance.
 
-        Override default to return only Plasma tokens used by this strategy.
+        Override default to return only tokens used by this strategy.
         """
         return [self.base_token_symbol, self.pt_token_symbol]
 
@@ -380,10 +364,10 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"\nStrategy Name: {PendleBasicsStrategy.STRATEGY_NAME}")
     print(f"Version: {PendleBasicsStrategy.STRATEGY_METADATA.version}")
-    print(f"Supported Chains: {PendleBasicsStrategy.SUPPORTED_CHAINS}")
-    print(f"Supported Protocols: {PendleBasicsStrategy.SUPPORTED_PROTOCOLS}")
-    print(f"Intent Types: {PendleBasicsStrategy.INTENT_TYPES}")
+    print(f"Supported Chains: {PendleBasicsStrategy.STRATEGY_METADATA.supported_chains}")
+    print(f"Supported Protocols: {PendleBasicsStrategy.STRATEGY_METADATA.supported_protocols}")
+    print(f"Intent Types: {PendleBasicsStrategy.STRATEGY_METADATA.intent_types}")
     print(f"\nDescription: {PendleBasicsStrategy.STRATEGY_METADATA.description}")
     print("\nTo run this strategy:")
     print("  1. Start gateway: almanak gateway --network anvil")
-    print("  2. Run strategy: almanak strat run -d strategies/demo/pendle_basics --once")
+    print("  2. Run strategy: almanak strat run -d pendle_basics --once")

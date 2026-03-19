@@ -42,10 +42,10 @@ Price at bin ID: price = (1 + binStep/10000)^(binId - 8388608)
 USAGE:
 ------
     # Test on Anvil (local Avalanche fork)
-    python strategies/demo/traderjoe_lp/run_anvil.py
+    almanak strat run -d strategies/demo/traderjoe_lp --network anvil --once
 
     # Run once to open a position
-    python -m src.cli.run --strategy demo_traderjoe_lp --once
+    almanak strat run -d strategies/demo/traderjoe_lp --once
 
 ===============================================================================
 """
@@ -279,6 +279,15 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             Intent: LP_OPEN, LP_CLOSE, or HOLD
         """
         # =================================================================
+        # STEP 1.5: Handle forced close before price lookup (does not need price)
+        # =================================================================
+
+        if self.force_action == "close":
+            # Don't check _position_bin_ids - the adapter queries on-chain for positions
+            logger.info("Forced action: CLOSE LP position (adapter will query on-chain)")
+            return self._create_close_intent()
+
+        # =================================================================
         # STEP 1: Get current market price
         # =================================================================
         # Price is expressed as token_y per token_x
@@ -287,6 +296,17 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         try:
             token_x_price_usd = market.price(self.token_x_symbol)
             token_y_price_usd = market.price(self.token_y_symbol)
+            if (
+                not token_x_price_usd.is_finite()
+                or not token_y_price_usd.is_finite()
+                or token_x_price_usd <= 0
+                or token_y_price_usd <= 0
+            ):
+                logger.warning(
+                    f"Invalid quote: {self.token_x_symbol}={token_x_price_usd}, "
+                    f"{self.token_y_symbol}={token_y_price_usd}"
+                )
+                return Intent.hold(reason="Price data unavailable")
             current_price = token_x_price_usd / token_y_price_usd
             logger.debug(f"Current price: {current_price:.4f} {self.token_y_symbol}/{self.token_x_symbol}")
         except (ValueError, KeyError) as e:
@@ -294,17 +314,12 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             return Intent.hold(reason=f"Price data unavailable: {e}")
 
         # =================================================================
-        # STEP 2: Handle forced actions (for testing)
+        # STEP 2: Handle forced open (needs price for intent)
         # =================================================================
 
         if self.force_action == "open":
             logger.info("Forced action: OPEN LP position")
             return self._create_open_intent(current_price)
-
-        elif self.force_action == "close":
-            # Don't check _position_bin_ids - the adapter queries on-chain for positions
-            logger.info("Forced action: CLOSE LP position (adapter will query on-chain)")
-            return self._create_close_intent()
 
         # =================================================================
         # STEP 3: Check current position status
@@ -607,9 +622,9 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"\nStrategy Name: {TraderJoeLPStrategy.STRATEGY_NAME}")
     print(f"Version: {TraderJoeLPStrategy.STRATEGY_METADATA.version}")
-    print(f"Supported Chains: {TraderJoeLPStrategy.SUPPORTED_CHAINS}")
-    print(f"Supported Protocols: {TraderJoeLPStrategy.SUPPORTED_PROTOCOLS}")
-    print(f"Intent Types: {TraderJoeLPStrategy.INTENT_TYPES}")
+    print(f"Supported Chains: {TraderJoeLPStrategy.STRATEGY_METADATA.supported_chains}")
+    print(f"Supported Protocols: {TraderJoeLPStrategy.STRATEGY_METADATA.supported_protocols}")
+    print(f"Intent Types: {TraderJoeLPStrategy.STRATEGY_METADATA.intent_types}")
     print(f"\nDescription: {TraderJoeLPStrategy.STRATEGY_METADATA.description}")
     print("\nTo test on Anvil:")
-    print("  python strategies/demo/traderjoe_lp/run_anvil.py")
+    print("  almanak strat run -d strategies/demo/traderjoe_lp --network anvil --once")

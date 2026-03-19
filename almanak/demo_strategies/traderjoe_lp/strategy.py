@@ -42,10 +42,10 @@ Price at bin ID: price = (1 + binStep/10000)^(binId - 8388608)
 USAGE:
 ------
     # Test on Anvil (local Avalanche fork)
-    python strategies/demo/traderjoe_lp/run_anvil.py
+    almanak strat run -d traderjoe_lp --network anvil --once
 
     # Run once to open a position
-    python -m src.cli.run --strategy demo_traderjoe_lp --once
+    almanak strat run -d traderjoe_lp --once
 
 ===============================================================================
 """
@@ -278,81 +278,85 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         Returns:
             Intent: LP_OPEN, LP_CLOSE, or HOLD
         """
+        # =================================================================
+        # STEP 1.5: Handle forced close before price lookup (does not need price)
+        # =================================================================
+
+        if self.force_action == "close":
+            # Don't check _position_bin_ids - the adapter queries on-chain for positions
+            logger.info("Forced action: CLOSE LP position (adapter will query on-chain)")
+            return self._create_close_intent()
+
+        # =================================================================
+        # STEP 1: Get current market price
+        # =================================================================
+        # Price is expressed as token_y per token_x
+        # For WAVAX/USDC: price = USDC per WAVAX (e.g., 30)
+
         try:
-            # =================================================================
-            # STEP 1: Get current market price
-            # =================================================================
-            # Price is expressed as token_y per token_x
-            # For WAVAX/USDC: price = USDC per WAVAX (e.g., 30)
-
-            try:
-                token_x_price_usd = market.price(self.token_x_symbol)
-                token_y_price_usd = market.price(self.token_y_symbol)
-                current_price = token_x_price_usd / token_y_price_usd
-                logger.debug(f"Current price: {current_price:.4f} {self.token_y_symbol}/{self.token_x_symbol}")
-            except (ValueError, KeyError) as e:
-                logger.warning(f"Could not get price: {e}")
-                # Use a reasonable default for AVAX/USDC testing
-                current_price = Decimal("30")  # ~$30 per AVAX
-
-            # =================================================================
-            # STEP 2: Handle forced actions (for testing)
-            # =================================================================
-
-            if self.force_action == "open":
-                logger.info("Forced action: OPEN LP position")
-                return self._create_open_intent(current_price)
-
-            elif self.force_action == "close":
-                # Don't check _position_bin_ids - the adapter queries on-chain for positions
-                logger.info("Forced action: CLOSE LP position (adapter will query on-chain)")
-                return self._create_close_intent()
-
-            # =================================================================
-            # STEP 3: Check current position status
-            # =================================================================
-
-            if self._position_bin_ids:
-                # We have a position - check if it's still in range
-                # In production, you would query the pool's active bin
-                return Intent.hold(reason=f"Position exists in bins {self._position_bin_ids[:3]}... - monitoring")
-
-            # =================================================================
-            # STEP 4: No position - decide whether to open one
-            # =================================================================
-
-            # Check we have sufficient balance
-            try:
-                token_x_balance = market.balance(self.token_x_symbol)
-                token_y_balance = market.balance(self.token_y_symbol)
-
-                if token_x_balance.balance < self.amount_x:
-                    return Intent.hold(
-                        reason=f"Insufficient {self.token_x_symbol}: {token_x_balance.balance} < {self.amount_x}"
-                    )
-                if token_y_balance.balance < self.amount_y:
-                    return Intent.hold(
-                        reason=f"Insufficient {self.token_y_symbol}: {token_y_balance.balance} < {self.amount_y}"
-                    )
-            except (ValueError, KeyError):
-                logger.warning("Could not verify balances, proceeding anyway")
-
-            # Open new position centered on current price
-            logger.info("No position found - opening new LP position")
-            add_event(
-                TimelineEvent(
-                    timestamp=datetime.now(UTC),
-                    event_type=TimelineEventType.STATE_CHANGE,
-                    description="No position found - opening new TraderJoe LP position",
-                    strategy_id=self.strategy_id,
-                    details={"action": "opening_new_position", "pool": self.pool},
+            token_x_price_usd = market.price(self.token_x_symbol)
+            token_y_price_usd = market.price(self.token_y_symbol)
+            if token_x_price_usd <= 0 or token_y_price_usd <= 0:
+                logger.warning(
+                    f"Invalid quote: {self.token_x_symbol}={token_x_price_usd}, "
+                    f"{self.token_y_symbol}={token_y_price_usd}"
                 )
-            )
+                return Intent.hold(reason="Price data unavailable")
+            current_price = token_x_price_usd / token_y_price_usd
+            logger.debug(f"Current price: {current_price:.4f} {self.token_y_symbol}/{self.token_x_symbol}")
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Could not get price: {e}")
+            return Intent.hold(reason=f"Price data unavailable: {e}")
+
+        # =================================================================
+        # STEP 2: Handle forced open (needs price for intent)
+        # =================================================================
+
+        if self.force_action == "open":
+            logger.info("Forced action: OPEN LP position")
             return self._create_open_intent(current_price)
 
-        except Exception as e:
-            logger.exception(f"Error in decide(): {e}")
-            return Intent.hold(reason=f"Error: {str(e)}")
+        # =================================================================
+        # STEP 3: Check current position status
+        # =================================================================
+
+        if self._position_bin_ids:
+            # We have a position - check if it's still in range
+            # In production, you would query the pool's active bin
+            return Intent.hold(reason=f"Position exists in bins {self._position_bin_ids[:3]}... - monitoring")
+
+        # =================================================================
+        # STEP 4: No position - decide whether to open one
+        # =================================================================
+
+        # Check we have sufficient balance
+        try:
+            token_x_balance = market.balance(self.token_x_symbol)
+            token_y_balance = market.balance(self.token_y_symbol)
+
+            if token_x_balance.balance < self.amount_x:
+                return Intent.hold(
+                    reason=f"Insufficient {self.token_x_symbol}: {token_x_balance.balance} < {self.amount_x}"
+                )
+            if token_y_balance.balance < self.amount_y:
+                return Intent.hold(
+                    reason=f"Insufficient {self.token_y_symbol}: {token_y_balance.balance} < {self.amount_y}"
+                )
+        except (ValueError, KeyError):
+            logger.warning("Could not verify balances, proceeding anyway")
+
+        # Open new position centered on current price
+        logger.info("No position found - opening new LP position")
+        add_event(
+            TimelineEvent(
+                timestamp=datetime.now(UTC),
+                event_type=TimelineEventType.STATE_CHANGE,
+                description="No position found - opening new TraderJoe LP position",
+                strategy_id=self.strategy_id,
+                details={"action": "opening_new_position", "pool": self.pool},
+            )
+        )
+        return self._create_open_intent(current_price)
 
     # =========================================================================
     # INTENT CREATION HELPERS
@@ -541,9 +545,17 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         positions: list[PositionInfo] = []
 
         if self._position_bin_ids:
-            # Calculate estimated value
-            token_x_price_usd = Decimal("30")  # Default AVAX price
-            token_y_price_usd = Decimal("1")  # Default USDC price
+            # Calculate estimated value using live prices
+            try:
+                snapshot = self.create_market_snapshot()
+                token_x_price_usd = Decimal(str(snapshot.price(self.token_x_symbol)))
+                token_y_price_usd = Decimal(str(snapshot.price(self.token_y_symbol)))
+            except Exception:
+                logger.warning(
+                    f"Unable to fetch live prices for {self.token_x_symbol}/{self.token_y_symbol} in teardown valuation"
+                )
+                token_x_price_usd = Decimal("0")
+                token_y_price_usd = Decimal("0")
 
             estimated_value = self.amount_x * token_x_price_usd + self.amount_y * token_y_price_usd
 
@@ -605,9 +617,9 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"\nStrategy Name: {TraderJoeLPStrategy.STRATEGY_NAME}")
     print(f"Version: {TraderJoeLPStrategy.STRATEGY_METADATA.version}")
-    print(f"Supported Chains: {TraderJoeLPStrategy.SUPPORTED_CHAINS}")
-    print(f"Supported Protocols: {TraderJoeLPStrategy.SUPPORTED_PROTOCOLS}")
-    print(f"Intent Types: {TraderJoeLPStrategy.INTENT_TYPES}")
+    print(f"Supported Chains: {TraderJoeLPStrategy.STRATEGY_METADATA.supported_chains}")
+    print(f"Supported Protocols: {TraderJoeLPStrategy.STRATEGY_METADATA.supported_protocols}")
+    print(f"Intent Types: {TraderJoeLPStrategy.STRATEGY_METADATA.intent_types}")
     print(f"\nDescription: {TraderJoeLPStrategy.STRATEGY_METADATA.description}")
     print("\nTo test on Anvil:")
-    print("  python strategies/demo/traderjoe_lp/run_anvil.py")
+    print("  almanak strat run -d traderjoe_lp --network anvil --once")
