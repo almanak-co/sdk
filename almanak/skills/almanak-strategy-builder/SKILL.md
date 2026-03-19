@@ -92,6 +92,24 @@ my_strategy/
   AGENTS.md          # AI agent guide
 ```
 
+**pyproject.toml example:**
+
+```toml
+[project]
+name = "my-strategy"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "almanak>=2.4.0",
+]
+
+[tool.almanak.run]
+interval = 60
+```
+
+The `[tool.almanak.run]` section is required — it sets the execution interval (in seconds)
+for the strategy loop in production. Always include it when writing pyproject.toml manually.
+
 **Adding dependencies:**
 
 ```bash
