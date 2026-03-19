@@ -162,6 +162,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                             "chains": [c.strip() for c in str(chain).split(",")],
                             "config_path": str(config_file),
                             "category": category,
+                            "consecutive_errors": 0,
+                            "last_iteration_at": 0,
+                            "pnl_since_deploy_usd": "",
                         }
                     )
                 except (json.JSONDecodeError, KeyError) as e:
@@ -261,6 +264,18 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     continue
 
         return str(total_value_usd), str(pnl_24h_usd)
+
+    async def _get_portfolio_metrics(self, strategy_id: str) -> Decimal | None:
+        """Return pnl_after_gas for a strategy, or None if unavailable."""
+        if self._state_manager is None:
+            return None
+        try:
+            metrics = await self._state_manager.get_portfolio_metrics(strategy_id)
+            if metrics is None:
+                return None
+            return metrics.pnl_after_gas
+        except Exception:
+            return None
 
     def _compute_effective_status(self, instance: Any, stale_threshold_seconds: int = 300) -> str:
         """Compute effective status for a registered instance.
@@ -386,6 +401,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                             "attention_reason": "Heartbeat stale" if effective_status == "STALE" else "",
                             "is_multi_chain": "," in inst.chain,
                             "chains": [c.strip() for c in inst.chain.split(",")],
+                            "consecutive_errors": 0,
+                            "last_iteration_at": 0,
+                            "pnl_since_deploy_usd": "",
                         }
 
                         # Enrich with state data
@@ -394,6 +412,26 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                             total_value, pnl = self._extract_portfolio_value_from_state(state)
                             strategy_info["total_value_usd"] = total_value
                             strategy_info["pnl_24h_usd"] = pnl
+
+                            try:
+                                strategy_info["consecutive_errors"] = int(state.get("consecutive_errors", 0) or 0)
+                            except (TypeError, ValueError):
+                                strategy_info["consecutive_errors"] = 0
+
+                            last_iteration = state.get("last_iteration", {})
+                            last_iteration_ts = last_iteration.get("timestamp")
+                            if last_iteration_ts:
+                                try:
+                                    ts = datetime.fromisoformat(last_iteration_ts)
+                                    strategy_info["last_iteration_at"] = int(ts.timestamp())
+                                except (ValueError, TypeError):
+                                    strategy_info["last_iteration_at"] = 0
+                            else:
+                                strategy_info["last_iteration_at"] = 0
+
+                        pnl_metrics = await self._get_portfolio_metrics(inst.strategy_id)
+                        if pnl_metrics is not None:
+                            strategy_info["pnl_since_deploy_usd"] = str(pnl_metrics)
 
                         strategies.append(strategy_info)
 
@@ -436,6 +474,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     attention_reason=s["attention_reason"],
                     is_multi_chain=s["is_multi_chain"],
                     chains=s["chains"],
+                    consecutive_errors=s.get("consecutive_errors", 0),
+                    last_iteration_at=s.get("last_iteration_at", 0),
+                    pnl_since_deploy_usd=s.get("pnl_since_deploy_usd", ""),
                 )
             )
 
@@ -499,6 +540,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     "attention_reason": "Heartbeat stale" if effective_status == "STALE" else "",
                     "is_multi_chain": "," in inst.chain,
                     "chains": [c.strip() for c in inst.chain.split(",")],
+                    "consecutive_errors": 0,
+                    "last_iteration_at": 0,
+                    "pnl_since_deploy_usd": "",
                 }
         except Exception as e:
             logger.debug(f"Failed to check registry for {strategy_id}: {e}")
@@ -523,10 +567,15 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             strategy_info["total_value_usd"] = total_value
             strategy_info["pnl_24h_usd"] = pnl
 
-            # Derive status from state (same logic as ListStrategies)
+            # Derive status from state, but never downgrade a registry-set PAUSED to ERROR.
+            # The runner explicitly sets PAUSED in the registry via _gateway_update_status();
+            # that signal must take precedence over a stale last_iteration error status.
             last_iteration = state.get("last_iteration", {})
             iteration_status = last_iteration.get("status", "")
-            if iteration_status in ("EXECUTION_FAILED", "STRATEGY_ERROR"):
+            registry_status = strategy_info.get("status", "")
+            if registry_status == "PAUSED":
+                pass  # preserve PAUSED — operator explicitly paused this strategy
+            elif iteration_status in ("EXECUTION_FAILED", "STRATEGY_ERROR"):
                 strategy_info["status"] = "ERROR"
                 strategy_info["attention_required"] = True
                 strategy_info["attention_reason"] = f"Last iteration: {iteration_status}"
@@ -543,6 +592,25 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 except (ValueError, TypeError):
                     pass
 
+            try:
+                strategy_info["consecutive_errors"] = int(state.get("consecutive_errors", 0) or 0)
+            except (TypeError, ValueError):
+                strategy_info["consecutive_errors"] = 0
+
+            last_iteration_ts = last_iteration.get("timestamp")
+            if last_iteration_ts:
+                try:
+                    ts = datetime.fromisoformat(last_iteration_ts)
+                    strategy_info["last_iteration_at"] = int(ts.timestamp())
+                except (ValueError, TypeError):
+                    strategy_info["last_iteration_at"] = 0
+            else:
+                strategy_info["last_iteration_at"] = 0
+
+        pnl_metrics = await self._get_portfolio_metrics(strategy_id)
+        if pnl_metrics is not None:
+            strategy_info["pnl_since_deploy_usd"] = str(pnl_metrics)
+
         # Build summary
         summary = gateway_pb2.StrategySummary(
             strategy_id=str(strategy_info["strategy_id"]),
@@ -557,6 +625,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             attention_reason=str(strategy_info["attention_reason"]),
             is_multi_chain=bool(strategy_info["is_multi_chain"]),
             chains=strategy_info["chains"],  # type: ignore[arg-type]
+            consecutive_errors=int(str(strategy_info.get("consecutive_errors", 0))),
+            last_iteration_at=int(str(strategy_info.get("last_iteration_at", 0))),
+            pnl_since_deploy_usd=str(strategy_info.get("pnl_since_deploy_usd", "")),
         )
 
         # Build position info from state

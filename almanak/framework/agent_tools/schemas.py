@@ -167,6 +167,10 @@ class GetLPPositionResponse(BaseModel):
     tokens_owed_a: str = ""
     tokens_owed_b: str = ""
     in_range: bool = True
+    current_tick: int | None = None
+    fees_a_usd: float | None = None
+    fees_b_usd: float | None = None
+    total_fees_usd: float | None = None
 
 
 class ResolveTokenRequest(BaseModel):

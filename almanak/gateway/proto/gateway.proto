@@ -748,6 +748,9 @@ message StrategySummary {
   string attention_reason = 10;
   bool is_multi_chain = 11;
   repeated string chains = 12;
+  int32  consecutive_errors  = 13;  // count of consecutive failed iterations
+  int64  last_iteration_at   = 14;  // unix timestamp of last iteration completion
+  string pnl_since_deploy_usd = 15; // lifetime PnL after gas; empty if unavailable
 }
 
 message GetStrategyDetailsRequest {

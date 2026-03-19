@@ -2285,6 +2285,9 @@ class StrategySummary(_message.Message):
     ATTENTION_REASON_FIELD_NUMBER: _builtins.int
     IS_MULTI_CHAIN_FIELD_NUMBER: _builtins.int
     CHAINS_FIELD_NUMBER: _builtins.int
+    CONSECUTIVE_ERRORS_FIELD_NUMBER: _builtins.int
+    LAST_ITERATION_AT_FIELD_NUMBER: _builtins.int
+    PNL_SINCE_DEPLOY_USD_FIELD_NUMBER: _builtins.int
     strategy_id: _builtins.str
     name: _builtins.str
     status: _builtins.str
@@ -2297,6 +2300,9 @@ class StrategySummary(_message.Message):
     attention_required: _builtins.bool
     attention_reason: _builtins.str
     is_multi_chain: _builtins.bool
+    consecutive_errors: _builtins.int
+    last_iteration_at: _builtins.int
+    pnl_since_deploy_usd: _builtins.str
     @_builtins.property
     def chains(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
     def __init__(
@@ -2314,8 +2320,11 @@ class StrategySummary(_message.Message):
         attention_reason: _builtins.str = ...,
         is_multi_chain: _builtins.bool = ...,
         chains: _abc.Iterable[_builtins.str] | None = ...,
+        consecutive_errors: _builtins.int = ...,
+        last_iteration_at: _builtins.int = ...,
+        pnl_since_deploy_usd: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["attention_reason", b"attention_reason", "attention_required", b"attention_required", "chain", b"chain", "chains", b"chains", "is_multi_chain", b"is_multi_chain", "last_action_at", b"last_action_at", "name", b"name", "pnl_24h_usd", b"pnl_24h_usd", "protocol", b"protocol", "status", b"status", "strategy_id", b"strategy_id", "total_value_usd", b"total_value_usd"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["attention_reason", b"attention_reason", "attention_required", b"attention_required", "chain", b"chain", "chains", b"chains", "consecutive_errors", b"consecutive_errors", "is_multi_chain", b"is_multi_chain", "last_action_at", b"last_action_at", "last_iteration_at", b"last_iteration_at", "name", b"name", "pnl_24h_usd", b"pnl_24h_usd", "pnl_since_deploy_usd", b"pnl_since_deploy_usd", "protocol", b"protocol", "status", b"status", "strategy_id", b"strategy_id", "total_value_usd", b"total_value_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___StrategySummary: _TypeAlias = StrategySummary  # noqa: Y015

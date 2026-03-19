@@ -801,6 +801,39 @@ class StrategyRunner:
         except Exception as e:
             logger.debug(f"Failed to deregister from gateway (non-fatal): {e}")
 
+    def _gateway_update_status(
+        self,
+        strategy_id: str,
+        status: str,
+    ) -> None:
+        """Update instance status in the gateway registry (non-heartbeat).
+
+        Used to flip status to PAUSED/RUNNING on pause/resume so that
+        strat list / strat status reflects the correct state.
+        Non-fatal: catches all exceptions.
+        """
+        client = self._get_gateway_client()
+        if client is None:
+            return
+        try:
+            from almanak.gateway.proto import gateway_pb2
+
+            request = gateway_pb2.UpdateInstanceStatusRequest(
+                strategy_id=strategy_id,
+                status=status,
+                heartbeat_only=False,
+            )
+            response = client.dashboard.UpdateStrategyInstanceStatus(request, timeout=5.0)
+            if not response.success:
+                logger.warning(
+                    "Gateway rejected status update to %s for %s: %s",
+                    status,
+                    strategy_id,
+                    response.error,
+                )
+        except Exception as e:
+            logger.debug(f"Failed to update gateway status to {status} (non-fatal): {e}")
+
     def _gateway_heartbeat(
         self,
         strategy_id: str,
@@ -1736,6 +1769,9 @@ class StrategyRunner:
                 elif command == "PAUSE":
                     logger.info("Received PAUSE command for %s", strategy_id)
                     self._lifecycle_write_state(strategy_id, "PAUSED")
+                    self._gateway_update_status(strategy_id, "PAUSED")
+                    # Preserve position snapshot so the dashboard doesn't lose it during pause
+                    self._gateway_heartbeat(strategy_id, positions=self._collect_position_snapshot(strategy))
                     # Wait for RESUME command (send heartbeats so operator sees liveness)
                     while not self._shutdown_requested:
                         self._lifecycle_heartbeat(strategy_id)
@@ -1743,6 +1779,8 @@ class StrategyRunner:
                         if resume_cmd == "RESUME":
                             logger.info("Received RESUME command for %s", strategy_id)
                             self._lifecycle_write_state(strategy_id, "RUNNING")
+                            self._gateway_update_status(strategy_id, "RUNNING")
+                            self._gateway_heartbeat(strategy_id, positions=self._collect_position_snapshot(strategy))
                             break
                         elif resume_cmd == "STOP":
                             logger.info("Received STOP command while paused for %s", strategy_id)

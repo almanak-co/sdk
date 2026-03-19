@@ -201,6 +201,9 @@ def list_strategies(status_filter, chain, as_json, gateway_host, gateway_port):
                     "last_action_at": s.last_action_at,
                     "attention_required": s.attention_required,
                     "attention_reason": s.attention_reason,
+                    "consecutive_errors": s.consecutive_errors,
+                    "last_iteration_at": s.last_iteration_at,
+                    "pnl_since_deploy_usd": s.pnl_since_deploy_usd,
                 }
             )
         click.echo(json.dumps(rows, indent=2))
@@ -313,6 +316,9 @@ def strategy_status(strategy_id, timeline, timeline_limit, as_json, gateway_host
             "last_action_at": s.last_action_at,
             "attention_required": s.attention_required,
             "attention_reason": s.attention_reason,
+            "consecutive_errors": s.consecutive_errors,
+            "last_iteration_at": s.last_iteration_at,
+            "pnl_since_deploy_usd": s.pnl_since_deploy_usd,
         }
         if details.position:
             pos_data: dict[str, Any] = {}
@@ -406,7 +412,14 @@ def strategy_status(strategy_id, timeline, timeline_limit, as_json, gateway_host
     click.echo(f"  Protocol:    {s.protocol or '-'}")
     click.echo(f"  Value:       ${s.total_value_usd}" if s.total_value_usd is not None else "  Value:       -")
     click.echo(f"  PnL (24h):   ${s.pnl_24h_usd}" if s.pnl_24h_usd is not None else "  PnL (24h):   -")
+    click.echo(
+        f"  PnL (total): ${s.pnl_since_deploy_usd}" if s.pnl_since_deploy_usd is not None else "  PnL (total): -"
+    )
     click.echo(f"  Last Active: {_format_timestamp(s.last_action_at)}")
+    if s.last_iteration_at:
+        click.echo(f"  Last Iter:   {_format_timestamp(s.last_iteration_at)}")
+    if s.consecutive_errors:
+        click.echo(click.style(f"  Errors:      {s.consecutive_errors} consecutive", fg="red"))
 
     if s.attention_required:
         click.echo()
@@ -676,3 +689,129 @@ def strategy_logs(strategy_id, limit, event_type, since, as_json, gateway_host, 
     shown = len(events)
     more = " (more available)" if response.has_more else ""
     click.echo(f"Showing {shown} events{more}")
+
+
+# =============================================================================
+# strat pause
+# =============================================================================
+
+
+@click.command("pause")
+@click.option("--strategy-id", "-s", required=True, help="Strategy instance ID.")
+@click.option("--reason", required=True, help="Reason for pause (required for audit trail).")
+@click.option(
+    "--wait",
+    is_flag=True,
+    default=False,
+    help="Wait until strategy confirms PAUSED status.",
+)
+@click.option("--timeout", default=60, type=int, help="Seconds to wait (default 60).")
+@_add_gateway_options
+def strategy_pause(strategy_id, reason, wait, timeout, gateway_host, gateway_port):
+    """Suspend a strategy's iteration loop without closing positions.
+
+    The strategy completes its current iteration, then enters a suspended state.
+    On-chain positions are not touched. Use 'strat resume' to restart the loop.
+
+    Examples:
+
+    \b
+        almanak strat pause -s my_strategy --reason "manual review"
+        almanak strat pause -s my_strategy --reason "market volatile" --wait
+    """
+    import time
+
+    from almanak.gateway.proto import gateway_pb2
+
+    client = _make_client(gateway_host, gateway_port)
+    try:
+        # Sample pre-pause status BEFORE issuing the command so --wait can detect
+        # the transition and avoid false positives from filesystem strategies whose
+        # default status is already "PAUSED".
+        pre_status = ""
+        if wait:
+            try:
+                pre_req = gateway_pb2.GetStrategyDetailsRequest(strategy_id=strategy_id)
+                pre_details = client.dashboard.GetStrategyDetails(pre_req)
+                pre_status = pre_details.summary.status
+            except Exception:
+                pass
+
+        try:
+            request = gateway_pb2.ExecuteActionRequest(
+                strategy_id=strategy_id,
+                action="PAUSE",
+                reason=reason,
+            )
+            response = client.dashboard.ExecuteAction(request)
+        except Exception as e:
+            click.secho(f"Failed to pause strategy: {e}", fg="red", err=True)
+            sys.exit(1)
+
+        if not response.success:
+            click.secho(f"Pause failed: {response.error}", fg="red", err=True)
+            sys.exit(1)
+
+        click.echo(f"Pause command issued for {strategy_id} (action_id: {response.action_id})")
+
+        if wait:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    det_req = gateway_pb2.GetStrategyDetailsRequest(strategy_id=strategy_id)
+                    details = client.dashboard.GetStrategyDetails(det_req)
+                    if details.summary.status == "PAUSED" and pre_status != "PAUSED":
+                        click.secho(f"Strategy {strategy_id} is now PAUSED.", fg="yellow")
+                        return
+                except Exception as exc:
+                    click.secho(f"Poll error: {exc}", fg="red", err=True)
+                time.sleep(2)
+            click.secho(f"Timed out waiting for {strategy_id} to reach PAUSED status.", fg="red", err=True)
+            sys.exit(1)
+    finally:
+        client.disconnect()
+
+
+# =============================================================================
+# strat resume
+# =============================================================================
+
+
+@click.command("resume")
+@click.option("--strategy-id", "-s", required=True, help="Strategy instance ID.")
+@click.option("--reason", required=True, help="Reason for resume (required for audit trail).")
+@_add_gateway_options
+def strategy_resume(strategy_id, reason, gateway_host, gateway_port):
+    """Resume a previously paused strategy.
+
+    Sends a RESUME command to the gateway, which the strategy runner picks up
+    and uses to restart its iteration loop.
+
+    Examples:
+
+    \b
+        almanak strat resume -s my_strategy --reason "review complete"
+    """
+    from almanak.gateway.proto import gateway_pb2
+
+    client = _make_client(gateway_host, gateway_port)
+    try:
+        request = gateway_pb2.ExecuteActionRequest(
+            strategy_id=strategy_id,
+            action="RESUME",
+            reason=reason,
+        )
+        response = client.dashboard.ExecuteAction(request)
+
+        if not response.success:
+            click.secho(f"Resume failed: {response.error}", fg="red", err=True)
+            sys.exit(1)
+
+        click.secho(f"Resume command issued for {strategy_id} (action_id: {response.action_id})", fg="green")
+    except SystemExit:
+        raise
+    except Exception as e:
+        click.secho(f"Failed to resume strategy: {e}", fg="red", err=True)
+        sys.exit(1)
+    finally:
+        client.disconnect()
