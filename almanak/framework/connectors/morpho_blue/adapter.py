@@ -229,20 +229,6 @@ MORPHO_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
             "is_pt_market": True,
         },
     },
-    "arbitrum": {
-        # PT-USDai/USDC market (86% LLTV) - Pendle PT on Arbitrum
-        "0xf4abce39de1e88e6f98e2e5e0960f609caf67db710b3e2a36e8e06a1038ec949": {
-            "name": "PT-USDai/USDC",
-            "loan_token": "USDC",
-            "loan_token_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-            "collateral_token": "PT-USDai",
-            "collateral_token_address": "0x3B0C5Ef8D4c8aE6Db1A3E3b9c876A53f3fe8C0b1",
-            "oracle": "0x2a01EB9496094dA03c4E364Def50f5aD1280AD72",
-            "irm": "0x870aC11D48B15DB9a138Cf899d20F13F79Ba00BC",
-            "lltv": 860000000000000000,  # 86%
-            "is_pt_market": True,
-        },
-    },
     "base": {
         # cbETH/USDC market (86% LLTV)
         "0xdba352d93a64b17c71104cbddc6aef85cd432322a1446b5b65163cbbc615cd0c": {
@@ -1560,7 +1546,11 @@ class MorphoBlueAdapter:
     # =========================================================================
 
     def _get_market_info(self, market_id: str) -> dict[str, Any] | None:
-        """Get market info by market_id."""
+        """Get market info by market_id.
+
+        Falls back to on-chain lookup via SDK if the market is not in the local registry.
+        This allows any Morpho Blue market to be used without pre-registration.
+        """
         # Normalize market_id
         if not market_id.startswith("0x"):
             market_id = "0x" + market_id
@@ -1570,6 +1560,28 @@ class MorphoBlueAdapter:
         for mid, info in self.markets.items():
             if mid.lower() == market_id:
                 return info
+
+        # Fallback: fetch params on-chain if SDK is initialized
+        if self._sdk_enabled and self._sdk is not None:
+            try:
+                sdk_params = self._sdk.get_market_params(market_id)
+                logger.info(
+                    f"Market {market_id[:18]}... not in local registry; resolved on-chain: "
+                    f"loan={sdk_params.loan_token}, collateral={sdk_params.collateral_token}, "
+                    f"lltv={sdk_params.lltv_percent:.1f}%"
+                )
+                return {
+                    "name": f"on-chain:{market_id[:10]}",
+                    "loan_token": sdk_params.loan_token,
+                    "loan_token_address": sdk_params.loan_token,
+                    "collateral_token": sdk_params.collateral_token,
+                    "collateral_token_address": sdk_params.collateral_token,
+                    "oracle": sdk_params.oracle,
+                    "irm": sdk_params.irm,
+                    "lltv": sdk_params.lltv,
+                }
+            except Exception as e:
+                logger.warning(f"On-chain market lookup failed for {market_id[:18]}...: {e}")
 
         return None
 

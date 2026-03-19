@@ -84,6 +84,10 @@ COMPOUND_V3_COMET_ADDRESSES: dict[str, dict[str, str]] = {
         "weth": "0x46e6b214b524310239732D51387075E0e70970bf",
         "aero": "0x784efeB622244d2348d4F2522f8860B96fbEcE89",
     },
+    "optimism": {
+        # Verified on-chain: baseToken() returns 0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85 (USDC on Optimism)
+        "usdc": "0x2e44e174f7D53F0212823acC11C01A11d58c5bCB",
+    },
 }
 
 
@@ -340,6 +344,34 @@ COMPOUND_V3_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
                     "borrow_collateral_factor": Decimal("0.80"),
                     "liquidation_collateral_factor": Decimal("0.85"),
                     "liquidation_factor": Decimal("0.95"),
+                },
+            },
+        },
+    },
+    "optimism": {
+        # USDC Comet on Optimism -- verified on-chain: baseToken() = 0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85 (USDC)
+        "usdc": {
+            "name": "USDC Market",
+            "base_token": "USDC",
+            "base_token_address": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+            "collaterals": {
+                "WETH": {
+                    "address": "0x4200000000000000000000000000000000000006",
+                    "borrow_collateral_factor": Decimal("0.825"),
+                    "liquidation_collateral_factor": Decimal("0.895"),
+                    "liquidation_factor": Decimal("0.95"),
+                },
+                "wstETH": {
+                    "address": "0x1F32b1c2345538c0c6f582fCB022739c4A194Ebb",
+                    "borrow_collateral_factor": Decimal("0.80"),
+                    "liquidation_collateral_factor": Decimal("0.85"),
+                    "liquidation_factor": Decimal("0.95"),
+                },
+                "OP": {
+                    "address": "0x4200000000000000000000000000000000000042",
+                    "borrow_collateral_factor": Decimal("0.65"),
+                    "liquidation_collateral_factor": Decimal("0.70"),
+                    "liquidation_factor": Decimal("0.93"),
                 },
             },
         },
