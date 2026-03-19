@@ -57,6 +57,17 @@ test-ledger/
 
 # Local Claude artifacts
 .claude/worktrees/
+.claude/projects/
+
+# Video build output
+videos/out/
+
+# Nightly test output
+tests/visual/nightly/output/
+
+# Stray uv.lock files in strategy subdirectories (not part of the SDK package)
+strategies/incubating/*/uv.lock
+strategies/demo/*/uv.lock
 
 # KitchenLoop runtime artifacts
 .kitchenloop/
