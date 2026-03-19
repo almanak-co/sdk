@@ -209,3 +209,57 @@ class TestRpcServiceMetrics:
         assert metrics["successful_requests"] == 0
         assert metrics["failed_requests"] == 0
         assert metrics["rate_limited_requests"] == 0
+
+
+class TestMakeRpcCallErrorMessages:
+    """Tests for _make_rpc_call error message clarity."""
+
+    def _make_client_error_session(self, error_cls, *args):
+        """Build a mock aiohttp session whose post() raises a ClientError from __aenter__."""
+        import aiohttp
+
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(side_effect=error_cls(*args))
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock()
+        mock_session.post.return_value = mock_cm
+        return mock_session
+
+    @pytest.mark.asyncio
+    async def test_localhost_connection_error_mentions_local_rpc(self, rpc_service):
+        """When connecting to localhost fails, error message mentions the local RPC."""
+        import aiohttp
+
+        mock_session = self._make_client_error_session(
+            aiohttp.ClientConnectorError, MagicMock(), OSError("Connect call failed")
+        )
+
+        with patch.object(rpc_service, "_get_session", new=AsyncMock(return_value=mock_session)):
+            result, error = await rpc_service._make_rpc_call(
+                "http://127.0.0.1:8546", "eth_blockNumber", [], "test"
+            )
+
+        assert result is None
+        assert error is not None
+        assert "local RPC" in error["message"]
+        assert "127.0.0.1" in error["message"]
+
+    @pytest.mark.asyncio
+    async def test_external_connection_error_generic_message(self, rpc_service):
+        """When connecting to an external RPC fails, error message is generic."""
+        import aiohttp
+
+        mock_session = self._make_client_error_session(
+            aiohttp.ClientConnectorError, MagicMock(), OSError("Connection refused")
+        )
+
+        with patch.object(rpc_service, "_get_session", new=AsyncMock(return_value=mock_session)):
+            result, error = await rpc_service._make_rpc_call(
+                "https://arb1.arbitrum.io/rpc", "eth_blockNumber", [], "test"
+            )
+
+        assert result is None
+        assert error is not None
+        assert "Network error" in error["message"]
+        # Should NOT mention Anvil for external RPCs
+        assert "Anvil" not in error["message"]

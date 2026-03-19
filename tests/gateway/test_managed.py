@@ -395,3 +395,137 @@ class TestManagedGatewayKeepAlive:
 
         # manager.stop() SHOULD have been called despite keep_anvil=True
         mock_manager.stop.assert_called_once()
+
+
+class TestAnvilWatchdog:
+    """Tests for the Anvil process watchdog."""
+
+    def _make_settings(self, port: int, network: str = "anvil") -> GatewaySettings:
+        return GatewaySettings(
+            grpc_port=port,
+            metrics_enabled=False,
+            audit_enabled=False,
+            allow_insecure=True,
+            network=network,
+        )
+
+    @pytest.mark.asyncio
+    async def test_watchdog_restarts_crashed_process(self):
+        """Watchdog detects a dead Anvil process and restarts it."""
+        import asyncio
+
+        settings = self._make_settings(50080)
+        gw = ManagedGateway(settings, anvil_chains=["arbitrum"])
+        gw._stop_requested = threading.Event()
+
+        # First call: not running (crashed). Second call: running (restarted).
+        mock_manager = AsyncMock()
+        mock_manager.is_running = False
+        mock_manager.reset_to_latest = AsyncMock(return_value=True)
+        gw._anvil_managers["arbitrum"] = mock_manager
+        gw._wallet_address = None  # no funding needed
+
+        # Use a short interval so the watchdog triggers immediately
+        gw._WATCHDOG_INTERVAL = 0.05
+
+        # Run watchdog for just long enough for one cycle, then stop
+        async def run_briefly():
+            task = asyncio.ensure_future(gw._anvil_watchdog())
+            await asyncio.sleep(0.15)
+            gw._stop_requested.set()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        await run_briefly()
+
+        mock_manager.reset_to_latest.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_watchdog_skips_healthy_process(self):
+        """Watchdog does not restart a healthy Anvil process."""
+        import asyncio
+
+        settings = self._make_settings(50081)
+        gw = ManagedGateway(settings, anvil_chains=["base"])
+        gw._stop_requested = threading.Event()
+
+        mock_manager = AsyncMock()
+        mock_manager.is_running = True  # healthy
+        mock_manager.reset_to_latest = AsyncMock(return_value=True)
+        gw._anvil_managers["base"] = mock_manager
+
+        gw._WATCHDOG_INTERVAL = 0.05
+
+        async def run_briefly():
+            task = asyncio.ensure_future(gw._anvil_watchdog())
+            await asyncio.sleep(0.15)
+            gw._stop_requested.set()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        await run_briefly()
+
+        mock_manager.reset_to_latest.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_watchdog_handles_restart_failure_gracefully(self):
+        """Watchdog logs an error but does not raise when restart fails."""
+        import asyncio
+
+        settings = self._make_settings(50082)
+        gw = ManagedGateway(settings, anvil_chains=["arbitrum"])
+        gw._stop_requested = threading.Event()
+
+        mock_manager = AsyncMock()
+        mock_manager.is_running = False
+        mock_manager.reset_to_latest = AsyncMock(return_value=False)  # restart fails
+        gw._anvil_managers["arbitrum"] = mock_manager
+
+        gw._WATCHDOG_INTERVAL = 0.05
+
+        async def run_briefly():
+            task = asyncio.ensure_future(gw._anvil_watchdog())
+            await asyncio.sleep(0.15)
+            gw._stop_requested.set()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Should not raise
+        await run_briefly()
+        mock_manager.reset_to_latest.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_watchdog_exits_on_stop_requested(self):
+        """Watchdog exits cleanly when stop is requested before first check."""
+        import asyncio
+
+        settings = self._make_settings(50083)
+        gw = ManagedGateway(settings, anvil_chains=["arbitrum"])
+        gw._stop_requested = threading.Event()
+        gw._stop_requested.set()  # stop immediately
+
+        mock_manager = AsyncMock()
+        mock_manager.is_running = False
+        gw._anvil_managers["arbitrum"] = mock_manager
+
+        gw._WATCHDOG_INTERVAL = 0.05
+
+        task = asyncio.ensure_future(gw._anvil_watchdog())
+        await asyncio.sleep(0.15)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should not have tried to restart since stop was requested immediately
+        mock_manager.reset_to_latest.assert_not_called()

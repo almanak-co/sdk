@@ -241,6 +241,20 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                 return data.get("result"), None
 
         except aiohttp.ClientError as e:
+            # Detect connections to localhost specifically so the error message is
+            # actionable rather than a generic "Cannot connect".
+            from urllib.parse import urlparse
+
+            _hostname = urlparse(rpc_url).hostname or ""
+            if _hostname in {"127.0.0.1", "localhost", "::1"}:
+                return None, {
+                    "code": -32603,
+                    "message": (
+                        f"Cannot connect to local RPC at {rpc_url}. "
+                        "The local node process (Anvil or other) may not be running. "
+                        f"Original error: {e!s}"
+                    ),
+                }
             return None, {"code": -32603, "message": f"Network error: {e!s}"}
         except TimeoutError:
             return None, {"code": -32603, "message": "Request timeout"}
