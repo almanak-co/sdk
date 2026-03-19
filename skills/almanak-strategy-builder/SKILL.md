@@ -1251,22 +1251,117 @@ class MyStrategy(IntentStrategy):
 
 ### Safe Teardown
 
-Implement teardown so the strategy can cleanly exit positions:
+All `IntentStrategy` subclasses **must** implement two abstract teardown methods:
+`get_open_positions()` and `generate_teardown_intents()`. Without these, the
+strategy class cannot be instantiated.
+
+For strategies that never hold positions, extend `StatelessStrategy` instead of
+`IntentStrategy` — it provides empty default implementations.
+
+#### `get_open_positions()`
+
+Returns a `TeardownPositionSummary` describing all current positions. Must query
+on-chain state (not cached) for safety:
 
 ```python
-def supports_teardown(self) -> bool:
-    return True
+def get_open_positions(self):
+    from datetime import UTC, datetime
+    from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
+    positions = []
+    try:
+        market = self.create_market_snapshot()
+        base_bal = market.balance(self.base_token)
+        if base_bal.balance > 0:
+            positions.append(
+                PositionInfo(
+                    position_type=PositionType.TOKEN,
+                    position_id=f"{self.base_token}-holding",
+                    chain=self.chain,
+                    protocol="uniswap_v3",
+                    value_usd=base_bal.balance_usd,
+                    details={"asset": self.base_token, "amount": str(base_bal.balance)},
+                )
+            )
+    except Exception:
+        logger.warning("Unable to fetch balances for teardown position summary")
+
+    return TeardownPositionSummary(
+        strategy_id=getattr(self, "strategy_id", "my_strategy"),
+        timestamp=datetime.now(UTC),
+        positions=positions,
+    )
+```
+
+**PositionType** values (close in this priority order):
+`PERP` > `BORROW` > `SUPPLY` > `LP` > `STAKE` > `PREDICTION` > `CEX` > `TOKEN`
+
+For strategies with no positions, return `TeardownPositionSummary.empty(self.strategy_id)`.
+
+#### `generate_teardown_intents()`
+
+Returns intents to close all positions, respecting priority order and teardown mode:
+
+```python
 def generate_teardown_intents(self, mode, market=None) -> list[Intent]:
+    from almanak.framework.teardown import TeardownMode
+
+    max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.01")
     intents = []
+    # Close LP positions first (if any)
     position_id = self._lp_position_id
     if position_id:
         intents.append(Intent.lp_close(position_id=position_id))
     # Swap all base token back to quote
     intents.append(Intent.swap(
         from_token=self.base_token, to_token=self.quote_token,
-        amount="all", max_slippage=Decimal("0.03"),
+        amount="all", max_slippage=max_slippage,
     ))
+    return intents
+```
+
+`TeardownMode.SOFT` = graceful exit (minimize costs), `TeardownMode.HARD` = emergency (speed over cost).
+
+#### Lending strategy teardown example (Aave V3)
+
+```python
+def get_open_positions(self):
+    from datetime import UTC, datetime
+    from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
+
+    positions = []
+    if self._borrowed_amount > 0:
+        positions.append(PositionInfo(
+            position_type=PositionType.BORROW,
+            position_id=f"aave-borrow-{self.borrow_token}",
+            chain=self.chain, protocol="aave_v3",
+            value_usd=self._borrowed_amount * self._borrow_price,
+            details={"asset": self.borrow_token, "amount": str(self._borrowed_amount)},
+        ))
+    if self._supplied_amount > 0:
+        positions.append(PositionInfo(
+            position_type=PositionType.SUPPLY,
+            position_id=f"aave-supply-{self.collateral_token}",
+            chain=self.chain, protocol="aave_v3",
+            value_usd=self._supplied_amount,
+            details={"asset": self.collateral_token, "amount": str(self._supplied_amount)},
+        ))
+    return TeardownPositionSummary(
+        strategy_id=self.strategy_id, timestamp=datetime.now(UTC), positions=positions,
+    )
+
+def generate_teardown_intents(self, mode, market=None) -> list[Intent]:
+    intents = []
+    if self._borrowed_amount > 0:
+        intents.append(Intent.repay(
+            protocol="aave_v3", token=self.borrow_token,
+            amount=self._borrowed_amount, repay_full=True, chain=self.chain,
+        ))
+    if self._supplied_amount > 0:
+        intents.append(Intent.withdraw(
+            protocol="aave_v3", token=self.collateral_token,
+            amount=self._supplied_amount, withdraw_all=True, chain=self.chain,
+        ))
     return intents
 ```
 
