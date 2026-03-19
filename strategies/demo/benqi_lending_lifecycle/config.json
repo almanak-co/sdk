@@ -1,0 +1,15 @@
+{
+    "strategy_id": "benqi_lending_lifecycle",
+    "strategy_name": "benqi_lending_lifecycle",
+    "description": "BENQI full lending lifecycle on Avalanche: supply collateral -> borrow -> repay -> withdraw",
+    "chain": "avalanche",
+    "collateral_token": "USDC",
+    "collateral_amount": "400",
+    "borrow_token": "USDT",
+    "ltv_target": 0.2,
+    "anvil_funding": {
+        "AVAX": 10,
+        "USDC": 10000,
+        "USDT": 100
+    }
+}
