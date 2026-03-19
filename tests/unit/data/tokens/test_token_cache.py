@@ -716,3 +716,29 @@ class TestCacheKeyMethod:
             key2 = cache_key("arbitrum", symbol="USDC")
 
             assert key1 == key2
+
+
+class TestResolveCacheFile:
+    """Tests for TokenCacheManager._resolve_cache_file fallback logic."""
+
+    def test_none_returns_home_dir_when_writable(self):
+        """Default (None) resolves to ~/.almanak/token_cache.json when writable."""
+        result = TokenCacheManager._resolve_cache_file(None)
+        expected = Path(TokenCacheManager.DEFAULT_CACHE_FILE).expanduser()
+        assert result == expected
+
+    def test_none_falls_back_to_tmp_when_home_not_writable(self):
+        """Falls back to /tmp when home directory mkdir raises OSError."""
+        with patch.object(Path, "mkdir", side_effect=OSError("Read-only file system")):
+            result = TokenCacheManager._resolve_cache_file(None)
+        assert result == Path("/tmp/.almanak/token_cache.json")
+
+    def test_explicit_path_returned_as_is(self):
+        """Explicit cache_file is expanded and returned directly."""
+        result = TokenCacheManager._resolve_cache_file("/custom/path/cache.json")
+        assert result == Path("/custom/path/cache.json")
+
+    def test_explicit_tilde_path_is_expanded(self):
+        """Explicit cache_file with ~ is expanded."""
+        result = TokenCacheManager._resolve_cache_file("~/my_cache.json")
+        assert result == Path("~/my_cache.json").expanduser()

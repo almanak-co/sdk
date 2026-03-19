@@ -191,8 +191,16 @@ class DataCache:
 
         if db_path is None:
             cache_dir = Path.home() / ".almanak" / "cache"
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            self.db_path = str(cache_dir / "data_cache.db")
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                self.db_path = str(cache_dir / "data_cache.db")
+            except OSError:
+                fallback_dir = Path("/tmp/.almanak/cache")
+                try:
+                    fallback_dir.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    pass
+                self.db_path = str(fallback_dir / "data_cache.db")
         elif self._is_memory:
             self.db_path = ":memory:"
             # For in-memory, create persistent connection immediately

@@ -48,10 +48,25 @@ class TeardownStateManager:
         """Initialize the state manager.
 
         Args:
-            db_path: Path to SQLite database. Defaults to 'almanak_state.db'
+            db_path: Path to SQLite database. Defaults to 'almanak_state.db',
+                falls back to '/tmp/almanak_state.db' if cwd is not writable.
         """
-        self.db_path = Path(db_path) if db_path else Path("almanak_state.db")
+        self.db_path = self._resolve_db_path(db_path)
         self._init_db()
+
+    @staticmethod
+    def _resolve_db_path(db_path: str | Path | None) -> Path:
+        """Resolve database path, falling back to /tmp if cwd is not writable."""
+        if db_path is not None:
+            return Path(db_path)
+
+        primary = Path("almanak_state.db")
+        try:
+            # Test if we can write to the current directory
+            primary.touch(exist_ok=True)
+            return primary
+        except OSError:
+            return Path("/tmp/almanak_state.db")
 
     def _init_db(self) -> None:
         """Initialize the database schema."""

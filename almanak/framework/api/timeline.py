@@ -296,10 +296,11 @@ def add_event(event: TimelineEvent) -> None:
     # Keep events sorted by timestamp descending
     _event_store[event.strategy_id].sort(key=lambda e: e.timestamp, reverse=True)
 
-    # Persist to file for cross-process sharing (dashboard) -- local fallback
-    _persist_events_to_file()
+    # Persist to file for cross-process sharing (dashboard) — only in local mode
+    if _gateway_client is None:
+        _persist_events_to_file()
 
-    # Dual-write to gateway for persistent storage (non-fatal)
+    # Write to gateway for persistent storage (non-fatal)
     if _gateway_client is not None:
         try:
             from almanak.gateway.proto import gateway_pb2

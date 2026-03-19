@@ -127,10 +127,11 @@ class TokenCacheManager:
         """Initialize the token cache.
 
         Args:
-            cache_file: Path to disk cache file. Defaults to ~/.almanak/token_cache.json
+            cache_file: Path to disk cache file. Defaults to ~/.almanak/token_cache.json.
+                Falls back to /tmp/.almanak/token_cache.json if home dir is not writable.
             max_size: Maximum cache entries (default 10000). Uses LRU eviction when full.
         """
-        self._cache_file = Path(cache_file or self.DEFAULT_CACHE_FILE).expanduser()
+        self._cache_file = self._resolve_cache_file(cache_file)
         self._max_size = max_size
 
         # Memory cache using OrderedDict for LRU ordering
@@ -151,6 +152,24 @@ class TokenCacheManager:
             "misses": 0,
             "evictions": 0,
         }
+
+    @staticmethod
+    def _resolve_cache_file(cache_file: str | Path | None) -> Path:
+        """Resolve cache file path, falling back to /tmp if home is not writable."""
+        if cache_file is not None:
+            return Path(cache_file).expanduser()
+
+        primary = Path(TokenCacheManager.DEFAULT_CACHE_FILE).expanduser()
+        try:
+            primary.parent.mkdir(parents=True, exist_ok=True)
+            return primary
+        except OSError:
+            fallback = Path("/tmp/.almanak/token_cache.json")
+            try:
+                fallback.parent.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+            return fallback
 
     def _ensure_disk_loaded(self) -> None:
         """Load disk cache if not already loaded. Must be called with lock held."""

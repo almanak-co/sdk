@@ -8,11 +8,13 @@ This module tests the DataCache class, covering:
 - Key-value caching
 - Cache warming
 - Statistics tracking
+- Filesystem fallback paths
 """
 
 from datetime import datetime
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1230,3 +1232,33 @@ class TestTTLProperty:
         cache = DataCache(":memory:")
         cache.ttl_seconds = 7200
         assert cache.ttl_seconds == 7200
+
+
+class TestDataCacheFilesystemFallback:
+    """Tests for DataCache filesystem fallback when home dir is not writable."""
+
+    def test_default_path_uses_home_dir(self, tmp_path):
+        """Default (None) resolves to ~/.almanak/cache/data_cache.db."""
+        fake_home = tmp_path / "home"
+        expected = str(fake_home / ".almanak" / "cache" / "data_cache.db")
+        with patch.object(Path, "home", return_value=fake_home):
+            cache = DataCache()
+        assert cache.db_path == expected
+
+    def test_fallback_to_tmp_when_home_not_writable(self):
+        """Falls back to /tmp when home directory mkdir raises OSError."""
+        original_mkdir = Path.mkdir
+
+        def selective_mkdir(self, *args, **kwargs):
+            if ".almanak" in str(self) and "/tmp" not in str(self):
+                raise OSError("Read-only file system")
+            return original_mkdir(self, *args, **kwargs)
+
+        with patch.object(Path, "mkdir", selective_mkdir):
+            cache = DataCache()
+        assert "/tmp/.almanak/cache/data_cache.db" in cache.db_path
+
+    def test_explicit_path_bypasses_fallback(self):
+        """Explicit db_path is used directly without fallback."""
+        cache = DataCache(":memory:")
+        assert cache.db_path == ":memory:"

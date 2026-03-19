@@ -47,8 +47,16 @@ class OHLCVCache:
         """
         if db_path is None:
             cache_dir = Path.home() / ".almanak" / "cache"
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            self.db_path = str(cache_dir / "ohlcv_cache.db")
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                self.db_path = str(cache_dir / "ohlcv_cache.db")
+            except OSError:
+                fallback_dir = Path("/tmp/.almanak/cache")
+                try:
+                    fallback_dir.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    pass
+                self.db_path = str(fallback_dir / "ohlcv_cache.db")
         else:
             self.db_path = db_path
             # Ensure parent directory exists

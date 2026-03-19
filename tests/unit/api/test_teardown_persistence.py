@@ -1,10 +1,12 @@
 """Tests for teardown API persistence alignment with TeardownStateManager."""
 
-from unittest.mock import MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from almanak.framework.api import teardown as teardown_api
+from almanak.framework.teardown.state_manager import TeardownStateManager
 
 
 @pytest.mark.asyncio
@@ -61,3 +63,23 @@ async def test_cancel_close_marks_persisted_request_cancelled(monkeypatch: pytes
 
     assert response.success is True
     manager.mark_cancelled.assert_called_once_with(strategy_id)
+
+
+class TestResolveDbPath:
+    """Tests for TeardownStateManager._resolve_db_path fallback logic."""
+
+    def test_none_returns_cwd_when_writable(self):
+        """Default (None) resolves to almanak_state.db when cwd is writable."""
+        result = TeardownStateManager._resolve_db_path(None)
+        assert result == Path("almanak_state.db")
+
+    def test_none_falls_back_to_tmp_when_cwd_not_writable(self):
+        """Falls back to /tmp when cwd is not writable."""
+        with patch.object(Path, "touch", side_effect=OSError("Read-only file system")):
+            result = TeardownStateManager._resolve_db_path(None)
+        assert result == Path("/tmp/almanak_state.db")
+
+    def test_explicit_path_bypasses_fallback(self):
+        """Explicit db_path is returned directly without fallback logic."""
+        result = TeardownStateManager._resolve_db_path("/custom/state.db")
+        assert result == Path("/custom/state.db")
