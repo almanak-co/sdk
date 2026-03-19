@@ -12,7 +12,7 @@ This is the "hello world" of Mantle strategies — no indicators, no signals,
 just a clean on-chain swap showing the core execution flow.
 
 Usage:
-    almanak strat run -d strategies/demo/mantle_swap --network anvil --once
+    almanak strat run -d mantle_swap --network anvil --once
 """
 
 import logging

@@ -1,6 +1,6 @@
 """Packaged demo strategies for `almanak strat demo`.
 
-This package contains the 13 implemented demo strategies that ship with
+This package contains the 16 implemented demo strategies that ship with
 the almanak package.  The `demo` CLI command copies a strategy directory
 from here into the user's working directory so they can immediately run
 and modify it.

@@ -260,7 +260,7 @@ USDT = Token(
         "avalanche": "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7",  # USDT on Avalanche
         "bsc": "0x55d398326f99059fF775485246999027B3197955",  # Binance-Peg USDT (18 decimals on BSC)
         "solana": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT on Solana
-        "mantle": "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE",  # Bridged USDT on Mantle
+        "mantle": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USDT0 on Mantle (LayerZero bridged)
     },
     coingecko_id="tether",
     is_stablecoin=True,
@@ -618,6 +618,7 @@ USDe = Token(
     decimals=18,
     addresses={
         "ethereum": "0x4c9EDD5852cd905f086C759E8383e09bff1E68B3",
+        "mantle": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",  # USDe on Mantle
     },
     coingecko_id="ethena-usde",
     is_stablecoin=True,
@@ -633,6 +634,20 @@ sUSDe = Token(
     },
     coingecko_id="ethena-staked-usde",
     is_stablecoin=False,
+)
+
+# Aave GHO stablecoin
+GHO = Token(
+    symbol="GHO",
+    name="GHO Stablecoin",
+    decimals=18,
+    addresses={
+        "ethereum": "0x40D16FC0246aD3160Ccc09B8D0D3A2cD28aE6C2f",
+        "arbitrum": "0x7dfF72693f6A4149b17e7C6314655f6A9F7c8B33",
+        "mantle": "0xfc421aD3C883Bf9E7C4f42dE845C4e4405799e73",  # GHO on Mantle
+    },
+    coingecko_id="gho",
+    is_stablecoin=True,
 )
 
 # =============================================================================
@@ -1096,6 +1111,7 @@ DEFAULT_TOKENS: list[Token] = [
     # Ethena tokens
     USDe,
     sUSDe,
+    GHO,
     # LST/LRT tokens
     wstETH,
     WEETH,
@@ -1236,6 +1252,7 @@ __all__ = [
     # Ethena tokens
     "USDe",
     "sUSDe",
+    "GHO",
     # LST/LRT tokens
     "wstETH",
     "WEETH",
