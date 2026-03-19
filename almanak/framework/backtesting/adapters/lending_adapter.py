@@ -1038,9 +1038,9 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
         if not isinstance(intent, BorrowIntent):
             return None
 
-        # Get borrow amount and token
-        borrow_token = intent.token
-        borrow_amount = Decimal(str(intent.amount))
+        # Get borrow amount and token (BorrowIntent uses borrow_token/borrow_amount)
+        borrow_token = intent.borrow_token
+        borrow_amount = Decimal(str(intent.borrow_amount))
         protocol = intent.protocol or self._config.protocol
 
         # Get token price to convert to USD

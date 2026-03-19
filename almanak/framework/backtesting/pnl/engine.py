@@ -1619,6 +1619,7 @@ class PnLBacktester:
                         market_state=market_state,
                         config=config,
                         data_quality_tracker=data_quality_tracker,
+                        strategy=strategy,
                     )
 
                     # Get strategy decision
@@ -1699,7 +1700,19 @@ class PnLBacktester:
                                 f"type={trade_record.intent_type.value}, "
                                 f"amount=${trade_record.amount_usd:,.2f}"
                             )
+                            # Notify strategy of successful execution
+                            if hasattr(strategy, "on_intent_executed"):
+                                try:
+                                    strategy.on_intent_executed(intent, True, trade_record)
+                                except Exception as notify_err:
+                                    bt_logger.debug(f"on_intent_executed raised: {notify_err}")
                         except Exception as e:
+                            # Notify strategy of execution failure
+                            if hasattr(strategy, "on_intent_executed"):
+                                try:
+                                    strategy.on_intent_executed(intent, False, str(e))
+                                except Exception as notify_err:
+                                    bt_logger.debug(f"on_intent_executed (failure) raised: {notify_err}")
                             # Use error handler for intent execution errors
                             if self._error_handler:
                                 result = self._error_handler.handle_error(
@@ -2012,6 +2025,7 @@ class PnLBacktester:
         market_state: MarketState,
         config: PnLBacktestConfig,
         data_quality_tracker: DataQualityTracker | None = None,
+        strategy: Any = None,
     ) -> list[tuple[Any, datetime, int]]:
         """Process pending intents, executing those ready and decrementing others.
 
@@ -2024,6 +2038,7 @@ class PnLBacktester:
             market_state: Current market state for execution
             config: Backtest config
             data_quality_tracker: Optional tracker for data quality metrics
+            strategy: Optional strategy instance to notify via on_intent_executed
 
         Returns:
             Updated list of pending intents (those still waiting)
@@ -2052,7 +2067,19 @@ class PnLBacktester:
                         f"amount=${trade_record.amount_usd:,.2f}, "
                         f"fee=${trade_record.fee_usd:,.2f}"
                     )
+                    # Notify strategy of successful execution so state machines can advance
+                    if strategy is not None and hasattr(strategy, "on_intent_executed"):
+                        try:
+                            strategy.on_intent_executed(intent, True, trade_record)
+                        except Exception as notify_err:
+                            logger.debug(f"on_intent_executed raised: {notify_err}")
                 except Exception as e:
+                    # Notify strategy of execution failure
+                    if strategy is not None and hasattr(strategy, "on_intent_executed"):
+                        try:
+                            strategy.on_intent_executed(intent, False, str(e))
+                        except Exception as notify_err:
+                            logger.debug(f"on_intent_executed (failure) raised: {notify_err}")
                     # Use error handler for intent execution errors
                     if self._error_handler:
                         result = self._error_handler.handle_error(

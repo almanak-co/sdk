@@ -160,11 +160,12 @@ class AavePnLLendingStrategy(IntentStrategy):
                     repay_full=True,
                 )
 
-        # Safety: revert stuck transitional states
+        # Hold while waiting for a pending intent to confirm.
+        # Transient states ("supplying", "borrowing", "repaying") are resolved via
+        # on_intent_executed; returning hold here prevents duplicate submissions
+        # when execution is delayed (e.g. PnL backtester inclusion_delay_blocks).
         if self._state in ("supplying", "borrowing", "repaying"):
-            revert_to = self._previous_stable_state
-            logger.warning(f"Stuck in '{self._state}', reverting to '{revert_to}'")
-            self._state = revert_to
+            return Intent.hold(reason=f"Waiting for {self._state} to confirm")
 
         return Intent.hold(reason=f"Holding (state={self._state}, price=${supply_price:.2f})")
 
