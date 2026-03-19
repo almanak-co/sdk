@@ -137,6 +137,12 @@ TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
         "WBTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
         "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
     },
+    "sonic": {
+        "wS": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",
+        "WETH": "0x50c42dEAcD8Fc9773493ED674b675bE577f2634b",
+        "USDC": "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",
+        "USDT": "0x6047828dc181963ba44974801FF68e538dA5eaF9",
+    },
 }
 
 
@@ -165,6 +171,7 @@ TOKEN_DECIMALS: dict[str, int] = {
     "PENDLE": 18,
     "WBERA": 18,
     "HONEY": 18,
+    "wS": 18,
 }
 
 

@@ -171,6 +171,7 @@ WETH = Token(
         "mantle": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",  # Bridged WETH on Mantle
         "berachain": "0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590",  # Bridged WETH on Berachain
         "monad": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",  # WETH on Monad
+        "sonic": "0x50c42dEAcD8Fc9773493ED674b675bE577f2634b",  # Bridged WETH on Sonic
     },
     coingecko_id="weth",
     is_stablecoin=False,
@@ -232,6 +233,7 @@ USDC = Token(
         "solana": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # Native USDC on Solana
         "mantle": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",  # Bridged USDC on Mantle
         "monad": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",  # Native USDC on Monad
+        "sonic": "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",  # Bridged USDC on Sonic
     },
     coingecko_id="usd-coin",
     is_stablecoin=True,
