@@ -191,7 +191,7 @@ def _restore_strategy_state_for_teardown(
     gateway_client: Any,
 ) -> None:
     """Restore strategy state before computing teardown positions."""
-    if not hasattr(strategy, "set_state_manager") or not hasattr(strategy, "load_state"):
+    if not hasattr(strategy, "set_state_manager"):
         logger.debug("Strategy %s does not expose state persistence hooks", strategy_class.__name__)
         return
 
@@ -212,7 +212,14 @@ def _restore_strategy_state_for_teardown(
             continue
 
         try:
-            if strategy.load_state():
+            if hasattr(strategy, "load_state_async"):
+                loaded = asyncio.run(strategy.load_state_async())
+            elif hasattr(strategy, "load_state"):
+                loaded = strategy.load_state()
+            else:
+                loaded = False
+
+            if loaded:
                 logger.info("Restored strategy state for teardown (strategy_id=%s)", strategy_id)
                 return
             logger.info("No persisted strategy state for strategy_id=%s", strategy_id)

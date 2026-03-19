@@ -2278,14 +2278,11 @@ def run(
         state_manager = GatewayStateManager(gateway_client)
         click.echo("  Using gateway-backed state manager")
 
-        # Inject state manager into strategy for persistence
+        # Inject state manager into strategy for persistence.
+        # State loading is deferred to the async setup phase (run_once_with_cleanup /
+        # run_loop_with_cleanup) so that load_state_async() can be awaited properly.
         if hasattr(strategy_instance, "set_state_manager"):
             strategy_instance.set_state_manager(state_manager, strategy_id)
-            # Try to load existing state (for resume)
-            if strategy_instance.load_state():
-                click.secho("  Strategy state restored from persistence", fg="yellow")
-            else:
-                click.echo("  No previous state found (fresh start)")
 
         # Wire vault lifecycle if vault config is present
         vault_lifecycle = None
@@ -2321,13 +2318,27 @@ def run(
             vault_adapter = LagoonVaultAdapter(vault_sdk)
 
             # Extract initial vault state from persisted strategy state.
-            # StrategyBase uses persistent_state (dict); check both for compatibility.
+            # State loading is deferred to the async phase for IntentStrategy, so we
+            # load the raw state here directly from the state manager (safe to use
+            # asyncio.run() because we are still in the sync Click command, before any
+            # event loop is started).
             initial_vault_state = None
-            for attr in ("persistent_state", "state"):
-                store = getattr(strategy_instance, attr, None)
-                if isinstance(store, dict):
-                    initial_vault_state = store.get(VAULT_STATE_KEY)
-                    break
+            try:
+                import asyncio as _asyncio
+
+                _raw_state_data = _asyncio.run(state_manager.load_state(strategy_id))
+                if _raw_state_data and _raw_state_data.state:
+                    initial_vault_state = _raw_state_data.state.get(VAULT_STATE_KEY)
+            except Exception as _e:  # noqa: BLE001
+                logger.debug("Could not load persisted state for vault init (strategy_id=%s): %s", strategy_id, _e)
+                # No persisted state — VaultLifecycleManager uses defaults
+            # Fallback: also check in-memory strategy state (for StrategyBase subclasses)
+            if initial_vault_state is None:
+                for attr in ("persistent_state", "state"):
+                    store = getattr(strategy_instance, attr, None)
+                    if isinstance(store, dict):
+                        initial_vault_state = store.get(VAULT_STATE_KEY)
+                        break
 
             # Wire persistence callback: vault state changes are saved into the
             # strategy's persistent_state dict and persisted via the gateway state manager.
@@ -2406,6 +2417,13 @@ def run(
             """Run single iteration, optional teardown, and cleanup resources."""
             runner.setup_gateway_integration(strategy_instance)
             try:
+                # Restore persisted strategy state (e.g. position_id after restart)
+                if hasattr(strategy_instance, "load_state_async"):
+                    if await strategy_instance.load_state_async():
+                        click.secho("  Strategy state restored from persistence", fg="yellow")
+                    else:
+                        click.echo("  No previous state found (fresh start)")
+
                 # Restore copy trading cursor state (mirrors run_loop pattern)
                 activity_provider = getattr(strategy_instance, "_wallet_activity_provider", None)
                 if activity_provider is not None:
@@ -2552,6 +2570,13 @@ def run(
         async def run_loop_with_cleanup() -> None:
             """Run loop and cleanup resources."""
             try:
+                # Restore persisted strategy state (e.g. position_id after restart)
+                if hasattr(strategy_instance, "load_state_async"):
+                    if await strategy_instance.load_state_async():
+                        click.secho("  Strategy state restored from persistence", fg="yellow")
+                    else:
+                        click.echo("  No previous state found (fresh start)")
+
                 await runner.run_loop(
                     strategy=strategy_instance,
                     interval_seconds=interval,

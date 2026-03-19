@@ -3943,6 +3943,32 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 logger.warning(f"Failed to load state: {e}")
             return False
 
+    async def load_state_async(self) -> bool:
+        """Async variant of load_state() — preferred when already in an event loop.
+
+        Called by the CLI runner inside its async setup so that state is always
+        restored correctly, regardless of whether a loop is already running.
+        """
+        if not self._state_manager or not self._strategy_id:
+            return False
+        try:
+            state_data = await self._state_manager.load_state(self._strategy_id)
+            if state_data and state_data.state:
+                self.load_persistent_state(state_data.state)
+                self._state_version = state_data.version
+                state_summary = {
+                    k: (f"{v:.6g}" if isinstance(v, float) else str(v)[:80]) for k, v in state_data.state.items()
+                }
+                logger.info(f"Loaded state for {self._strategy_id}: {state_summary}")
+                return True
+            return False
+        except Exception as e:
+            if "not found" in str(e).lower():
+                logger.debug(f"No existing state for {self._strategy_id}")
+            else:
+                logger.warning(f"Failed to load state: {e}")
+            return False
+
     @abstractmethod
     def decide(self, market: MarketSnapshot) -> DecideResult:
         """Decide what action to take based on current market conditions.
