@@ -61,16 +61,7 @@ from .data_provider import (
 )
 
 # Engine
-from .engine import (
-    BacktestableStrategy,
-    DefaultFeeModel,
-    DefaultSlippageModel,
-    FeeModel,
-    LinearImpactSlippageModel,
-    PnLBacktester,
-    SlippageModel,
-    create_market_snapshot_from_state,
-)
+from .engine import BacktestableStrategy, PnLBacktester, create_market_snapshot_from_state
 
 # Error handling and circuit breaker
 from .error_handling import (
@@ -249,12 +240,6 @@ __all__ = [
     "BacktestableStrategy",
     "BacktestIndicatorEngine",
     "create_market_snapshot_from_state",
-    # Fee and slippage models
-    "FeeModel",
-    "SlippageModel",
-    "DefaultFeeModel",
-    "DefaultSlippageModel",
-    "LinearImpactSlippageModel",
     # Receipt parsing utilities
     "TransferEvent",
     "TokenFlow",

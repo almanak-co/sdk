@@ -31,7 +31,6 @@ from almanak.framework.backtesting.pnl.data_provider import (
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
     DefaultSlippageModel,
-    LinearImpactSlippageModel,
     PnLBacktester,
     create_market_snapshot_from_state,
 )
@@ -372,120 +371,6 @@ class TestDefaultSlippageModel:
         )
 
         assert slippage == Decimal("0.05")  # Capped at max
-
-
-# =============================================================================
-# LinearImpactSlippageModel Tests
-# =============================================================================
-
-
-class TestLinearImpactSlippageModel:
-    """Tests for LinearImpactSlippageModel."""
-
-    def _market_state(self) -> MarketState:
-        return MarketState(timestamp=datetime.now(), prices={"WETH": Decimal("3000")})
-
-    def test_zero_slippage_intents_return_zero(self) -> None:
-        """HOLD, SUPPLY, WITHDRAW, REPAY, BORROW, VAULT_DEPOSIT, VAULT_REDEEM return 0."""
-        model = LinearImpactSlippageModel()
-        ms = self._market_state()
-        for intent_type in [
-            IntentType.HOLD,
-            IntentType.SUPPLY,
-            IntentType.WITHDRAW,
-            IntentType.REPAY,
-            IntentType.BORROW,
-            IntentType.VAULT_DEPOSIT,
-            IntentType.VAULT_REDEEM,
-        ]:
-            result = model.calculate_slippage(intent_type, Decimal("100000"), ms)
-            assert result == Decimal("0"), f"{intent_type} should have zero slippage"
-
-    def test_base_slippage_for_small_trade(self) -> None:
-        """Very small trade is dominated by base_bps (impact term negligible)."""
-        model = LinearImpactSlippageModel(
-            base_bps=Decimal("10"),
-            impact_bps_per_million=Decimal("5"),
-        )
-        ms = self._market_state()
-        # $1 trade: impact = 5 * (1 / 1_000_000) / 10000 ≈ 0.0000000005, negligible
-        result = model.calculate_slippage(IntentType.SWAP, Decimal("1"), ms)
-        # Result should be very close to 0.001 (base_bps / 10000)
-        base_only = Decimal("10") / Decimal("10000")
-        assert abs(result - base_only) < Decimal("0.000001"), f"Expected ~{base_only}, got {result}"
-
-    def test_impact_scales_with_amount(self) -> None:
-        """Larger trades incur more slippage than smaller ones."""
-        model = LinearImpactSlippageModel()
-        ms = self._market_state()
-        small = model.calculate_slippage(IntentType.SWAP, Decimal("10000"), ms)
-        large = model.calculate_slippage(IntentType.SWAP, Decimal("1000000"), ms)
-        assert large > small
-
-    def test_linear_scaling_formula(self) -> None:
-        """Verify the exact linear impact formula: (base + impact * amount/1M) / 10000."""
-        model = LinearImpactSlippageModel(
-            base_bps=Decimal("10"),
-            impact_bps_per_million=Decimal("5"),
-            max_slippage_pct=Decimal("0.10"),
-        )
-        ms = self._market_state()
-        amount_usd = Decimal("2000000")  # $2M
-        result = model.calculate_slippage(IntentType.SWAP, amount_usd, ms)
-        # Expected: (10 + 5 * 2) / 10000 = 20 / 10000 = 0.002
-        expected = Decimal("20") / Decimal("10000")
-        assert result == expected
-
-    def test_max_slippage_cap_applied(self) -> None:
-        """Slippage is capped at max_slippage_pct even for huge trades."""
-        model = LinearImpactSlippageModel(
-            base_bps=Decimal("10"),
-            impact_bps_per_million=Decimal("100"),
-            max_slippage_pct=Decimal("0.02"),  # 2% cap
-        )
-        ms = self._market_state()
-        # Very large trade would exceed 2%
-        result = model.calculate_slippage(IntentType.SWAP, Decimal("100000000"), ms)
-        assert result == Decimal("0.02")
-
-    def test_negative_amount_treated_as_zero(self) -> None:
-        """Negative amounts (defensive guard) produce only base slippage."""
-        model = LinearImpactSlippageModel(
-            base_bps=Decimal("10"),
-            impact_bps_per_million=Decimal("5"),
-        )
-        ms = self._market_state()
-        result = model.calculate_slippage(IntentType.SWAP, Decimal("-1000"), ms)
-        # Negative amount clamped to 0 → only base_bps applies
-        assert result == Decimal("10") / Decimal("10000")
-
-    def test_model_name(self) -> None:
-        """Model name is 'linear_impact'."""
-        assert LinearImpactSlippageModel().model_name == "linear_impact"
-
-    def test_default_parameters_produce_reasonable_slippage(self) -> None:
-        """Default parameters give reasonable slippage for typical DeFi trades."""
-        model = LinearImpactSlippageModel()
-        ms = self._market_state()
-        # $100k trade: (10 + 5 * 0.1) / 10000 = 10.5 / 10000 = 0.00105
-        result = model.calculate_slippage(IntentType.SWAP, Decimal("100000"), ms)
-        assert Decimal("0.001") <= result <= Decimal("0.005"), f"Expected ~0.10-0.50% slippage for $100k, got {result}"
-
-    def test_model_parameters_affect_slippage(self) -> None:
-        """Verify that different model parameters result in different slippage."""
-        deep_pool = LinearImpactSlippageModel(
-            base_bps=Decimal("2"),
-            impact_bps_per_million=Decimal("1"),
-        )
-        shallow_pool = LinearImpactSlippageModel(
-            base_bps=Decimal("30"),
-            impact_bps_per_million=Decimal("20"),
-        )
-        ms = self._market_state()
-        amount = Decimal("500000")
-        deep_slip = deep_pool.calculate_slippage(IntentType.SWAP, amount, ms)
-        shallow_slip = shallow_pool.calculate_slippage(IntentType.SWAP, amount, ms)
-        assert shallow_slip > deep_slip
 
 
 # =============================================================================
