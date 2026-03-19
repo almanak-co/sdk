@@ -244,6 +244,110 @@ class DefaultSlippageModel:
         return "default"
 
 
+@_dataclass
+class LinearImpactSlippageModel:
+    """Depth-aware slippage model with linear market impact scaling.
+
+    Models slippage as a fixed base spread plus a market-impact term that
+    grows linearly with trade size. This captures the intuition that large
+    trades move the price more than small ones.
+
+    Formula (in basis points)::
+
+        slippage_bps = base_bps + impact_bps_per_million * (amount_usd / 1_000_000)
+        slippage_pct = min(slippage_bps / 10_000, max_slippage_pct)
+
+    Default parameters model a mid-tier DEX (e.g., Uniswap V3 on Arbitrum):
+    - ``base_bps = 10`` — 0.10% fixed spread (bid-ask + rounding)
+    - ``impact_bps_per_million = 5`` — 0.05% extra per $1 M notional
+    - ``max_slippage_pct = 0.05`` — hard cap at 5%
+
+    A $100 k trade incurs ~0.105%; a $1 M trade incurs ~0.15%; a $10 M trade
+    incurs ~0.60% (still below the 5% cap).
+
+    Per-protocol calibration examples:
+
+    .. code-block:: python
+
+        # Uniswap V3 ETH/USDC 0.05% pool (deep, low impact)
+        slippage_models = {
+            "uniswap_v3": LinearImpactSlippageModel(
+                base_bps=Decimal("5"),
+                impact_bps_per_million=Decimal("2"),
+            ),
+            # Smaller mid-cap DEX (shallower liquidity)
+            "traderjoe_v2": LinearImpactSlippageModel(
+                base_bps=Decimal("20"),
+                impact_bps_per_million=Decimal("15"),
+            ),
+            "default": LinearImpactSlippageModel(),
+        }
+
+    Attributes:
+        base_bps: Fixed slippage component in basis points (1 bps = 0.01%).
+            Represents the bid-ask spread and routing overhead.
+        impact_bps_per_million: Market-impact coefficient in bps per $1 M.
+            Controls how steeply slippage grows with trade size.
+        max_slippage_pct: Hard cap on slippage as a fraction (e.g., 0.05 = 5%).
+    """
+
+    base_bps: Decimal = Decimal("10")  # 0.10% base spread
+    impact_bps_per_million: Decimal = Decimal("5")  # 0.05% per $1 M
+    max_slippage_pct: Decimal = Decimal("0.05")  # 5% hard cap
+
+    _BPS_DIVISOR: Decimal = Decimal("10000")
+    _MILLION: Decimal = Decimal("1000000")
+
+    def __post_init__(self) -> None:
+        """Validate model parameters on initialization."""
+        if self.base_bps < 0:
+            raise ValueError("base_bps cannot be negative.")
+        if self.impact_bps_per_million < 0:
+            raise ValueError("impact_bps_per_million cannot be negative.")
+        if not (0 <= self.max_slippage_pct <= 1):
+            raise ValueError("max_slippage_pct must be a fraction between 0 and 1.")
+
+    def calculate_slippage(
+        self,
+        intent_type: IntentType,
+        amount_usd: Decimal,
+        market_state: MarketState,
+        protocol: str = "",
+        **kwargs: Any,
+    ) -> Decimal:
+        """Calculate depth-aware slippage.
+
+        Returns zero for intent types that don't incur price impact
+        (e.g., HOLD, SUPPLY, WITHDRAW). For all other intents, applies
+        the linear impact formula.
+
+        Args:
+            intent_type: Type of intent being executed.
+            amount_usd: Trade notional in USD.
+            market_state: Current market data (unused by this model but
+                required by the SlippageModel protocol).
+            protocol: Protocol name (unused; use per-protocol model keys instead).
+            **kwargs: Ignored extra arguments.
+
+        Returns:
+            Slippage as a fraction (e.g., 0.001 = 0.1%).
+        """
+        if intent_type in _ZERO_SLIPPAGE_INTENTS:
+            return Decimal("0")
+
+        # Guard against negative amounts (shouldn't happen, but be defensive)
+        safe_amount = max(amount_usd, Decimal("0"))
+        impact_bps = self.impact_bps_per_million * (safe_amount / self._MILLION)
+        total_bps = self.base_bps + impact_bps
+        slippage_pct = total_bps / self._BPS_DIVISOR
+        return min(slippage_pct, self.max_slippage_pct)
+
+    @property
+    def model_name(self) -> str:
+        """Return the unique name of this slippage model."""
+        return "linear_impact"
+
+
 # =============================================================================
 # Protocol for Backtest-Compatible Strategies
 # =============================================================================
