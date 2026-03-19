@@ -109,9 +109,28 @@ class GatewayExecutionResult:
             # Normalize receipt values once to ensure consistency between
             # TransactionReceipt and TransactionResult
             if isinstance(receipt_data, dict):
-                status = receipt_data.get("status", 1)
+                # Normalize status: some chains (e.g. OP Stack) may return "0x1" instead of 1.
+                # Without this, the TransactionResult would have success=False and _collect_receipts
+                # would skip the receipt, causing swap_amounts / position_id enrichment to fail
+                # even on successful transactions (VIB-1437).
+                status_raw = receipt_data.get("status", 1)
+                try:
+                    if isinstance(status_raw, str):
+                        # Supports decimal and 0x/0X-prefixed hex values (e.g. OP Stack returns "0x1").
+                        status = int(status_raw, 0)
+                    elif status_raw is None:
+                        status = 0
+                    else:
+                        status = int(status_raw)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Invalid receipt status %r for tx %s; treating as failed receipt.",
+                        status_raw,
+                        tx_hash,
+                    )
+                    status = 0
                 gas_used = receipt_data.get("gas_used", 0)
-                logs = receipt_data.get("logs", [])
+                logs = receipt_data.get("logs") or []
             else:
                 status = 1
                 gas_used = 0

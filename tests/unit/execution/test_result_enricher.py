@@ -201,18 +201,21 @@ class TestEnsoSwapEnrichment:
 
 
 class TestSushiSwapV3SwapEnrichment:
-    """VIB-624: SushiSwap V3 swap_amounts enrichment via Swap events."""
+    """VIB-624 / VIB-1437: SushiSwap V3 swap_amounts enrichment via Swap events."""
 
-    POOL = "0x1234000000000000000000000000000000000001"
-    ROUTER = "0x2626664c2603336E57B271c5C0b26F421741e481"  # SushiSwap V3 Router on Base
+    POOL_BASE = "0x1234000000000000000000000000000000000001"
+    POOL_OPTIMISM = "0xabcdef1234567890abcdef1234567890abcdef12"
+    ROUTER_BASE = "0x2626664c2603336E57B271c5C0b26F421741e481"
+    ROUTER_OPTIMISM = "0x8516944E89f296eb6473d79aED1Ba12088016c9e"
     WALLET = "0xabcdef0000000000000000000000000000000001"
+    USDC = "0x0b2c639c533813f4aa9d7837caf62653d097ff85"  # USDC on Optimism
 
     def test_sushiswap_v3_swap_enrichment(self):
-        """SushiSwap V3 swap_amounts extracted from Swap event."""
+        """SushiSwap V3 swap_amounts extracted from Swap event on Base."""
         # amount0 > 0 means user paid token0, amount1 < 0 means user received token1
         swap_log = _make_swap_log(
-            pool_address=self.POOL,
-            sender=self.ROUTER,
+            pool_address=self.POOL_BASE,
+            sender=self.ROUTER_BASE,
             recipient=self.WALLET,
             amount0=50_000_000,       # 50 USDC in (6 decimals)
             amount1=-24_000_000_000_000_000,  # ~0.024 WETH out
@@ -230,6 +233,131 @@ class TestSushiSwapV3SwapEnrichment:
         assert enriched.swap_amounts is not None, "swap_amounts should be populated for SushiSwap V3"
         assert enriched.swap_amounts.amount_in > 0
         assert enriched.swap_amounts.amount_out > 0
+
+    def test_sushiswap_v3_swap_enrichment_optimism(self):
+        """VIB-1437: SushiSwap V3 swap_amounts extracted from Swap event on Optimism."""
+        swap_log = _make_swap_log(
+            pool_address=self.POOL_OPTIMISM,
+            sender=self.ROUTER_OPTIMISM,
+            recipient=self.WALLET,
+            amount0=500_000_000,      # 500 USDC in (6 decimals)
+            amount1=-180_000_000_000_000_000,  # ~0.18 WETH out
+        )
+        receipt = _FakeReceipt(status=1, logs=[swap_log], gas_used=22796)
+        result = _FakeExecResult(
+            transaction_results=[_FakeTxResult(receipt=receipt)],
+        )
+        intent = _FakeIntent(protocol="sushiswap_v3")
+        context = _FakeContext(chain="optimism", protocol="sushiswap_v3")
+
+        enricher = ResultEnricher()
+        enriched = enricher.enrich(result, intent, context)
+
+        assert enriched.swap_amounts is not None, (
+            "swap_amounts should be populated for SushiSwap V3 on Optimism (VIB-1437)"
+        )
+        assert enriched.swap_amounts.amount_in == 500_000_000
+        assert enriched.swap_amounts.amount_out == 180_000_000_000_000_000
+
+    def test_sushiswap_v3_multi_tx_bundle_optimism(self):
+        """VIB-1437: swap_amounts extracted from 2nd TX (swap) in approve+swap bundle on Optimism.
+
+        This is the exact multi-TX bundle scenario from iter 90:
+        TX 1: USDC approve (55,449 gas) -- has Approval event, NO Swap event
+        TX 2: exactInputSingle swap (22,796 gas) -- has Swap event
+        """
+        APPROVAL_TOPIC = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
+
+        # TX 1: approve receipt (has Approval event, NO Swap event)
+        approval_log = {
+            "address": self.USDC,
+            "topics": [
+                APPROVAL_TOPIC,
+                "0x" + self.WALLET.lower().replace("0x", "").zfill(64),
+                "0x" + self.ROUTER_OPTIMISM.lower().replace("0x", "").zfill(64),
+            ],
+            "data": "0x" + "f" * 64,  # max uint256 approval
+            "logIndex": 0,
+        }
+        approve_receipt = _FakeReceipt(
+            tx_hash="0xapprove1",
+            status=1,
+            logs=[approval_log],
+            gas_used=55449,
+        )
+
+        # TX 2: swap receipt (has Swap event)
+        swap_log = _make_swap_log(
+            pool_address=self.POOL_OPTIMISM,
+            sender=self.ROUTER_OPTIMISM,
+            recipient=self.WALLET,
+            amount0=500_000_000,      # 500 USDC in
+            amount1=-180_000_000_000_000_000,  # ~0.18 WETH out
+        )
+        swap_receipt = _FakeReceipt(
+            tx_hash="0xswap2",
+            status=1,
+            logs=[swap_log],
+            gas_used=22796,
+        )
+
+        result = _FakeExecResult(
+            transaction_results=[
+                _FakeTxResult(tx_hash="0xapprove1", receipt=approve_receipt),
+                _FakeTxResult(tx_hash="0xswap2", receipt=swap_receipt),
+            ],
+        )
+        intent = _FakeIntent(protocol="sushiswap_v3")
+        context = _FakeContext(chain="optimism", protocol="sushiswap_v3")
+
+        enricher = ResultEnricher()
+        enriched = enricher.enrich(result, intent, context)
+
+        assert enriched.swap_amounts is not None, (
+            "swap_amounts should be populated from the swap TX (TX 2) in a "
+            "2-TX approve+swap bundle on Optimism (VIB-1437)"
+        )
+        assert enriched.swap_amounts.amount_in == 500_000_000
+        assert enriched.swap_amounts.amount_out == 180_000_000_000_000_000
+
+    def test_sushiswap_v3_gateway_hex_status_and_null_logs_optimism(self):
+        """VIB-1437: GatewayExecutionResult with hex status and null logs still enriches swap_amounts.
+
+        Exercises the actual gateway normalization path (hex "0x1" -> 1, logs=None -> [])
+        that caused the original bug, unlike the other tests which use pre-normalized fakes.
+        """
+        from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult
+
+        swap_log = _make_swap_log(
+            pool_address=self.POOL_OPTIMISM,
+            sender=self.ROUTER_OPTIMISM,
+            recipient=self.WALLET,
+            amount0=500_000_000,
+            amount1=-180_000_000_000_000_000,
+        )
+
+        gw_result = GatewayExecutionResult(
+            success=True,
+            tx_hashes=["0xapprove1", "0xswap2"],
+            total_gas_used=78_245,
+            receipts=[
+                {"status": "0x1", "gas_used": 55_449, "logs": None},  # approve tx: OP-style hex status + null logs
+                {"status": "0x1", "gas_used": 22_796, "logs": [swap_log]},  # swap tx
+            ],
+            execution_id="test-vib-1437",
+        )
+
+        result = _FakeExecResult(transaction_results=gw_result.transaction_results)
+        intent = _FakeIntent(protocol="sushiswap_v3")
+        context = _FakeContext(chain="optimism", protocol="sushiswap_v3")
+
+        enriched = ResultEnricher().enrich(result, intent, context)
+
+        assert enriched.swap_amounts is not None, (
+            "GatewayExecutionResult with hex status '0x1' and null logs should still enrich swap_amounts (VIB-1437)"
+        )
+        assert enriched.swap_amounts.amount_in == 500_000_000
+        assert enriched.swap_amounts.amount_out == 180_000_000_000_000_000
 
 
 class TestUniswapV3SwapEnrichment:
