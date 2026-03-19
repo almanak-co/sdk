@@ -271,7 +271,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                             position_id=self._position_id,
                             pool=self.pool_address,
                             collect_fees=True,
-                            protocol="uniswap_v3",
+                            protocol=self.protocol,
                         )
                 return Intent.hold(reason=f"LP position {self._position_id} in range")
 
@@ -291,44 +291,62 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 amount1=Decimal("0"),
                 range_lower=lower_price,
                 range_upper=upper_price,
-                protocol="uniswap_v3",
+                protocol=self.protocol,
             )"""
 
     elif template == StrategyTemplate.LENDING_LOOP:
         return """
-            # State machine: idle -> supplied -> borrowed -> monitoring
+            # Leverage loop state machine:
+            #   idle -> supplied -> borrowed -> (check leverage) -> idle (loop) or monitoring
+            # Each loop iteration: supply collateral -> borrow -> swap back to collateral
+            # Loops until target_leverage is reached, then monitors health.
+
             if self._loop_state == "idle":
-                # Check collateral balance
+                # Supply collateral (first loop: configured amount, subsequent: all available)
                 try:
                     collateral_bal = market.balance(self.collateral_token)
                 except ValueError:
                     return Intent.hold(reason="Cannot check collateral balance")
 
-                if collateral_bal.balance_usd < self.min_collateral_usd:
+                if self._loop_count == 0 and collateral_bal.balance_usd < self.min_collateral_usd:
                     return Intent.hold(reason=f"Insufficient {self.collateral_token}")
+                if self._loop_count > 0 and collateral_bal.balance_usd < Decimal("10"):
+                    # Dust remaining after swap -- stop looping
+                    self._loop_state = "monitoring"
+                    return Intent.hold(reason="Insufficient collateral for next loop, entering monitoring")
 
-                logger.info(f"Supplying {self.supply_amount} {self.collateral_token}")
+                amount = self.supply_amount if self._loop_count == 0 else "all"
+                logger.info(f"Loop {self._loop_count + 1}: supplying {amount} {self.collateral_token}")
                 return Intent.supply(
                     protocol="aave_v3",
                     token=self.collateral_token,
-                    amount=self.supply_amount,
+                    amount=amount,
                     use_as_collateral=True,
                 )
 
             elif self._loop_state == "supplied":
-                # Borrow against collateral
-                logger.info(f"Borrowing {self.borrow_amount} {self.borrow_token}")
+                # Borrow against collateral -- amount decays each loop
+                # First loop: full borrow_amount. Each subsequent: scaled by borrow_ratio.
+                if self.borrow_ratio <= Decimal("0"):
+                    self._loop_state = "monitoring"
+                    return Intent.hold(reason="borrow_ratio must be > 0; entering monitoring")
+                scale = self.borrow_ratio ** self._loop_count
+                borrow_amount = (self.borrow_amount * scale).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+                if borrow_amount < Decimal("1"):
+                    self._loop_state = "monitoring"
+                    return Intent.hold(reason="Borrow amount too small, entering monitoring")
+                logger.info(f"Loop {self._loop_count + 1}: borrowing {borrow_amount} {self.borrow_token}")
                 return Intent.borrow(
                     protocol="aave_v3",
                     collateral_token=self.collateral_token,
                     collateral_amount=Decimal("0"),
                     borrow_token=self.borrow_token,
-                    borrow_amount=self.borrow_amount,
+                    borrow_amount=borrow_amount,
                 )
 
             elif self._loop_state == "borrowed":
-                # Swap borrowed tokens back to collateral for loop
-                logger.info(f"Swapping {self.borrow_token} -> {self.collateral_token}")
+                # Swap borrowed tokens back to collateral for next loop iteration
+                logger.info(f"Loop {self._loop_count + 1}: swapping {self.borrow_token} -> {self.collateral_token}")
                 return Intent.swap(
                     from_token=self.borrow_token,
                     to_token=self.collateral_token,
@@ -337,8 +355,18 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 )
 
             elif self._loop_state == "monitoring":
-                # Monitor health factor -- would repay if too low
-                return Intent.hold(reason=f"Monitoring loop, target_leverage={self.target_leverage}")
+                # Leverage target reached -- monitor health factor
+                # In production, query on-chain health factor and repay if it drops
+                # below min_health_factor to avoid liquidation.
+                logger.info(
+                    f"Monitoring: leverage ~{self._current_leverage:.2f}x "
+                    f"(target {self.target_leverage}x, {self._loop_count} loops, "
+                    f"min_health_factor={self.min_health_factor})"
+                )
+                return Intent.hold(
+                    reason=f"Monitoring leveraged position (~{self._current_leverage:.2f}x, "
+                    f"{self._loop_count} loops)"
+                )
 
             return Intent.hold(reason=f"Unknown state: {self._loop_state}")"""
 
@@ -347,6 +375,21 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
             spot_price = market.price(self.base_token)
 
             if self._trade_state == "idle":
+                # Check funding rate before entering -- only trade when funding is attractive
+                try:
+                    funding = market.funding_rate("gmx_v2", self.perp_market)
+                    hourly_rate = funding.rate_hourly
+                    logger.info(f"Funding rate for {self.perp_market}: {hourly_rate:.6f}/hr")
+                except Exception as e:
+                    logger.warning(f"Cannot fetch funding rate: {e}")
+                    return Intent.hold(reason="Cannot check funding rate")
+
+                if hourly_rate < self.funding_entry_threshold:
+                    return Intent.hold(
+                        reason=f"Funding rate {hourly_rate:.6f}/hr < entry threshold "
+                        f"{self.funding_entry_threshold}/hr"
+                    )
+
                 try:
                     quote_balance = market.balance(self.quote_token)
                 except ValueError:
@@ -355,8 +398,11 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 if quote_balance.balance_usd < self.spot_size_usd:
                     return Intent.hold(reason=f"Insufficient {self.quote_token}")
 
-                # Buy spot
-                logger.info(f"Opening basis: buying {self.base_token} spot at {spot_price}")
+                # Funding rate is attractive -- buy spot (first leg of basis trade)
+                logger.info(
+                    f"Opening basis: buying {self.base_token} spot at {spot_price} "
+                    f"(funding={hourly_rate:.6f}/hr)"
+                )
                 return Intent.swap(
                     from_token=self.quote_token,
                     to_token=self.base_token,
@@ -365,7 +411,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 )
 
             elif self._trade_state == "spot_bought":
-                # Hedge with short perp
+                # Hedge with short perp (second leg)
                 logger.info(f"Hedging: opening short perp on {self.perp_market}")
                 return Intent.perp_open(
                     market=self.perp_market,
@@ -378,8 +424,44 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 )
 
             elif self._trade_state == "hedged":
-                # Monitor position -- collect funding
-                return Intent.hold(reason="Basis trade active, collecting funding")
+                # Monitor funding rate -- exit if it drops below threshold
+                try:
+                    funding = market.funding_rate("gmx_v2", self.perp_market)
+                    hourly_rate = funding.rate_hourly
+                except Exception as e:
+                    logger.warning(f"Cannot fetch funding rate: {e}")
+                    return Intent.hold(reason=f"Cannot check funding rate: {e}")
+
+                if hourly_rate < self.funding_exit_threshold:
+                    # Funding has turned unfavorable -- close perp first (higher priority).
+                    # State advances to "unwinding" in on_intent_executed() after success.
+                    logger.info(
+                        f"Exiting basis: funding {hourly_rate:.6f}/hr < exit threshold "
+                        f"{self.funding_exit_threshold}/hr -- closing perp"
+                    )
+                    return Intent.perp_close(
+                        market=self.perp_market,
+                        collateral_token=self.quote_token,
+                        is_long=False,
+                        size_usd=self.spot_size_usd * self.hedge_ratio,
+                        max_slippage=Decimal("0.005"),
+                        protocol="gmx_v2",
+                    )
+
+                return Intent.hold(
+                    reason=f"Basis trade active (funding={hourly_rate:.6f}/hr, "
+                    f"exit_threshold={self.funding_exit_threshold})"
+                )
+
+            elif self._trade_state == "unwinding":
+                # Perp closed, now sell spot to complete unwind
+                logger.info(f"Unwinding: selling {self.base_token} spot")
+                return Intent.swap(
+                    from_token=self.base_token,
+                    to_token=self.quote_token,
+                    amount="all",
+                    max_slippage=Decimal("0.005"),
+                )
 
             return Intent.hold(reason=f"Unknown state: {self._trade_state}")"""
 
@@ -518,22 +600,34 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 if self._range_lower and self._range_upper:
                     mid = (self._range_lower + self._range_upper) / Decimal("2")
                     drift = abs(base_price - mid) / mid
-                    if drift < Decimal("0.03"):
+                    if drift < self.rebalance_threshold_pct:
                         return Intent.hold(reason=f"Position in range, drift={drift:.2%}")
 
-                # Close LP only -- next iteration will reopen with fresh balances
-                # (avoids stale-balance bug where Intent.sequence() pre-computes amounts)
-                logger.info(f"Closing LP for rebalance around {base_price}")
-                return Intent.lp_close(
-                    position_id=self._position_id,
-                    pool=self.pool_address,
-                    collect_fees=True,
-                    protocol="uniswap_v3",
+                # Rebalance: use IntentSequence to atomically close LP + consolidate
+                # into quote token. The next iteration will open a fresh LP.
+                # Intent.sequence() ensures close happens before swap, and
+                # amount="all" chains the swap to use whatever the close released.
+                logger.info(f"Rebalancing LP around {base_price} via IntentSequence")
+                return Intent.sequence(
+                    [
+                        Intent.lp_close(
+                            position_id=self._position_id,
+                            pool=self.pool_address,
+                            collect_fees=True,
+                            protocol=self.protocol,
+                        ),
+                        Intent.swap(
+                            from_token=self.base_token,
+                            to_token=self.quote_token,
+                            amount="all",
+                            max_slippage=Decimal("0.005"),
+                        ),
+                    ],
+                    description=f"Close LP #{self._position_id} and consolidate to {self.quote_token}",
                 )
 
             # No position -- open one with fresh balances
             try:
-                base_balance = market.balance(self.base_token)
                 quote_balance = market.balance(self.quote_token)
             except ValueError:
                 return Intent.hold(reason="Cannot check balances")
@@ -541,16 +635,40 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
             if quote_balance.balance_usd < self.min_position_usd:
                 return Intent.hold(reason=f"Insufficient {self.quote_token} for LP")
 
+            # Swap half of quote to base, then open LP with both tokens.
+            # LPOpenIntent requires concrete Decimal amounts (not "all"), so we
+            # estimate the base amount after the swap using current price with a 5%
+            # buffer for slippage. IntentSequence ensures swap executes first.
+            half_quote = quote_balance.balance * Decimal("0.5")
+            # Estimate how much base token we'll receive after swapping half_quote.
+            # Fetch quote price so this works for non-stablecoin pairs (e.g. WETH/WBTC).
+            quote_price = market.price(self.quote_token)
+            half_base_est = (
+                (half_quote * quote_price / base_price * Decimal("0.95"))
+                if base_price > 0 and quote_price > 0
+                else Decimal("0")
+            )
             lower_price = base_price * (Decimal("1") - range_pct)
             upper_price = base_price * (Decimal("1") + range_pct)
-            logger.info(f"Opening LP: {lower_price:.2f} - {upper_price:.2f}")
-            return Intent.lp_open(
-                pool=self.pool_address,
-                amount0=base_balance.balance * Decimal("0.45"),
-                amount1=quote_balance.balance * Decimal("0.45"),
-                range_lower=lower_price,
-                range_upper=upper_price,
-                protocol="uniswap_v3",
+            logger.info(f"Opening LP via IntentSequence: {lower_price:.2f} - {upper_price:.2f}")
+            return Intent.sequence(
+                [
+                    Intent.swap(
+                        from_token=self.quote_token,
+                        to_token=self.base_token,
+                        amount=half_quote,
+                        max_slippage=Decimal("0.005"),
+                    ),
+                    Intent.lp_open(
+                        pool=self.pool_address,
+                        amount0=half_base_est,
+                        amount1=half_quote * Decimal("0.95"),
+                        range_lower=lower_price,
+                        range_upper=upper_price,
+                        protocol=self.protocol,
+                    ),
+                ],
+                description=f"Swap {self.quote_token} -> {self.base_token} and open LP",
             )"""
 
     elif template == StrategyTemplate.STAKING:
@@ -757,7 +875,7 @@ def _get_template_teardown(
                     position_type=PositionType.LP,
                     position_id=str(self._position_id),
                     chain=self.chain,
-                    protocol="{config.default_protocol}",
+                    protocol=self.protocol,
                     value_usd=Decimal("0"),  # Will be enriched by framework
                     details={{
                         "pool": self.pool_address,
@@ -789,7 +907,7 @@ def _get_template_teardown(
                     position_id=self._position_id,
                     pool=self.pool_address,
                     collect_fees=True,
-                    protocol="{config.default_protocol}",
+                    protocol=self.protocol,
                 )
             )
             # Swap remaining base tokens back to quote
@@ -825,7 +943,9 @@ def _get_template_teardown(
 
         positions = []
 
-        if self._loop_state in ("borrowed", "monitoring"):
+        # After looping, borrows exist even in "supplied" state (from prior loops)
+        has_borrows = self._loop_state in ("borrowed", "monitoring") or self._loop_count > 0
+        if has_borrows:
             positions.append(
                 PositionInfo(
                     position_type=PositionType.BORROW,
@@ -835,12 +955,15 @@ def _get_template_teardown(
                     value_usd=Decimal("0"),  # Will be enriched by framework
                     details={{
                         "borrow_token": self.borrow_token,
-                        "borrow_amount": str(self.borrow_amount),
+                        "loop_count": self._loop_count,
                     }},
                 )
             )
 
-        if self._loop_state in ("supplied", "borrowed", "monitoring"):
+        # Supply is open in supplied/borrowed/monitoring states OR whenever looping
+        # (after a SWAP the state returns to idle but collateral remains on Aave)
+        has_supply = self._loop_state in ("supplied", "borrowed", "monitoring") or self._loop_count > 0
+        if has_supply:
             positions.append(
                 PositionInfo(
                     position_type=PositionType.SUPPLY,
@@ -873,8 +996,9 @@ def _get_template_teardown(
         intents: list[Intent] = []
         max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
 
-        # 1. Repay borrow (if active)
-        if self._loop_state in ("borrowed", "monitoring"):
+        # 1. Repay borrow (if active -- after looping, borrows exist in any non-idle state)
+        has_borrows = self._loop_state in ("borrowed", "monitoring") or self._loop_count > 0
+        if has_borrows:
             intents.append(
                 Intent.repay(
                     protocol="aave_v3",
@@ -883,8 +1007,9 @@ def _get_template_teardown(
                 )
             )
 
-        # 2. Withdraw collateral (if supplied)
-        if self._loop_state in ("supplied", "borrowed", "monitoring"):
+        # 2. Withdraw collateral (if supplied -- in any non-initial-idle state or after looping)
+        has_supply = self._loop_state in ("supplied", "borrowed", "monitoring") or self._loop_count > 0
+        if has_supply:
             intents.append(
                 Intent.withdraw(
                     protocol="aave_v3",
@@ -893,8 +1018,8 @@ def _get_template_teardown(
                 )
             )
 
-        # 3. Swap collateral back to stable if needed
-        if self._loop_state != "idle":
+        # 3. Swap collateral back to stable if any supply/borrow existed
+        if has_borrows or has_supply:
             intents.append(
                 Intent.swap(
                     from_token=self.collateral_token,
@@ -953,7 +1078,8 @@ def _get_template_teardown(
                     details={{"asset": self.base_token}},
                 )
             )
-        elif self._trade_state == "spot_bought":
+        elif self._trade_state in ("spot_bought", "unwinding"):
+            # unwinding = perp already closed, still holding spot
             positions.append(
                 PositionInfo(
                     position_type=PositionType.TOKEN,
@@ -997,7 +1123,7 @@ def _get_template_teardown(
             )
 
         # 2. Sell spot position
-        if self._trade_state in ("spot_bought", "hedged"):
+        if self._trade_state in ("spot_bought", "hedged", "unwinding"):
             intents.append(
                 Intent.swap(
                     from_token=self.base_token,
@@ -1286,7 +1412,7 @@ def _get_template_teardown(
                     position_type=PositionType.LP,
                     position_id=str(self._position_id),
                     chain=self.chain,
-                    protocol="uniswap_v3",
+                    protocol=self.protocol,
                     value_usd=Decimal("0"),  # Will be enriched by framework
                     details={{
                         "pool": self.pool_address,
@@ -1318,7 +1444,7 @@ def _get_template_teardown(
                     position_id=self._position_id,
                     pool=self.pool_address,
                     collect_fees=True,
-                    protocol="uniswap_v3",
+                    protocol=self.protocol,
                 )
             )
             # Swap remaining base tokens back to quote
@@ -1464,6 +1590,7 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         return """
         # LP parameters
         self.pool_address = get_config("pool_address", "0x_SET_POOL_ADDRESS")
+        self.protocol = get_config("protocol", "uniswap_v3")
         self.range_width_pct = float(get_config("range_width_pct", 5))
         self.rebalance_threshold_pct = float(get_config("rebalance_threshold_pct", 80))
         self.min_position_usd = Decimal(str(get_config("min_position_usd", "500")))
@@ -1478,19 +1605,23 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self._range_upper = None"""
 
     elif template == StrategyTemplate.LENDING_LOOP:
-        return '''
+        return """
         # Lending parameters
         self.supply_amount = Decimal(str(get_config("supply_amount", "1")))
         self.borrow_amount = Decimal(str(get_config("borrow_amount", "500")))
         self.target_leverage = Decimal(str(get_config("target_leverage", "2.0")))
+        self.borrow_ratio = Decimal(str(get_config("borrow_ratio", "0.7")))
+        self.min_health_factor = Decimal(str(get_config("min_health_factor", "1.5")))
         self.min_collateral_usd = Decimal(str(get_config("min_collateral_usd", "100")))
 
         # Token configuration
         self.collateral_token = get_config("collateral_token", "WETH")
         self.borrow_token = get_config("borrow_token", "USDC")
 
-        # State machine: idle -> supplied -> borrowed -> monitoring
-        self._loop_state = "idle"'''
+        # State machine: idle -> supplied -> borrowed -> (check leverage) -> idle or monitoring
+        self._loop_state = "idle"
+        self._loop_count = 0
+        self._current_leverage = Decimal("1.0")"""
 
     elif template == StrategyTemplate.BASIS_TRADE:
         return '''
@@ -1498,12 +1629,16 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self.spot_size_usd = Decimal(str(get_config("spot_size_usd", "10000")))
         self.hedge_ratio = Decimal(str(get_config("hedge_ratio", "1.0")))
 
+        # Funding rate thresholds (hourly rate, e.g. 0.0001 = 0.01%/hr)
+        self.funding_entry_threshold = Decimal(str(get_config("funding_entry_threshold", "0.0001")))
+        self.funding_exit_threshold = Decimal(str(get_config("funding_exit_threshold", "-0.00005")))
+
         # Token configuration
         self.base_token = get_config("base_token", "WETH")
         self.quote_token = get_config("quote_token", "USDC")
         self.perp_market = get_config("perp_market", "ETH/USD")
 
-        # State machine: idle -> spot_bought -> hedged
+        # State machine: idle -> spot_bought -> hedged -> unwinding -> idle
         self._trade_state = "idle"'''
 
     elif template == StrategyTemplate.COPY_TRADER:
@@ -1562,14 +1697,18 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         return """
         # Multi-step LP parameters
         self.pool_address = get_config("pool_address", "0x_SET_POOL_ADDRESS")
+        self.protocol = get_config("protocol", "uniswap_v3")
         self.range_width_pct = float(get_config("range_width_pct", 5))
+        # rebalance_threshold_pct is configured as a percentage (e.g. 3 = 3%)
+        # and divided by 100 here to convert to a decimal fraction for comparison
+        self.rebalance_threshold_pct = Decimal(str(get_config("rebalance_threshold_pct", "3"))) / Decimal("100")
         self.min_position_usd = Decimal(str(get_config("min_position_usd", "500")))
 
         # Token configuration
         self.base_token = get_config("base_token", "WETH")
         self.quote_token = get_config("quote_token", "USDC")
 
-        # Position tracking
+        # Position tracking (restored via load_persistent_state)
         self._position_id = None
         self._range_lower = None
         self._range_upper = None"""
@@ -1589,10 +1728,10 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
 
     else:  # BLANK template
         return """
-        # Add your configuration parameters here
-        # Example:
-        # self.trade_size_usd = Decimal(str(get_config("trade_size_usd", "100")))
-        pass"""
+        # Example configuration -- customize for your strategy
+        self.base_token = get_config("base_token", "WETH")
+        self.quote_token = get_config("quote_token", "USDC")
+        self.trade_size_usd = Decimal(str(get_config("trade_size_usd", "100")))"""
 
 
 def _get_template_callbacks(template: StrategyTemplate) -> str:
@@ -1637,7 +1776,7 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
     elif template == StrategyTemplate.LENDING_LOOP:
         return (
             "    def on_intent_executed(self, intent, success: bool, result):\n"
-            '        """Advance state machine after intent execution."""\n'
+            '        """Advance leverage loop state machine after intent execution."""\n'
             "        if not success:\n"
             "            return\n"
             '        intent_type = getattr(intent, "intent_type", None)\n'
@@ -1645,22 +1784,46 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "            return\n"
             '        if intent_type.value == "SUPPLY":\n'
             '            self._loop_state = "supplied"\n'
-            '            logger.info("Supply confirmed -> supplied")\n'
+            '            logger.info(f"Supply confirmed (loop {self._loop_count + 1}) -> supplied")\n'
             '        elif intent_type.value == "BORROW":\n'
             '            self._loop_state = "borrowed"\n'
-            '            logger.info("Borrow confirmed -> borrowed")\n'
+            '            logger.info(f"Borrow confirmed (loop {self._loop_count + 1}) -> borrowed")\n'
             '        elif intent_type.value == "SWAP":\n'
-            '            self._loop_state = "monitoring"\n'
-            '            logger.info("Swap confirmed -> monitoring")\n'
+            "            self._loop_count += 1\n"
+            "            # Estimate leverage: geometric series 1 + r + r^2 + ... + r^n\n"
+            "            # where r = borrow_ratio (approximate LTV usage)\n"
+            "            leverage = sum(\n"
+            "                self.borrow_ratio ** i for i in range(self._loop_count + 1)\n"
+            "            )\n"
+            "            self._current_leverage = leverage\n"
+            "            if leverage >= self.target_leverage:\n"
+            '                self._loop_state = "monitoring"\n'
+            "                logger.info(\n"
+            '                    f"Loop {self._loop_count} complete: leverage ~{leverage:.2f}x "\n'
+            '                    f">= target {self.target_leverage}x -> monitoring"\n'
+            "                )\n"
+            "            else:\n"
+            '                self._loop_state = "idle"  # Loop again\n'
+            "                logger.info(\n"
+            '                    f"Loop {self._loop_count} complete: leverage ~{leverage:.2f}x "\n'
+            '                    f"< target {self.target_leverage}x -> continuing"\n'
+            "                )\n"
             "\n"
             "    def get_persistent_state(self):\n"
-            '        """Save loop state."""\n'
-            '        return {"loop_state": self._loop_state}\n'
+            '        """Save loop state and leverage tracking."""\n'
+            "        return {\n"
+            '            "loop_state": self._loop_state,\n'
+            '            "loop_count": self._loop_count,\n'
+            '            "current_leverage": str(self._current_leverage),\n'
+            "        }\n"
             "\n"
             "    def load_persistent_state(self, state):\n"
-            '        """Restore loop state."""\n'
+            '        """Restore loop state and leverage tracking."""\n'
             "        if state:\n"
             '            self._loop_state = state.get("loop_state", "idle")\n'
+            '            self._loop_count = state.get("loop_count", 0)\n'
+            '            cl = state.get("current_leverage", "1.0")\n'
+            "            self._current_leverage = Decimal(str(cl))\n"
             "\n"
         )
 
@@ -1676,9 +1839,15 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             '        if intent_type.value == "SWAP" and self._trade_state == "idle":\n'
             '            self._trade_state = "spot_bought"\n'
             '            logger.info("Spot bought -> spot_bought")\n'
+            '        elif intent_type.value == "SWAP" and self._trade_state == "unwinding":\n'
+            '            self._trade_state = "idle"\n'
+            '            logger.info("Spot sold -> idle (unwind complete)")\n'
             '        elif intent_type.value == "PERP_OPEN":\n'
             '            self._trade_state = "hedged"\n'
             '            logger.info("Perp opened -> hedged")\n'
+            '        elif intent_type.value == "PERP_CLOSE":\n'
+            '            self._trade_state = "unwinding"\n'
+            '            logger.info("Perp closed -> unwinding")\n'
             "\n"
             "    def get_persistent_state(self):\n"
             '        """Save trade state."""\n'
@@ -1952,7 +2121,7 @@ Strategy Pattern:
 """
 
 import logging
-from decimal import Decimal  # noqa: F401 (used by most templates, not blank)
+from decimal import ROUND_DOWN, Decimal  # noqa: F401
 from typing import Any, Optional
 
 # Core strategy framework imports
@@ -2112,6 +2281,7 @@ def generate_config_json(
         data.update(
             {
                 "pool_address": "0x_SET_POOL_ADDRESS",
+                "protocol": "uniswap_v3",
                 "base_token": "WETH",
                 "quote_token": "USDC",
                 "range_width_pct": 5,
@@ -2124,10 +2294,12 @@ def generate_config_json(
             {
                 "collateral_token": "WETH",
                 "borrow_token": "USDC",
-                "supply_amount": 1,
-                "borrow_amount": 500,
-                "target_leverage": 2.0,
-                "min_collateral_usd": 100,
+                "supply_amount": "1",
+                "borrow_amount": "500",
+                "target_leverage": "2.0",
+                "borrow_ratio": "0.7",
+                "min_health_factor": "1.5",
+                "min_collateral_usd": "100",
             }
         )
     elif template == StrategyTemplate.BASIS_TRADE:
@@ -2136,8 +2308,10 @@ def generate_config_json(
                 "base_token": "WETH",
                 "quote_token": "USDC",
                 "perp_market": "ETH/USD",
-                "spot_size_usd": 10000,
-                "hedge_ratio": 1.0,
+                "spot_size_usd": "10000",
+                "hedge_ratio": "1.0",
+                "funding_entry_threshold": "0.0001",
+                "funding_exit_threshold": "-0.00005",
             }
         )
     elif template == StrategyTemplate.VAULT_YIELD:
@@ -2177,9 +2351,11 @@ def generate_config_json(
         data.update(
             {
                 "pool_address": "0x_SET_POOL_ADDRESS",
+                "protocol": "uniswap_v3",
                 "base_token": "WETH",
                 "quote_token": "USDC",
                 "range_width_pct": 5,
+                "rebalance_threshold_pct": 3,
                 "min_position_usd": 500,
             }
         )
@@ -2193,7 +2369,14 @@ def generate_config_json(
                 "swap_before_stake": True,
             }
         )
-    # BLANK: empty config
+    else:  # BLANK: seed with example config
+        data.update(
+            {
+                "base_token": "WETH",
+                "quote_token": "USDC",
+                "trade_size_usd": "100",
+            }
+        )
 
     return json.dumps(data, indent=4) + "\n"
 

@@ -181,3 +181,358 @@ def test_stateful_templates_have_callbacks(template: StrategyTemplate) -> None:
         assert "on_intent_executed" in method_names, (
             f"on_intent_executed() missing from {template.value} template"
         )
+
+
+# ---------------------------------------------------------------------------
+# LENDING_LOOP: state machine transitions and persistence
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_intent(intent_type_value: str):
+    """Create a minimal mock intent with intent_type.value == intent_type_value."""
+
+    class _IntentType:
+        value = intent_type_value
+
+    class _MockIntent:
+        intent_type = _IntentType()
+
+    return _MockIntent()
+
+
+def _scaffold_lending_loop():
+    """Scaffold a LENDING_LOOP strategy and return a concrete subclass for testing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        code = generate_strategy_file(
+            name="Test Loop",
+            template=StrategyTemplate.LENDING_LOOP,
+            chain=SupportedChain.ARBITRUM,
+            output_dir=Path(tmpdir),
+        )
+    # Execute the scaffolded code; capture the class object.
+    ns: dict = {}
+    exec(compile(code, "<scaffold>", "exec"), ns)  # noqa: S102
+    # Find the scaffolded strategy class: a direct subclass of IntentStrategy
+    # that is not IntentStrategy itself (which also appears in ns after import).
+    from almanak.framework.strategies import IntentStrategy as _Base
+
+    base_cls = next(
+        v
+        for v in ns.values()
+        if isinstance(v, type) and issubclass(v, _Base) and v is not _Base
+    )
+
+    # Create a concrete subclass satisfying IntentStrategy's abstract interface.
+    # Only the callback/persistence methods are under test; the abstract methods
+    # are already tested by other scaffold tests.
+    class _Concrete(base_cls):
+        def decide(self, market):
+            return None  # Not under test
+
+        def get_open_positions(self):
+            return None  # Not under test
+
+        def generate_teardown_intents(self, mode=None, market=None):
+            return []  # Not under test
+
+    return _Concrete
+
+
+class _MockMarket:
+    """Minimal market mock so __init__ doesn't fail on market access."""
+
+    def price(self, token):
+        return __import__("decimal").Decimal("2000")
+
+    def balance(self, token):
+        class B:
+            balance = __import__("decimal").Decimal("1")
+            balance_usd = __import__("decimal").Decimal("2000")
+
+        return B()
+
+    def funding_rate(self, protocol, market):
+        class F:
+            rate_hourly = __import__("decimal").Decimal("0.0001")
+
+        return F()
+
+
+def _make_strategy():
+    """Instantiate the scaffolded LENDING_LOOP strategy with a stub config."""
+    cls = _scaffold_lending_loop()
+
+    class _Cfg:
+        def get(self, key, default=None):
+            defaults = {
+                "supply_amount": "1",
+                "borrow_amount": "500",
+                "target_leverage": "2.0",
+                "borrow_ratio": "0.7",
+                "min_health_factor": "1.5",
+                "min_collateral_usd": "100",
+                "collateral_token": "WETH",
+                "borrow_token": "USDC",
+            }
+            return defaults.get(key, default)
+
+    strat = cls.__new__(cls)
+    # Manually run the init params (avoid full IntentStrategy.__init__)
+    from decimal import Decimal
+
+    strat.config = _Cfg()
+    strat.supply_amount = Decimal("1")
+    strat.borrow_amount = Decimal("500")
+    strat.target_leverage = Decimal("2.0")
+    strat.borrow_ratio = Decimal("0.7")
+    strat.min_health_factor = Decimal("1.5")
+    strat.min_collateral_usd = Decimal("100")
+    strat.collateral_token = "WETH"
+    strat.borrow_token = "USDC"
+    strat._loop_state = "idle"
+    strat._loop_count = 0
+    strat._current_leverage = Decimal("1.0")
+    return strat
+
+
+def test_lending_loop_supply_transition() -> None:
+    """SUPPLY intent -> state advances to 'supplied'."""
+    strat = _make_strategy()
+    strat.on_intent_executed(_make_mock_intent("SUPPLY"), success=True, result=None)
+    assert strat._loop_state == "supplied"
+    assert strat._loop_count == 0  # loop_count increments only on SWAP
+
+
+def test_lending_loop_borrow_transition() -> None:
+    """BORROW intent -> state advances to 'borrowed'."""
+    strat = _make_strategy()
+    strat._loop_state = "supplied"
+    strat.on_intent_executed(_make_mock_intent("BORROW"), success=True, result=None)
+    assert strat._loop_state == "borrowed"
+
+
+def test_lending_loop_swap_below_target_loops() -> None:
+    """SWAP when leverage < target -> state returns to 'idle' for next loop."""
+    strat = _make_strategy()
+    strat._loop_state = "borrowed"
+    strat._loop_count = 0
+    # After 1 loop: leverage = 1 + 0.7 = 1.7 < 2.0 target
+    strat.on_intent_executed(_make_mock_intent("SWAP"), success=True, result=None)
+    assert strat._loop_state == "idle"
+    assert strat._loop_count == 1
+
+
+def test_lending_loop_swap_at_target_monitors() -> None:
+    """SWAP when leverage >= target -> state advances to 'monitoring'."""
+    from decimal import Decimal
+
+    strat = _make_strategy()
+    strat._loop_state = "borrowed"
+    strat._loop_count = 1  # Will become 2 after SWAP
+    # After 2 loops: 1 + 0.7 + 0.49 = 2.19 >= 2.0 target
+    strat.on_intent_executed(_make_mock_intent("SWAP"), success=True, result=None)
+    assert strat._loop_state == "monitoring"
+    assert strat._loop_count == 2
+    assert strat._current_leverage >= Decimal("2.0")
+
+
+def test_lending_loop_no_transition_on_failure() -> None:
+    """success=False -> no state change."""
+    strat = _make_strategy()
+    strat._loop_state = "borrowed"
+    original_count = strat._loop_count
+    strat.on_intent_executed(_make_mock_intent("SWAP"), success=False, result=None)
+    assert strat._loop_state == "borrowed"
+    assert strat._loop_count == original_count
+
+
+def test_lending_loop_persistence_round_trip() -> None:
+    """get_persistent_state() / load_persistent_state() round-trips all fields."""
+    from decimal import Decimal
+
+    strat = _make_strategy()
+    strat._loop_state = "monitoring"
+    strat._loop_count = 3
+    strat._current_leverage = Decimal("2.19")
+
+    saved = strat.get_persistent_state()
+    assert saved["loop_state"] == "monitoring"
+    assert saved["loop_count"] == 3
+    assert saved["current_leverage"] == "2.19"
+
+    # Restore into a fresh instance
+    strat2 = _make_strategy()
+    strat2.load_persistent_state(saved)
+    assert strat2._loop_state == "monitoring"
+    assert strat2._loop_count == 3
+    assert strat2._current_leverage == Decimal("2.19")
+
+
+def test_lending_loop_persistence_decimal_as_string() -> None:
+    """load_persistent_state handles current_leverage stored as a string."""
+    from decimal import Decimal
+
+    strat = _make_strategy()
+    strat.load_persistent_state({"loop_state": "idle", "loop_count": 0, "current_leverage": "1.7"})
+    assert strat._current_leverage == Decimal("1.7")
+
+
+def test_lending_loop_persistence_zero_loop_count() -> None:
+    """load_persistent_state handles loop_count=0 (initial state)."""
+    from decimal import Decimal
+
+    strat = _make_strategy()
+    strat.load_persistent_state({"loop_state": "idle", "loop_count": 0, "current_leverage": "1.0"})
+    assert strat._loop_count == 0
+    assert strat._loop_state == "idle"
+    assert strat._current_leverage == Decimal("1.0")
+
+
+# ---------------------------------------------------------------------------
+# BASIS_TRADE: state machine transitions and persistence
+# ---------------------------------------------------------------------------
+
+
+def _scaffold_basis_trade():
+    """Scaffold a BASIS_TRADE strategy and return a concrete subclass for testing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        code = generate_strategy_file(
+            name="Test Basis",
+            template=StrategyTemplate.BASIS_TRADE,
+            chain=SupportedChain.ARBITRUM,
+            output_dir=Path(tmpdir),
+        )
+    ns: dict = {}
+    exec(compile(code, "<scaffold>", "exec"), ns)  # noqa: S102
+    from almanak.framework.strategies import IntentStrategy as _Base
+
+    base_cls = next(
+        v
+        for v in ns.values()
+        if isinstance(v, type) and issubclass(v, _Base) and v is not _Base
+    )
+
+    class _Concrete(base_cls):
+        def decide(self, market):
+            return None
+
+        def get_open_positions(self):
+            return None
+
+        def generate_teardown_intents(self, mode=None, market=None):
+            return []
+
+    return _Concrete
+
+
+def _make_basis_strategy():
+    """Instantiate the scaffolded BASIS_TRADE strategy with a stub config."""
+    from decimal import Decimal
+
+    cls = _scaffold_basis_trade()
+
+    class _Cfg:
+        def get(self, key, default=None):
+            defaults = {
+                "spot_size_usd": "10000",
+                "hedge_ratio": "1.0",
+                "funding_entry_threshold": "0.0001",
+                "funding_exit_threshold": "-0.00005",
+                "base_token": "WETH",
+                "quote_token": "USDC",
+                "perp_market": "ETH/USD",
+            }
+            return defaults.get(key, default)
+
+    strat = cls.__new__(cls)
+    strat.config = _Cfg()
+    strat.spot_size_usd = Decimal("10000")
+    strat.hedge_ratio = Decimal("1.0")
+    strat.funding_entry_threshold = Decimal("0.0001")
+    strat.funding_exit_threshold = Decimal("-0.00005")
+    strat.base_token = "WETH"
+    strat.quote_token = "USDC"
+    strat.perp_market = "ETH/USD"
+    strat._trade_state = "idle"
+    return strat
+
+
+def test_basis_trade_swap_idle_to_spot_bought() -> None:
+    """SWAP when idle -> state advances to 'spot_bought'."""
+    strat = _make_basis_strategy()
+    strat.on_intent_executed(_make_mock_intent("SWAP"), success=True, result=None)
+    assert strat._trade_state == "spot_bought"
+
+
+def test_basis_trade_perp_open_to_hedged() -> None:
+    """PERP_OPEN -> state advances to 'hedged'."""
+    strat = _make_basis_strategy()
+    strat._trade_state = "spot_bought"
+    strat.on_intent_executed(_make_mock_intent("PERP_OPEN"), success=True, result=None)
+    assert strat._trade_state == "hedged"
+
+
+def test_basis_trade_perp_close_to_unwinding() -> None:
+    """PERP_CLOSE -> state advances to 'unwinding'."""
+    strat = _make_basis_strategy()
+    strat._trade_state = "hedged"
+    strat.on_intent_executed(_make_mock_intent("PERP_CLOSE"), success=True, result=None)
+    assert strat._trade_state == "unwinding"
+
+
+def test_basis_trade_swap_unwinding_to_idle() -> None:
+    """SWAP when unwinding -> state returns to 'idle' (unwind complete)."""
+    strat = _make_basis_strategy()
+    strat._trade_state = "unwinding"
+    strat.on_intent_executed(_make_mock_intent("SWAP"), success=True, result=None)
+    assert strat._trade_state == "idle"
+
+
+def test_basis_trade_full_lifecycle() -> None:
+    """Full lifecycle: idle -> spot_bought -> hedged -> unwinding -> idle."""
+    strat = _make_basis_strategy()
+    assert strat._trade_state == "idle"
+
+    strat.on_intent_executed(_make_mock_intent("SWAP"), success=True, result=None)
+    assert strat._trade_state == "spot_bought"
+
+    strat.on_intent_executed(_make_mock_intent("PERP_OPEN"), success=True, result=None)
+    assert strat._trade_state == "hedged"
+
+    strat.on_intent_executed(_make_mock_intent("PERP_CLOSE"), success=True, result=None)
+    assert strat._trade_state == "unwinding"
+
+    strat.on_intent_executed(_make_mock_intent("SWAP"), success=True, result=None)
+    assert strat._trade_state == "idle"
+
+
+def test_basis_trade_no_transition_on_failure() -> None:
+    """success=False -> no state change."""
+    strat = _make_basis_strategy()
+    strat._trade_state = "hedged"
+    strat.on_intent_executed(_make_mock_intent("PERP_CLOSE"), success=False, result=None)
+    assert strat._trade_state == "hedged"
+
+
+def test_basis_trade_persistence_round_trip() -> None:
+    """get_persistent_state() / load_persistent_state() round-trips trade_state."""
+    strat = _make_basis_strategy()
+    strat._trade_state = "unwinding"
+
+    saved = strat.get_persistent_state()
+    assert saved["trade_state"] == "unwinding"
+
+    strat2 = _make_basis_strategy()
+    strat2.load_persistent_state(saved)
+    assert strat2._trade_state == "unwinding"
+
+
+def test_basis_trade_persistence_all_states() -> None:
+    """Persistence round-trips correctly for each trade_state value."""
+    for state in ("idle", "spot_bought", "hedged", "unwinding"):
+        strat = _make_basis_strategy()
+        strat._trade_state = state
+        saved = strat.get_persistent_state()
+        strat2 = _make_basis_strategy()
+        strat2.load_persistent_state(saved)
+        assert strat2._trade_state == state, f"round-trip failed for state={state}"
