@@ -160,13 +160,13 @@ The framework compiles these to actual transactions.
 
 ### 4. Error Handling
 
-Catch specific exceptions where recovery is possible. Let unexpected errors
-propagate to the framework's built-in `STRATEGY_ERROR` handler:
+Always wrap logic in try/except:
 ```python
 try:
     rsi = market.rsi("WETH")
-except ValueError:
-    return Intent.hold(reason="RSI data unavailable")
+    # ... logic ...
+except Exception as e:
+    return Intent.hold(reason=f"Error: {e}")
 ```
 
 ## Limitations

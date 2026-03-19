@@ -36,18 +36,19 @@ strategies/demo/uniswap_rsi/
     __init__.py      - Package exports
     strategy.py      - This file (main strategy logic)
     config.json      - Default configuration
+    run_anvil.py     - Test script for running on Anvil fork
     README.md        - Documentation
 
 USAGE:
 ------
     # Run once in dry-run mode (no real transactions)
-    almanak strat run -d strategies/demo/uniswap_rsi --once --dry-run
+    python -m src.cli.run --strategy demo_uniswap_rsi --once --dry-run
 
     # Run continuously every 60 seconds
-    almanak strat run -d strategies/demo/uniswap_rsi --interval 60
+    python -m src.cli.run --strategy demo_uniswap_rsi --interval 60
 
     # Test on Anvil (local fork)
-    almanak strat run -d strategies/demo/uniswap_rsi --network anvil --once
+    python strategies/demo/uniswap_rsi/run_anvil.py
 
 ===============================================================================
 """
@@ -95,7 +96,7 @@ logger = logging.getLogger(__name__)
 
 @almanak_strategy(
     # Unique identifier - used to run the strategy via CLI
-    # Example: almanak strat run -d strategies/demo/uniswap_rsi --once
+    # Example: python -m src.cli.run --strategy demo_uniswap_rsi
     name="demo_uniswap_rsi",
     # Human-readable description for documentation
     description="Tutorial RSI strategy - buys when oversold, sells when overbought on Uniswap V3",
@@ -346,9 +347,6 @@ class UniswapRSIStrategy(IntentStrategy):
         # The asset appears overvalued. We want to sell.
 
         elif rsi.value >= self.rsi_overbought:
-            # Guard against zero price before division
-            if base_price <= 0:
-                return Intent.hold(reason=f"Invalid {self.base_token} price: {base_price}")
             # Calculate how much base token we need to sell for our trade size
             min_base_to_sell = self.trade_size_usd / base_price
 
@@ -535,6 +533,6 @@ if __name__ == "__main__":
     print(f"Intent Types: {UniswapRSIStrategy.INTENT_TYPES}")
     print(f"\nDescription: {UniswapRSIStrategy.STRATEGY_METADATA.description}")
     print("\nTo run this strategy:")
-    print("  almanak strat run -d strategies/demo/uniswap_rsi --once --dry-run")
+    print("  python -m src.cli.run --strategy demo_uniswap_rsi --once --dry-run")
     print("\nTo test on Anvil:")
-    print("  almanak strat run -d strategies/demo/uniswap_rsi --network anvil --once")
+    print("  python strategies/demo/uniswap_rsi/run_anvil.py")

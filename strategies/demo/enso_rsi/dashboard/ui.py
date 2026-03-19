@@ -45,7 +45,7 @@ def render_custom_dashboard(
 
     # RSI Indicator section
     st.subheader("RSI Indicator")
-    _render_rsi_indicator(session_state, rsi_period, rsi_oversold, rsi_overbought, base_token)
+    _render_rsi_indicator(session_state, rsi_period, rsi_oversold, rsi_overbought, strategy_config)
 
     st.divider()
 
@@ -71,7 +71,7 @@ def _render_rsi_indicator(
     rsi_period: int,
     rsi_oversold: Decimal,
     rsi_overbought: Decimal,
-    base_token: str = "WETH",
+    strategy_config: dict[str, Any] | None = None,
 ) -> None:
     """Render RSI indicator with color coding."""
     current_rsi = Decimal(str(session_state.get("current_rsi", "50")))
@@ -109,6 +109,8 @@ def _render_rsi_indicator(
         st.info(f"Zone: NEUTRAL - No signal (RSI={float(current_rsi):.1f})")
 
     # RSI explanation
+    cfg = strategy_config or {}
+    base_token = cfg.get("base_token", "WETH")
     st.markdown("**RSI Strategy Logic:**")
     st.markdown(
         f"""

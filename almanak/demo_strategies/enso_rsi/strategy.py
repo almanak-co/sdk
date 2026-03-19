@@ -127,22 +127,28 @@ class EnsoRSIStrategy(IntentStrategy):
         # CONFIGURATION PARSING
         # =====================================================================
 
+        config_dict = self.config if isinstance(self.config, dict) else {}
+
+        # Handle DictConfigWrapper (from CLI)
+        if hasattr(self.config, "get"):
+            config_dict = {k: getattr(self.config, k) for k in dir(self.config) if not k.startswith("_")}
+
         # Trading parameters
-        self.trade_size_usd = Decimal(str(self.get_config("trade_size_usd", "100")))
+        self.trade_size_usd = Decimal(str(config_dict.get("trade_size_usd", "100")))
 
         # RSI thresholds
-        self.rsi_oversold = int(self.get_config("rsi_oversold", 30))
-        self.rsi_overbought = int(self.get_config("rsi_overbought", 70))
+        self.rsi_oversold = int(config_dict.get("rsi_oversold", 30))
+        self.rsi_overbought = int(config_dict.get("rsi_overbought", 70))
 
         # Slippage (as percentage, e.g., 0.5 = 0.5%)
-        self.max_slippage_pct = float(self.get_config("max_slippage_pct", 0.5))
+        self.max_slippage_pct = float(config_dict.get("max_slippage_pct", 0.5))
 
         # Token configuration
-        self.base_token = self.get_config("base_token", "WETH")
-        self.quote_token = self.get_config("quote_token", "USDC")
+        self.base_token = config_dict.get("base_token", "WETH")
+        self.quote_token = config_dict.get("quote_token", "USDC")
 
         # Force action for testing
-        self.force_action = self.get_config("force_action", None)
+        self.force_action = config_dict.get("force_action", None)
 
         # Internal state
         self._trades_executed = 0
@@ -176,57 +182,62 @@ class EnsoRSIStrategy(IntentStrategy):
         Returns:
             Intent to execute (SWAP via Enso or HOLD)
         """
-        # =================================================================
-        # STEP 1: HANDLE FORCED ACTIONS (FOR TESTING)
-        # =================================================================
-        if self.force_action:
-            logger.info(f"Force action requested: {self.force_action}")
-
-            if self.force_action == "buy":
-                return self._create_buy_intent()
-            elif self.force_action == "sell":
-                return self._create_sell_intent()
-            else:
-                logger.warning(f"Unknown force_action: {self.force_action}")
-
-        # =================================================================
-        # STEP 2: GET RSI VALUE
-        # =================================================================
         try:
-            rsi_data = market.rsi(self.base_token)
-            current_rsi = float(rsi_data.value)
-            logger.debug(f"Current RSI for {self.base_token}: {current_rsi:.2f}")
-        except ValueError:
-            # RSI not available - use default for testing
-            current_rsi = 50.0
-            logger.warning(f"RSI unavailable for {self.base_token}, using {current_rsi}")
+            # =================================================================
+            # STEP 1: HANDLE FORCED ACTIONS (FOR TESTING)
+            # =================================================================
+            if self.force_action:
+                logger.info(f"Force action requested: {self.force_action}")
 
-        # =================================================================
-        # STEP 3: MAKE TRADING DECISION
-        # =================================================================
+                if self.force_action == "buy":
+                    return self._create_buy_intent()
+                elif self.force_action == "sell":
+                    return self._create_sell_intent()
+                else:
+                    logger.warning(f"Unknown force_action: {self.force_action}")
 
-        # OVERSOLD: RSI < threshold -> BUY
-        if current_rsi < self.rsi_oversold:
-            logger.info(
-                f"📈 BUY SIGNAL: RSI={current_rsi:.2f} < {self.rsi_oversold} (oversold) "
-                f"| Buying {format_usd(self.trade_size_usd)} of {self.base_token} via Enso"
-            )
-            return self._create_buy_intent()
+            # =================================================================
+            # STEP 2: GET RSI VALUE
+            # =================================================================
+            try:
+                rsi_data = market.rsi(self.base_token)
+                current_rsi = float(rsi_data.value)
+                logger.debug(f"Current RSI for {self.base_token}: {current_rsi:.2f}")
+            except ValueError:
+                # RSI not available - use default for testing
+                current_rsi = 50.0
+                logger.warning(f"RSI unavailable for {self.base_token}, using {current_rsi}")
 
-        # OVERBOUGHT: RSI > threshold -> SELL
-        elif current_rsi > self.rsi_overbought:
-            logger.info(
-                f"📉 SELL SIGNAL: RSI={current_rsi:.2f} > {self.rsi_overbought} (overbought) "
-                f"| Selling {format_usd(self.trade_size_usd)} of {self.base_token} via Enso"
-            )
-            return self._create_sell_intent()
+            # =================================================================
+            # STEP 3: MAKE TRADING DECISION
+            # =================================================================
 
-        # NEUTRAL: HOLD
-        else:
-            logger.debug(
-                f"RSI {current_rsi:.2f} in neutral zone [{self.rsi_oversold}-{self.rsi_overbought}] -> HOLD"
-            )
-            return Intent.hold(reason=f"RSI {current_rsi:.2f} in neutral zone")
+            # OVERSOLD: RSI < threshold -> BUY
+            if current_rsi < self.rsi_oversold:
+                logger.info(
+                    f"📈 BUY SIGNAL: RSI={current_rsi:.2f} < {self.rsi_oversold} (oversold) "
+                    f"| Buying {format_usd(self.trade_size_usd)} of {self.base_token} via Enso"
+                )
+                return self._create_buy_intent()
+
+            # OVERBOUGHT: RSI > threshold -> SELL
+            elif current_rsi > self.rsi_overbought:
+                logger.info(
+                    f"📉 SELL SIGNAL: RSI={current_rsi:.2f} > {self.rsi_overbought} (overbought) "
+                    f"| Selling {format_usd(self.trade_size_usd)} of {self.base_token} via Enso"
+                )
+                return self._create_sell_intent()
+
+            # NEUTRAL: HOLD
+            else:
+                logger.debug(
+                    f"RSI {current_rsi:.2f} in neutral zone [{self.rsi_oversold}-{self.rsi_overbought}] -> HOLD"
+                )
+                return Intent.hold(reason=f"RSI {current_rsi:.2f} in neutral zone")
+
+        except Exception as e:
+            logger.exception(f"Error in decide(): {e}")
+            return Intent.hold(reason=f"Error: {str(e)}")
 
     # =========================================================================
     # INTENT CREATION METHODS

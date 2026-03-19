@@ -30,20 +30,10 @@ EVENT_TOPICS: dict[str, str] = {
     # CryptoSwap/Tricrypto: TokenExchange(address,uint256,uint256,uint256,uint256)
     "TokenExchangeCrypto": "0xb2e76ae99761dc136e598d4a629bb347eccb9532a5f8bbd72e18467c3c34cc98",
     "TokenExchangeUnderlying": "0xd013ca23e77a65003c2c659c5442c00c805371b7fc1ebd4c206c41d1536bd90b",
-    # AddLiquidity for NG pools (StableswapNG, TwocryptoNG):
-    # AddLiquidity(address,uint256[2],uint256[2],uint256,uint256) — includes fees array
     "AddLiquidity2": "0x26f55a85081d24974e85c6c00045d0f0453991e95873f52bff0d21af4079a768",
     "AddLiquidity3": "0x423f6495a08fc652425cf4ed0d1f9e37e571d9b9529b1c1c23cce780b2e7df0d",
-    # AddLiquidity for old-style Twocrypto (pre-NG, no fees array):
-    # AddLiquidity(address,uint256[2],uint256,uint256) — provider, amounts, invariant, supply
-    "AddLiquidityV2Crypto2": "0x540ab385f9b5d450a27404172caade516b3ba3f4be88239ac56a2ad1de2a1f5a",
-    # RemoveLiquidity for NG pools (includes fees array):
-    # RemoveLiquidity(address,uint256[2],uint256[2],uint256)
     "RemoveLiquidity2": "0x7c363854ccf79623411f8995b362bce5eddff18c927edc6f5dbbb5e05819a82c",
     "RemoveLiquidity3": "0xa49d4cf02656aebf8c771f5a8585638a2a15ee6c97cf7205d4208ed7c1df252d",
-    # RemoveLiquidity for old-style Twocrypto (no fees array):
-    # RemoveLiquidity(address,uint256[2],uint256)
-    "RemoveLiquidityV2Crypto2": "0xdd3c0336a16f1b64f172b7bb0dad5b2b3c7c76f91e8c4aafd6aae60dce800153",
     "RemoveLiquidityOne": "0x5ad056f2e28a8cec232015406b843668c1e36cda598127ec3b8c59b8c72773a0",
     "RemoveLiquidityImbalance": "0x2b5508378d7e19e0d5fa338419034731416c4f5b219a10379956f764317fd47e",
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
@@ -80,10 +70,8 @@ EVENT_NAME_TO_TYPE: dict[str, CurveEventType] = {
     "TokenExchangeUnderlying": CurveEventType.TOKEN_EXCHANGE_UNDERLYING,
     "AddLiquidity2": CurveEventType.ADD_LIQUIDITY,
     "AddLiquidity3": CurveEventType.ADD_LIQUIDITY,
-    "AddLiquidityV2Crypto2": CurveEventType.ADD_LIQUIDITY,  # old-style Twocrypto (pre-NG)
     "RemoveLiquidity2": CurveEventType.REMOVE_LIQUIDITY,
     "RemoveLiquidity3": CurveEventType.REMOVE_LIQUIDITY,
-    "RemoveLiquidityV2Crypto2": CurveEventType.REMOVE_LIQUIDITY,  # old-style Twocrypto (pre-NG)
     "RemoveLiquidityOne": CurveEventType.REMOVE_LIQUIDITY_ONE,
     "RemoveLiquidityImbalance": CurveEventType.REMOVE_LIQUIDITY_IMBALANCE,
     "Transfer": CurveEventType.TRANSFER,
@@ -420,9 +408,9 @@ class CurveReceiptParser:
         if event_type in (CurveEventType.TOKEN_EXCHANGE, CurveEventType.TOKEN_EXCHANGE_UNDERLYING):
             return self._decode_swap_data(topics, data, address, event_name=event_name)
         elif event_type == CurveEventType.ADD_LIQUIDITY:
-            return self._decode_add_liquidity_data(topics, data, address, event_name=event_name)
+            return self._decode_add_liquidity_data(topics, data, address)
         elif event_type == CurveEventType.REMOVE_LIQUIDITY:
-            return self._decode_remove_liquidity_data(topics, data, address, event_name=event_name)
+            return self._decode_remove_liquidity_data(topics, data, address)
         else:
             return {"raw_data": data}
 
@@ -473,41 +461,16 @@ class CurveReceiptParser:
         topics: list[Any],
         data: str,
         address: str,
-        event_name: str = "",
     ) -> dict[str, Any]:
-        """Decode AddLiquidity event data.
-
-        Two formats are supported:
-        - NG pools (AddLiquidity2/AddLiquidity3): amounts + fees + invariant + supply
-          (2-coin: 6 fields × 64 = 384 hex chars; 3-coin: 8 fields × 512 hex chars)
-        - Old-style Twocrypto (AddLiquidityV2Crypto2): amounts + invariant + supply
-          (NO fees array: 2-coin: 4 fields × 64 = 256 hex chars)
-        """
+        """Decode AddLiquidity event data."""
         try:
             # Indexed: provider
             provider = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
-            pool_address = address.lower() if isinstance(address, str) else ""
 
-            # Old-style Twocrypto (pre-NG): no fees array
-            # Format: amounts[0], amounts[1], invariant, token_supply
-            if event_name == "AddLiquidityV2Crypto2":
-                token_amounts = [
-                    HexDecoder.decode_uint256(data, 0),
-                    HexDecoder.decode_uint256(data, 32),
-                ]
-                invariant = HexDecoder.decode_uint256(data, 64)
-                token_supply = HexDecoder.decode_uint256(data, 96)
-                return {
-                    "provider": provider,
-                    "token_amounts": token_amounts,
-                    "fees": [],  # Old-style pools don't emit fees in this event
-                    "invariant": invariant,
-                    "token_supply": token_supply,
-                    "pool_address": pool_address,
-                }
-
-            # NG pools: amounts + fees + invariant + supply
-            # Determine 2-coin vs 3-coin based on data length
+            # Determine pool type (2-coin or 3-coin) based on data length
+            # AddLiquidity: amounts + fees + invariant + supply
+            # 2-coin: 2 + 2 + 1 + 1 = 6 fields × 64 = 384 hex chars
+            # 3-coin: 3 + 3 + 1 + 1 = 8 fields × 64 = 512 hex chars
             data_len = len(data)
             if data_len >= 512:  # 8 * 64 for 3-coin
                 n_coins = 3
@@ -528,6 +491,8 @@ class CurveReceiptParser:
             invariant = HexDecoder.decode_uint256(data, n_coins * 2 * 32)
             token_supply = HexDecoder.decode_uint256(data, (n_coins * 2 + 1) * 32)
 
+            pool_address = address.lower() if isinstance(address, str) else ""
+
             return {
                 "provider": provider,
                 "token_amounts": token_amounts,
@@ -546,39 +511,16 @@ class CurveReceiptParser:
         topics: list[Any],
         data: str,
         address: str,
-        event_name: str = "",
     ) -> dict[str, Any]:
-        """Decode RemoveLiquidity event data.
-
-        Two formats are supported:
-        - NG pools (RemoveLiquidity2/RemoveLiquidity3): amounts + fees + supply
-          (2-coin: 5 fields × 64 = 320 hex chars; 3-coin: 7 fields × 448 hex chars)
-        - Old-style Twocrypto (RemoveLiquidityV2Crypto2): amounts + supply (NO fees)
-          (2-coin: 3 fields × 64 = 192 hex chars)
-        """
+        """Decode RemoveLiquidity event data."""
         try:
             # Indexed: provider
             provider = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
-            pool_address = address.lower() if isinstance(address, str) else ""
 
-            # Old-style Twocrypto (pre-NG): no fees array
-            # Format: amounts[0], amounts[1], token_supply
-            if event_name == "RemoveLiquidityV2Crypto2":
-                token_amounts = [
-                    HexDecoder.decode_uint256(data, 0),
-                    HexDecoder.decode_uint256(data, 32),
-                ]
-                token_supply = HexDecoder.decode_uint256(data, 64)
-                return {
-                    "provider": provider,
-                    "token_amounts": token_amounts,
-                    "fees": [],  # Old-style pools don't emit fees in this event
-                    "token_supply": token_supply,
-                    "pool_address": pool_address,
-                }
-
-            # NG pools: amounts + fees + supply (no invariant)
-            # Determine 2-coin vs 3-coin based on data length
+            # Determine pool type based on data length
+            # RemoveLiquidity: amounts + fees + supply (no invariant)
+            # 2-coin: 2 + 2 + 1 = 5 fields × 64 = 320 hex chars
+            # 3-coin: 3 + 3 + 1 = 7 fields × 64 = 448 hex chars
             data_len = len(data)
             if data_len >= 448:  # 7 * 64 for 3-coin
                 n_coins = 3
@@ -597,6 +539,8 @@ class CurveReceiptParser:
 
             # Parse supply
             token_supply = HexDecoder.decode_uint256(data, n_coins * 2 * 32)
+
+            pool_address = address.lower() if isinstance(address, str) else ""
 
             return {
                 "provider": provider,

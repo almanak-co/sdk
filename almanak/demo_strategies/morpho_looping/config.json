@@ -2,15 +2,15 @@
     "market_id": "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
     "collateral_token": "wstETH",
     "borrow_token": "USDC",
-    "initial_collateral": "0.014",
+    "initial_collateral": "0.1",
     "target_loops": 2,
     "target_ltv": "0.70",
     "min_health_factor": "1.5",
     "swap_slippage": "0.005",
-    "force_action": "supply",
+    "force_action": "",
     "anvil_funding": {
         "ETH": 100,
-        "wstETH": 0.1,
-        "USDC": 500
+        "wstETH": 1,
+        "USDC": 10000
     }
 }

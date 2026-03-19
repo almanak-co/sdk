@@ -2423,25 +2423,6 @@ def run(
                         click.secho("  Strategy state restored from persistence", fg="yellow")
                     else:
                         click.echo("  No previous state found (fresh start)")
-                elif hasattr(strategy_instance, "load_state"):
-                    if strategy_instance.load_state():
-                        click.secho("  Strategy state restored from persistence", fg="yellow")
-                    else:
-                        click.echo("  No previous state found (fresh start)")
-
-                # Re-inject vault state now that persistent_state has been loaded.
-                # VaultLifecycleManager was constructed before async state restore,
-                # so its _initial_vault_state may be None even when persisted state exists.
-                if vault_lifecycle is not None:
-                    for attr in ("persistent_state", "state"):
-                        store = getattr(strategy_instance, attr, None)
-                        if isinstance(store, dict):
-                            from ..vault.lifecycle import VAULT_STATE_KEY
-
-                            restored_vault_state = store.get(VAULT_STATE_KEY)
-                            if restored_vault_state is not None:
-                                vault_lifecycle._initial_vault_state = restored_vault_state
-                            break
 
                 # Restore copy trading cursor state (mirrors run_loop pattern)
                 activity_provider = getattr(strategy_instance, "_wallet_activity_provider", None)
@@ -2595,23 +2576,6 @@ def run(
                         click.secho("  Strategy state restored from persistence", fg="yellow")
                     else:
                         click.echo("  No previous state found (fresh start)")
-                elif hasattr(strategy_instance, "load_state"):
-                    if strategy_instance.load_state():
-                        click.secho("  Strategy state restored from persistence", fg="yellow")
-                    else:
-                        click.echo("  No previous state found (fresh start)")
-
-                # Re-inject vault state now that persistent_state has been loaded.
-                if vault_lifecycle is not None:
-                    for attr in ("persistent_state", "state"):
-                        store = getattr(strategy_instance, attr, None)
-                        if isinstance(store, dict):
-                            from ..vault.lifecycle import VAULT_STATE_KEY
-
-                            restored_vault_state = store.get(VAULT_STATE_KEY)
-                            if restored_vault_state is not None:
-                                vault_lifecycle._initial_vault_state = restored_vault_state
-                            break
 
                 await runner.run_loop(
                     strategy=strategy_instance,

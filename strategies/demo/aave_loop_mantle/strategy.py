@@ -78,9 +78,6 @@ class AaveLoopMantleStrategy(IntentStrategy):
 
         # Enforce min_health_factor: cap ltv_target so each borrow stays within the health factor floor.
         # Conservative proxy: ltv_target <= 1 / min_health_factor.
-        # NOTE: This does NOT enforce the Aave collateral-specific LTV ceiling (e.g. WMNT = 40%).
-        # The default ltv_target=0.4 matches the WMNT reserve limit. If you change supply_token,
-        # ensure ltv_target does not exceed the token's Aave max LTV or borrows will revert.
         max_safe_ltv = Decimal("1") / self.min_health_factor
         if self.ltv_target > max_safe_ltv:
             logger.warning(
@@ -124,6 +121,7 @@ class AaveLoopMantleStrategy(IntentStrategy):
         try:
             supply_price = Decimal(str(market.price(self.supply_token)))
             borrow_price = Decimal(str(market.price(self.borrow_token)))
+            self._supply_price_usd = supply_price
         except (ValueError, KeyError) as e:
             return Intent.hold(reason=f"Price data unavailable: {e}")
 
@@ -132,8 +130,6 @@ class AaveLoopMantleStrategy(IntentStrategy):
                 reason=f"Invalid price(s): {self.supply_token}={supply_price}, {self.borrow_token}={borrow_price}"
             )
 
-        # Cache only validated price (after guard above confirms > 0)
-        self._supply_price_usd = supply_price
         max_slippage = Decimal(str(self.max_slippage_bps)) / Decimal("10000")
 
         # Step 1: Supply (first loop uses initial amount, subsequent loops use swapped amount)

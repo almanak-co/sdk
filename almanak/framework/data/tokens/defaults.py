@@ -699,19 +699,6 @@ SAVAX = Token(
 # BASE CHAIN TOKENS
 # =============================================================================
 
-# Coinbase Wrapped Staked ETH (cbETH) — liquid staking token native to Base
-CBETH = Token(
-    symbol="cbETH",
-    name="Coinbase Wrapped Staked ETH",
-    decimals=18,
-    addresses={
-        "base": "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
-        "ethereum": "0xBe9895146f7AF43049ca1c1AE358B0541Ea49704",
-    },
-    coingecko_id="coinbase-wrapped-staked-eth",
-    is_stablecoin=False,
-)
-
 # Almanak (governance token on Base)
 ALMANAK = Token(
     symbol="ALMANAK",
@@ -1130,7 +1117,6 @@ DEFAULT_TOKENS: list[Token] = [
     WEETH,
     SAVAX,
     # Base chain tokens
-    CBETH,
     ALMANAK,
     # Plasma chain tokens
     XPL,
@@ -1271,8 +1257,6 @@ __all__ = [
     "wstETH",
     "WEETH",
     "SAVAX",
-    # Base chain tokens
-    "CBETH",
     # Plasma chain tokens
     "XPL",
     "WXPL",

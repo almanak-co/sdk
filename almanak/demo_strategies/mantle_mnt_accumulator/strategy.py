@@ -18,7 +18,7 @@ State machine:
     accumulating -> (dip_buy | heavy_dip | profit_take | regular_buy) -> accumulating
 
 Usage:
-    almanak strat run -d mantle_mnt_accumulator --network anvil --once
+    almanak strat run -d strategies/demo/mantle_mnt_accumulator --network anvil --once
 """
 
 import logging

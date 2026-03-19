@@ -35,10 +35,10 @@ Benefits:
 USAGE:
 ------
     # Test on Anvil (local Base fork)
-    almanak strat run -d aerodrome_lp --network anvil --once
+    python strategies/demo/aerodrome_lp/run_anvil.py
 
     # Run once to open a position
-    almanak strat run -d aerodrome_lp --once
+    python -m src.cli.run --strategy demo_aerodrome_lp --once
 
 ===============================================================================
 """
@@ -241,68 +241,73 @@ class AerodromeLPStrategy(IntentStrategy[AerodromeLPConfig]):
         Returns:
             Intent: LP_OPEN, LP_CLOSE, or HOLD
         """
-        # =================================================================
-        # STEP 1: Get current market price
-        # =================================================================
-
         try:
-            token0_price_usd = market.price(self.token0_symbol)
-            token1_price_usd = market.price(self.token1_symbol)
-            current_price = token0_price_usd / token1_price_usd
-            logger.debug(f"Current price: {current_price:.4f} {self.token1_symbol}/{self.token0_symbol}")
-        except (ValueError, KeyError) as e:
-            logger.warning(f"Could not get price: {e}")
-            # Use a reasonable default for ETH/USDC testing
-            current_price = Decimal("3000")  # ~$3000 per ETH
+            # =================================================================
+            # STEP 1: Get current market price
+            # =================================================================
 
-        # =================================================================
-        # STEP 2: Handle forced actions (for testing)
-        # =================================================================
+            try:
+                token0_price_usd = market.price(self.token0_symbol)
+                token1_price_usd = market.price(self.token1_symbol)
+                current_price = token0_price_usd / token1_price_usd
+                logger.debug(f"Current price: {current_price:.4f} {self.token1_symbol}/{self.token0_symbol}")
+            except (ValueError, KeyError) as e:
+                logger.warning(f"Could not get price: {e}")
+                # Use a reasonable default for ETH/USDC testing
+                current_price = Decimal("3000")  # ~$3000 per ETH
 
-        if self.force_action == "open":
-            logger.info("Forced action: OPEN LP position")
+            # =================================================================
+            # STEP 2: Handle forced actions (for testing)
+            # =================================================================
+
+            if self.force_action == "open":
+                logger.info("Forced action: OPEN LP position")
+                return self._create_open_intent()
+
+            elif self.force_action == "close":
+                # Note: We don't check _has_position here because:
+                # 1. Position state is in-memory and lost on restart
+                # 2. User explicitly wants to close - trust them
+                # 3. The removeLiquidity call will fail gracefully if no position exists
+                logger.info("Forced action: CLOSE LP position")
+                return self._create_close_intent()
+
+            # =================================================================
+            # STEP 3: Check current position status
+            # =================================================================
+
+            if self._has_tracked_position():
+                # We have a position - monitor it
+                return Intent.hold(reason=f"Position exists in {self.pool} pool - monitoring")
+
+            # =================================================================
+            # STEP 4: No position - decide whether to open one
+            # =================================================================
+
+            # Check we have sufficient balance
+            try:
+                token0_bal = market.balance(self.token0_symbol)
+                token1_bal = market.balance(self.token1_symbol)
+
+                # TokenBalance has .balance attribute with the actual Decimal value
+                if token0_bal.balance < self.amount0:
+                    return Intent.hold(
+                        reason=f"Insufficient {self.token0_symbol}: {token0_bal.balance} < {self.amount0}"
+                    )
+                if token1_bal.balance < self.amount1:
+                    return Intent.hold(
+                        reason=f"Insufficient {self.token1_symbol}: {token1_bal.balance} < {self.amount1}"
+                    )
+            except (ValueError, KeyError, AttributeError):
+                logger.warning("Could not verify balances, proceeding anyway")
+
+            # Open new position
+            logger.info("No position found - opening new LP position")
             return self._create_open_intent()
 
-        elif self.force_action == "close":
-            # Note: We don't check _has_position here because:
-            # 1. Position state is in-memory and lost on restart
-            # 2. User explicitly wants to close - trust them
-            # 3. The removeLiquidity call will fail gracefully if no position exists
-            logger.info("Forced action: CLOSE LP position")
-            return self._create_close_intent()
-
-        # =================================================================
-        # STEP 3: Check current position status
-        # =================================================================
-
-        if self._has_tracked_position():
-            # We have a position - monitor it
-            return Intent.hold(reason=f"Position exists in {self.pool} pool - monitoring")
-
-        # =================================================================
-        # STEP 4: No position - decide whether to open one
-        # =================================================================
-
-        # Check we have sufficient balance
-        try:
-            token0_bal = market.balance(self.token0_symbol)
-            token1_bal = market.balance(self.token1_symbol)
-
-            # TokenBalance has .balance attribute with the actual Decimal value
-            if token0_bal.balance < self.amount0:
-                return Intent.hold(
-                    reason=f"Insufficient {self.token0_symbol}: {token0_bal.balance} < {self.amount0}"
-                )
-            if token1_bal.balance < self.amount1:
-                return Intent.hold(
-                    reason=f"Insufficient {self.token1_symbol}: {token1_bal.balance} < {self.amount1}"
-                )
-        except (ValueError, KeyError, AttributeError):
-            logger.warning("Could not verify balances, proceeding anyway")
-
-        # Open new position
-        logger.info("No position found - opening new LP position")
-        return self._create_open_intent()
+        except Exception as e:
+            logger.exception(f"Error in decide(): {e}")
+            return Intent.hold(reason=f"Error: {str(e)}")
 
     # =========================================================================
     # INTENT CREATION HELPERS
@@ -433,6 +438,7 @@ class AerodromeLPStrategy(IntentStrategy[AerodromeLPConfig]):
         except Exception:
             logger.warning("Invalid persisted lp_token_balance=%r; defaulting to 0", raw_lp_balance)
             self._lp_token_balance = Decimal("0")
+
         if self._lp_token_balance > 0:
             self._has_position = True
 
@@ -549,4 +555,4 @@ if __name__ == "__main__":
     print(f"Intent Types: {AerodromeLPStrategy.STRATEGY_METADATA.intent_types}")
     print(f"\nDescription: {AerodromeLPStrategy.STRATEGY_METADATA.description}")
     print("\nTo test on Anvil:")
-    print("  almanak strat run -d aerodrome_lp --network anvil --once")
+    print("  python strategies/demo/aerodrome_lp/run_anvil.py")
