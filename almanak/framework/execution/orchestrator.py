@@ -178,7 +178,7 @@ class ExecutionResult:
         completed_at: When execution completed
         correlation_id: Unique identifier for this execution
 
-        position_id: LP position ID for LP_OPEN intents (NFT tokenId), populated by ResultEnricher
+        position_id: LP position ID for LP_OPEN intents (NFT tokenId int, or pool address str for pool-based protocols like Curve), populated by ResultEnricher
         swap_amounts: Swap execution data for SWAP intents
         lp_close_data: LP close data for LP_CLOSE intents
         bin_ids: TraderJoe V2 bin IDs for LP positions
@@ -202,7 +202,7 @@ class ExecutionResult:
     gas_warnings: list[str] = field(default_factory=list)
 
     # === Enriched Data (populated by ResultEnricher) ===
-    position_id: int | None = None
+    position_id: int | str | None = None
     swap_amounts: SwapAmounts | None = None
     lp_close_data: LPCloseData | None = None
     bin_ids: list[int] | None = None  # TraderJoe V2 LP bin IDs

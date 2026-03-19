@@ -72,7 +72,7 @@ class GatewayExecutionResult:
 
     # === Enriched Data (populated by ResultEnricher) ===
     # These fields mirror ExecutionResult for strategy author UX consistency
-    position_id: int | None = None
+    position_id: int | str | None = None
     swap_amounts: "SwapAmounts | None" = None
     lp_close_data: "LPCloseData | None" = None
     bin_ids: list[int] | None = None

@@ -1,7 +1,10 @@
-"""Tests for CurveReceiptParser.extract_swap_amounts() decimal handling.
+"""Tests for CurveReceiptParser extraction methods.
 
 VIB-441: Verifies that extract_swap_amounts() uses actual token decimals
 from TokenResolver instead of hardcoding 18.
+
+VIB-1502: Tests for LP enrichment methods (extract_position_id, extract_liquidity,
+extract_lp_close_data).
 """
 
 from decimal import Decimal
@@ -226,6 +229,107 @@ class TestExtractSwapAmountsDecimals:
         assert result.effective_price == Decimal("0.0005")
 
 
+# =============================================================================
+# LP Enrichment Tests (VIB-1502)
+# =============================================================================
+
+POOL_3POOL = "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7"
+LP_TOKEN_3CRV = "0x6c3f90f043a72fa612cbac8115ee7e52bde6e490"
+WALLET = "0xaabbccddee1122334455667788990011aabbccdd"
+ZERO_ADDR = "0x0000000000000000000000000000000000000000"
+
+
+def _build_add_liquidity_receipt(
+    pool: str = POOL_3POOL,
+    lp_token: str = LP_TOKEN_3CRV,
+    wallet: str = WALLET,
+    token_amounts: list[int] | None = None,
+    lp_minted: int = 99_000_000_000_000_000_000,  # ~99 LP tokens
+) -> dict:
+    """Build a synthetic Curve AddLiquidity receipt for 3pool."""
+    if token_amounts is None:
+        token_amounts = [50_000_000_000_000_000_000, 50_000_000, 0]  # 50 DAI, 50 USDC, 0 USDT
+
+    # AddLiquidity3 event data: 3 amounts + 3 fees + invariant + token_supply
+    add_liq_topic = _make_topic(EVENT_TOPICS["AddLiquidity3"])
+    provider_topic = "0x" + "00" * 12 + wallet[2:]
+    fees = [0, 0, 0]
+    invariant = 100_000_000_000_000_000_000
+    token_supply = 1_000_000_000_000_000_000_000
+
+    data_parts = [_pad_hex(a) for a in token_amounts]
+    data_parts += [_pad_hex(f) for f in fees]
+    data_parts += [_pad_hex(invariant), _pad_hex(token_supply)]
+    add_liq_data = "0x" + "".join(data_parts)
+
+    # ERC-20 Transfer: mint LP tokens (from zero address to wallet)
+    transfer_topic = _make_topic(EVENT_TOPICS["Transfer"])
+    zero_topic = "0x" + "00" * 12 + ZERO_ADDR[2:]
+    wallet_topic = "0x" + "00" * 12 + wallet[2:]
+    mint_data = "0x" + _pad_hex(lp_minted)
+
+    return {
+        "status": 1,
+        "from": wallet,
+        "transactionHash": "0x" + "cc" * 32,
+        "blockNumber": 19_000_000,
+        "gasUsed": 300_000,
+        "logs": [
+            # AddLiquidity3 event from pool
+            {
+                "address": pool,
+                "topics": [add_liq_topic, provider_topic],
+                "data": add_liq_data,
+                "logIndex": 0,
+            },
+            # Transfer: mint LP tokens (zero -> wallet)
+            {
+                "address": lp_token,
+                "topics": [transfer_topic, zero_topic, wallet_topic],
+                "data": mint_data,
+                "logIndex": 1,
+            },
+        ],
+    }
+
+
+def _build_remove_liquidity_receipt(
+    pool: str = POOL_3POOL,
+    wallet: str = WALLET,
+    token_amounts: list[int] | None = None,
+) -> dict:
+    """Build a synthetic Curve RemoveLiquidity receipt for 3pool."""
+    if token_amounts is None:
+        token_amounts = [33_000_000_000_000_000_000, 33_000_000, 33_000_000]
+
+    # RemoveLiquidity3 event data: 3 amounts + 3 fees + token_supply
+    remove_liq_topic = _make_topic(EVENT_TOPICS["RemoveLiquidity3"])
+    provider_topic = "0x" + "00" * 12 + wallet[2:]
+    fees = [0, 0, 0]
+    token_supply = 900_000_000_000_000_000_000
+
+    data_parts = [_pad_hex(a) for a in token_amounts]
+    data_parts += [_pad_hex(f) for f in fees]
+    data_parts += [_pad_hex(token_supply)]
+    remove_liq_data = "0x" + "".join(data_parts)
+
+    return {
+        "status": 1,
+        "from": wallet,
+        "transactionHash": "0x" + "dd" * 32,
+        "blockNumber": 19_000_001,
+        "gasUsed": 200_000,
+        "logs": [
+            {
+                "address": pool,
+                "topics": [remove_liq_topic, provider_topic],
+                "data": remove_liq_data,
+                "logIndex": 0,
+            },
+        ],
+    }
+
+
 def _build_cryptoswap_receipt(
     wallet: str = "0xaabbccddee1122334455667788990011aabbccdd",
     pool: str = "0xd51a44d3fae010294c616388b506acda1bfaae46",  # tricrypto2
@@ -284,6 +388,81 @@ def _build_cryptoswap_receipt(
             },
         ],
     }
+
+
+class TestExtractPositionId:
+    """Test extract_position_id returns LP token amount string for Curve LP.
+
+    Curve uses pool-based LP (no NFT tokenId). The position_id is the LP token
+    amount as a decimal string so it can be fed directly into
+    Intent.lp_close(position_id=...), which _compile_lp_close_curve() interprets
+    as the amount to burn.
+    """
+
+    def test_returns_lp_amount_string_for_add_liquidity(self):
+        """AddLiquidity receipt should return LP token amount as decimal string."""
+        lp_minted = 99_000_000_000_000_000_000  # 99 LP tokens (18 decimals)
+        receipt = _build_add_liquidity_receipt(lp_minted=lp_minted)
+        # 3CRV LP token address from receipt; mock resolver so decimals are returned
+        resolver = _mock_resolver({LP_TOKEN_3CRV: 18})
+        parser = CurveReceiptParser(chain="ethereum")
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
+            position_id = parser.extract_position_id(receipt)
+        # Should be compatible with Intent.lp_close(position_id=position_id)
+        assert position_id == "99"
+
+    def test_returns_none_for_swap_receipt(self):
+        """Swap receipt (no AddLiquidity) should return None."""
+        receipt = _build_swap_receipt()
+        parser = CurveReceiptParser(chain="ethereum")
+        position_id = parser.extract_position_id(receipt)
+        assert position_id is None
+
+    def test_returns_none_for_empty_receipt(self):
+        """Empty receipt should return None."""
+        parser = CurveReceiptParser(chain="ethereum")
+        position_id = parser.extract_position_id({"status": 1, "logs": []})
+        assert position_id is None
+
+
+class TestExtractLiquidity:
+    """Test extract_liquidity returns LP tokens minted."""
+
+    def test_returns_lp_tokens_minted(self):
+        """Should extract LP tokens from mint Transfer event."""
+        lp_amount = 99_000_000_000_000_000_000
+        receipt = _build_add_liquidity_receipt(lp_minted=lp_amount)
+        parser = CurveReceiptParser(chain="ethereum")
+        result = parser.extract_liquidity(receipt)
+        assert result == lp_amount
+
+    def test_returns_none_for_no_mint(self):
+        """Receipt without mint Transfer should return None."""
+        receipt = _build_swap_receipt()
+        parser = CurveReceiptParser(chain="ethereum")
+        result = parser.extract_liquidity(receipt)
+        assert result is None
+
+
+class TestExtractLPCloseData:
+    """Test extract_lp_close_data for RemoveLiquidity events."""
+
+    def test_returns_token_amounts_from_remove_liquidity(self):
+        """Should extract amounts from RemoveLiquidity event."""
+        amounts = [33_000_000_000_000_000_000, 33_000_000, 33_000_000]
+        receipt = _build_remove_liquidity_receipt(token_amounts=amounts)
+        parser = CurveReceiptParser(chain="ethereum")
+        result = parser.extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount0_collected == amounts[0]
+        assert result.amount1_collected == amounts[1]
+
+    def test_returns_none_for_swap_receipt(self):
+        """Swap receipt should return None."""
+        receipt = _build_swap_receipt()
+        parser = CurveReceiptParser(chain="ethereum")
+        result = parser.extract_lp_close_data(receipt)
+        assert result is None
 
 
 class TestCryptoSwapReceiptParsing:

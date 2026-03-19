@@ -510,7 +510,7 @@ def extract_position_id(
     result: Any,
     protocol: str,
     chain: str | None = None,
-) -> int | None:
+) -> int | str | None:
     """Extract LP position ID from an execution result.
 
     This is a high-level utility that automatically selects the right parser
@@ -520,15 +520,18 @@ def extract_position_id(
         - uniswap_v3: Extracts tokenId from NonfungiblePositionManager Transfer events
         - pancakeswap_v3: Same as uniswap_v3 (Uniswap V3 fork)
 
+    Supports pool-based LP protocols (no NFT):
+        - curve: Returns LP token amount as decimal string (e.g., "99.5")
+
     Args:
         result: ExecutionResult from orchestrator, or a dict with 'transaction_results'
                 or 'logs' field, or a raw receipt dict
-        protocol: Protocol name (e.g., "uniswap_v3", "pancakeswap_v3")
+        protocol: Protocol name (e.g., "uniswap_v3", "pancakeswap_v3", "curve")
         chain: Chain name for protocol-specific address lookups. Required for
                correct behavior; omitting it defaults to "arbitrum" with a warning.
 
     Returns:
-        Position ID (NFT tokenId) if found, None otherwise
+        Position ID (int NFT tokenId for NFT protocols, str decimal amount for pool-based protocols like Curve) if found, None otherwise
 
     Example:
         # From ExecutionResult (in on_intent_executed callback)

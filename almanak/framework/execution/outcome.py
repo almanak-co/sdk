@@ -26,7 +26,7 @@ class ExecutionOutcome:
         total_fee_native: Total fee in native units (ETH wei / SOL lamports).
         error: Human-readable error message (None on success).
         chain_family: "EVM" or "SOLANA".
-        position_id: LP position ID extracted by ResultEnricher.
+        position_id: LP position ID extracted by ResultEnricher (int for NFT, str for pool address).
         swap_amounts: Swap data extracted by ResultEnricher.
         lp_close_data: LP close data extracted by ResultEnricher.
         extracted_data: Flexible dict for protocol-specific data.
@@ -41,7 +41,7 @@ class ExecutionOutcome:
     chain_family: str = "EVM"
 
     # Enrichment fields (same shape as ExecutionResult / GatewayExecutionResult)
-    position_id: int | None = None
+    position_id: int | str | None = None
     swap_amounts: SwapAmounts | None = None
     lp_close_data: LPCloseData | None = None
     extracted_data: dict[str, Any] = field(default_factory=dict)

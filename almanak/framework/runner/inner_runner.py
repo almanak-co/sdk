@@ -101,7 +101,7 @@ class EnrichedExecutionResult:
     raw_receipts: bytes | str | None = None
 
     # Enriched data (populated by ResultEnricher)
-    position_id: int | None = None
+    position_id: int | str | None = None
     swap_amounts: Any = None  # SwapAmounts dataclass
     lp_close_data: Any = None  # LPCloseData dataclass
     extracted_data: dict[str, Any] = field(default_factory=dict)

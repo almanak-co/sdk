@@ -36,7 +36,7 @@ class SolanaExecutionResult:
     fee_lamports: int = 0
 
     # Enrichment fields (populated by ResultEnricher)
-    position_id: int | None = None
+    position_id: int | str | None = None
     swap_amounts: SwapAmounts | None = None
     lp_close_data: LPCloseData | None = None
     extracted_data: dict[str, Any] = field(default_factory=dict)
