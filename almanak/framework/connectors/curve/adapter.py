@@ -255,12 +255,18 @@ class CurveConfig:
         wallet_address: Address executing transactions
         default_slippage_bps: Default slippage tolerance in basis points (default 50 = 0.5%)
         deadline_seconds: Transaction deadline in seconds (default 300 = 5 minutes)
+        rpc_url: Optional JSON-RPC URL for on-chain state queries (e.g., pool balances
+            for accurate remove_liquidity slippage estimates). When provided, the adapter
+            queries pool.balances(i) and lp_token.totalSupply() to compute proportional
+            min_amounts rather than returning zeros. When absent or on RPC failure,
+            min_amounts fall back to [0, 0, ..., 0] with a warning.
     """
 
     chain: str
     wallet_address: str
     default_slippage_bps: int = 50
     deadline_seconds: int = 300
+    rpc_url: str | None = None
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -277,6 +283,7 @@ class CurveConfig:
             "wallet_address": self.wallet_address,
             "default_slippage_bps": self.default_slippage_bps,
             "deadline_seconds": self.deadline_seconds,
+            "rpc_url": self.rpc_url,
         }
 
 
@@ -496,6 +503,7 @@ class CurveAdapter:
         self.config = config
         self.chain = config.chain
         self.wallet_address = config.wallet_address
+        self._rpc_url = config.rpc_url
 
         # Load contract addresses
         self.addresses = CURVE_ADDRESSES[self.chain]
@@ -811,17 +819,25 @@ class CurveAdapter:
             # Convert LP amount to wei (18 decimals)
             lp_amount_wei = int(lp_amount * Decimal(10**18))
 
-            # Estimate output amounts (simplified)
+            # Estimate output amounts via on-chain query (or fallback to zeros)
+            self._last_estimation_error: str | None = None
             min_amounts = self._estimate_remove_liquidity(pool_info, lp_amount_wei)
             min_amounts = [int(a * (10000 - slippage_bps) // 10000) for a in min_amounts]
 
-            # Guard: very small LP amounts can produce all-zero min_amounts via integer division.
-            # _estimate_remove_liquidity returns a 1% floor but it can still round to 0 for tiny positions.
+            # Guard: fail closed when min_amounts are all zero — proceeding without slippage
+            # protection would expose the full withdrawal to sandwich attacks.
+            # This can happen when: (a) rpc_url is not configured and LP amount is very small
+            # (1% floor rounds to 0 via integer division), or (b) on-chain estimation fails
+            # and the fallback also rounds to 0. Either way, refusing is safer than proceeding.
             if all(a == 0 for a in min_amounts):
-                logger.warning(
-                    "remove_liquidity has zero min_amounts (no slippage protection) -- "
-                    "LP amount may be too small for the 1% floor estimate, or use on-chain "
-                    "calc_token_amount for production strategies"
+                reason = self._last_estimation_error or "unknown"
+                return LiquidityResult(
+                    success=False,
+                    error=(
+                        f"remove_liquidity: cannot compute slippage protection (min_amounts are all zero). "
+                        f"Cause: {reason}. "
+                        f"Set CurveConfig.rpc_url for on-chain estimation."
+                    ),
                 )
 
             # Build transactions
@@ -1238,26 +1254,141 @@ class CurveAdapter:
         return total
 
     def _estimate_remove_liquidity(self, pool_info: PoolInfo, lp_amount: int) -> list[int]:
-        """Estimate min_amounts for remove_liquidity (proportional).
+        """Estimate expected per-coin amounts for proportional remove_liquidity.
 
-        Returns a conservative lower bound: 1% of the equal-distribution estimate
-        per coin. This is intentionally very loose to avoid reverts on imbalanced
-        pools (e.g., 3pool where DAI is ~7% of pool, not 33%). It provides a floor
-        against near-total MEV extraction while tolerating pools up to ~99% imbalance.
+        When rpc_url is configured, queries on-chain pool.balances(i) and
+        lp_token.totalSupply() to compute accurate proportional amounts:
+            expected_i = pool.balances(i) * lp_amount / lp_token.totalSupply()
 
-        Production strategies requiring precise slippage control should call
-        calc_token_amount on-chain for accurate min_amounts before executing.
+        This is the only correct approach for imbalanced pools (e.g., Curve 3pool
+        where DAI is ~7% of pool, not 33%). A slippage tolerance is then applied by
+        the caller: min_amount_i = expected_i * (10000 - slippage_bps) / 10000
+
+        When rpc_url is not configured or the RPC call fails, returns [0, ..., 0] and
+        logs a warning. Callers that receive all-zeros should log an additional warning
+        about absent slippage protection.
+
+        Args:
+            pool_info: Pool configuration including address, lp_token, and coin list
+            lp_amount: LP token amount to burn (in wei, 18 decimals)
+
+        Returns:
+            List of expected token amounts (in native token decimals), one per coin.
+            Returns [0, ..., 0] when on-chain estimation is unavailable.
         """
-        # Total underlying value at fair price (in 18-decimal units)
-        total_18 = int(Decimal(lp_amount) * pool_info.virtual_price)
-        # Equal share per coin, then take 1% as the conservative floor
-        per_coin_18 = total_18 // pool_info.n_coins // 100
+        zero_amounts = [0] * pool_info.n_coins
+        if not self._rpc_url:
+            logger.warning(
+                f"remove_liquidity: rpc_url not configured for {pool_info.name} -- "
+                "min_amounts will be [0, ..., 0] (no slippage protection). "
+                "Set CurveConfig.rpc_url to enable on-chain estimation."
+            )
+            self._last_estimation_error = "rpc_url not configured"
+            return zero_amounts
+
+        try:
+            return self._query_proportional_amounts_onchain(pool_info, lp_amount)
+        except Exception as e:
+            logger.warning(
+                f"remove_liquidity: on-chain estimation failed for {pool_info.name}: {e} -- "
+                "falling back to [0, ..., 0] (no slippage protection)"
+            )
+            self._last_estimation_error = str(e)
+            return zero_amounts
+
+    def _query_proportional_amounts_onchain(self, pool_info: PoolInfo, lp_amount: int) -> list[int]:
+        """Query on-chain pool balances and LP totalSupply to compute proportional amounts.
+
+        Makes synchronous JSON-RPC eth_call requests:
+        1. lp_token.totalSupply() -> total LP supply
+        2. pool.balances(i) for each coin -> current pool reserves
+
+        Proportional amount for coin i:
+            expected_i = pool.balances(i) * lp_amount / totalSupply
+
+        This is exact for proportional remove_liquidity because Curve V1 StableSwap
+        pools charge no fee on proportional withdrawals (only imbalanced ones do).
+
+        Args:
+            pool_info: Pool configuration
+            lp_amount: LP token amount in wei
+
+        Returns:
+            List of expected token amounts in native decimals
+
+        Raises:
+            ValueError: If RPC returns unexpected data
+            Exception: On network or parsing errors (caller handles fallback)
+        """
+        import httpx
+
+        assert self._rpc_url is not None
+
+        # ABI selectors
+        TOTAL_SUPPLY_SELECTOR = "18160ddd"  # totalSupply() -> uint256
+        BALANCES_UINT256_SELECTOR = "4903b0d1"  # balances(uint256) -> uint256 (factory/newer pools)
+        BALANCES_INT128_SELECTOR = "065a80d8"  # balances(int128) -> uint256 (old Vyper pools, e.g. 3pool)
+
+        def _encode_uint256_arg(value: int) -> str:
+            """Encode a single uint256 argument (32 bytes, no 0x prefix)."""
+            return hex(value)[2:].zfill(64)
+
+        def _eth_call(to: str, data: str) -> int:
+            """Make a synchronous eth_call and return the result as int."""
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [{"to": to, "data": data}, "latest"],
+                "id": 1,
+            }
+            response = httpx.post(self._rpc_url, json=payload, timeout=10.0)  # type: ignore[arg-type]
+            response.raise_for_status()
+            result = response.json()
+            if "error" in result:
+                raise ValueError(f"eth_call error: {result['error'].get('message', result['error'])}")
+            hex_result = result.get("result", "0x0")
+            if not hex_result or hex_result == "0x":
+                raise ValueError("eth_call returned empty result")
+            return int(hex_result, 16)
+
+        # 1. Query LP totalSupply
+        total_supply = _eth_call(
+            pool_info.lp_token,
+            f"0x{TOTAL_SUPPLY_SELECTOR}",
+        )
+        if total_supply == 0:
+            raise ValueError(f"LP totalSupply is zero for pool {pool_info.name}")
+
+        # 2. Query balances for each coin
+        # Try balances(uint256) first (newer/factory pools), fall back to balances(int128)
+        # (old Vyper pools like Ethereum 3pool). We detect the correct selector on the
+        # first coin query and reuse it for the rest.
         amounts = []
+        balances_selector = BALANCES_UINT256_SELECTOR
         for i in range(pool_info.n_coins):
-            decimals = self._get_token_decimals(pool_info.coins[i])
-            # Convert from 18 decimals to token decimals
-            amount = per_coin_18 // (10 ** (18 - decimals))
-            amounts.append(amount)
+            try:
+                balance_raw = _eth_call(
+                    pool_info.address,
+                    f"0x{balances_selector}{_encode_uint256_arg(i)}",
+                )
+            except (ValueError, Exception):
+                if i == 0 and balances_selector == BALANCES_UINT256_SELECTOR:
+                    # First call failed with uint256 selector, retry with int128
+                    balances_selector = BALANCES_INT128_SELECTOR
+                    balance_raw = _eth_call(
+                        pool_info.address,
+                        f"0x{balances_selector}{_encode_uint256_arg(i)}",
+                    )
+                else:
+                    raise
+            # Proportional share: balance * lp_amount / total_supply
+            expected = balance_raw * lp_amount // total_supply
+            amounts.append(expected)
+
+        logger.debug(
+            f"remove_liquidity on-chain estimate for {pool_info.name}: "
+            f"lp={lp_amount}, total_supply={total_supply}, amounts={amounts}"
+        )
         return amounts
 
     def _estimate_remove_liquidity_one(self, pool_info: PoolInfo, lp_amount: int, coin_index: int) -> int:

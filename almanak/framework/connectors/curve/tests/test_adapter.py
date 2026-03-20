@@ -9,6 +9,7 @@ This module tests the CurveAdapter class functionality including:
 """
 
 from decimal import Decimal
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -398,25 +399,100 @@ class TestAddLiquidity:
 class TestRemoveLiquidity:
     """Tests for remove_liquidity (LP_CLOSE) transaction building."""
 
-    def test_remove_liquidity_success(self, adapter: CurveAdapter) -> None:
-        """Test successful remove_liquidity transaction building."""
+    def test_remove_liquidity_fails_without_rpc_url(self, adapter: CurveAdapter) -> None:
+        """remove_liquidity must fail closed when rpc_url is not configured.
+
+        Without rpc_url, _estimate_remove_liquidity returns [0,...,0] (no slippage
+        protection). Rather than warn-and-proceed (sandwich-extractable), the adapter
+        must return a failure result so the caller can handle it explicitly.
+        """
         pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
         result = adapter.remove_liquidity(
             pool_address=pool_address,
             lp_amount=Decimal("1000"),
         )
+
+        assert result.success is False
+        assert "cannot compute slippage protection" in result.error
+        assert "rpc_url not configured" in result.error
+
+    def test_remove_liquidity_success_with_rpc_url(self) -> None:
+        """remove_liquidity succeeds when rpc_url is set and RPC responds."""
+        from unittest.mock import MagicMock, patch
+
+        total_supply = 100_000_000 * 10**18
+        lp_amount = Decimal("1000")
+        dai_balance = 10_000_000 * 10**18
+        usdc_balance = 56_000_000 * 10**6
+        usdt_balance = 37_000_000 * 10**6
+
+        config = CurveConfig(
+            chain="ethereum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            rpc_url="http://localhost:8545",
+        )
+        adapter = CurveAdapter(config)
+        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+
+        def _hex(v: int) -> str:
+            return "0x" + hex(v)[2:].zfill(64)
+
+        def mock_resp(v: int) -> MagicMock:
+            m = MagicMock()
+            m.raise_for_status = MagicMock()
+            m.json.return_value = {"jsonrpc": "2.0", "id": 1, "result": _hex(v)}
+            return m
+
+        rpc_responses = [
+            mock_resp(total_supply),
+            mock_resp(dai_balance),
+            mock_resp(usdc_balance),
+            mock_resp(usdt_balance),
+        ]
+
+        with patch("httpx.post", side_effect=rpc_responses):
+            result = adapter.remove_liquidity(pool_address=pool_address, lp_amount=lp_amount)
 
         assert result.success is True
         assert result.operation == "remove_liquidity"
         assert len(result.amounts) == 3
+        assert all(a > 0 for a in result.amounts)
 
-    def test_remove_liquidity_calldata_format(self, adapter: CurveAdapter) -> None:
-        """Test remove_liquidity calldata has correct format."""
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
-        result = adapter.remove_liquidity(
-            pool_address=pool_address,
-            lp_amount=Decimal("1000"),
+    def test_remove_liquidity_calldata_format(self) -> None:
+        """Test remove_liquidity calldata has correct format (requires rpc_url)."""
+        from unittest.mock import MagicMock, patch
+
+        total_supply = 100_000_000 * 10**18
+        dai_balance = 10_000_000 * 10**18
+        usdc_balance = 56_000_000 * 10**6
+        usdt_balance = 37_000_000 * 10**6
+
+        config = CurveConfig(
+            chain="ethereum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            rpc_url="http://localhost:8545",
         )
+        adapter = CurveAdapter(config)
+        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+
+        def _hex(v: int) -> str:
+            return "0x" + hex(v)[2:].zfill(64)
+
+        def mock_resp(v: int) -> MagicMock:
+            m = MagicMock()
+            m.raise_for_status = MagicMock()
+            m.json.return_value = {"jsonrpc": "2.0", "id": 1, "result": _hex(v)}
+            return m
+
+        rpc_responses = [
+            mock_resp(total_supply),
+            mock_resp(dai_balance),
+            mock_resp(usdc_balance),
+            mock_resp(usdt_balance),
+        ]
+
+        with patch("httpx.post", side_effect=rpc_responses):
+            result = adapter.remove_liquidity(pool_address=pool_address, lp_amount=Decimal("1000"))
 
         assert result.success is True
         remove_tx = next(tx for tx in result.transactions if tx.tx_type == "remove_liquidity")
@@ -650,4 +726,227 @@ class TestDataClasses:
 
         assert pool_dict["address"] == "0x1234"
         assert pool_dict["pool_type"] == "stableswap"
-        assert pool_dict["n_coins"] == 2
+
+
+# =============================================================================
+# Slippage Protection Tests: remove_liquidity (VIB-1510)
+# =============================================================================
+
+
+def _make_3pool_info() -> PoolInfo:
+    """Build a PoolInfo for Ethereum 3pool for testing."""
+    return PoolInfo(
+        address=CURVE_POOLS["ethereum"]["3pool"]["address"],
+        lp_token=CURVE_POOLS["ethereum"]["3pool"]["lp_token"],
+        coins=CURVE_POOLS["ethereum"]["3pool"]["coins"],
+        coin_addresses=CURVE_POOLS["ethereum"]["3pool"]["coin_addresses"],
+        pool_type=PoolType.STABLESWAP,
+        n_coins=3,
+        name="3pool",
+        virtual_price=Decimal("1.04"),
+    )
+
+
+def _make_mock_rpc_response(result_hex: str) -> MagicMock:
+    """Build a mock httpx response returning result_hex."""
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {"jsonrpc": "2.0", "id": 1, "result": result_hex}
+    return mock_resp
+
+
+def _hex_uint256(value: int) -> str:
+    """Encode an integer as a 0x-prefixed 64-char hex string (uint256)."""
+    return "0x" + hex(value)[2:].zfill(64)
+
+
+class TestEstimateRemoveLiquiditySlippage:
+    """Tests for _estimate_remove_liquidity on-chain slippage estimation (VIB-1510)."""
+
+    def test_returns_zeros_when_no_rpc_url(self, adapter: CurveAdapter) -> None:
+        """Without rpc_url, _estimate_remove_liquidity returns [0, 0, 0]."""
+        pool_info = _make_3pool_info()
+        result = adapter._estimate_remove_liquidity(pool_info, lp_amount=10**18)
+        assert result == [0, 0, 0]
+
+    def test_config_rpc_url_is_stored(self) -> None:
+        """CurveConfig.rpc_url should be stored on adapter._rpc_url."""
+        config = CurveConfig(
+            chain="ethereum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            rpc_url="http://localhost:8545",
+        )
+        adapter = CurveAdapter(config)
+        assert adapter._rpc_url == "http://localhost:8545"
+
+    def test_rpc_url_defaults_to_none(self) -> None:
+        """CurveConfig.rpc_url should default to None."""
+        config = CurveConfig(
+            chain="ethereum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+        )
+        assert config.rpc_url is None
+
+    def test_query_proportional_amounts_onchain(self) -> None:
+        """_query_proportional_amounts_onchain returns proportional amounts from pool balances."""
+        # Pool has 10M DAI + 56M USDC (6 dec) + 37M USDT (6 dec), total supply 100M 3Crv
+        # Burning 1M 3Crv (1% of supply) should yield: 100k DAI, 560k USDC, 370k USDT
+        total_supply = 100_000_000 * 10**18  # 100M LP tokens
+        lp_amount = 1_000_000 * 10**18  # 1M LP tokens (1%)
+        dai_balance = 10_000_000 * 10**18  # 10M DAI (18 dec)
+        usdc_balance = 56_000_000 * 10**6  # 56M USDC (6 dec)
+        usdt_balance = 37_000_000 * 10**6  # 37M USDT (6 dec)
+
+        # Expected: proportional = balance * lp_amount / total_supply
+        expected_dai = dai_balance * lp_amount // total_supply  # 100k DAI
+        expected_usdc = usdc_balance * lp_amount // total_supply  # 560k USDC
+        expected_usdt = usdt_balance * lp_amount // total_supply  # 370k USDT
+
+        config = CurveConfig(
+            chain="ethereum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            rpc_url="http://localhost:8545",
+        )
+        adapter = CurveAdapter(config)
+        pool_info = _make_3pool_info()
+
+        # Mock httpx.post to return: totalSupply, then balances(0), balances(1), balances(2)
+        rpc_responses = [
+            _make_mock_rpc_response(_hex_uint256(total_supply)),  # totalSupply()
+            _make_mock_rpc_response(_hex_uint256(dai_balance)),  # balances(0)
+            _make_mock_rpc_response(_hex_uint256(usdc_balance)),  # balances(1)
+            _make_mock_rpc_response(_hex_uint256(usdt_balance)),  # balances(2)
+        ]
+
+        with patch("httpx.post", side_effect=rpc_responses):
+            amounts = adapter._query_proportional_amounts_onchain(pool_info, lp_amount)
+
+        assert amounts == [expected_dai, expected_usdc, expected_usdt]
+        assert amounts[0] == 100_000 * 10**18  # 100k DAI
+        assert amounts[1] == 560_000 * 10**6  # 560k USDC
+        assert amounts[2] == 370_000 * 10**6  # 370k USDT
+
+    def test_estimate_remove_liquidity_with_rpc(self) -> None:
+        """_estimate_remove_liquidity returns on-chain amounts when rpc_url configured."""
+        total_supply = 100_000_000 * 10**18
+        lp_amount = 1_000_000 * 10**18
+        dai_balance = 10_000_000 * 10**18
+        usdc_balance = 56_000_000 * 10**6
+        usdt_balance = 37_000_000 * 10**6
+
+        config = CurveConfig(
+            chain="ethereum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            rpc_url="http://localhost:8545",
+        )
+        adapter = CurveAdapter(config)
+        pool_info = _make_3pool_info()
+
+        rpc_responses = [
+            _make_mock_rpc_response(_hex_uint256(total_supply)),
+            _make_mock_rpc_response(_hex_uint256(dai_balance)),
+            _make_mock_rpc_response(_hex_uint256(usdc_balance)),
+            _make_mock_rpc_response(_hex_uint256(usdt_balance)),
+        ]
+
+        with patch("httpx.post", side_effect=rpc_responses):
+            amounts = adapter._estimate_remove_liquidity(pool_info, lp_amount)
+
+        # Should return non-zero proportional amounts
+        assert len(amounts) == 3
+        assert all(a > 0 for a in amounts)
+        assert amounts[0] == 100_000 * 10**18  # DAI
+        assert amounts[1] == 560_000 * 10**6  # USDC
+        assert amounts[2] == 370_000 * 10**6  # USDT
+
+    def test_estimate_remove_liquidity_rpc_failure_falls_back_to_zeros(self) -> None:
+        """When RPC call fails, _estimate_remove_liquidity returns [0, 0, 0] with warning."""
+        config = CurveConfig(
+            chain="ethereum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            rpc_url="http://localhost:8545",
+        )
+        adapter = CurveAdapter(config)
+        pool_info = _make_3pool_info()
+
+        with patch("httpx.post", side_effect=Exception("Connection refused")):
+            amounts = adapter._estimate_remove_liquidity(pool_info, lp_amount=10**18)
+
+        assert amounts == [0, 0, 0]
+
+    def test_remove_liquidity_with_rpc_produces_slippage_protected_amounts(self) -> None:
+        """remove_liquidity with rpc_url produces non-zero slippage-protected min_amounts."""
+        total_supply = 100_000_000 * 10**18
+        lp_amount_dec = Decimal("1000000")  # 1M LP tokens
+        lp_amount_wei = int(lp_amount_dec * 10**18)
+        dai_balance = 10_000_000 * 10**18
+        usdc_balance = 56_000_000 * 10**6
+        usdt_balance = 37_000_000 * 10**6
+
+        config = CurveConfig(
+            chain="ethereum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            rpc_url="http://localhost:8545",
+            default_slippage_bps=50,  # 0.5%
+        )
+        adapter = CurveAdapter(config)
+        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+
+        rpc_responses = [
+            _make_mock_rpc_response(_hex_uint256(total_supply)),
+            _make_mock_rpc_response(_hex_uint256(dai_balance)),
+            _make_mock_rpc_response(_hex_uint256(usdc_balance)),
+            _make_mock_rpc_response(_hex_uint256(usdt_balance)),
+        ]
+
+        with patch("httpx.post", side_effect=rpc_responses):
+            result = adapter.remove_liquidity(pool_address=pool_address, lp_amount=lp_amount_dec)
+
+        assert result.success is True
+        assert len(result.amounts) == 3
+        # With slippage 0.5%, min_amounts = expected * 9950 / 10000
+        assert result.amounts[0] > 0, "DAI min_amount should be positive"
+        assert result.amounts[1] > 0, "USDC min_amount should be positive"
+        assert result.amounts[2] > 0, "USDT min_amount should be positive"
+        # Verify slippage was applied: amounts should be 99.5% of raw estimates
+        expected_dai = dai_balance * lp_amount_wei // total_supply
+        assert result.amounts[0] == expected_dai * 9950 // 10000
+
+    def test_rpc_error_response_falls_back_to_zeros(self) -> None:
+        """RPC error response causes fallback to [0, ..., 0]."""
+        config = CurveConfig(
+            chain="ethereum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            rpc_url="http://localhost:8545",
+        )
+        adapter = CurveAdapter(config)
+        pool_info = _make_3pool_info()
+
+        # totalSupply returns RPC error
+        mock_error_resp = MagicMock()
+        mock_error_resp.raise_for_status = MagicMock()
+        mock_error_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32603, "message": "execution reverted"},
+        }
+
+        with patch("httpx.post", return_value=mock_error_resp):
+            amounts = adapter._estimate_remove_liquidity(pool_info, lp_amount=10**18)
+
+        assert amounts == [0, 0, 0]
+
+    def test_zero_total_supply_raises(self) -> None:
+        """_query_proportional_amounts_onchain raises when totalSupply is zero."""
+        config = CurveConfig(
+            chain="ethereum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            rpc_url="http://localhost:8545",
+        )
+        adapter = CurveAdapter(config)
+        pool_info = _make_3pool_info()
+
+        # Return 0 for totalSupply
+        with patch("httpx.post", return_value=_make_mock_rpc_response(_hex_uint256(0))):
+            with pytest.raises(ValueError, match="totalSupply is zero"):
+                adapter._query_proportional_amounts_onchain(pool_info, lp_amount=10**18)

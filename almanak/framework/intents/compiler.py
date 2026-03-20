@@ -5556,6 +5556,7 @@ class IntentCompiler:
                 chain=self.chain,
                 wallet_address=self.wallet_address,
                 default_slippage_bps=slippage_bps,
+                rpc_url=self._get_chain_rpc_url(),
             )
             adapter = CurveAdapter(config)
 
@@ -5743,6 +5744,7 @@ class IntentCompiler:
                 chain=self.chain,
                 wallet_address=self.wallet_address,
                 default_slippage_bps=slippage_bps,
+                rpc_url=self._get_chain_rpc_url(),
             )
             adapter = CurveAdapter(config)
 
@@ -5890,6 +5892,7 @@ class IntentCompiler:
                 chain=self.chain,
                 wallet_address=self.wallet_address,
                 default_slippage_bps=slippage_bps,
+                rpc_url=self._get_chain_rpc_url(),
             )
             adapter = CurveAdapter(config)
 
