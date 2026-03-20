@@ -260,3 +260,81 @@ class TestExecuteBlocksOnGasCap:
         # Verify no transactions were signed or submitted
         orchestrator.signer.sign_batch.assert_not_called()
         orchestrator.submitter.submit.assert_not_called()
+
+
+# =============================================================================
+# ChainExecutor.get_gas_params: priority fee <= max_fee (VIB-1605)
+# =============================================================================
+
+
+class TestGetGasParamsPriorityFeeClamping:
+    """Verify that get_gas_params clamps max_priority_fee to max_fee.
+
+    Regression test for VIB-1605: on OP-stack chains with near-zero base fees,
+    the gas cap can push max_fee below the RPC-suggested priority fee, violating
+    the EIP-1559 invariant max_priority_fee_per_gas <= max_fee_per_gas.
+    """
+
+    @pytest.mark.asyncio
+    async def test_priority_fee_clamped_when_exceeding_max_fee(self):
+        """When gas cap kicks in, priority fee must not exceed the capped max_fee.
+
+        Regression test for VIB-1605: on OP-stack chains with near-zero base fees,
+        the gas cap pushes max_fee below the RPC-suggested priority fee.
+        """
+        from unittest.mock import patch
+
+        from almanak.framework.execution.chain_executor import ChainExecutor
+
+        # Create executor with a low gas cap (5 gwei)
+        executor = ChainExecutor(
+            chain="optimism",
+            rpc_url="https://example.com",
+            private_key="0x" + "ab" * 32,
+            max_gas_price_gwei=5,
+        )
+
+        # Patch _get_web3 at the instance level
+        mock_web3 = MagicMock()
+        mock_web3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": 100_000})  # ~0 gwei
+        mock_web3.eth.max_priority_fee = AsyncMock(return_value=10_000_000_000)()  # 10 gwei
+
+        async def fake_get_web3():
+            return mock_web3
+
+        with patch.object(executor, "_get_web3", side_effect=fake_get_web3):
+            gas_params = await executor.get_gas_params()
+
+        # max_fee should be capped at 5 gwei
+        assert gas_params["max_fee_per_gas"] == 5_000_000_000
+        # priority fee must not exceed max_fee (the VIB-1605 fix)
+        assert gas_params["max_priority_fee_per_gas"] <= gas_params["max_fee_per_gas"]
+
+    @pytest.mark.asyncio
+    async def test_priority_fee_untouched_when_below_max_fee(self):
+        """When priority fee is already below max_fee, it should not be modified."""
+        from unittest.mock import patch
+
+        from almanak.framework.execution.chain_executor import ChainExecutor
+
+        executor = ChainExecutor(
+            chain="arbitrum",
+            rpc_url="https://example.com",
+            private_key="0x" + "ab" * 32,
+            max_gas_price_gwei=100,
+        )
+
+        mock_web3 = MagicMock()
+        mock_web3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": 1_000_000_000})  # 1 gwei
+        mock_web3.eth.max_priority_fee = AsyncMock(return_value=500_000_000)()  # 0.5 gwei
+
+        async def fake_get_web3():
+            return mock_web3
+
+        with patch.object(executor, "_get_web3", side_effect=fake_get_web3):
+            gas_params = await executor.get_gas_params()
+
+        # Priority fee should remain at 0.5 gwei (not clamped)
+        assert gas_params["max_priority_fee_per_gas"] == 500_000_000
+        # max_fee = 2 * 1 gwei + 0.5 gwei = 2.5 gwei (under 100 gwei cap)
+        assert gas_params["max_fee_per_gas"] == 2_500_000_000

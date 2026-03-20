@@ -544,6 +544,12 @@ class ChainExecutor:
             max_fee = self.max_gas_price_wei
             logger.warning(f"Capped max_fee_per_gas at {self._max_gas_price_gwei} gwei on {self._chain}")
 
+        # Ensure priority fee never exceeds max fee (required by EIP-1559).
+        # Can happen on OP-stack chains where base fees are near-zero and the
+        # gas cap kicks in, or when the RPC returns an unexpectedly high
+        # priority fee suggestion (VIB-1605).
+        max_priority_fee = min(max_priority_fee, max_fee)
+
         return {
             "max_fee_per_gas": max_fee,
             "max_priority_fee_per_gas": max_priority_fee,
