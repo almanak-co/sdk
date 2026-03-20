@@ -401,6 +401,8 @@ class IntentExecutionService:
                 # Step 3: Enrich result
                 if exec_resp.success and not dry_run:
                     self._enrich_result(result, intent_type, intent_params, effective_chain, effective_wallet, protocol)
+                elif dry_run and intent_type.lower() == "swap":
+                    self._enrich_dry_run_swap(result, compile_resp, intent_params)
 
                 if attempts > 1:
                     logger.info(
@@ -587,6 +589,103 @@ class IntentExecutionService:
         except Exception as e:
             logger.warning("Result enrichment failed for %s (non-fatal): %s", intent_type, e)
             result.extraction_warnings.append(f"Enrichment failed: {e}")
+
+    def _enrich_dry_run_swap(
+        self,
+        result: EnrichedExecutionResult,
+        compile_resp: Any,
+        intent_params: dict[str, Any],
+    ) -> None:
+        """Populate swap_amounts from compilation metadata for dry-run responses.
+
+        In dry-run mode, no real execution occurs so there are no receipts to parse.
+        However, the compiler stores quote data in the ActionBundle metadata
+        (amount_in, min_amount_out, from_token, to_token). We use this to give
+        users a useful preview of the expected swap output.
+        """
+        try:
+            from decimal import Decimal
+
+            from almanak.framework.execution.extracted_data import SwapAmounts
+
+            bundle_bytes = getattr(compile_resp, "action_bundle", None)
+            if not bundle_bytes:
+                return
+
+            if isinstance(bundle_bytes, bytes):
+                bundle_data = json.loads(bundle_bytes.decode("utf-8"))
+            elif isinstance(bundle_bytes, str):
+                bundle_data = json.loads(bundle_bytes)
+            else:
+                return
+
+            metadata = bundle_data.get("metadata", {})
+            amount_in_str = metadata.get("amount_in")
+            min_amount_out_str = metadata.get("min_amount_out")
+            if not amount_in_str or not min_amount_out_str:
+                return
+
+            amount_in = int(amount_in_str)
+            min_amount_out = int(min_amount_out_str)
+            if amount_in <= 0 or min_amount_out <= 0:
+                return
+
+            # Extract token decimals from metadata
+            from_token_info = metadata.get("from_token", {})
+            to_token_info = metadata.get("to_token", {})
+            from_decimals = from_token_info.get("decimals")
+            to_decimals = to_token_info.get("decimals")
+            if from_decimals is None or to_decimals is None:
+                logger.debug("Dry-run swap enrichment skipped: missing token decimals in metadata")
+                return
+            from_symbol = from_token_info.get("symbol", intent_params.get("from_token", ""))
+            to_symbol = to_token_info.get("symbol", intent_params.get("to_token", ""))
+
+            # Compute human-readable amounts
+            amount_in_decimal = Decimal(amount_in) / Decimal(10**from_decimals)
+            # min_amount_out is amount_out * (1 - slippage), so the expected amount_out
+            # is approximately min_amount_out / (1 - slippage). For the quoted amount,
+            # check if we have quoted_candidates with the best amount_out.
+            best_amount_out = min_amount_out  # fallback to min
+            # If quoting was used, extract the actual quoted amount from candidates
+            # The compiler stores quoted_candidates in fee_tier_candidates when quoting
+            # was the source, but actually the data is lost through gRPC serialization.
+            # Use the slippage to back-calculate the expected amount_out.
+            slippage_str = metadata.get("slippage")
+            if slippage_str:
+                slippage = Decimal(slippage_str)
+                if slippage < 1:  # e.g., 0.005 = 0.5%
+                    # min_amount_out = expected * (1 - slippage)
+                    # expected = min_amount_out / (1 - slippage)
+                    best_amount_out = int(Decimal(min_amount_out) / (1 - slippage))
+
+            amount_out_decimal = Decimal(best_amount_out) / Decimal(10**to_decimals)
+
+            # Compute effective price
+            effective_price = None
+            if amount_in_decimal > 0:
+                effective_price = amount_out_decimal / amount_in_decimal
+
+            result.swap_amounts = SwapAmounts(
+                amount_in=amount_in,
+                amount_out=best_amount_out,
+                amount_in_decimal=amount_in_decimal,
+                amount_out_decimal=amount_out_decimal,
+                effective_price=effective_price,
+                slippage_bps=None,  # Not known for dry-run estimates
+                token_in=from_symbol,
+                token_out=to_symbol,
+            )
+            logger.debug(
+                "Dry-run swap quote: %s %s -> %s %s (price: %s)",
+                amount_in_decimal,
+                from_symbol,
+                amount_out_decimal,
+                to_symbol,
+                effective_price,
+            )
+        except Exception as e:
+            logger.debug("Dry-run swap enrichment failed (non-fatal): %s", e)
 
     def _parse_gateway_receipts(self, raw_receipts: bytes | str | None) -> list[dict[str, Any]]:
         """Parse receipts from gateway Execute response.

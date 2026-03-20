@@ -601,3 +601,97 @@ class TestRetryLogLevelMatrix:
         exec_fail_records = [r for r in caplog.records if "Intent execution failed" in r.message]
         assert len(exec_fail_records) == 1
         assert exec_fail_records[0].levelno == logging.WARNING
+
+
+# =============================================================================
+# Dry-run swap enrichment tests (VIB-1609)
+# =============================================================================
+
+
+class TestDryRunSwapEnrichment:
+    """Tests for _enrich_dry_run_swap -- populating swap_amounts from compilation metadata."""
+
+    def _make_swap_bundle(self, amount_in="1000000", min_amount_out="995000",
+                          slippage="0.005", from_decimals=6, to_decimals=18,
+                          from_symbol="USDC", to_symbol="WETH"):
+        return {
+            "actions": [{"type": "SWAP"}],
+            "metadata": {
+                "amount_in": amount_in,
+                "min_amount_out": min_amount_out,
+                "slippage": slippage,
+                "from_token": {"symbol": from_symbol, "decimals": from_decimals},
+                "to_token": {"symbol": to_symbol, "decimals": to_decimals},
+                "protocol": "uniswap_v3",
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_dry_run_swap_populates_swap_amounts(self, service, mock_gateway):
+        """Dry-run swap should have non-None swap_amounts from compilation metadata."""
+        bundle_data = self._make_swap_bundle()
+        mock_gateway.execution.CompileIntent.return_value = _make_compile_resp(bundle_data=bundle_data)
+        mock_gateway.execution.Execute.return_value = _make_exec_resp(success=True, tx_hashes=[])
+
+        result = await service.execute_intent(
+            "swap", {"from_token": "USDC", "to_token": "WETH"}, dry_run=True,
+        )
+
+        assert result.dry_run is True
+        assert result.swap_amounts is not None
+        assert result.swap_amounts.amount_in == 1000000
+        assert result.swap_amounts.token_in == "USDC"
+        assert result.swap_amounts.token_out == "WETH"
+        # effective_price should be computed
+        assert result.swap_amounts.effective_price is not None
+        assert result.swap_amounts.effective_price > 0
+
+    @pytest.mark.asyncio
+    async def test_dry_run_swap_back_calculates_amount_out(self, service, mock_gateway):
+        """Dry-run should back-calculate expected amount_out from min_amount_out and slippage."""
+        from decimal import Decimal
+
+        bundle_data = self._make_swap_bundle(
+            amount_in="1000000000",  # 1000 USDC (6 decimals)
+            min_amount_out="497500000000000000",  # ~0.4975 WETH
+            slippage="0.005",  # 0.5% slippage
+            from_decimals=6,
+            to_decimals=18,
+        )
+        mock_gateway.execution.CompileIntent.return_value = _make_compile_resp(bundle_data=bundle_data)
+        mock_gateway.execution.Execute.return_value = _make_exec_resp(success=True, tx_hashes=[])
+
+        result = await service.execute_intent(
+            "swap", {"from_token": "USDC", "to_token": "WETH"}, dry_run=True,
+        )
+
+        assert result.swap_amounts is not None
+        # Back-calculated: 497500000000000000 / (1 - 0.005) = ~500000000000000000
+        assert result.swap_amounts.amount_out > int("497500000000000000")
+        assert result.swap_amounts.amount_out_decimal > Decimal("0.497")
+
+    @pytest.mark.asyncio
+    async def test_dry_run_non_swap_no_enrichment(self, service, mock_gateway):
+        """Dry-run for non-swap intents should not populate swap_amounts."""
+        mock_gateway.execution.CompileIntent.return_value = _make_compile_resp()
+        mock_gateway.execution.Execute.return_value = _make_exec_resp(success=True, tx_hashes=[])
+
+        result = await service.execute_intent(
+            "supply", {"token": "USDC", "amount": "1000"}, dry_run=True,
+        )
+
+        assert result.swap_amounts is None
+
+    @pytest.mark.asyncio
+    async def test_dry_run_swap_missing_metadata_graceful(self, service, mock_gateway):
+        """Dry-run swap with missing metadata should not crash."""
+        bundle_data = {"actions": [{"type": "SWAP"}], "metadata": {}}
+        mock_gateway.execution.CompileIntent.return_value = _make_compile_resp(bundle_data=bundle_data)
+        mock_gateway.execution.Execute.return_value = _make_exec_resp(success=True, tx_hashes=[])
+
+        result = await service.execute_intent(
+            "swap", {"from_token": "USDC", "to_token": "WETH"}, dry_run=True,
+        )
+
+        # Should not crash, swap_amounts stays None
+        assert result.swap_amounts is None
