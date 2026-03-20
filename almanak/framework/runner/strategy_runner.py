@@ -4035,10 +4035,20 @@ class StrategyRunner:
             "USDbC": Decimal("1"),
         }
 
+        # Derive native + wrapped token symbols from existing registry maps
+        # so new chains are picked up automatically without code changes here.
+        from almanak.framework.data.models import _NATIVE_TO_WRAPPED
+        from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
+
+        chain = getattr(market, "_chain", None) or getattr(market, "chain", None)
+        native = NATIVE_TOKEN_SYMBOLS.get(str(chain).lower(), "ETH") if chain else "ETH"
+        wrapped = _NATIVE_TO_WRAPPED.get(native, f"W{native}")
+        tokens_to_fetch = (native, wrapped, "WBTC")
+
         # Try to get real prices from the market one more time — the gateway
         # may have recovered since the prefetch attempt.
         if market is not None and hasattr(market, "price"):
-            for symbol in ("ETH", "WETH", "WBTC", "AVAX", "WAVAX", "MATIC", "WMATIC"):
+            for symbol in tokens_to_fetch:
                 try:
                     price = market.price(symbol)
                     if price and price > 0:
