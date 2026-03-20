@@ -1014,7 +1014,7 @@ almanak gateway --port 50052          # Custom port
 ```bash
 almanak agent install                 # Auto-detect platforms and install
 almanak agent install -p claude       # Install for specific platform
-almanak agent install -p all          # Install for all 9 platforms
+almanak agent install -p all          # Install for all 10 platforms
 almanak agent update                  # Update installed skill files
 almanak agent status                  # Check installation status
 ```

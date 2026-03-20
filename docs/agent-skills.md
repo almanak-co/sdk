@@ -217,7 +217,7 @@ Agent skill status (SDK v2.0.0):
   copilot     not installed
   ...
 
-Installed: 1  Outdated: 1  Missing: 7
+Installed: 1  Outdated: 1  Missing: 8
 ```
 
 ### Update
@@ -272,7 +272,7 @@ The bundled skill covers:
 | Token Resolution | get_token_resolver(), resolve_for_swap() |
 | Backtesting | PnL simulation, paper trading, parameter sweeps |
 | CLI Commands | strat new/run/demo/backtest, gateway, agent |
-| Chains & Protocols | 12 chains, 10 protocols with enum names |
+| Chains & Protocols | 14 chains, 13 protocols with enum names |
 | Common Patterns | Rebalancing, alerting, teardown, IntentSequence |
 | Troubleshooting | Common errors and fixes |
 

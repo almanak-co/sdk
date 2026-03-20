@@ -19,6 +19,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | PolymarketService | 18 | Polymarket CLOB API proxy (market data, orders, positions) |
 | EnsoService | 4 | Enso Finance routing and bundling |
 | TokenService | 4 | Token resolution and on-chain metadata |
+| LifecycleService | 6 | Agent state management, heartbeat, and commands |
 
 ## Health
 
@@ -77,9 +78,8 @@ rpc GetPrice(PriceRequest) returns (PriceResponse)
 **Request:**
 ```protobuf
 message PriceRequest {
-  string chain = 1;      // e.g., "arbitrum", "ethereum"
-  string token = 2;      // Token symbol or address
-  string quote = 3;      // Quote currency (default: "USD")
+  string token = 1;      // Token symbol or address
+  string quote = 2;      // Quote currency (default: "USD")
 }
 ```
 
@@ -113,18 +113,23 @@ rpc GetBalance(BalanceRequest) returns (BalanceResponse)
 **Request:**
 ```protobuf
 message BalanceRequest {
-  string chain = 1;
-  string wallet_address = 2;
-  string token_address = 3;  // Optional, empty for native token
+  string token = 1;            // Token symbol or address
+  string chain = 2;
+  string wallet_address = 3;
 }
 ```
 
 **Response:**
 ```protobuf
 message BalanceResponse {
-  string balance = 1;      // Balance as string (precision preserved)
-  int32 decimals = 2;
-  string symbol = 3;
+  string balance = 1;          // Human-readable units as string
+  string balance_usd = 2;
+  string address = 3;
+  int32 decimals = 4;
+  string raw_balance = 5;      // Wei/raw units as string
+  int64 timestamp = 6;
+  bool stale = 7;
+  string error = 8;
 }
 ```
 
@@ -342,14 +347,6 @@ message RecordTimelineEventResponse {
 }
 ```
 
-### RecordTimelineEvent
-
-Record a timeline event for strategy execution history.
-
-```protobuf
-rpc RecordTimelineEvent(RecordTimelineEventRequest) returns (RecordTimelineEventResponse)
-```
-
 ## RpcService
 
 ### Call
@@ -384,7 +381,7 @@ message RpcResponse {
 
 EVM chains:
 
-- ethereum, arbitrum, base, optimism, polygon, avalanche, bsc, bnb, sonic, plasma, linea, blast, mantle, berachain
+- ethereum, arbitrum, base, optimism, polygon, avalanche, bsc, bnb, sonic, plasma, linea, blast, mantle, berachain, monad
 
 Non-EVM chains:
 
@@ -943,6 +940,58 @@ Resolve multiple tokens in a single call.
 
 ```protobuf
 rpc BatchResolveTokens(BatchResolveTokensRequest) returns (BatchResolveTokensResponse)
+```
+
+## LifecycleService
+
+Agent state management and command dispatch for V2 deployments.
+
+### WriteState
+
+Write the current agent state (INITIALIZING, RUNNING, PAUSED, ERROR, STOPPING, TERMINATED).
+
+```protobuf
+rpc WriteState(WriteAgentStateRequest) returns (WriteAgentStateResponse)
+```
+
+### ReadState
+
+Read the current agent state.
+
+```protobuf
+rpc ReadState(ReadAgentStateRequest) returns (ReadAgentStateResponse)
+```
+
+### Heartbeat
+
+Send a heartbeat to update the last activity timestamp and increment the iteration count.
+
+```protobuf
+rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse)
+```
+
+### ReadCommand
+
+Read the most recent unprocessed command for an agent (PAUSE, RESUME, STOP).
+
+```protobuf
+rpc ReadCommand(ReadAgentCommandRequest) returns (ReadAgentCommandResponse)
+```
+
+### AckCommand
+
+Acknowledge (mark processed) a command.
+
+```protobuf
+rpc AckCommand(AckAgentCommandRequest) returns (AckAgentCommandResponse)
+```
+
+### WriteCommand
+
+Write a command to an agent.
+
+```protobuf
+rpc WriteCommand(WriteAgentCommandRequest) returns (WriteAgentCommandResponse)
 ```
 
 ## Error Codes
