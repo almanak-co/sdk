@@ -2121,7 +2121,7 @@ Strategy Pattern:
 """
 
 import logging
-from decimal import ROUND_DOWN, Decimal  # noqa: F401
+from decimal import ROUND_DOWN, Decimal  # noqa: F401 - ROUND_DOWN used by lending template only
 from typing import Any, Optional
 
 # Core strategy framework imports
