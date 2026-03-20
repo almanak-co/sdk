@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 # Event Topic Signatures
 # =============================================================================
 
+# Null address constant used for ERC-20 Transfer mint/burn detection
+_ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
 # Aave V3 event topic signatures (keccak256 hashes of event signatures)
 # These are the actual topic hashes from Aave V3 contracts
 EVENT_TOPICS: dict[str, str] = {
@@ -504,6 +507,32 @@ class IsolationModeDebtUpdatedEventData:
 
 
 @dataclass
+class SupplyAmountsResult:
+    """Aggregated supply extraction result for ResultEnricher.
+
+    Returned by extract_supply_amounts() to provide a structured view
+    of all supply-related data from a single transaction receipt.
+
+    Attributes:
+        supply_amount: Raw amount supplied (in token's smallest unit)
+        a_token_received: Amount of aTokens minted (if available)
+        supply_rate: Supply APY at time of supply (if available)
+    """
+
+    supply_amount: int
+    a_token_received: int | None = None
+    supply_rate: "Decimal | None" = None
+
+    def to_dict(self) -> "dict[str, Any]":
+        """Convert to dictionary."""
+        return {
+            "supply_amount": self.supply_amount,
+            "a_token_received": self.a_token_received,
+            "supply_rate": str(self.supply_rate) if self.supply_rate is not None else None,
+        }
+
+
+@dataclass
 class ParseResult:
     """Result of parsing a receipt.
 
@@ -579,10 +608,12 @@ class AaveV3ReceiptParser:
     SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset(
         {
             "supply_amount",
+            "supply_amounts",
             "withdraw_amount",
             "borrow_amount",
             "repay_amount",
             "a_token_received",
+            "a_token_burned",
             "borrow_rate",
             "debt_token",
             "supply_rate",
@@ -1361,7 +1392,6 @@ class AaveV3ReceiptParser:
                 return None
 
             transfer_topic = EVENT_TOPICS["Transfer"].lower()
-            zero_addr = "0x0000000000000000000000000000000000000000"
 
             for log in logs:
                 topics = log.get("topics", [])
@@ -1377,7 +1407,7 @@ class AaveV3ReceiptParser:
                     continue
 
                 from_addr = HexDecoder.topic_to_address(topics[1])
-                if from_addr.lower() == zero_addr:
+                if from_addr.lower() == _ZERO_ADDRESS:
                     data = HexDecoder.normalize_hex(log.get("data", ""))
                     amount = HexDecoder.decode_uint256(data, 0)
                     return amount
@@ -1434,7 +1464,6 @@ class AaveV3ReceiptParser:
                 return None
 
             transfer_topic = EVENT_TOPICS["Transfer"].lower()
-            zero_addr = "0x0000000000000000000000000000000000000000"
 
             for log in logs:
                 topics = log.get("topics", [])
@@ -1451,7 +1480,7 @@ class AaveV3ReceiptParser:
 
                 # Check if this is a mint (from 0x0)
                 from_addr = HexDecoder.topic_to_address(topics[1])
-                if from_addr.lower() != zero_addr:
+                if from_addr.lower() != _ZERO_ADDRESS:
                     continue
 
                 # Check if the minted amount matches the borrow amount
@@ -1497,6 +1526,85 @@ class AaveV3ReceiptParser:
 
         except Exception as e:
             logger.warning(f"Failed to extract supply rate: {e}")
+            return None
+
+    def extract_supply_amounts(self, receipt: dict[str, Any]) -> "SupplyAmountsResult | None":
+        """Extract aggregated supply data from a transaction receipt.
+
+        Returns a SupplyAmountsResult combining supply_amount, a_token_received,
+        and supply_rate into a single structured object. Called by ResultEnricher
+        for SUPPLY intents.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            SupplyAmountsResult if supply found, None otherwise
+        """
+        try:
+            supply_amount = self.extract_supply_amount(receipt)
+            if supply_amount is None:
+                return None
+            a_token_received = self.extract_a_token_received(receipt)
+            supply_rate = self.extract_supply_rate(receipt)
+            return SupplyAmountsResult(
+                supply_amount=supply_amount,
+                a_token_received=a_token_received,
+                supply_rate=supply_rate,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to extract supply amounts: {e}")
+            return None
+
+    def extract_a_token_burned(self, receipt: dict[str, Any]) -> int | None:
+        """Extract aToken amount burned from a WITHDRAW transaction receipt.
+
+        Looks for Transfer events TO the zero address (burning) in the receipt.
+        These are emitted by the aToken contract when tokens are burned on withdrawal.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            aToken amount burned if found, None otherwise
+        """
+        try:
+            parsed = self.parse_receipt(receipt)
+            if not parsed.withdraws:
+                return None
+            withdraw_user = parsed.withdraws[0].user.lower()
+
+            logs = receipt.get("logs", [])
+            if not logs:
+                return None
+
+            transfer_topic = EVENT_TOPICS["Transfer"].lower()
+
+            for log in logs:
+                topics = log.get("topics", [])
+                if len(topics) < 3:
+                    continue
+
+                first_topic = topics[0]
+                if isinstance(first_topic, bytes):
+                    first_topic = "0x" + first_topic.hex()
+                first_topic = str(first_topic).lower()
+
+                if first_topic != transfer_topic:
+                    continue
+
+                # Check if this is the withdraw user's burn (user -> 0x0)
+                from_addr = HexDecoder.topic_to_address(topics[1]).lower()
+                to_addr = HexDecoder.topic_to_address(topics[2]).lower()
+                if to_addr == _ZERO_ADDRESS and from_addr == withdraw_user:
+                    data = HexDecoder.normalize_hex(log.get("data", ""))
+                    amount = HexDecoder.decode_uint256(data, 0)
+                    return amount
+
+            return None
+
+        except Exception as e:
+            logger.warning(f"Failed to extract aToken burned: {e}")
             return None
 
     def extract_remaining_debt(self, receipt: dict[str, Any]) -> int | None:
@@ -1588,6 +1696,8 @@ __all__ = [
     "UserEModeSetEventData",
     "IsolationModeDebtUpdatedEventData",
     "ParseResult",
+    # Extraction result types
+    "SupplyAmountsResult",
     # Constants
     "EVENT_TOPICS",
     "TOPIC_TO_EVENT",

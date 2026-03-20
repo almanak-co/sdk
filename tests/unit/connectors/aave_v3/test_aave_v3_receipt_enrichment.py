@@ -20,6 +20,7 @@ import pytest
 from almanak.framework.connectors.aave_v3.receipt_parser import (
     EVENT_TOPICS,
     AaveV3ReceiptParser,
+    SupplyAmountsResult,
 )
 
 
@@ -202,6 +203,53 @@ def _make_repay_receipt(
     return {
         "transactionHash": "0x" + "ef" * 32,
         "blockNumber": 12345680,
+        "status": 1,
+        "logs": logs,
+    }
+
+
+def _make_withdraw_receipt(
+    withdraw_amount: int = 1000000000000000000,  # 1 WETH (18 decimals)
+    include_atoken_burn: bool = True,
+    burn_amount: int | None = None,
+    atoken_address: str = ATOKEN_ADDRESS,
+) -> dict[str, Any]:
+    """Build a realistic Aave V3 Withdraw transaction receipt."""
+    logs: list[dict] = []
+
+    # Withdraw event
+    # Withdraw(address indexed reserve, address indexed user, address indexed to, uint256 amount)
+    withdraw_data = _encode_uint256(withdraw_amount)
+    logs.append({
+        "address": POOL_ADDRESS,
+        "topics": [
+            EVENT_TOPICS["Withdraw"],
+            _pad_address(WETH_ADDRESS),   # reserve (indexed)
+            _pad_address(USER_ADDRESS),   # user (indexed)
+            _pad_address(USER_ADDRESS),   # to (indexed)
+        ],
+        "data": "0x" + withdraw_data,
+        "logIndex": 0,
+    })
+
+    # aToken burn (Transfer from user to 0x0)
+    if include_atoken_burn:
+        actual_burn = burn_amount if burn_amount is not None else withdraw_amount
+        transfer_data = _encode_uint256(actual_burn)
+        logs.append({
+            "address": atoken_address,
+            "topics": [
+                EVENT_TOPICS["Transfer"],
+                _pad_address(USER_ADDRESS),   # from (user)
+                _pad_address(ZERO_ADDRESS),   # to (burn)
+            ],
+            "data": "0x" + transfer_data,
+            "logIndex": 1,
+        })
+
+    return {
+        "transactionHash": "0x" + "12" * 32,
+        "blockNumber": 12345681,
         "status": 1,
         "logs": logs,
     }
@@ -426,3 +474,107 @@ class TestExistingExtractions:
         result = parser.extract_borrow_rate(receipt)
         assert result is not None
         assert Decimal("0.04") < result < Decimal("0.06")
+
+
+# =============================================================================
+# Tests: extract_supply_amounts (VIB-1585)
+# =============================================================================
+
+
+class TestExtractSupplyAmounts:
+    """Tests for the aggregated supply_amounts extraction method."""
+
+    def test_returns_supply_amounts_result(self) -> None:
+        """Should return a SupplyAmountsResult with all fields populated."""
+        parser = AaveV3ReceiptParser()
+        receipt = _make_supply_receipt(
+            supply_amount=1000000000000000000,
+            include_reserve_data_updated=True,
+            liquidity_rate_ray=35000000000000000000000000,
+        )
+        result = parser.extract_supply_amounts(receipt)
+        assert result is not None
+        assert isinstance(result, SupplyAmountsResult)
+        assert result.supply_amount == 1000000000000000000
+        assert result.a_token_received == 1000000000000000000
+        assert result.supply_rate is not None
+        assert Decimal("0.03") < result.supply_rate < Decimal("0.04")
+
+    def test_returns_none_when_no_supply_event(self) -> None:
+        """Should return None if receipt has no Supply event."""
+        parser = AaveV3ReceiptParser()
+        receipt = _make_borrow_receipt()
+        result = parser.extract_supply_amounts(receipt)
+        assert result is None
+
+    def test_supply_amounts_without_reserve_data_updated(self) -> None:
+        """Should return result with supply_rate=None when ReserveDataUpdated missing."""
+        parser = AaveV3ReceiptParser()
+        receipt = _make_supply_receipt(include_reserve_data_updated=False)
+        result = parser.extract_supply_amounts(receipt)
+        assert result is not None
+        assert result.supply_amount == 1000000000000000000
+        assert result.supply_rate is None
+
+    def test_supply_amounts_in_supported_extractions(self) -> None:
+        """supply_amounts should be declared in SUPPORTED_EXTRACTIONS."""
+        assert "supply_amounts" in AaveV3ReceiptParser.SUPPORTED_EXTRACTIONS
+
+    def test_returns_none_for_empty_receipt(self) -> None:
+        """Should return None for receipt with no logs."""
+        parser = AaveV3ReceiptParser()
+        receipt = {"transactionHash": "0x" + "00" * 32, "blockNumber": 1, "status": 1, "logs": []}
+        result = parser.extract_supply_amounts(receipt)
+        assert result is None
+
+
+# =============================================================================
+# Tests: extract_a_token_burned (VIB-534)
+# =============================================================================
+
+
+class TestExtractATokenBurned:
+    """Tests for aToken burn extraction from Withdraw receipts."""
+
+    def test_extracts_atoken_burn_amount(self) -> None:
+        """Should find aToken burn amount from Transfer-to-zero event."""
+        parser = AaveV3ReceiptParser()
+        receipt = _make_withdraw_receipt(withdraw_amount=1000000000000000000)
+        result = parser.extract_a_token_burned(receipt)
+        assert result is not None
+        assert result == 1000000000000000000
+
+    def test_returns_none_when_no_burn_event(self) -> None:
+        """Should return None if no Transfer-to-zero event in receipt."""
+        parser = AaveV3ReceiptParser()
+        receipt = _make_withdraw_receipt(include_atoken_burn=False)
+        result = parser.extract_a_token_burned(receipt)
+        assert result is None
+
+    def test_different_burn_amount_than_withdraw(self) -> None:
+        """Should return the burn Transfer amount even if it differs from withdraw amount."""
+        parser = AaveV3ReceiptParser()
+        receipt = _make_withdraw_receipt(
+            withdraw_amount=1000000000000000000,
+            burn_amount=999999999999999999,  # Slightly less due to interest accrual
+        )
+        result = parser.extract_a_token_burned(receipt)
+        assert result == 999999999999999999
+
+    def test_returns_none_for_supply_receipt(self) -> None:
+        """Should return None for supply receipts (Transfer-from-zero, not to)."""
+        parser = AaveV3ReceiptParser()
+        receipt = _make_supply_receipt()
+        result = parser.extract_a_token_burned(receipt)
+        assert result is None
+
+    def test_returns_none_for_empty_receipt(self) -> None:
+        """Should return None for receipt with no logs."""
+        parser = AaveV3ReceiptParser()
+        receipt = {"transactionHash": "0x" + "00" * 32, "blockNumber": 1, "status": 1, "logs": []}
+        result = parser.extract_a_token_burned(receipt)
+        assert result is None
+
+    def test_a_token_burned_in_supported_extractions(self) -> None:
+        """a_token_burned should be declared in SUPPORTED_EXTRACTIONS."""
+        assert "a_token_burned" in AaveV3ReceiptParser.SUPPORTED_EXTRACTIONS
