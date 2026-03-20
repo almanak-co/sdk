@@ -51,7 +51,7 @@ class MantleSwapStrategy(IntentStrategy):
         super().__init__(*args, **kwargs)
 
         self.trade_size_usd = Decimal(str(self.get_config("trade_size_usd", "5")))
-        self.from_token = self.get_config("from_token", "USDT0")
+        self.from_token = self.get_config("from_token", "USDT")
         self.to_token = self.get_config("to_token", "WMNT")
         self.max_slippage_bps = int(self.get_config("max_slippage_bps", 300))
 
