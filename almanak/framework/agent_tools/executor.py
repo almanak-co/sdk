@@ -75,7 +75,8 @@ def _decode_int24(word_hex: str) -> int:
 
     ABI encoding sign-extends int24 to 256 bits. To recover the original
     signed value, read only the low 3 bytes and apply int24 two's-complement.
-    Reading the full 32-byte word and subtracting 2**24 breaks for negative ticks.
+    Reading the full 32-byte word and subtracting 2**24 breaks for negative ticks
+    because the sign-extension fills all upper bytes with 0xff.
 
     Args:
         word_hex: 64-character hex string representing a 32-byte ABI word.

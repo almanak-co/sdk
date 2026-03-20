@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.agent_tools.executor import ToolExecutor
+from almanak.framework.agent_tools.executor import ToolExecutor, _decode_int24
 from almanak.framework.agent_tools.policy import AgentPolicy
 from almanak.framework.agent_tools.schemas import ToolResponse
 
@@ -1779,3 +1779,59 @@ class TestValidateRisk:
         )
         assert "blocked" in result.explanation.lower()
         assert "violation" in result.explanation.lower()
+
+
+class TestDecodeInt24:
+    """Tests for _decode_int24 helper used in Uniswap V3 tick decoding."""
+
+    def test_zero_tick(self):
+        """Zero tick from a 32-byte ABI word of all zeros."""
+        word = "0" * 64
+        assert _decode_int24(word) == 0
+
+    def test_positive_tick(self):
+        """Positive tick 100 (0x64) in low 3 bytes."""
+        word = "0" * 58 + "000064"
+        assert _decode_int24(word) == 100
+
+    def test_negative_tick_small(self):
+        """Negative tick -100. ABI sign-extends to 256 bits (ff-padded).
+
+        int24(-100) = 0xFFFF9C. When ABI-encoded as int24, the full 32-byte
+        word is sign-extended: 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff9c.
+        The function must extract only the low 3 bytes (ff9c -> with leading ff = ffff9c)
+        and apply int24 two's complement to get -100.
+        """
+        # ABI-encoded int24(-100): sign-extended to 256 bits
+        word = "ff" * 29 + "ffff9c"
+        assert _decode_int24(word) == -100
+
+    def test_negative_tick_typical_uniswap(self):
+        """Typical negative tick -887272 used in Uniswap V3 full-range positions."""
+        # int24(-887272) = 0xF2C068 (low 3 bytes)
+        # Verify: 0xF2C068 = 15908968, 15908968 - 2^24 = 15908968 - 16777216 = -868248
+        # Actually -887272 in hex: 887272 = 0x0D8A08, -887272 two's complement int24 = 0xF275F8
+        val_24 = (-887272) & 0xFFFFFF  # = 0xF275F8
+        word = "ff" * 29 + f"{val_24:06x}"
+        assert _decode_int24(word) == -887272
+
+    def test_max_positive_int24(self):
+        """Max positive int24: 2^23 - 1 = 8388607."""
+        word = "0" * 58 + "7fffff"
+        assert _decode_int24(word) == 8388607
+
+    def test_min_negative_int24(self):
+        """Min negative int24: -2^23 = -8388608."""
+        word = "ff" * 29 + "800000"
+        assert _decode_int24(word) == -8388608
+
+    def test_negative_one(self):
+        """Tick -1: ABI-encoded as all ff bytes."""
+        word = "ff" * 32
+        assert _decode_int24(word) == -1
+
+    def test_positive_large_tick(self):
+        """Positive tick 887272 (max tick for Uniswap V3 1-tick spacing)."""
+        val = 887272  # 0x0D8A08
+        word = "0" * 58 + f"{val:06x}"
+        assert _decode_int24(word) == 887272
