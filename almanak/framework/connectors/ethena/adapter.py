@@ -66,7 +66,9 @@ ETHENA_COOLDOWN_ASSETS_SELECTOR = "0xcdac52ed"
 # Selector: cast sig "cooldownShares(uint256)" = 0x9343d9e1
 ETHENA_COOLDOWN_SHARES_SELECTOR = "0x9343d9e1"
 # sUSDe.unstake(address receiver) - Complete unstake after cooldown
-ETHENA_UNSTAKE_SELECTOR = "0x2e17de78"
+# Selector: cast sig "unstake(address)" = 0xf2888dbb
+# Bug history: was 0x2e17de78 (unstake(uint256)) -- caught by iter 99, fixed VIB-1529
+ETHENA_UNSTAKE_SELECTOR = "0xf2888dbb"
 
 # Gas estimates for Ethena operations
 DEFAULT_GAS_ESTIMATES: dict[str, int] = {
