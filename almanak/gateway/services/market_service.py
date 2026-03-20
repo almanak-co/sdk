@@ -23,6 +23,19 @@ from almanak.gateway.validation import (
 
 logger = logging.getLogger(__name__)
 
+# Native-to-wrapped token price aliases.
+# When a price lookup for the native token fails, retry with the wrapped equivalent.
+# This handles chains where the native token (e.g. MNT) has poor exchange coverage
+# but the wrapped version (e.g. WMNT) is listed on major exchanges.
+NATIVE_PRICE_ALIASES: dict[str, str] = {
+    "MNT": "WMNT",
+    "MATIC": "WMATIC",
+    "AVAX": "WAVAX",
+    "FTM": "WFTM",
+    "BNB": "WBNB",
+    "S": "WS",  # Sonic
+}
+
 
 class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
     """Implements MarketService gRPC interface.
@@ -195,6 +208,29 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 response.outliers.extend(details.get("outliers", []))
             return response
         except Exception as e:
+            # Try native->wrapped alias fallback (e.g., MNT->WMNT)
+            alias = NATIVE_PRICE_ALIASES.get(token.upper())
+            if alias:
+                try:
+                    result = await self._price_aggregator.get_aggregated_price(alias, quote)
+                    logger.info(f"GetPrice: {token} resolved via alias {alias}")
+                    response = gateway_pb2.PriceResponse(
+                        price=str(result.price),
+                        timestamp=int(result.timestamp.timestamp()),
+                        source=result.source,
+                        confidence=result.confidence,
+                        stale=result.stale,
+                    )
+                    details = self._price_aggregator.get_last_details(alias, quote)
+                    if details:
+                        response.sources_ok.extend(details.get("sources_ok", []))
+                        for k, v in details.get("sources_failed", {}).items():
+                            response.sources_failed[k] = v
+                        response.outliers.extend(details.get("outliers", []))
+                    return response
+                except Exception as alias_err:
+                    logger.debug(f"GetPrice: alias {alias} also failed for {token}/{quote}: {alias_err}")
+
             from almanak.framework.data.interfaces import AllDataSourcesFailed
             from almanak.gateway.data.price.aggregator import _is_known_unpriceable
 

@@ -249,6 +249,73 @@ class TestMarketServiceInitialization:
             await service.close()
 
 
+class TestMarketServicePriceAlias:
+    """Tests for native->wrapped price alias fallback."""
+
+    @pytest.mark.asyncio
+    async def test_mnt_falls_back_to_wmnt(self, market_service, mock_context):
+        """GetPrice for MNT falls back to WMNT when MNT lookup fails."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.interfaces import AllDataSourcesFailed, PriceResult
+
+        wmnt_result = PriceResult(
+            price=Decimal("0.85"),
+            source="binance",
+            timestamp=datetime.now(UTC),
+            confidence=0.90,
+            stale=False,
+        )
+
+        call_count = 0
+
+        async def mock_get_price(token, quote, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if token == "MNT":
+                raise AllDataSourcesFailed(errors={"all": "no sources"})
+            return wmnt_result
+
+        market_service._price_aggregator = MagicMock()
+        market_service._price_aggregator.get_aggregated_price = AsyncMock(side_effect=mock_get_price)
+        market_service._price_aggregator.get_last_details = MagicMock(return_value=None)
+        market_service._initialized = True
+
+        request = gateway_pb2.PriceRequest(token="MNT", quote="USD")
+        response = await market_service.GetPrice(request, mock_context)
+
+        assert response.price == "0.85"
+        assert response.source == "binance"
+        assert call_count == 2  # MNT failed, then WMNT succeeded
+
+    @pytest.mark.asyncio
+    async def test_no_alias_for_known_token(self, market_service, mock_context):
+        """GetPrice for ETH succeeds directly without alias fallback."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.interfaces import PriceResult
+
+        eth_result = PriceResult(
+            price=Decimal("3000.00"),
+            source="binance",
+            timestamp=datetime.now(UTC),
+            confidence=0.95,
+            stale=False,
+        )
+
+        market_service._price_aggregator = MagicMock()
+        market_service._price_aggregator.get_aggregated_price = AsyncMock(return_value=eth_result)
+        market_service._price_aggregator.get_last_details = MagicMock(return_value=None)
+        market_service._initialized = True
+
+        request = gateway_pb2.PriceRequest(token="ETH", quote="USD")
+        response = await market_service.GetPrice(request, mock_context)
+
+        assert response.price == "3000.00"
+        # Should only call once - no fallback needed
+        market_service._price_aggregator.get_aggregated_price.assert_called_once_with("ETH", "USD")
+
+
 class TestMarketServiceGetIndicator:
     """Tests for MarketService.GetIndicator."""
 
