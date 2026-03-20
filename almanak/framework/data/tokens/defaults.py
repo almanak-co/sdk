@@ -93,6 +93,8 @@ SYMBOL_ALIASES: dict[tuple[str, str], str] = {
     # Berachain bridged tokens
     ("berachain", "USDC.E"): "0x549943e04f40284185054145c6E4e9568C1D3241",  # Bridged USDC (Stargate)
     ("berachain", "USDC"): "0x549943e04f40284185054145c6E4e9568C1D3241",  # USDC -> bridged USDC on Berachain
+    # Pendle YT token aliases (short symbol -> full maturity symbol address)
+    ("arbitrum", "YT-WSTETH"): "0x25BdA1EDd6aF17C61399aA0eb84b93dAA3069764",  # YT-wstETH-25JUN2026
 }
 
 # =============================================================================
@@ -1157,6 +1159,24 @@ PT_wstETH = Token(
     is_stablecoin=False,
 )
 
+# =============================================================================
+# PENDLE YT TOKENS (Yield Tokens -- used by pendle_yt_yield strategy)
+# WARNING: YT tokens are maturity-bound. These addresses expire and new ones
+# are deployed. Check Pendle app for current YT addresses before using.
+# TODO: Replace with dynamic YT resolution via Pendle API in a follow-up PR.
+# =============================================================================
+
+YT_wstETH = Token(
+    symbol="YT-wstETH-25JUN2026",
+    name="Pendle YT wstETH",  # Maturity: 25-JUN-2026
+    decimals=18,
+    addresses={
+        "arbitrum": "0x25BdA1EDd6aF17C61399aA0eb84b93dAA3069764",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
 
 # =============================================================================
 # DEFAULT TOKENS LIST
@@ -1253,6 +1273,8 @@ DEFAULT_TOKENS: list[Token] = [
     PT_USDe,
     PT_USDai,
     PT_wstETH,
+    # Pendle YT tokens (yield tokens)
+    YT_wstETH,
 ]
 
 
@@ -1396,6 +1418,9 @@ __all__ = [
     "PT_eUSDe",
     "PT_USDe",
     "PT_USDai",
+    "PT_wstETH",
+    # Pendle YT tokens
+    "YT_wstETH",
     # Functions and lists
     "DEFAULT_TOKENS",
     "get_default_registry",

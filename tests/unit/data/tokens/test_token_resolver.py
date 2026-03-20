@@ -1850,3 +1850,40 @@ class TestGatewayIntegrityCheck:
         )
         assert result is not None
         assert result.symbol == "TEST"
+
+
+class TestPendleYTTokenResolution:
+    """Tests for Pendle YT token resolution (VIB-1590).
+
+    The pendle_yt_yield strategy uses YT-wstETH-25JUN2026 as a symbol.
+    This token must be resolvable by both full symbol and short alias.
+    """
+
+    def test_yt_wsteth_resolves_by_full_symbol(self):
+        """YT-wstETH-25JUN2026 should resolve on Arbitrum."""
+        resolver = TokenResolver()
+        result = resolver.resolve("YT-wstETH-25JUN2026", "arbitrum")
+        assert result is not None
+        assert result.address == "0x25BdA1EDd6aF17C61399aA0eb84b93dAA3069764"
+        assert result.decimals == 18
+        assert result.symbol == "YT-WSTETH-25JUN2026"
+
+    def test_yt_wsteth_resolves_by_short_alias(self):
+        """YT-wstETH (short symbol) should resolve via SYMBOL_ALIASES."""
+        resolver = TokenResolver()
+        result = resolver.resolve("YT-wstETH", "arbitrum")
+        assert result is not None
+        assert result.address == "0x25BdA1EDd6aF17C61399aA0eb84b93dAA3069764"
+
+    def test_yt_wsteth_resolves_by_address(self):
+        """YT token should resolve by address on Arbitrum."""
+        resolver = TokenResolver()
+        result = resolver.resolve("0x25BdA1EDd6aF17C61399aA0eb84b93dAA3069764", "arbitrum")
+        assert result is not None
+        assert result.decimals == 18
+
+    def test_yt_wsteth_not_on_other_chains(self):
+        """YT-wstETH-25JUN2026 should not resolve on non-Arbitrum chains."""
+        resolver = TokenResolver()
+        with pytest.raises(TokenResolutionError):
+            resolver.resolve("YT-wstETH-25JUN2026", "ethereum")
