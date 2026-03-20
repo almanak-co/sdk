@@ -210,8 +210,9 @@ def _handle_natural_language(ctx: click.Context, text: str):
     if not llm_config.api_key:
         render_error(
             "Natural language mode requires an LLM API key.\n"
-            "Set AGENT_LLM_API_KEY environment variable.\n\n"
-            "  export AGENT_LLM_API_KEY=sk-...\n\n"
+            "Set the AGENT_LLM_API_KEY environment variable to an Anthropic API key.\n"
+            "Get one at: https://console.anthropic.com\n\n"
+            "  export AGENT_LLM_API_KEY=sk-ant-...\n\n"
             "Or use structured syntax: almanak ax swap USDC ETH 100",
             json_output=json_output,
         )

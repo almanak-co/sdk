@@ -11382,7 +11382,7 @@ class IntentCompiler:
             from web3 import Web3
 
             if self._web3 is None:
-                logger.warning("Using direct Web3 RPC for allowance query - this is deprecated")
+                logger.debug("Using direct Web3 RPC for allowance query - this is deprecated")
                 self._web3 = Web3(Web3.HTTPProvider(self.rpc_url))
 
             assert self._web3 is not None

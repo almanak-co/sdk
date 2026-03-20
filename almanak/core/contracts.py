@@ -169,7 +169,7 @@ UNISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
     "mantle": {
         "MNT": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
         "WMNT": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
-        "WETH": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",
+        "WETH": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",  # Canonical Mantle Bridged WETH (deterministic bridge address, not a placeholder)
         "USDC": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",
         "USDT": "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE",
     },
@@ -476,7 +476,7 @@ AAVE_V3_TOKENS: dict[str, dict[str, str]] = {
     },
     "mantle": {
         "WMNT": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
-        "WETH": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",
+        "WETH": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",  # Canonical Mantle Bridged WETH (deterministic bridge address, not a placeholder)
         "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
         "USDC": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",
         "USDe": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
@@ -842,7 +842,7 @@ PENDLE_TOKENS: dict[str, dict[str, str]] = {
     },
     "mantle": {
         "WMNT": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
-        "WETH": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",
+        "WETH": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",  # Canonical Mantle Bridged WETH (deterministic bridge address, not a placeholder)
         "USDC": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",
     },
     "bsc": {

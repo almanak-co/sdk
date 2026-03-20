@@ -129,6 +129,7 @@ NATIVE_TOKEN_SYMBOLS: dict[str, str] = {
     "base": "ETH",
     "avalanche": "AVAX",
     "plasma": "XPL",
+    "mantle": "MNT",
 }
 
 

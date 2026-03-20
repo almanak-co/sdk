@@ -49,6 +49,44 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _coerce_floats_to_str(obj: Any) -> Any:
+    """Recursively coerce float values to strings for Pydantic SafeDecimal compatibility.
+
+    Prevents Pydantic's SafeDecimal rejection of raw float values (e.g., 0.03)
+    by converting them to strings before JSON serialization.
+
+    Args:
+        obj: Any JSON-serializable object (dict, list, float, or other).
+
+    Returns:
+        The same structure with all floats replaced by their string representation.
+    """
+    if isinstance(obj, float):
+        return str(obj)
+    if isinstance(obj, dict):
+        return {k: _coerce_floats_to_str(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_coerce_floats_to_str(v) for v in obj]
+    return obj
+
+
+def _decode_int24(word_hex: str) -> int:
+    """Decode an ABI-encoded int24 value from a 32-byte hex word.
+
+    ABI encoding sign-extends int24 to 256 bits. To recover the original
+    signed value, read only the low 3 bytes and apply int24 two's-complement.
+    Reading the full 32-byte word and subtracting 2**24 breaks for negative ticks.
+
+    Args:
+        word_hex: 64-character hex string representing a 32-byte ABI word.
+
+    Returns:
+        Signed int24 value in the range [-8388608, 8388607].
+    """
+    value = int(word_hex[-6:], 16)  # extract low 3 bytes
+    return value - (1 << 24) if value >= (1 << 23) else value
+
+
 def _error_dict(code: AgentErrorCode, message: str, *, recoverable: bool = False) -> dict:
     """Build a standardized error dict for ToolResponse envelopes.
 
@@ -416,6 +454,27 @@ class ToolExecutor:
             if "chain" in tool_def.request_schema.model_fields:
                 arguments = {**arguments, "chain": self._default_chain}
 
+        # Normalize token0/token1 aliases for pool tools.
+        # Reject conflicting values (e.g., token_a="WETH" and token0="USDC") rather than
+        # silently overwriting the canonical field with the alias value.
+        if tool_name in ("get_pool_state", "open_lp_position"):
+            normalized = dict(arguments)
+            if "token0" in normalized:
+                if "token_a" in normalized and str(normalized["token_a"]).lower() != str(normalized["token0"]).lower():
+                    raise ToolValidationError(
+                        f"Conflicting values for token_a ('{normalized['token_a']}') and token0 ('{normalized['token0']}').",
+                        tool_name=tool_name,
+                    )
+                normalized["token_a"] = normalized.pop("token0")
+            if "token1" in normalized:
+                if "token_b" in normalized and str(normalized["token_b"]).lower() != str(normalized["token1"]).lower():
+                    raise ToolValidationError(
+                        f"Conflicting values for token_b ('{normalized['token_b']}') and token1 ('{normalized['token1']}').",
+                        tool_name=tool_name,
+                    )
+                normalized["token_b"] = normalized.pop("token1")
+            arguments = normalized
+
         # 2. Validate input schema
         try:
             request = tool_def.request_schema(**arguments)
@@ -618,6 +677,10 @@ class ToolExecutor:
             intent_type = args["intent_type"]
             params = args.get("params", {})
 
+            # Coerce float values to strings to prevent Pydantic SafeDecimal rejection
+            # (e.g., max_slippage=0.03 becomes "0.03" which Decimal() accepts)
+            params = _coerce_floats_to_str(params)
+
             resp = self._client.execution.CompileIntent(
                 gateway_pb2.CompileIntentRequest(
                     intent_type=intent_type,
@@ -668,6 +731,9 @@ class ToolExecutor:
                 # Compile on the fly for simulation
                 chain = args.get("chain", self._default_chain)
                 params = args.get("params", {})
+                # Coerce float values to strings to prevent Pydantic SafeDecimal rejection
+                # (matches compile_intent behavior; e.g., max_slippage=0.03 becomes "0.03")
+                params = _coerce_floats_to_str(params)
                 compile_resp = self._client.execution.CompileIntent(
                     gateway_pb2.CompileIntentRequest(
                         intent_type=args["intent_type"],
@@ -1504,7 +1570,8 @@ class ToolExecutor:
 
     async def _execute_get_pool_state(self, args: dict) -> ToolResponse:
         """Read Uniswap V3 pool state via slot0() and liquidity() RPC calls."""
-        from almanak.framework.connectors.uniswap_v3.sdk import FACTORY_ADDRESSES, compute_pool_address
+        from almanak.core.contracts import AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, UNISWAP_V3
+        from almanak.framework.connectors.protocol_aliases import normalize_protocol
         from almanak.framework.data.tokens import get_token_resolver
         from almanak.gateway.proto import gateway_pb2
 
@@ -1512,21 +1579,80 @@ class ToolExecutor:
         token_a_sym = args["token_a"]
         token_b_sym = args["token_b"]
         fee_tier = args.get("fee_tier", 3000)
+        # Normalize protocol to canonical name (e.g., "uniswap_v3" on Mantle -> "agni_finance")
+        protocol = normalize_protocol(chain, args.get("protocol", "uniswap_v3"))
+
+        # Map canonical protocol names to their contract address registries
+        _PROTOCOL_REGISTRIES: dict[str, dict[str, dict[str, str]]] = {
+            "uniswap_v3": UNISWAP_V3,
+            "agni_finance": AGNI_FINANCE,
+            "pancakeswap_v3": PANCAKESWAP_V3,
+            "sushiswap_v3": SUSHISWAP_V3,
+        }
+        registry = _PROTOCOL_REGISTRIES.get(protocol)
+        if registry is None:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    f"Unsupported protocol '{protocol}' for pool lookup. Supported: {list(_PROTOCOL_REGISTRIES)}",
+                    recoverable=True,
+                ),
+            )
 
         # Resolve token addresses
         resolver = get_token_resolver()
         token_a = resolver.resolve_for_swap(token_a_sym, chain)
         token_b = resolver.resolve_for_swap(token_b_sym, chain)
 
-        # Use explicit pool_address if provided, otherwise compute from factory
+        # Use explicit pool_address if provided, otherwise query factory.getPool() via gateway RPC.
+        # Using getPool() instead of CREATE2 derivation handles forks with different init_code_hash
+        # values (e.g., Agni Finance on Mantle).
         pool_address = args.get("pool_address")
         if not pool_address:
-            if chain not in FACTORY_ADDRESSES:
+            chain_contracts = registry.get(chain, {})
+            factory_address = chain_contracts.get("factory")
+            if not factory_address:
                 return ToolResponse(
                     status="error",
-                    error=_error_dict(AgentErrorCode.UNSUPPORTED_CHAIN, f"No Uniswap V3 factory on {chain}"),
+                    error=_error_dict(AgentErrorCode.UNSUPPORTED_CHAIN, f"No {protocol} factory on {chain}"),
                 )
-            pool_address = compute_pool_address(FACTORY_ADDRESSES[chain], token_a.address, token_b.address, fee_tier)
+            # getPool(address,address,uint24) selector = 0x1698ee82
+            # Calldata: 4-byte selector + 32-byte padded token_a + 32-byte padded token_b + 32-byte padded fee
+            addr_a_padded = token_a.address.lower().removeprefix("0x").zfill(64)
+            addr_b_padded = token_b.address.lower().removeprefix("0x").zfill(64)
+            fee_padded = hex(fee_tier)[2:].zfill(64)
+            get_pool_calldata = "0x1698ee82" + addr_a_padded + addr_b_padded + fee_padded
+            get_pool_resp = self._client.rpc.Call(
+                gateway_pb2.RpcRequest(
+                    chain=chain,
+                    method="eth_call",
+                    params=json.dumps([{"to": factory_address, "data": get_pool_calldata}, "latest"]),
+                    id="factory_get_pool",
+                ),
+                timeout=30.0,
+            )
+            if not get_pool_resp.success:
+                return ToolResponse(
+                    status="error",
+                    error=_error_dict(
+                        AgentErrorCode.RPC_FAILED,
+                        f"factory.getPool() failed: {get_pool_resp.error}",
+                        recoverable=True,
+                    ),
+                )
+            raw_pool = json.loads(get_pool_resp.result).removeprefix("0x")
+            # Result is 32 bytes (64 hex chars); pool address is the last 20 bytes (40 hex chars)
+            pool_address = "0x" + raw_pool[-40:] if len(raw_pool) >= 40 else "0x" + "0" * 40
+            if pool_address == "0x" + "0" * 40:
+                return ToolResponse(
+                    status="error",
+                    error=_error_dict(
+                        AgentErrorCode.EMPTY_POOL,
+                        f"Pool not found: {protocol} {token_a_sym}/{token_b_sym} fee={fee_tier} on {chain}. "
+                        f"The factory returned a zero address — the pool may not exist.",
+                    ),
+                )
 
         # Read slot0: sqrtPriceX96 (uint160), tick (int24), ...
         slot0_selector = "0x3850c7bd"
@@ -1560,8 +1686,7 @@ class ToolExecutor:
             )
 
         sqrt_price_x96 = int(slot0_hex[0:64], 16)
-        raw_tick = int(slot0_hex[64:128], 16)
-        tick = raw_tick if raw_tick < 2**23 else raw_tick - 2**24
+        tick = _decode_int24(slot0_hex[64:128])
 
         # Read liquidity
         liq_selector = "0x1a686502"
@@ -1657,37 +1782,75 @@ class ToolExecutor:
         token0 = "0x" + words[2][-40:]
         token1 = "0x" + words[3][-40:]
         fee = int(words[4], 16)
-        tick_lower_raw = int(words[5], 16)
-        tick_lower = tick_lower_raw if tick_lower_raw < 2**23 else tick_lower_raw - 2**24
-        tick_upper_raw = int(words[6], 16)
-        tick_upper = tick_upper_raw if tick_upper_raw < 2**23 else tick_upper_raw - 2**24
+        tick_lower = _decode_int24(words[5])
+        tick_upper = _decode_int24(words[6])
         liquidity = int(words[7], 16)
         tokens_owed_0 = int(words[10], 16)
         tokens_owed_1 = int(words[11], 16)
 
-        # Read current tick to determine if in range
-        # We need the pool address -- compute from token0/token1/fee
-        from almanak.framework.connectors.uniswap_v3.sdk import FACTORY_ADDRESSES, compute_pool_address
+        # Read current tick to determine if in range.
+        # We need the pool address -- query factory.getPool() via gateway RPC to avoid
+        # CREATE2 derivation which breaks on forks with different init_code_hash (e.g., Agni on Mantle).
+        from almanak.core.contracts import AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, UNISWAP_V3
+        from almanak.framework.connectors.protocol_aliases import normalize_protocol
 
-        in_range = True
+        lp_protocol = normalize_protocol(chain, args.get("protocol", "uniswap_v3"))
+        _LP_PROTOCOL_REGISTRIES: dict[str, dict[str, dict[str, str]]] = {
+            "uniswap_v3": UNISWAP_V3,
+            "agni_finance": AGNI_FINANCE,
+            "pancakeswap_v3": PANCAKESWAP_V3,
+            "sushiswap_v3": SUSHISWAP_V3,
+        }
+        lp_registry = _LP_PROTOCOL_REGISTRIES.get(lp_protocol)
+        if lp_registry is None:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    f"Unsupported protocol '{lp_protocol}' for LP position lookup. Supported: {list(_LP_PROTOCOL_REGISTRIES)}",
+                    recoverable=True,
+                ),
+            )
+        lp_factory_address = lp_registry.get(chain, {}).get("factory")
+
+        in_range: bool | None = None
         pool_current_tick = None
-        if chain in FACTORY_ADDRESSES:
-            pool_addr = compute_pool_address(FACTORY_ADDRESSES[chain], token0, token1, fee)
-            slot0_resp = self._client.rpc.Call(
+        if lp_factory_address:
+            # getPool(address,address,uint24) selector = 0x1698ee82
+            addr0_padded = token0.lower().removeprefix("0x").zfill(64)
+            addr1_padded = token1.lower().removeprefix("0x").zfill(64)
+            fee_hex_padded = hex(fee)[2:].zfill(64)
+            get_pool_cd = "0x1698ee82" + addr0_padded + addr1_padded + fee_hex_padded
+            gp_resp = self._client.rpc.Call(
                 gateway_pb2.RpcRequest(
                     chain=chain,
                     method="eth_call",
-                    params=json.dumps([{"to": pool_addr, "data": "0x3850c7bd"}, "latest"]),
-                    id="lp_pool_slot0",
+                    params=json.dumps([{"to": lp_factory_address, "data": get_pool_cd}, "latest"]),
+                    id="lp_factory_get_pool",
                 ),
                 timeout=30.0,
             )
-            if slot0_resp.success:
-                s0 = json.loads(slot0_resp.result).removeprefix("0x")
-                if len(s0) >= 128:
-                    current_tick_raw = int(s0[64:128], 16)
-                    pool_current_tick = current_tick_raw if current_tick_raw < 2**23 else current_tick_raw - 2**24
-                    in_range = tick_lower <= pool_current_tick < tick_upper
+            pool_addr: str | None = None
+            if gp_resp.success:
+                raw_gp = json.loads(gp_resp.result).removeprefix("0x")
+                candidate = "0x" + raw_gp[-40:] if len(raw_gp) >= 40 else None
+                if candidate and candidate != "0x" + "0" * 40:
+                    pool_addr = candidate
+            if pool_addr:
+                slot0_resp = self._client.rpc.Call(
+                    gateway_pb2.RpcRequest(
+                        chain=chain,
+                        method="eth_call",
+                        params=json.dumps([{"to": pool_addr, "data": "0x3850c7bd"}, "latest"]),
+                        id="lp_pool_slot0",
+                    ),
+                    timeout=30.0,
+                )
+                if slot0_resp.success:
+                    s0 = json.loads(slot0_resp.result).removeprefix("0x")
+                    if len(s0) >= 128:
+                        pool_current_tick = _decode_int24(s0[64:128])
+                        in_range = tick_lower <= pool_current_tick < tick_upper
 
         data: dict = {
             "position_id": str(position_id),

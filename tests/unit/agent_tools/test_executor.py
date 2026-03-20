@@ -161,6 +161,17 @@ class TestDataToolDispatch:
         assert result.status == "error"
 
     @pytest.mark.asyncio
+    async def test_get_pool_state_unknown_protocol_returns_error(self, executor, mock_gateway):
+        """get_pool_state must return a validation_error for unknown protocol instead of silently falling back."""
+        result = await executor.execute(
+            "get_pool_state",
+            {"token_a": "WETH", "token_b": "USDC", "chain": "arbitrum", "protocol": "totally_unknown_dex"},
+        )
+        assert result.status == "error"
+        assert result.error["error_code"] == "validation_error"
+        assert "totally_unknown_dex" in result.error["message"]
+
+    @pytest.mark.asyncio
     async def test_get_risk_metrics_returns_portfolio_value(self, executor, mock_gateway):
         """get_risk_metrics returns portfolio value from gateway balances."""
         mock_batch_resp = MagicMock()
@@ -248,6 +259,30 @@ class TestPlanningToolDispatch:
             {"intent_type": "swap", "params": {"from_token": "USDC", "to_token": "ETH", "amount": "1000"}},
         )
         assert result.status == "simulated"
+
+    @pytest.mark.asyncio
+    async def test_simulate_intent_coerces_float_params(self, executor, mock_gateway):
+        """simulate_intent on-the-fly compile path must coerce float params to strings."""
+        compile_resp = MagicMock()
+        compile_resp.success = True
+        compile_resp.action_bundle = json.dumps({"actions": []}).encode()
+        mock_gateway.execution.CompileIntent.return_value = compile_resp
+
+        exec_resp = MagicMock()
+        exec_resp.success = True
+        exec_resp.error = ""
+        mock_gateway.execution.Execute.return_value = exec_resp
+
+        # max_slippage as raw float -- should not cause SafeDecimal rejection
+        result = await executor.execute(
+            "simulate_intent",
+            {"intent_type": "swap", "params": {"from_token": "USDC", "to_token": "ETH", "max_slippage": 0.03}},
+        )
+        assert result.status == "simulated"
+        # Verify the compile call received coerced string, not raw float
+        call_args = mock_gateway.execution.CompileIntent.call_args
+        sent_data = json.loads(call_args[0][0].intent_data.decode())
+        assert sent_data["max_slippage"] == "0.03", "float should be coerced to string before CompileIntent"
 
     @pytest.mark.asyncio
     async def test_estimate_gas_returns_gas_units(self, executor):

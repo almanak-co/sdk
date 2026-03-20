@@ -43,6 +43,7 @@ from almanak.framework.execution.interfaces import (
     Simulator,
     UnsignedTransaction,
 )
+from almanak.framework.execution.simulator.config import is_local_rpc
 
 logger = logging.getLogger(__name__)
 
@@ -315,23 +316,31 @@ class LocalSimulator(Simulator):
         snapshot_id = None
         snapshot_unavailable = False
         if tx_count > 1:
-            try:
-                result = await web3.provider.make_request(RPCEndpoint("evm_snapshot"), [])
-                snapshot_id = result.get("result")
-                if snapshot_id is not None:
-                    logger.debug(f"Created EVM snapshot: {snapshot_id}")
-                else:
+            if not is_local_rpc(self._rpc_url):
+                # evm_snapshot is an Anvil/Hardhat-only method; skip silently on remote RPCs
+                snapshot_unavailable = True
+                logger.debug(
+                    "Skipping evm_snapshot: not a local RPC (evm_snapshot is Anvil-only). "
+                    "Proceeding with gas estimation only."
+                )
+            else:
+                try:
+                    result = await web3.provider.make_request(RPCEndpoint("evm_snapshot"), [])
+                    snapshot_id = result.get("result")
+                    if snapshot_id is not None:
+                        logger.debug(f"Created EVM snapshot: {snapshot_id}")
+                    else:
+                        snapshot_unavailable = True
+                        logger.warning(
+                            "evm_snapshot returned None - snapshot not supported. "
+                            "Proceeding with gas estimation only (no state-mutating execution)."
+                        )
+                except Exception as e:
                     snapshot_unavailable = True
                     logger.warning(
-                        "evm_snapshot returned None - snapshot not supported. "
+                        f"evm_snapshot failed (unexpected on Anvil): {e}. "
                         "Proceeding with gas estimation only (no state-mutating execution)."
                     )
-            except Exception as e:
-                snapshot_unavailable = True
-                logger.warning(
-                    f"evm_snapshot failed (not Anvil?): {e}. "
-                    "Proceeding with gas estimation only (no state-mutating execution)."
-                )
 
             # Add warning to result when snapshot is unavailable for multi-tx bundles
             if snapshot_unavailable:

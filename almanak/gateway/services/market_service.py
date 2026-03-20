@@ -245,7 +245,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         try:
             provider = await self._get_balance_provider(chain, wallet_address)
 
-            if token.upper() in ("ETH", "AVAX", "MATIC", "SOL"):
+            if token.upper() in ("ETH", "AVAX", "MATIC", "SOL", "MNT"):
                 result = await provider.get_native_balance()
             else:
                 result = await provider.get_balance(token)
@@ -308,7 +308,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             try:
                 provider = await self._get_balance_provider(chain, wallet_address)
 
-                if token.upper() in ("ETH", "AVAX", "MATIC", "SOL"):
+                if token.upper() in ("ETH", "AVAX", "MATIC", "SOL", "MNT"):
                     result = await provider.get_native_balance()
                 else:
                     result = await provider.get_balance(token)

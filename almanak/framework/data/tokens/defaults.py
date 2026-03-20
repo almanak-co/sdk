@@ -168,7 +168,7 @@ WETH = Token(
         "polygon": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",  # Bridged WETH on Polygon
         "avalanche": "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",  # WETH.e on Avalanche
         "bsc": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",  # Binance-Peg ETH
-        "mantle": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",  # Bridged WETH on Mantle
+        "mantle": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",  # Canonical Mantle Bridged WETH (deterministic bridge address, not a placeholder)
         "berachain": "0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590",  # Bridged WETH on Berachain
         "monad": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",  # WETH on Monad
         "sonic": "0x50c42dEAcD8Fc9773493ED674b675bE577f2634b",  # Bridged WETH on Sonic

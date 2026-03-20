@@ -2277,6 +2277,12 @@ def generate_config_json(
                 "max_slippage_bps": 50,
             }
         )
+        if chain == SupportedChain.MANTLE:
+            data["anvil_funding"] = {
+                "MNT": 1000,
+                "WMNT": 10,
+                "WETH": 5,
+            }
     elif template == StrategyTemplate.DYNAMIC_LP:
         data.update(
             {

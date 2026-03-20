@@ -13,6 +13,7 @@ from decimal import Decimal
 from typing import Any
 
 import grpc
+import pydantic
 
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
@@ -342,8 +343,23 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             # Deserialize intent data
             intent_data = json.loads(request.intent_data.decode("utf-8"))
 
-            # Create intent object from type and data
-            intent = self._create_intent(intent_type, intent_data)
+            # Create intent object from type and data.
+            # Catch pydantic.ValidationError (e.g., SafeDecimal rejection of raw floats)
+            # and ValueError (e.g., unknown intent_type) — both are client input errors and
+            # should surface as INVALID_ARGUMENT, not INTERNAL.
+            try:
+                intent = self._create_intent(intent_type, intent_data)
+            except (pydantic.ValidationError, ValueError) as e:
+                error_msg = str(e)
+                error_code = "INVALID_INTENT_DATA" if isinstance(e, pydantic.ValidationError) else "INVALID_INTENT_TYPE"
+                logger.warning(f"CompileIntent rejected for {intent_type}: {error_msg}")
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(error_msg)
+                return gateway_pb2.CompilationResult(
+                    success=False,
+                    error=error_msg,
+                    error_code=error_code,
+                )
 
             # Get compiler for this chain/wallet pair
             cache_key = f"{chain}:{wallet_address}"

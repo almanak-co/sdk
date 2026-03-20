@@ -148,6 +148,42 @@ def test_config_json_is_valid(template: StrategyTemplate) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Mantle-specific anvil_funding config branch
+# ---------------------------------------------------------------------------
+
+
+def test_generate_config_json_mantle_includes_anvil_funding() -> None:
+    """generate_config_json for Mantle includes MNT/WMNT/WETH anvil_funding entries."""
+    import json
+
+    config_str = generate_config_json(
+        name="Mantle Test",
+        template=StrategyTemplate.TA_SWAP,
+        chain=SupportedChain.MANTLE,
+    )
+    config = json.loads(config_str)
+    assert "anvil_funding" in config, "Mantle config must include anvil_funding"
+    funding = config["anvil_funding"]
+    assert funding.get("MNT") == 1000
+    assert funding.get("WMNT") == 10
+    assert funding.get("WETH") == 5
+
+
+def test_generate_config_json_non_mantle_excludes_anvil_funding() -> None:
+    """generate_config_json for non-Mantle chains must NOT include anvil_funding."""
+    import json
+
+    for chain in (SupportedChain.ARBITRUM, SupportedChain.BASE, SupportedChain.OPTIMISM):
+        config_str = generate_config_json(
+            name="Non Mantle Test",
+            template=StrategyTemplate.TA_SWAP,
+            chain=chain,
+        )
+        config = json.loads(config_str)
+        assert "anvil_funding" not in config, f"Non-Mantle chain {chain} must not include anvil_funding"
+
+
+# ---------------------------------------------------------------------------
 # Stateful templates must have on_intent_executed callback
 # ---------------------------------------------------------------------------
 
