@@ -116,6 +116,15 @@ POLYGON_PRICE_FEEDS: dict[str, str] = {
     "WSTETH/USD": "0x10f964234cae09cB6a9854B56FF7D4F38Cda5E6a",
 }
 
+# Sonic price feeds (Chain ID: 146)
+# Reference: https://bgd-labs.github.io/aave-address-book/AaveV3Sonic.html
+# Feed addresses sourced from Aave V3 Sonic deployment (bgd-labs/aave-address-book)
+SONIC_PRICE_FEEDS: dict[str, str] = {
+    "ETH/USD": "0x824364077993847f71293B24ccA8567c00c2de11",
+    "USDC/USD": "0x7A8443a2a5D772db7f1E40DeFe32db485108F128",
+    "S/USD": "0xc76dFb89fF298145b417d221B2c747d84952e01d",
+}
+
 # BNB Smart Chain price feeds (Chain ID: 56)
 # Reference: https://docs.chain.link/data-feeds/price-feeds/addresses?network=bnb-chain
 BSC_PRICE_FEEDS: dict[str, str] = {
@@ -154,6 +163,7 @@ CHAINLINK_PRICE_FEEDS: dict[str, dict[str, str]] = {
     "polygon": POLYGON_PRICE_FEEDS,
     "bsc": BSC_PRICE_FEEDS,
     "avalanche": AVALANCHE_PRICE_FEEDS,
+    "sonic": SONIC_PRICE_FEEDS,
 }
 
 # Token symbol to pair mapping (for convenience)
@@ -193,6 +203,8 @@ TOKEN_TO_PAIR: dict[str, str] = {
     "CAKE": "CAKE/USD",
     "BNB": "BNB/USD",
     "WBNB": "BNB/USD",
+    "S": "S/USD",
+    "WS": "S/USD",  # Wrapped Sonic (wS) uses same S/USD feed
 }
 
 # Chainlink heartbeat intervals (seconds) for staleness checks
@@ -228,6 +240,7 @@ CHAINLINK_CHAIN_IDS: dict[str, int] = {
     "polygon": 137,
     "bsc": 56,
     "avalanche": 43114,
+    "sonic": 146,
 }
 
 # =============================================================================

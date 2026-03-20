@@ -288,9 +288,9 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                 id=request.id,
             )
 
-        # Validate RPC method against allowlist (chain-aware: Solana vs EVM)
+        # Validate RPC method against allowlist (chain-aware: Solana vs EVM, network-aware: Anvil)
         try:
-            validate_rpc_method(request.method, chain=chain)
+            validate_rpc_method(request.method, chain=chain, network=self.settings.network)
         except ValidationError as e:
             self._metrics.failed_requests += 1
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -407,10 +407,10 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.RpcBatchResponse(responses=[])
 
-        # Validate all RPC methods in batch (chain-aware: Solana vs EVM)
+        # Validate all RPC methods in batch (chain-aware: Solana vs EVM, network-aware: Anvil)
         for rpc_request in request.requests:
             try:
-                validate_rpc_method(rpc_request.method, chain=chain)
+                validate_rpc_method(rpc_request.method, chain=chain, network=self.settings.network)
             except ValidationError as e:
                 self._metrics.failed_requests += num_requests
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)

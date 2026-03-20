@@ -72,6 +72,28 @@ ALLOWED_RPC_METHODS = frozenset(
     }
 )
 
+# Anvil-only RPC methods for local testing (NOT allowed on mainnet/testnet)
+# These methods are only available when gateway network == "anvil".
+# Enables time-locked DeFi testing: cooldown periods, vesting, lock expiry, etc.
+ANVIL_ONLY_RPC_METHODS = frozenset(
+    {
+        "evm_increaseTime",
+        "evm_mine",
+        "evm_snapshot",
+        "evm_revert",
+        "evm_setNextBlockTimestamp",
+        "evm_setAutomine",
+        "anvil_setBlockTimestamp",
+        "anvil_mine",
+        "anvil_setNextBlockBaseFeePerGas",
+        "anvil_impersonateAccount",
+        "anvil_stopImpersonatingAccount",
+        "anvil_setBalance",
+        "anvil_setStorageAt",
+        "anvil_setCode",
+    }
+)
+
 # Solana RPC methods that are safe to expose
 ALLOWED_SOLANA_RPC_METHODS = frozenset(
     {
@@ -266,18 +288,23 @@ def is_solana_chain(chain: str) -> bool:
 SOLANA_TX_SIGNATURE_PATTERN = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{87,88}$")
 
 
-def validate_rpc_method(method: str, field: str = "method", chain: str | None = None) -> str:
+def validate_rpc_method(
+    method: str, field: str = "method", chain: str | None = None, network: str | None = None
+) -> str:
     """Validate RPC method against allowlist.
 
     Only safe read methods and transaction submission are allowed.
     Dangerous methods (debug_*, admin_*, personal_*) are blocked.
 
     Dispatches to the Solana allowlist when chain is a Solana-family chain.
+    Allows Anvil-only methods (evm_increaseTime, evm_mine, etc.) when network == "anvil".
 
     Args:
         method: RPC method name to validate
         field: Field name for error messages
         chain: Optional chain name for chain-aware dispatch
+        network: Optional network name ("mainnet", "anvil"). Anvil-only methods
+                 are only allowed when this is "anvil".
 
     Returns:
         Method name (unchanged)
@@ -291,6 +318,8 @@ def validate_rpc_method(method: str, field: str = "method", chain: str | None = 
     if chain and is_solana_chain(chain):
         if method not in ALLOWED_SOLANA_RPC_METHODS:
             raise ValidationError(field, f"'{method}' is not allowed for Solana")
+    elif network == "anvil" and method in ANVIL_ONLY_RPC_METHODS:
+        pass  # Anvil test methods are allowed in local testing mode
     else:
         if method not in ALLOWED_RPC_METHODS:
             raise ValidationError(field, f"'{method}' is not allowed")
