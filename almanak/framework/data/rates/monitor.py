@@ -59,7 +59,7 @@ SUPPORTED_PROTOCOLS: list[str] = [p.value for p in Protocol]
 PROTOCOL_CHAINS: dict[str, list[str]] = {
     "ethereum": ["aave_v3", "morpho_blue", "compound_v3"],
     "arbitrum": ["aave_v3", "compound_v3"],
-    "optimism": ["aave_v3"],
+    "optimism": ["aave_v3", "compound_v3"],
     "polygon": ["aave_v3"],
     "base": ["aave_v3", "morpho_blue", "compound_v3"],
     "avalanche": ["aave_v3"],

@@ -608,6 +608,85 @@ PENDLE = Token(
 )
 
 # =============================================================================
+# CURVE LP TOKENS
+# =============================================================================
+# Registering well-known Curve LP tokens here prevents a ~30s gateway timeout
+# during LP_CLOSE compilation (token resolver falls back to slow on-chain lookup
+# for unregistered LP token addresses). See VIB-1509.
+
+# Curve 3pool LP (3Crv) -- DAI/USDC/USDT stableswap on Ethereum
+CRV_3CRV = Token(
+    symbol="3Crv",
+    name="Curve 3pool LP",
+    decimals=18,
+    addresses={
+        "ethereum": "0x6c3F90f043a72FA612cbac8115EE7e52BDe6E490",
+    },
+    coingecko_id="lp-3pool-curve",
+    is_stablecoin=False,
+)
+
+# Curve FRAX/USDC LP -- frax_usdc stableswap on Ethereum
+CRV_FRAX_USDC_LP = Token(
+    symbol="crvFRAX",
+    name="Curve FRAX/USDC LP",
+    decimals=18,
+    addresses={
+        "ethereum": "0x3175Df0976dFA876431C2E9eE6Bc45b65d3473CC",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
+# Curve tricrypto2 LP -- USDT/WBTC/WETH on Ethereum
+CRV_TRICRYPTO2_LP = Token(
+    symbol="crv3crypto",
+    name="Curve Tricrypto2 LP",
+    decimals=18,
+    addresses={
+        "ethereum": "0xc4AD29ba4B3c580e6D59105FFf484999997675Ff",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
+# Curve 2pool LP (2CRV) -- USDC.e/USDT stableswap on Arbitrum
+CRV_2CRV = Token(
+    symbol="2CRV",
+    name="Curve 2pool LP (Arbitrum)",
+    decimals=18,
+    addresses={
+        "arbitrum": "0x7f90122BF0700F9E7e1F688fe926940E8839F353",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
+# Curve tricrypto LP -- USDT/WBTC/WETH on Arbitrum
+CRV_TRICRYPTO_ARB_LP = Token(
+    symbol="crvUSDBTCETH",
+    name="Curve Tricrypto LP (Arbitrum)",
+    decimals=18,
+    addresses={
+        "arbitrum": "0x8e0B8c8BB9db49a46697F3a5Bb8A308e744821D2",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
+# Curve WETH/cbETH LP -- Twocrypto on Base
+CRV_WETH_CBETH_LP = Token(
+    symbol="crvWETHcbETH",
+    name="Curve WETH/cbETH LP (Base)",
+    decimals=18,
+    addresses={
+        "base": "0x98244d93D42b42aB3E3A4D12A5dc0B3e7f8F32f9",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
+# =============================================================================
 # ETHENA PROTOCOL TOKENS
 # =============================================================================
 
@@ -1121,6 +1200,13 @@ DEFAULT_TOKENS: list[Token] = [
     CRV,
     GMX,
     PENDLE,
+    # Curve LP tokens (avoids 30s timeout in LP_CLOSE compilation -- VIB-1509)
+    CRV_3CRV,
+    CRV_FRAX_USDC_LP,
+    CRV_TRICRYPTO2_LP,
+    CRV_2CRV,
+    CRV_TRICRYPTO_ARB_LP,
+    CRV_WETH_CBETH_LP,
     # Ethena tokens
     USDe,
     sUSDe,
@@ -1263,6 +1349,13 @@ __all__ = [
     "CRV",
     "GMX",
     "PENDLE",
+    # Curve LP tokens
+    "CRV_3CRV",
+    "CRV_FRAX_USDC_LP",
+    "CRV_TRICRYPTO2_LP",
+    "CRV_2CRV",
+    "CRV_TRICRYPTO_ARB_LP",
+    "CRV_WETH_CBETH_LP",
     # Ethena tokens
     "USDe",
     "sUSDe",

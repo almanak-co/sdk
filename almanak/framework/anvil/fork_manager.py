@@ -187,6 +187,7 @@ KNOWN_BALANCE_SLOTS: dict[str, dict[str, int]] = {
     "polygon": {"USDC": 9, "WETH": 3, "USDT": 2, "WMATIC": 3, "USDC.e": 0},
     "bsc": {"USDC": 1, "WBNB": 3, "USDT": 1, "BUSD": 0},
     "linea": {"USDC": 0, "WETH": 0, "USDT": 0},
+    "sonic": {"USDC": 9},  # confirmed iter-100: brute-force found slot 9 for bridged USDC
 }
 
 
