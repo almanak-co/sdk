@@ -302,13 +302,11 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
     def extract_swap_amounts(self, receipt: dict[str, Any]) -> "SwapAmounts | None":
         """Extract swap amounts from a transaction receipt.
 
-        Note: Decimal conversions assume 18 decimals. PancakeSwap pools often
-        include tokens with different decimals (e.g., USDC with 6, WBTC with 8).
-        The raw amount_in/amount_out fields are always accurate; use those with
-        your own decimal scaling for precise calculations.
+        Uses ERC-20 Transfer events to identify token addresses, then resolves
+        actual decimals via the token resolver for accurate decimal conversion.
 
         Args:
-            receipt: Transaction receipt dict with 'logs' field
+            receipt: Transaction receipt dict with 'logs' and 'from' fields
 
         Returns:
             SwapAmounts dataclass if swap event found, None otherwise
@@ -316,25 +314,68 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
         from almanak.framework.execution.extracted_data import SwapAmounts
 
         try:
-            result = self.parse_receipt(receipt)
-            if not result.swaps:
+            status = receipt.get("status", 0)
+            if isinstance(status, str):
+                status = int(status, 16) if status.startswith("0x") else int(status)
+            if status != 1:
                 return None
 
-            swap = result.swaps[0]
-            amount0 = int(swap.amount0)
-            amount1 = int(swap.amount1)
+            raw_wallet = receipt.get("from") or ""
+            wallet = self._normalize_topic(raw_wallet) if raw_wallet else ""
+            if not wallet:
+                return None
 
-            # Determine input/output based on signs
-            if amount0 > 0:
-                amount_in = amount0
-                amount_out = abs(amount1)
-            else:
-                amount_in = amount1
-                amount_out = abs(amount0)
+            logs = receipt.get("logs", [])
+            transfer_topic = self._normalize_topic(EVENT_TOPICS["Transfer"])
+            transfers_from_wallet: list[tuple[str, int]] = []
+            transfers_to_wallet: list[tuple[str, int]] = []
 
-            # Calculate effective price (assuming 18 decimals - see docstring for limitations)
-            amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**18)
-            amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**18)
+            for log in logs:
+                topics = log.get("topics", [])
+                if not topics or len(topics) < 3:
+                    continue
+                topic0 = self._normalize_topic(topics[0])
+                if topic0 != transfer_topic:
+                    continue
+
+                log_from = HexDecoder.topic_to_address(topics[1])
+                log_to = HexDecoder.topic_to_address(topics[2])
+                data = HexDecoder.normalize_hex(log.get("data", ""))
+                if not data:
+                    continue
+                try:
+                    amount = HexDecoder.decode_uint256(data, 0)
+                except (ValueError, IndexError):
+                    continue
+
+                raw_token = log.get("address") or ""
+                token_address = self._normalize_topic(raw_token) if raw_token else ""
+                if log_from == wallet:
+                    transfers_from_wallet.append((token_address, amount))
+                if log_to == wallet:
+                    transfers_to_wallet.append((token_address, amount))
+
+            if not transfers_to_wallet:
+                return None
+
+            token_in_addr, amount_in = transfers_from_wallet[0] if transfers_from_wallet else ("", 0)
+            token_out_addr, amount_out = transfers_to_wallet[-1]
+
+            if amount_out == 0:
+                return None
+
+            decimals_in = self._resolve_decimals(token_in_addr)
+            decimals_out = self._resolve_decimals(token_out_addr)
+
+            if decimals_out is None:
+                logger.warning("Cannot compute swap amounts: output token decimals unknown")
+                return None
+
+            amount_in_decimal = (
+                Decimal(amount_in) / Decimal(10**decimals_in) if (amount_in and decimals_in is not None) else Decimal(0)
+            )
+            amount_out_decimal = Decimal(amount_out) / Decimal(10**decimals_out)
+
             effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal(0)
 
             return SwapAmounts(
@@ -344,12 +385,29 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
                 amount_out_decimal=amount_out_decimal,
                 effective_price=effective_price,
                 slippage_bps=None,
-                token_in=None,
-                token_out=None,
+                token_in=token_in_addr or None,
+                token_out=token_out_addr or None,
             )
 
         except Exception as e:
             logger.warning(f"Failed to extract swap amounts: {e}")
+            return None
+
+    def _resolve_decimals(self, token_address: str) -> int | None:
+        """Resolve token decimals via the token resolver.
+
+        Returns None if the resolver is unavailable or the token is unknown.
+        """
+        if not token_address:
+            return None
+        try:
+            from almanak.framework.data.tokens import get_token_resolver
+
+            resolver = get_token_resolver()
+            token = resolver.resolve(token_address, self.chain)
+            return token.decimals
+        except Exception as e:
+            logger.warning(f"Could not resolve decimals for {token_address}: {e}")
             return None
 
     def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
