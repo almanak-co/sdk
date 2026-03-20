@@ -203,7 +203,7 @@ def list_strategies(status_filter, chain, as_json, gateway_host, gateway_port):
                     "attention_reason": s.attention_reason,
                     "consecutive_errors": s.consecutive_errors,
                     "last_iteration_at": s.last_iteration_at,
-                    "pnl_since_deploy_usd": s.pnl_since_deploy_usd,
+                    "pnl_since_deploy_usd": s.pnl_since_deploy_usd or None,
                 }
             )
         click.echo(json.dumps(rows, indent=2))
@@ -318,7 +318,7 @@ def strategy_status(strategy_id, timeline, timeline_limit, as_json, gateway_host
             "attention_reason": s.attention_reason,
             "consecutive_errors": s.consecutive_errors,
             "last_iteration_at": s.last_iteration_at,
-            "pnl_since_deploy_usd": s.pnl_since_deploy_usd,
+            "pnl_since_deploy_usd": s.pnl_since_deploy_usd or None,
         }
         if details.position:
             pos_data: dict[str, Any] = {}
@@ -412,9 +412,7 @@ def strategy_status(strategy_id, timeline, timeline_limit, as_json, gateway_host
     click.echo(f"  Protocol:    {s.protocol or '-'}")
     click.echo(f"  Value:       ${s.total_value_usd}" if s.total_value_usd is not None else "  Value:       -")
     click.echo(f"  PnL (24h):   ${s.pnl_24h_usd}" if s.pnl_24h_usd is not None else "  PnL (24h):   -")
-    click.echo(
-        f"  PnL (total): ${s.pnl_since_deploy_usd}" if s.pnl_since_deploy_usd is not None else "  PnL (total): -"
-    )
+    click.echo(f"  PnL (total): ${s.pnl_since_deploy_usd}" if s.pnl_since_deploy_usd != "" else "  PnL (total): -")
     click.echo(f"  Last Active: {_format_timestamp(s.last_action_at)}")
     if s.last_iteration_at:
         click.echo(f"  Last Iter:   {_format_timestamp(s.last_iteration_at)}")

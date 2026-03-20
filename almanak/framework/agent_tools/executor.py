@@ -1869,30 +1869,33 @@ class ToolExecutor:
             data["current_tick"] = pool_current_tick
 
         # USD-denominate uncollected fees (fail-open per token)
-        from decimal import Decimal
+        try:
+            from decimal import Decimal
 
-        from almanak.framework.data.tokens import get_token_resolver
+            from almanak.framework.data.tokens import get_token_resolver
 
-        resolver = get_token_resolver()
-        for token_addr, tokens_owed_raw, fee_key in [
-            (token0, tokens_owed_0, "fees_a_usd"),
-            (token1, tokens_owed_1, "fees_b_usd"),
-        ]:
-            if tokens_owed_raw <= 0:
-                continue
-            try:
-                resolved = resolver.resolve(token_addr, chain)
-                price_resp = self._client.market.GetPrice(gateway_pb2.PriceRequest(token=token_addr, quote="USD"))
-                token_price = Decimal(str(price_resp.price))
-                if token_price > 0 and resolved:
-                    fee_usd = Decimal(tokens_owed_raw) / Decimal(10**resolved.decimals) * token_price
-                    data[fee_key] = float(round(fee_usd, 6))
-            except Exception as exc:
-                logger.debug("fee_usd enrichment failed for %s (%s): %s", fee_key, token_addr, exc)
-        if "fees_a_usd" in data and "fees_b_usd" in data:
-            data["total_fees_usd"] = float(
-                round(Decimal(str(data["fees_a_usd"])) + Decimal(str(data["fees_b_usd"])), 6)
-            )
+            resolver = get_token_resolver()
+            for token_addr, tokens_owed_raw, fee_key in [
+                (token0, tokens_owed_0, "fees_a_usd"),
+                (token1, tokens_owed_1, "fees_b_usd"),
+            ]:
+                if tokens_owed_raw <= 0:
+                    continue
+                try:
+                    resolved = resolver.resolve(token_addr, chain)
+                    price_resp = self._client.market.GetPrice(gateway_pb2.PriceRequest(token=token_addr, quote="USD"))
+                    token_price = Decimal(str(price_resp.price))
+                    if token_price > 0 and resolved:
+                        fee_usd = Decimal(tokens_owed_raw) / Decimal(10**resolved.decimals) * token_price
+                        data[fee_key] = float(round(fee_usd, 6))
+                except Exception as exc:
+                    logger.debug("fee_usd enrichment failed for %s (%s): %s", fee_key, token_addr, exc)
+            # Compute total from whichever individual fees are available
+            partial = [Decimal(str(data[k])) for k in ("fees_a_usd", "fees_b_usd") if k in data]
+            if partial:
+                data["total_fees_usd"] = float(round(sum(partial, Decimal(0)), 6))
+        except Exception as exc:
+            logger.warning("fee USD enrichment block failed, failing open: %s", exc)
 
         return ToolResponse(status="success", data=data)
 
