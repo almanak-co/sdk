@@ -56,6 +56,13 @@ CURVE_ADDRESSES: dict[str, dict[str, str]] = {
         "twocrypto_factory": "0x98EE851a00abeE0d95D08cF4CA2BdCE32aeaAF7F",
         "tricrypto_factory": "0xbC0797015fcFc47d9C1856639CaE50D0e69FbEE8",
     },
+    "base": {
+        "router": "0xd6681e74eEA20d196c15038C580f721EF2aB6320",  # CurveRouterNG on Base
+        "address_provider": "0x5ffe7FB82894076ECB99A30D6A32e969e6e35E98",  # Same across all EVM chains
+        "stableswap_factory": "0x3093f9B57A428F3EB6285a589cb35bEA6e78c336",  # StableswapFactory NG
+        "twocrypto_factory": "0xc9FE0c63AF9a39402E8a5514F9c21af076813f1b",  # TwocryptoFactory NG
+        "tricrypto_factory": "0xa5961898d4539B95e3B8571c74f86D5E5b48DB25",  # TricryptoFactory NG
+    },
     "optimism": {
         "router": "0xF0d4c12A5768D806021F80a262B4d39d26C58b8D",  # CurveRouterNG on Optimism
         "address_provider": "0x5ffe7FB82894076ECB99A30D6A32e969e6e35E98",  # Universal
@@ -147,6 +154,29 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
             "pool_type": "tricrypto",
             "n_coins": 3,
             "virtual_price": Decimal("1.0"),
+        },
+    },
+    "base": {
+        # WETH/cbETH Twocrypto pool — ETH liquid staking yield, ~3% APY
+        # Pool: 0x11C1fBd4b3De66bC0565779b35171a6CF3E71f59 (old Twocrypto, NOT NG)
+        # LP token: 0x98244d93D42b42aB3E3A4D12A5dc0B3e7f8F32f9 (SEPARATE from pool — old-style Twocrypto)
+        # NOTE: This pool uses an OLD Twocrypto factory (not TwocryptoNG), so the LP token
+        # is a separate ERC20 contract, not the pool address itself.
+        # Verified on-chain 2026-03-19: pool.token() = 0x98244d93...F32f9
+        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.virtual_price() at runtime for accuracy.
+        # Queried on-chain 2026-03-19: pool.virtual_price() = 1017035434756947721 -> 1.0170
+        # Pool reserves (2026-03-19): 3804.66 WETH + 3223.99 cbETH, LP supply: 3445 LP tokens
+        "weth_cbeth": {
+            "address": "0x11C1fBd4b3De66bC0565779b35171a6CF3E71f59",
+            "lp_token": "0x98244d93D42b42aB3E3A4D12A5dc0B3e7f8F32f9",  # Separate LP token (old-style Twocrypto)
+            "coins": ["WETH", "cbETH"],
+            "coin_addresses": [
+                "0x4200000000000000000000000000000000000006",  # WETH on Base
+                "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",  # cbETH on Base
+            ],
+            "pool_type": "cryptoswap",
+            "n_coins": 2,
+            "virtual_price": Decimal("1.017"),
         },
     },
     "optimism": {
@@ -1172,13 +1202,29 @@ class CurveAdapter:
     def _estimate_add_liquidity(self, pool_info: PoolInfo, amounts: list[int]) -> int:
         """Estimate LP tokens from add_liquidity.
 
-        Mature Curve pools have virtual_price > 1.0 because accumulated fees
-        increase the value of each LP token relative to the underlying assets.
-        A naive sum of deposit amounts overestimates LP tokens minted, causing
-        add_liquidity to revert when min_lp exceeds actual minted amount.
+        For StableSwap pools: divides total deposit by virtual_price.
+        Mature pools have virtual_price > 1.0 because fees increase LP token value.
+        The sum/virtual_price formula works for stablecoin pools because deposit
+        value is proportional to LP supply.
 
-        We divide by virtual_price to get a realistic estimate.
+        For CryptoSwap/Tricrypto pools: returns 0 (no LP slippage protection).
+        Volatile-asset pools track LP tokens as a share of D-invariant, not deposit
+        value. Accurate estimation requires querying calc_token_amount() on-chain
+        (which depends on pool reserves, A, gamma, and current prices). Without that
+        data, any static estimate risks setting min_lp higher than actual minted
+        tokens, causing the add_liquidity to revert with "Slippage".
+        TECH_DEBT(VIB-581): Add on-chain calc_token_amount query for production use.
         """
+        if pool_info.pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO):
+            # Cannot accurately estimate LP tokens for volatile pools without on-chain query.
+            # Return 0 to accept any minted amount — production strategies should use
+            # calc_token_amount() on-chain for proper slippage protection.
+            logger.debug(
+                f"CryptoSwap/Tricrypto pool {pool_info.name}: returning min_lp=0 "
+                "(no slippage protection — use calc_token_amount on-chain for production)"
+            )
+            return 0
+
         total = 0
         for i, amount in enumerate(amounts):
             decimals = self._get_token_decimals(pool_info.coins[i])
