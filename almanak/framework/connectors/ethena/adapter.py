@@ -467,6 +467,43 @@ class EthenaAdapter:
             metadata=metadata,
         )
 
+    def _compile_complete_unstake(self, intent: UnstakeIntent) -> ActionBundle:
+        """Compile phase 2 of Ethena unstake: call ``unstake(address receiver)``."""
+        from almanak.framework.models.reproduction_bundle import ActionBundle
+
+        result = self.complete_unstake(receiver=self.wallet_address)
+        if not result.success or result.tx_data is None:
+            return ActionBundle(
+                intent_type="UNSTAKE",
+                transactions=[],
+                metadata={
+                    "error": result.error or "complete_unstake failed",
+                    "protocol": "ethena",
+                    "phase": "complete",
+                },
+            )
+
+        return ActionBundle(
+            intent_type="UNSTAKE",
+            transactions=[
+                {
+                    "to": result.tx_data["to"],
+                    "value": result.tx_data["value"],
+                    "data": result.tx_data["data"],
+                    "gas_estimate": result.gas_estimate,
+                    "description": result.description,
+                    "action_type": "unstake_complete",
+                }
+            ],
+            metadata={
+                "protocol": "ethena",
+                "phase": "complete",
+                "receiver": self.wallet_address,
+                "chain": self.chain,
+                "note": "Phase 2: unstake(address receiver) called after cooldown expired.",
+            },
+        )
+
     def compile_unstake_intent(
         self,
         intent: UnstakeIntent,
@@ -475,14 +512,14 @@ class EthenaAdapter:
         """Compile an UnstakeIntent to an ActionBundle.
 
         This method converts a high-level UnstakeIntent into executable transaction
-        data. For Ethena, this initiates the cooldown period for unstaking sUSDe.
+        data. For Ethena, this supports two phases via ``protocol_params``:
 
-        Note: Ethena unstaking is a two-phase process:
-        1. Initiate cooldown: Call cooldownAssets() to start the 7-day cooldown
-        2. Complete unstake: Call unstake() after cooldown expires to receive USDe
-
-        This method handles phase 1 (initiate cooldown). Phase 2 requires a separate
-        transaction after the cooldown period has elapsed.
+        Phase 1 (default, ``protocol_params={"phase": "cooldown"}``):
+            Initiates the 7-day cooldown by calling ``cooldownAssets(uint256)``.
+        Phase 2 (``protocol_params={"phase": "complete"}``):
+            Completes the withdrawal after cooldown by calling ``unstake(address)``.
+            Only valid after cooldown has elapsed (use Anvil ``evm_increaseTime``
+            for testing).
 
         Args:
             intent: The UnstakeIntent to compile
@@ -495,6 +532,17 @@ class EthenaAdapter:
             ValueError: If amount="all" is not resolved before compilation
         """
         from almanak.framework.models.reproduction_bundle import ActionBundle
+
+        # Route to phase 2 (complete unstake) when requested via protocol_params
+        phase = (intent.protocol_params or {}).get("phase", "cooldown")
+        if phase not in ("cooldown", "complete"):
+            raise ValueError(f"Invalid Ethena unstake phase: {phase!r}. Must be 'cooldown' or 'complete'.")
+        if phase == "complete":
+            if intent.amount != "all":
+                raise ValueError(
+                    "Ethena complete unstake withdraws the full matured cooldown balance; use amount='all'."
+                )
+            return self._compile_complete_unstake(intent)
 
         # Validate amount is resolved
         if intent.amount == "all":

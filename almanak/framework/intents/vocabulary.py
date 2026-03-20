@@ -1457,6 +1457,7 @@ class UnstakeIntent(AlmanakImmutableModel):
     chain: str | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
+    protocol_params: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def validate_unstake_intent(self) -> "UnstakeIntent":
@@ -2873,6 +2874,7 @@ class Intent:
         token_in: str,
         amount: ChainedAmount,
         chain: str | None = None,
+        protocol_params: "dict[str, Any] | None" = None,
     ) -> UnstakeIntent:
         """Create an unstake intent for withdrawing from liquid staking protocols.
 
@@ -2915,6 +2917,7 @@ class Intent:
             token_in=token_in,
             amount=amount,
             chain=chain,
+            protocol_params=protocol_params,
         )
 
     @staticmethod
