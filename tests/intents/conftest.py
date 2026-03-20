@@ -237,10 +237,10 @@ CHAIN_CONFIGS = {
             "USDT": "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE",
         },
         "balance_slots": {
-            "WMNT": 0,
-            "USDC": 0,
-            "WETH": 0,
-            "USDT": 0,
+            "WMNT": 0,  # Unused — wraps from native MNT
+            "USDC": 9,  # Bridged USDC uses slot 9 (verified via cast index + cast storage)
+            "WETH": 0,  # L2 predeploy WETH uses slot 0
+            "USDT": 0,  # Bridged USDT uses slot 0
         },
     },
 }
