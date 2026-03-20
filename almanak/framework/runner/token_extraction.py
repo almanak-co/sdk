@@ -57,12 +57,15 @@ def extract_token_symbols(intent: Any, *, _depth: int = 0) -> list[str]:
         if _is_symbol(val):
             symbols.append(val.strip())
 
-    # Parse pool name (e.g., "WETH/USDC") for LP intents
+    # Parse pool name (e.g., "WETH/USDC/500") for LP intents
     pool = _get("pool")
     if isinstance(pool, str) and "/" in pool:
         for part in pool.split("/"):
             # Strip whitespace and common pool decorations (e.g., "USDC (0.05%)")
             part = part.strip().split("(")[0].split(" ")[0].strip()
+            # Skip numeric parts (fee tiers like "500", "3000", bin steps like "20")
+            if part.isdigit():
+                continue
             if _is_symbol(part):
                 symbols.append(part)
 

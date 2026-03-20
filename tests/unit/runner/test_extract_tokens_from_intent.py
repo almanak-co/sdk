@@ -105,3 +105,30 @@ class TestExtractTokensFromIntent:
         intent = Intent.hold(reason="waiting")
         tokens = _extract_tokens_from_intent(intent)
         assert tokens == []
+
+    def test_lp_intent_skips_fee_tier_in_pool_string(self):
+        """Pool strings like 'WETH/USDC/500' should not extract '500' as a token."""
+        intent = Intent.lp_open(
+            pool="WETH/USDC/500",
+            amount0=Decimal("1"),
+            amount1=Decimal("2000"),
+            range_lower=Decimal("1500"),
+            range_upper=Decimal("2500"),
+        )
+        tokens = _extract_tokens_from_intent(intent)
+        assert "WETH" in tokens
+        assert "USDC" in tokens
+        assert "500" not in tokens
+
+    def test_lp_intent_skips_various_fee_tiers(self):
+        """Fee tiers (500, 3000, 10000) and bin steps (20) should all be filtered."""
+        for fee in ["500", "3000", "10000", "20"]:
+            intent = Intent.lp_open(
+                pool=f"WETH/USDT/{fee}",
+                amount0=Decimal("1"),
+                amount1=Decimal("2000"),
+                range_lower=Decimal("1500"),
+                range_upper=Decimal("2500"),
+            )
+            tokens = _extract_tokens_from_intent(intent)
+            assert fee not in tokens, f"Fee tier '{fee}' should not be extracted as a token"
