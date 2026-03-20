@@ -183,7 +183,7 @@ KNOWN_BALANCE_SLOTS: dict[str, dict[str, int]] = {
     "ethereum": {"USDC": 9, "WETH": 3, "USDT": 2, "DAI": 2, "WBTC": 0, "wstETH": 0},
     "base": {"USDC": 9, "WETH": 3, "USDbC": 9, "DAI": 0, "wstETH": 1},
     "avalanche": {"USDC": 9, "WAVAX": 3, "USDT": 2, "USDC.e": 0},
-    "optimism": {"USDC": 9, "WETH": 3, "USDT": 2, "USDC.e": 0, "OP": 0},
+    "optimism": {"USDC": 9, "WETH": 3, "USDT": 0, "USDC.e": 0, "OP": 0},
     "polygon": {"USDC": 9, "WETH": 3, "USDT": 2, "WMATIC": 3, "USDC.e": 0},
     "bsc": {"USDC": 1, "WBNB": 3, "USDT": 1, "BUSD": 0},
     "linea": {"USDC": 0, "WETH": 0, "USDT": 0},
