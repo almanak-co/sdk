@@ -2234,6 +2234,44 @@ class IntentCompiler:
             logger.debug(f"No API key configured, using Anvil RPC for {self.chain}: {rpc_url}")
             return rpc_url
 
+    def _is_wallet_contract(self) -> bool | None:
+        """Check if the wallet address is a contract (has bytecode).
+
+        Uses eth_getCode via RPC to check if the wallet has deployed bytecode.
+        Flash loans require a contract wallet to handle callbacks.
+
+        Returns:
+            True if contract, False if EOA, None if RPC unavailable.
+        """
+        rpc_url = self._get_chain_rpc_url()
+        if not rpc_url:
+            return None
+
+        try:
+            import httpx
+
+            response = httpx.post(
+                rpc_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "eth_getCode",
+                    "params": [self.wallet_address, "latest"],
+                    "id": 1,
+                },
+                timeout=self.rpc_timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, dict) or data.get("error") is not None:
+                logger.debug("eth_getCode RPC error: %s", data)
+                return None
+            code = data.get("result")
+            # EOA wallets return "0x" (empty bytecode)
+            return code not in ("0x", "0x0", "", None)
+        except Exception as e:
+            logger.debug(f"Failed to check wallet bytecode via eth_getCode: {e}")
+            return None
+
     def _validate_pool(self, result: "PoolValidationResult", intent_id: str) -> CompilationResult | None:
         """Check pool validation result and return FAILED CompilationResult if pool doesn't exist.
 
@@ -10082,6 +10120,31 @@ class IntentCompiler:
         warnings: list[str] = []
 
         try:
+            # Step 0: Check wallet can handle flash loan callbacks
+            # Flash loans require a contract wallet (e.g., Safe) because the lending
+            # protocol calls back into the recipient to execute callback operations.
+            # EOA wallets have no bytecode and cannot receive these callbacks.
+            # Skip check for zero-address sentinel (used by permission discovery synthetic intents).
+            _zero_addr = "0x" + "0" * 40
+            is_contract = True if self.wallet_address == _zero_addr else self._is_wallet_contract()
+            if is_contract is False:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        "Flash loans require a receiver contract that implements the provider callback "
+                        "(e.g., Balancer's receiveFlashLoan or Aave's executeOperation). "
+                        f"Wallet {self.wallet_address} is an EOA (no bytecode). "
+                        "Flash-loan providers call back into the recipient during the same transaction, "
+                        "which EOAs cannot handle. Deploy a compatible flash-loan receiver contract."
+                    ),
+                    intent_id=intent.intent_id,
+                )
+            elif is_contract is None:
+                warnings.append(
+                    "Could not verify wallet bytecode (no RPC available). "
+                    "Flash loans will revert if the wallet is an EOA (not a contract)."
+                )
+
             # Step 1: Validate and resolve provider
             if intent.provider == "auto":
                 # Use FlashLoanSelector to find optimal provider

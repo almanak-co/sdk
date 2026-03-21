@@ -16,6 +16,14 @@ BALANCER FLASH LOANS:
 - Borrowed via Balancer Vault (same address on all chains)
 - Must repay borrowed amount in same transaction (no fee)
 - Ideal for arbitrage where profit covers gas only
+
+IMPORTANT LIMITATION:
+Flash loans require a receiver contract that implements the provider callback
+(e.g., Balancer's receiveFlashLoan or Aave's executeOperation). The flash loan
+provider calls back into the recipient during the same transaction, which reverts
+on EOA wallets (no bytecode). The compiler will detect this and fail at compile
+time with a clear error. To run this strategy, deploy a compatible flash-loan
+receiver contract.
 """
 
 import logging
