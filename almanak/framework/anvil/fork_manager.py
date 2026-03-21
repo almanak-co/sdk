@@ -527,33 +527,45 @@ class RollingForkManager:
     async def reset_to_latest(self) -> bool:
         """Reset the fork to the latest mainnet block.
 
-        This stops the current fork and starts a new one forking from
-        the latest block on mainnet. Useful for keeping paper trading
-        in sync with real-time market conditions.
+        Uses Anvil's anvil_reset RPC to re-fork in-place without restarting the
+        process. This is much faster and avoids upstream RPC rate limiting from
+        repeated process startups. Falls back to stop/start if anvil_reset fails.
 
         Returns:
             True if reset successful, False otherwise
         """
-        logger.info("Resetting fork to latest block...")
+        # Try in-place reset via anvil_reset RPC (preferred — no process restart)
+        if self.is_running:
+            try:
+                success, _ = await self._rpc_call_raw(
+                    "anvil_reset",
+                    [{"forking": {"jsonRpcUrl": self.rpc_url}}],
+                )
+                if success:
+                    # Update current block number
+                    block_hex = await self._rpc_call("eth_blockNumber", [])
+                    if block_hex:
+                        self._current_block = int(block_hex, 16)
+                    logger.info(f"Fork reset in-place to block {self._current_block}")
+                    return True
+                else:
+                    logger.warning("anvil_reset RPC failed, falling back to stop/start")
+            except Exception as e:
+                logger.warning(f"anvil_reset failed ({e}), falling back to stop/start")
 
-        # Store current fork_block_number setting
+        # Fallback: stop and restart the process
+        logger.info("Resetting fork via process restart...")
         original_fork_block = self.fork_block_number
 
         try:
-            # Stop current fork
             await self.stop()
-
-            # Start new fork at latest block (clear any specific block setting)
             self.fork_block_number = None
-
-            # Start fresh fork
             success = await self.start()
 
             if success:
                 logger.info(f"Fork reset to latest block: {self._current_block}")
             else:
                 logger.error("Failed to reset fork to latest block")
-                # Restore original setting
                 self.fork_block_number = original_fork_block
 
             return success

@@ -1311,10 +1311,17 @@ class PaperTrader:
         )
 
         try:
-            # Check fork is running
+            # Check fork is running, attempt recovery if dead
             if not self.fork_manager.is_running:
-                logger.warning(f"[{self._backtest_id}] Fork not running, skipping tick")
-                return None
+                logger.warning(f"[{self._backtest_id}] Fork not running, attempting recovery...")
+                recovered = await self.fork_manager.reset_to_latest()
+                if recovered:
+                    await self._initialize_orchestrator()
+                    await self._sync_wallet_to_fork()
+                    logger.info(f"[{self._backtest_id}] Fork recovered successfully")
+                else:
+                    logger.error(f"[{self._backtest_id}] Fork recovery failed, skipping tick")
+                    return None
 
             # Fetch prices for portfolio tokens (cached for IntentCompiler use)
             token_prices = await self._get_portfolio_prices()
@@ -1637,9 +1644,11 @@ class PaperTrader:
         now = datetime.now(UTC)
         value = self._calculate_portfolio_value()
 
+        eth_price = self._cached_prices.get("ETH") or self._cached_prices.get("WETH")
         point = EquityPoint(
             timestamp=now,
             value_usd=value,
+            eth_price_usd=eth_price,
         )
 
         self._equity_curve.append(point)

@@ -280,7 +280,7 @@ class TradeHistoryWriter:
         }
         try:
             with open(self.path, "a") as f:
-                f.write(json.dumps(record) + "\n")
+                f.write(json.dumps(record, default=str) + "\n")
             self._trade_count += 1
             logger.debug(f"Wrote trade {self._trade_count} to {self.path}")
         except OSError as e:
@@ -306,7 +306,7 @@ class TradeHistoryWriter:
         }
         try:
             with open(self.path, "a") as f:
-                f.write(json.dumps(record) + "\n")
+                f.write(json.dumps(record, default=str) + "\n")
             self._error_count += 1
             logger.debug(f"Wrote error {self._error_count} to {self.path}")
         except OSError as e:
@@ -413,7 +413,7 @@ class PaperTraderState:
     errors: list[PaperTradeError]
     current_balances: dict[str, Decimal]
     initial_balances: dict[str, Decimal]
-    equity_curve: list[tuple[datetime, Decimal]]
+    equity_curve: list[tuple[datetime, Decimal, Decimal | None]]  # (timestamp, value_usd, eth_price_usd)
     config: dict[str, Any]
     pid: int
     status: str = "running"  # running, stopped, error, resumed
@@ -436,7 +436,10 @@ class PaperTraderState:
             "errors": [e.to_dict() for e in self.errors],
             "current_balances": {k: str(v) for k, v in self.current_balances.items()},
             "initial_balances": {k: str(v) for k, v in self.initial_balances.items()},
-            "equity_curve": [{"timestamp": ts.isoformat(), "value": str(val)} for ts, val in self.equity_curve],
+            "equity_curve": [
+                {"timestamp": ts.isoformat(), "value": str(val), **({"eth_price_usd": str(ep)} if ep else {})}
+                for ts, val, ep in self.equity_curve
+            ],
             "config": self.config,
             "pid": self.pid,
             "status": self.status,
@@ -473,7 +476,12 @@ class PaperTraderState:
             current_balances={k: Decimal(v) for k, v in data.get("current_balances", {}).items()},
             initial_balances={k: Decimal(v) for k, v in data.get("initial_balances", {}).items()},
             equity_curve=[
-                (datetime.fromisoformat(p["timestamp"]), Decimal(p["value"])) for p in data.get("equity_curve", [])
+                (
+                    datetime.fromisoformat(p["timestamp"]),
+                    Decimal(p["value"]),
+                    Decimal(p["eth_price_usd"]) if "eth_price_usd" in p else None,
+                )
+                for p in data.get("equity_curve", [])
             ],
             config=data.get("config", {}),
             pid=data["pid"],
@@ -502,7 +510,7 @@ class PaperTraderState:
         temp_path = path.with_suffix(".tmp")
         try:
             with open(temp_path, "w") as f:
-                json.dump(self.to_dict(), f, indent=2)
+                json.dump(self.to_dict(), f, indent=2, default=str)
             temp_path.replace(path)
             logger.debug(f"Saved state to {path}")
         except OSError as e:
@@ -733,6 +741,7 @@ class BackgroundPaperTrader:
             raise RuntimeError(f"Paper Trader for {self.config.strategy_id} already running (PID: {existing_pid})")
 
         # Create the background process
+        # Pass raw rpc_url separately since to_dict() masks it for display
         self._process = multiprocessing.Process(
             target=_run_background_paper_trader,
             args=(
@@ -742,7 +751,7 @@ class BackgroundPaperTrader:
                 str(self.state_dir),
                 self.save_interval_seconds,
             ),
-            kwargs={"strategy_config": strategy_config},
+            kwargs={"strategy_config": strategy_config, "raw_rpc_url": self.config.rpc_url},
             daemon=False,  # Not daemon so it can continue after parent exits
         )
 
@@ -1022,6 +1031,7 @@ def _run_background_paper_trader(
     save_interval_seconds: int,
     resume: bool = False,
     strategy_config: dict[str, Any] | None = None,
+    raw_rpc_url: str | None = None,
 ) -> None:
     """Entry point for the background Paper Trader process.
 
@@ -1041,11 +1051,15 @@ def _run_background_paper_trader(
         save_interval_seconds: Interval between state saves
         resume: Whether to resume from saved state (default: False)
         strategy_config: Strategy configuration dict (from config.json).
+        raw_rpc_url: Unmasked RPC URL (to_dict masks it for display).
     """
     import asyncio
 
     # Convert paths
     state_path = Path(state_dir)
+    # Restore unmasked RPC URL before deserializing (to_dict masks it for display)
+    if raw_rpc_url:
+        config_dict["rpc_url"] = raw_rpc_url
     config = PaperTraderConfig.from_dict(config_dict)
 
     # Set up logging to file
@@ -1273,6 +1287,9 @@ def _run_background_paper_trader(
                 state.trades = trader._trades
                 state.errors = trader._errors
                 state.current_balances = dict(portfolio_tracker.current_balances)
+                state.equity_curve = [
+                    (p.timestamp, p.value_usd, getattr(p, "eth_price_usd", None)) for p in trader._equity_curve
+                ]
 
                 # Periodic save of full state
                 current_time = time.time()

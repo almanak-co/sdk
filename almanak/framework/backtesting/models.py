@@ -1438,13 +1438,17 @@ class EquityPoint:
 
     timestamp: datetime
     value_usd: Decimal
+    eth_price_usd: Decimal | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
-        return {
+        d = {
             "timestamp": self.timestamp.isoformat(),
             "value_usd": str(self.value_usd),
         }
+        if self.eth_price_usd is not None:
+            d["eth_price_usd"] = str(self.eth_price_usd)
+        return d
 
 
 @dataclass
@@ -2384,6 +2388,7 @@ class BacktestResult:
                 EquityPoint(
                     timestamp=datetime.fromisoformat(e_data["timestamp"]),
                     value_usd=Decimal(e_data["value_usd"]),
+                    eth_price_usd=Decimal(e_data["eth_price_usd"]) if "eth_price_usd" in e_data else None,
                 )
             )
 
