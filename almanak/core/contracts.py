@@ -364,13 +364,13 @@ AAVE_V3: dict[str, dict[str, str]] = {
     },
     "bsc": {
         "pool": "0x6807dc923806fE8Fd134338EABCA509979a7e0cB",
-        "pool_data_provider": "0x41585C50524fb8c3899B43D7D797d9486AAc94DB",
+        "pool_data_provider": "0xc90Df74A7c16245c5F5C5870327Ceb38Fe5d5328",
         "oracle": "0x39bc1bfDa2130d6Bb6DBEfd366939b4c7aa7C697",
     },
     "linea": {
         "pool": "0xc47b8C00b0f69a36fa203Ffeac0334874574a8Ac",
-        "pool_data_provider": "0x2D97F8FA96886Fd923c065F5457F9DDd494e3877",
-        "oracle": "0x3c6Cd9Cc7c7a4c2Cf5a82734CD249D7D593354dA",
+        "pool_data_provider": "0x47cd4b507B81cB831669c71c7077f4daF6762FF4",
+        "oracle": "0xCFDAdA7DCd2e785cF706BaDBC2B8Af5084d595e9",
     },
     "plasma": {
         "pool": "0x925a2A7214Ed92428B5b1B090F80b25700095e12",
