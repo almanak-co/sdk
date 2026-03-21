@@ -7236,11 +7236,19 @@ class IntentCompiler:
                 else:
                     warnings.append("No collateral supplied - borrowing against existing collateral")
 
+                # Resolve interest rate mode: use intent value or default to variable
+                aave_borrow_rate_mode = AAVE_VARIABLE_RATE_MODE
+                borrow_rate_mode_label = "variable"
+                if intent.interest_rate_mode is not None:
+                    if intent.interest_rate_mode == "stable":
+                        aave_borrow_rate_mode = AAVE_STABLE_RATE_MODE
+                        borrow_rate_mode_label = "stable"
+
                 # Build borrow TX
                 borrow_calldata = adapter.get_borrow_calldata(
                     asset=borrow_token.address,
                     amount=borrow_amount,
-                    interest_rate_mode=AAVE_VARIABLE_RATE_MODE,
+                    interest_rate_mode=aave_borrow_rate_mode,
                     on_behalf_of=self.wallet_address,
                 )
 
@@ -7250,7 +7258,7 @@ class IntentCompiler:
                     data="0x" + borrow_calldata.hex(),
                     gas_estimate=adapter.estimate_borrow_gas(),
                     description=(
-                        f"Borrow {self._format_amount(borrow_amount, borrow_token.decimals)} {borrow_token.symbol} (variable rate)"
+                        f"Borrow {self._format_amount(borrow_amount, borrow_token.decimals)} {borrow_token.symbol} ({borrow_rate_mode_label} rate)"
                     ),
                     tx_type="lending_borrow",
                 )
@@ -7269,7 +7277,7 @@ class IntentCompiler:
                         "borrow_token": borrow_token.to_dict(),
                         "collateral_amount": str(collateral_amount),
                         "borrow_amount": str(borrow_amount),
-                        "interest_rate_mode": AAVE_VARIABLE_RATE_MODE,
+                        "interest_rate_mode": aave_borrow_rate_mode,
                         "chain": self.chain,
                     },
                 )
@@ -7293,6 +7301,7 @@ class IntentCompiler:
             elif protocol_lower == "spark":
                 from ..connectors.spark import (
                     SPARK_POOL_ADDRESSES,
+                    SPARK_STABLE_RATE_MODE,
                     SPARK_VARIABLE_RATE_MODE,
                     SparkAdapter,
                     SparkConfig,
@@ -7391,11 +7400,19 @@ class IntentCompiler:
                 else:
                     warnings.append("No collateral supplied - borrowing against existing collateral")
 
+                # Resolve interest rate mode: use intent value or default to variable
+                spark_borrow_rate_mode = SPARK_VARIABLE_RATE_MODE
+                spark_borrow_rate_label = "variable"
+                if intent.interest_rate_mode is not None:
+                    if intent.interest_rate_mode == "stable":
+                        spark_borrow_rate_mode = SPARK_STABLE_RATE_MODE
+                        spark_borrow_rate_label = "stable"
+
                 # Build borrow TX via Spark adapter
                 borrow_result = spark_adapter.borrow(
                     asset=borrow_token.address,
                     amount=intent.borrow_amount,
-                    interest_rate_mode=SPARK_VARIABLE_RATE_MODE,
+                    interest_rate_mode=spark_borrow_rate_mode,
                     on_behalf_of=self.wallet_address,
                 )
 
@@ -7417,7 +7434,7 @@ class IntentCompiler:
                     data=borrow_data,
                     gas_estimate=borrow_result.gas_estimate,
                     description=(
-                        f"Borrow {self._format_amount(borrow_amount, borrow_token.decimals)} {borrow_token.symbol} from Spark (variable rate)"
+                        f"Borrow {self._format_amount(borrow_amount, borrow_token.decimals)} {borrow_token.symbol} from Spark ({spark_borrow_rate_label} rate)"
                     ),
                     tx_type="lending_borrow",
                 )
@@ -7436,7 +7453,7 @@ class IntentCompiler:
                         "borrow_token": borrow_token.to_dict(),
                         "collateral_amount": str(collateral_amount),
                         "borrow_amount": str(borrow_amount),
-                        "interest_rate_mode": SPARK_VARIABLE_RATE_MODE,
+                        "interest_rate_mode": spark_borrow_rate_mode,
                         "chain": self.chain,
                     },
                 )
@@ -7977,10 +7994,18 @@ class IntentCompiler:
                     if weth_address:
                         actual_repay_address = weth_address
 
+                # Resolve interest rate mode: use intent value or default to variable
+                aave_rate_mode = AAVE_VARIABLE_RATE_MODE
+                rate_mode_label = "variable"
+                if intent.interest_rate_mode is not None:
+                    if intent.interest_rate_mode == "stable":
+                        aave_rate_mode = AAVE_STABLE_RATE_MODE
+                        rate_mode_label = "stable"
+
                 repay_calldata = adapter.get_repay_calldata(
                     asset=actual_repay_address,
                     amount=repay_amount,
-                    interest_rate_mode=AAVE_VARIABLE_RATE_MODE,
+                    interest_rate_mode=aave_rate_mode,
                     on_behalf_of=self.wallet_address,
                 )
 
@@ -7989,7 +8014,7 @@ class IntentCompiler:
                     value=0,
                     data="0x" + repay_calldata.hex(),
                     gas_estimate=adapter.estimate_repay_gas(),
-                    description=(f"Repay {amount_description} {repay_token.symbol} (variable rate)"),
+                    description=(f"Repay {amount_description} {repay_token.symbol} ({rate_mode_label} rate)"),
                     tx_type="lending_repay",
                 )
                 transactions.append(repay_tx)
@@ -8005,7 +8030,7 @@ class IntentCompiler:
                         "repay_token": repay_token.to_dict(),
                         "repay_amount": str(repay_amount),
                         "repay_full": intent.repay_full,
-                        "interest_rate_mode": AAVE_VARIABLE_RATE_MODE,
+                        "interest_rate_mode": aave_rate_mode,
                         "chain": self.chain,
                     },
                 )
@@ -8025,6 +8050,7 @@ class IntentCompiler:
             elif protocol_lower == "spark":
                 from ..connectors.spark import (
                     SPARK_POOL_ADDRESSES,
+                    SPARK_STABLE_RATE_MODE,
                     SPARK_VARIABLE_RATE_MODE,
                     SparkAdapter,
                     SparkConfig,
@@ -8072,11 +8098,19 @@ class IntentCompiler:
                         transactions.extend(approve_txs)
                         warnings.append("Native token debt: using WETH for repayment")
 
+                # Resolve interest rate mode: use intent value or default to variable
+                spark_repay_rate_mode = SPARK_VARIABLE_RATE_MODE
+                spark_repay_rate_label = "variable"
+                if intent.interest_rate_mode is not None:
+                    if intent.interest_rate_mode == "stable":
+                        spark_repay_rate_mode = SPARK_STABLE_RATE_MODE
+                        spark_repay_rate_label = "stable"
+
                 # Build repay TX via Spark adapter
                 repay_result = spark_adapter.repay(
                     asset=actual_repay_address,
                     amount=repay_amount_decimal if repay_amount_decimal else Decimal("0"),
-                    interest_rate_mode=SPARK_VARIABLE_RATE_MODE,
+                    interest_rate_mode=spark_repay_rate_mode,
                     on_behalf_of=self.wallet_address,
                     repay_all=intent.repay_full,
                 )
@@ -8099,7 +8133,7 @@ class IntentCompiler:
                     data=repay_data,
                     gas_estimate=repay_result.gas_estimate,
                     description=repay_result.description
-                    or f"Repay {amount_description} {repay_token.symbol} to Spark (variable rate)",
+                    or f"Repay {amount_description} {repay_token.symbol} to Spark ({spark_repay_rate_label} rate)",
                     tx_type="lending_repay",
                 )
                 transactions.append(repay_tx)
@@ -8115,7 +8149,7 @@ class IntentCompiler:
                         "repay_token": repay_token.to_dict(),
                         "repay_amount": str(repay_amount),
                         "repay_full": intent.repay_full,
-                        "interest_rate_mode": SPARK_VARIABLE_RATE_MODE,
+                        "interest_rate_mode": spark_repay_rate_mode,
                         "chain": self.chain,
                     },
                 )

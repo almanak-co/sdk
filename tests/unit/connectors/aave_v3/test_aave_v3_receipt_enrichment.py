@@ -20,7 +20,10 @@ import pytest
 from almanak.framework.connectors.aave_v3.receipt_parser import (
     EVENT_TOPICS,
     AaveV3ReceiptParser,
+    BorrowAmountsResult,
+    RepayAmountsResult,
     SupplyAmountsResult,
+    WithdrawAmountsResult,
 )
 
 
@@ -578,3 +581,249 @@ class TestExtractATokenBurned:
     def test_a_token_burned_in_supported_extractions(self) -> None:
         """a_token_burned should be declared in SUPPORTED_EXTRACTIONS."""
         assert "a_token_burned" in AaveV3ReceiptParser.SUPPORTED_EXTRACTIONS
+
+
+# =============================================================================
+# Tests: extract_borrow_amounts (VIB-1641)
+# =============================================================================
+
+
+class TestExtractBorrowAmounts:
+    """Tests for the aggregated borrow_amounts extraction method."""
+
+    def test_returns_borrow_amounts_result(self) -> None:
+        """Should return a BorrowAmountsResult with all fields populated."""
+        parser = AaveV3ReceiptParser()
+        receipt = _make_borrow_receipt(borrow_amount=1000000000)
+        result = parser.extract_borrow_amounts(receipt)
+        assert result is not None
+        assert isinstance(result, BorrowAmountsResult)
+        assert result.borrow_amount == 1000000000
+        assert result.debt_token is not None
+        assert result.debt_token.lower() == DEBT_TOKEN_ADDRESS.lower()
+
+    def test_includes_borrow_rate(self) -> None:
+        """Should include borrow_rate when available."""
+        parser = AaveV3ReceiptParser()
+        receipt = _make_borrow_receipt(borrow_rate_ray=50000000000000000000000000)
+        result = parser.extract_borrow_amounts(receipt)
+        assert result is not None
+        assert result.borrow_rate is not None
+        assert Decimal("0.04") < result.borrow_rate < Decimal("0.06")
+
+    def test_returns_none_when_no_borrow_event(self) -> None:
+        """Should return None if receipt has no Borrow event."""
+        parser = AaveV3ReceiptParser()
+        receipt = _make_supply_receipt()
+        result = parser.extract_borrow_amounts(receipt)
+        assert result is None
+
+    def test_returns_none_for_empty_receipt(self) -> None:
+        """Should return None for receipt with no logs."""
+        parser = AaveV3ReceiptParser()
+        receipt = {"transactionHash": "0x" + "00" * 32, "blockNumber": 1, "status": 1, "logs": []}
+        result = parser.extract_borrow_amounts(receipt)
+        assert result is None
+
+    def test_borrow_amounts_in_supported_extractions(self) -> None:
+        """borrow_amounts should be declared in SUPPORTED_EXTRACTIONS."""
+        assert "borrow_amounts" in AaveV3ReceiptParser.SUPPORTED_EXTRACTIONS
+
+    def test_to_dict(self) -> None:
+        """BorrowAmountsResult.to_dict() should serialize correctly."""
+        result = BorrowAmountsResult(
+            borrow_amount=1000000000,
+            borrow_rate=Decimal("0.05"),
+            debt_token="0xDebt",
+        )
+        d = result.to_dict()
+        assert d["borrow_amount"] == 1000000000
+        assert d["borrow_rate"] == "0.05"
+        assert d["debt_token"] == "0xDebt"
+
+
+# =============================================================================
+# Tests: extract_repay_amounts (VIB-1641)
+# =============================================================================
+
+
+class TestExtractRepayAmounts:
+    """Tests for the aggregated repay_amounts extraction method."""
+
+    def test_returns_repay_amounts_result(self) -> None:
+        """Should return a RepayAmountsResult with repay_amount populated."""
+        parser = AaveV3ReceiptParser()
+        receipt = _make_repay_receipt(repay_amount=500000000)
+        result = parser.extract_repay_amounts(receipt)
+        assert result is not None
+        assert isinstance(result, RepayAmountsResult)
+        assert result.repay_amount == 500000000
+        # remaining_debt is always None (requires on-chain query)
+        assert result.remaining_debt is None
+
+    def test_returns_none_when_no_repay_event(self) -> None:
+        """Should return None if receipt has no Repay event."""
+        parser = AaveV3ReceiptParser()
+        receipt = _make_supply_receipt()
+        result = parser.extract_repay_amounts(receipt)
+        assert result is None
+
+    def test_returns_none_for_empty_receipt(self) -> None:
+        """Should return None for receipt with no logs."""
+        parser = AaveV3ReceiptParser()
+        receipt = {"transactionHash": "0x" + "00" * 32, "blockNumber": 1, "status": 1, "logs": []}
+        result = parser.extract_repay_amounts(receipt)
+        assert result is None
+
+    def test_repay_amounts_in_supported_extractions(self) -> None:
+        """repay_amounts should be declared in SUPPORTED_EXTRACTIONS."""
+        assert "repay_amounts" in AaveV3ReceiptParser.SUPPORTED_EXTRACTIONS
+
+    def test_to_dict(self) -> None:
+        """RepayAmountsResult.to_dict() should serialize correctly."""
+        result = RepayAmountsResult(repay_amount=500000000, remaining_debt=None)
+        d = result.to_dict()
+        assert d["repay_amount"] == 500000000
+        assert d["remaining_debt"] is None
+
+
+# =============================================================================
+# Tests: extract_withdraw_amounts (VIB-1641)
+# =============================================================================
+
+
+class TestExtractWithdrawAmounts:
+    """Tests for the aggregated withdraw_amounts extraction method."""
+
+    def test_returns_withdraw_amounts_result(self) -> None:
+        """Should return a WithdrawAmountsResult with all fields populated."""
+        parser = AaveV3ReceiptParser()
+        receipt = _make_withdraw_receipt(withdraw_amount=1000000000000000000)
+        result = parser.extract_withdraw_amounts(receipt)
+        assert result is not None
+        assert isinstance(result, WithdrawAmountsResult)
+        assert result.withdraw_amount == 1000000000000000000
+        assert result.a_token_burned == 1000000000000000000
+
+    def test_returns_none_when_no_withdraw_event(self) -> None:
+        """Should return None if receipt has no Withdraw event."""
+        parser = AaveV3ReceiptParser()
+        receipt = _make_supply_receipt()
+        result = parser.extract_withdraw_amounts(receipt)
+        assert result is None
+
+    def test_returns_none_for_empty_receipt(self) -> None:
+        """Should return None for receipt with no logs."""
+        parser = AaveV3ReceiptParser()
+        receipt = {"transactionHash": "0x" + "00" * 32, "blockNumber": 1, "status": 1, "logs": []}
+        result = parser.extract_withdraw_amounts(receipt)
+        assert result is None
+
+    def test_withdraw_amounts_without_atoken_burn(self) -> None:
+        """Should return result with a_token_burned=None when burn event missing."""
+        parser = AaveV3ReceiptParser()
+        receipt = _make_withdraw_receipt(include_atoken_burn=False)
+        result = parser.extract_withdraw_amounts(receipt)
+        assert result is not None
+        assert result.withdraw_amount == 1000000000000000000
+        assert result.a_token_burned is None
+
+    def test_withdraw_amounts_in_supported_extractions(self) -> None:
+        """withdraw_amounts should be declared in SUPPORTED_EXTRACTIONS."""
+        assert "withdraw_amounts" in AaveV3ReceiptParser.SUPPORTED_EXTRACTIONS
+
+    def test_to_dict(self) -> None:
+        """WithdrawAmountsResult.to_dict() should serialize correctly."""
+        result = WithdrawAmountsResult(withdraw_amount=1000000000000000000, a_token_burned=999999999999999999)
+        d = result.to_dict()
+        assert d["withdraw_amount"] == 1000000000000000000
+        assert d["a_token_burned"] == 999999999999999999
+
+
+# =============================================================================
+# Tests: RepayIntent interest_rate_mode (VIB-1640)
+# =============================================================================
+
+
+class TestRepayIntentInterestRateMode:
+    """Tests for interest_rate_mode parameter on RepayIntent."""
+
+    def test_repay_accepts_variable_interest_rate_mode(self) -> None:
+        """Intent.repay() should accept interest_rate_mode='variable'."""
+        from almanak.framework.intents.vocabulary import Intent
+
+        intent = Intent.repay(
+            protocol="aave_v3",
+            token="USDC",
+            amount=Decimal("500"),
+            interest_rate_mode="variable",
+        )
+        assert intent.interest_rate_mode == "variable"
+
+    def test_repay_accepts_stable_interest_rate_mode(self) -> None:
+        """Intent.repay() should accept interest_rate_mode='stable'."""
+        from almanak.framework.intents.vocabulary import Intent
+
+        intent = Intent.repay(
+            protocol="aave_v3",
+            token="USDC",
+            amount=Decimal("500"),
+            interest_rate_mode="stable",
+        )
+        assert intent.interest_rate_mode == "stable"
+
+    def test_repay_defaults_to_none_interest_rate_mode(self) -> None:
+        """Intent.repay() should default interest_rate_mode to None."""
+        from almanak.framework.intents.vocabulary import Intent
+
+        intent = Intent.repay(
+            protocol="aave_v3",
+            token="USDC",
+            amount=Decimal("500"),
+        )
+        assert intent.interest_rate_mode is None
+
+    def test_repay_rejects_invalid_interest_rate_mode(self) -> None:
+        """Intent.repay() should reject invalid interest_rate_mode values."""
+        from almanak.framework.intents.vocabulary import Intent
+
+        with pytest.raises(ValueError):
+            Intent.repay(
+                protocol="aave_v3",
+                token="USDC",
+                amount=Decimal("500"),
+                interest_rate_mode="fixed",  # type: ignore[arg-type]
+            )
+
+    def test_repay_rejects_interest_rate_mode_for_unsupported_protocol(self) -> None:
+        """Morpho does not support interest_rate_mode."""
+        from almanak.framework.intents.vocabulary import Intent
+
+        with pytest.raises(ValueError, match="does not support interest rate mode"):
+            Intent.repay(
+                protocol="morpho_blue",
+                token="USDC",
+                amount=Decimal("500"),
+                interest_rate_mode="variable",
+                market_id="0x" + "ab" * 32,
+            )
+
+    def test_borrow_and_repay_api_symmetry(self) -> None:
+        """BorrowIntent and RepayIntent should both accept interest_rate_mode."""
+        from almanak.framework.intents.vocabulary import Intent
+
+        borrow = Intent.borrow(
+            protocol="aave_v3",
+            collateral_token="WETH",
+            collateral_amount=Decimal("1"),
+            borrow_token="USDC",
+            borrow_amount=Decimal("1000"),
+            interest_rate_mode="variable",
+        )
+        repay = Intent.repay(
+            protocol="aave_v3",
+            token="USDC",
+            amount=Decimal("500"),
+            interest_rate_mode="variable",
+        )
+        assert borrow.interest_rate_mode == repay.interest_rate_mode == "variable"

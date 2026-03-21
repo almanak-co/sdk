@@ -598,8 +598,8 @@ class BorrowIntent(AlmanakImmutableModel):
 
         The interest_rate_mode parameter is protocol-specific:
         - Aave V3: Supports 'variable' (default) and 'stable' modes
-        - Morpho: Does not support rate mode selection (parameter is ignored)
-        - Compound V3: Does not support rate mode selection (parameter is ignored)
+        - Morpho: Does not support rate mode selection (parameter is rejected)
+        - Compound V3: Does not support rate mode selection (parameter is rejected)
 
         The market_id parameter is required for protocols with isolated markets:
         - Morpho Blue: Required - identifies the specific lending market
@@ -699,6 +699,7 @@ class RepayIntent(AlmanakImmutableModel):
         token: Token to repay
         amount: Amount to repay, or "all" to use output from previous step
         repay_full: If True, repay the full outstanding debt
+        interest_rate_mode: Interest rate mode for protocols that support it (Aave: 'variable' | 'stable')
         chain: Optional target chain for execution (defaults to strategy's primary chain)
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
@@ -706,6 +707,12 @@ class RepayIntent(AlmanakImmutableModel):
     Note:
         When amount="all", the repay will use the entire output from the previous
         step in a sequence.
+
+        The interest_rate_mode parameter is protocol-specific:
+        - Aave V3: Supports 'variable' (default) and 'stable' modes. Must match the
+          rate mode used when borrowing.
+        - Morpho: Does not support rate mode selection (parameter is rejected)
+        - Compound V3: Does not support rate mode selection (parameter is rejected)
 
         The market_id parameter is required for protocols with isolated markets:
         - Morpho Blue: Required - identifies the specific lending market
@@ -716,6 +723,7 @@ class RepayIntent(AlmanakImmutableModel):
     token: str
     amount: PydanticChainedAmount
     repay_full: bool = False
+    interest_rate_mode: InterestRateMode | None = None
     market_id: str | None = None
     chain: str | None = None
     intent_id: str = Field(default_factory=default_intent_id)
@@ -746,6 +754,24 @@ class RepayIntent(AlmanakImmutableModel):
                     parameter="market_id",
                     value=self.market_id,
                     reason=f"Protocol '{self.protocol}' requires market_id for isolated lending markets",
+                )
+
+        # Validate interest_rate_mode if provided
+        if self.interest_rate_mode is not None:
+            if not capabilities.get("supports_interest_rate_mode", False):
+                raise InvalidProtocolParameterError(
+                    protocol=self.protocol,
+                    parameter="interest_rate_mode",
+                    value=self.interest_rate_mode,
+                    reason=f"Protocol '{self.protocol}' does not support interest rate mode selection",
+                )
+            valid_modes = capabilities.get("interest_rate_modes", [])
+            if self.interest_rate_mode not in valid_modes:
+                raise InvalidProtocolParameterError(
+                    protocol=self.protocol,
+                    parameter="interest_rate_mode",
+                    value=self.interest_rate_mode,
+                    reason=f"Valid modes for '{self.protocol}': {', '.join(valid_modes)}",
                 )
 
     @property
@@ -2466,6 +2492,7 @@ class Intent:
         token: str,
         amount: ChainedAmount,
         repay_full: bool = False,
+        interest_rate_mode: InterestRateMode | None = None,
         market_id: str | None = None,
         chain: str | None = None,
     ) -> RepayIntent:
@@ -2476,6 +2503,9 @@ class Intent:
             token: Token to repay
             amount: Amount to repay, or "all" to use previous step output
             repay_full: If True, repay the full outstanding debt
+            interest_rate_mode: Interest rate mode for protocols that support it.
+                Aave V3: 'variable' (default) or 'stable'. Must match the rate mode
+                used when borrowing.
             market_id: Market identifier for isolated lending protocols (e.g., Morpho Blue).
                 Required for morpho/morpho_blue, ignored for aave_v3.
             chain: Target chain for execution (defaults to strategy's primary chain)
@@ -2484,11 +2514,12 @@ class Intent:
             RepayIntent: The created repay intent
 
         Example:
-            # Repay 500 USDC on Aave
+            # Repay 500 USDC on Aave (variable rate)
             intent = Intent.repay(
                 protocol="aave_v3",
                 token="USDC",
                 amount=Decimal("500"),
+                interest_rate_mode="variable",
             )
 
             # Repay full debt on Morpho Blue
@@ -2505,6 +2536,7 @@ class Intent:
             token=token,
             amount=amount,
             repay_full=repay_full,
+            interest_rate_mode=interest_rate_mode,
             market_id=market_id,
             chain=chain,
         )

@@ -533,6 +533,78 @@ class SupplyAmountsResult:
 
 
 @dataclass
+class BorrowAmountsResult:
+    """Aggregated borrow extraction result for ResultEnricher.
+
+    Returned by extract_borrow_amounts() to provide a structured view
+    of all borrow-related data from a single transaction receipt.
+
+    Attributes:
+        borrow_amount: Raw amount borrowed (in token's smallest unit)
+        borrow_rate: Borrow APY at time of borrow (if available)
+        debt_token: Debt token address (if available)
+    """
+
+    borrow_amount: int
+    borrow_rate: "Decimal | None" = None
+    debt_token: str | None = None
+
+    def to_dict(self) -> "dict[str, Any]":
+        """Convert to dictionary."""
+        return {
+            "borrow_amount": self.borrow_amount,
+            "borrow_rate": str(self.borrow_rate) if self.borrow_rate is not None else None,
+            "debt_token": self.debt_token,
+        }
+
+
+@dataclass
+class RepayAmountsResult:
+    """Aggregated repay extraction result for ResultEnricher.
+
+    Returned by extract_repay_amounts() to provide a structured view
+    of all repay-related data from a single transaction receipt.
+
+    Attributes:
+        repay_amount: Raw amount repaid (in token's smallest unit)
+        remaining_debt: Remaining debt after repay (if available)
+    """
+
+    repay_amount: int
+    remaining_debt: int | None = None
+
+    def to_dict(self) -> "dict[str, Any]":
+        """Convert to dictionary."""
+        return {
+            "repay_amount": self.repay_amount,
+            "remaining_debt": self.remaining_debt,
+        }
+
+
+@dataclass
+class WithdrawAmountsResult:
+    """Aggregated withdraw extraction result for ResultEnricher.
+
+    Returned by extract_withdraw_amounts() to provide a structured view
+    of all withdraw-related data from a single transaction receipt.
+
+    Attributes:
+        withdraw_amount: Raw amount withdrawn (in token's smallest unit)
+        a_token_burned: Amount of aTokens burned (if available)
+    """
+
+    withdraw_amount: int
+    a_token_burned: int | None = None
+
+    def to_dict(self) -> "dict[str, Any]":
+        """Convert to dictionary."""
+        return {
+            "withdraw_amount": self.withdraw_amount,
+            "a_token_burned": self.a_token_burned,
+        }
+
+
+@dataclass
 class ParseResult:
     """Result of parsing a receipt.
 
@@ -610,8 +682,11 @@ class AaveV3ReceiptParser:
             "supply_amount",
             "supply_amounts",
             "withdraw_amount",
+            "withdraw_amounts",
             "borrow_amount",
+            "borrow_amounts",
             "repay_amount",
+            "repay_amounts",
             "a_token_received",
             "a_token_burned",
             "borrow_rate",
@@ -1556,6 +1631,84 @@ class AaveV3ReceiptParser:
             logger.warning(f"Failed to extract supply amounts: {e}")
             return None
 
+    def extract_borrow_amounts(self, receipt: dict[str, Any]) -> "BorrowAmountsResult | None":
+        """Extract aggregated borrow data from a transaction receipt.
+
+        Returns a BorrowAmountsResult combining borrow_amount, borrow_rate,
+        and debt_token into a single structured object. Called by ResultEnricher
+        for BORROW intents.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            BorrowAmountsResult if borrow found, None otherwise
+        """
+        try:
+            borrow_amount = self.extract_borrow_amount(receipt)
+            if borrow_amount is None:
+                return None
+            borrow_rate = self.extract_borrow_rate(receipt)
+            debt_token = self.extract_debt_token(receipt)
+            return BorrowAmountsResult(
+                borrow_amount=borrow_amount,
+                borrow_rate=borrow_rate,
+                debt_token=debt_token,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to extract borrow amounts: {e}")
+            return None
+
+    def extract_repay_amounts(self, receipt: dict[str, Any]) -> "RepayAmountsResult | None":
+        """Extract aggregated repay data from a transaction receipt.
+
+        Returns a RepayAmountsResult combining repay_amount and remaining_debt
+        into a single structured object. Called by ResultEnricher for REPAY intents.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            RepayAmountsResult if repay found, None otherwise
+        """
+        try:
+            repay_amount = self.extract_repay_amount(receipt)
+            if repay_amount is None:
+                return None
+            remaining_debt = self.extract_remaining_debt(receipt)
+            return RepayAmountsResult(
+                repay_amount=repay_amount,
+                remaining_debt=remaining_debt,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to extract repay amounts: {e}")
+            return None
+
+    def extract_withdraw_amounts(self, receipt: dict[str, Any]) -> "WithdrawAmountsResult | None":
+        """Extract aggregated withdraw data from a transaction receipt.
+
+        Returns a WithdrawAmountsResult combining withdraw_amount and a_token_burned
+        into a single structured object. Called by ResultEnricher for WITHDRAW intents.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            WithdrawAmountsResult if withdraw found, None otherwise
+        """
+        try:
+            withdraw_amount = self.extract_withdraw_amount(receipt)
+            if withdraw_amount is None:
+                return None
+            a_token_burned = self.extract_a_token_burned(receipt)
+            return WithdrawAmountsResult(
+                withdraw_amount=withdraw_amount,
+                a_token_burned=a_token_burned,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to extract withdraw amounts: {e}")
+            return None
+
     def extract_a_token_burned(self, receipt: dict[str, Any]) -> int | None:
         """Extract aToken amount burned from a WITHDRAW transaction receipt.
 
@@ -1698,6 +1851,9 @@ __all__ = [
     "ParseResult",
     # Extraction result types
     "SupplyAmountsResult",
+    "BorrowAmountsResult",
+    "RepayAmountsResult",
+    "WithdrawAmountsResult",
     # Constants
     "EVENT_TOPICS",
     "TOPIC_TO_EVENT",
