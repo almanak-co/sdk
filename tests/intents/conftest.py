@@ -1200,6 +1200,7 @@ price_oracle_bsc = _create_price_oracle_fixture("bsc")
 price_oracle_bnb = _create_price_oracle_fixture("bnb")  # Alias for bsc
 price_oracle_optimism = _create_price_oracle_fixture("optimism")
 price_oracle_polygon = _create_price_oracle_fixture("polygon")
+price_oracle_mantle = _create_price_oracle_fixture("mantle")
 
 
 # =============================================================================
@@ -1234,6 +1235,7 @@ def price_oracle(chain_name: str, request) -> dict[str, Decimal]:
         "bnb": "price_oracle_bnb",
         "optimism": "price_oracle_optimism",
         "polygon": "price_oracle_polygon",
+        "mantle": "price_oracle_mantle",
     }
 
     fixture_name = fixture_map.get(chain_name)
