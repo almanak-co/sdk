@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 EVENT_TOPICS: dict[str, str] = {
     "Swap": "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822",
+    "SwapCL": "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
     "Mint": "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f",
     "Burn": "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496",
     "Sync": "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1",
@@ -65,6 +66,7 @@ class AerodromeEventType(Enum):
 
 EVENT_NAME_TO_TYPE: dict[str, AerodromeEventType] = {
     "Swap": AerodromeEventType.SWAP,
+    "SwapCL": AerodromeEventType.SWAP,
     "Mint": AerodromeEventType.MINT,
     "Burn": AerodromeEventType.BURN,
     "Sync": AerodromeEventType.SYNC,
@@ -658,6 +660,8 @@ class AerodromeReceiptParser:
         """
         if event_name == "Swap":
             return self._decode_swap_data(topics, data, address)
+        elif event_name == "SwapCL":
+            return self._decode_cl_swap_data(topics, data, address)
         elif event_name == "Mint":
             return self._decode_mint_data(topics, data, address)
         elif event_name == "Burn":
@@ -706,6 +710,49 @@ class AerodromeReceiptParser:
         except Exception as e:
             logger.warning(f"Failed to decode Swap data: {e}")
             return {"raw_data": data}
+
+    def _decode_cl_swap_data(
+        self,
+        topics: list[Any],
+        data: str,
+        address: str,
+    ) -> dict[str, Any]:
+        """Decode Slipstream CL Swap event data (Uniswap V3-style).
+
+        SwapCL event structure:
+        - topic1: sender (indexed)
+        - topic2: recipient (indexed)
+        - data: amount0 (int256), amount1 (int256), sqrtPriceX96 (uint160),
+                liquidity (uint128), tick (int24)
+
+        Amount sign convention (pool perspective):
+        - positive = tokens flowing INTO the pool (user pays)
+        - negative = tokens flowing OUT of the pool (user receives)
+        """
+        sender = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
+        to = HexDecoder.topic_to_address(topics[2]) if len(topics) > 2 else ""
+
+        amount0 = HexDecoder.decode_int256(data, 0)
+        amount1 = HexDecoder.decode_int256(data, 32)
+
+        pool_address = address.lower() if isinstance(address, str) else ""
+
+        # Convert signed amounts to the V1-style amount_in/amount_out format:
+        # positive = user pays (amount_in), negative = user receives (amount_out)
+        amount0_in = amount0 if amount0 > 0 else 0
+        amount1_in = amount1 if amount1 > 0 else 0
+        amount0_out = abs(amount0) if amount0 < 0 else 0
+        amount1_out = abs(amount1) if amount1 < 0 else 0
+
+        return {
+            "sender": sender,
+            "to": to,
+            "amount0_in": amount0_in,
+            "amount1_in": amount1_in,
+            "amount0_out": amount0_out,
+            "amount1_out": amount1_out,
+            "pool_address": pool_address,
+        }
 
     def _decode_mint_data(
         self,
