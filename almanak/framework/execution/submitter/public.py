@@ -166,6 +166,29 @@ KNOWN_CUSTOM_ERRORS: dict[str, str] = {
     # OpenZeppelin Ownable / Access
     "0x118cdaa7": "OwnableUnauthorizedAccount(address account)",
     "0x1e4fbdf7": "OwnableInvalidOwner(address owner)",
+    # Aave V3 Pool custom errors
+    "0x2c5211c6": "InvalidAmount()",
+    "0x90cd6f24": "ReserveInactive()",
+    "0xd37f5f1c": "ReservePaused()",
+    "0x6d305815": "ReserveFrozen()",
+    "0x77a6a896": "BorrowCapExceeded()",
+    "0xf58f733a": "SupplyCapExceeded()",
+    "0xcdd36a97": "CallerNotPoolAdmin()",
+    "0x930bb771": "HealthFactorNotBelowThreshold()",
+    "0x979b5ce8": "CollateralCannotBeLiquidated()",
+    "0x3a23d825": "InsufficientCollateral()",
+    "0xf0788fb2": "NoDebtOfSelectedType()",
+    "0xdff88f51": "SameBlockBorrowRepay()",
+    # Compound V3 Comet custom errors
+    "0xe273b446": "BorrowTooSmall()",
+    "0x14c5f7b6": "NotCollateralized()",
+    "0x945e9268": "InsufficientReserves()",
+    "0x9e87fac8": "Paused()",
+    "0x82b42900": "Unauthorized()",
+    "0xe7a3dfa0": "TransferInFailed()",
+    "0xcefaffeb": "TransferOutFailed()",
+    "0xfd1ee349": "BadPrice()",
+    "0xfa6ad355": "TooMuchSlippage()",
     # General
     "0x": "EmptyRevertData()",
 }
