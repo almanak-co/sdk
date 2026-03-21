@@ -462,6 +462,19 @@ return resolved
 
 ### Token Utilities
 
+**WrapNativeIntent** - Wrap native tokens to ERC-20 (ETH -> WETH, MATIC -> WMATIC, etc.)
+
+```python
+from almanak.framework.intents import WrapNativeIntent
+from decimal import Decimal
+
+WrapNativeIntent(
+    token="WETH",              # Wrapped token symbol to receive
+    amount=Decimal("0.5"),     # Amount of native token to wrap (or "all")
+    chain="arbitrum",          # Target chain
+)
+```
+
 **UnwrapNativeIntent** - Unwrap wrapped native tokens (WETH -> ETH, WMATIC -> MATIC, etc.)
 
 ```python

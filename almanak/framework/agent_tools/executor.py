@@ -666,6 +666,12 @@ class ToolExecutor:
         if tool_name == "get_vault_state":
             return await self._execute_get_vault_state(args)
 
+        if tool_name == "get_wallet_overview":
+            return self._execute_get_wallet_overview(args)
+
+        if tool_name == "check_protocol_support":
+            return self._execute_check_protocol_support(args)
+
         raise ToolValidationError(f"Unknown data tool: {tool_name}", tool_name=tool_name)
 
     # ── PLANNING / SAFETY TOOLS ─────────────────────────────────────────
@@ -1133,6 +1139,13 @@ class ToolExecutor:
                 bridge_params["preferred_bridge"] = preferred
             return "bridge", bridge_params
 
+        if tool_name == "wrap_native":
+            return "wrap_native", {
+                "token": args["token"],
+                "amount": args["amount"],
+                "chain": args.get("chain", self._default_chain),
+            }
+
         if tool_name == "unwrap_native":
             return "unwrap_native", {
                 "token": args["token"],
@@ -1187,6 +1200,14 @@ class ToolExecutor:
                 "bridge_used": args.get("preferred_bridge", ""),
                 "estimated_arrival_seconds": None,
                 "gas_usd": "",
+            }
+
+        if tool_name == "wrap_native":
+            return {
+                **base,
+                "amount_wrapped": args.get("amount", ""),
+                "token": args.get("token", ""),
+                "chain": args.get("chain", self._default_chain),
             }
 
         if tool_name == "unwrap_native":
@@ -1268,6 +1289,15 @@ class ToolExecutor:
                 "bridge_used": metadata.get("bridge", args.get("preferred_bridge", "")),
                 "estimated_arrival_seconds": metadata.get("estimated_time"),
                 "gas_usd": "",
+            }
+
+        if tool_name == "wrap_native":
+            metadata = enriched.extracted_data or {}
+            return {
+                **base,
+                "amount_wrapped": str(metadata.get("amount_wrapped", args.get("amount", ""))),
+                "token": metadata.get("token", args.get("token", "")),
+                "chain": metadata.get("chain", args.get("chain", self._default_chain)),
             }
 
         if tool_name == "unwrap_native":
@@ -1971,6 +2001,162 @@ class ToolExecutor:
             },
         )
 
+    # ── WALLET OVERVIEW ────────────────────────────────────────────────
+
+    # Default tokens to query per chain for wallet overview
+    _CHAIN_DEFAULT_TOKENS: ClassVar[dict[str, list[str]]] = {
+        "arbitrum": ["ETH", "WETH", "USDC", "USDC.e", "USDT", "WBTC", "DAI", "ARB"],
+        "ethereum": ["ETH", "WETH", "USDC", "USDT", "WBTC", "DAI", "stETH", "wstETH"],
+        "base": ["ETH", "WETH", "USDC", "USDbC", "DAI", "cbETH"],
+        "optimism": ["ETH", "WETH", "USDC", "USDC.e", "USDT", "WBTC", "DAI", "OP"],
+        "polygon": ["MATIC", "WMATIC", "USDC", "USDC.e", "USDT", "WETH", "WBTC", "DAI"],
+        "avalanche": ["AVAX", "WAVAX", "USDC", "USDT", "WETH.e", "WBTC.e", "DAI.e"],
+        "bsc": ["BNB", "WBNB", "USDC", "USDT", "WETH", "BTCB", "DAI"],
+        "sonic": ["S", "WS", "USDC", "WETH"],
+        "mantle": ["MNT", "WMNT", "USDC", "USDT", "WETH", "mETH"],
+        "plasma": ["XPL", "WXPL", "USDC", "USDT", "WETH", "PENDLE"],
+    }
+    _FALLBACK_TOKENS: ClassVar[list[str]] = ["ETH", "WETH", "USDC", "USDT", "WBTC", "DAI"]
+
+    def _execute_get_wallet_overview(self, args: dict) -> ToolResponse:
+        """Get complete wallet balance overview in a single call."""
+        from almanak.gateway.proto import gateway_pb2
+
+        chain = args.get("chain", self._default_chain)
+        wallet = args.get("wallet_address") or self._wallet_address
+        min_usd = float(args.get("min_balance_usd", 0.01))
+        extra_tokens = args.get("extra_tokens", [])
+
+        # Build token list: chain defaults + extras, deduplicated
+        default_tokens = self._CHAIN_DEFAULT_TOKENS.get(chain, self._FALLBACK_TOKENS)
+        all_tokens = list(dict.fromkeys(default_tokens + extra_tokens))  # preserves order, dedupes
+
+        requests = [gateway_pb2.BalanceRequest(token=t, chain=chain, wallet_address=wallet) for t in all_tokens]
+        resp = self._client.market.BatchGetBalances(gateway_pb2.BatchBalanceRequest(requests=requests))
+
+        # Gateway must return one response per request in the same order
+        if len(resp.responses) != len(all_tokens):
+            return ToolResponse(
+                status="error",
+                data={
+                    "error": f"BatchGetBalances returned {len(resp.responses)} responses for {len(all_tokens)} requests"
+                },
+            )
+
+        tokens = []
+        total_usd = Decimal("0")
+        for i, r in enumerate(resp.responses):
+            if r.error:
+                continue
+            try:
+                bal_usd = Decimal(r.balance_usd) if r.balance_usd else Decimal("0")
+            except Exception:
+                bal_usd = Decimal("0")
+            if bal_usd < Decimal(str(min_usd)):
+                continue
+            tokens.append(
+                {
+                    "symbol": all_tokens[i],
+                    "balance": r.balance,
+                    "balance_usd": str(bal_usd),
+                }
+            )
+            total_usd += bal_usd
+
+        return ToolResponse(
+            status="success",
+            data={
+                "wallet_address": wallet,
+                "chain": chain,
+                "tokens": tokens,
+                "total_usd": str(total_usd),
+            },
+        )
+
+    # ── CHECK PROTOCOL SUPPORT ──────────────────────────────────────────
+
+    # Category → recommended strategy template
+    _CATEGORY_TEMPLATE_MAP: ClassVar[dict[str, str]] = {
+        "swap": "ta_swap",
+        "lp": "dynamic_lp",
+        "lending": "lending_loop",
+        "yield": "vault_yield",
+        "perps": "basis_trade",
+    }
+
+    def _execute_check_protocol_support(self, args: dict) -> ToolResponse:
+        """Check protocol support from the SDK's static registry."""
+        from almanak.framework.cli.support_matrix import _build_matrix
+
+        matrix = _build_matrix()
+        query_protocol = args["protocol"].lower().replace("-", "_").replace(" ", "_")
+        query_chain = args.get("chain", "").lower()
+
+        # Aggregate all rows for the protocol (may appear in multiple categories)
+        matched_rows: list[dict] = []
+        for proto in matrix["protocols"]:
+            name = proto["name"].lower().replace("-", "_").replace(" ", "_")
+            if name == query_protocol:
+                matched_rows.append(proto)
+
+        if not matched_rows:
+            return ToolResponse(
+                status="success",
+                data={
+                    "supported": False,
+                    "protocol": args["protocol"],
+                    "chain": query_chain,
+                    "supported_chains": [],
+                    "supported_actions": [],
+                    "sdk_template": None,
+                    "notes": f"Protocol '{args['protocol']}' is not integrated in the SDK.",
+                },
+            )
+
+        # Merge chains and categories across all rows
+        all_chains: set[str] = set()
+        all_categories: list[str] = []
+        display_name = matched_rows[0]["name"]
+        for row in matched_rows:
+            all_chains.update(row["chains"])
+            if row["category"] not in all_categories:
+                all_categories.append(row["category"])
+
+        supported_chains = sorted(all_chains)
+        # Pick template from the first category that has one
+        template = None
+        for cat in all_categories:
+            template = self._CATEGORY_TEMPLATE_MAP.get(cat)
+            if template:
+                break
+
+        if query_chain and query_chain not in [c.lower() for c in supported_chains]:
+            return ToolResponse(
+                status="success",
+                data={
+                    "supported": False,
+                    "protocol": display_name,
+                    "chain": query_chain,
+                    "supported_chains": supported_chains,
+                    "supported_actions": all_categories,
+                    "sdk_template": template,
+                    "notes": f"{display_name} is supported on {', '.join(supported_chains)} but not on {query_chain}.",
+                },
+            )
+
+        return ToolResponse(
+            status="success",
+            data={
+                "supported": True,
+                "protocol": display_name,
+                "chain": query_chain or "all",
+                "supported_chains": supported_chains,
+                "supported_actions": all_categories,
+                "sdk_template": template,
+                "notes": f"Use '{template}' template." if template else "",
+            },
+        )
+
     # ── VAULT TOOLS ──────────────────────────────────────────────────────
 
     # Common tokens for portfolio value estimation in get_risk_metrics
@@ -1989,6 +2175,8 @@ class ToolExecutor:
         "FLASH_LOAN": ["flash_loan"],
         "STAKE": ["approve", "swap_simple"],
         "UNSTAKE": ["swap_simple"],
+        "WRAP_NATIVE": ["unwrap_eth"],  # deposit() has similar gas to withdraw()
+        "UNWRAP_NATIVE": ["unwrap_eth"],
     }
 
     # Intent types that map to MEDIUM or HIGH risk actions for validation purposes.
@@ -2003,6 +2191,8 @@ class ToolExecutor:
         "borrow": "borrow_lending",
         "repay": "repay_lending",
         "flash_loan": "flash_loan",
+        "wrap_native": "wrap_native",
+        "unwrap_native": "unwrap_native",
     }
 
     def _execute_validate_risk(self, args: dict) -> ToolResponse:

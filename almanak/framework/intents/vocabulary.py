@@ -284,6 +284,7 @@ class IntentType(Enum):
     # LP fee collection (without removing liquidity)
     LP_COLLECT_FEES = "LP_COLLECT_FEES"
     # Native token wrap/unwrap (ETH↔WETH, MATIC↔WMATIC, etc.)
+    WRAP_NATIVE = "WRAP_NATIVE"
     UNWRAP_NATIVE = "UNWRAP_NATIVE"
 
 
@@ -1965,6 +1966,66 @@ class VaultRedeemIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
+class WrapNativeIntent(AlmanakImmutableModel):
+    """Intent to wrap native tokens (e.g. ETH -> WETH, MATIC -> WMATIC).
+
+    Calls the wrapped token's ``deposit()`` function with ``msg.value`` to convert
+    native currency to its wrapped ERC-20 equivalent.
+
+    Attributes:
+        token: Wrapped token symbol to receive (e.g. "WETH", "WMATIC", "WAVAX")
+        amount: Amount of native token to wrap in token units (Decimal or "all")
+        chain: Target chain for execution
+        intent_id: Unique identifier for this intent
+        created_at: Timestamp when the intent was created
+
+    Example:
+        intent = WrapNativeIntent(
+            token="WETH",
+            amount=Decimal("0.5"),
+            chain="arbitrum",
+        )
+    """
+
+    token: str
+    amount: PydanticChainedAmount
+    chain: str | None = None
+    intent_id: str = Field(default_factory=default_intent_id)
+    created_at: datetime = Field(default_factory=default_timestamp)
+
+    @model_validator(mode="after")
+    def validate_wrap_intent(self) -> "WrapNativeIntent":
+        """Validate wrap parameters."""
+        if isinstance(self.amount, Decimal) and self.amount <= 0:
+            raise ValueError("amount must be positive")
+        elif not isinstance(self.amount, Decimal) and self.amount != "all":
+            raise ValueError("amount must be a positive Decimal or 'all'")
+        return self
+
+    @property
+    def is_chained_amount(self) -> bool:
+        """Return True when amount depends on a prior step's output."""
+        return self.amount == "all"
+
+    @property
+    def intent_type(self) -> IntentType:
+        return IntentType.WRAP_NATIVE
+
+    def serialize(self) -> dict[str, Any]:
+        data = self.model_dump(mode="json")
+        data["type"] = self.intent_type.value
+        if self.amount == "all":
+            data["amount"] = "all"
+        return data
+
+    @classmethod
+    def deserialize(cls, data: dict[str, Any]) -> "WrapNativeIntent":
+        clean_data = {k: v for k, v in data.items() if k != "type"}
+        if "created_at" in clean_data and isinstance(clean_data["created_at"], str):
+            clean_data["created_at"] = datetime.fromisoformat(clean_data["created_at"])
+        return cls.model_validate(clean_data)
+
+
 class UnwrapNativeIntent(AlmanakImmutableModel):
     """Intent to unwrap a wrapped native token (e.g. WETH -> ETH).
 
@@ -2052,6 +2113,7 @@ AnyIntent = (
     | PredictionRedeemIntent
     | VaultDepositIntent
     | VaultRedeemIntent
+    | WrapNativeIntent
     | UnwrapNativeIntent
 )
 
@@ -2883,6 +2945,7 @@ class Intent:
             token_in: Staked token to unstake (e.g., "wstETH" for Lido, "sUSDe" for Ethena)
             amount: Amount to unstake, or "all" to use previous step output
             chain: Target chain for execution (defaults to strategy's primary chain)
+            protocol_params: Optional protocol-specific parameters (e.g., {"phase": "cooldown"} for Ethena)
 
         Returns:
             UnstakeIntent: The created unstake intent
@@ -3370,6 +3433,7 @@ class Intent:
             IntentType.PREDICTION_REDEEM.value: PredictionRedeemIntent,
             IntentType.VAULT_DEPOSIT.value: VaultDepositIntent,
             IntentType.VAULT_REDEEM.value: VaultRedeemIntent,
+            IntentType.WRAP_NATIVE.value: WrapNativeIntent,
             IntentType.UNWRAP_NATIVE.value: UnwrapNativeIntent,
         }
 

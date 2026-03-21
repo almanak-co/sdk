@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     from ..gateway_client import GatewayClient
     from .bridge import BridgeIntent
     from .pool_validation import PoolValidationResult
-    from .vocabulary import UnwrapNativeIntent
+    from .vocabulary import UnwrapNativeIntent, WrapNativeIntent
 
 logger = logging.getLogger(__name__)
 
@@ -2336,6 +2336,8 @@ class IntentCompiler:
                 return self._compile_vault_redeem(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.ENSURE_BALANCE:
                 return self._compile_ensure_balance(intent)
+            elif intent_type == IntentType.WRAP_NATIVE:
+                return self._compile_wrap_native(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.UNWRAP_NATIVE:
                 return self._compile_unwrap_native(intent)  # type: ignore[arg-type]
             else:
@@ -2935,6 +2937,118 @@ class IntentCompiler:
                 result.action_bundle = bundle
         except Exception as e:
             logger.exception(f"Orca LP close compilation failed: {e}")
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+        return result
+
+    def _compile_wrap_native(self, intent: "WrapNativeIntent") -> CompilationResult:
+        """Compile a WRAP_NATIVE intent into an ActionBundle.
+
+        Generates a single transaction calling the wrapped native token's
+        ``deposit()`` function with ``msg.value`` to convert native currency
+        (ETH, MATIC, AVAX, etc.) to its wrapped ERC-20 equivalent.
+        """
+
+        result = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=intent.intent_id,
+        )
+
+        try:
+            token_symbol = intent.token
+
+            # Resolve the wrapped native token address
+            weth_address = self._get_wrapped_native_address()
+            if not weth_address:
+                result.status = CompilationStatus.FAILED
+                result.error = f"No wrapped native token found for chain {self.chain}"
+                return result
+
+            # Resolve token to verify it matches the chain's wrapped native
+            resolved = self._resolve_token(token_symbol)
+            if not resolved:
+                result.status = CompilationStatus.FAILED
+                result.error = f"Cannot resolve token {token_symbol} on {self.chain}"
+                return result
+
+            if resolved.address.lower() != weth_address.lower():
+                result.status = CompilationStatus.FAILED
+                result.error = (
+                    f"{token_symbol} ({resolved.address}) is not the wrapped native token "
+                    f"({weth_address}) on {self.chain}"
+                )
+                return result
+
+            # Resolve amount
+            amount = intent.amount
+            decimals = resolved.decimals
+            gas_reserve = int(Decimal("0.001") * Decimal(10**decimals))
+            if isinstance(amount, str) and amount == "all":
+                # Query native balance
+                balance = self._query_native_balance(self.wallet_address)
+                if balance is None or balance <= 0:
+                    result.status = CompilationStatus.FAILED
+                    result.error = f"No native balance to wrap on {self.chain}"
+                    return result
+                # Reserve gas (0.001 native token ~= minimal gas buffer)
+                amount_raw = max(balance - gas_reserve, 0)
+                if amount_raw <= 0:
+                    result.status = CompilationStatus.FAILED
+                    result.error = "Native balance too low to wrap after reserving gas"
+                    return result
+            else:
+                amount_raw = int(Decimal(str(amount)) * Decimal(10**decimals))
+
+            if amount_raw <= 0:
+                result.status = CompilationStatus.FAILED
+                result.error = "Wrap amount must be positive"
+                return result
+
+            # Pre-flight balance check (must cover wrap amount + gas for the tx)
+            if not (isinstance(amount, str) and amount == "all"):
+                balance = self._query_native_balance(self.wallet_address)
+                if balance is not None and balance < amount_raw + gas_reserve:
+                    have = Decimal(balance) / Decimal(10**decimals)
+                    need = Decimal(str(intent.amount))
+                    result.status = CompilationStatus.FAILED
+                    result.error = f"Insufficient native balance: have {have}, need {need} + gas reserve"
+                    return result
+
+            # Build deposit() calldata
+            # Function selector: 0xd0e30db0 = keccak256("deposit()")[:4]
+            calldata = "0xd0e30db0"
+
+            wrap_tx = TransactionData(
+                to=weth_address,
+                value=amount_raw,
+                data=calldata,
+                gas_estimate=get_gas_estimate(self.chain, "unwrap_eth"),  # similar gas cost
+                description=f"Wrap {intent.amount} native to {token_symbol}",
+                tx_type="wrap",
+            )
+
+            transactions = [wrap_tx]
+
+            action_bundle = ActionBundle(
+                intent_type=IntentType.WRAP_NATIVE.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "token": token_symbol,
+                    "amount": str(intent.amount),
+                    "chain": self.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = wrap_tx.gas_estimate
+
+            logger.info(
+                f"Compiled WRAP_NATIVE intent: {intent.amount} native -> {token_symbol} on {self.chain}, "
+                f"1 tx, gas={wrap_tx.gas_estimate}"
+            )
+        except Exception as e:
+            logger.exception("Failed to compile WRAP_NATIVE intent")
             result.status = CompilationStatus.FAILED
             result.error = str(e)
         return result
@@ -11964,6 +12078,44 @@ class IntentCompiler:
 
         except Exception as e:
             logger.error(f"Failed to query ERC-20 balance: {e}")
+            return None
+
+    def _query_native_balance(self, wallet_address: str) -> int | None:
+        """Query native token balance (ETH, MATIC, AVAX, etc.) from on-chain.
+
+        Uses gateway RPC when available, otherwise falls back to direct Web3 RPC.
+
+        Returns:
+            Native balance in wei, or None if query fails
+        """
+        # Prefer gateway RPC via public API
+        if self._gateway_client is not None:
+            try:
+                return self._gateway_client.query_native_balance(
+                    chain=self.chain,
+                    wallet_address=wallet_address,
+                )
+            except Exception as e:
+                logger.error(f"Gateway native balance query failed: {e}")
+                return None
+
+        # Fallback to direct Web3 RPC (deprecated)
+        if self.rpc_url is None and self._web3 is None:
+            logger.warning("No RPC URL or gateway client - cannot query native balance")
+            return None
+
+        try:
+            from web3 import Web3
+
+            if self._web3 is None:
+                self._web3 = Web3(Web3.HTTPProvider(self.rpc_url))
+
+            assert self._web3 is not None
+            balance = self._web3.eth.get_balance(self._web3.to_checksum_address(wallet_address))
+            logger.debug(f"Native balance for {wallet_address}: {balance}")
+            return balance
+        except Exception as e:
+            logger.error(f"Failed to query native balance: {e}")
             return None
 
 

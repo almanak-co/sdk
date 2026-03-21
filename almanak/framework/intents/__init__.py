@@ -121,6 +121,7 @@ from .vocabulary import (
     VaultDepositIntent,
     VaultRedeemIntent,
     WithdrawIntent,
+    WrapNativeIntent,
 )
 
 __all__ = [
@@ -163,7 +164,8 @@ __all__ = [
     "PredictionTimeInForce",
     "PredictionShareAmount",
     "PredictionExitConditions",
-    # Unwrap Native Intent
+    # Wrap/Unwrap Native Intents
+    "WrapNativeIntent",
     "UnwrapNativeIntent",
     # Bridge Intent
     "BridgeIntent",

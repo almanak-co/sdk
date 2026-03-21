@@ -532,6 +532,48 @@ class GatewayClient:
             logger.warning(f"QueryBalance RPC error: {e}")
             return None
 
+    def query_native_balance(
+        self,
+        chain: str,
+        wallet_address: str,
+    ) -> int | None:
+        """Query native token balance (ETH, MATIC, AVAX, etc.) via gateway RPC.
+
+        Args:
+            chain: Chain identifier (e.g., "arbitrum", "base")
+            wallet_address: Wallet address to query balance for
+
+        Returns:
+            Native balance in wei, or None if query fails
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        if self._rpc_stub is None:
+            logger.warning("Gateway client not connected")
+            return None
+
+        try:
+            import json
+
+            response = self._rpc_stub.Call(
+                gateway_pb2.RpcRequest(
+                    chain=chain,
+                    method="eth_getBalance",
+                    params=f'["{wallet_address}", "latest"]',
+                ),
+                timeout=self.config.timeout,
+            )
+            if not response.success:
+                logger.warning(f"Native balance query failed: {response.error}")
+                return None
+            if response.result:
+                hex_balance = json.loads(response.result)
+                return int(hex_balance, 16)
+            return None
+        except grpc.RpcError as e:
+            logger.warning(f"Native balance query RPC error: {e}")
+            return None
+
     def query_position_liquidity(
         self,
         chain: str,

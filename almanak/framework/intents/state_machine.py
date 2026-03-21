@@ -184,6 +184,11 @@ class IntentState(Enum):
     VALIDATING_BRIDGE = auto()
     SADFLOW_BRIDGE = auto()
 
+    # WRAP_NATIVE intent states
+    PREPARING_WRAP_NATIVE = auto()
+    VALIDATING_WRAP_NATIVE = auto()
+    SADFLOW_WRAP_NATIVE = auto()
+
     # UNWRAP_NATIVE intent states
     PREPARING_UNWRAP_NATIVE = auto()
     VALIDATING_UNWRAP_NATIVE = auto()
@@ -222,6 +227,7 @@ def get_preparing_state(intent_type: IntentType) -> IntentState:
         IntentType.VAULT_MANAGE: IntentState.PREPARING_VAULT_MANAGE,
         IntentType.FLASH_LOAN: IntentState.PREPARING_FLASH_LOAN,
         IntentType.BRIDGE: IntentState.PREPARING_BRIDGE,
+        IntentType.WRAP_NATIVE: IntentState.PREPARING_WRAP_NATIVE,
         IntentType.UNWRAP_NATIVE: IntentState.PREPARING_UNWRAP_NATIVE,
     }
     return state_map.get(intent_type, IntentState.IDLE)
@@ -259,6 +265,7 @@ def get_validating_state(intent_type: IntentType) -> IntentState:
         IntentType.VAULT_MANAGE: IntentState.VALIDATING_VAULT_MANAGE,
         IntentType.FLASH_LOAN: IntentState.VALIDATING_FLASH_LOAN,
         IntentType.BRIDGE: IntentState.VALIDATING_BRIDGE,
+        IntentType.WRAP_NATIVE: IntentState.VALIDATING_WRAP_NATIVE,
         IntentType.UNWRAP_NATIVE: IntentState.VALIDATING_UNWRAP_NATIVE,
     }
     return state_map.get(intent_type, IntentState.IDLE)
@@ -296,6 +303,7 @@ def get_sadflow_state(intent_type: IntentType) -> IntentState:
         IntentType.VAULT_MANAGE: IntentState.SADFLOW_VAULT_MANAGE,
         IntentType.FLASH_LOAN: IntentState.SADFLOW_FLASH_LOAN,
         IntentType.BRIDGE: IntentState.SADFLOW_BRIDGE,
+        IntentType.WRAP_NATIVE: IntentState.SADFLOW_WRAP_NATIVE,
         IntentType.UNWRAP_NATIVE: IntentState.SADFLOW_UNWRAP_NATIVE,
     }
     return state_map.get(intent_type, IntentState.IDLE)
@@ -326,6 +334,7 @@ def is_preparing_state(state: IntentState) -> bool:
         IntentState.PREPARING_VAULT_MANAGE,
         IntentState.PREPARING_FLASH_LOAN,
         IntentState.PREPARING_BRIDGE,
+        IntentState.PREPARING_WRAP_NATIVE,
         IntentState.PREPARING_UNWRAP_NATIVE,
     }
 
@@ -355,6 +364,7 @@ def is_validating_state(state: IntentState) -> bool:
         IntentState.VALIDATING_VAULT_MANAGE,
         IntentState.VALIDATING_FLASH_LOAN,
         IntentState.VALIDATING_BRIDGE,
+        IntentState.VALIDATING_WRAP_NATIVE,
         IntentState.VALIDATING_UNWRAP_NATIVE,
     }
 
@@ -384,6 +394,7 @@ def is_sadflow_state(state: IntentState) -> bool:
         IntentState.SADFLOW_VAULT_MANAGE,
         IntentState.SADFLOW_FLASH_LOAN,
         IntentState.SADFLOW_BRIDGE,
+        IntentState.SADFLOW_WRAP_NATIVE,
         IntentState.SADFLOW_UNWRAP_NATIVE,
     }
 

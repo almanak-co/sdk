@@ -735,3 +735,79 @@ class TeardownVaultResponse(BaseModel):
     final_nav: str = Field(default="0", description="Final NAV after teardown")
     tx_hashes: list[str] = Field(default_factory=list, description="All transaction hashes")
     message: str = ""
+
+
+# ── WRAP NATIVE ────────────────────────────────────────────────────────
+
+
+class WrapNativeRequest(BaseModel):
+    """Wrap native tokens to their ERC-20 equivalent (e.g. ETH -> WETH, MATIC -> WMATIC)."""
+
+    token: str = Field(description="Wrapped token symbol to receive (e.g. 'WETH', 'WMATIC', 'WAVAX')")
+    amount: str = Field(description="Amount of native token to wrap as a decimal string, or 'all'")
+    chain: str = Field(default="arbitrum", description="Blockchain name")
+    dry_run: bool = Field(default=False, description="If true, simulate only")
+    execution_wallet: str | None = Field(default=None, description="Override wallet for execution")
+
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_positive_or_all(cls, v: str) -> str:
+        return _validate_positive_or_all(v, "amount")
+
+
+class WrapNativeResponse(BaseModel):
+    tx_hash: str | None = None
+    amount_wrapped: str = ""
+    token: str = ""
+    chain: str = ""
+    gas_usd: str = ""
+
+
+# ── WALLET OVERVIEW ────────────────────────────────────────────────────
+
+
+class GetWalletOverviewRequest(BaseModel):
+    """Get a complete wallet balance overview in a single call.
+
+    Automatically queries all common tokens for the chain (ETH, WETH, USDC, USDT, etc.)
+    plus any additional tokens specified. Filters out dust balances below min_balance_usd.
+    """
+
+    chain: str = Field(default="arbitrum", description="Blockchain name")
+    wallet_address: str = Field(default="", description="Wallet to query. Defaults to strategy wallet.")
+    min_balance_usd: float = Field(default=0.01, ge=0, description="Minimum USD balance to include (filters dust)")
+    extra_tokens: list[str] = Field(
+        default_factory=list,
+        description="Additional token symbols to query beyond the default set",
+    )
+
+
+class GetWalletOverviewResponse(BaseModel):
+    wallet_address: str = ""
+    chain: str = ""
+    tokens: list[dict] = Field(default_factory=list, description="List of {symbol, balance, balance_usd}")
+    total_usd: str = "0"
+
+
+# ── CHECK PROTOCOL SUPPORT ────────────────────────────────────────────
+
+
+class CheckProtocolSupportRequest(BaseModel):
+    """Check whether the SDK supports a given protocol on a given chain.
+
+    Returns supported actions, recommended strategy template, and known issues.
+    Uses static SDK registry data — no network calls needed.
+    """
+
+    protocol: str = Field(description="Protocol name (e.g. 'uniswap_v3', 'morpho_blue', 'fluid-dex')")
+    chain: str = Field(default="", description="Chain to check (e.g. 'arbitrum'). If empty, returns all chains.")
+
+
+class CheckProtocolSupportResponse(BaseModel):
+    supported: bool = False
+    protocol: str = ""
+    chain: str = ""
+    supported_chains: list[str] = Field(default_factory=list, description="Chains where protocol is supported")
+    supported_actions: list[str] = Field(default_factory=list, description="Actions: swap, lp, lending, perps, yield")
+    sdk_template: str | None = Field(default=None, description="Recommended strategy template")
+    notes: str = ""

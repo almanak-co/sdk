@@ -474,6 +474,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             UnstakeIntent,
             UnwrapNativeIntent,
             WithdrawIntent,
+            WrapNativeIntent,
         )
 
         # Canonical class lookup keys match derivation:
@@ -497,6 +498,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             "predictionsell": PredictionSellIntent,
             "predictionredeem": PredictionRedeemIntent,
             "bridge": BridgeIntent,
+            "wrapnative": WrapNativeIntent,
             "unwrapnative": UnwrapNativeIntent,
         }
 
