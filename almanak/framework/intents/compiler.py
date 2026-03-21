@@ -570,6 +570,7 @@ AAVE_FLASH_LOAN_SIMPLE_SELECTOR = "0x42b0b77c"
 AAVE_VARIABLE_RATE_MODE = 2  # Variable rate (most common)
 AAVE_STABLE_RATE_MODE = 1  # Stable rate (being deprecated on most assets)
 
+
 # Balancer Vault function selectors
 # flashLoan(address recipient, address[] tokens, uint256[] amounts, bytes userData)
 BALANCER_FLASH_LOAN_SELECTOR = "0x5c38449e"
