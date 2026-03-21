@@ -256,6 +256,7 @@ from tests.conftest_gateway import (
     anvil_base,
     anvil_bsc,
     anvil_ethereum,
+    anvil_mantle,
     anvil_optimism,
     anvil_polygon,
     get_anvil_rpc_url,
@@ -269,6 +270,7 @@ __all__ = [
     "anvil_base",
     "anvil_bsc",
     "anvil_ethereum",
+    "anvil_mantle",
     "anvil_optimism",
     "anvil_polygon",
     # Price oracle fixtures (session-scoped per chain)
@@ -278,6 +280,7 @@ __all__ = [
     "price_oracle_bsc",
     "price_oracle_bnb",
     "price_oracle_ethereum",
+    "price_oracle_mantle",
     "price_oracle_optimism",
     "price_oracle_polygon",
     # Utilities
@@ -1198,6 +1201,7 @@ price_oracle_ethereum = _create_price_oracle_fixture("ethereum")
 price_oracle_avalanche = _create_price_oracle_fixture("avalanche")
 price_oracle_bsc = _create_price_oracle_fixture("bsc")
 price_oracle_bnb = _create_price_oracle_fixture("bnb")  # Alias for bsc
+price_oracle_mantle = _create_price_oracle_fixture("mantle")
 price_oracle_optimism = _create_price_oracle_fixture("optimism")
 price_oracle_polygon = _create_price_oracle_fixture("polygon")
 price_oracle_mantle = _create_price_oracle_fixture("mantle")
@@ -1230,6 +1234,7 @@ def price_oracle(chain_name: str, request) -> dict[str, Decimal]:
         "arbitrum": "price_oracle_arbitrum",
         "base": "price_oracle_base",
         "ethereum": "price_oracle_ethereum",
+        "mantle": "price_oracle_mantle",
         "avalanche": "price_oracle_avalanche",
         "bsc": "price_oracle_bsc",
         "bnb": "price_oracle_bnb",
