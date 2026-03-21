@@ -1864,7 +1864,7 @@ class TestPendleYTTokenResolution:
         resolver = TokenResolver()
         result = resolver.resolve("YT-wstETH-25JUN2026", "arbitrum")
         assert result is not None
-        assert result.address == "0x25BdA1EDd6aF17C61399aA0eb84b93dAA3069764"
+        assert result.address == "0x25bda1edd6af17c61399aa0eb84b93daa3069764"
         assert result.decimals == 18
         assert result.symbol == "YT-WSTETH-25JUN2026"
 
@@ -1873,7 +1873,7 @@ class TestPendleYTTokenResolution:
         resolver = TokenResolver()
         result = resolver.resolve("YT-wstETH", "arbitrum")
         assert result is not None
-        assert result.address == "0x25BdA1EDd6aF17C61399aA0eb84b93dAA3069764"
+        assert result.address == "0x25bda1edd6af17c61399aa0eb84b93daa3069764"
 
     def test_yt_wsteth_resolves_by_address(self):
         """YT token should resolve by address on Arbitrum."""

@@ -973,7 +973,7 @@ class TokenResolver:
 
         return ResolvedToken(
             symbol=token.symbol,
-            address=address,
+            address=addr_norm,
             decimals=decimals,
             chain=chain_enum,
             chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
