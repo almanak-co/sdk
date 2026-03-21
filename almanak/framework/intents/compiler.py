@@ -23,6 +23,7 @@ Example:
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -808,6 +809,11 @@ class DefaultSwapAdapter:
 
     This adapter generates calldata compatible with Uniswap V3's
     SwapRouter interface (exactInputSingle).
+
+    Note: Instances are single-use per swap compilation. The compiler creates
+    a fresh adapter in ``_compile_swap`` for each SwapIntent. Mutable state
+    (``_cached_fee``, ``last_quoted_amount_out``) is therefore never carried
+    across different token pairs or amounts.
     """
 
     def __init__(
@@ -836,6 +842,8 @@ class DefaultSwapAdapter:
         self.rpc_url = rpc_url
         self.rpc_timeout = rpc_timeout
         self.last_fee_selection: dict[str, Any] = {}
+        self.last_quoted_amount_out: int | None = None
+        self._cached_fee: int | None = None
 
         # Get router address
         chain_routers = PROTOCOL_ROUTERS.get(chain, {})
@@ -844,6 +852,32 @@ class DefaultSwapAdapter:
     def get_router_address(self) -> str:
         """Get the router address."""
         return self.router_address
+
+    def select_fee_tier(self, from_token: str, to_token: str, amount_in: int) -> int:
+        """Pre-select fee tier and cache the result.
+
+        Call this before get_swap_calldata() to make quoter data available
+        for slippage adjustments. The selected fee tier is cached and reused
+        by get_swap_calldata().
+
+        Returns:
+            Selected fee tier (bps).
+        """
+        # Clear previous state so stale data is never carried across calls.
+        self._cached_fee = None
+        self.last_quoted_amount_out = None
+        fee = self._select_fee_tier(from_token, to_token, amount_in)
+        self._cached_fee = fee
+        return fee
+
+    def get_quoted_amount_out(self) -> int | None:
+        """Return the best quoted amount_out from the last fee tier selection.
+
+        Only available after select_fee_tier() or get_swap_calldata() when
+        the quoter was used (auto mode with RPC). Returns None if quoter
+        was not used or no valid quotes were returned.
+        """
+        return self.last_quoted_amount_out
 
     def get_swap_calldata(
         self,
@@ -867,7 +901,11 @@ class DefaultSwapAdapter:
         Returns:
             Encoded calldata for the swap
         """
-        fee = self._select_fee_tier(from_token, to_token, amount_in)
+        # Use cached fee tier if pre-selected via select_fee_tier()
+        if self._cached_fee is not None:
+            fee = self._cached_fee
+        else:
+            fee = self._select_fee_tier(from_token, to_token, amount_in)
         sqrt_price_limit = 0
 
         chain_v1_overrides = SWAP_ROUTER_V1_CHAIN_OVERRIDES.get(self.chain, frozenset())
@@ -1070,34 +1108,40 @@ class DefaultSwapAdapter:
         ]
 
         contract = web3.eth.contract(address=web3.to_checksum_address(quoter_address), abi=quoter_abi)
-        quoted_candidates: list[dict[str, int]] = []
-        for fee_tier in candidates:
+        from_addr = web3.to_checksum_address(from_token)
+        to_addr = web3.to_checksum_address(to_token)
+
+        def _quote_fee_tier(fee_tier: int) -> dict[str, int] | None:
+            """Quote a single fee tier. Returns result dict or None on failure."""
             try:
                 amount_out, _, _, gas_estimate = contract.functions.quoteExactInputSingle(
-                    (
-                        web3.to_checksum_address(from_token),
-                        web3.to_checksum_address(to_token),
-                        amount_in,
-                        fee_tier,
-                        0,
-                    )
+                    (from_addr, to_addr, amount_in, fee_tier, 0)
                 ).call()
                 if amount_out > 0:
-                    quoted_candidates.append(
-                        {
-                            "fee_tier": fee_tier,
-                            "amount_out": int(amount_out),
-                            "gas_estimate": int(gas_estimate),
-                        }
-                    )
+                    return {
+                        "fee_tier": fee_tier,
+                        "amount_out": int(amount_out),
+                        "gas_estimate": int(gas_estimate),
+                    }
             except Exception as exc:
                 logger.debug("Fee-tier quote failed for fee_tier=%s: %s", fee_tier, exc)
-                continue
+            return None
+
+        # Query all fee tiers in parallel to avoid sequential RPC latency
+        quoted_candidates: list[dict[str, int]] = []
+        with ThreadPoolExecutor(max_workers=len(candidates)) as executor:
+            futures = {executor.submit(_quote_fee_tier, ft): ft for ft in candidates}
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    quoted_candidates.append(result)
 
         if not quoted_candidates:
             return None
 
         best = max(quoted_candidates, key=lambda quote: (quote["amount_out"], -quote["fee_tier"]))
+        # Store the best quoted amount for downstream slippage adjustments
+        self.last_quoted_amount_out = int(best["amount_out"])
         return {
             "fee_tier": int(best["fee_tier"]),
             "quoted_candidates": quoted_candidates,
@@ -3336,7 +3380,6 @@ class IntentCompiler:
             # Step 3: Calculate minimum output with slippage
             try:
                 expected_output = self._calculate_expected_output(amount_in, from_token, to_token)
-                min_output = int(Decimal(str(expected_output)) * (Decimal("1") - intent.max_slippage))
             except ValueError as e:
                 # Price unavailable -- fail-closed to prevent swaps with zero slippage protection.
                 # Without a price, min_output would be 0 and the swap would be vulnerable to
@@ -3400,7 +3443,32 @@ class IntentCompiler:
                 actual_to_token = weth_address
                 warnings.append("Native token output: will receive WETH, unwrap separately")
 
-            # Generate swap calldata
+            # Pre-select fee tier to make quoter data available for slippage adjustment.
+            # This also parallelizes fee tier queries for faster compilation.
+            # Wrapped in try/except so that RPC failures in the quoter path degrade
+            # gracefully to the oracle-only slippage estimate instead of crashing compilation.
+            try:
+                adapter.select_fee_tier(actual_from_token, actual_to_token, amount_in)
+            except Exception as exc:
+                logger.warning("Fee tier pre-selection failed, falling back to oracle estimate: %s", exc)
+
+            # Tighten slippage using quoter data when available.
+            # The on-chain quoter reflects actual pool liquidity and is more accurate
+            # than the price oracle estimate. Use the lower of the two to protect against
+            # both quoter overestimates and stale oracle prices.
+            quoter_amount = adapter.get_quoted_amount_out()
+            if quoter_amount is not None and quoter_amount < expected_output:
+                logger.info(
+                    "Quoter amount (%s) is lower than price oracle estimate (%s) — "
+                    "using quoter amount as slippage basis for safer execution",
+                    quoter_amount,
+                    expected_output,
+                )
+                expected_output = quoter_amount
+
+            min_output = int(Decimal(str(expected_output)) * (Decimal("1") - intent.max_slippage))
+
+            # Generate swap calldata (uses cached fee tier from select_fee_tier above)
             swap_calldata = adapter.get_swap_calldata(
                 from_token=actual_from_token,
                 to_token=actual_to_token,
