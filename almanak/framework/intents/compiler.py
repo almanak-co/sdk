@@ -11589,21 +11589,21 @@ class IntentCompiler:
     # when the price oracle hasn't cached their price yet.
     _KNOWN_STABLECOINS: ClassVar[set[str]] = {
         "USDC",
-        "USDC.e",
+        "USDC.E",
         "USDT",
         "DAI",
         "BUSD",
         "TUSD",
         "FRAX",
         "LUSD",
-        "sDAI",
-        "USDe",
-        "sUSDe",
+        "SDAI",
+        "USDE",
+        "SUSDE",
         "PYUSD",
         "GHO",
-        "crvUSD",
+        "CRVUSD",
         "FUSDT0",
-        "USDbC",
+        "USDBC",
         "USDP",
     }
 
@@ -11654,13 +11654,24 @@ class IntentCompiler:
             if self._using_placeholders:
                 return Decimal("1")
             # Fall back for stablecoins even without an oracle
-            if symbol in self._KNOWN_STABLECOINS:
+            if symbol.upper() in self._KNOWN_STABLECOINS:
                 return Decimal("1")
             raise ValueError(
                 f"No price oracle available and placeholder prices are disabled. Cannot resolve price for '{symbol}'."
             )
 
         price = self.price_oracle.get(symbol)
+        if price is None or price == 0:
+            # Case-insensitive fallback: Token.__post_init__ uppercases symbols
+            # (e.g., "cbETH" -> "CBETH") but the price oracle may store them in
+            # original case. Try case-insensitive match before giving up.
+            symbol_upper = symbol.upper()
+            for key, val in self.price_oracle.items():
+                if key.upper() == symbol_upper and val is not None and val != 0:
+                    price = val
+                    logger.debug(f"Resolved '{symbol}' price via case-insensitive match (key='{key}')")
+                    break
+
         if price is None or price == 0:
             # Try wrapped-native alias (WETH -> ETH, WMATIC -> MATIC, etc.)
             native_alias = self._WRAPPED_TO_NATIVE.get(symbol.upper())
@@ -11673,7 +11684,7 @@ class IntentCompiler:
             if self._using_placeholders:
                 return Decimal("1")
             # Stablecoin fallback: these are always ~$1, safe to assume
-            if symbol in self._KNOWN_STABLECOINS:
+            if symbol.upper() in self._KNOWN_STABLECOINS:
                 if symbol not in self._stablecoin_fallback_logged:
                     logger.info(f"Price for '{symbol}' not in oracle cache, using stablecoin fallback ($1.00)")
                     self._stablecoin_fallback_logged.add(symbol)

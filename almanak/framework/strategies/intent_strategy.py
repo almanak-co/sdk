@@ -2102,22 +2102,25 @@ class MarketSnapshot:
         """Get all prices as a dict suitable for IntentCompiler.
 
         Combines pre-populated prices and cached prices from oracle calls.
-        This is used to pass real prices to the IntentCompiler for accurate
-        slippage calculations.
+        Keys are normalized to uppercase to match Token.symbol (which is
+        always uppercased by Token.__post_init__).  This prevents
+        case-mismatch lookup failures for mixed-case tokens like cbETH,
+        wstETH, crvUSD, sUSDe, etc.
 
         Returns:
-            Dict mapping token symbols to USD prices
+            Dict mapping uppercase token symbols to USD prices
         """
         prices: dict[str, Decimal] = {}
 
-        # Add pre-populated prices
-        prices.update(self._prices)
+        # Add pre-populated prices (normalize keys to uppercase)
+        for key, val in self._prices.items():
+            prices[key.upper()] = val
 
         # Add cached prices from oracle calls (key format: "TOKEN/USD")
         for cache_key, price_data in self._price_cache.items():
             # Extract token symbol from cache key (e.g., "ETH/USD" -> "ETH")
             if "/" in cache_key:
-                token = cache_key.split("/")[0]
+                token = cache_key.split("/")[0].upper()
                 prices[token] = price_data.price
 
         return prices
