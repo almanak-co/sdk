@@ -195,6 +195,24 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
             "n_coins": 3,
             "virtual_price": Decimal("1.02"),
         },
+        # crvUSD/USDC StableSwap NG pool on Optimism (VIB-1587)
+        # Contains NATIVE USDC (0x0b2C639c...) — the key missing piece vs 3pool (which uses USDC.e)
+        # StableSwap NG: LP token IS the pool address.
+        # Pool verified on Optimism Etherscan: CurveStableSwapNG "crvUSDC Pool"
+        # Coin order verified from on-chain contract: coins[0]=USDC, coins[1]=crvUSD
+        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.virtual_price() at runtime for accuracy.
+        "crvusd_usdc": {
+            "address": "0x03771e24b7C9172d163Bf447490B142a15be3485",
+            "lp_token": "0x03771e24b7C9172d163Bf447490B142a15be3485",  # StableSwap NG: LP = pool
+            "coins": ["USDC", "crvUSD"],
+            "coin_addresses": [
+                "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",  # USDC (native) on Optimism
+                "0xC52D7F23a2e460248Db6eE192Cb23dD12bDDCbf6",  # crvUSD on Optimism
+            ],
+            "pool_type": "stableswap",
+            "n_coins": 2,
+            "virtual_price": Decimal("1.0"),
+        },
     },
 }
 

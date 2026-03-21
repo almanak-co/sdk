@@ -67,6 +67,7 @@ STABLECOINS: set[str] = {
     "LUSD",
     "TUSD",
     "BUSD",
+    "CRVUSD",
 }
 
 # =============================================================================
@@ -731,6 +732,22 @@ GHO = Token(
     is_stablecoin=True,
 )
 
+# Curve crvUSD (Curve's native overcollateralized stablecoin)
+# Used in Curve StableSwap NG pools on multiple chains
+CRVUSD = Token(
+    symbol="crvUSD",
+    name="Curve.Fi USD Stablecoin",
+    decimals=18,
+    addresses={
+        "ethereum": "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E",
+        "arbitrum": "0x498Bf2B1e120FeD3ad3D42EA2165E9b73f99C1e5",
+        "optimism": "0xC52D7F23a2e460248Db6eE192Cb23dD12bDDCbf6",
+        "base": "0x417Ac0e078398C154EdFadD9Ef675d30Be60Af93",
+    },
+    coingecko_id="crvusd",
+    is_stablecoin=True,
+)
+
 # =============================================================================
 # LIQUID STAKING TOKENS (LST/LRT)
 # =============================================================================
@@ -1231,6 +1248,7 @@ DEFAULT_TOKENS: list[Token] = [
     USDe,
     sUSDe,
     GHO,
+    CRVUSD,
     # LST/LRT tokens
     wstETH,
     WEETH,
@@ -1382,6 +1400,7 @@ __all__ = [
     "USDe",
     "sUSDe",
     "GHO",
+    "CRVUSD",
     # LST/LRT tokens
     "wstETH",
     "WEETH",
