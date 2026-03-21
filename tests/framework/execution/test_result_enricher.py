@@ -704,3 +704,163 @@ class TestResultEnricherWithUniswapV3:
         # Swap amounts should be extracted (even without full token info)
         assert enriched.swap_amounts is not None
         assert enriched.swap_amounts.amount_in > 0
+
+    def test_enriches_agni_swap_on_mantle(self):
+        """Agni Finance (V3 fork) swap enrichment on Mantle should work (VIB-1653).
+
+        Agni Finance is registered as 'agni_finance' in the receipt registry,
+        mapping to UniswapV3ReceiptParser. This test verifies the full enrichment
+        pipeline works with:
+        - protocol='agni_finance' on the intent
+        - chain='mantle' on the context
+        - A real Uniswap V3 Swap event receipt
+        """
+        swap_event = {
+            "address": "0x1234567890abcdef1234567890abcdef12345678",
+            "topics": [
+                "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",  # Swap
+                "0x0000000000000000000000001111111111111111111111111111111111111111",  # sender
+                "0x0000000000000000000000002222222222222222222222222222222222222222",  # recipient
+            ],
+            "data": (
+                "0x"
+                "00000000000000000000000000000000000000000000000000000000002faf08"  # amount0 = 3_125_000 (USDC in, 6 dec)
+                "fffffffffffffffffffffffffffffffffffffffffffffffffff3e8948e1e0000"  # amount1 = negative (WETH out)
+                "0000000000000000000000000000000000000001000000000000000000000000"  # sqrtPriceX96
+                "00000000000000000000000000000000000000000000000000000000000186a0"  # liquidity
+                "0000000000000000000000000000000000000000000000000000000000000000"  # tick
+            ),
+        }
+
+        enricher = ResultEnricher()
+        result = create_execution_result(success=True, logs=[swap_event])
+
+        @dataclass
+        class AgniSwapIntent:
+            intent_type: str = "SWAP"
+            protocol: str = "agni_finance"
+            intent_id: str = "test-agni-swap"
+
+        intent = AgniSwapIntent()
+        context = ExecutionContext(
+            strategy_id="test-strategy",
+            chain="mantle",
+            wallet_address="0xtest",
+            protocol="agni_finance",
+        )
+
+        enriched = enricher.enrich(result, intent, context)
+
+        assert enriched.swap_amounts is not None, "swap_amounts should be enriched for agni_finance on Mantle"
+        assert enriched.swap_amounts.amount_in > 0
+
+    def test_enriches_agni_swap_via_context_protocol_fallback(self):
+        """Agni swap enrichment should work when intent.protocol is None (VIB-1653).
+
+        When strategy authors omit protocol on the intent, the runner sets
+        context.protocol = compiler.default_protocol. On Mantle, this resolves
+        to 'agni_finance'. Enrichment must still work via this fallback path.
+        """
+        swap_event = {
+            "address": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            "topics": [
+                "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
+                "0x0000000000000000000000001111111111111111111111111111111111111111",
+                "0x0000000000000000000000002222222222222222222222222222222222222222",
+            ],
+            "data": (
+                "0x"
+                "00000000000000000000000000000000000000000000000000000000000f4240"  # amount0 = 1_000_000
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffff0000000f423f"  # amount1 = negative
+                "0000000000000000000000000000000000000001000000000000000000000000"
+                "00000000000000000000000000000000000000000000000000000000000186a0"
+                "0000000000000000000000000000000000000000000000000000000000000000"
+            ),
+        }
+
+        enricher = ResultEnricher()
+        result = create_execution_result(success=True, logs=[swap_event])
+
+        @dataclass
+        class NoProtocolIntent:
+            intent_type: str = "SWAP"
+            protocol: str | None = None
+            intent_id: str = "test-no-protocol"
+
+        intent = NoProtocolIntent()
+        context = ExecutionContext(
+            strategy_id="test-strategy",
+            chain="mantle",
+            wallet_address="0xtest",
+            protocol="agni_finance",  # Set by runner from compiler.default_protocol
+        )
+
+        enriched = enricher.enrich(result, intent, context)
+
+        assert enriched.swap_amounts is not None, (
+            "swap_amounts should be enriched via context.protocol fallback"
+        )
+        assert enriched.swap_amounts.amount_in > 0
+
+    def test_enriches_swap_with_approve_plus_swap_receipts(self):
+        """Enrichment should work with 2 TXs: approve (no Swap event) + swap (VIB-1653).
+
+        Strategy executions on Agni often produce 2 transactions: an ERC-20
+        approve followed by the actual swap. The enricher must try each receipt
+        and find swap_amounts from the second one.
+        """
+        approve_log = {
+            "address": "0xusdc_token_address",
+            "topics": [
+                "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",  # Approval
+                "0x0000000000000000000000001111111111111111111111111111111111111111",
+                "0x0000000000000000000000002222222222222222222222222222222222222222",
+            ],
+            "data": "0x00000000000000000000000000000000000000000000000000000000ffffffff",
+        }
+
+        swap_log = {
+            "address": "0x3333333333333333333333333333333333333333",
+            "topics": [
+                "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
+                "0x0000000000000000000000001111111111111111111111111111111111111111",
+                "0x0000000000000000000000002222222222222222222222222222222222222222",
+            ],
+            "data": (
+                "0x"
+                "00000000000000000000000000000000000000000000000000000000002faf08"
+                "fffffffffffffffffffffffffffffffffffffffffffffffffff3e8948e1e0000"
+                "0000000000000000000000000000000000000001000000000000000000000000"
+                "00000000000000000000000000000000000000000000000000000000000186a0"
+                "0000000000000000000000000000000000000000000000000000000000000000"
+            ),
+        }
+
+        # Create 2 transaction results: approve + swap
+        approve_receipt = MockReceipt(logs=[approve_log])
+        approve_tx = TransactionResult(tx_hash="0xapprove", success=True, receipt=approve_receipt, gas_used=46000)
+        swap_receipt = MockReceipt(logs=[swap_log])
+        swap_tx = TransactionResult(tx_hash="0xswap", success=True, receipt=swap_receipt, gas_used=180000)
+
+        result = ExecutionResult(
+            success=True,
+            phase=ExecutionPhase.COMPLETE,
+            transaction_results=[approve_tx, swap_tx],
+            total_gas_used=226000,
+        )
+
+        enricher = ResultEnricher()
+        intent = MockSwapIntent(protocol="agni_finance")
+        context = ExecutionContext(
+            strategy_id="test-strategy",
+            chain="mantle",
+            wallet_address="0xtest",
+            protocol="agni_finance",
+        )
+
+        enriched = enricher.enrich(result, intent, context)
+
+        assert enriched.swap_amounts is not None, (
+            "swap_amounts should be extracted from swap TX even when approve TX comes first"
+        )
+        assert enriched.swap_amounts.amount_in > 0

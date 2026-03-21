@@ -992,6 +992,13 @@ class UniswapV3ReceiptParser:
             parse_result = self.parse_receipt(receipt)
 
             if not parse_result.swap_result:
+                # Log diagnostic info to help debug enrichment failures (VIB-1653)
+                num_events = len(parse_result.events)
+                swap_count = len(parse_result.swap_events)
+                logger.debug(
+                    f"extract_swap_amounts: no swap_result (events={num_events}, "
+                    f"swap_events={swap_count}, chain={self.chain})"
+                )
                 return None
 
             sr = parse_result.swap_result
