@@ -41,6 +41,36 @@ from almanak.framework.utils.log_formatters import format_address, format_gas_co
 logger = logging.getLogger(__name__)
 
 
+def _format_token_amount(raw_amount: Decimal, token_address: str, chain: str) -> str:
+    """Format a raw token amount into a human-readable string.
+
+    Looks up decimals for the token via the token resolver. Falls back to
+    raw amount formatting if decimals cannot be determined.
+
+    Args:
+        raw_amount: Raw uint256 amount from the event
+        token_address: Token contract address
+        chain: Chain name (e.g., "arbitrum", "ethereum")
+
+    Returns:
+        Human-readable amount string (e.g., "0.0027" or "1,500.50")
+    """
+    try:
+        from almanak.framework.data.tokens import get_token_resolver
+
+        resolver = get_token_resolver()
+        resolved = resolver.resolve(token_address, chain)
+        decimals = resolved.decimals
+        human_amount = raw_amount / Decimal(10**decimals)
+        # Use up to 6 significant digits for readability
+        if human_amount == 0:
+            return "0"
+        return f"{human_amount:,.6f}".rstrip("0").rstrip(".")
+    except Exception:
+        # Fallback to raw amount if resolver fails
+        return f"{raw_amount:,.0f} (raw)"
+
+
 # =============================================================================
 # Event Topic Signatures
 # =============================================================================
@@ -700,9 +730,10 @@ class AaveV3ReceiptParser:
         """Initialize the parser.
 
         Args:
-            **kwargs: Additional arguments (ignored for compatibility)
+            **kwargs: Additional arguments. Accepts 'chain' for token decimal lookup.
         """
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
+        self._chain = kwargs.get("chain", "ethereum")
 
     def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:
         """Parse a transaction receipt.
@@ -804,17 +835,25 @@ class AaveV3ReceiptParser:
             actions = []
             if supplies:
                 for s in supplies:
-                    actions.append(f"SUPPLY {s.amount:,.0f} to {format_address(s.reserve)}")
+                    actions.append(
+                        f"SUPPLY {_format_token_amount(s.amount, s.reserve, self._chain)} to {format_address(s.reserve)}"
+                    )
             if withdraws:
                 for w in withdraws:
-                    actions.append(f"WITHDRAW {w.amount:,.0f} from {format_address(w.reserve)}")
+                    actions.append(
+                        f"WITHDRAW {_format_token_amount(w.amount, w.reserve, self._chain)} from {format_address(w.reserve)}"
+                    )
             if borrows:
                 for b in borrows:
                     rate_type = "variable" if b.is_variable_rate else "stable"
-                    actions.append(f"BORROW {b.amount:,.0f} ({rate_type}) from {format_address(b.reserve)}")
+                    actions.append(
+                        f"BORROW {_format_token_amount(b.amount, b.reserve, self._chain)} ({rate_type}) from {format_address(b.reserve)}"
+                    )
             if repays:
                 for r in repays:
-                    actions.append(f"REPAY {r.amount:,.0f} to {format_address(r.reserve)}")
+                    actions.append(
+                        f"REPAY {_format_token_amount(r.amount, r.reserve, self._chain)} to {format_address(r.reserve)}"
+                    )
             if liquidations:
                 for liq in liquidations:
                     actions.append(f"LIQUIDATION on {format_address(liq.user)}")

@@ -396,19 +396,12 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
         range_upper = current_price * (Decimal("1") + half_width)
 
         # Convert price range to ticks
-        # Get decimals from known token symbols
-        token_decimals = {
-            "WETH": 18,
-            "USDC": 6,
-            "USDT": 6,
-            "DAI": 18,
-            "WBTC": 8,
-            "ARB": 18,
-            "SUSHI": 18,
-            "WMATIC": 18,
-        }
-        decimals0 = token_decimals.get(self.token0_symbol, 18)
-        decimals1 = token_decimals.get(self.token1_symbol, 18)
+        # Look up decimals from the token resolver (works for any token on any chain)
+        from almanak.framework.data.tokens import get_token_resolver
+
+        resolver = get_token_resolver()
+        decimals0 = resolver.get_decimals(self.chain, self.token0_symbol)
+        decimals1 = resolver.get_decimals(self.chain, self.token1_symbol)
         tick_lower = get_nearest_tick(price_to_tick(range_lower, decimals0, decimals1), self.fee_tier)
         tick_upper = get_nearest_tick(price_to_tick(range_upper, decimals0, decimals1), self.fee_tier)
 
