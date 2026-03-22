@@ -152,6 +152,10 @@ class ReceiptParserRegistry:
             "almanak.framework.connectors.traderjoe_v2.receipt_parser",
             "TraderJoeV2ReceiptParser",
         ),
+        "fluid": (
+            "almanak.framework.connectors.fluid.receipt_parser",
+            "FluidReceiptParser",
+        ),
         "sushiswap_v3": (
             "almanak.framework.connectors.sushiswap_v3.receipt_parser",
             "SushiSwapV3ReceiptParser",

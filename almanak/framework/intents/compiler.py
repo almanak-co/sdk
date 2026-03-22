@@ -294,6 +294,7 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
         "camelot": "0x00c7f3082833e796A5b3e4Bd59f6642FF44DCD15",
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
         "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter v2.1
+        "fluid": "0x91716C4EDA1Fb55e84Bf8b4c7085f84285c19085",  # Fluid DexFactory (pools resolved dynamically)
     },
     "optimism": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
@@ -3313,6 +3314,10 @@ class IntentCompiler:
         if protocol == "uniswap_v4":
             return self._compile_swap_uniswap_v4(intent)
 
+        # Handle Fluid DEX swaps (direct pool swapIn call)
+        if protocol == "fluid":
+            return self._compile_swap_fluid(intent)
+
         # Guard: TraderJoe V2 uses LBRouter2 (bin-based AMM), NOT Uniswap V3 interface.
         # DefaultSwapAdapter generates exactInputSingle calldata which reverts on LBRouter2.
         # LP operations still work via the dedicated TraderJoe V2 connector. (VIB-1406)
@@ -4163,6 +4168,10 @@ class IntentCompiler:
         if intent.protocol == "curve":
             return self._compile_lp_open_curve(intent)
 
+        # Handle Fluid DEX LP (Arbitrum only, unencumbered positions)
+        if intent.protocol == "fluid":
+            return self._compile_lp_open_fluid(intent)
+
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
             intent_id=intent.intent_id,
@@ -4375,6 +4384,111 @@ class IntentCompiler:
 
         except Exception as e:
             logger.exception(f"Failed to compile LP_OPEN intent: {e}")
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+
+        return result
+
+    def _compile_lp_open_fluid(self, intent: "LPOpenIntent") -> "CompilationResult":
+        """Compile LP_OPEN intent for Fluid DEX T1 (Arbitrum only).
+
+        Phase 1 limitation: LP deposit is not yet supported on-chain.
+        Fluid DEX deposit() reverts due to complex Liquidity-layer routing.
+        This method short-circuits with a clear FAILED status.
+        """
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                "Fluid DEX LP_OPEN is not supported in phase 1. "
+                "The Liquidity-layer routing causes on-chain reverts on all pools. "
+                "LP deposit support is a follow-up. Use swap intents instead."
+            ),
+            intent_id=intent.intent_id,
+        )
+
+    def _compile_lp_close_fluid(self, intent: "LPCloseIntent") -> "CompilationResult":
+        """Compile LP_CLOSE intent for Fluid DEX T1 (with encumbrance guard).
+
+        ENCUMBRANCE GUARD: Rejects compilation if the pool has smart-collateral
+        or smart-debt enabled, preventing liquidation risk.
+        """
+        result = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=intent.intent_id,
+        )
+        transactions: list[TransactionData] = []
+
+        try:
+            from almanak.framework.connectors.fluid import FluidAdapter, FluidConfig
+
+            try:
+                nft_id = int(intent.position_id)
+            except ValueError:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Invalid Fluid position ID (must be integer): {intent.position_id}",
+                    intent_id=intent.intent_id,
+                )
+
+            dex_address = intent.pool
+            if not dex_address or not dex_address.startswith("0x"):
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(f"Fluid LP_CLOSE requires pool address in pool field. Got pool={intent.pool}"),
+                    intent_id=intent.intent_id,
+                )
+
+            rpc_url = self._get_chain_rpc_url()
+            if not rpc_url:
+                raise ValueError("RPC URL required for Fluid DEX adapter.")
+
+            config = FluidConfig(
+                chain=self.chain,
+                wallet_address=self.wallet_address,
+                rpc_url=rpc_url,
+            )
+            fluid_adapter = FluidAdapter(config)
+
+            # COMPILE-TIME ENCUMBRANCE GUARD — raises if pool has smart-debt/collateral
+            lp_tx = fluid_adapter.build_remove_liquidity_transaction(
+                dex_address=dex_address,
+                nft_id=nft_id,
+            )
+
+            transactions.append(
+                TransactionData(
+                    to=lp_tx.to,
+                    value=lp_tx.value,
+                    data=lp_tx.data,
+                    gas_estimate=lp_tx.gas,
+                    description=lp_tx.description,
+                    tx_type="fluid_operate_close",
+                )
+            )
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+            action_bundle = ActionBundle(
+                intent_type=IntentType.LP_CLOSE.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "dex_address": dex_address,
+                    "nft_id": nft_id,
+                    "protocol": "fluid",
+                    "chain": self.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+
+            logger.info(
+                f"Compiled Fluid LP_CLOSE intent: nft_id={nft_id}, pool={dex_address}, "
+                f"{len(transactions)} txs, {total_gas} gas"
+            )
+
+        except Exception as e:
+            logger.exception(f"Failed to compile Fluid LP_CLOSE intent: {e}")
             result.status = CompilationStatus.FAILED
             result.error = str(e)
 
@@ -4629,6 +4743,10 @@ class IntentCompiler:
         # Handle Curve LP close (pool-based AMM, proportional removal)
         if intent.protocol == "curve":
             return self._compile_lp_close_curve(intent)
+
+        # Handle Fluid DEX LP close (with encumbrance guard)
+        if intent.protocol == "fluid":
+            return self._compile_lp_close_fluid(intent)
 
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
@@ -5846,6 +5964,150 @@ class IntentCompiler:
 
         except Exception as e:
             logger.exception("Failed to compile Curve SWAP intent")
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+
+        return result
+
+    def _compile_swap_fluid(self, intent: SwapIntent) -> CompilationResult:
+        """Compile SWAP intent for Fluid DEX (Arbitrum only).
+
+        Uses the pool's swapIn() function directly. Automatically discovers
+        the Fluid DEX pool for the token pair and determines swap direction.
+        """
+        result = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=intent.intent_id,
+        )
+        transactions: list[TransactionData] = []
+
+        try:
+            from almanak.framework.connectors.fluid.sdk import FluidSDK
+
+            # Resolve tokens
+            from_token_info = self._resolve_token(intent.from_token)
+            to_token_info = self._resolve_token(intent.to_token)
+
+            if not from_token_info:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Unknown token {intent.from_token} for chain {self.chain}",
+                    intent_id=intent.intent_id,
+                )
+            if not to_token_info:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Unknown token {intent.to_token} for chain {self.chain}",
+                    intent_id=intent.intent_id,
+                )
+
+            rpc_url = self._get_chain_rpc_url()
+            if not rpc_url:
+                raise ValueError("RPC URL required for Fluid DEX adapter.")
+
+            sdk = FluidSDK(chain=self.chain, rpc_url=rpc_url)
+
+            # Find the pool
+            pool_addr = sdk.find_dex_by_tokens(from_token_info.address, to_token_info.address)
+            if not pool_addr:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"No Fluid DEX pool found for {intent.from_token}/{intent.to_token} on {self.chain}",
+                    intent_id=intent.intent_id,
+                )
+
+            # Determine swap direction (swap0to1 = from_token is token0)
+            pool_data = sdk.get_dex_data(pool_addr)
+            from_addr_lower = from_token_info.address.lower()
+            swap0to1 = pool_data.token0.lower() == from_addr_lower
+
+            # Calculate input amount (support amount_usd, amount, and "all")
+            amount_decimal: Decimal
+            if intent.amount_usd is not None:
+                price = self._require_token_price(from_token_info.symbol)
+                amount_decimal = intent.amount_usd / price
+            elif intent.amount is not None:
+                if intent.amount == "all":
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error="amount='all' must be resolved before compilation. Use Intent.set_resolved_amount() to resolve chained amounts.",
+                        intent_id=intent.intent_id,
+                    )
+                amount_decimal = intent.amount  # type: ignore[assignment]
+            else:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error="Either amount_usd or amount must be provided",
+                    intent_id=intent.intent_id,
+                )
+
+            # Convert to wei
+            amount_in_wei = int(amount_decimal * Decimal(10**from_token_info.decimals))
+
+            # Build approval TX — approve to the pool (Fluid routes through Liquidity layer)
+            if not from_token_info.is_native:
+                approve_txs = self._build_approve_tx(from_token_info.address, pool_addr, amount_in_wei)
+                transactions.extend(approve_txs)
+
+            # Calculate min output with slippage
+            slippage_bps = int((intent.max_slippage or Decimal("0.005")) * 10000)
+            try:
+                quote = sdk.get_swap_quote(pool_addr, swap0to1, amount_in_wei, self.wallet_address)
+                min_out = quote * (10000 - slippage_bps) // 10000
+            except Exception as e:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Failed to get Fluid swap quote for slippage protection: {e}",
+                    intent_id=intent.intent_id,
+                )
+
+            # Build swap TX
+            swap_tx_data = sdk.build_swap_tx(
+                dex_address=pool_addr,
+                swap0to1=swap0to1,
+                amount_in=amount_in_wei,
+                amount_out_min=min_out,
+                to=self.wallet_address,
+            )
+
+            transactions.append(
+                TransactionData(
+                    to=swap_tx_data["to"],
+                    value=swap_tx_data["value"],
+                    data=swap_tx_data["data"],
+                    gas_estimate=swap_tx_data["gas"],
+                    description=f"Swap {amount_decimal} {intent.from_token} -> {intent.to_token} on Fluid DEX",
+                    tx_type="fluid_swap",
+                )
+            )
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+            action_bundle = ActionBundle(
+                intent_type=IntentType.SWAP.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "from_token": from_token_info.to_dict(),
+                    "to_token": to_token_info.to_dict(),
+                    "amount_in": str(amount_in_wei),
+                    "min_amount_out": str(min_out),
+                    "pool": pool_addr,
+                    "swap0to1": swap0to1,
+                    "protocol": "fluid",
+                    "chain": self.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+
+            logger.info(
+                f"Compiled Fluid SWAP: {intent.from_token} -> {intent.to_token}, "
+                f"pool={pool_addr[:10]}..., {len(transactions)} txs, {total_gas} gas"
+            )
+
+        except Exception as e:
+            logger.exception(f"Failed to compile Fluid SWAP intent: {e}")
             result.status = CompilationStatus.FAILED
             result.error = str(e)
 
