@@ -846,6 +846,9 @@ class RollingForkManager:
         cmd.extend(["--timeout", "120000"])  # 120s upstream RPC timeout
         cmd.extend(["--retries", "3"])  # Retry failed upstream calls
 
+        # Disable gas price cap so high-gas chains (e.g. Polygon) don't fail
+        cmd.append("--no-gas-cap")
+
         # Silent mode for cleaner logs
         cmd.append("--silent")
 
