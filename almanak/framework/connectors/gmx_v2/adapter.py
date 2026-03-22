@@ -28,6 +28,7 @@ from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
+    from almanak.framework.teardown import TeardownPositionSummary
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,54 @@ GMX_V2_MARKETS: dict[str, dict[str, str]] = {
     },
 }
 
+
+# Index token decimals per market address.
+# GMX V2 size_in_tokens uses the index token's native decimals.
+# Mirrored from almanak.framework.backtesting.paper.position_queries for consistency.
+_GMX_V2_INDEX_TOKEN_DECIMALS: dict[str, dict[str, int]] = {
+    "arbitrum": {
+        "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336": 18,  # ETH/USD (WETH)
+        "0x47c031236e19d024b42f8AE6780E44A573170703": 8,  # BTC/USD (WBTC)
+        "0x7f1fa204bb700853D36994DA19F830b6Ad18455C": 18,  # LINK/USD
+        "0xC25cEf6061Cf5dE5eb761b50E4743c1F5D7E5407": 18,  # ARB/USD
+        "0x09400D9DB990D5ed3f35D7be61DfAEB900Af03C9": 9,  # SOL/USD
+    },
+    "avalanche": {
+        "0xD996ff47A1F763E1e55415BC4437c59292D1F415": 18,  # AVAX/USD (WAVAX)
+        "0xB7e69749E3d2EDd90ea59A4932EFEa2D41E245d7": 18,  # ETH/USD (WETH.e)
+        "0xFb02132333A79C8B5Bd0b64E3AbccA5f7fAf2937": 8,  # BTC/USD (WBTC.e)
+        "0x91ccF2053d79e16beE6B8c4b9F8e67Ba64669B98": 9,  # SOL/USD
+        "0x7e0d5dc8C0c4F04c37568a5E3C2B29cA6C54a8e7": 18,  # LTC/USD
+    },
+}
+
+# Known collateral token decimals (fallback when TokenResolver fails).
+# Covers Arbitrum and Avalanche GMX V2 collateral tokens.
+_KNOWN_COLLATERAL_DECIMALS: dict[str, int] = {
+    # Arbitrum
+    "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".lower(): 6,  # USDC (Arbitrum)
+    "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9".lower(): 6,  # USDT (Arbitrum)
+    "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f".lower(): 8,  # WBTC (Arbitrum)
+    # Avalanche
+    "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E".lower(): 6,  # USDC (Avalanche)
+    "0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664".lower(): 6,  # USDC.e (Avalanche)
+    "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7".lower(): 6,  # USDT (Avalanche)
+    "0xc7198437980c041c805A1EDcbA50c1Ce5db95118".lower(): 6,  # USDT.e (Avalanche)
+    "0x50b7545627a5162F82A992c33b87aDc75187B218".lower(): 8,  # WBTC.e (Avalanche)
+}
+
+# Known stablecoin addresses for collateral USD estimation (1:1 peg assumed).
+# Covers both Arbitrum and Avalanche chains.
+_KNOWN_STABLECOIN_ADDRESSES: set[str] = {
+    # Arbitrum
+    "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".lower(),  # USDC
+    "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9".lower(),  # USDT
+    # Avalanche
+    "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E".lower(),  # USDC
+    "0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664".lower(),  # USDC.e
+    "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7".lower(),  # USDT
+    "0xc7198437980c041c805A1EDcbA50c1Ce5db95118".lower(),  # USDT.e
+}
 
 # Default execution fee (in native token)
 DEFAULT_EXECUTION_FEE: dict[str, int] = {
@@ -934,12 +983,324 @@ class GMXv2Adapter:
         return self._positions.get(position_key)
 
     def get_all_positions(self) -> list[GMXv2Position]:
-        """Get all open positions.
+        """Get all open positions from in-memory state.
 
         Returns:
-            List of all open positions
+            List of all open positions (in-memory only, not on-chain)
         """
         return list(self._positions.values())
+
+    def get_positions_onchain(self, rpc_url: str) -> list[GMXv2Position]:
+        """Read all open positions for this wallet directly from on-chain state.
+
+        Uses the GMX V2 SyntheticsReader contract to query the DataStore
+        for all positions belonging to the configured wallet address.
+
+        Args:
+            rpc_url: RPC endpoint URL for on-chain queries
+
+        Returns:
+            List of GMXv2Position objects read from chain
+
+        Raises:
+            ValueError: If the chain is not supported for on-chain reads
+        """
+        if self.chain not in ("arbitrum", "avalanche"):
+            raise ValueError(f"On-chain position reads not supported for chain: {self.chain}")
+
+        reader_address = self.addresses.get("synthetics_reader")
+        data_store_address = self.addresses.get("data_store")
+        if not reader_address or not data_store_address:
+            raise ValueError(f"Missing reader or data_store address for chain: {self.chain}")
+
+        from web3 import Web3
+
+        from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+
+        sdk = GMXV2SDK(rpc_url, chain="arbitrum") if self.chain == "arbitrum" else None
+        if sdk is None:
+            # For non-arbitrum chains, use direct Web3 with the reader ABI
+            import json
+            import os
+
+            w3 = Web3(Web3.HTTPProvider(rpc_url))
+            abi_dir = os.path.join(os.path.dirname(__file__), "abis")
+            with open(os.path.join(abi_dir, "reader.json")) as f:
+                reader_abi = json.load(f)
+            reader = w3.eth.contract(address=w3.to_checksum_address(reader_address), abi=reader_abi)
+            ds = w3.to_checksum_address(data_store_address)
+            acct = w3.to_checksum_address(self.wallet_address)
+
+            count = reader.functions.getAccountPositionCount(ds, acct).call()
+            if count == 0:
+                return []
+            raw_positions = reader.functions.getAccountPositions(ds, acct, 0, count).call()
+        else:
+            raw_positions_dicts = sdk.get_account_positions(self.wallet_address)
+            # Convert from dict format to raw tuple format for unified processing
+            return self._parse_position_dicts(raw_positions_dicts)
+
+        return self._parse_raw_positions(raw_positions)
+
+    def _parse_position_dicts(self, position_dicts: list[dict]) -> list[GMXv2Position]:
+        """Parse position dicts from SDK into GMXv2Position objects.
+
+        Args:
+            position_dicts: List of position dicts from GMXV2SDK.get_account_positions()
+
+        Returns:
+            List of GMXv2Position objects
+        """
+        positions = []
+        for pos in position_dicts:
+            size_in_usd = pos["size_in_usd"]
+            if size_in_usd == 0:
+                continue  # Skip empty positions
+
+            # GMX V2 uses 30 decimals for USD values
+            size_usd_decimal = Decimal(size_in_usd) / Decimal(10**30)
+
+            # size_in_tokens uses the index token's decimals (e.g., WETH=18, WBTC=8)
+            index_token_decimals = self._get_index_token_decimals(pos["market"])
+            size_in_tokens_decimal = Decimal(pos["size_in_tokens"]) / Decimal(10**index_token_decimals)
+
+            # Collateral amount needs the collateral token's decimals
+            collateral_decimals = self._get_collateral_decimals(pos["collateral_token"])
+            collateral_decimal = Decimal(pos["collateral_amount"]) / Decimal(10**collateral_decimals)
+
+            # Calculate entry price from size_in_usd / size_in_tokens
+            if pos["size_in_tokens"] > 0:
+                entry_price = size_usd_decimal / size_in_tokens_decimal
+            else:
+                entry_price = Decimal("0")
+
+            # Calculate leverage: size_in_usd / collateral_value_in_usd
+            # For stablecoin collateral (USDC/USDT), token amount ~= USD value.
+            # For non-stablecoin collateral (WETH/WBTC), we approximate using
+            # entry_price to convert collateral to USD. This is approximate since
+            # the collateral token price may differ from the entry price, but is
+            # more accurate than assuming 1:1 USD peg.
+            collateral_value_usd = self._estimate_collateral_usd(
+                collateral_decimal, pos["collateral_token"], entry_price, pos["market"]
+            )
+            if collateral_value_usd > 0:
+                leverage = size_usd_decimal / collateral_value_usd
+            else:
+                leverage = Decimal("1")
+
+            position_key = self._get_position_key(pos["market"], pos["collateral_token"], pos["is_long"])
+
+            positions.append(
+                GMXv2Position(
+                    position_key=position_key,
+                    market=pos["market"],
+                    collateral_token=pos["collateral_token"],
+                    size_in_usd=size_usd_decimal,
+                    size_in_tokens=size_in_tokens_decimal,
+                    collateral_amount=collateral_decimal,
+                    entry_price=entry_price,
+                    is_long=pos["is_long"],
+                    leverage=leverage,
+                    # Note: borrowing_factor and funding_fee_amount_per_size from the Reader
+                    # are coefficients/per-size values, not realized fee totals. Computing
+                    # actual fees requires additional on-chain data (cumulative factors).
+                    # We store them as raw scaled values for informational purposes.
+                    borrowing_fee_amount=Decimal(pos.get("borrowing_factor", 0)) / Decimal(10**30),
+                    funding_fee_amount=Decimal(pos.get("funding_fee_amount_per_size", 0)) / Decimal(10**30),
+                    last_updated=datetime.now(UTC),
+                )
+            )
+
+        return positions
+
+    def _parse_raw_positions(self, raw_positions: list) -> list[GMXv2Position]:
+        """Parse raw position tuples from Reader contract into GMXv2Position objects.
+
+        Args:
+            raw_positions: Raw tuples from getAccountPositions call
+
+        Returns:
+            List of GMXv2Position objects
+        """
+        # Convert raw tuples to dicts then reuse _parse_position_dicts
+        position_dicts = []
+        for raw in raw_positions:
+            addresses = raw[0]
+            numbers = raw[1]
+            flags = raw[2]
+            position_dicts.append(
+                {
+                    "account": addresses[0],
+                    "market": addresses[1],
+                    "collateral_token": addresses[2],
+                    "size_in_usd": numbers[0],
+                    "size_in_tokens": numbers[1],
+                    "collateral_amount": numbers[2],
+                    "borrowing_factor": numbers[3],
+                    "funding_fee_amount_per_size": numbers[4],
+                    "long_token_claimable_funding_per_size": numbers[5],
+                    "short_token_claimable_funding_per_size": numbers[6],
+                    "increased_at_block": numbers[7],
+                    "decreased_at_block": numbers[8],
+                    "increased_at_time": numbers[9],
+                    "decreased_at_time": numbers[10],
+                    "is_long": flags[0],
+                }
+            )
+        return self._parse_position_dicts(position_dicts)
+
+    def _get_collateral_decimals(self, collateral_address: str) -> int:
+        """Get decimals for a collateral token address.
+
+        Args:
+            collateral_address: Token address
+
+        Returns:
+            Token decimals
+        """
+        try:
+            resolved = self._token_resolver.resolve(collateral_address, self.chain)
+            return resolved.decimals
+        except TokenResolutionError:
+            # Common GMX collateral tokens - fallback for known addresses
+            # Covers both Arbitrum and Avalanche chains
+            addr_lower = collateral_address.lower()
+            fallback = _KNOWN_COLLATERAL_DECIMALS.get(addr_lower)
+            if fallback is not None:
+                return fallback
+            # Unknown collateral token -- log warning and default to 18.
+            # This is a best-effort fallback for the read-only position query path;
+            # most GMX V2 collateral tokens are WETH (18) when not stablecoins.
+            logger.warning(
+                "gmx_v2_unknown_collateral_decimals: defaulting to 18 for %s on %s",
+                collateral_address,
+                self.chain,
+            )
+            return 18
+
+    def _get_index_token_decimals(self, market_address: str) -> int:
+        """Get the decimals for a market's index token.
+
+        GMX V2 size_in_tokens uses the index token's native decimals.
+        For example, ETH/USD uses 18 (WETH), BTC/USD uses 8 (WBTC),
+        SOL/USD uses 9.
+
+        Uses the same mapping as the paper trading position queries to stay
+        consistent across the codebase.
+
+        Args:
+            market_address: GMX V2 market address
+
+        Returns:
+            Index token decimals for the market
+        """
+        chain_markets = _GMX_V2_INDEX_TOKEN_DECIMALS.get(self.chain, {})
+        decimals = chain_markets.get(market_address)
+        if decimals is not None:
+            return decimals
+        logger.warning(
+            "gmx_v2_unknown_index_token_decimals: defaulting to 18 for market %s on %s",
+            market_address,
+            self.chain,
+        )
+        return 18
+
+    def _estimate_collateral_usd(
+        self,
+        collateral_decimal: Decimal,
+        collateral_address: str,
+        entry_price: Decimal,
+        market_address: str,
+    ) -> Decimal:
+        """Estimate collateral value in USD.
+
+        For stablecoin collateral (USDC, USDT), the token amount equals USD value.
+        For non-stablecoin collateral, we use the entry price as an approximation
+        when the collateral token matches the market's index token (e.g., WETH
+        collateral in ETH/USD market).
+
+        Args:
+            collateral_decimal: Collateral amount in human-readable decimals
+            collateral_address: Collateral token address
+            entry_price: Position entry price (USD per index token)
+            market_address: GMX V2 market address
+
+        Returns:
+            Estimated collateral value in USD
+        """
+        addr_lower = collateral_address.lower()
+
+        if addr_lower in _KNOWN_STABLECOIN_ADDRESSES:
+            return collateral_decimal
+
+        # For non-stablecoin collateral, approximate using entry_price.
+        # This works when collateral is the index token (e.g., WETH in ETH/USD).
+        # For cross-collateral positions, this is approximate.
+        if entry_price > 0:
+            return collateral_decimal * entry_price
+
+        return collateral_decimal
+
+    def get_positions_as_teardown_summary(
+        self,
+        rpc_url: str,
+        strategy_id: str,
+    ) -> "TeardownPositionSummary":
+        """Read on-chain positions and return as TeardownPositionSummary.
+
+        This is the primary method for integrating with the teardown system.
+        It reads positions directly from chain and converts them to the
+        PositionInfo format used by get_open_positions().
+
+        Args:
+            rpc_url: RPC endpoint URL for on-chain queries
+            strategy_id: Strategy identifier for the summary
+
+        Returns:
+            TeardownPositionSummary with on-chain position data
+        """
+        from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
+
+        onchain_positions = self.get_positions_onchain(rpc_url)
+
+        # Reverse-lookup market names
+        market_names = {v: k for k, v in self.markets.items()}
+
+        position_infos = []
+        for pos in onchain_positions:
+            market_name = market_names.get(pos.market, pos.market)
+
+            position_infos.append(
+                PositionInfo(
+                    position_type=PositionType.PERP,
+                    position_id=pos.position_key,
+                    chain=self.chain,
+                    protocol="gmx_v2",
+                    value_usd=pos.size_in_usd,
+                    direction="LONG" if pos.is_long else "SHORT",
+                    size_usd=pos.size_in_usd,
+                    collateral_usd=pos.size_in_usd / pos.leverage if pos.leverage > 0 else pos.collateral_amount,
+                    entry_price=pos.entry_price,
+                    leverage=pos.leverage,
+                    unrealized_pnl_usd=pos.unrealized_pnl,
+                    details={
+                        "market": market_name,
+                        "market_address": pos.market,
+                        "collateral_token": pos.collateral_token,
+                        "is_long": pos.is_long,
+                        "size_in_tokens": str(pos.size_in_tokens),
+                        "leverage": str(pos.leverage),
+                        "funding_fees": str(pos.funding_fee_amount),
+                        "borrowing_fees": str(pos.borrowing_fee_amount),
+                    },
+                )
+            )
+
+        return TeardownPositionSummary(
+            strategy_id=strategy_id,
+            timestamp=datetime.now(UTC),
+            positions=position_infos,
+        )
 
     # =========================================================================
     # Order Management

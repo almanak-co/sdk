@@ -1,0 +1,158 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "contract DataStore",
+        "name": "dataStore",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "account",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "start",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "end",
+        "type": "uint256"
+      }
+    ],
+    "name": "getAccountPositions",
+    "outputs": [
+      {
+        "components": [
+          {
+            "components": [
+              {
+                "internalType": "address",
+                "name": "account",
+                "type": "address"
+              },
+              {
+                "internalType": "address",
+                "name": "market",
+                "type": "address"
+              },
+              {
+                "internalType": "address",
+                "name": "collateralToken",
+                "type": "address"
+              }
+            ],
+            "internalType": "struct Position.Addresses",
+            "name": "addresses",
+            "type": "tuple"
+          },
+          {
+            "components": [
+              {
+                "internalType": "uint256",
+                "name": "sizeInUsd",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "sizeInTokens",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "collateralAmount",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "borrowingFactor",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "fundingFeeAmountPerSize",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "longTokenClaimableFundingAmountPerSize",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "shortTokenClaimableFundingAmountPerSize",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "increasedAtBlock",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "decreasedAtBlock",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "increasedAtTime",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "decreasedAtTime",
+                "type": "uint256"
+              }
+            ],
+            "internalType": "struct Position.Numbers",
+            "name": "numbers",
+            "type": "tuple"
+          },
+          {
+            "components": [
+              {
+                "internalType": "bool",
+                "name": "isLong",
+                "type": "bool"
+              }
+            ],
+            "internalType": "struct Position.Flags",
+            "name": "flags",
+            "type": "tuple"
+          }
+        ],
+        "internalType": "struct Position.Props[]",
+        "name": "",
+        "type": "tuple[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "contract DataStore",
+        "name": "dataStore",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "account",
+        "type": "address"
+      }
+    ],
+    "name": "getAccountPositionCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]

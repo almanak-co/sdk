@@ -13,11 +13,12 @@ from decimal import Decimal
 
 import pytest
 
+from almanak.core.contracts import GMX_V2_TOKENS
+
 from ..adapter import (
     DEFAULT_EXECUTION_FEE,
     GMX_V2_ADDRESSES,
     GMX_V2_MARKETS,
-    GMX_V2_TOKENS,
     GMXv2Adapter,
     GMXv2Config,
     GMXv2Order,
@@ -891,3 +892,296 @@ class TestGMXv2AdapterHelpers:
 
         assert len(adapter.get_all_positions()) == 0
         assert len(adapter.get_all_orders()) == 0
+
+
+# =============================================================================
+# On-Chain Position Reading Tests
+# =============================================================================
+
+
+class TestGMXv2OnchainPositionParsing:
+    """Tests for on-chain position parsing logic (no RPC required)."""
+
+    @pytest.fixture
+    def adapter(self) -> GMXv2Adapter:
+        """Create adapter for testing."""
+        config = GMXv2Config(
+            chain="arbitrum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+        )
+        return GMXv2Adapter(config)
+
+    def test_parse_position_dicts_empty(self, adapter: GMXv2Adapter) -> None:
+        """Test parsing empty position list."""
+        result = adapter._parse_position_dicts([])
+        assert result == []
+
+    def test_parse_position_dicts_skips_zero_size(self, adapter: GMXv2Adapter) -> None:
+        """Test that positions with zero size are skipped."""
+        position_dicts = [
+            {
+                "account": "0x1234567890123456789012345678901234567890",
+                "market": GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+                "collateral_token": GMX_V2_TOKENS["arbitrum"]["USDC"],
+                "size_in_usd": 0,
+                "size_in_tokens": 0,
+                "collateral_amount": 0,
+                "borrowing_factor": 0,
+                "funding_fee_amount_per_size": 0,
+                "is_long": True,
+            }
+        ]
+        result = adapter._parse_position_dicts(position_dicts)
+        assert len(result) == 0
+
+    def test_parse_position_dicts_long_usdc_collateral(self, adapter: GMXv2Adapter) -> None:
+        """Test parsing a long ETH position with USDC collateral."""
+        # Simulate a $5000 long ETH position with $1000 USDC collateral
+        # GMX V2 uses 30 decimals for USD values
+        size_usd_30 = 5000 * 10**30  # $5000 in 30 decimals
+        size_tokens_18 = int(2.5 * 10**18)  # 2.5 ETH in 18 decimals
+        collateral_6 = 1000 * 10**6  # 1000 USDC in 6 decimals
+
+        position_dicts = [
+            {
+                "account": "0x1234567890123456789012345678901234567890",
+                "market": GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+                "collateral_token": GMX_V2_TOKENS["arbitrum"]["USDC"],
+                "size_in_usd": size_usd_30,
+                "size_in_tokens": size_tokens_18,
+                "collateral_amount": collateral_6,
+                "borrowing_factor": 0,
+                "funding_fee_amount_per_size": 0,
+                "is_long": True,
+            }
+        ]
+
+        result = adapter._parse_position_dicts(position_dicts)
+
+        assert len(result) == 1
+        pos = result[0]
+        assert pos.is_long is True
+        assert pos.size_in_usd == Decimal("5000")
+        assert pos.collateral_amount == Decimal("1000")
+        assert pos.entry_price == Decimal("2000")  # 5000 / 2.5
+        assert pos.leverage == Decimal("5")  # 5000 / 1000
+        assert pos.market == GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
+
+    def test_parse_position_dicts_short_position(self, adapter: GMXv2Adapter) -> None:
+        """Test parsing a short BTC position (WBTC has 8 decimals)."""
+        size_usd_30 = 10000 * 10**30
+        size_tokens_8 = int(0.25 * 10**8)  # 0.25 BTC in 8 decimals (WBTC)
+        collateral_6 = 2000 * 10**6  # 2000 USDC
+
+        position_dicts = [
+            {
+                "account": "0x1234567890123456789012345678901234567890",
+                "market": GMX_V2_MARKETS["arbitrum"]["BTC/USD"],
+                "collateral_token": GMX_V2_TOKENS["arbitrum"]["USDC"],
+                "size_in_usd": size_usd_30,
+                "size_in_tokens": size_tokens_8,
+                "collateral_amount": collateral_6,
+                "borrowing_factor": 0,
+                "funding_fee_amount_per_size": 0,
+                "is_long": False,
+            }
+        ]
+
+        result = adapter._parse_position_dicts(position_dicts)
+
+        assert len(result) == 1
+        pos = result[0]
+        assert pos.is_long is False
+        assert pos.size_in_usd == Decimal("10000")
+        assert pos.collateral_amount == Decimal("2000")
+        # Entry price: $10000 / 0.25 BTC = $40000
+        assert pos.entry_price == Decimal("40000")
+        assert pos.leverage == Decimal("5")
+
+    def test_parse_position_dicts_multiple_positions(self, adapter: GMXv2Adapter) -> None:
+        """Test parsing multiple positions."""
+        position_dicts = [
+            {
+                "account": "0x1234567890123456789012345678901234567890",
+                "market": GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+                "collateral_token": GMX_V2_TOKENS["arbitrum"]["USDC"],
+                "size_in_usd": 5000 * 10**30,
+                "size_in_tokens": int(2.5 * 10**18),
+                "collateral_amount": 1000 * 10**6,
+                "borrowing_factor": 0,
+                "funding_fee_amount_per_size": 0,
+                "is_long": True,
+            },
+            {
+                "account": "0x1234567890123456789012345678901234567890",
+                "market": GMX_V2_MARKETS["arbitrum"]["BTC/USD"],
+                "collateral_token": GMX_V2_TOKENS["arbitrum"]["USDC"],
+                "size_in_usd": 10000 * 10**30,
+                "size_in_tokens": int(0.25 * 10**8),  # WBTC has 8 decimals
+                "collateral_amount": 2000 * 10**6,
+                "borrowing_factor": 0,
+                "funding_fee_amount_per_size": 0,
+                "is_long": False,
+            },
+        ]
+
+        result = adapter._parse_position_dicts(position_dicts)
+        assert len(result) == 2
+
+    def test_parse_raw_positions(self, adapter: GMXv2Adapter) -> None:
+        """Test parsing raw tuples from Reader contract."""
+        # Simulate raw tuple format: (addresses, numbers, flags)
+        raw_positions = [
+            (
+                # addresses: (account, market, collateralToken)
+                (
+                    "0x1234567890123456789012345678901234567890",
+                    GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+                    GMX_V2_TOKENS["arbitrum"]["USDC"],
+                ),
+                # numbers: (sizeInUsd, sizeInTokens, collateralAmount,
+                #           borrowingFactor, fundingFeeAmountPerSize,
+                #           longClaimable, shortClaimable,
+                #           increasedAtBlock, decreasedAtBlock,
+                #           increasedAtTime, decreasedAtTime)
+                (
+                    5000 * 10**30,  # sizeInUsd
+                    int(2.5 * 10**18),  # sizeInTokens
+                    1000 * 10**6,  # collateralAmount (USDC, 6 decimals)
+                    0,  # borrowingFactor
+                    0,  # fundingFeeAmountPerSize
+                    0,  # longClaimable
+                    0,  # shortClaimable
+                    100,  # increasedAtBlock
+                    0,  # decreasedAtBlock
+                    1700000000,  # increasedAtTime
+                    0,  # decreasedAtTime
+                ),
+                # flags: (isLong,)
+                (True,),
+            )
+        ]
+
+        result = adapter._parse_raw_positions(raw_positions)
+
+        assert len(result) == 1
+        pos = result[0]
+        assert pos.is_long is True
+        assert pos.size_in_usd == Decimal("5000")
+        assert pos.collateral_amount == Decimal("1000")
+
+    def test_get_collateral_decimals_usdc(self, adapter: GMXv2Adapter) -> None:
+        """Test collateral decimal lookup for USDC."""
+        decimals = adapter._get_collateral_decimals("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
+        assert decimals == 6
+
+    def test_get_collateral_decimals_usdt(self, adapter: GMXv2Adapter) -> None:
+        """Test collateral decimal lookup for USDT."""
+        decimals = adapter._get_collateral_decimals("0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9")
+        assert decimals == 6
+
+    def test_get_collateral_decimals_weth(self, adapter: GMXv2Adapter) -> None:
+        """Test collateral decimal lookup for WETH (18 decimals)."""
+        # Known WETH address should resolve via token resolver
+        decimals = adapter._get_collateral_decimals("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1")
+        assert decimals == 18
+
+    def test_get_collateral_decimals_wbtc(self, adapter: GMXv2Adapter) -> None:
+        """Test collateral decimal lookup for WBTC (8 decimals)."""
+        decimals = adapter._get_collateral_decimals("0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f")
+        assert decimals == 8
+
+    def test_get_index_token_decimals(self, adapter: GMXv2Adapter) -> None:
+        """Test index token decimal lookup by market address."""
+        from ..adapter import GMX_V2_MARKETS
+
+        # ETH/USD market -> WETH -> 18 decimals
+        assert adapter._get_index_token_decimals(GMX_V2_MARKETS["arbitrum"]["ETH/USD"]) == 18
+        # BTC/USD market -> WBTC -> 8 decimals
+        assert adapter._get_index_token_decimals(GMX_V2_MARKETS["arbitrum"]["BTC/USD"]) == 8
+
+    def test_parse_position_weth_collateral_leverage(self, adapter: GMXv2Adapter) -> None:
+        """Test leverage calculation with WETH collateral (non-stablecoin)."""
+        # $5000 long ETH position, 1 WETH collateral (~$2000 at entry)
+        size_usd_30 = 5000 * 10**30
+        size_tokens_18 = int(2.5 * 10**18)  # 2.5 ETH
+        collateral_18 = 1 * 10**18  # 1 WETH
+
+        position_dicts = [
+            {
+                "account": "0x1234567890123456789012345678901234567890",
+                "market": GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+                "collateral_token": GMX_V2_TOKENS["arbitrum"]["WETH"],
+                "size_in_usd": size_usd_30,
+                "size_in_tokens": size_tokens_18,
+                "collateral_amount": collateral_18,
+                "borrowing_factor": 0,
+                "funding_fee_amount_per_size": 0,
+                "is_long": True,
+            }
+        ]
+
+        result = adapter._parse_position_dicts(position_dicts)
+
+        assert len(result) == 1
+        pos = result[0]
+        # Entry price: $5000 / 2.5 ETH = $2000
+        assert pos.entry_price == Decimal("2000")
+        # Collateral value: 1 WETH * $2000 = $2000
+        # Leverage: $5000 / $2000 = 2.5x
+        assert pos.leverage == Decimal("2.5")
+
+    def test_get_positions_onchain_unsupported_chain(self) -> None:
+        """Test that unsupported chains raise ValueError."""
+        # We can't actually create an adapter for an unsupported chain
+        # since GMXv2Config validates. Instead, test the error message pattern.
+        config = GMXv2Config(
+            chain="arbitrum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+        )
+        adapter = GMXv2Adapter(config)
+        # Temporarily override chain to test the guard
+        adapter.chain = "unsupported"
+
+        with pytest.raises(ValueError, match="not supported"):
+            adapter.get_positions_onchain("http://localhost:8545")
+
+    def test_positions_as_teardown_summary(self, adapter: GMXv2Adapter) -> None:
+        """Test converting parsed positions to TeardownPositionSummary format."""
+        from unittest.mock import patch
+
+        from almanak.framework.teardown import PositionType
+
+        # Mock get_positions_onchain to return test positions
+        mock_positions = [
+            GMXv2Position(
+                position_key="test_key",
+                market=GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+                collateral_token=GMX_V2_TOKENS["arbitrum"]["USDC"],
+                size_in_usd=Decimal("5000"),
+                size_in_tokens=Decimal("2.5"),
+                collateral_amount=Decimal("1000"),
+                entry_price=Decimal("2000"),
+                is_long=True,
+                leverage=Decimal("5"),
+            )
+        ]
+
+        with patch.object(adapter, "get_positions_onchain", return_value=mock_positions):
+            summary = adapter.get_positions_as_teardown_summary(
+                rpc_url="http://localhost:8545",
+                strategy_id="test_strategy",
+            )
+
+        assert summary.strategy_id == "test_strategy"
+        assert len(summary.positions) == 1
+        pos = summary.positions[0]
+        assert pos.position_type == PositionType.PERP
+        assert pos.protocol == "gmx_v2"
+        assert pos.chain == "arbitrum"
+        assert pos.direction == "LONG"
+        assert pos.size_usd == Decimal("5000")
+        assert pos.entry_price == Decimal("2000")
+        assert pos.leverage == Decimal("5")
+        assert pos.details["market"] == "ETH/USD"
+        assert pos.details["is_long"] is True

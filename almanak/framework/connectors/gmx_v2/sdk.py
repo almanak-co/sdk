@@ -157,6 +157,11 @@ class GMXV2SDK:
         self.exchange_router = self._load_contract("exchange_router", self.EXCHANGE_ROUTER_ADDRESS)
         self.erc20_abi = self._load_abi("erc20")
 
+        # Reader contract for on-chain position queries
+        self.READER_ADDRESS = self.addresses["READER"]
+        self.DATA_STORE_ADDRESS = self.addresses["DATA_STORE"]
+        self.reader = self._load_contract("reader", self.READER_ADDRESS)
+
     def _load_abi(self, name: str) -> list[dict]:
         """Load ABI from file."""
         abi_path = os.path.join(self.abi_dir, f"{name}.json")
@@ -167,6 +172,79 @@ class GMXV2SDK:
         """Load contract with ABI."""
         abi = self._load_abi(abi_name)
         return self.web3.eth.contract(address=self.web3.to_checksum_address(address), abi=abi)
+
+    def get_account_position_count(self, account: str) -> int:
+        """Get the number of open positions for an account.
+
+        Args:
+            account: Wallet address to query
+
+        Returns:
+            Number of open positions
+        """
+        account_cs = self.web3.to_checksum_address(account)
+        data_store_cs = self.web3.to_checksum_address(self.DATA_STORE_ADDRESS)
+        return self.reader.functions.getAccountPositionCount(data_store_cs, account_cs).call()
+
+    def get_account_positions(self, account: str) -> list[dict]:
+        """Read all open positions for an account from on-chain state.
+
+        Calls SyntheticsReader.getAccountPositions(dataStore, account, start, end)
+        on the GMX V2 Reader contract.
+
+        Args:
+            account: Wallet address to query
+
+        Returns:
+            List of position dicts with keys: account, market, collateral_token,
+            size_in_usd, size_in_tokens, collateral_amount, borrowing_factor,
+            funding_fee_amount_per_size, is_long, increased_at_time, decreased_at_time
+        """
+        account_cs = self.web3.to_checksum_address(account)
+        data_store_cs = self.web3.to_checksum_address(self.DATA_STORE_ADDRESS)
+
+        # First get count so we know the range
+        count = self.reader.functions.getAccountPositionCount(data_store_cs, account_cs).call()
+        if count == 0:
+            return []
+
+        # Fetch all positions (start=0, end=count)
+        raw_positions = self.reader.functions.getAccountPositions(data_store_cs, account_cs, 0, count).call()
+
+        positions = []
+        for raw in raw_positions:
+            # raw is a tuple: (addresses, numbers, flags)
+            # addresses: (account, market, collateralToken)
+            # numbers: (sizeInUsd, sizeInTokens, collateralAmount, borrowingFactor,
+            #           fundingFeeAmountPerSize, longTokenClaimableFundingAmountPerSize,
+            #           shortTokenClaimableFundingAmountPerSize, increasedAtBlock,
+            #           decreasedAtBlock, increasedAtTime, decreasedAtTime)
+            # flags: (isLong,)
+            addresses = raw[0]
+            numbers = raw[1]
+            flags = raw[2]
+
+            positions.append(
+                {
+                    "account": addresses[0],
+                    "market": addresses[1],
+                    "collateral_token": addresses[2],
+                    "size_in_usd": numbers[0],  # 30 decimals
+                    "size_in_tokens": numbers[1],  # token decimals
+                    "collateral_amount": numbers[2],  # token decimals
+                    "borrowing_factor": numbers[3],
+                    "funding_fee_amount_per_size": numbers[4],
+                    "long_token_claimable_funding_per_size": numbers[5],
+                    "short_token_claimable_funding_per_size": numbers[6],
+                    "increased_at_block": numbers[7],
+                    "decreased_at_block": numbers[8],
+                    "increased_at_time": numbers[9],
+                    "decreased_at_time": numbers[10],
+                    "is_long": flags[0],
+                }
+            )
+
+        return positions
 
     def get_market_address(self, index_token_symbol: str) -> str:
         """
