@@ -6050,6 +6050,7 @@ class IntentCompiler:
                 transactions.extend(approve_txs)
 
             # Calculate min output with slippage
+            # get_swap_quote uses ERC-20 state overrides so approval is not needed for eth_call.
             slippage_bps = int((intent.max_slippage or Decimal("0.005")) * 10000)
             try:
                 quote = sdk.get_swap_quote(pool_addr, swap0to1, amount_in_wei, self.wallet_address)
@@ -6057,8 +6058,7 @@ class IntentCompiler:
             except Exception as e:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=f"Failed to get Fluid swap quote for slippage protection: {e}",
-                    intent_id=intent.intent_id,
+                    error=f"Fluid swap quote failed: {e}",
                 )
 
             # Build swap TX
