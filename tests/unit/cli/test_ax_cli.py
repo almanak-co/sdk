@@ -46,6 +46,54 @@ class TestAxCliGroup:
         assert result.exit_code == 0
 
 
+class TestLpInfoNetwork:
+    """Test that lp-info passes --network to the tool executor."""
+
+    def test_lp_info_default_network_is_mainnet(self):
+        """lp-info should default to mainnet network."""
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "lp-info", "--help"])
+        assert result.exit_code == 0
+        assert "mainnet" in result.output
+        assert "anvil" in result.output
+
+    @patch("almanak.framework.cli.ax._run_tool")
+    def test_lp_info_passes_network_mainnet(self, mock_run_tool):
+        """lp-info should pass network='mainnet' by default."""
+        mock_response = MagicMock()
+        mock_response.status = "success"
+        mock_run_tool.return_value = mock_response
+
+        runner = CliRunner()
+        result = runner.invoke(
+            almanak,
+            ["ax", "--chain", "arbitrum", "lp-info", "123456"],
+        )
+        # Should have called _run_tool with network="mainnet"
+        mock_run_tool.assert_called_once()
+        call_args = mock_run_tool.call_args
+        tool_args = call_args[0][2] if len(call_args[0]) > 2 else call_args[1].get("args", {})
+        assert tool_args["network"] == "mainnet"
+        assert tool_args["position_id"] == "123456"
+
+    @patch("almanak.framework.cli.ax._run_tool")
+    def test_lp_info_passes_network_anvil(self, mock_run_tool):
+        """lp-info --network anvil should pass network='anvil'."""
+        mock_response = MagicMock()
+        mock_response.status = "success"
+        mock_run_tool.return_value = mock_response
+
+        runner = CliRunner()
+        result = runner.invoke(
+            almanak,
+            ["ax", "--chain", "arbitrum", "lp-info", "123456", "--network", "anvil"],
+        )
+        mock_run_tool.assert_called_once()
+        call_args = mock_run_tool.call_args
+        tool_args = call_args[0][2] if len(call_args[0]) > 2 else call_args[1].get("args", {})
+        assert tool_args["network"] == "anvil"
+
+
 class TestGatewayConnectionError:
     def test_error_message(self):
         err = GatewayConnectionError("localhost", 50051)

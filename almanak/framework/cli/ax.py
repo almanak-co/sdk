@@ -687,17 +687,27 @@ def lp_close(ctx, position_id, protocol, no_collect_fees, sub_yes, sub_dry_run, 
     default="uniswap_v3",
     help="LP protocol (default: uniswap_v3).",
 )
+@click.option(
+    "--network",
+    "lp_network",
+    type=click.Choice(["mainnet", "anvil"], case_sensitive=False),
+    default="mainnet",
+    help="Network to query (default: mainnet). Use 'anvil' for local fork.",
+)
 @click.pass_context
-def lp_info(ctx, position_id, protocol):
+def lp_info(ctx, position_id, protocol, lp_network):
     """Get details about an existing LP position.
 
     Shows range, liquidity, accrued fees, and in-range status.
+    Queries mainnet by default so live positions are always accessible,
+    even when a local Anvil gateway is running.
 
     \b
     Examples:
-        almanak ax lp-info 123456                      # View LP #123456
+        almanak ax lp-info 123456                      # View LP #123456 on mainnet
         almanak ax lp-info 123456 --json               # JSON output
         almanak ax lp-info 123456 --protocol uniswap_v3
+        almanak ax lp-info 123456 --network anvil      # Query local Anvil fork
     """
     from almanak.framework.cli.ax_render import render_error, render_result
 
@@ -710,6 +720,7 @@ def lp_info(ctx, position_id, protocol):
                 "position_id": position_id,
                 "chain": ctx.obj["chain"],
                 "protocol": protocol,
+                "network": lp_network,
             },
         )
         render_result(response, json_output=json_output, title=f"LP Position: #{position_id}")

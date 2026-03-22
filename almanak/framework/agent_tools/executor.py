@@ -1776,6 +1776,11 @@ class ToolExecutor:
         from almanak.gateway.proto import gateway_pb2
 
         chain = args.get("chain", self._default_chain)
+        # When called from the CLI (lp-info), the caller passes network="mainnet"
+        # explicitly so queries hit live chain state (VIB-1713). When called from
+        # internal executor paths (e.g., rebalance, teardown), network is omitted
+        # and we pass "" to let the gateway use its configured default.
+        network = args.get("network", "")
         position_id = int(args["position_id"])
 
         nft_manager = POSITION_MANAGER_ADDRESSES.get(chain)
@@ -1793,6 +1798,7 @@ class ToolExecutor:
                 method="eth_call",
                 params=json.dumps([{"to": nft_manager, "data": calldata}, "latest"]),
                 id="lp_position",
+                network=network,
             ),
             timeout=30.0,
         )
@@ -1858,6 +1864,7 @@ class ToolExecutor:
                     method="eth_call",
                     params=json.dumps([{"to": lp_factory_address, "data": get_pool_cd}, "latest"]),
                     id="lp_factory_get_pool",
+                    network=network,
                 ),
                 timeout=30.0,
             )
@@ -1874,6 +1881,7 @@ class ToolExecutor:
                         method="eth_call",
                         params=json.dumps([{"to": pool_addr, "data": "0x3850c7bd"}, "latest"]),
                         id="lp_pool_slot0",
+                        network=network,
                     ),
                     timeout=30.0,
                 )

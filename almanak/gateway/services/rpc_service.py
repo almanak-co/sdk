@@ -162,14 +162,17 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             self._rate_limiters[chain] = ChainRateLimiter(limit)
         return self._rate_limiters[chain]
 
-    def _get_rpc_url(self, chain: str) -> str | None:
+    def _get_rpc_url(self, chain: str, network_override: str | None = None) -> str | None:
         """Get RPC URL for a chain.
 
         This function looks up the RPC URL with the API key from settings.
-        Uses the network setting from GatewaySettings (mainnet or anvil).
+        Uses the network setting from GatewaySettings (mainnet or anvil),
+        unless a per-request network_override is provided.
 
         Args:
             chain: Chain name
+            network_override: Optional per-request network override. When set,
+                takes precedence over the gateway's default network setting.
 
         Returns:
             RPC URL or None if chain not configured
@@ -181,8 +184,8 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         from almanak.gateway.utils import get_rpc_url
 
         try:
-            # Use network from settings (default: mainnet, can be set to anvil for testing)
-            network = self.settings.network
+            # Per-request override takes precedence over gateway default
+            network = network_override or self.settings.network
             return get_rpc_url(chain, network=network)
         except ValueError as e:
             # ValueError is raised for unsupported chains or missing API keys
@@ -288,9 +291,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                 id=request.id,
             )
 
+        # Resolve effective network so validation and execution use the same policy
+        network_override = request.network if request.network else None
+        effective_network = network_override or self.settings.network
+
         # Validate RPC method against allowlist (chain-aware: Solana vs EVM, network-aware: Anvil)
         try:
-            validate_rpc_method(request.method, chain=chain, network=self.settings.network)
+            validate_rpc_method(request.method, chain=chain, network=effective_network)
         except ValidationError as e:
             self._metrics.failed_requests += 1
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -314,8 +321,8 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                 id=request.id,
             )
 
-        # Get RPC URL
-        rpc_url = self._get_rpc_url(chain)
+        # Get RPC URL (per-request network override takes precedence over gateway default)
+        rpc_url = self._get_rpc_url(chain, network_override=network_override)
         if not rpc_url:
             self._metrics.failed_requests += 1
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
@@ -407,10 +414,20 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.RpcBatchResponse(responses=[])
 
+        # Resolve effective network for the batch (reject mixed per-request overrides)
+        batch_networks = {r.network.strip().lower() for r in request.requests if r.network}
+        if len(batch_networks) > 1:
+            self._metrics.failed_requests += num_requests
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("All requests in a batch must use the same network override")
+            return gateway_pb2.RpcBatchResponse(responses=[])
+        network_override = next(iter(batch_networks), None)
+        effective_network = network_override or self.settings.network
+
         # Validate all RPC methods in batch (chain-aware: Solana vs EVM, network-aware: Anvil)
         for rpc_request in request.requests:
             try:
-                validate_rpc_method(rpc_request.method, chain=chain, network=self.settings.network)
+                validate_rpc_method(rpc_request.method, chain=chain, network=effective_network)
             except ValidationError as e:
                 self._metrics.failed_requests += num_requests
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -426,8 +443,8 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_details(f"Rate limited, retry after {wait_time:.2f}s")
             return gateway_pb2.RpcBatchResponse(responses=[])
 
-        # Get RPC URL
-        rpc_url = self._get_rpc_url(chain)
+        # Get RPC URL using the resolved network override
+        rpc_url = self._get_rpc_url(chain, network_override=network_override)
         if not rpc_url:
             self._metrics.failed_requests += num_requests
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)

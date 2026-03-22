@@ -335,6 +335,7 @@ message RpcRequest {
   string method = 2;          // JSON-RPC method (e.g., "eth_call", "eth_getBalance")
   string params = 3;          // JSON-encoded params array
   string id = 4;              // Request ID for correlation
+  string network = 5;         // Optional network override ("mainnet", "anvil"). If empty, uses gateway default.
 }
 
 message RpcResponse {

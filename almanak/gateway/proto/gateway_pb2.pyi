@@ -984,6 +984,7 @@ class RpcRequest(_message.Message):
     METHOD_FIELD_NUMBER: _builtins.int
     PARAMS_FIELD_NUMBER: _builtins.int
     ID_FIELD_NUMBER: _builtins.int
+    NETWORK_FIELD_NUMBER: _builtins.int
     chain: _builtins.str
     """Chain identifier (e.g., "arbitrum", "base", "ethereum")"""
     method: _builtins.str
@@ -992,6 +993,8 @@ class RpcRequest(_message.Message):
     """JSON-encoded params array"""
     id: _builtins.str
     """Request ID for correlation"""
+    network: _builtins.str
+    """Optional network override ("mainnet", "anvil"). If empty, uses gateway default."""
     def __init__(
         self,
         *,
@@ -999,8 +1002,9 @@ class RpcRequest(_message.Message):
         method: _builtins.str = ...,
         params: _builtins.str = ...,
         id: _builtins.str = ...,
+        network: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "id", b"id", "method", b"method", "params", b"params"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "id", b"id", "method", b"method", "network", b"network", "params", b"params"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___RpcRequest: _TypeAlias = RpcRequest  # noqa: Y015
