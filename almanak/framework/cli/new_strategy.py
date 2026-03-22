@@ -60,6 +60,19 @@ class TemplateConfig:
     config_params: dict[str, str]
 
 
+# Chain-specific anvil_funding defaults (native + wrapped + WETH + USDC).
+# Chains not listed here get the ETH-native default in generate_config_json().
+_CHAIN_NATIVE_FUNDING: dict[str, dict[str, object]] = {
+    "mantle": {"MNT": 1000, "WMNT": 10, "WETH": 5, "USDC": 10000},
+    "avalanche": {"AVAX": 100, "WAVAX": 10, "WETH": 5, "USDC": 10000},
+    "bsc": {"BNB": 10, "WBNB": 5, "WETH": 5, "USDC": 10000},
+    "polygon": {"MATIC": 1000, "WMATIC": 100, "WETH": 5, "USDC": 10000},
+    "sonic": {"S": 100, "WETH": 5, "USDC": 10000},
+    "monad": {"MON": 100, "WETH": 5, "USDC": 10000},
+}
+
+_DEFAULT_ANVIL_FUNDING: dict[str, object] = {"ETH": 10, "WETH": 5, "USDC": 10000}
+
 # Template configurations with sensible defaults
 TEMPLATE_CONFIGS: dict[StrategyTemplate, TemplateConfig] = {
     StrategyTemplate.BLANK: TemplateConfig(
@@ -2277,12 +2290,6 @@ def generate_config_json(
                 "max_slippage_bps": 50,
             }
         )
-        if chain == SupportedChain.MANTLE:
-            data["anvil_funding"] = {
-                "MNT": 1000,
-                "WMNT": 10,
-                "WETH": 5,
-            }
     elif template == StrategyTemplate.DYNAMIC_LP:
         data.update(
             {
@@ -2383,6 +2390,11 @@ def generate_config_json(
                 "trade_size_usd": "100",
             }
         )
+
+    # Add anvil_funding for all templates (unless already set).
+    # This ensures `almanak strat run --network anvil` funds the wallet automatically.
+    if "anvil_funding" not in data:
+        data["anvil_funding"] = _CHAIN_NATIVE_FUNDING.get(chain.value, _DEFAULT_ANVIL_FUNDING)
 
     return json.dumps(data, indent=4) + "\n"
 

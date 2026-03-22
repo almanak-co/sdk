@@ -167,20 +167,75 @@ def test_generate_config_json_mantle_includes_anvil_funding() -> None:
     assert funding.get("MNT") == 1000
     assert funding.get("WMNT") == 10
     assert funding.get("WETH") == 5
+    assert funding.get("USDC") == 10000
 
 
-def test_generate_config_json_non_mantle_excludes_anvil_funding() -> None:
-    """generate_config_json for non-Mantle chains must NOT include anvil_funding."""
+def test_generate_config_json_all_chains_include_anvil_funding() -> None:
+    """generate_config_json for all chains includes anvil_funding with chain-appropriate tokens."""
     import json
 
     for chain in (SupportedChain.ARBITRUM, SupportedChain.BASE, SupportedChain.OPTIMISM):
         config_str = generate_config_json(
-            name="Non Mantle Test",
+            name="Anvil Funding Test",
             template=StrategyTemplate.TA_SWAP,
             chain=chain,
         )
         config = json.loads(config_str)
-        assert "anvil_funding" not in config, f"Non-Mantle chain {chain} must not include anvil_funding"
+        assert "anvil_funding" in config, f"Chain {chain} must include anvil_funding"
+        funding = config["anvil_funding"]
+        assert funding.get("ETH") == 10, f"Chain {chain} must fund 10 ETH"
+        assert funding.get("WETH") == 5, f"Chain {chain} must fund 5 WETH"
+        assert funding.get("USDC") == 10000, f"Chain {chain} must fund 10000 USDC"
+
+
+def test_generate_config_json_bsc_uses_native_tokens() -> None:
+    """BSC anvil_funding uses BNB/WBNB instead of ETH/WETH."""
+    import json
+
+    config_str = generate_config_json(
+        name="BSC Test",
+        template=StrategyTemplate.BLANK,
+        chain=SupportedChain.BSC,
+    )
+    config = json.loads(config_str)
+    funding = config["anvil_funding"]
+    assert funding.get("BNB") == 10
+    assert funding.get("WBNB") == 5
+    assert funding.get("WETH") == 5
+    assert funding.get("USDC") == 10000
+
+
+def test_generate_config_json_sonic_uses_native_tokens() -> None:
+    """Sonic anvil_funding uses S instead of ETH."""
+    import json
+
+    config_str = generate_config_json(
+        name="Sonic Test",
+        template=StrategyTemplate.BLANK,
+        chain=SupportedChain.SONIC,
+    )
+    config = json.loads(config_str)
+    funding = config["anvil_funding"]
+    assert funding.get("S") == 100
+    assert funding.get("WETH") == 5
+    assert funding.get("USDC") == 10000
+
+
+def test_generate_config_json_avalanche_uses_native_tokens() -> None:
+    """Avalanche anvil_funding uses AVAX/WAVAX instead of ETH/WETH."""
+    import json
+
+    config_str = generate_config_json(
+        name="Avalanche Test",
+        template=StrategyTemplate.BLANK,
+        chain=SupportedChain.AVALANCHE,
+    )
+    config = json.loads(config_str)
+    funding = config["anvil_funding"]
+    assert funding.get("AVAX") == 100
+    assert funding.get("WAVAX") == 10
+    assert funding.get("WETH") == 5
+    assert funding.get("USDC") == 10000
 
 
 # ---------------------------------------------------------------------------
