@@ -1796,6 +1796,13 @@ def run(
         click.secho("Mode: RESUME (existing state found)", fg="yellow", bold=True)
         if existing_state_info:
             click.echo(f"  State version: {existing_state_info['version']}, keys: {existing_state_info['keys']}")
+        if once and not fresh:
+            click.secho(
+                "WARNING: Loading state from a previous run. "
+                "If this is unexpected, re-run with --fresh to start clean.",
+                fg="red",
+                bold=True,
+            )
     else:
         click.secho("Mode: FRESH START (no existing state)", fg="green", bold=True)
     if multi_chain:
