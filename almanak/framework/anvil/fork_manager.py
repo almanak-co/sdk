@@ -542,6 +542,8 @@ class RollingForkManager:
                     [{"forking": {"jsonRpcUrl": self.rpc_url}}],
                 )
                 if success:
+                    # Clear pinned block so next auto-restart forks latest too
+                    self.fork_block_number = None
                     # Update current block number
                     block_hex = await self._rpc_call("eth_blockNumber", [])
                     if block_hex:

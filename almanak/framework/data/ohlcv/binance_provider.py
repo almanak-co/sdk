@@ -20,6 +20,7 @@ Example:
         print(f"{candle.timestamp}: close={candle.close}")
 """
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -210,8 +211,9 @@ class BinanceOHLCVProvider:
         # Health metrics
         self._metrics = BinanceHealthMetrics()
 
-        # HTTP session
+        # HTTP session and the event loop it was created on
         self._session: aiohttp.ClientSession | None = None
+        self._session_loop: asyncio.AbstractEventLoop | None = None
 
         logger.info(
             "Initialized BinanceOHLCVProvider",
@@ -229,10 +231,28 @@ class BinanceOHLCVProvider:
         return self.SUPPORTED_TIMEFRAMES.copy()
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create HTTP session."""
+        """Get or create HTTP session.
+
+        Creates a new session if none exists, the existing one is closed,
+        or the existing one was created on a different event loop (which
+        happens when _run_async falls back to a thread pool).
+        """
+        current_loop = asyncio.get_running_loop()
+        if self._session is not None and not self._session.closed:
+            # Check if session belongs to the current event loop
+            if self._session_loop is not None and self._session_loop is not current_loop:
+                # Session from a different loop — close it and create a new one
+                try:
+                    await self._session.close()
+                except Exception:
+                    pass
+                self._session = None
+                self._session_loop = None
+
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=self._request_timeout)
             self._session = aiohttp.ClientSession(timeout=timeout)
+            self._session_loop = current_loop
         return self._session
 
     async def close(self) -> None:

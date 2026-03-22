@@ -586,6 +586,14 @@ async def create_market_snapshot_from_fork(
                 snapshot._balances = {}  # type: ignore[attr-defined]
             snapshot._balances[token] = balance_data  # type: ignore[attr-defined]
 
+            # Also populate _balance_cache so market.balance() works without a provider.
+            # Use TokenBalance for full strategy compat (numeric comparisons, .balance_usd).
+            from almanak.framework.strategies.intent_strategy import TokenBalance
+
+            snapshot._balance_cache[token] = TokenBalance(  # type: ignore[assignment]
+                symbol=token, balance=amount, balance_usd=balance_usd
+            )
+
     return snapshot
 
 
@@ -1328,6 +1336,7 @@ class PaperTrader:
             self._cached_prices = token_prices
 
             # Create market snapshot from fork (with price oracle so strategies can call market.price())
+            logger.info(f"[{self._backtest_id}] Creating market snapshot...")
             wallet_address = self._orchestrator.signer.address if self._orchestrator else ""
             snapshot = await create_market_snapshot_from_fork(
                 fork_manager=self.fork_manager,
@@ -1339,6 +1348,26 @@ class PaperTrader:
                 rsi_calculator=self._rsi_calculator,
             )
 
+            logger.info(f"[{self._backtest_id}] Snapshot created, pre-computing indicators...")
+            # Pre-compute common indicators in async context for performance.
+            # _run_async() handles the nested-loop case via ThreadPoolExecutor, so
+            # uncached parameters won't deadlock -- but pre-computation avoids the
+            # thread overhead. Covers default timeframes:
+            #   - rsi() defaults to "4h"
+            #   - sma/ema/macd/bollinger_bands/atr default to "1h"
+            if self._rsi_calculator:
+                for token in list(token_prices.keys()):
+                    for period in [14]:
+                        for timeframe in ["1h", "4h", "1d"]:
+                            cache_key = f"{token}:{period}:{timeframe}"
+                            try:
+                                rsi_val = await self._rsi_calculator.calculate_rsi(token, period, timeframe)
+                                snapshot._rsi_cache[cache_key] = rsi_val
+                                logger.debug(f"Pre-computed RSI({period},{timeframe}) for {token}: {rsi_val:.2f}")
+                            except Exception as e:
+                                logger.warning(f"RSI pre-compute failed for {token} ({timeframe}): {e}")
+
+            logger.info(f"[{self._backtest_id}] Calling strategy.decide()...")
             # Call strategy decide
             try:
                 decide_result = strategy.decide(snapshot)

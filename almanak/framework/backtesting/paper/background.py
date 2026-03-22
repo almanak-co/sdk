@@ -437,7 +437,11 @@ class PaperTraderState:
             "current_balances": {k: str(v) for k, v in self.current_balances.items()},
             "initial_balances": {k: str(v) for k, v in self.initial_balances.items()},
             "equity_curve": [
-                {"timestamp": ts.isoformat(), "value": str(val), **({"eth_price_usd": str(ep)} if ep else {})}
+                {
+                    "timestamp": ts.isoformat(),
+                    "value": str(val),
+                    **({"eth_price_usd": str(ep)} if ep is not None else {}),
+                }
                 for ts, val, ep in self.equity_curve
             ],
             "config": self.config,
@@ -739,6 +743,15 @@ class BackgroundPaperTrader:
         if pid_file.is_running():
             existing_pid = pid_file.get_pid()
             raise RuntimeError(f"Paper Trader for {self.config.strategy_id} already running (PID: {existing_pid})")
+
+        # Fix SSL cert resolution for spawned subprocess (macOS multiprocessing)
+        import os
+
+        if "SSL_CERT_FILE" not in os.environ:
+            for cert_path in ["/private/etc/ssl/cert.pem", "/etc/ssl/cert.pem"]:
+                if os.path.exists(cert_path):
+                    os.environ["SSL_CERT_FILE"] = cert_path
+                    break
 
         # Create the background process
         # Pass raw rpc_url separately since to_dict() masks it for display
@@ -1054,6 +1067,14 @@ def _run_background_paper_trader(
         raw_rpc_url: Unmasked RPC URL (to_dict masks it for display).
     """
     import asyncio
+    import os
+
+    # Fix SSL cert resolution in spawned subprocess (macOS multiprocessing issue)
+    if "SSL_CERT_FILE" not in os.environ:
+        for cert_path in ["/private/etc/ssl/cert.pem", "/etc/ssl/cert.pem"]:
+            if os.path.exists(cert_path):
+                os.environ["SSL_CERT_FILE"] = cert_path
+                break
 
     # Convert paths
     state_path = Path(state_dir)

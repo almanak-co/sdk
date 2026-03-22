@@ -794,6 +794,9 @@ class MarketSnapshot:
         """Run an async coroutine synchronously.
 
         Handles event loop creation/reuse for async-to-sync bridge.
+        When called from within a running event loop (e.g., paper trading subprocess),
+        runs the coroutine in a separate thread to avoid deadlocking aiohttp with
+        nested run_until_complete (nest_asyncio + aiohttp is unreliable).
 
         Args:
             coro: Coroutine to run
@@ -802,27 +805,31 @@ class MarketSnapshot:
             Result from the coroutine
         """
         try:
-            # Check if there's an existing event loop
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
+            has_running_loop = True
         except RuntimeError:
-            # No running loop, create new one
-            loop = None
+            has_running_loop = False
 
-        if loop is not None:
-            # We're inside an async context - need to create a nested loop
-            # This handles the case where MarketSnapshot is used inside async code
-            import nest_asyncio
+        if has_running_loop:
+            # We're inside an async context (e.g., paper trading subprocess).
+            # Use a thread with its own event loop to avoid nest_asyncio + aiohttp
+            # deadlocks. The OHLCV provider will create a fresh aiohttp session
+            # on the new loop automatically via lazy _get_session().
+            import concurrent.futures
 
+            _ASYNC_TIMEOUT = 60
+
+            async def _with_timeout():
+                return await asyncio.wait_for(coro, timeout=_ASYNC_TIMEOUT)
+
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(asyncio.run, _with_timeout())
             try:
-                nest_asyncio.apply()
-                return asyncio.get_event_loop().run_until_complete(coro)
-            except ImportError:
-                # nest_asyncio not available, try using asyncio.run in new thread
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, coro)
-                    return future.result()
+                return future.result(timeout=_ASYNC_TIMEOUT + 5)  # grace for loop overhead
+            except concurrent.futures.TimeoutError as e:
+                raise TimeoutError(f"Async operation timed out after {_ASYNC_TIMEOUT}s") from e
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
         else:
             # No running loop - simple case
             return asyncio.run(coro)
