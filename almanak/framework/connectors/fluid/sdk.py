@@ -144,6 +144,87 @@ class DexPoolData:
 # =============================================================================
 
 
+# =============================================================================
+# ERC20 State Override Helpers (for eth_call simulation)
+# =============================================================================
+
+# Maximum uint256 value — used to simulate unlimited balance/approval
+_MAX_UINT256_HEX = "0x" + "ff" * 32
+
+# Common ERC20 storage layout slots for balanceOf and allowance mappings.
+# Different token implementations use different slot indices:
+#   OpenZeppelin standard: balances=0, allowances=1
+#   FiatTokenV2 (USDC):   balances=9, allowances=10
+#   Some proxies:          balances=2, allowances=3
+#   Vyper/custom:          balances=51, allowances=52
+_BALANCE_MAPPING_SLOTS = [0, 2, 9, 51]
+_ALLOWANCE_MAPPING_SLOTS = [1, 3, 10, 52]
+
+
+def _compute_mapping_slot(key_address: str, mapping_slot: int) -> str:
+    """Compute keccak256(abi.encode(address, uint256)) for a Solidity mapping.
+
+    For `mapping(address => T)` at storage slot `p`, the value for key `k`
+    is at `keccak256(abi.encode(k, p))` where both are left-padded to 32 bytes.
+    """
+    addr_bytes = int(key_address, 16).to_bytes(32, "big")
+    slot_bytes = mapping_slot.to_bytes(32, "big")
+    return "0x" + Web3.keccak(addr_bytes + slot_bytes).hex()
+
+
+def _compute_nested_mapping_slot(key1: str, key2: str, mapping_slot: int) -> str:
+    """Compute storage slot for mapping(address => mapping(address => T)).
+
+    For allowances[owner][spender]:
+      inner = keccak256(abi.encode(owner, mapping_slot))
+      slot  = keccak256(abi.encode(spender, inner))
+    """
+    key1_bytes = int(key1, 16).to_bytes(32, "big")
+    slot_bytes = mapping_slot.to_bytes(32, "big")
+    inner_hash = Web3.keccak(key1_bytes + slot_bytes)
+
+    key2_bytes = int(key2, 16).to_bytes(32, "big")
+    return "0x" + Web3.keccak(key2_bytes + inner_hash).hex()
+
+
+def _build_erc20_state_override(
+    token_address: str,
+    holder: str,
+    spender: str,
+) -> dict:
+    """Build eth_call state overrides to simulate ERC20 balance + approval.
+
+    Sets the holder's balance and allowance to MAX_UINT256 across all common
+    ERC20 storage layouts. Since this only affects eth_call simulation (no
+    on-chain state change), writing extra slots is harmless.
+
+    Args:
+        token_address: ERC20 token contract address
+        holder: Address that needs a simulated balance
+        spender: Address that needs a simulated approval (the pool)
+
+    Returns:
+        State override dict for web3.py's call(state_override=...)
+    """
+    state_diff: dict[str, str] = {}
+
+    # Set balance slots across all common layouts
+    for bal_slot in _BALANCE_MAPPING_SLOTS:
+        slot = _compute_mapping_slot(holder, bal_slot)
+        state_diff[slot] = _MAX_UINT256_HEX
+
+    # Set allowance slots across all common layouts
+    for allow_slot in _ALLOWANCE_MAPPING_SLOTS:
+        slot = _compute_nested_mapping_slot(holder, spender, allow_slot)
+        state_diff[slot] = _MAX_UINT256_HEX
+
+    return {
+        token_address: {
+            "stateDiff": state_diff,
+        }
+    }
+
+
 class FluidSDKError(Exception):
     """Raised when a Fluid SDK operation fails."""
 
@@ -326,7 +407,9 @@ class FluidSDK:
     ) -> int:
         """Get a swap quote (estimate) from a Fluid DEX pool.
 
-        Calls swapIn with estimate semantics (eth_call, no state change).
+        Calls swapIn via eth_call with state overrides to simulate token
+        approval and balance. Without overrides, swapIn() reverts because
+        it internally calls transferFrom() which requires prior approval.
 
         Args:
             dex_address: Pool contract address
@@ -337,13 +420,25 @@ class FluidSDK:
         Returns:
             Expected output amount in token's smallest unit
         """
-        dex_contract = self.w3.eth.contract(
-            address=Web3.to_checksum_address(dex_address),
-            abi=DEX_SWAP_ABI,
+        pool_addr = Web3.to_checksum_address(dex_address)
+        caller = Web3.to_checksum_address(to)
+
+        # Determine input token from pool data
+        pool_data = self.get_dex_data(dex_address)
+        input_token = Web3.to_checksum_address(pool_data.token0 if swap0to1 else pool_data.token1)
+
+        # Build state overrides: set caller's balance and allowance for the input token
+        state_override = _build_erc20_state_override(
+            token_address=input_token,
+            holder=caller,
+            spender=pool_addr,
         )
+
+        dex_contract = self.w3.eth.contract(address=pool_addr, abi=DEX_SWAP_ABI)
         try:
-            amount_out = dex_contract.functions.swapIn(swap0to1, amount_in, 0, Web3.to_checksum_address(to)).call(
-                {"from": Web3.to_checksum_address(to), "value": 0}  # type: ignore[arg-type]
+            amount_out = dex_contract.functions.swapIn(swap0to1, amount_in, 0, caller).call(
+                {"from": caller, "value": 0},  # type: ignore[arg-type]
+                state_override=state_override,
             )
             return amount_out
         except Exception as e:
