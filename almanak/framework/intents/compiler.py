@@ -11950,27 +11950,19 @@ class IntentCompiler:
             logger.warning(f"Failed to query allowance for {token_address}: {e}")
             return 0
 
-    # Known stablecoins that are pegged to ~$1 USD. Used as a fallback
-    # when the price oracle hasn't cached their price yet.
-    _KNOWN_STABLECOINS: ClassVar[set[str]] = {
-        "USDC",
-        "USDC.E",
-        "USDT",
-        "DAI",
-        "BUSD",
-        "TUSD",
-        "FRAX",
-        "LUSD",
-        "SDAI",
-        "USDE",
-        "SUSDE",
-        "PYUSD",
-        "GHO",
-        "CRVUSD",
-        "FUSDT0",
-        "USDBC",
-        "USDP",
-    }
+    # Lazy-loaded from almanak.core.constants to avoid circular import
+    # (compiler -> data/__init__ -> prediction_provider -> connectors -> execution -> compiler)
+    _KNOWN_STABLECOINS: ClassVar[frozenset[str] | None] = None
+
+    @classmethod
+    def _get_known_stablecoins(cls) -> frozenset[str]:
+        known = cls._KNOWN_STABLECOINS
+        if known is None:
+            from almanak.core.constants import STABLECOINS
+
+            known = frozenset(s.upper() for s in STABLECOINS)
+            cls._KNOWN_STABLECOINS = known
+        return known
 
     # Wrapped native tokens map to their native counterpart for price lookups.
     # Wrapped natives are 1:1 pegged by the WETH9 contract (deposit/withdraw at par),
@@ -12019,7 +12011,7 @@ class IntentCompiler:
             if self._using_placeholders:
                 return Decimal("1")
             # Fall back for stablecoins even without an oracle
-            if symbol.upper() in self._KNOWN_STABLECOINS:
+            if symbol.upper() in self._get_known_stablecoins():
                 return Decimal("1")
             raise ValueError(
                 f"No price oracle available and placeholder prices are disabled. Cannot resolve price for '{symbol}'."
@@ -12049,7 +12041,7 @@ class IntentCompiler:
             if self._using_placeholders:
                 return Decimal("1")
             # Stablecoin fallback: these are always ~$1, safe to assume
-            if symbol.upper() in self._KNOWN_STABLECOINS:
+            if symbol.upper() in self._get_known_stablecoins():
                 if symbol not in self._stablecoin_fallback_logged:
                     logger.info(f"Price for '{symbol}' not in oracle cache, using stablecoin fallback ($1.00)")
                     self._stablecoin_fallback_logged.add(symbol)

@@ -53,22 +53,9 @@ WRAPPED_NATIVE: dict[str, str] = {
     "monad": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",  # WMON
 }
 
-# Set of stablecoin symbols for quick identification
-# Includes both native and bridged variants
-STABLECOINS: set[str] = {
-    "USDC",
-    "USDT",
-    "DAI",
-    "USDC.E",
-    "USDBC",
-    "USDT.E",
-    "USDE",
-    "FRAX",
-    "LUSD",
-    "TUSD",
-    "BUSD",
-    "CRVUSD",
-}
+# Re-exported from almanak.core.constants for backwards compatibility.
+# The canonical definition lives in core/constants.py to avoid circular imports.
+from almanak.core.constants import STABLECOINS as STABLECOINS  # noqa: F811
 
 # =============================================================================
 # SYMBOL ALIASES

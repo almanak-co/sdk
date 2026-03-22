@@ -17,6 +17,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.constants import STABLECOINS
 from almanak.framework.backtesting.models import (
     BacktestMetrics,
     DataCoverageMetrics,
@@ -797,10 +798,7 @@ class SimulatedPortfolio:
     _realized_pnl: Decimal = field(default=Decimal("0"))
     _unrealized_pnl: Decimal = field(default=Decimal("0"))
 
-    # Known stablecoins for which a $1 fallback is reasonable
-    _STABLECOIN_SYMBOLS: frozenset = frozenset(
-        {"USDC", "USDT", "DAI", "FRAX", "LUSD", "USDC.E", "USDT.E", "BUSD", "TUSD", "USDBC"}
-    )
+    _STABLECOIN_SYMBOLS: frozenset[str] = STABLECOINS
 
     def __post_init__(self) -> None:
         """Initialize cash from initial capital if not set."""

@@ -2,6 +2,33 @@ from almanak import Chain
 
 ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
+# Known stablecoins pegged to ~$1 USD.
+# Single source of truth for stablecoin identification across the SDK.
+# Used by: IntentCompiler (price fallback), backtesting (price fallback),
+# CoinGecko provider (unlisted token fallback), token defaults.
+STABLECOINS: frozenset[str] = frozenset(
+    {
+        "USDC",
+        "USDT",
+        "DAI",
+        "USDC.E",
+        "USDBC",
+        "USDT.E",
+        "USDE",
+        "SUSDE",
+        "SDAI",
+        "FRAX",
+        "LUSD",
+        "TUSD",
+        "BUSD",
+        "CRVUSD",
+        "PYUSD",
+        "GHO",
+        "FUSDT0",
+        "USDP",
+    }
+)
+
 # Numeric chain IDs for each chain (EIP-155)
 CHAIN_IDS: dict[Chain, int] = {
     Chain.ETHEREUM: 1,

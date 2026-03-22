@@ -29,6 +29,7 @@ from typing import Any
 
 import aiohttp
 
+from almanak.core.constants import STABLECOINS
 from almanak.framework.data.interfaces import (
     BasePriceSource,
     DataSourceRateLimited,
@@ -444,23 +445,7 @@ class CoinGeckoPriceSource(BasePriceSource):
         if token_id is None:
             # Stablecoin fallback: tokens like FUSDT0, USDbC, etc. may not be
             # listed on CoinGecko but are known USD-pegged stablecoins.
-            _KNOWN_STABLECOINS = {
-                "USDC",
-                "USDC.E",
-                "USDT",
-                "DAI",
-                "BUSD",
-                "TUSD",
-                "FRAX",
-                "LUSD",
-                "PYUSD",
-                "GHO",
-                "CRVUSD",
-                "FUSDT0",
-                "USDBC",
-                "USDP",
-            }
-            if token_upper in _KNOWN_STABLECOINS and quote_upper == "USD":
+            if token_upper in STABLECOINS and quote_upper == "USD":
                 logger.info(f"Token {token_upper} not on CoinGecko, using stablecoin fallback ($1.00)")
                 result = PriceResult(
                     price=Decimal("1"),
