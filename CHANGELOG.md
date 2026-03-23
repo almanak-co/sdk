@@ -6,13 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [2.6.1] - 2026-03-23
+## [2.6.2] - 2026-03-23
 
 ### Added
 - Forward unknown CLI args to native almanak-code binary via execv, enabling `almanak acp --dangerously-skip-permissions` passthrough
 
 ### Fixed
-- Docs sync: remove Monad from chains, fix chain count, add Agni/Fluid connectors, update strategy-builder skill to v2.6.0
+- Fix CLI test crashes from `ignore_unknown_options` swallowing subcommand flags
+- Sync all version files (_version.py, SKILL.md) to match pyproject.toml
+- Restore MONAD chain and indicator methods (adx, obv, cci, ichimoku) in strategy-builder skill
+
+## [2.6.1] - 2026-03-23 [YANKED]
+
+### Added
+- Forward unknown CLI args to native almanak-code binary via execv, enabling `almanak acp --dangerously-skip-permissions` passthrough
+
+### Fixed
+- Docs sync: add Agni/Fluid connectors, update strategy-builder skill version
 
 ## [2.6.0] - 2026-03-23
 
