@@ -71,6 +71,11 @@ test-integration:
 test-all:
 	uv run pytest tests/ --ignore=tests/intents -m "not integration" -v --import-mode=importlib
 
+# Run all tests for CI (with JUnit XML report, no coverage)
+test-ci:
+	uv run pytest tests/ --ignore=tests/intents --ignore=tests/visual/nightly -m "not integration" -v --import-mode=importlib \
+		--junitxml=test-results.xml
+
 # Run all tests with coverage report
 test-coverage:
 	uv run pytest tests/ --ignore=tests/intents --ignore=tests/visual/nightly -m "not integration" -v --import-mode=importlib \
