@@ -780,6 +780,25 @@ class CompoundV3Adapter:
     # Collateral Operations
     # =========================================================================
 
+    def _resolve_collateral_key(self, asset: str) -> str | None:
+        """Case-insensitive collateral key lookup.
+
+        The compiler uppercases token symbols (e.g., "wstETH" -> "WSTETH") but
+        COMPOUND_V3_MARKETS uses mixed-case keys. This method resolves the
+        correct dict key by falling back to case-insensitive comparison.
+
+        Returns:
+            The matching collateral key, or None if not found.
+        """
+        collaterals = self.market_config.get("collaterals", {})
+        if asset in collaterals:
+            return asset
+        asset_lower = asset.lower()
+        for key in collaterals:
+            if key.lower() == asset_lower:
+                return key
+        return None
+
     def supply_collateral(
         self,
         asset: str,
@@ -800,14 +819,15 @@ class CompoundV3Adapter:
         """
         try:
             collaterals = self.market_config.get("collaterals", {})
-            if asset not in collaterals:
+            resolved_key = self._resolve_collateral_key(asset)
+            if resolved_key is None:
                 return TransactionResult(
                     success=False,
                     error=f"Unsupported collateral: {asset}. Supported: {list(collaterals.keys())}",
                 )
 
-            asset_address = collaterals[asset]["address"]
-            decimals = self._get_decimals(asset)
+            asset_address = collaterals[resolved_key]["address"]
+            decimals = self._get_decimals(resolved_key)
             amount_wei = int(amount * Decimal(10**decimals))
             recipient = on_behalf_of or self.wallet_address
 
@@ -855,14 +875,15 @@ class CompoundV3Adapter:
         """
         try:
             collaterals = self.market_config.get("collaterals", {})
-            if asset not in collaterals:
+            resolved_key = self._resolve_collateral_key(asset)
+            if resolved_key is None:
                 return TransactionResult(
                     success=False,
                     error=f"Unsupported collateral: {asset}. Supported: {list(collaterals.keys())}",
                 )
 
-            asset_address = collaterals[asset]["address"]
-            decimals = self._get_decimals(asset)
+            asset_address = collaterals[resolved_key]["address"]
+            decimals = self._get_decimals(resolved_key)
             recipient = receiver or self.wallet_address
 
             if withdraw_all:
@@ -1042,11 +1063,12 @@ class CompoundV3Adapter:
         Returns:
             Collateral info dictionary or None if not supported
         """
-        collaterals = self.market_config.get("collaterals", {})
-        if asset not in collaterals:
+        resolved_key = self._resolve_collateral_key(asset)
+        if resolved_key is None:
             return None
-        info = collaterals[asset].copy()
-        info["symbol"] = asset
+        collaterals = self.market_config.get("collaterals", {})
+        info = collaterals[resolved_key].copy()
+        info["symbol"] = resolved_key
         return info
 
     # =========================================================================
@@ -1074,14 +1096,15 @@ class CompoundV3Adapter:
         collaterals = self.market_config.get("collaterals", {})
 
         for asset, balance in collateral_balances.items():
-            if asset not in collaterals or balance <= 0:
+            resolved_key = self._resolve_collateral_key(asset)
+            if resolved_key is None or balance <= 0:
                 continue
 
-            price = self._price_oracle(asset)
+            price = self._price_oracle(resolved_key)
             value_usd = balance * price
             collateral_value_usd += value_usd
 
-            collateral_info = collaterals[asset]
+            collateral_info = collaterals[resolved_key]
             borrow_cf = collateral_info.get("borrow_collateral_factor", Decimal("0"))
             liquidation_cf = collateral_info.get("liquidation_collateral_factor", Decimal("0"))
 
