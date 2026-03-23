@@ -105,12 +105,17 @@ class IntentCompilerConfig:
             - "fixed": Use fixed_swap_fee_tier for deterministic execution.
         fixed_swap_fee_tier: Optional fixed fee tier used when swap_pool_selection_mode="fixed".
             Must be valid for the selected protocol.
+        max_price_impact_pct: Maximum acceptable price impact as a fraction (0.0 to 1.0).
+            If the on-chain quoter returns an amount deviating more than this from the oracle
+            estimate, compilation fails with a clear error. Default: 0.30 (30%).
+            Can be overridden per-intent via SwapIntent.max_price_impact.
     """
 
     allow_placeholder_prices: bool = False
     polymarket_config: "PolymarketConfig | None" = None
     swap_pool_selection_mode: Literal["auto", "fixed"] = "auto"
     fixed_swap_fee_tier: int | None = None
+    max_price_impact_pct: Decimal = Decimal("0.30")
 
     def __post_init__(self) -> None:
         """Validate swap pool selection settings."""
@@ -118,6 +123,11 @@ class IntentCompilerConfig:
             raise ValueError("swap_pool_selection_mode must be 'auto' or 'fixed'")
         if self.swap_pool_selection_mode == "fixed" and self.fixed_swap_fee_tier is None:
             raise ValueError("fixed_swap_fee_tier is required when swap_pool_selection_mode='fixed'")
+        # Coerce float to Decimal to ensure guard always operates in Decimal space
+        if not isinstance(self.max_price_impact_pct, Decimal):
+            object.__setattr__(self, "max_price_impact_pct", Decimal(str(self.max_price_impact_pct)))
+        if not Decimal("0") < self.max_price_impact_pct <= Decimal("1"):
+            raise ValueError("max_price_impact_pct must be between 0 (exclusive) and 1 (inclusive)")
 
 
 # =============================================================================
@@ -3461,6 +3471,7 @@ class IntentCompiler:
             # The on-chain quoter reflects actual pool liquidity and is more accurate
             # than the price oracle estimate. Use the lower of the two to protect against
             # both quoter overestimates and stale oracle prices.
+            oracle_estimate = expected_output
             quoter_amount = adapter.get_quoted_amount_out()
             if quoter_amount is not None and quoter_amount < expected_output:
                 logger.info(
@@ -3470,6 +3481,36 @@ class IntentCompiler:
                     expected_output,
                 )
                 expected_output = quoter_amount
+
+            # Price impact guard: fail compilation if quoter deviates too far from oracle.
+            # This catches zero/low-liquidity pools where slippage protection is meaningless
+            # because the quoter amount itself is catastrophically bad.
+            # Skip when using placeholder prices — oracle estimates are unreliable in that mode.
+            if quoter_amount is not None and oracle_estimate > 0 and not self._using_placeholders:
+                price_impact = Decimal(1) - (Decimal(quoter_amount) / Decimal(oracle_estimate))
+                max_impact = (
+                    intent.max_price_impact
+                    if intent.max_price_impact is not None
+                    else self._config.max_price_impact_pct
+                )
+                if price_impact > max_impact:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=(
+                            f"Price impact too high: quoter returned amount implying "
+                            f"{price_impact:.1%} price impact "
+                            f"(oracle estimate: {oracle_estimate}, quoter: {quoter_amount}). "
+                            f"Maximum allowed: {max_impact:.0%}. "
+                            f"Likely cause: pool has insufficient liquidity for {intent.from_token}->{intent.to_token}."
+                        ),
+                    )
+            elif quoter_amount is None and oracle_estimate > 0 and not self._using_placeholders:
+                logger.warning(
+                    "Price impact guard skipped: quoter returned None (RPC may be unavailable). "
+                    "Proceeding with oracle-only estimate for %s->%s.",
+                    intent.from_token,
+                    intent.to_token,
+                )
 
             min_output = int(Decimal(str(expected_output)) * (Decimal("1") - intent.max_slippage))
 

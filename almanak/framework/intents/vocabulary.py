@@ -302,6 +302,9 @@ class SwapIntent(AlmanakImmutableModel):
         amount_usd: Amount to swap in USD terms (mutually exclusive with amount)
         amount: Amount to swap in token terms, or "all" to use output from previous step
         max_slippage: Maximum acceptable slippage (e.g., 0.005 = 0.5%)
+        max_price_impact: Maximum acceptable price impact vs oracle price (e.g., 0.50 = 50%).
+            If the on-chain quoter returns an amount deviating more than this from the oracle
+            estimate, compilation fails. Defaults to None (uses compiler config default of 30%).
         protocol: Preferred protocol for the swap (e.g., "uniswap_v3", "enso")
         chain: Source chain for execution (defaults to strategy's primary chain)
         destination_chain: Destination chain for cross-chain swaps (None for same-chain)
@@ -334,6 +337,12 @@ class SwapIntent(AlmanakImmutableModel):
     amount_usd: OptionalSafeDecimal = None
     amount: OptionalChainedAmount = None
     max_slippage: SafeDecimal = Field(default=Decimal("0.005"))
+    max_price_impact: OptionalSafeDecimal = Field(
+        default=None,
+        description="Maximum acceptable price impact vs oracle price (e.g., 0.50 = 50%). "
+        "Compilation fails if quoter/oracle deviation exceeds this. "
+        "Defaults to None (uses compiler config default of 30%).",
+    )
     protocol: str | None = None
     chain: str | None = None
     destination_chain: str | None = None
@@ -366,6 +375,8 @@ class SwapIntent(AlmanakImmutableModel):
                 raise ValueError("amount must be a positive Decimal or 'all'")
         if self.max_slippage < 0 or self.max_slippage > 1:
             raise ValueError("max_slippage must be between 0 and 1")
+        if self.max_price_impact is not None and (self.max_price_impact <= 0 or self.max_price_impact > 1):
+            raise ValueError("max_price_impact must be between 0 (exclusive) and 1 (inclusive)")
         # Cross-chain swaps require an aggregator protocol (Enso or LiFi)
         if self.is_cross_chain and self.protocol and self.protocol.lower() not in ("enso", "lifi"):
             raise ValueError("Cross-chain swaps require protocol='enso' or protocol='lifi'")
@@ -2271,6 +2282,7 @@ class Intent:
         amount_usd: Decimal | None = None,
         amount: ChainedAmount | None = None,
         max_slippage: Decimal = Decimal("0.005"),
+        max_price_impact: Decimal | None = None,
         protocol: str | None = None,
         chain: str | None = None,
         destination_chain: str | None = None,
@@ -2283,6 +2295,9 @@ class Intent:
             amount_usd: Amount to swap in USD terms
             amount: Amount to swap in token terms, or "all" to use previous step output
             max_slippage: Maximum acceptable slippage (default 0.5%)
+            max_price_impact: Maximum acceptable price impact vs oracle price (e.g., 0.50 = 50%).
+                Compilation fails if quoter/oracle deviation exceeds this.
+                Defaults to None (uses compiler config default of 30%).
             protocol: Preferred protocol for the swap
             chain: Source chain for execution (defaults to strategy's primary chain)
             destination_chain: Destination chain for cross-chain swaps (None for same-chain)
@@ -2310,6 +2325,7 @@ class Intent:
             amount_usd=amount_usd,
             amount=amount,
             max_slippage=max_slippage,
+            max_price_impact=max_price_impact,
             protocol=protocol,
             chain=chain,
             destination_chain=destination_chain,
