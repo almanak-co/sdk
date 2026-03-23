@@ -74,7 +74,7 @@ test-all:
 # Run all tests with coverage report
 test-coverage:
 	uv run pytest tests/ --ignore=tests/intents --ignore=tests/visual/nightly -m "not integration" -v --import-mode=importlib \
-		--cov=almanak --cov-report=html:coverage-html --cov-report=xml:coverage.xml --cov-report=term \
+		--cov=almanak --cov-report=xml:coverage.xml \
 		--junitxml=test-results.xml
 
 # Run nightly-only visual Market Data API contract tests
@@ -312,4 +312,4 @@ clean:
 	find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name ".ruff_cache" -exec rm -rf {} + 2>/dev/null || true
 	rm -rf dist/ build/ *.egg-info .eggs/ site/
-	rm -rf coverage-html/ coverage.xml test-results.xml .coverage
+	rm -rf coverage.xml test-results.xml .coverage .coverage.*
