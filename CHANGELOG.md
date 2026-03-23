@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.6.3] - 2026-03-23
+
+### Added
+- Multi-chain sidecar deployment mode: strategies can run with `--no-gateway` using per-chain wallet config via `ALMANAK_GATEWAY_WALLETS` (#1003)
+
+### Fixed
+- Swap amounts decimals resolved from Transfer events instead of defaulting to 18, fixing wrong values for non-18-decimal tokens like USDC (#997)
+- CLI native fallback command now forwards `--flags` correctly to almanak-code binary
+
 ## [2.6.2] - 2026-03-23
 
 ### Added

@@ -12,7 +12,7 @@ description: >-
   debugging strategy execution on Anvil forks. Do NOT use for general
   smart contract development, Solidity code, or non-strategy SDK internals.
 metadata:
-  version: "2.6.2"
+  version: "2.6.3"
   author: Almanak
   license: Apache-2.0
   type: documentation
