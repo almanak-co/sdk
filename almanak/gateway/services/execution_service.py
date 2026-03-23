@@ -89,6 +89,14 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         if not self.market_servicer:
             return {}
 
+        # Ensure the market service's price aggregator is initialized.
+        # It uses lazy init (_ensure_initialized) which only runs on first
+        # GetMarketSnapshot/GetPrice call. If the first price-sensitive intent
+        # compiles before any market query, the aggregator would be None.
+        ensure_init = getattr(self.market_servicer, "_ensure_initialized", None)
+        if ensure_init:
+            await ensure_init()
+
         prices: dict[str, Decimal] = {}
         aggregator = getattr(self.market_servicer, "_price_aggregator", None)
         if not aggregator:

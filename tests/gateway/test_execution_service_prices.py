@@ -416,10 +416,12 @@ async def test_fetch_prices_returns_empty_without_market_servicer():
 
 @pytest.mark.asyncio
 async def test_fetch_prices_returns_empty_without_aggregator():
-    """_fetch_prices_for_tokens returns empty when market_servicer has no _price_aggregator."""
+    """_fetch_prices_for_tokens returns empty when market_servicer has no _price_aggregator after init."""
     settings = GatewaySettings()
     service = ExecutionServiceServicer(settings)
-    service.market_servicer = MagicMock(spec=[])  # No _price_aggregator attr
+    mock_market = MagicMock(spec=[])  # No _price_aggregator attr
+    mock_market._ensure_initialized = AsyncMock()
+    service.market_servicer = mock_market
 
     result = await service._fetch_prices_for_tokens(["USDC", "WETH"])
     assert result == {}
@@ -439,6 +441,7 @@ async def test_fetch_prices_returns_decimals_from_aggregator():
 
     mock_market = MagicMock()
     mock_market._price_aggregator = mock_aggregator
+    mock_market._ensure_initialized = AsyncMock()
     service.market_servicer = mock_market
 
     result = await service._fetch_prices_for_tokens(["WETH"])
@@ -466,6 +469,7 @@ async def test_fetch_prices_handles_partial_failures():
 
     mock_market = MagicMock()
     mock_market._price_aggregator = mock_aggregator
+    mock_market._ensure_initialized = AsyncMock()
     service.market_servicer = mock_market
 
     result = await service._fetch_prices_for_tokens(["USDC", "UNKNOWN_TOKEN"])
@@ -519,6 +523,7 @@ async def test_mainnet_self_serve_prices_used_when_no_price_map():
     mock_aggregator.get_aggregated_price = mock_get_price
     mock_market = MagicMock()
     mock_market._price_aggregator = mock_aggregator
+    mock_market._ensure_initialized = AsyncMock()
     service.market_servicer = mock_market
 
     context = MagicMock()

@@ -1801,7 +1801,6 @@ def run(
                         click.echo(f"  {ch}: {addr}")
         except Exception as e:
             click.secho(f"WARNING: register_chains() failed: {e}", fg="yellow", err=True)
-            click.echo("Falling back to legacy wallet resolution.", err=True)
             logger.warning("register_chains() failed: %s", e)
 
     # Ensure chain and wallet_address are set in strategy config
@@ -2069,6 +2068,12 @@ def run(
             effective_wallet = runtime_config.execution_address
             if chain_wallets:
                 effective_wallet = chain_wallets.get(strategy_chains[0], effective_wallet)
+
+            if not effective_wallet:
+                raise click.ClickException(
+                    "No wallet address resolved for multi-chain execution. "
+                    "Ensure ALMANAK_GATEWAY_WALLETS is configured correctly and the gateway is reachable."
+                )
 
             click.echo("  Using gateway-backed providers for multi-chain...")
             price_oracle = GatewayPriceOracle(gateway_client)
