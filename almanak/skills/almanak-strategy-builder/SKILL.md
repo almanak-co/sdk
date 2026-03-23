@@ -596,6 +596,30 @@ sma = market.sma("WETH", period=20)
 ema = market.ema("WETH", period=12)
 # Both return MAData with: .value, .is_price_above, .is_price_below, .signal
 
+adx = market.adx("WETH", period=14)
+adx.value           # Decimal
+adx.plus_di         # Decimal
+adx.minus_di        # Decimal
+adx.is_trending     # bool
+adx.is_uptrend      # bool
+
+obv = market.obv("WETH", signal_period=21)
+obv.value           # Decimal
+obv.signal          # Decimal
+obv.is_bullish      # bool
+
+cci = market.cci("WETH", period=20)
+cci.value           # Decimal
+cci.is_overbought   # bool
+cci.is_oversold     # bool
+
+ich = market.ichimoku("WETH", tenkan_period=9, kijun_period=26, senkou_b_period=52)
+ich.tenkan_sen      # Decimal (conversion line)
+ich.kijun_sen       # Decimal (base line)
+ich.senkou_span_a   # Decimal (leading span A)
+ich.senkou_span_b   # Decimal (leading span B)
+ich.is_bullish_crossover  # bool
+ich.is_above_cloud  # bool
 ```
 
 ### Multi-Token Queries
@@ -1127,6 +1151,7 @@ class MyStrategy(IntentStrategy):
 | Blast | `BLAST` | `blast` |
 | Mantle | `MANTLE` | `mantle` |
 | Berachain | `BERACHAIN` | `berachain` |
+| Monad | `MONAD` | `monad` |
 | Solana | `SOLANA` | `solana` |
 
 <!-- almanak-sdk-end: supported-chains -->
