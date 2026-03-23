@@ -1804,6 +1804,7 @@ def run(
                         click.echo(f"  {ch}: {addr}")
         except Exception as e:
             click.secho(f"WARNING: register_chains() failed: {e}", fg="yellow", err=True)
+            click.echo("Falling back to legacy wallet resolution.", err=True)
             logger.warning("register_chains() failed: %s", e)
 
     # Ensure chain and wallet_address are set in strategy config

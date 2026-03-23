@@ -395,7 +395,7 @@ AXLUSDC = Token(
     addresses={
         "base": "0xEB466342C4d449BC9f53A865D5Cb90586f405215",
     },
-    coingecko_id="axlusdc",
+    coingecko_id="axelar-bridged-usdc",
     is_stablecoin=True,
     chain_overrides={
         "base": ChainTokenConfig(
