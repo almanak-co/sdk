@@ -90,23 +90,47 @@ def _resolve_native_binary() -> Path:
     return Path(__file__).resolve().parent.parent / "bin" / binary_name
 
 
-@click.group(invoke_without_command=True, context_settings={"ignore_unknown_options": True})
+class _NativeFallbackGroup(click.Group):
+    """Click group that forwards unrecognized commands to the native binary."""
+
+    def resolve_command(self, ctx, args):
+        """Try normal resolution first; on failure, fall through to native binary."""
+        try:
+            return super().resolve_command(ctx, args)
+        except click.UsageError:
+            return "native", self._make_native_cmd(), args
+
+    def _make_native_cmd(self):
+        """Create a synthetic Click command that execv's the native binary."""
+
+        @click.command("native", hidden=True)
+        @click.argument("native_args", nargs=-1, type=click.UNPROCESSED)
+        @click.pass_context
+        def _native(ctx, native_args):
+            _exec_native_binary(list(ctx.parent.params.get("args", [])) + list(native_args))
+
+        return _native
+
+
+def _exec_native_binary(extra_args=None):
+    """Replace the current process with the native almanak-code binary."""
+    binary_path = _resolve_native_binary()
+    if not binary_path.exists():
+        click.echo(f"Error: no binary for this platform at {binary_path}", err=True)
+        sys.exit(1)
+    if not os.access(binary_path, os.X_OK):
+        binary_path.chmod(binary_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    args = extra_args or sys.argv[1:]
+    os.execv(str(binary_path), [str(binary_path)] + args)
+
+
+@click.group(cls=_NativeFallbackGroup, invoke_without_command=True)
 @click.version_option(__version__)
-@click.argument("native_args", nargs=-1, type=click.UNPROCESSED)
 @click.pass_context
-def almanak(ctx, native_args):
+def almanak(ctx):
     """Almanak CLI for managing strategies."""
     if ctx.invoked_subcommand is None:
-        binary_path = _resolve_native_binary()
-        if not binary_path.exists():
-            click.echo(f"Error: no binary for this platform at {binary_path}", err=True)
-            sys.exit(1)
-        # Ensure the binary is executable (pip may strip permissions from wheel installs)
-        if not os.access(binary_path, os.X_OK):
-            binary_path.chmod(binary_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        # Use execv to replace the Python process with the binary, avoiding
-        # subprocess buffering issues with the ndjson stdin/stdout protocol.
-        os.execv(str(binary_path), [str(binary_path)] + list(native_args))
+        _exec_native_binary()
 
 
 @almanak.group()
