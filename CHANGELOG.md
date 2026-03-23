@@ -6,6 +6,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-03-23
+
+### Added
+- Gateway multi-wallet abstraction: per-chain wallet config with cross-chain IntentSequence execution (#970)
+- Price impact guard in compiler: fails swap when quoter deviates >50% from oracle (#988)
+- Fluid DEX connector for Arbitrum with swap support (#904)
+- LinearImpactSlippageModel for PnL backtester: depth-aware slippage (#849)
+- GMX V2 on-chain position reads via Reader contract (#979)
+- PancakeSwap V3 swap lifecycle on BSC (#972)
+- Curve StableSwap NG on Optimism (#952)
+- Curve adapter extended to Base chain + WETH/cbETH pool (#872)
+- SushiSwap V3 swap on BSC + BSC Chainlink price feeds (#878)
+- Agni Finance promoted to first-class protocol on Mantle (#827)
+- Compound V3 on Optimism + Morpho Blue on-chain market fallback (#851)
+- Aave V3 lending lifecycle on BSC (#954)
+- Ethena time-warp lifecycle + unstake selector fix (#886)
+- LP enrichment methods for Curve receipt parser (#824)
+- Pre-built base images for V2 strategy/dashboard deploys (#867)
+- Read-only root filesystem container support (#859)
+- Anvil watchdog auto-restart for crashed forks (#848)
+- Template improvements: looping, funding rates, IntentSequence (#844)
+- anvil_funding added to all strat new templates (#957)
+- Longer CoinGecko cache TTL for stablecoins (#986)
+- PM monitoring: pause/resume, consecutive_errors, pnl, LP fees (#877)
+- 17 new demo strategies across Morpho, Compound, Aerodrome, Curve, Aave, SushiSwap, Enso, Fluid, BENQI
+
+### Changed
+- Stablecoin symbols extracted to shared constant (#956)
+
+### Fixed
+- Startup watchdog no longer kills agents still alive (#998)
+- Curve LP position_id returns LP token address, not minted amount (#985)
+- Warn when --once loads stale state from previous run (#984)
+- Balance retry with backoff and cached fallback (#977)
+- Interest_rate_mode wired through all borrow/repay paths (#940)
+- Paper trading stability: RPC masking, datetime, anvil_reset (#938)
+- Case-insensitive price oracle lookup for mixed-case tokens (#931)
+- Slipstream CL swap event parsing in Aerodrome receipt parser (#928)
+- Reject flash loan compilation for EOA wallets (#923)
+- Curve remove_liquidity slippage via on-chain pool.balances() (#891)
+- PancakeSwap V3 extract_swap_amounts uses actual decimals (#908)
+- AaveV3ReceiptParser: extract_supply_amounts() (#889)
+- Sonic Chainlink feeds + Anvil-only RPC methods (#892)
+- Complete BSC Chainlink support (#883)
+- Curve CryptoSwap slippage protection via price_ratio (#831)
+- Strategy state restored correctly on restart (#865)
+- Ghost RUNNING entries: startup reconciliation + heartbeat TTL (#841)
+- Block TraderJoe V2 swap: LBRouter2 interface mismatch (#833)
+- Quarantine Uniswap V4 swap: fabricated addresses (#832)
+- Stale Aave V3 addresses (BSC/Linea) updated (#945)
+- Make teardown fallback price fetch chain-aware (#896)
+- Populate swap quote fields in dry-run mode (#915)
+
 ## [2.5.0] - 2026-03-18
 
 ### Added
