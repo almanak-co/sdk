@@ -26,6 +26,17 @@ TOKEN_FIELDS: tuple[str, ...] = (
 MAX_SYMBOL_LENGTH = 20
 MAX_CALLBACK_DEPTH = 3
 
+# Pool-type suffixes used by AMMs (e.g., Aerodrome "WETH/USDC/volatile").
+# These are pool metadata, not token symbols, and must be stripped during extraction.
+_POOL_TYPE_SUFFIXES: frozenset[str] = frozenset(
+    {
+        "volatile",
+        "stable",
+        "concentrated",
+        "cl",  # Aerodrome Slipstream concentrated liquidity
+    }
+)
+
 
 def _is_symbol(value: Any) -> TypeGuard[str]:
     """Return True if *value* looks like a token symbol (not an address)."""
@@ -60,11 +71,16 @@ def extract_token_symbols(intent: Any, *, _depth: int = 0) -> list[str]:
     # Parse pool name (e.g., "WETH/USDC/500") for LP intents
     pool = _get("pool")
     if isinstance(pool, str) and "/" in pool:
-        for part in pool.split("/"):
+        parts = [p for p in pool.split("/") if p.strip()]
+        last_idx = len(parts) - 1
+        for idx, part in enumerate(parts):
             # Strip whitespace and common pool decorations (e.g., "USDC (0.05%)")
             part = part.strip().split("(")[0].split(" ")[0].strip()
             # Skip numeric parts (fee tiers like "500", "3000", bin steps like "20")
             if part.isdigit():
+                continue
+            # Skip pool-type suffixes only in trailing position (e.g., "volatile", "stable")
+            if idx == last_idx and part.lower() in _POOL_TYPE_SUFFIXES:
                 continue
             if _is_symbol(part):
                 symbols.append(part)

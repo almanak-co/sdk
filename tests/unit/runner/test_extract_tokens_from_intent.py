@@ -132,3 +132,61 @@ class TestExtractTokensFromIntent:
             )
             tokens = _extract_tokens_from_intent(intent)
             assert fee not in tokens, f"Fee tier '{fee}' should not be extracted as a token"
+
+    def test_lp_intent_skips_volatile_pool_type(self):
+        """VIB-1642: pool string 'WETH/USDC/volatile' must not extract 'volatile' as a token."""
+        intent = Intent.lp_open(
+            pool="WETH/USDC/volatile",
+            amount0=Decimal("1"),
+            amount1=Decimal("2000"),
+            range_lower=Decimal("1500"),
+            range_upper=Decimal("2500"),
+        )
+        tokens = _extract_tokens_from_intent(intent)
+        assert "WETH" in tokens
+        assert "USDC" in tokens
+        assert "volatile" not in tokens
+        assert "VOLATILE" not in tokens
+
+    def test_lp_intent_skips_stable_pool_type(self):
+        """Pool string 'USDC/DAI/stable' must not extract 'stable' as a token."""
+        intent = Intent.lp_open(
+            pool="USDC/DAI/stable",
+            amount0=Decimal("1000"),
+            amount1=Decimal("1000"),
+            range_lower=Decimal("0.99"),
+            range_upper=Decimal("1.01"),
+        )
+        tokens = _extract_tokens_from_intent(intent)
+        assert "USDC" in tokens
+        assert "DAI" in tokens
+        assert "stable" not in tokens
+
+    def test_lp_intent_skips_concentrated_pool_type(self):
+        """Pool string with 'concentrated' or 'cl' suffix must be filtered."""
+        for suffix in ["concentrated", "cl"]:
+            intent = Intent.lp_open(
+                pool=f"WETH/USDC/{suffix}",
+                amount0=Decimal("1"),
+                amount1=Decimal("2000"),
+                range_lower=Decimal("1500"),
+                range_upper=Decimal("2500"),
+            )
+            tokens = _extract_tokens_from_intent(intent)
+            assert "WETH" in tokens
+            assert "USDC" in tokens
+            assert suffix not in tokens, f"Pool type '{suffix}' should not be extracted as a token"
+
+    def test_lp_intent_skips_pool_type_with_trailing_slash(self):
+        """Pool string with trailing slash must still filter the pool-type suffix."""
+        intent = Intent.lp_open(
+            pool="WETH/USDC/volatile/",
+            amount0=Decimal("1"),
+            amount1=Decimal("2000"),
+            range_lower=Decimal("1500"),
+            range_upper=Decimal("2500"),
+        )
+        tokens = _extract_tokens_from_intent(intent)
+        assert "WETH" in tokens
+        assert "USDC" in tokens
+        assert "volatile" not in tokens
