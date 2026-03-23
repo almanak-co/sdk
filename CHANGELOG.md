@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.6.1] - 2026-03-23
+
+### Added
+- Forward unknown CLI args to native almanak-code binary via execv, enabling `almanak acp --dangerously-skip-permissions` passthrough
+
+### Fixed
+- Docs sync: remove Monad from chains, fix chain count, add Agni/Fluid connectors, update strategy-builder skill to v2.6.0
+
 ## [2.6.0] - 2026-03-23
 
 ### Added
