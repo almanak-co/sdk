@@ -388,6 +388,16 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                             except (ValueError, OSError):
                                 pass
 
+                        # Parse chain_wallets JSON if present
+                        inst_chain_wallets: dict[str, str] = {}
+                        if hasattr(inst, "chain_wallets") and inst.chain_wallets:
+                            try:
+                                parsed = json.loads(inst.chain_wallets)
+                                if isinstance(parsed, dict):
+                                    inst_chain_wallets = parsed
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+
                         strategy_info = {
                             "strategy_id": inst.strategy_id,
                             "name": inst.strategy_name.replace("_", " ").title(),
@@ -404,6 +414,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                             "consecutive_errors": 0,
                             "last_iteration_at": 0,
                             "pnl_since_deploy_usd": "",
+                            "wallet_address": inst.wallet_address,
+                            "chain_wallets": inst_chain_wallets,
                         }
 
                         # Enrich with state data
@@ -460,25 +472,28 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # Convert to proto messages
         summaries = []
         for s in filtered:
-            summaries.append(
-                gateway_pb2.StrategySummary(
-                    strategy_id=s["strategy_id"],
-                    name=s["name"],
-                    status=s["status"],
-                    chain=s["chain"],
-                    protocol=s["protocol"],
-                    total_value_usd=s["total_value_usd"],
-                    pnl_24h_usd=s["pnl_24h_usd"],
-                    last_action_at=s["last_action_at"],
-                    attention_required=s["attention_required"],
-                    attention_reason=s["attention_reason"],
-                    is_multi_chain=s["is_multi_chain"],
-                    chains=s["chains"],
-                    consecutive_errors=s.get("consecutive_errors", 0),
-                    last_iteration_at=s.get("last_iteration_at", 0),
-                    pnl_since_deploy_usd=s.get("pnl_since_deploy_usd", ""),
-                )
-            )
+            summary_kwargs = {
+                "strategy_id": s["strategy_id"],
+                "name": s["name"],
+                "status": s["status"],
+                "chain": s["chain"],
+                "protocol": s["protocol"],
+                "total_value_usd": s["total_value_usd"],
+                "pnl_24h_usd": s["pnl_24h_usd"],
+                "last_action_at": s["last_action_at"],
+                "attention_required": s["attention_required"],
+                "attention_reason": s["attention_reason"],
+                "is_multi_chain": s["is_multi_chain"],
+                "chains": s["chains"],
+                "consecutive_errors": s.get("consecutive_errors", 0),
+                "last_iteration_at": s.get("last_iteration_at", 0),
+                "pnl_since_deploy_usd": s.get("pnl_since_deploy_usd", ""),
+            }
+            if "wallet_address" in s:
+                summary_kwargs["wallet_address"] = s["wallet_address"]
+            if "chain_wallets" in s:
+                summary_kwargs["chain_wallets"] = s["chain_wallets"]
+            summaries.append(gateway_pb2.StrategySummary(**summary_kwargs))
 
         return gateway_pb2.ListStrategiesResponse(
             strategies=summaries,
@@ -527,6 +542,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     except (ValueError, OSError):
                         pass
 
+                # Parse chain_wallets JSON if present
+                inst_chain_wallets: dict[str, str] = {}
+                if hasattr(inst, "chain_wallets") and inst.chain_wallets:
+                    try:
+                        inst_chain_wallets = json.loads(inst.chain_wallets)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
                 strategy_info = {
                     "strategy_id": inst.strategy_id,
                     "name": inst.strategy_name.replace("_", " ").title(),
@@ -543,6 +566,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     "consecutive_errors": 0,
                     "last_iteration_at": 0,
                     "pnl_since_deploy_usd": "",
+                    "wallet_address": inst.wallet_address,
+                    "chain_wallets": inst_chain_wallets,
                 }
         except Exception as e:
             logger.debug(f"Failed to check registry for {strategy_id}: {e}")
@@ -612,23 +637,28 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             strategy_info["pnl_since_deploy_usd"] = str(pnl_metrics)
 
         # Build summary
-        summary = gateway_pb2.StrategySummary(
-            strategy_id=str(strategy_info["strategy_id"]),
-            name=str(strategy_info["name"]),
-            status=str(strategy_info["status"]),
-            chain=str(strategy_info["chain"]),
-            protocol=str(strategy_info["protocol"]),
-            total_value_usd=str(strategy_info["total_value_usd"]),
-            pnl_24h_usd=str(strategy_info["pnl_24h_usd"]),
-            last_action_at=int(str(strategy_info["last_action_at"])),
-            attention_required=bool(strategy_info["attention_required"]),
-            attention_reason=str(strategy_info["attention_reason"]),
-            is_multi_chain=bool(strategy_info["is_multi_chain"]),
-            chains=strategy_info["chains"],  # type: ignore[arg-type]
-            consecutive_errors=int(str(strategy_info.get("consecutive_errors", 0))),
-            last_iteration_at=int(str(strategy_info.get("last_iteration_at", 0))),
-            pnl_since_deploy_usd=str(strategy_info.get("pnl_since_deploy_usd", "")),
-        )
+        summary_kwargs = {
+            "strategy_id": str(strategy_info["strategy_id"]),
+            "name": str(strategy_info["name"]),
+            "status": str(strategy_info["status"]),
+            "chain": str(strategy_info["chain"]),
+            "protocol": str(strategy_info["protocol"]),
+            "total_value_usd": str(strategy_info["total_value_usd"]),
+            "pnl_24h_usd": str(strategy_info["pnl_24h_usd"]),
+            "last_action_at": int(str(strategy_info["last_action_at"])),
+            "attention_required": bool(strategy_info["attention_required"]),
+            "attention_reason": str(strategy_info["attention_reason"]),
+            "is_multi_chain": bool(strategy_info["is_multi_chain"]),
+            "chains": strategy_info["chains"],
+            "consecutive_errors": int(str(strategy_info.get("consecutive_errors", 0))),
+            "last_iteration_at": int(str(strategy_info.get("last_iteration_at", 0))),
+            "pnl_since_deploy_usd": str(strategy_info.get("pnl_since_deploy_usd", "")),
+        }
+        if "wallet_address" in strategy_info:
+            summary_kwargs["wallet_address"] = str(strategy_info["wallet_address"])
+        if "chain_wallets" in strategy_info:
+            summary_kwargs["chain_wallets"] = strategy_info["chain_wallets"]
+        summary = gateway_pb2.StrategySummary(**summary_kwargs)  # type: ignore[arg-type]
 
         # Build position info from state
         position = gateway_pb2.PositionInfo()
@@ -1004,6 +1034,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             now = datetime.now(UTC)
 
             existing = registry.get(strategy_id)
+            # Read chains and chain_wallets from request
+            chains_str = ",".join(request.chains) if request.chains else request.chain
+            chain_wallets_str = ""
+            if request.chain_wallets:
+                chain_wallets_str = json.dumps(dict(request.chain_wallets))
+
             instance = StrategyInstance(
                 strategy_id=strategy_id,
                 strategy_name=request.strategy_name or strategy_id,
@@ -1012,6 +1048,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 protocol=request.protocol,
                 wallet_address=request.wallet_address,
                 config_json=request.config_json,
+                chains=chains_str,
+                chain_wallets=chain_wallets_str,
                 status="RUNNING",
                 archived=existing.archived if existing else False,
                 created_at=existing.created_at if existing else now,

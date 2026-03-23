@@ -420,6 +420,12 @@ class LocalRuntimeConfig:
             self.wallet_address = self.safe_signer.eoa_address
             return
 
+        # Gateway wallets mode: wallet addresses come from the gateway's WalletRegistry
+        # at RegisterChains time, not from local env vars.
+        if not self.private_key and os.environ.get("ALMANAK_GATEWAY_WALLETS"):
+            self.wallet_address = ""  # Resolved later by register_chains()
+            return
+
         if not self.private_key:
             raise ConfigurationError(field="private_key", reason="Private key cannot be empty")
 
@@ -742,16 +748,23 @@ class LocalRuntimeConfig:
         mode_str = get_optional("EXECUTION_MODE", "eoa") or "eoa"
         execution_mode = ExecutionMode.from_string(mode_str)
 
+        # When ALMANAK_GATEWAY_WALLETS is set, the gateway's WalletRegistry handles
+        # signer creation per chain. No local private key or SAFE_ADDRESS needed.
+        gateway_wallets_configured = bool(os.environ.get("ALMANAK_GATEWAY_WALLETS"))
+
         # Solana uses a separate key env var (base58 Ed25519 instead of hex secp256k1)
         if resolved_chain == "solana":
             private_key = os.environ.get("SOLANA_PRIVATE_KEY") or get_required("PRIVATE_KEY")
         elif execution_mode == ExecutionMode.SAFE_ZODIAC:
             # Zodiac mode: private key is held by remote signer service, not needed locally
             private_key = get_optional("PRIVATE_KEY", "") or ""
+        elif gateway_wallets_configured:
+            # Gateway wallets mode: private key is optional (gateway handles signing)
+            private_key = get_optional("PRIVATE_KEY", "") or ""
         else:
             private_key = get_required("PRIVATE_KEY")
         safe_signer = None
-        if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC):
+        if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC) and not gateway_wallets_configured:
             safe_signer = _create_safe_signer_from_env(
                 execution_mode=execution_mode,
                 private_key=private_key,
@@ -1186,6 +1199,17 @@ class MultiChainRuntimeConfig:
             self.wallet_address = self.safe_signer.eoa_address
             return
 
+        # Gateway wallets mode: wallet addresses come from the gateway's WalletRegistry
+        # at RegisterChains time, not from local env vars. Set a placeholder that will
+        # be overridden after register_chains() returns per-chain wallets.
+        if not self.private_key and os.environ.get("ALMANAK_GATEWAY_WALLETS"):
+            self.wallet_address = ""  # Resolved later by register_chains()
+            logger.info(
+                "Gateway wallets configured — wallet address will be resolved "
+                "from WalletRegistry at RegisterChains time"
+            )
+            return
+
         if not self.private_key:
             raise ConfigurationError(
                 field="private_key",
@@ -1529,7 +1553,7 @@ class MultiChainRuntimeConfig:
                     field="zodiac_address",
                     reason="zodiac_address is required for safe_zodiac mode",
                 )
-            # Derive EOA from private key when available, fall back to explicit eoa_address
+            # Prefer explicit eoa_address; derive from private key only as fallback
             if not eoa_address and private_key:
                 try:
                     eoa_address = Account.from_key(private_key).address
@@ -1687,15 +1711,24 @@ class MultiChainRuntimeConfig:
         mode_str = get_optional("EXECUTION_MODE", "eoa") or "eoa"
         execution_mode = ExecutionMode.from_string(mode_str)
 
+        # When ALMANAK_GATEWAY_WALLETS is set, the gateway's WalletRegistry handles
+        # signer creation per chain. The framework does not need a local private key
+        # or SAFE_ADDRESS — those are resolved from the registry at RegisterChains time.
+        gateway_wallets_configured = bool(os.environ.get("ALMANAK_GATEWAY_WALLETS"))
+
         # Zodiac mode: private key is held by remote signer service, not needed locally
         if execution_mode == ExecutionMode.SAFE_ZODIAC:
+            private_key = get_optional("PRIVATE_KEY", "") or ""
+        elif gateway_wallets_configured:
+            # Gateway wallets mode: private key is optional (gateway handles signing)
             private_key = get_optional("PRIVATE_KEY", "") or ""
         else:
             private_key = get_required("PRIVATE_KEY")
 
-        # Create Safe signer if needed
+        # Create Safe signer if needed — skip when gateway wallets are configured
+        # (the gateway creates signers per chain from the WalletRegistry)
         safe_signer = None
-        if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC):
+        if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC) and not gateway_wallets_configured:
             safe_signer = _create_safe_signer_from_env(
                 execution_mode=execution_mode,
                 private_key=private_key,
@@ -2023,9 +2056,13 @@ def _create_safe_signer_from_env(
     safe_address = get_required("SAFE_ADDRESS")
 
     if execution_mode == ExecutionMode.SAFE_ZODIAC:
-        # Derive EOA from private key when available, fall back to explicit EOA_ADDRESS
-        # (platform deployments use remote signer with no local key)
-        if private_key:
+        # Zodiac mode: prefer explicit EOA_ADDRESS (platform deployments use
+        # remote signer with no local key). Fall back to deriving from private
+        # key only when EOA_ADDRESS is not set.
+        explicit_eoa = get_optional("EOA_ADDRESS")
+        if explicit_eoa:
+            eoa_address = explicit_eoa
+        elif private_key:
             try:
                 account = Account.from_key(private_key)
                 eoa_address = account.address
@@ -2035,7 +2072,7 @@ def _create_safe_signer_from_env(
                     reason="Invalid private key format for safe_zodiac mode",
                 ) from None
         else:
-            eoa_address = get_required("EOA_ADDRESS")
+            raise MissingEnvironmentVariableError(f"{prefix}EOA_ADDRESS")
     else:
         # Direct mode: derive EOA from private key
         account = Account.from_key(private_key)

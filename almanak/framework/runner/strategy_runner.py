@@ -2117,6 +2117,7 @@ class StrategyRunner:
                 price_oracle=price_oracle,
                 config=compiler_config,
                 gateway_client=gateway_client,
+                chain_wallets=getattr(strategy, "_chain_wallets", None),
             )
 
             state_machine_config = StateMachineConfig(
@@ -3945,6 +3946,7 @@ class StrategyRunner:
                 price_oracle=price_oracle,
                 config=compiler_config,
                 gateway_client=gateway_client,
+                chain_wallets=getattr(strategy, "_chain_wallets", None),
             )
         except Exception as e:
             logger.warning(f"Failed to build teardown compiler: {e}")

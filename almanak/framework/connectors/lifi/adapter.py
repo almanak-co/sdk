@@ -406,15 +406,18 @@ class LiFiAdapter:
         )
 
         # Fetch fresh quote from LiFi API
-        quote = self.client.get_quote(
-            from_chain_id=route_params["from_chain_id"],
-            to_chain_id=route_params["to_chain_id"],
-            from_token=route_params["from_token"],
-            to_token=route_params["to_token"],
-            from_amount=route_params["from_amount"],
-            from_address=route_params["from_address"],
-            slippage=route_params["slippage"],
-        )
+        quote_kwargs: dict[str, Any] = {
+            "from_chain_id": route_params["from_chain_id"],
+            "to_chain_id": route_params["to_chain_id"],
+            "from_token": route_params["from_token"],
+            "to_token": route_params["to_token"],
+            "from_amount": route_params["from_amount"],
+            "from_address": route_params["from_address"],
+            "slippage": route_params["slippage"],
+        }
+        if route_params.get("to_address"):
+            quote_kwargs["to_address"] = route_params["to_address"]
+        quote = self.client.get_quote(**quote_kwargs)
 
         tx_request = quote.transaction_request
         gas_estimate = self._get_gas_estimate(quote)

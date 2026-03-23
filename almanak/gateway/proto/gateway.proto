@@ -44,6 +44,7 @@ message RegisterChainsResponse {
   repeated string initialized_chains = 2;  // Chains that were successfully initialized
   string wallet_address = 3;               // Wallet address derived from gateway private key
   string error = 4;
+  map<string, string> chain_wallets = 5;   // Per-chain wallet addresses resolved from wallet registry
 }
 
 // =============================================================================
@@ -752,6 +753,8 @@ message StrategySummary {
   int32  consecutive_errors  = 13;  // count of consecutive failed iterations
   int64  last_iteration_at   = 14;  // unix timestamp of last iteration completion
   string pnl_since_deploy_usd = 15; // lifetime PnL after gas; empty if unavailable
+  string wallet_address = 16;
+  map<string, string> chain_wallets = 17;
 }
 
 message GetStrategyDetailsRequest {
@@ -914,6 +917,8 @@ message RegisterInstanceRequest {
   string wallet_address = 6;
   string config_json = 7;
   string version = 8;
+  repeated string chains = 9;
+  map<string, string> chain_wallets = 10;
 }
 
 message RegisterInstanceResponse {

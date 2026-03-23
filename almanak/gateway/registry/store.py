@@ -33,6 +33,8 @@ class StrategyInstance:
     protocol: str
     wallet_address: str
     config_json: str
+    chains: str  # Comma-separated chain list (e.g., "arbitrum,base")
+    chain_wallets: str  # JSON-encoded per-chain wallet map (e.g., '{"arbitrum":"0x..."}')
     status: str  # RUNNING | INACTIVE | ERROR | PAUSED | STALE
     archived: bool  # Hidden from dashboard, data retained
     created_at: datetime
@@ -110,6 +112,15 @@ class InstanceRegistry:
                     version TEXT NOT NULL DEFAULT ''
                 )
             """)
+            # Migration: add chains and chain_wallets columns if missing
+            try:
+                conn.execute("ALTER TABLE strategy_instances ADD COLUMN chains TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+            try:
+                conn.execute("ALTER TABLE strategy_instances ADD COLUMN chain_wallets TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # column already exists
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_instances_status
                 ON strategy_instances(status)
@@ -130,7 +141,8 @@ class InstanceRegistry:
             cursor = conn.execute("""
                 SELECT strategy_id, strategy_name, template_name, chain, protocol,
                        wallet_address, config_json, status, archived,
-                       created_at, updated_at, last_heartbeat_at, version
+                       created_at, updated_at, last_heartbeat_at, version,
+                       chains, chain_wallets
                 FROM strategy_instances
             """)
 
@@ -143,6 +155,8 @@ class InstanceRegistry:
                     protocol=row["protocol"] or "",
                     wallet_address=row["wallet_address"] or "",
                     config_json=row["config_json"] or "",
+                    chains=row["chains"] or "",
+                    chain_wallets=row["chain_wallets"] or "",
                     status=row["status"],
                     archived=bool(row["archived"]),
                     created_at=datetime.fromisoformat(row["created_at"]),
@@ -188,8 +202,9 @@ class InstanceRegistry:
                 INSERT OR REPLACE INTO strategy_instances
                 (strategy_id, strategy_name, template_name, chain, protocol,
                  wallet_address, config_json, status, archived,
-                 created_at, updated_at, last_heartbeat_at, version)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 created_at, updated_at, last_heartbeat_at, version,
+                 chains, chain_wallets)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     instance.strategy_id,
@@ -205,6 +220,8 @@ class InstanceRegistry:
                     instance.updated_at.isoformat(),
                     instance.last_heartbeat_at.isoformat(),
                     instance.version,
+                    instance.chains,
+                    instance.chain_wallets,
                 ),
             )
             conn.commit()

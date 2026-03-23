@@ -50,6 +50,7 @@ class MultiChainGatewayBalanceProvider:
         client: GatewayClient,
         wallet_address: str,
         chains: list[str],
+        chain_wallets: dict[str, str] | None = None,
         cache_ttl: float = 30.0,
     ) -> None:
         """Initialize the multi-chain gateway balance provider.
@@ -58,11 +59,13 @@ class MultiChainGatewayBalanceProvider:
             client: Connected GatewayClient instance
             wallet_address: Wallet address to query balances for
             chains: List of supported chain names
+            chain_wallets: Per-chain wallet addresses from wallet registry
             cache_ttl: How long (seconds) cached balances remain valid. Default 30s.
         """
         self._client = client
         self._wallet_address = wallet_address
         self._chains = [c.lower() for c in chains]
+        self._chain_wallets = chain_wallets
         self._cache_ttl = cache_ttl
         # Cache: (token, chain) -> (TokenBalance, monotonic_timestamp)
         self._cache: dict[tuple[str, str], tuple[TokenBalance, float]] = {}
@@ -87,6 +90,11 @@ class MultiChainGatewayBalanceProvider:
             logger.warning(f"Chain '{chain}' not in configured chains: {self._chains}")
             return TokenBalance(symbol=token, balance=Decimal("0"), balance_usd=Decimal("0"))
 
+        # Resolve per-chain wallet if wallet registry configured
+        effective_wallet = self._wallet_address
+        if self._chain_wallets:
+            effective_wallet = self._chain_wallets.get(chain_lower, self._wallet_address)
+
         cache_key = (token, chain_lower)
         last_error: Exception | None = None
 
@@ -96,7 +104,7 @@ class MultiChainGatewayBalanceProvider:
                     gateway_pb2.BalanceRequest(
                         token=token,
                         chain=chain_lower,
-                        wallet_address=self._wallet_address,
+                        wallet_address=effective_wallet,
                     ),
                     timeout=15.0,
                 )

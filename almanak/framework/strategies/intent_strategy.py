@@ -3699,6 +3699,8 @@ class IntentStrategy(StrategyBase[ConfigT]):
         balance_provider: BalanceProvider | None = None,
         rpc_url: str | None = None,
         wallet_activity_provider: "WalletActivityProvider | None" = None,
+        chains: list[str] | None = None,
+        chain_wallets: dict[str, str] | None = None,
     ) -> None:
         """Initialize the intent strategy.
 
@@ -3715,12 +3717,16 @@ class IntentStrategy(StrategyBase[ConfigT]):
             balance_provider: Function to fetch balances
             rpc_url: RPC URL for on-chain queries (needed for LP close)
             wallet_activity_provider: Provider for leader wallet activity signals
+            chains: List of all chains this strategy operates on (multi-chain)
+            chain_wallets: Per-chain wallet addresses from wallet registry
         """
         super().__init__(config, risk_guard_config, notification_callback)
 
         self._chain = chain
         self._wallet_address = wallet_address
         self._rpc_url = rpc_url
+        self._chains = chains or [chain]
+        self._chain_wallets = {k.lower(): v for k, v in chain_wallets.items()} if chain_wallets else None
 
         # Store compiler if provided (runner creates its own with real prices)
         # Do NOT auto-create - that would require placeholder prices which is unsafe
@@ -3759,8 +3765,29 @@ class IntentStrategy(StrategyBase[ConfigT]):
 
     @property
     def chain(self) -> str:
-        """Get the chain name."""
+        """Get the primary chain name."""
         return self._chain
+
+    @property
+    def chains(self) -> list[str]:
+        """Get all chains this strategy operates on."""
+        return self._chains
+
+    def get_wallet_for_chain(self, chain: str) -> str:
+        """Get the wallet address for a specific chain.
+
+        If a wallet registry provided per-chain wallets, returns the
+        chain-specific wallet. Otherwise falls back to the default wallet.
+
+        Args:
+            chain: Chain name (e.g., "arbitrum", "base")
+
+        Returns:
+            Wallet address for the specified chain
+        """
+        if self._chain_wallets:
+            return self._chain_wallets.get(chain.lower(), self._wallet_address)
+        return self._wallet_address
 
     @property
     def wallet_address(self) -> str:

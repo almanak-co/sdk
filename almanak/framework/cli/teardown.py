@@ -1,3 +1,5 @@
+# MULTI-WALLET: Teardown currently uses a single wallet address. When multi-wallet
+# support is enabled, teardown must iterate per-chain wallets to close all positions.
 """CLI command for managing strategy teardowns.
 
 Usage:

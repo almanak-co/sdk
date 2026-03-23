@@ -1,3 +1,5 @@
+# MULTI-WALLET: CLI executor currently assumes a single wallet. When multi-wallet
+# support is enabled, tool execution must resolve per-chain wallets from the registry.
 """Factory for creating a ToolExecutor wired for CLI (one-shot) use.
 
 Shared bootstrap logic used by ``almanak ax`` commands and potentially

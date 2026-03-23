@@ -18,6 +18,7 @@ Multi-chain example:
 """
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -608,15 +609,58 @@ def create_execution_orchestrator(
     )
 
 
-def is_multi_chain_strategy(strategy_class: type) -> bool:
-    """Check if a strategy class supports multiple chains.
+def is_multi_chain_strategy(strategy_class: type, config: dict | None = None) -> bool:
+    """Check if a strategy should run in multi-chain mode.
+
+    Multi-chain mode means the strategy executes intents across multiple chains
+    simultaneously (e.g., bridge + swap on destination chain). This is different
+    from a portable strategy that supports multiple chains but runs on one at a time.
+
+    The signal is a "chains" list with >1 entry in either:
+    1. config.json (highest priority)
+    2. The strategy's config dataclass defaults (for strategies without config.json)
+    3. Legacy SUPPORTED_CHAINS class attribute
+
+    The decorator's supported_chains is NOT used — it's portability metadata,
+    not a runtime multi-chain signal.
 
     Args:
         strategy_class: The strategy class to check
+        config: Strategy config dict (from config.json). If provided and contains
+            a "chains" list with >1 entry, the strategy is multi-chain.
 
     Returns:
-        True if strategy has SUPPORTED_CHAINS with multiple chains
+        True if strategy should use MultiChainOrchestrator
     """
+    # Primary signal: config "chains" list with >1 entry
+    if config:
+        config_chains = config.get("chains")
+        if isinstance(config_chains, list) and len(config_chains) > 1:
+            return True
+
+    # Check config dataclass defaults (for strategies using Python config classes)
+    # e.g., cross_chain_arbitrage has chains: list[str] = ["arbitrum", "optimism", "base"]
+    from typing import get_args
+
+    for base in getattr(strategy_class, "__orig_bases__", []):
+        args = get_args(base)
+        if args and hasattr(args[0], "__dataclass_fields__"):
+            config_class = args[0]
+            if "chains" in config_class.__dataclass_fields__:
+                default = config_class.__dataclass_fields__["chains"].default
+                if default is not dataclasses.MISSING and isinstance(default, list) and len(default) > 1:
+                    return True
+                # Check default_factory
+                factory = config_class.__dataclass_fields__["chains"].default_factory
+                if factory is not dataclasses.MISSING:
+                    try:
+                        default_val = factory()
+                        if isinstance(default_val, list) and len(default_val) > 1:
+                            return True
+                    except Exception:
+                        pass
+
+    # Legacy: SUPPORTED_CHAINS class attribute (set manually, not by decorator)
     supported_chains = getattr(strategy_class, "SUPPORTED_CHAINS", None)
     if supported_chains and isinstance(supported_chains, list | tuple):
         return len(supported_chains) > 1
@@ -1465,9 +1509,9 @@ def run(
     # Use provided instance ID if given
     provided_instance_id = strategy_id_override
 
-    # Check if strategy is multi-chain
-    multi_chain = is_multi_chain_strategy(strategy_class)
+    # Preliminary: get strategy chains from decorator (may be refined after config load)
     strategy_chains = get_strategy_chains(strategy_class)
+    multi_chain = False  # Determined after config load
     strategy_protocols = get_strategy_protocols(strategy_class)
 
     # Auto-discover config file from working directory if not explicitly provided
@@ -1484,6 +1528,16 @@ def run(
     except Exception as e:
         click.echo(f"Error loading strategy config: {e}", err=True)
         sys.exit(1)
+
+    # Now determine multi-chain mode from config (not decorator supported_chains,
+    # which is portability metadata). A "chains" list with >1 entry in config.json
+    # signals the strategy should execute across multiple chains simultaneously.
+    multi_chain = is_multi_chain_strategy(strategy_class, config=strategy_config)
+    if multi_chain:
+        # Use chains from config if specified, else fall back to decorator
+        config_chains = strategy_config.get("chains", [])
+        if isinstance(config_chains, list) and len(config_chains) > 1:
+            strategy_chains = config_chains
 
     normalized_copy_mode = copy_mode.lower() if copy_mode is not None else None
 
@@ -1700,11 +1754,47 @@ def run(
     # Preflight checks for Safe mode consistency between framework and gateway
     # Only check when the CLI manages the gateway (env vars are local).
     # With --no-gateway the env vars may live on a remote host.
-    if runtime_config.is_safe_mode and not no_gateway:
+    # Skip when ALMANAK_GATEWAY_WALLETS is set — the gateway's WalletRegistry
+    # handles wallet/signer configuration per chain, not local env vars.
+    gateway_wallets_configured = bool(os.environ.get("ALMANAK_GATEWAY_WALLETS"))
+    if runtime_config.is_safe_mode and not no_gateway and not gateway_wallets_configured:
         error = _validate_safe_mode_preflight(runtime_config.execution_address)
         if error:
             click.secho(f"ERROR: {error}", fg="red", err=True)
             sys.exit(1)
+
+    # ---- Register chains with gateway to resolve per-chain wallet addresses ----
+    # When ALMANAK_GATEWAY_WALLETS is set, the gateway's WalletRegistry provides
+    # per-chain wallet addresses. Call register_chains() to pre-warm orchestrators
+    # and get the resolved wallet map.
+    chain_wallets: dict[str, str] = {}
+    if gateway_wallets_configured:
+        try:
+            register_chain_list = strategy_chains if multi_chain else [str(config_chain)]
+            chain_wallets = gateway_client.register_chains(register_chain_list)
+
+            if chain_wallets:
+                primary_chain = register_chain_list[0]
+                primary_wallet = chain_wallets.get(primary_chain, "")
+
+                # Update runtime_config with resolved wallet address
+                runtime_config.wallet_address = primary_wallet
+
+                unique_addrs = {v.lower() for v in chain_wallets.values()}
+                is_uniform = len(unique_addrs) <= 1
+
+                if is_uniform:
+                    click.echo(
+                        f"Gateway wallet registry: uniform wallet {primary_wallet[:12]}... on {len(chain_wallets)} chain(s)"
+                    )
+                else:
+                    click.echo("Gateway wallet registry: non-uniform wallets")
+                    for ch, addr in chain_wallets.items():
+                        click.echo(f"  {ch}: {addr}")
+        except Exception as e:
+            click.secho(f"WARNING: register_chains() failed: {e}", fg="yellow", err=True)
+            click.echo("Falling back to legacy wallet resolution.", err=True)
+            logger.warning("register_chains() failed: %s", e)
 
     # Ensure chain and wallet_address are set in strategy config
     if "chain" not in strategy_config:
@@ -1714,7 +1804,12 @@ def run(
             assert isinstance(runtime_config, LocalRuntimeConfig | GatewayRuntimeConfig)
             strategy_config["chain"] = runtime_config.chain
     if "wallet_address" not in strategy_config:
-        strategy_config["wallet_address"] = runtime_config.execution_address
+        # Use per-chain wallet from registry if available, else fall back to runtime_config
+        if chain_wallets:
+            primary = strategy_chains[0] if multi_chain else str(config_chain)
+            strategy_config["wallet_address"] = chain_wallets.get(primary, runtime_config.execution_address)
+        else:
+            strategy_config["wallet_address"] = runtime_config.execution_address
 
     # Handle --fresh flag: clear state for this strategy only
     strategy_id = strategy_config["strategy_id"]
@@ -1897,10 +1992,17 @@ def run(
                 config_instance = DictConfigWrapper(config_instance)
                 click.echo("  Config wrapped in DictConfigWrapper")
 
+            # Resolve wallet for strategy construction
+            strat_wallet = runtime_config.execution_address
+            if chain_wallets:
+                strat_wallet = chain_wallets.get(primary_chain, strat_wallet)
+
             strategy_instance = strategy_class(
                 config=config_instance,
                 chain=primary_chain,
-                wallet_address=runtime_config.execution_address,
+                wallet_address=strat_wallet,
+                chains=list(chain_wallets.keys()) if chain_wallets else None,
+                chain_wallets=chain_wallets or None,
             )
         else:
             # Try dict config first, then no config
@@ -1955,25 +2057,32 @@ def run(
             from ..data.balance.gateway_multichain import MultiChainGatewayBalanceProvider
             from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
 
+            # Resolve effective wallet address (from chain_wallets or runtime_config)
+            effective_wallet = runtime_config.execution_address
+            if chain_wallets:
+                effective_wallet = chain_wallets.get(strategy_chains[0], effective_wallet)
+
             click.echo("  Using gateway-backed providers for multi-chain...")
             price_oracle = GatewayPriceOracle(gateway_client)
             balance_provider = GatewayBalanceProvider(
                 client=gateway_client,
-                wallet_address=runtime_config.execution_address,
+                wallet_address=effective_wallet,
                 chain=strategy_chains[0],
             )
             execution_orchestrator = MultiChainOrchestrator.from_gateway(
                 gateway_client=gateway_client,
                 chains=strategy_chains,
-                wallet_address=runtime_config.execution_address,
+                wallet_address=effective_wallet,
                 max_gas_price_gwei=runtime_config.max_gas_price_gwei,
+                chain_wallets=chain_wallets or None,
             )
 
             # Create multi-chain balance provider for the strategy
             multi_chain_balance_provider = MultiChainGatewayBalanceProvider(
                 client=gateway_client,
-                wallet_address=runtime_config.execution_address,
+                wallet_address=effective_wallet,
                 chains=strategy_chains,
+                chain_wallets=chain_wallets or None,
             )
 
             # Set multi-chain providers on strategy if it's an IntentStrategy
@@ -2033,11 +2142,16 @@ def run(
 
             from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
 
+            # Resolve effective wallet address (from chain_wallets or runtime_config)
+            sc_effective_wallet = runtime_config.execution_address
+            if chain_wallets:
+                sc_effective_wallet = chain_wallets.get(runtime_config.chain, sc_effective_wallet)
+
             click.echo("  Using gateway-backed providers...")
             price_oracle = GatewayPriceOracle(gateway_client)
             balance_provider = GatewayBalanceProvider(
                 client=gateway_client,
-                wallet_address=runtime_config.execution_address,
+                wallet_address=sc_effective_wallet,
                 chain=runtime_config.chain,
             )
 
@@ -2079,7 +2193,7 @@ def run(
             execution_orchestrator = GatewayExecutionOrchestrator(
                 client=gateway_client,
                 chain=runtime_config.chain,
-                wallet_address=runtime_config.execution_address,
+                wallet_address=sc_effective_wallet,
                 max_gas_price_gwei=runtime_config.max_gas_price_gwei,
             )
             click.echo("  Gateway-backed providers created")

@@ -378,3 +378,197 @@ async def test_non_finite_price_map_returns_invalid_argument():
         assert result.success is False, f"Expected failure for price={bad_value}"
         assert result.error_code == "INVALID_PRICE_MAP", f"Wrong error_code for price={bad_value}"
         context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+
+
+# ---------------------------------------------------------------------------
+# Self-serve price fetching tests (gateway fetches its own prices)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_extract_token_symbols_from_intent():
+    """_extract_token_symbols_from_intent extracts from_token and to_token."""
+    intent = MagicMock()
+    intent.from_token = "USDC"
+    intent.to_token = "WETH"
+    intent.token = None
+    intent.collateral_token = None
+    intent.borrow_token = None
+    # Delete attrs that shouldn't exist so getattr falls through
+    del intent.collateral_token
+    del intent.borrow_token
+
+    tokens = ExecutionServiceServicer._extract_token_symbols_from_intent(intent)
+    assert "USDC" in tokens
+    assert "WETH" in tokens
+
+
+@pytest.mark.asyncio
+async def test_fetch_prices_returns_empty_without_market_servicer():
+    """_fetch_prices_for_tokens returns empty when no market_servicer is set."""
+    settings = GatewaySettings()
+    service = ExecutionServiceServicer(settings)
+    service.market_servicer = None
+
+    result = await service._fetch_prices_for_tokens(["USDC", "WETH"])
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_fetch_prices_returns_empty_without_aggregator():
+    """_fetch_prices_for_tokens returns empty when market_servicer has no _price_aggregator."""
+    settings = GatewaySettings()
+    service = ExecutionServiceServicer(settings)
+    service.market_servicer = MagicMock(spec=[])  # No _price_aggregator attr
+
+    result = await service._fetch_prices_for_tokens(["USDC", "WETH"])
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_fetch_prices_returns_decimals_from_aggregator():
+    """_fetch_prices_for_tokens fetches from aggregator and returns Decimals."""
+    settings = GatewaySettings()
+    service = ExecutionServiceServicer(settings)
+
+    mock_aggregator = AsyncMock()
+    price_result = MagicMock()
+    price_result.price = 2100.50
+
+    mock_aggregator.get_aggregated_price = AsyncMock(return_value=price_result)
+
+    mock_market = MagicMock()
+    mock_market._price_aggregator = mock_aggregator
+    service.market_servicer = mock_market
+
+    result = await service._fetch_prices_for_tokens(["WETH"])
+    assert "WETH" in result
+    assert isinstance(result["WETH"], Decimal)
+    assert result["WETH"] == Decimal("2100.5")
+
+
+@pytest.mark.asyncio
+async def test_fetch_prices_handles_partial_failures():
+    """_fetch_prices_for_tokens returns available prices even if some fail."""
+    settings = GatewaySettings()
+    service = ExecutionServiceServicer(settings)
+
+    mock_aggregator = AsyncMock()
+
+    async def mock_get_price(token, quote):
+        if token == "USDC":
+            result = MagicMock()
+            result.price = 1.0
+            return result
+        raise Exception("CoinGecko rate limited")
+
+    mock_aggregator.get_aggregated_price = mock_get_price
+
+    mock_market = MagicMock()
+    mock_market._price_aggregator = mock_aggregator
+    service.market_servicer = mock_market
+
+    result = await service._fetch_prices_for_tokens(["USDC", "UNKNOWN_TOKEN"])
+    assert "USDC" in result
+    assert "UNKNOWN_TOKEN" not in result
+
+
+@pytest.mark.asyncio
+async def test_mainnet_self_serve_prices_used_when_no_price_map():
+    """On mainnet, self-served prices are used for compilation when price_map is empty."""
+    settings = GatewaySettings(network="mainnet")
+    service = ExecutionServiceServicer(settings)
+    service._ensure_initialized = AsyncMock()
+
+    # Set up compiler
+    compiler = MagicMock()
+    compiler.price_oracle = None
+    compiler._using_placeholders = True
+    compiler.compile.return_value = _make_compilation_result()
+
+    captured_prices = {}
+
+    def _update_prices(prices):
+        captured_prices.update(prices)
+        compiler.price_oracle = prices
+        compiler._using_placeholders = False
+
+    def _restore_prices(oracle, placeholders):
+        compiler.price_oracle = oracle
+        compiler._using_placeholders = placeholders
+
+    compiler.update_prices = _update_prices
+    compiler.restore_prices = _restore_prices
+    service._get_compiler = MagicMock(return_value=compiler)
+
+    # Create a swap intent mock with from_token/to_token
+    mock_intent = MagicMock()
+    mock_intent.from_token = "USDC"
+    mock_intent.to_token = "WETH"
+    service._create_intent = MagicMock(return_value=mock_intent)
+
+    # Set up market servicer with mock aggregator
+    mock_aggregator = AsyncMock()
+
+    async def mock_get_price(token, quote):
+        prices = {"USDC": 1.0, "WETH": 2100.0}
+        result = MagicMock()
+        result.price = prices.get(token, 0)
+        return result
+
+    mock_aggregator.get_aggregated_price = mock_get_price
+    mock_market = MagicMock()
+    mock_market._price_aggregator = mock_aggregator
+    service.market_servicer = mock_market
+
+    context = MagicMock()
+    intent_data = json.dumps({"from_token": "USDC", "to_token": "WETH", "amount": "100"}).encode("utf-8")
+    request = gateway_pb2.CompileIntentRequest(
+        intent_type="swap",
+        intent_data=intent_data,
+        chain="arbitrum",
+        wallet_address="0x1234567890123456789012345678901234567890",
+        price_map={},  # empty — triggers self-serve
+    )
+
+    result = await service.CompileIntent(request, context)
+
+    assert result.success is True
+    assert "USDC" in captured_prices
+    assert "WETH" in captured_prices
+    assert isinstance(captured_prices["USDC"], Decimal)
+
+
+@pytest.mark.asyncio
+async def test_mainnet_no_market_servicer_still_fails():
+    """On mainnet without market_servicer, NO_PRICES_AVAILABLE error is returned."""
+    settings = GatewaySettings(network="mainnet")
+    service = ExecutionServiceServicer(settings)
+    service._ensure_initialized = AsyncMock()
+    service.market_servicer = None  # No market service available
+
+    compiler = MagicMock()
+    compiler.price_oracle = None
+    compiler._using_placeholders = True
+    service._get_compiler = MagicMock(return_value=compiler)
+
+    mock_intent = MagicMock()
+    mock_intent.from_token = "USDC"
+    mock_intent.to_token = "WETH"
+    service._create_intent = MagicMock(return_value=mock_intent)
+
+    context = MagicMock()
+    intent_data = json.dumps({"from_token": "USDC", "to_token": "WETH", "amount": "100"}).encode("utf-8")
+    request = gateway_pb2.CompileIntentRequest(
+        intent_type="swap",
+        intent_data=intent_data,
+        chain="arbitrum",
+        wallet_address="0x1234567890123456789012345678901234567890",
+        price_map={},
+    )
+
+    result = await service.CompileIntent(request, context)
+
+    assert result.success is False
+    assert result.error_code == "NO_PRICES_AVAILABLE"
+    compiler.compile.assert_not_called()

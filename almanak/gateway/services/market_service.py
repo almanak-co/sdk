@@ -56,6 +56,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         self._price_aggregator: Any = None
         self._balance_providers: dict[str, object] = {}
         self._initialized = False
+        self.wallet_registry: object | None = None
 
     async def close(self) -> None:
         """Close resources held by MarketService (HTTP sessions, etc.)."""

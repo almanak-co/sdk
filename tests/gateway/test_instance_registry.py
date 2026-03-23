@@ -43,6 +43,8 @@ def _make_instance(
         protocol="Uniswap V3",
         wallet_address="0x1234",
         config_json="{}",
+        chains=chain,
+        chain_wallets="{}",
         status=status,
         archived=archived,
         created_at=now,

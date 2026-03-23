@@ -137,11 +137,20 @@ SOLANA_TOKEN_IDS: dict[str, str] = {
 
 # Combined token mappings (chain-agnostic fallback)
 # Used when chain-specific mapping not found
+MANTLE_TOKEN_IDS: dict[str, str] = {
+    "MNT": "mantle",
+    "WMNT": "mantle",  # Wrapped MNT uses same price as MNT
+    "WETH": "weth",
+    "USDC": "usd-coin",
+    "USDT": "tether",
+}
+
 GLOBAL_TOKEN_IDS: dict[str, str] = {
     **ARBITRUM_TOKEN_IDS,
     **AVALANCHE_TOKEN_IDS,
     **BASE_TOKEN_IDS,
     **BSC_TOKEN_IDS,
+    **MANTLE_TOKEN_IDS,
     **SOLANA_TOKEN_IDS,
     # Ethena tokens (available on multiple chains)
     "USDE": "ethena-usde",

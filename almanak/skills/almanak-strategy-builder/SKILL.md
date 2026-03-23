@@ -208,7 +208,8 @@ def __init__(self, *args, **kwargs):
     self.base_token = self.config.get("base_token", "WETH")
 ```
 
-Also available: `self.chain` (str), `self.wallet_address` (str).
+Also available: `self.chain` (str), `self.wallet_address` (str), `self.chains` (list[str]),
+`self.get_wallet_for_chain(chain)` (str).
 
 <!-- almanak-sdk-end: core-concepts -->
 
@@ -810,12 +811,13 @@ def on_intent_executed(self, intent, success: bool, result):
 
 ### config.json
 
-Contains only tunable runtime parameters. Structural metadata (name, description, default execution chain) lives in
+Contains only tunable runtime parameters. Structural metadata (name, description, chains) lives in
 the `@almanak_strategy` decorator on your strategy class.
+
+**Single-chain:**
 
 ```json
 {
-    "chain": "arbitrum",
     "base_token": "WETH",
     "quote_token": "USDC",
     "rsi_period": 14,
@@ -830,8 +832,23 @@ the `@almanak_strategy` decorator on your strategy class.
 }
 ```
 
-The `chain` field sets the execution chain for the strategy and is read by the platform at deployment
-time. It should match one of the values in `supported_chains` from the `@almanak_strategy` decorator.
+**Multi-chain:**
+
+```json
+{
+    "chains": ["base", "arbitrum"],
+    "swap_amount_usdc": "100",
+    "max_slippage_bps": 100,
+    "anvil_funding": {
+        "USDC": 500
+    }
+}
+```
+
+The `chains` field lists the chains the strategy operates on and is read by the platform at
+deployment time. It should match `supported_chains` from the `@almanak_strategy` decorator.
+For single-chain strategies, `chain` (singular) is also accepted. `anvil_funding` is flat --
+the same tokens are funded on all chains.
 All other fields are strategy-specific and accessed via `self.config.get(key, default)`.
 
 ### .env (local development only)
@@ -1262,6 +1279,113 @@ def decide(self, market):
         description="Leverage loop: buy WETH, supply, borrow USDC",
     )
 ```
+
+### Multi-Chain Strategies
+
+Strategies can operate across multiple chains with per-chain wallet addresses.
+The primary chain is `supported_chains[0]`. Intents without an explicit `chain=`
+parameter run on the primary chain.
+
+**Decorator:**
+
+```python
+@almanak_strategy(
+    name="cross_chain_arb",
+    supported_chains=["base", "arbitrum"],       # base is primary (first in list)
+    supported_protocols=["uniswap_v3", "across"],
+    intent_types=["SWAP", "BRIDGE", "HOLD"],
+)
+class CrossChainArbStrategy(IntentStrategy):
+    ...
+```
+
+**config.json:**
+
+```json
+{
+    "chains": ["base", "arbitrum"],
+    "swap_amount_usdc": "100",
+    "anvil_funding": {
+        "USDC": 500
+    }
+}
+```
+
+Note: `anvil_funding` is flat (not per-chain) -- the same tokens are funded on
+all chains.
+
+**Strategy properties:**
+
+```python
+self.chain                          # "base" (primary chain = supported_chains[0])
+self.chains                         # ["base", "arbitrum"]
+self.wallet_address                 # default wallet
+self.get_wallet_for_chain("arbitrum")  # per-chain wallet (if wallet registry configured)
+```
+
+When a gateway wallet registry is configured (`ALMANAK_GATEWAY_WALLETS`), each
+chain can use a different Safe wallet. The framework resolves destination wallets
+automatically for bridge intents.
+
+**decide() with cross-chain intents:**
+
+```python
+def decide(self, market: MarketSnapshot):
+    return Intent.sequence([
+        # Bridge USDC from Base to Arbitrum
+        Intent.bridge(
+            token="USDC",
+            amount=Decimal("100"),
+            from_chain="base",
+            to_chain="arbitrum",
+            preferred_bridge="across",
+            max_slippage=Decimal("0.01"),
+        ),
+        # Swap on Arbitrum (explicit chain= required for non-primary chain)
+        Intent.swap(
+            from_token="USDC",
+            to_token="WETH",
+            amount=Decimal("50"),
+            protocol="uniswap_v3",
+            chain="arbitrum",
+        ),
+        # Bridge back to primary chain
+        Intent.bridge(
+            token="USDC",
+            amount=Decimal("50"),
+            from_chain="arbitrum",
+            to_chain="base",
+            preferred_bridge="across",
+        ),
+    ], description="Arb USDC across chains")
+```
+
+**Multi-chain market data:**
+
+For multi-chain strategies, `market` is a `MultiChainMarketSnapshot` with
+chain-aware queries:
+
+```python
+def decide(self, market):
+    # Chain-specific prices and balances
+    arb_price = market.price("WETH", chain="arbitrum")
+    base_price = market.price("WETH", chain="base")
+    usdc_on_base = market.balance("USDC", chain="base")
+
+    # Chain health monitoring
+    market.healthy_chains       # ["base", "arbitrum"]
+    market.stale_chains         # [] (empty if all healthy)
+    market.all_chains_healthy   # True
+```
+
+**Key rules:**
+
+- Intents on the primary chain can omit `chain=` -- it's implicit
+- Intents on non-primary chains must include `chain="arbitrum"` etc.
+- Bridge intents always require explicit `from_chain` and `to_chain`
+- Use `Intent.sequence()` to order cross-chain operations
+- `amount="all"` chaining does not work after bridge intents (bridge receipt
+  parsers don't extract output amounts) -- use explicit amounts instead
 
 ### Alerting
 

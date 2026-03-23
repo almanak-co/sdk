@@ -1,3 +1,5 @@
+# MULTI-WALLET: Vault lifecycle currently uses a single wallet. When multi-wallet
+# support is enabled, settlement must handle per-chain vault wallets.
 """VaultLifecycleManager - manages vault settlement lifecycle and state."""
 
 from __future__ import annotations

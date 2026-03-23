@@ -2040,6 +2040,7 @@ class IntentCompiler:
         config: IntentCompilerConfig | None = None,
         gateway_client: "GatewayClient | None" = None,
         token_resolver: "TokenResolverType | None" = None,
+        chain_wallets: dict[str, str] | None = None,
     ) -> None:
         """Initialize the compiler.
 
@@ -2104,6 +2105,7 @@ class IntentCompiler:
         self.rpc_timeout = rpc_timeout
         self._web3: Web3 | None = None
         self._gateway_client = gateway_client
+        self._chain_wallets = chain_wallets
 
         # LP slippage configuration (0.99 = 99% default, allows concentrated liquidity flexibility)
         self.default_lp_slippage = min(max(default_lp_slippage, Decimal("0")), Decimal("1"))
@@ -2503,13 +2505,30 @@ class IntentCompiler:
                 )
 
             selector = self._get_bridge_selector()
-            selection = selector.select_bridge(
-                token=token_symbol,
-                amount=amount_decimal,
-                from_chain=from_chain,
-                to_chain=to_chain,
-                max_slippage=intent.max_slippage,
-            )
+
+            # If preferred_bridge is set, exclude all other bridges
+            preferred = getattr(intent, "preferred_bridge", None)
+            excluded = None
+            if preferred:
+                excluded = [b.name.lower() for b in selector.bridges if b.name.lower() != preferred.lower()]
+
+            if excluded:
+                selection = selector.select_bridge_with_fallback(
+                    token=token_symbol,
+                    amount=amount_decimal,
+                    from_chain=from_chain,
+                    to_chain=to_chain,
+                    max_slippage=intent.max_slippage,
+                    excluded_bridges=excluded,
+                )
+            else:
+                selection = selector.select_bridge(
+                    token=token_symbol,
+                    amount=amount_decimal,
+                    from_chain=from_chain,
+                    to_chain=to_chain,
+                    max_slippage=intent.max_slippage,
+                )
             if not selection.is_success or selection.bridge is None or selection.quote is None:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
@@ -2519,7 +2538,9 @@ class IntentCompiler:
 
             quote = selection.quote
             bridge = selection.bridge
-            bridge_tx = bridge.build_deposit_tx(quote=quote, recipient=self.wallet_address)
+            # Use destination_address from intent or resolve from wallet registry
+            dest_wallet = getattr(intent, "destination_address", None) or self._resolve_dest_wallet(to_chain)
+            bridge_tx = bridge.build_deposit_tx(quote=quote, recipient=dest_wallet)
 
             amount_in_wei: int | None = None
             if quote.route_data and "amount_wei" in quote.route_data:
@@ -3949,6 +3970,7 @@ class IntentCompiler:
                         "to_token": lifi_to_address,
                         "from_amount": str(amount_in),
                         "from_address": self.wallet_address,
+                        "to_address": self._resolve_dest_wallet(dest_chain) if is_cross_chain else self.wallet_address,
                         "slippage": slippage,
                     },
                 },
@@ -4072,13 +4094,14 @@ class IntentCompiler:
                     intent_id=intent.intent_id,
                 )
 
+            dest_wallet = self._resolve_dest_wallet(dest_chain)
             route = client.get_route(
                 token_in=from_token.address,
                 token_out=to_token.address,
                 amount_in=amount_in,
                 slippage_bps=slippage_bps,
                 destination_chain_id=dest_chain_id,
-                refund_receiver=self.wallet_address,
+                refund_receiver=dest_wallet,
             )
 
             # Step 4: Build approve TX if needed (skip for native token)
@@ -12140,6 +12163,22 @@ class IntentCompiler:
                 "Compilation requires a valid price to calculate amounts and slippage."
             )
         return price
+
+    def _resolve_dest_wallet(self, dest_chain: str) -> str:
+        """Resolve destination wallet for cross-chain operations.
+
+        If chain_wallets is configured (from wallet registry), returns the
+        wallet for the destination chain. Otherwise returns self.wallet_address.
+
+        Args:
+            dest_chain: Destination chain name
+
+        Returns:
+            Wallet address for the destination chain
+        """
+        if self._chain_wallets:
+            return self._chain_wallets.get(dest_chain.lower(), self.wallet_address)
+        return self.wallet_address
 
     def _get_placeholder_prices(self) -> dict[str, Decimal]:
         """Get placeholder price data for testing only.

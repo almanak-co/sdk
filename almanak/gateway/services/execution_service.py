@@ -70,6 +70,48 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         self._compiler_locks: dict[str, asyncio.Lock] = {}
         self._solana_rpc_cache: dict[str, object] = {}
         self._initialized = False
+        self.wallet_registry: Any = None
+        self.market_servicer: object | None = None  # Set by GatewayServer after creation
+        self._registered_chains: set[str] | None = None
+        self._registered_chain_wallets: dict[str, str] | None = None
+
+    async def _fetch_prices_for_tokens(self, tokens: list[str]) -> dict[str, Decimal]:
+        """Fetch prices from the gateway's own market service for the given tokens.
+
+        Used as a fallback when the caller doesn't provide prices (e.g., multi-chain
+        execution where the price_map isn't propagated from the market snapshot).
+        The market service uses chain-agnostic sources (CoinGecko, Binance) so
+        prices like USDC=$1 and WETH=$2100 are valid regardless of chain.
+
+        Returns:
+            Dict mapping token symbol -> USD price as Decimal. Empty if market service unavailable.
+        """
+        if not self.market_servicer:
+            return {}
+
+        prices: dict[str, Decimal] = {}
+        aggregator = getattr(self.market_servicer, "_price_aggregator", None)
+        if not aggregator:
+            return {}
+
+        for token in tokens:
+            try:
+                result = await aggregator.get_aggregated_price(token, "USD")
+                if result and result.price:
+                    prices[token.upper()] = Decimal(str(result.price))
+            except Exception as e:
+                logger.debug(f"Self-serve price fetch failed for {token}: {e}")
+        return prices
+
+    @staticmethod
+    def _extract_token_symbols_from_intent(intent: object) -> list[str]:
+        """Extract token symbols from an intent object for price fetching."""
+        tokens = []
+        for attr in ("from_token", "to_token", "token", "collateral_token", "borrow_token"):
+            val = getattr(intent, attr, None)
+            if val and isinstance(val, str):
+                tokens.append(val)
+        return tokens
 
     async def _ensure_initialized(self) -> None:
         """Lazy initialization of execution components."""
@@ -125,6 +167,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             wallet_address=wallet_address,
             rpc_url=rpc_url,
             config=config,
+            chain_wallets=self._registered_chain_wallets,
         )
 
         self._compiler_cache[cache_key] = (compiler, now)
@@ -152,16 +195,17 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             safe_mode = self.settings.safe_mode or "direct"
 
             if safe_mode == "zodiac":
-                # Derive EOA from private key when available, fall back to explicit EOA_ADDRESS
-                # (platform deployments use remote signer with no local key)
-                if self.settings.private_key:
+                # Zodiac mode: prefer explicit EOA_ADDRESS (platform deployments use
+                # remote signer with no local key). Fall back to deriving from private
+                # key only when EOA_ADDRESS is not set.
+                if self.settings.eoa_address:
+                    eoa_address = self.settings.eoa_address
+                elif self.settings.private_key:
                     from eth_account import Account
 
                     eoa_address = Account.from_key(self.settings.private_key).address
-                elif self.settings.eoa_address:
-                    eoa_address = self.settings.eoa_address
                 else:
-                    raise ValueError("Zodiac mode requires either PRIVATE_KEY (to derive EOA) or explicit EOA_ADDRESS")
+                    raise ValueError("Zodiac mode requires either EOA_ADDRESS or PRIVATE_KEY (to derive EOA)")
             else:
                 private_key = self.settings.private_key
                 if not private_key:
@@ -196,6 +240,67 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             raise ValueError("PRIVATE_KEY not configured in gateway settings")
         return LocalKeySigner(private_key=private_key)
 
+    def _create_signer_from_resolved(self, wallet: "Any"):
+        """Create a signer from a wallet registry resolved wallet (ResolvedWallet).
+
+        Switches on wallet.kind:
+          - 'zodiac' -> create_safe_signer
+          - 'direct' -> LocalKeySigner
+          - 'squads' -> NotImplementedError (Solana multisig, not yet supported)
+        """
+        from almanak.framework.execution.signer import LocalKeySigner
+
+        kind = getattr(wallet, "kind", "direct")
+        if kind == "zodiac":
+            from almanak.framework.execution.signer.safe import create_safe_signer
+            from almanak.framework.execution.signer.safe.config import SafeSignerConfig, SafeWalletConfig
+
+            eoa_address = wallet.config.get("eoa_address", "")
+            if not eoa_address:
+                # Prefer explicit EOA_ADDRESS over private key derivation
+                # (same precedence as _create_signer zodiac path)
+                if self.settings.eoa_address:
+                    eoa_address = self.settings.eoa_address
+                elif self.settings.private_key:
+                    from eth_account import Account
+
+                    eoa_address = Account.from_key(self.settings.private_key).address
+                else:
+                    raise ValueError(
+                        f"Zodiac wallet {wallet.account_address} requires eoa_address in config "
+                        "or PRIVATE_KEY/EOA_ADDRESS in gateway settings"
+                    )
+
+            wallet_config = SafeWalletConfig(
+                safe_address=wallet.account_address,
+                eoa_address=eoa_address,
+                zodiac_roles_address=wallet.config.get("zodiac_roles_address"),
+            )
+            safe_config = SafeSignerConfig(
+                mode="zodiac",
+                wallet_config=wallet_config,
+                private_key=self.settings.private_key,
+                signer_service_url=self.settings.signer_service_url,
+                signer_service_jwt=self.settings.signer_service_jwt,
+            )
+            signer = create_safe_signer(safe_config)
+            logger.info(
+                "Using %s for resolved wallet %s (chain=%s)",
+                type(signer).__name__,
+                wallet.account_address[:10],
+                wallet.chain,
+            )
+            return signer
+        elif kind == "direct":
+            pk = getattr(wallet, "private_key", None) or self.settings.private_key
+            if not pk:
+                raise ValueError("Direct wallet requires private_key")
+            return LocalKeySigner(private_key=pk)
+        elif kind == "squads":
+            raise NotImplementedError("Squads multisig wallet support is not yet implemented")
+        else:
+            raise ValueError(f"Unknown wallet kind: {kind}")
+
     async def _get_orchestrator(self, chain: str, wallet_address: str):
         """Get or create execution orchestrator for a chain.
 
@@ -221,7 +326,27 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         network = self.settings.network
         rpc_url = get_rpc_url(chain, network=network)
 
-        signer = self._create_signer(wallet_address)
+        # Resolve wallet from registry for per-chain signer selection.
+        # If a registry is configured and resolves a wallet, signer errors must
+        # fail closed (no fallback to default signer) to prevent funds being
+        # routed through the wrong wallet.
+        signer = None
+        if self.wallet_registry is not None:
+            try:
+                resolved = self.wallet_registry.resolve(chain)
+                if resolved is not None:
+                    signer = self._create_signer_from_resolved(resolved)
+            except KeyError:
+                # Chain not in registry — fall through to default signer
+                logger.debug(f"Chain {chain} not in wallet registry, using default signer")
+            except Exception as e:
+                # Signer construction failed for a resolved wallet — fail closed
+                raise ValueError(
+                    f"Wallet registry resolved chain '{chain}' but signer creation failed: {e}. "
+                    f"Refusing to fall back to default signer to prevent wallet mismatch."
+                ) from e
+        if signer is None:
+            signer = self._create_signer(wallet_address)
         submitter = PublicMempoolSubmitter(rpc_url=rpc_url)
         simulator = create_simulator(rpc_url=rpc_url)
 
@@ -386,18 +511,30 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                     # VIB-523: On mainnet, fail compilation for price-sensitive intents
                     # if no real prices are available, instead of silently using
                     # placeholder prices with incorrect slippage calculations.
-                    error_msg = (
-                        f"No real prices available for {intent_type} compilation on mainnet. "
-                        f"Price oracle returned no data (CoinGecko rate-limited or Chainlink "
-                        f"unavailable). Refusing to compile with placeholder prices. "
-                        f"Retry after price sources recover."
-                    )
-                    logger.warning(error_msg)
-                    return gateway_pb2.CompilationResult(
-                        success=False,
-                        error=error_msg,
-                        error_code="NO_PRICES_AVAILABLE",
-                    )
+                    # First try self-serving prices from the gateway's own market service.
+                    intent_tokens = self._extract_token_symbols_from_intent(intent)
+                    self_served = await self._fetch_prices_for_tokens(intent_tokens) if intent_tokens else {}
+                    # Require prices for ALL extracted tokens to prevent partial placeholder usage
+                    all_covered = intent_tokens and all(t.upper() in self_served for t in intent_tokens)
+                    if all_covered and hasattr(compiler, "update_prices"):
+                        compiler.update_prices(self_served)
+                        logger.info(
+                            f"Self-served {len(self_served)} prices for {intent_type} compilation: "
+                            f"{list(self_served.keys())}"
+                        )
+                    else:
+                        error_msg = (
+                            f"No real prices available for {intent_type} compilation on mainnet. "
+                            f"Price oracle returned no data (CoinGecko rate-limited or Chainlink "
+                            f"unavailable). Refusing to compile with placeholder prices. "
+                            f"Retry after price sources recover."
+                        )
+                        logger.warning(error_msg)
+                        return gateway_pb2.CompilationResult(
+                            success=False,
+                            error=error_msg,
+                            error_code="NO_PRICES_AVAILABLE",
+                        )
 
                 try:
                     compilation_result = compiler.compile(intent=intent)

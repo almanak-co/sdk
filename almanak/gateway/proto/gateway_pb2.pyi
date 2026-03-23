@@ -110,6 +110,11 @@ class RegisterChainsResponse(_message.Message):
     def initialized_chains(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
         """Chains that were successfully initialized"""
 
+    CHAIN_WALLETS_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def chain_wallets(self) -> _containers.ScalarMap[_builtins.str, _builtins.str]:
+        """Per-chain wallet addresses resolved from wallet registry"""
+
     def __init__(
         self,
         *,
@@ -117,8 +122,9 @@ class RegisterChainsResponse(_message.Message):
         initialized_chains: _abc.Iterable[_builtins.str] | None = ...,
         wallet_address: _builtins.str = ...,
         error: _builtins.str = ...,
+        chain_wallets: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "initialized_chains", b"initialized_chains", "success", b"success", "wallet_address", b"wallet_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain_wallets", b"chain_wallets", "error", b"error", "initialized_chains", b"initialized_chains", "success", b"success", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___RegisterChainsResponse: _TypeAlias = RegisterChainsResponse  # noqa: Y015
@@ -2292,6 +2298,8 @@ class StrategySummary(_message.Message):
     CONSECUTIVE_ERRORS_FIELD_NUMBER: _builtins.int
     LAST_ITERATION_AT_FIELD_NUMBER: _builtins.int
     PNL_SINCE_DEPLOY_USD_FIELD_NUMBER: _builtins.int
+    WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
+    CHAIN_WALLETS_FIELD_NUMBER: _builtins.int
     strategy_id: _builtins.str
     name: _builtins.str
     status: _builtins.str
@@ -2307,8 +2315,11 @@ class StrategySummary(_message.Message):
     consecutive_errors: _builtins.int
     last_iteration_at: _builtins.int
     pnl_since_deploy_usd: _builtins.str
+    wallet_address: _builtins.str
     @_builtins.property
     def chains(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
+    @_builtins.property
+    def chain_wallets(self) -> _containers.ScalarMap[_builtins.str, _builtins.str]: ...
     def __init__(
         self,
         *,
@@ -2327,6 +2338,8 @@ class StrategySummary(_message.Message):
         consecutive_errors: _builtins.int = ...,
         last_iteration_at: _builtins.int = ...,
         pnl_since_deploy_usd: _builtins.str = ...,
+        wallet_address: _builtins.str = ...,
+        chain_wallets: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["attention_reason", b"attention_reason", "attention_required", b"attention_required", "chain", b"chain", "chains", b"chains", "consecutive_errors", b"consecutive_errors", "is_multi_chain", b"is_multi_chain", "last_action_at", b"last_action_at", "last_iteration_at", b"last_iteration_at", "name", b"name", "pnl_24h_usd", b"pnl_24h_usd", "pnl_since_deploy_usd", b"pnl_since_deploy_usd", "protocol", b"protocol", "status", b"status", "strategy_id", b"strategy_id", "total_value_usd", b"total_value_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
@@ -2940,6 +2953,8 @@ class RegisterInstanceRequest(_message.Message):
     WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
     CONFIG_JSON_FIELD_NUMBER: _builtins.int
     VERSION_FIELD_NUMBER: _builtins.int
+    CHAINS_FIELD_NUMBER: _builtins.int
+    CHAIN_WALLETS_FIELD_NUMBER: _builtins.int
     strategy_id: _builtins.str
     """Unique instance ID (e.g. "uniswap_lp:a1b2c3d4e5f6")"""
     strategy_name: _builtins.str
@@ -2951,6 +2966,9 @@ class RegisterInstanceRequest(_message.Message):
     wallet_address: _builtins.str
     config_json: _builtins.str
     version: _builtins.str
+    chains: _builtins.str
+    @_builtins.property
+    def chain_wallets(self) -> _containers.ScalarMap[_builtins.str, _builtins.str]: ...
     def __init__(
         self,
         *,
@@ -2962,6 +2980,8 @@ class RegisterInstanceRequest(_message.Message):
         wallet_address: _builtins.str = ...,
         config_json: _builtins.str = ...,
         version: _builtins.str = ...,
+        chains: _builtins.str = ...,
+        chain_wallets: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "config_json", b"config_json", "protocol", b"protocol", "strategy_id", b"strategy_id", "strategy_name", b"strategy_name", "template_name", b"template_name", "version", b"version", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...

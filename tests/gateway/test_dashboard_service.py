@@ -85,6 +85,9 @@ def _make_instance(
     inst.template_name = "TestStrategy"
     inst.chain = chain
     inst.protocol = protocol
+    inst.wallet_address = "0x1234"
+    inst.chains = chain
+    inst.chain_wallets = ""
     inst.status = status
     inst.archived = False
     inst.last_heartbeat_at = last_heartbeat_at or datetime.now(UTC)

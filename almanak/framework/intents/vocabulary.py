@@ -2776,6 +2776,7 @@ class Intent:
         to_chain: str,
         max_slippage: Decimal = Decimal("0.005"),
         preferred_bridge: str | None = None,
+        destination_address: str | None = None,
     ) -> Any:
         """Create a bridge intent for cross-chain asset transfer.
 
@@ -2793,6 +2794,9 @@ class Intent:
             to_chain: Destination chain identifier (e.g., "arbitrum", "optimism")
             max_slippage: Maximum acceptable slippage (default 0.5%)
             preferred_bridge: Optional preferred bridge adapter name (e.g., "across", "stargate")
+            destination_address: Optional recipient address on the destination chain.
+                If None, the compiler resolves it from chain_wallets (multi-wallet mode)
+                or uses the source wallet address (single-wallet mode).
 
         Returns:
             BridgeIntent: The created bridge intent
@@ -2837,6 +2841,7 @@ class Intent:
             to_chain=to_chain,
             max_slippage=max_slippage,
             preferred_bridge=preferred_bridge,
+            destination_address=destination_address,
         )
 
     @staticmethod

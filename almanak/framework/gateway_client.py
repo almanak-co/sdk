@@ -195,6 +195,9 @@ class GatewayClient:
         self._polymarket_stub: gateway_pb2_grpc.PolymarketServiceStub | None = None
         self._enso_stub: gateway_pb2_grpc.EnsoServiceStub | None = None
         self._lifecycle_stub: gateway_pb2_grpc.LifecycleServiceStub | None = None
+        self._gateway_health_stub: gateway_pb2_grpc.HealthStub | None = None
+        self.registered_chains: list[str] | None = None
+        self.registered_with_wallet_registry: bool = False
 
     @property
     def target(self) -> str:
@@ -316,6 +319,7 @@ class GatewayClient:
             self._channel = base_channel
 
         self._health_stub = health_pb2_grpc.HealthStub(self._channel)
+        self._gateway_health_stub = gateway_pb2_grpc.HealthStub(self._channel)
 
         # Initialize Phase 2 service stubs
         self._market_stub = gateway_pb2_grpc.MarketServiceStub(self._channel)
@@ -356,6 +360,9 @@ class GatewayClient:
             self._channel.close()
             self._channel = None
             self._health_stub = None
+            self._gateway_health_stub = None
+            self.registered_chains = None
+            self.registered_with_wallet_registry = False
             self._market_stub = None
             self._state_stub = None
             self._execution_stub = None
@@ -446,6 +453,47 @@ class GatewayClient:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """Context manager exit - disconnect from gateway."""
         self.disconnect()
+
+    def register_chains(self, chains: list[str]) -> dict[str, str]:
+        """Register chains with the gateway and discover per-chain wallets.
+
+        Calls the gateway's RegisterChains RPC to pre-warm orchestrators and
+        compilers. If the gateway has a wallet registry plugin, per-chain wallet
+        addresses are returned in the response.
+
+        Args:
+            chains: List of chain names to register (e.g., ["arbitrum", "base"])
+
+        Returns:
+            Dict mapping chain name to wallet address (from wallet registry).
+            Empty dict if no wallet registry is configured.
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        if self._gateway_health_stub is None:
+            raise RuntimeError("Gateway client not connected")
+
+        try:
+            response = self._gateway_health_stub.RegisterChains(
+                gateway_pb2.RegisterChainsRequest(chains=chains),
+                timeout=self.config.timeout,
+            )
+            chain_wallets = dict(response.chain_wallets) if response.chain_wallets else {}
+            self.registered_chains = list(response.initialized_chains)
+            self.registered_with_wallet_registry = bool(chain_wallets)
+            if chain_wallets:
+                logger.info(
+                    "Registered chains with wallet registry: %s",
+                    {k: v[:10] + "..." for k, v in chain_wallets.items()},
+                )
+            return chain_wallets
+        except grpc.RpcError as e:
+            # Legacy fallback: gateway may not support RegisterChains yet
+            if e.code() == grpc.StatusCode.UNIMPLEMENTED:
+                logger.debug("Gateway does not support RegisterChains, using legacy flow")
+                self.registered_chains = list(chains)
+                return {}
+            raise
 
     # =========================================================================
     # Convenience methods for typed RPC queries
