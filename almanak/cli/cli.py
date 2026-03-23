@@ -91,10 +91,11 @@ def _resolve_native_binary() -> Path:
     return Path(__file__).resolve().parent.parent / "bin" / binary_name
 
 
-@click.group(invoke_without_command=True)
+@click.group(invoke_without_command=True, context_settings={"ignore_unknown_options": True})
 @click.version_option(__version__)
+@click.argument("native_args", nargs=-1, type=click.UNPROCESSED)
 @click.pass_context
-def almanak(ctx):
+def almanak(ctx, native_args):
     """Almanak CLI for managing strategies."""
     if ctx.invoked_subcommand is None:
         binary_path = _resolve_native_binary()
@@ -104,8 +105,9 @@ def almanak(ctx):
         # Ensure the binary is executable (pip may strip permissions from wheel installs)
         if not os.access(binary_path, os.X_OK):
             binary_path.chmod(binary_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        result = subprocess.run([str(binary_path)])
-        sys.exit(result.returncode)
+        # Use execv to replace the Python process with the binary, avoiding
+        # subprocess buffering issues with the ndjson stdin/stdout protocol.
+        os.execv(str(binary_path), [str(binary_path)] + list(native_args))
 
 
 @almanak.group()
