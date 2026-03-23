@@ -766,24 +766,26 @@ class CurveReceiptParser:
     def extract_position_id(self, receipt: dict[str, Any]) -> int | str | None:
         """Extract position identifier from LP transaction receipt.
 
-        For Curve (pool-based LP, no NFT positions), returns the LP token
-        contract address.  Unlike V3 DEXes where position_id is an NFT tokenId,
-        Curve LP tokens are fungible ERC-20s — the LP token address is the
-        stable identifier for the position.
-
-        The minted LP token *amount* is available separately via
-        ``extract_liquidity()``.
+        For Curve (pool-based LP, no NFT positions), returns the LP token amount
+        as a decimal string so it can be stored and passed directly to
+        Intent.lp_close(position_id=...) — which _compile_lp_close_curve()
+        interprets as the LP token amount to burn (e.g., "99").
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
 
         Returns:
-            LP token address as hex string, or None if not found
+            LP token amount as decimal string (e.g., "99"), or None if not found
         """
         try:
+            lp_amount_raw = self.extract_lp_tokens_received(receipt)
+            if lp_amount_raw is None:
+                return None
+
             # Find LP token address from the mint Transfer event (from zero address)
             zero_addr = "0x0000000000000000000000000000000000000000"
             transfer_topic = EVENT_TOPICS["Transfer"].lower()
+            lp_token_address: str | None = None
             for log in receipt.get("logs", []):
                 topics = log.get("topics", [])
                 if len(topics) < 3:
@@ -799,13 +801,21 @@ class CurveReceiptParser:
                 from_addr = "0x" + str(from_topic).lower()[-40:]
                 if from_addr == zero_addr:
                     lp_token_address = log.get("address", "")
-                    if isinstance(lp_token_address, bytes):
-                        lp_token_address = "0x" + lp_token_address.hex()
-                    if lp_token_address:
-                        return str(lp_token_address)
+                    break
 
-            logger.warning("Cannot extract position_id: LP token address not found in receipt")
-            return None
+            if not lp_token_address:
+                logger.warning("Cannot extract position_id: LP token address not found in receipt")
+                return None
+
+            lp_token_address = str(lp_token_address).lower()
+            decimals = self._resolve_decimals(lp_token_address)
+            if decimals is None:
+                # All Curve LP tokens use 18 decimals — fall back rather than silently dropping
+                # the position_id (consistent with _compile_lp_close_curve which also assumes 18).
+                logger.warning(f"Decimals unknown for Curve LP token {lp_token_address}; falling back to 18")
+                decimals = 18
+
+            return str(Decimal(lp_amount_raw) / Decimal(10**decimals))
         except Exception as e:
             logger.warning(f"Failed to extract position_id: {e}")
             return None

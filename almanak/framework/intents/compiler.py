@@ -6413,64 +6413,18 @@ class IntentCompiler:
                     intent_id=intent.intent_id,
                 )
 
-            # Parse LP token amount from position_id.
-            # position_id can be:
-            #   - An LP token address (0x...) — query on-chain balance and withdraw all
-            #   - An LP token amount as decimal string (e.g., "100.5") — legacy, withdraw that amount
-            position_id_str = str(intent.position_id).strip()
-            if position_id_str.startswith("0x") and len(position_id_str) == 42:
-                # Position ID is an LP token address — withdraw full balance
-                lp_token_address = position_id_str
-                lp_token_for_pool = pool_data.get("lp_token", "").lower()
-                if lp_token_for_pool and lp_token_address.lower() != lp_token_for_pool.lower():
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=(
-                            f"position_id LP token {lp_token_address} does not match "
-                            f"pool '{pool_name}' LP token {lp_token_for_pool}. "
-                            f"Refusing to proceed — this would close the wrong position."
-                        ),
-                        intent_id=intent.intent_id,
-                    )
-                # Query on-chain LP token balance via shared helper
-                raw_balance = self._query_erc20_balance(pool_data["lp_token"], self.wallet_address)
-                if raw_balance is None:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=(
-                            f"Failed to query LP token balance for {pool_name or pool_address} "
-                            f"({pool_data['lp_token']}). Ensure gateway_client or rpc_url is configured."
-                        ),
-                        intent_id=intent.intent_id,
-                    )
-                if raw_balance == 0:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Wallet has zero LP token balance for {pool_name} ({pool_data['lp_token']})",
-                        intent_id=intent.intent_id,
-                    )
-                lp_token_info = self._resolve_token(pool_data["lp_token"])
-                decimals = lp_token_info.decimals if lp_token_info else 18
-                if not lp_token_info:
-                    logger.warning(
-                        "Could not resolve decimals for Curve LP token %s; falling back to 18",
-                        pool_data["lp_token"],
-                    )
-                lp_amount = Decimal(raw_balance) / Decimal(10**decimals)
-                logger.info("Queried on-chain LP balance for %s: %s", pool_name, lp_amount)
-            else:
-                # Legacy: position_id is LP token amount as decimal string
-                try:
-                    lp_amount = Decimal(position_id_str)
-                except (InvalidOperation, TypeError, ValueError):
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=(
-                            f"Invalid position_id for Curve LP_CLOSE: '{intent.position_id}'. "
-                            f"Must be an LP token address (0x...) or LP token amount as decimal string (e.g., '100.5')."
-                        ),
-                        intent_id=intent.intent_id,
-                    )
+            # Parse LP token amount from position_id
+            try:
+                lp_amount = Decimal(intent.position_id)
+            except (InvalidOperation, TypeError, ValueError):
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"Invalid position_id for Curve LP_CLOSE: '{intent.position_id}'. "
+                        f"Must be the LP token amount as a decimal string (e.g., '100.5')."
+                    ),
+                    intent_id=intent.intent_id,
+                )
 
             slippage_bps = 50  # Default 0.5%
 
