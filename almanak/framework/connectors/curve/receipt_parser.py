@@ -790,72 +790,45 @@ class CurveReceiptParser:
             LP token amount as decimal string (e.g., "99"), or None if not found
         """
         try:
-            lp_amount_raw = self.extract_lp_tokens_received(receipt)
-            if lp_amount_raw is None:
+            # extract_lp_tokens_received already returns human-readable Decimal
+            lp_amount = self.extract_lp_tokens_received(receipt)
+            if lp_amount is None:
                 return None
 
-            # Find LP token address from the mint Transfer event (from zero address)
-            zero_addr = "0x0000000000000000000000000000000000000000"
-            transfer_topic = EVENT_TOPICS["Transfer"].lower()
-            lp_token_address: str | None = None
-            for log in receipt.get("logs", []):
-                topics = log.get("topics", [])
-                if len(topics) < 3:
-                    continue
-                first_topic = topics[0]
-                if isinstance(first_topic, bytes):
-                    first_topic = "0x" + first_topic.hex()
-                if str(first_topic).lower() != transfer_topic:
-                    continue
-                from_topic = topics[1]
-                if isinstance(from_topic, bytes):
-                    from_topic = "0x" + from_topic.hex()
-                from_addr = "0x" + str(from_topic).lower()[-40:]
-                if from_addr == zero_addr:
-                    lp_token_address = log.get("address", "")
-                    break
-
-            if not lp_token_address:
-                logger.warning("Cannot extract position_id: LP token address not found in receipt")
-                return None
-
-            lp_token_address = str(lp_token_address).lower()
-            decimals = self._resolve_decimals(lp_token_address)
-            if decimals is None:
-                # All Curve LP tokens use 18 decimals — fall back rather than silently dropping
-                # the position_id (consistent with _compile_lp_close_curve which also assumes 18).
-                logger.warning(f"Decimals unknown for Curve LP token {lp_token_address}; falling back to 18")
-                decimals = 18
-
-            return str(Decimal(lp_amount_raw) / Decimal(10**decimals))
+            return str(lp_amount)
         except Exception as e:
             logger.warning(f"Failed to extract position_id: {e}")
             return None
 
-    def extract_liquidity(self, receipt: dict[str, Any]) -> int | None:
+    def extract_liquidity(self, receipt: dict[str, Any]) -> Decimal | None:
         """Extract LP tokens minted from AddLiquidity transaction.
 
-        Looks for ERC-20 Transfer events from the zero address (mint) to identify
-        the LP tokens minted during add_liquidity.
+        Returns the LP token amount in **human-readable** form (e.g., ``Decimal("98.133")``)
+        by dividing the raw wei value by 10^decimals. This matches the convention expected by
+        the LP_CLOSE compiler, which treats the value as a human-readable amount and converts
+        back to wei internally.
+
+        Curve LP tokens always have 18 decimals. If the LP token address is found in the
+        receipt, decimals are resolved via the token resolver; otherwise falls back to 18.
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
 
         Returns:
-            LP token amount minted, or None if not found
+            LP token amount in human-readable Decimal, or None if not found
         """
         return self.extract_lp_tokens_received(receipt)
 
-    def extract_lp_tokens_received(self, receipt: dict[str, Any]) -> int | None:
+    def extract_lp_tokens_received(self, receipt: dict[str, Any]) -> Decimal | None:
         """Extract LP tokens received from AddLiquidity transaction.
 
-        Looks for Transfer events from the pool address to the user.
+        Looks for Transfer events from the zero address (mint).
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
 
         Returns:
-            LP token amount if found, None otherwise
+            LP token amount in human-readable Decimal, or None if not found
         """
         try:
             # Look for Transfer events from zero address (mint)
@@ -879,8 +852,21 @@ class CurveReceiptParser:
                 from_addr = HexDecoder.topic_to_address(topics[1])
                 if from_addr.lower() == zero_addr:
                     data = HexDecoder.normalize_hex(log.get("data", ""))
-                    lp_amount = HexDecoder.decode_uint256(data, 0)
-                    return lp_amount
+                    lp_amount_raw = HexDecoder.decode_uint256(data, 0)
+
+                    # Resolve LP token decimals (Curve LP tokens are always 18,
+                    # but resolve to be safe)
+                    lp_token_address = log.get("address", "")
+                    if isinstance(lp_token_address, bytes):
+                        lp_token_address = "0x" + lp_token_address.hex()
+                    decimals = self._resolve_decimals(str(lp_token_address).lower())
+                    if decimals is None:
+                        logger.warning(
+                            f"Cannot resolve decimals for Curve LP token {lp_token_address}; falling back to 18"
+                        )
+                        decimals = 18
+
+                    return Decimal(lp_amount_raw) / Decimal(10**decimals)
 
             return None
 

@@ -426,15 +426,32 @@ class TestExtractPositionId:
 
 
 class TestExtractLiquidity:
-    """Test extract_liquidity returns LP tokens minted."""
+    """Test extract_liquidity returns human-readable LP token amount.
 
-    def test_returns_lp_tokens_minted(self):
-        """Should extract LP tokens from mint Transfer event."""
-        lp_amount = 99_000_000_000_000_000_000
-        receipt = _build_add_liquidity_receipt(lp_minted=lp_amount)
+    VIB-1753: extract_liquidity must return human-readable Decimal (e.g., 99.0)
+    NOT raw wei (e.g., 99000000000000000000). The LP_CLOSE compiler expects
+    human-readable amounts and converts to wei internally.
+    """
+
+    def test_returns_human_readable_decimal(self):
+        """Should extract LP tokens and convert from wei to human-readable Decimal."""
+        lp_amount_wei = 99_000_000_000_000_000_000  # 99 LP tokens in wei (18 decimals)
+        receipt = _build_add_liquidity_receipt(lp_minted=lp_amount_wei)
         parser = CurveReceiptParser(chain="ethereum")
         result = parser.extract_liquidity(receipt)
-        assert result == lp_amount
+        assert isinstance(result, Decimal)
+        assert result == Decimal(99)
+
+    def test_fractional_amount(self):
+        """Should preserve fractional LP token amounts."""
+        # 98.133240027002648655 LP tokens
+        lp_amount_wei = 98_133_240_027_002_648_655
+        receipt = _build_add_liquidity_receipt(lp_minted=lp_amount_wei)
+        parser = CurveReceiptParser(chain="ethereum")
+        result = parser.extract_liquidity(receipt)
+        assert isinstance(result, Decimal)
+        expected = Decimal(lp_amount_wei) / Decimal(10**18)
+        assert result == expected
 
     def test_returns_none_for_no_mint(self):
         """Receipt without mint Transfer should return None."""
