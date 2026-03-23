@@ -146,7 +146,6 @@ addopts = "-n auto"
 # --- coverage ---
 [tool.coverage.run]
 source = ["almanak"]
-parallel = true
 omit = [
     "almanak/gateway/proto/*_pb2*.py",
     "almanak/**/tests/*",
