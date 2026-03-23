@@ -278,6 +278,11 @@ class CoinGeckoPriceSource(BasePriceSource):
     # Cached token registry (lazy-loaded)
     _token_registry: Any = None
 
+    # Stablecoins get a much longer cache TTL since their prices are ~$1.00
+    # and rarely change. This reduces unnecessary CoinGecko API calls by ~10x
+    # for stablecoin lookups, preserving rate limit budget for volatile tokens.
+    _STABLECOIN_CACHE_TTL_MULTIPLIER = 10
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -290,6 +295,7 @@ class CoinGeckoPriceSource(BasePriceSource):
         Args:
             api_key: Optional CoinGecko API key. If provided, uses pro API.
             cache_ttl: Cache time-to-live in seconds. Default 30.
+                Stablecoins automatically use 10x this value (default 300s).
             request_timeout: HTTP request timeout in seconds. Default 10.
             stale_confidence_multiplier: Confidence multiplier for stale data (0-1).
                 Default 0.7 means stale data has 70% of original confidence.
@@ -340,6 +346,18 @@ class CoinGeckoPriceSource(BasePriceSource):
         """Generate cache key for token/quote pair."""
         return f"{token.upper()}/{quote.upper()}"
 
+    def _get_cache_ttl_for_token(self, token: str, quote: str = "USD") -> int:
+        """Return the effective cache TTL for a token/quote pair.
+
+        Stablecoins use a longer TTL (10x default) since their prices are
+        inherently stable (~$1.00), reducing unnecessary API calls.
+        Only applies to USD-quoted pairs — cross-rates (e.g. USDC/ETH)
+        use the default TTL since the quote leg can move materially.
+        """
+        if quote.upper() == "USD" and token.upper() in STABLECOINS:
+            return self._cache_ttl * self._STABLECOIN_CACHE_TTL_MULTIPLIER
+        return self._cache_ttl
+
     def _get_cached(self, token: str, quote: str) -> CacheEntry | None:
         """Get cached entry if exists and not expired."""
         cache_key = self._get_cache_key(token, quote)
@@ -347,9 +365,10 @@ class CoinGeckoPriceSource(BasePriceSource):
         if entry is None:
             return None
 
-        # Check if expired
+        # Check if expired (stablecoins get a longer TTL)
         age_seconds = (datetime.now(UTC) - entry.cached_at).total_seconds()
-        if age_seconds > self._cache_ttl:
+        effective_ttl = self._get_cache_ttl_for_token(token, quote)
+        if age_seconds > effective_ttl:
             return None
 
         return entry
