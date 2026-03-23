@@ -411,7 +411,9 @@ class UniswapV3ReceiptParser:
             if decimals is not None:
                 self.token1_decimals = decimals
 
-        # Default to 18 decimals if still unresolved (needed for amount calculations)
+        # Track whether decimals are resolved or defaulted (18 is unreliable for non-ETH tokens)
+        self._token0_decimals_resolved = self.token0_decimals is not None
+        self._token1_decimals_resolved = self.token1_decimals is not None
         if self.token0_decimals is None:
             self.token0_decimals = 18
         if self.token1_decimals is None:
@@ -760,6 +762,111 @@ class UniswapV3ReceiptParser:
             logger.warning(f"Failed to parse TransferEventData: {e}")
             return None
 
+    def _resolve_tokens_from_transfers(
+        self,
+        transfer_events: list[TransferEventData],
+        swap_event: SwapEventData,
+    ) -> dict[str, Any]:
+        """Resolve token addresses and decimals from Transfer events.
+
+        When the parser was constructed without token info (e.g., by the ResultEnricher),
+        decimals default to 18 which is wrong for tokens like USDC (6 decimals).
+        This method extracts token addresses from the Transfer events in the swap
+        transaction and resolves their actual decimals via the TokenResolver.
+
+        Returns a dict of per-receipt overrides (token0_address, token0_decimals, etc.)
+        without mutating parser state, so cached parser instances stay clean across receipts.
+        Branch 1 (addresses pre-set, just need decimals) writes to self because the correct
+        decimals for those addresses are stable. Branch 2 (addresses inferred) only returns
+        local overrides.
+
+        The Uniswap V3 Swap event emits amount0/amount1 where positive = sent to pool
+        (input) and negative = received from pool (output). The corresponding ERC-20
+        Transfer events carry the actual token contract addresses.
+        """
+        overrides: dict[str, Any] = {}
+        if not transfer_events:
+            return overrides
+
+        # Only resolve if we have unresolved decimals
+        needs_token0 = not self._token0_decimals_resolved
+        needs_token1 = not self._token1_decimals_resolved
+        if not needs_token0 and not needs_token1:
+            return overrides
+
+        pool_address = swap_event.pool_address.lower() if swap_event.pool_address else ""
+        if not pool_address:
+            return overrides
+
+        # Classify transfers by direction relative to pool.
+        # In Uniswap V3: amount0 > 0 means token0 was sent TO the pool (input),
+        # amount1 < 0 means token1 was received FROM the pool (output), and vice versa.
+        input_token_addrs: list[str] = []
+        output_token_addrs: list[str] = []
+        for transfer in transfer_events:
+            addr = transfer.token_address.lower() if transfer.token_address else ""
+            if not addr:
+                continue
+            if transfer.to_addr.lower() == pool_address:
+                input_token_addrs.append(addr)
+            elif transfer.from_addr.lower() == pool_address:
+                output_token_addrs.append(addr)
+
+        # Build a deduplicated mapping: address -> (symbol, decimals)
+        all_addrs = set(input_token_addrs + output_token_addrs)
+        resolved: dict[str, tuple[str, int]] = {}
+        for addr in all_addrs:
+            symbol, decimals = self._resolve_token_info(addr)
+            if decimals is not None:
+                resolved[addr] = (symbol, decimals)
+
+        # --- Branch 1: addresses already known, just need decimals ---
+        # Safe to write to self because the token addresses are pre-set and stable.
+        for addr, (symbol, decimals) in resolved.items():
+            if needs_token0 and self.token0_address and self.token0_address.lower() == addr:
+                self.token0_decimals = decimals
+                self._token0_decimals_resolved = True
+                if symbol and not self.token0_symbol:
+                    self.token0_symbol = symbol
+                logger.debug(f"Resolved token0 decimals from Transfer: {symbol} = {decimals}")
+                needs_token0 = False
+            elif needs_token1 and self.token1_address and self.token1_address.lower() == addr:
+                self.token1_decimals = decimals
+                self._token1_decimals_resolved = True
+                if symbol and not self.token1_symbol:
+                    self.token1_symbol = symbol
+                logger.debug(f"Resolved token1 decimals from Transfer: {symbol} = {decimals}")
+                needs_token1 = False
+
+        # --- Branch 2: addresses unknown — infer from transfer direction + swap event ---
+        # Returns local overrides instead of mutating self, so cached parsers stay clean.
+        # Uses swap_event.token0_is_input to determine which transfer direction maps to token0.
+        if needs_token0 and not self.token0_address:
+            candidates = input_token_addrs if swap_event.token0_is_input else output_token_addrs
+            for addr in candidates:
+                if addr in resolved:
+                    symbol, decimals = resolved[addr]
+                    overrides["token0_address"] = addr
+                    overrides["token0_decimals"] = decimals
+                    overrides["token0_symbol"] = symbol or ""
+                    logger.debug(f"Inferred token0 from Transfer: {symbol} ({addr}) = {decimals}")
+                    needs_token0 = False
+                    break
+
+        if needs_token1 and not self.token1_address:
+            candidates = output_token_addrs if swap_event.token0_is_input else input_token_addrs
+            for addr in candidates:
+                if addr in resolved:
+                    symbol, decimals = resolved[addr]
+                    overrides["token1_address"] = addr
+                    overrides["token1_decimals"] = decimals
+                    overrides["token1_symbol"] = symbol or ""
+                    logger.debug(f"Inferred token1 from Transfer: {symbol} ({addr}) = {decimals}")
+                    needs_token1 = False
+                    break
+
+        return overrides
+
     def _build_swap_result(
         self,
         swap_event: SwapEventData,
@@ -776,21 +883,36 @@ class UniswapV3ReceiptParser:
         Returns:
             ParsedSwapResult with full swap details
         """
+        # Try to resolve token addresses and decimals from Transfer events when not
+        # provided at construction time. This fixes wrong decimals (e.g., USDC treated
+        # as 18 decimals instead of 6) when the parser is used via the ResultEnricher
+        # without token context.
+        overrides = self._resolve_tokens_from_transfers(transfer_events, swap_event)
+
+        # Apply per-receipt overrides (from inferred addresses) on top of self values.
+        # These are local to this receipt and don't persist on the parser instance.
+        t0_addr = overrides.get("token0_address", self.token0_address) or ""
+        t0_symbol = overrides.get("token0_symbol", self.token0_symbol) or ""
+        t0_decimals = overrides.get("token0_decimals", self.token0_decimals)
+        t1_addr = overrides.get("token1_address", self.token1_address) or ""
+        t1_symbol = overrides.get("token1_symbol", self.token1_symbol) or ""
+        t1_decimals = overrides.get("token1_decimals", self.token1_decimals)
+
         # Determine which token is in/out
         if swap_event.token0_is_input:
-            token_in = self.token0_address or ""
-            token_out = self.token1_address or ""
-            token_in_symbol = self.token0_symbol or ""
-            token_out_symbol = self.token1_symbol or ""
-            token_in_decimals = self.token0_decimals
-            token_out_decimals = self.token1_decimals
+            token_in = t0_addr
+            token_out = t1_addr
+            token_in_symbol = t0_symbol
+            token_out_symbol = t1_symbol
+            token_in_decimals = t0_decimals
+            token_out_decimals = t1_decimals
         else:
-            token_in = self.token1_address or ""
-            token_out = self.token0_address or ""
-            token_in_symbol = self.token1_symbol or ""
-            token_out_symbol = self.token0_symbol or ""
-            token_in_decimals = self.token1_decimals
-            token_out_decimals = self.token0_decimals
+            token_in = t1_addr
+            token_out = t0_addr
+            token_in_symbol = t1_symbol
+            token_out_symbol = t0_symbol
+            token_in_decimals = t1_decimals
+            token_out_decimals = t0_decimals
 
         amount_in = swap_event.amount_in
         amount_out = swap_event.amount_out

@@ -103,7 +103,7 @@ class _NativeFallbackGroup(click.Group):
     def _make_native_cmd(self):
         """Create a synthetic Click command that execv's the native binary."""
 
-        @click.command("native", hidden=True)
+        @click.command("native", hidden=True, context_settings={"ignore_unknown_options": True})
         @click.argument("native_args", nargs=-1, type=click.UNPROCESSED)
         @click.pass_context
         def _native(ctx, native_args):
