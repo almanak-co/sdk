@@ -1249,6 +1249,12 @@ class MultiChainRuntimeConfig:
         Args:
             network: Network environment ("mainnet", "sepolia", "anvil"). Default: "mainnet"
         """
+        # Gateway wallets mode: the gateway handles all RPC access, no local URLs needed.
+        # Wallet addresses are resolved at RegisterChains time from the WalletRegistry.
+        if not self.private_key and os.environ.get("ALMANAK_GATEWAY_WALLETS"):
+            logger.info("Gateway wallets mode — skipping local RPC URL loading (gateway handles RPC)")
+            return
+
         from almanak.gateway.utils.rpc_provider import get_rpc_url
 
         load_dotenv()

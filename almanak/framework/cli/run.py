@@ -1611,11 +1611,9 @@ def run(
 
     # Sidecar deployment mode: --no-gateway without a local private key.
     # The gateway handles all signing and RPC; we only need chain + wallet address.
-    if no_gateway and not os.environ.get("ALMANAK_PRIVATE_KEY"):
-        if multi_chain:
-            raise click.ClickException(
-                "Multi-chain sidecar mode is not supported yet; set ALMANAK_PRIVATE_KEY or run a single-chain strategy."
-            )
+    # Multi-chain sidecar is handled by the `elif multi_chain` branch below,
+    # which supports ALMANAK_GATEWAY_WALLETS for per-chain wallet resolution.
+    if no_gateway and not os.environ.get("ALMANAK_PRIVATE_KEY") and not multi_chain:
         resolved_chain = config_chain or None
         if not resolved_chain:
             raise click.ClickException(
@@ -1666,6 +1664,16 @@ def run(
                     click.echo(f"Error loading configuration after setting default key: {retry_err}", err=True)
                     sys.exit(1)
                 click.echo(f"Multi-chain config loaded for: {', '.join(strategy_chains)}")
+            elif no_gateway and e.var_name.endswith("PRIVATE_KEY"):
+                click.echo(
+                    "Error: Multi-chain sidecar mode requires ALMANAK_GATEWAY_WALLETS or ALMANAK_PRIVATE_KEY.",
+                    err=True,
+                )
+                click.echo(
+                    "Set ALMANAK_GATEWAY_WALLETS with per-chain wallet config, or provide ALMANAK_PRIVATE_KEY.",
+                    err=True,
+                )
+                sys.exit(1)
             else:
                 if e.var_name.endswith("PRIVATE_KEY"):
                     click.echo("Error: ALMANAK_PRIVATE_KEY is required for mainnet execution.", err=True)
