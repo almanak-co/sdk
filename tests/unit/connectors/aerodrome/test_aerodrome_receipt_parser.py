@@ -2,13 +2,10 @@
 
 from decimal import Decimal
 
-import pytest
-
 from almanak.framework.connectors.aerodrome.receipt_parser import (
     EVENT_TOPICS,
     AerodromeReceiptParser,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers to build mock receipts
@@ -121,6 +118,11 @@ class TestV1SwapParsing:
         assert result.swap_result.token_out_symbol == "WETH"
 
     def test_v1_extract_swap_amounts(self):
+        # Real Base addresses so the token resolver can find decimals
+        usdc_addr = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        weth_addr = "0x4200000000000000000000000000000000000006"
+        wallet = "0x" + "aa" * 20
+
         parser = AerodromeReceiptParser(
             chain="base",
             token0_decimals=6,
@@ -134,6 +136,22 @@ class TestV1SwapParsing:
             amount0_out=0,
             amount1_out=2 * 10**15,
         )
+        # Add Transfer events and from address for decimal resolution
+        transfer_topic = EVENT_TOPICS["Transfer"]
+        receipt["from"] = wallet
+        receipt["logs"].insert(0, {
+            "address": usdc_addr,
+            "topics": [transfer_topic, _addr_topic(wallet), _addr_topic("0x" + "cc" * 20)],
+            "data": "0x" + _pad32(5_000_000),
+            "logIndex": 10,
+        })
+        receipt["logs"].append({
+            "address": weth_addr,
+            "topics": [transfer_topic, _addr_topic("0x" + "cc" * 20), _addr_topic(wallet)],
+            "data": "0x" + _pad32(2 * 10**15),
+            "logIndex": 11,
+        })
+
         swap_amounts = parser.extract_swap_amounts(receipt)
         assert swap_amounts is not None
         assert swap_amounts.amount_in == 5_000_000
@@ -198,6 +216,10 @@ class TestCLSwapParsing:
 
     def test_cl_swap_extract_swap_amounts(self):
         """extract_swap_amounts() returns SwapAmounts for CL swaps."""
+        usdc_addr = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        weth_addr = "0x4200000000000000000000000000000000000006"
+        wallet = "0x" + "aa" * 20
+
         parser = AerodromeReceiptParser(
             chain="base",
             token0_decimals=6,
@@ -209,6 +231,22 @@ class TestCLSwapParsing:
             amount0=10_000_000,  # +10 USDC
             amount1=-(4 * 10**15),  # -0.004 WETH
         )
+        # Add Transfer events and from address for decimal resolution
+        transfer_topic = EVENT_TOPICS["Transfer"]
+        receipt["from"] = wallet
+        receipt["logs"].insert(0, {
+            "address": usdc_addr,
+            "topics": [transfer_topic, _addr_topic(wallet), _addr_topic("0x" + "dd" * 20)],
+            "data": "0x" + _pad32(10_000_000),
+            "logIndex": 10,
+        })
+        receipt["logs"].append({
+            "address": weth_addr,
+            "topics": [transfer_topic, _addr_topic("0x" + "dd" * 20), _addr_topic(wallet)],
+            "data": "0x" + _pad32(4 * 10**15),
+            "logIndex": 11,
+        })
+
         swap_amounts = parser.extract_swap_amounts(receipt)
         assert swap_amounts is not None
         assert swap_amounts.amount_in == 10_000_000

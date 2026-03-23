@@ -13,13 +13,9 @@ Covers:
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
-from unittest.mock import MagicMock
-
-import pytest
 
 from almanak.framework.execution.extracted_data import SwapAmounts
 from almanak.framework.execution.result_enricher import ResultEnricher
-
 
 # ---------------------------------------------------------------------------
 # Minimal stubs for ExecutionResult / TransactionResult / TransactionReceipt
@@ -212,6 +208,8 @@ class TestSushiSwapV3SwapEnrichment:
 
     def test_sushiswap_v3_swap_enrichment(self):
         """SushiSwap V3 swap_amounts extracted from Swap event on Base."""
+        usdc_base = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        weth_base = "0x4200000000000000000000000000000000000006"
         # amount0 > 0 means user paid token0, amount1 < 0 means user received token1
         swap_log = _make_swap_log(
             pool_address=self.POOL_BASE,
@@ -220,7 +218,9 @@ class TestSushiSwapV3SwapEnrichment:
             amount0=50_000_000,       # 50 USDC in (6 decimals)
             amount1=-24_000_000_000_000_000,  # ~0.024 WETH out
         )
-        receipt = _FakeReceipt(status=1, logs=[swap_log])
+        transfer_out = _make_transfer_log(usdc_base, self.WALLET, self.ROUTER_BASE, 50_000_000)
+        transfer_in = _make_transfer_log(weth_base, self.ROUTER_BASE, self.WALLET, 24_000_000_000_000_000)
+        receipt = _FakeReceipt(status=1, logs=[transfer_out, swap_log, transfer_in], from_address=self.WALLET)
         result = _FakeExecResult(
             transaction_results=[_FakeTxResult(receipt=receipt)],
         )
@@ -236,6 +236,8 @@ class TestSushiSwapV3SwapEnrichment:
 
     def test_sushiswap_v3_swap_enrichment_optimism(self):
         """VIB-1437: SushiSwap V3 swap_amounts extracted from Swap event on Optimism."""
+        usdc_op = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"
+        weth_op = "0x4200000000000000000000000000000000000006"
         swap_log = _make_swap_log(
             pool_address=self.POOL_OPTIMISM,
             sender=self.ROUTER_OPTIMISM,
@@ -243,7 +245,9 @@ class TestSushiSwapV3SwapEnrichment:
             amount0=500_000_000,      # 500 USDC in (6 decimals)
             amount1=-180_000_000_000_000_000,  # ~0.18 WETH out
         )
-        receipt = _FakeReceipt(status=1, logs=[swap_log], gas_used=22796)
+        transfer_out = _make_transfer_log(usdc_op, self.WALLET, self.ROUTER_OPTIMISM, 500_000_000)
+        transfer_in = _make_transfer_log(weth_op, self.ROUTER_OPTIMISM, self.WALLET, 180_000_000_000_000_000)
+        receipt = _FakeReceipt(status=1, logs=[transfer_out, swap_log, transfer_in], gas_used=22796, from_address=self.WALLET)
         result = _FakeExecResult(
             transaction_results=[_FakeTxResult(receipt=receipt)],
         )
@@ -266,6 +270,8 @@ class TestSushiSwapV3SwapEnrichment:
         TX 1: USDC approve (55,449 gas) -- has Approval event, NO Swap event
         TX 2: exactInputSingle swap (22,796 gas) -- has Swap event
         """
+        usdc_op = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"
+        weth_op = "0x4200000000000000000000000000000000000006"
         APPROVAL_TOPIC = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
 
         # TX 1: approve receipt (has Approval event, NO Swap event)
@@ -284,9 +290,10 @@ class TestSushiSwapV3SwapEnrichment:
             status=1,
             logs=[approval_log],
             gas_used=55449,
+            from_address=self.WALLET,
         )
 
-        # TX 2: swap receipt (has Swap event)
+        # TX 2: swap receipt (has Swap event + Transfer events)
         swap_log = _make_swap_log(
             pool_address=self.POOL_OPTIMISM,
             sender=self.ROUTER_OPTIMISM,
@@ -294,11 +301,14 @@ class TestSushiSwapV3SwapEnrichment:
             amount0=500_000_000,      # 500 USDC in
             amount1=-180_000_000_000_000_000,  # ~0.18 WETH out
         )
+        transfer_out = _make_transfer_log(usdc_op, self.WALLET, self.ROUTER_OPTIMISM, 500_000_000)
+        transfer_in = _make_transfer_log(weth_op, self.ROUTER_OPTIMISM, self.WALLET, 180_000_000_000_000_000)
         swap_receipt = _FakeReceipt(
             tx_hash="0xswap2",
             status=1,
-            logs=[swap_log],
+            logs=[transfer_out, swap_log, transfer_in],
             gas_used=22796,
+            from_address=self.WALLET,
         )
 
         result = _FakeExecResult(
@@ -328,6 +338,9 @@ class TestSushiSwapV3SwapEnrichment:
         """
         from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult
 
+        usdc_op = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"
+        weth_op = "0x4200000000000000000000000000000000000006"
+
         swap_log = _make_swap_log(
             pool_address=self.POOL_OPTIMISM,
             sender=self.ROUTER_OPTIMISM,
@@ -335,6 +348,8 @@ class TestSushiSwapV3SwapEnrichment:
             amount0=500_000_000,
             amount1=-180_000_000_000_000_000,
         )
+        transfer_out = _make_transfer_log(usdc_op, self.WALLET, self.ROUTER_OPTIMISM, 500_000_000)
+        transfer_in = _make_transfer_log(weth_op, self.ROUTER_OPTIMISM, self.WALLET, 180_000_000_000_000_000)
 
         gw_result = GatewayExecutionResult(
             success=True,
@@ -342,7 +357,7 @@ class TestSushiSwapV3SwapEnrichment:
             total_gas_used=78_245,
             receipts=[
                 {"status": "0x1", "gas_used": 55_449, "logs": None},  # approve tx: OP-style hex status + null logs
-                {"status": "0x1", "gas_used": 22_796, "logs": [swap_log]},  # swap tx
+                {"status": "0x1", "gas_used": 22_796, "logs": [transfer_out, swap_log, transfer_in], "from_address": self.WALLET},  # swap tx
             ],
             execution_id="test-vib-1437",
         )
@@ -369,6 +384,8 @@ class TestUniswapV3SwapEnrichment:
 
     def test_uniswap_v3_swap_enrichment(self):
         """Uniswap V3 swap_amounts extracted from Swap event."""
+        usdc_arb = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+        weth_arb = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
         swap_log = _make_swap_log(
             pool_address=self.POOL,
             sender=self.ROUTER,
@@ -376,7 +393,9 @@ class TestUniswapV3SwapEnrichment:
             amount0=1_000_000_000,    # 1000 USDC
             amount1=-500_000_000_000_000_000,  # ~0.5 WETH
         )
-        receipt = _FakeReceipt(status=1, logs=[swap_log])
+        transfer_out = _make_transfer_log(usdc_arb, self.WALLET, self.ROUTER, 1_000_000_000)
+        transfer_in = _make_transfer_log(weth_arb, self.ROUTER, self.WALLET, 500_000_000_000_000_000)
+        receipt = _FakeReceipt(status=1, logs=[transfer_out, swap_log, transfer_in], from_address=self.WALLET)
         result = _FakeExecResult(
             transaction_results=[_FakeTxResult(receipt=receipt)],
         )

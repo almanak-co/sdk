@@ -367,8 +367,8 @@ class AerodromeReceiptParser:
         token1_address: str | None = None,
         token0_symbol: str | None = None,
         token1_symbol: str | None = None,
-        token0_decimals: int = 18,
-        token1_decimals: int = 18,
+        token0_decimals: int | None = None,
+        token1_decimals: int | None = None,
         quoted_price: Decimal | None = None,
         **kwargs: Any,
     ) -> None:
@@ -410,14 +410,20 @@ class AerodromeReceiptParser:
                 self.token1_decimals = decimals
 
         # If symbols were provided but decimals weren't, resolve decimals
-        if self.token0_symbol and self.token0_decimals == 18:
+        if self.token0_symbol and self.token0_decimals is None:
             _, decimals = self._resolve_token_info(self.token0_symbol)
             if decimals is not None:
                 self.token0_decimals = decimals
-        if self.token1_symbol and self.token1_decimals == 18:
+        if self.token1_symbol and self.token1_decimals is None:
             _, decimals = self._resolve_token_info(self.token1_symbol)
             if decimals is not None:
                 self.token1_decimals = decimals
+
+        # Log warning if decimals remain unresolved — do NOT default to 18.
+        if self.token0_decimals is None:
+            logger.debug(f"token0 decimals unresolved for chain={self.chain} (address={self.token0_address})")
+        if self.token1_decimals is None:
+            logger.debug(f"token1 decimals unresolved for chain={self.chain} (address={self.token1_address})")
 
     def _resolve_token_info(self, token: str) -> tuple[str, int | None]:
         """Resolve token symbol and decimals via TokenResolver.
@@ -436,6 +442,22 @@ class AerodromeReceiptParser:
             return resolved.symbol, resolved.decimals
         except Exception:
             return "", None
+
+    def _resolve_decimals(self, token_address: str) -> int | None:
+        """Resolve token decimals via the token resolver.
+
+        Returns None if the resolver is unavailable or the token is unknown.
+        """
+        if not token_address:
+            return None
+        try:
+            from almanak.framework.data.tokens.resolver import get_token_resolver
+
+            resolver = get_token_resolver()
+            resolved = resolver.resolve(token_address, self.chain)
+            return resolved.decimals
+        except Exception:
+            return None
 
     def parse_receipt(
         self,
@@ -919,7 +941,7 @@ class AerodromeReceiptParser:
         swap_event: SwapEventData,
         transfer_events: list[TransferEventData],
         quoted_amount_out: int | None,
-    ) -> ParsedSwapResult:
+    ) -> ParsedSwapResult | None:
         """Build high-level swap result from events.
 
         Args:
@@ -928,7 +950,7 @@ class AerodromeReceiptParser:
             quoted_amount_out: Expected output for slippage calc
 
         Returns:
-            ParsedSwapResult with full swap details
+            ParsedSwapResult with full swap details, or None if decimals unresolved
         """
         # Determine which token is in/out
         if swap_event.token0_is_input:
@@ -949,9 +971,26 @@ class AerodromeReceiptParser:
         amount_in = swap_event.amount_in
         amount_out = swap_event.amount_out
 
-        # Convert to decimal with proper decimals
-        amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
-        amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
+        # Try to resolve decimals if not already known
+        if token_in_decimals is None and token_in:
+            token_in_decimals = self._resolve_decimals(token_in)
+        if token_out_decimals is None and token_out:
+            token_out_decimals = self._resolve_decimals(token_out)
+
+        # Convert to decimal with proper decimals.
+        # Return None when decimals are unresolved to avoid leaking fabricated
+        # zero values to direct callers of parse_receipt().
+        # extract_swap_amounts() handles this by falling back to raw swap_events.
+        if token_in_decimals is not None and token_out_decimals is not None:
+            amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
+            amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
+        else:
+            logger.warning(
+                "Token decimals unresolved (in=%s, out=%s); omitting swap_result",
+                token_in_decimals,
+                token_out_decimals,
+            )
+            return None
 
         # Calculate effective price
         if amount_in_decimal > 0:
@@ -1004,9 +1043,13 @@ class AerodromeReceiptParser:
         amount0 = liquidity_event.amount0
         amount1 = liquidity_event.amount1
 
-        # Convert to decimal
-        amount0_decimal = Decimal(str(amount0)) / Decimal(10**self.token0_decimals)
-        amount1_decimal = Decimal(str(amount1)) / Decimal(10**self.token1_decimals)
+        # Resolve decimals, falling back to resolver if constructor value is None
+        t0_dec = self.token0_decimals if self.token0_decimals is not None else self._resolve_decimals(token0)
+        t1_dec = self.token1_decimals if self.token1_decimals is not None else self._resolve_decimals(token1)
+
+        # Convert to decimal (zero if decimals still unknown)
+        amount0_decimal = Decimal(str(amount0)) / Decimal(10**t0_dec) if t0_dec is not None else Decimal(0)
+        amount1_decimal = Decimal(str(amount1)) / Decimal(10**t1_dec) if t1_dec is not None else Decimal(0)
 
         return ParsedLiquidityResult(
             operation=operation,
@@ -1028,8 +1071,12 @@ class AerodromeReceiptParser:
     def extract_swap_amounts(self, receipt: dict[str, Any]) -> "SwapAmounts | None":
         """Extract swap amounts from a transaction receipt.
 
+        Resolves token decimals independently from ERC-20 Transfer events in the
+        receipt, so it produces correct human-readable amounts even when the parser
+        was constructed without token metadata (the enrichment path).
+
         Args:
-            receipt: Transaction receipt dict with 'logs' field
+            receipt: Transaction receipt dict with 'logs' and 'from' fields
 
         Returns:
             SwapAmounts dataclass if swap event found, None otherwise
@@ -1037,25 +1084,118 @@ class AerodromeReceiptParser:
         from almanak.framework.execution.extracted_data import SwapAmounts
 
         try:
-            result = self.parse_receipt(receipt)
-            if not result.swap_result:
+            parse_result = self.parse_receipt(receipt)
+
+            # Extract raw amounts from swap_result if available, otherwise
+            # fall back to raw swap_events (swap_result may be None when
+            # _build_swap_result fails closed due to unresolved decimals).
+            sr = parse_result.swap_result
+            if sr:
+                raw_in = sr.amount_in
+                raw_out = sr.amount_out
+                token_in_hint = sr.token_in
+                token_out_hint = sr.token_out
+                token_in_symbol = sr.token_in_symbol
+                token_out_symbol = sr.token_out_symbol
+                slippage_bps = sr.slippage_bps if sr.slippage_bps else None
+            elif parse_result.swap_events:
+                se = parse_result.swap_events[0]
+                raw_in = se.amount_in
+                raw_out = se.amount_out
+                token_in_hint = (self.token0_address or "") if se.token0_is_input else (self.token1_address or "")
+                token_out_hint = (self.token1_address or "") if se.token0_is_input else (self.token0_address or "")
+                token_in_symbol = (self.token0_symbol or "") if se.token0_is_input else (self.token1_symbol or "")
+                token_out_symbol = (self.token1_symbol or "") if se.token0_is_input else (self.token0_symbol or "")
+                slippage_bps = None
+            else:
                 return None
 
-            sr = result.swap_result
+            # Resolve decimals independently from Transfer events in the receipt.
+            token_in_addr, token_out_addr, _, _ = self._extract_swap_tokens_from_transfers(receipt)
+
+            if not token_in_addr:
+                token_in_addr = token_in_hint
+            if not token_out_addr:
+                token_out_addr = token_out_hint
+
+            in_decimals = self._resolve_decimals(token_in_addr) if token_in_addr else None
+            out_decimals = self._resolve_decimals(token_out_addr) if token_out_addr else None
+
+            if in_decimals is None or out_decimals is None:
+                logger.warning(
+                    f"Cannot compute swap amounts: token decimals unknown "
+                    f"(in={token_in_addr}:{in_decimals}, out={token_out_addr}:{out_decimals})"
+                )
+                return None
+
+            amount_in_decimal = Decimal(str(raw_in)) / Decimal(10**in_decimals)
+            amount_out_decimal = Decimal(str(raw_out)) / Decimal(10**out_decimals)
+            effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal("0")
+
             return SwapAmounts(
-                amount_in=sr.amount_in,
-                amount_out=sr.amount_out,
-                amount_in_decimal=sr.amount_in_decimal,
-                amount_out_decimal=sr.amount_out_decimal,
-                effective_price=sr.effective_price,
-                slippage_bps=sr.slippage_bps if sr.slippage_bps else None,
-                token_in=sr.token_in_symbol or sr.token_in,
-                token_out=sr.token_out_symbol or sr.token_out,
+                amount_in=raw_in,
+                amount_out=raw_out,
+                amount_in_decimal=amount_in_decimal,
+                amount_out_decimal=amount_out_decimal,
+                effective_price=effective_price,
+                slippage_bps=slippage_bps,
+                token_in=token_in_symbol or token_in_addr or token_in_hint,
+                token_out=token_out_symbol or token_out_addr or token_out_hint,
             )
 
         except Exception as e:
             logger.warning(f"Failed to extract swap amounts: {e}")
             return None
+
+    def _extract_swap_tokens_from_transfers(self, receipt: dict[str, Any]) -> tuple[str, str, int, int]:
+        """Extract token addresses and amounts from ERC-20 Transfer events.
+
+        Returns:
+            Tuple of (token_in_addr, token_out_addr, amount_in, amount_out).
+            Empty strings / 0 for fields that could not be determined.
+        """
+        raw_wallet = receipt.get("from") or receipt.get("from_address") or ""
+        wallet = str(raw_wallet).lower() if raw_wallet else ""
+        if not wallet:
+            return "", "", 0, 0
+
+        transfer_topic = EVENT_TOPICS["Transfer"].lower()
+        transfers_from: list[tuple[str, int]] = []
+        transfers_to: list[tuple[str, int]] = []
+
+        for log in receipt.get("logs", []):
+            topics = log.get("topics", [])
+            if not topics or len(topics) < 3:
+                continue
+
+            topic0 = HexDecoder.normalize_hex(topics[0])
+            if not topic0:
+                continue
+            if not topic0.startswith("0x"):
+                topic0 = "0x" + topic0
+            if topic0.lower() != transfer_topic:
+                continue
+
+            log_from = HexDecoder.topic_to_address(topics[1])
+            log_to = HexDecoder.topic_to_address(topics[2])
+            data = HexDecoder.normalize_hex(log.get("data", ""))
+            if not data:
+                continue
+            try:
+                amount = HexDecoder.decode_uint256(data, 0)
+            except (ValueError, IndexError):
+                continue
+
+            raw_token = log.get("address") or ""
+            token_address = str(raw_token).lower() if raw_token else ""
+            if log_from == wallet:
+                transfers_from.append((token_address, amount))
+            if log_to == wallet:
+                transfers_to.append((token_address, amount))
+
+        token_in_addr, amount_in = transfers_from[0] if transfers_from else ("", 0)
+        token_out_addr, amount_out = transfers_to[-1] if transfers_to else ("", 0)
+        return token_in_addr, token_out_addr, amount_in, amount_out
 
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> "LPCloseData | None":
         """Extract LP close data from transaction receipt.

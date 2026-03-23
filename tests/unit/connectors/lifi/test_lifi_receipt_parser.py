@@ -8,7 +8,6 @@ from almanak.framework.connectors.lifi.receipt_parser import (
     LiFiSwapResult,
 )
 
-
 # ============================================================================
 # Fixtures
 # ============================================================================
@@ -349,15 +348,16 @@ class TestTransferExtraction:
 class TestExtractionMethods:
     """Test extraction methods for Result Enrichment system."""
 
-    def test_extract_swap_amounts(self, parser):
+    def test_extract_swap_amounts(self):
         """Extract swap amounts for Result Enrichment."""
+        arb_parser = LiFiReceiptParser(chain="arbitrum")
         logs = [
             _make_transfer_log(USDC_ADDRESS, WALLET_ADDRESS, LIFI_DIAMOND, 1000_000000, 0),
             _make_transfer_log(WETH_ADDRESS, LIFI_DIAMOND, WALLET_ADDRESS, 500000000000000000, 1),
         ]
         receipt = _make_receipt(logs=logs)
 
-        result = parser.extract_swap_amounts(receipt)
+        result = arb_parser.extract_swap_amounts(receipt)
 
         assert result is not None
         assert result.amount_in == 1000_000000
@@ -377,6 +377,32 @@ class TestExtractionMethods:
         receipt = _make_receipt(logs=[])
 
         result = parser.extract_swap_amounts(receipt)
+        assert result is None
+
+    def test_extract_swap_amounts_unknown_input_decimals(self):
+        """Extract returns None when input token decimals cannot be resolved."""
+        unknown_token = "0x0000000000000000000000000000000000099999"
+        logs = [
+            _make_transfer_log(unknown_token, WALLET_ADDRESS, LIFI_DIAMOND, 1000_000000, 0),
+            _make_transfer_log(WETH_ADDRESS, LIFI_DIAMOND, WALLET_ADDRESS, 500000000000000000, 1),
+        ]
+        receipt = _make_receipt(logs=logs)
+
+        arb_parser = LiFiReceiptParser(chain="arbitrum")
+        result = arb_parser.extract_swap_amounts(receipt)
+        assert result is None
+
+    def test_extract_swap_amounts_unknown_output_decimals(self):
+        """Extract returns None when output token decimals cannot be resolved."""
+        unknown_token = "0x0000000000000000000000000000000000099999"
+        logs = [
+            _make_transfer_log(USDC_ADDRESS, WALLET_ADDRESS, LIFI_DIAMOND, 1000_000000, 0),
+            _make_transfer_log(unknown_token, LIFI_DIAMOND, WALLET_ADDRESS, 500000000000000000, 1),
+        ]
+        receipt = _make_receipt(logs=logs)
+
+        arb_parser = LiFiReceiptParser(chain="arbitrum")
+        result = arb_parser.extract_swap_amounts(receipt)
         assert result is None
 
     def test_extract_position_id_returns_none(self, parser):

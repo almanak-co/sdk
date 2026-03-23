@@ -448,8 +448,12 @@ class ResultEnricher:
             if hasattr(receipt, "to_dict"):
                 receipt_dict = receipt.to_dict()
             elif hasattr(receipt, "logs"):
-                # Receipt object with logs attribute
+                # Receipt object with logs attribute — also propagate 'from' / 'from_address'
+                # for Transfer-event-based decimal resolution in extract_swap_amounts.
                 receipt_dict = {"logs": receipt.logs}
+                for attr in ("from_address", "status"):
+                    if hasattr(receipt, attr):
+                        receipt_dict[attr] = getattr(receipt, attr)
             elif isinstance(receipt, dict):
                 receipt_dict = receipt
             else:

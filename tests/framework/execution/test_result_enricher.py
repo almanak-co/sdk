@@ -7,11 +7,9 @@ that provides zero-cognitive-load data access for strategy authors.
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
-import pytest
-
-from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
+from almanak.framework.execution.extracted_data import SwapAmounts
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionPhase,
@@ -20,7 +18,6 @@ from almanak.framework.execution.orchestrator import (
 )
 from almanak.framework.execution.receipt_registry import ReceiptParserRegistry
 from almanak.framework.execution.result_enricher import ResultEnricher
-
 
 # =============================================================================
 # Test Fixtures
@@ -50,17 +47,65 @@ class MockReceipt:
     """Mock transaction receipt."""
 
     logs: list[dict[str, Any]] = field(default_factory=list)
+    from_address: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"logs": self.logs}
+        d: dict[str, Any] = {"logs": self.logs}
+        if self.from_address:
+            d["from"] = self.from_address
+        return d
+
+
+@dataclass
+class LogsOnlyReceipt:
+    """Mock receipt without to_dict() — exercises the _collect_receipts logs-attribute branch."""
+
+    logs: list[dict[str, Any]] = field(default_factory=list)
+    from_address: str | None = None
+    status: int = 1
+
+
+def create_execution_result_logs_only(
+    success: bool = True,
+    logs: list[dict[str, Any]] | None = None,
+    from_address: str | None = None,
+) -> ExecutionResult:
+    """Create a mock ExecutionResult using LogsOnlyReceipt (no to_dict)."""
+    receipt = LogsOnlyReceipt(logs=logs or [], from_address=from_address)
+    tx_result = TransactionResult(
+        tx_hash="0x456def",
+        success=success,
+        receipt=receipt,  # type: ignore
+        gas_used=100000,
+    )
+    return ExecutionResult(
+        success=success,
+        phase=ExecutionPhase.COMPLETE,
+        transaction_results=[tx_result],
+        total_gas_used=100000,
+    )
+
+
+def _make_transfer_log(token_address: str, from_addr: str, to_addr: str, amount: int) -> dict[str, Any]:
+    """Create a mock ERC-20 Transfer log entry."""
+    return {
+        "address": token_address,
+        "topics": [
+            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",  # Transfer
+            "0x000000000000000000000000" + from_addr.lower().removeprefix("0x"),
+            "0x000000000000000000000000" + to_addr.lower().removeprefix("0x"),
+        ],
+        "data": "0x" + hex(amount)[2:].zfill(64),
+    }
 
 
 def create_execution_result(
     success: bool = True,
     logs: list[dict[str, Any]] | None = None,
+    from_address: str | None = None,
 ) -> ExecutionResult:
     """Create a mock ExecutionResult for testing."""
-    receipt = MockReceipt(logs=logs or [])
+    receipt = MockReceipt(logs=logs or [], from_address=from_address)
     tx_result = TransactionResult(
         tx_hash="0x123abc",
         success=success,
@@ -337,6 +382,61 @@ class TestResultEnricherSwapAmounts:
         assert enriched.swap_amounts is None
         # No warning for missing method (it's expected)
         assert len(enriched.extraction_warnings) == 0
+
+
+class TestResultEnricherLogsOnlyReceipt:
+    """Test enrichment via receipts that lack to_dict() (logs-attribute branch)."""
+
+    def test_swap_enrichment_with_logs_only_receipt(self):
+        """Swap enrichment should work when receipt has logs attribute but no to_dict()."""
+        swap_amounts = SwapAmounts(
+            amount_in=1000000,
+            amount_out=500000,
+            amount_in_decimal=Decimal("1.0"),
+            amount_out_decimal=Decimal("0.5"),
+            effective_price=Decimal("0.5"),
+        )
+
+        mock_parser = Mock()
+        mock_parser.extract_swap_amounts.return_value = swap_amounts
+
+        mock_registry = Mock(spec=ReceiptParserRegistry)
+        mock_registry.get.return_value = mock_parser
+
+        enricher = ResultEnricher(parser_registry=mock_registry)
+        result = create_execution_result_logs_only(
+            success=True,
+            logs=[{"topics": ["0xabc"], "data": "0x01"}],
+            from_address="0xWallet",
+        )
+        intent = MockSwapIntent()
+        context = create_context()
+
+        enriched = enricher.enrich(result, intent, context)
+
+        assert enriched.swap_amounts is swap_amounts
+        # Verify receipt dict passed to parser contains from_address
+        call_args = mock_parser.extract_swap_amounts.call_args
+        receipt_dict = call_args[0][0]
+        assert receipt_dict["from_address"] == "0xWallet"
+        assert receipt_dict["logs"] == [{"topics": ["0xabc"], "data": "0x01"}]
+
+    def test_lp_enrichment_with_logs_only_receipt(self):
+        """LP position ID extraction should work with logs-only receipts."""
+        mock_parser = Mock()
+        mock_parser.extract_position_id.return_value = 99999
+
+        mock_registry = Mock(spec=ReceiptParserRegistry)
+        mock_registry.get.return_value = mock_parser
+
+        enricher = ResultEnricher(parser_registry=mock_registry)
+        result = create_execution_result_logs_only(success=True)
+        intent = MockIntent()
+        context = create_context()
+
+        enriched = enricher.enrich(result, intent, context)
+
+        assert enriched.position_id == 99999
 
 
 class TestExecutionResultAccessors:
@@ -675,13 +775,18 @@ class TestResultEnricherWithUniswapV3:
 
     def test_enriches_swap_with_real_parser(self):
         """Should extract swap_amounts using real Uniswap V3 parser."""
-        # Create a receipt with Swap event
+        # Wallet address used as the swap sender
+        wallet = "0x1234567890abcdef1234567890abcdef12345678"
+        # Real Arbitrum token addresses so the resolver can find decimals
+        usdc_addr = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"  # 6 decimals
+        weth_addr = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"  # 18 decimals
+
         # Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)
         swap_event = {
             "address": "0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",  # Pool
             "topics": [
                 "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",  # Swap
-                "0x0000000000000000000000001234567890abcdef1234567890abcdef12345678",  # sender
+                "0x000000000000000000000000" + wallet.removeprefix("0x"),  # sender
                 "0x0000000000000000000000009876543210fedcba9876543210fedcba98765432",  # recipient
             ],
             "data": (
@@ -694,14 +799,21 @@ class TestResultEnricherWithUniswapV3:
             ),
         }
 
+        # ERC-20 Transfer events so _extract_swap_tokens_from_transfers can resolve decimals
+        transfer_out = _make_transfer_log(usdc_addr, wallet, "0x9876543210fedcba9876543210fedcba98765432", 1000000)
+        transfer_in = _make_transfer_log(weth_addr, "0x9876543210fedcba9876543210fedcba98765432", wallet, 1000000)
+
         enricher = ResultEnricher()
-        result = create_execution_result(success=True, logs=[swap_event])
+        result = create_execution_result(
+            success=True,
+            logs=[transfer_out, swap_event, transfer_in],
+            from_address=wallet,
+        )
         intent = MockSwapIntent()
         context = create_context()
 
         enriched = enricher.enrich(result, intent, context)
 
-        # Swap amounts should be extracted (even without full token info)
         assert enriched.swap_amounts is not None
         assert enriched.swap_amounts.amount_in > 0
 
@@ -715,11 +827,16 @@ class TestResultEnricherWithUniswapV3:
         - chain='mantle' on the context
         - A real Uniswap V3 Swap event receipt
         """
+        wallet = "0x1111111111111111111111111111111111111111"
+        # Real Mantle token addresses
+        usdc_addr = "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9"  # USDC on Mantle
+        weth_addr = "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111"  # WETH on Mantle
+
         swap_event = {
-            "address": "0x1234567890abcdef1234567890abcdef12345678",
+            "address": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
             "topics": [
                 "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",  # Swap
-                "0x0000000000000000000000001111111111111111111111111111111111111111",  # sender
+                "0x000000000000000000000000" + wallet.removeprefix("0x"),  # sender
                 "0x0000000000000000000000002222222222222222222222222222222222222222",  # recipient
             ],
             "data": (
@@ -732,8 +849,15 @@ class TestResultEnricherWithUniswapV3:
             ),
         }
 
+        transfer_out = _make_transfer_log(usdc_addr, wallet, "0x2222222222222222222222222222222222222222", 3_125_000)
+        transfer_in = _make_transfer_log(weth_addr, "0x2222222222222222222222222222222222222222", wallet, 3_400_000_000_000_000_000)
+
         enricher = ResultEnricher()
-        result = create_execution_result(success=True, logs=[swap_event])
+        result = create_execution_result(
+            success=True,
+            logs=[transfer_out, swap_event, transfer_in],
+            from_address=wallet,
+        )
 
         @dataclass
         class AgniSwapIntent:
@@ -745,7 +869,7 @@ class TestResultEnricherWithUniswapV3:
         context = ExecutionContext(
             strategy_id="test-strategy",
             chain="mantle",
-            wallet_address="0xtest",
+            wallet_address=wallet,
             protocol="agni_finance",
         )
 
@@ -761,11 +885,15 @@ class TestResultEnricherWithUniswapV3:
         context.protocol = compiler.default_protocol. On Mantle, this resolves
         to 'agni_finance'. Enrichment must still work via this fallback path.
         """
+        wallet = "0x1111111111111111111111111111111111111111"
+        usdc_addr = "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9"  # USDC on Mantle
+        weth_addr = "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111"  # WETH on Mantle
+
         swap_event = {
             "address": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
             "topics": [
                 "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
-                "0x0000000000000000000000001111111111111111111111111111111111111111",
+                "0x000000000000000000000000" + wallet.removeprefix("0x"),
                 "0x0000000000000000000000002222222222222222222222222222222222222222",
             ],
             "data": (
@@ -778,8 +906,15 @@ class TestResultEnricherWithUniswapV3:
             ),
         }
 
+        transfer_out = _make_transfer_log(usdc_addr, wallet, "0x2222222222222222222222222222222222222222", 1_000_000)
+        transfer_in = _make_transfer_log(weth_addr, "0x2222222222222222222222222222222222222222", wallet, 1_000_000)
+
         enricher = ResultEnricher()
-        result = create_execution_result(success=True, logs=[swap_event])
+        result = create_execution_result(
+            success=True,
+            logs=[transfer_out, swap_event, transfer_in],
+            from_address=wallet,
+        )
 
         @dataclass
         class NoProtocolIntent:
@@ -791,7 +926,7 @@ class TestResultEnricherWithUniswapV3:
         context = ExecutionContext(
             strategy_id="test-strategy",
             chain="mantle",
-            wallet_address="0xtest",
+            wallet_address=wallet,
             protocol="agni_finance",  # Set by runner from compiler.default_protocol
         )
 
@@ -809,11 +944,15 @@ class TestResultEnricherWithUniswapV3:
         approve followed by the actual swap. The enricher must try each receipt
         and find swap_amounts from the second one.
         """
+        wallet = "0x1111111111111111111111111111111111111111"
+        usdc_addr = "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9"  # USDC on Mantle
+        weth_addr = "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111"  # WETH on Mantle
+
         approve_log = {
-            "address": "0xusdc_token_address",
+            "address": usdc_addr,
             "topics": [
                 "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",  # Approval
-                "0x0000000000000000000000001111111111111111111111111111111111111111",
+                "0x000000000000000000000000" + wallet.removeprefix("0x"),
                 "0x0000000000000000000000002222222222222222222222222222222222222222",
             ],
             "data": "0x00000000000000000000000000000000000000000000000000000000ffffffff",
@@ -823,7 +962,7 @@ class TestResultEnricherWithUniswapV3:
             "address": "0x3333333333333333333333333333333333333333",
             "topics": [
                 "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
-                "0x0000000000000000000000001111111111111111111111111111111111111111",
+                "0x000000000000000000000000" + wallet.removeprefix("0x"),
                 "0x0000000000000000000000002222222222222222222222222222222222222222",
             ],
             "data": (
@@ -836,10 +975,14 @@ class TestResultEnricherWithUniswapV3:
             ),
         }
 
+        # Transfer events in the swap receipt
+        transfer_out = _make_transfer_log(usdc_addr, wallet, "0x2222222222222222222222222222222222222222", 3_125_000)
+        transfer_in = _make_transfer_log(weth_addr, "0x2222222222222222222222222222222222222222", wallet, 3_400_000_000_000_000_000)
+
         # Create 2 transaction results: approve + swap
-        approve_receipt = MockReceipt(logs=[approve_log])
+        approve_receipt = MockReceipt(logs=[approve_log], from_address=wallet)
         approve_tx = TransactionResult(tx_hash="0xapprove", success=True, receipt=approve_receipt, gas_used=46000)
-        swap_receipt = MockReceipt(logs=[swap_log])
+        swap_receipt = MockReceipt(logs=[transfer_out, swap_log, transfer_in], from_address=wallet)
         swap_tx = TransactionResult(tx_hash="0xswap", success=True, receipt=swap_receipt, gas_used=180000)
 
         result = ExecutionResult(
@@ -854,7 +997,7 @@ class TestResultEnricherWithUniswapV3:
         context = ExecutionContext(
             strategy_id="test-strategy",
             chain="mantle",
-            wallet_address="0xtest",
+            wallet_address=wallet,
             protocol="agni_finance",
         )
 

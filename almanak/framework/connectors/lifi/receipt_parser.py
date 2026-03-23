@@ -236,12 +236,15 @@ class LiFiReceiptParser:
         decimals_in = self._get_decimals(token_in_addr)
         decimals_out = self._get_decimals(token_out_addr)
 
-        amount_in_decimal = (
-            Decimal(amount_in) / Decimal(10**decimals_in) if decimals_in is not None else Decimal(str(amount_in))
-        )
-        amount_out_decimal = (
-            Decimal(amount_out) / Decimal(10**decimals_out) if decimals_out is not None else Decimal(str(amount_out))
-        )
+        if decimals_in is None or decimals_out is None:
+            logger.warning(
+                f"Cannot compute LiFi swap amounts: token decimals unknown "
+                f"(in={token_in_addr}:{decimals_in}, out={token_out_addr}:{decimals_out})"
+            )
+            return None
+
+        amount_in_decimal = Decimal(amount_in) / Decimal(10**decimals_in) if amount_in else Decimal(0)
+        amount_out_decimal = Decimal(amount_out) / Decimal(10**decimals_out)
 
         effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal else None
 
