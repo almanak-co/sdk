@@ -1622,11 +1622,14 @@ def run(
 
         safe_address = os.environ.get("ALMANAK_SAFE_ADDRESS")
         wallet_address = safe_address or os.environ.get("ALMANAK_EOA_ADDRESS")
-        if not wallet_address:
+        if not wallet_address and not os.environ.get("ALMANAK_GATEWAY_WALLETS"):
             raise click.ClickException(
                 "Sidecar mode (--no-gateway without ALMANAK_PRIVATE_KEY) requires "
-                "ALMANAK_SAFE_ADDRESS or ALMANAK_EOA_ADDRESS to be set."
+                "ALMANAK_SAFE_ADDRESS, ALMANAK_EOA_ADDRESS, or ALMANAK_GATEWAY_WALLETS to be set."
             )
+        # When ALMANAK_GATEWAY_WALLETS is set, wallet_address is resolved later
+        # by register_chains() from the gateway's WalletRegistry.
+        wallet_address = wallet_address or ""
 
         default_gas_cap = CHAIN_GAS_PRICE_CAPS_GWEI.get(resolved_chain, DEFAULT_GAS_PRICE_CAP_GWEI)
         runtime_config = GatewayRuntimeConfig(
