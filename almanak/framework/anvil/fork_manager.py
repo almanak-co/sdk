@@ -847,7 +847,19 @@ class RollingForkManager:
         cmd.extend(["--retries", "3"])  # Retry failed upstream calls
 
         # Disable gas price cap so high-gas chains (e.g. Polygon) don't fail
-        cmd.append("--no-gas-cap")
+        # --no-gas-cap requires Anvil >=0.4.0; skip on older versions to avoid startup failure
+        try:
+            import subprocess as _sp
+
+            _ver_out = _sp.check_output(["anvil", "--version"], text=True, timeout=5).strip()
+            _ver = _ver_out.split()[1] if len(_ver_out.split()) > 1 else "0.0.0"
+            _major, _minor = (int(x) for x in _ver.split(".")[:2])
+            if (_major, _minor) >= (0, 4):
+                cmd.append("--no-gas-cap")
+            else:
+                logger.debug("Anvil %s does not support --no-gas-cap, skipping", _ver)
+        except Exception:
+            logger.debug("Could not detect Anvil version, skipping --no-gas-cap")
 
         # Silent mode for cleaner logs
         cmd.append("--silent")

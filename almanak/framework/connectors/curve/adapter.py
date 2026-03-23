@@ -178,6 +178,28 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
             "n_coins": 2,
             "virtual_price": Decimal("1.017"),
         },
+        # StableSwap NG 4pool on Base: USDC / USDbC / axlUSDC / crvUSD
+        # First 4-coin pool in the Curve adapter. StableSwap NG: LP token IS the pool address.
+        # Coin order verified on-chain 2026-03-23 via cast call coins(0..3):
+        #   coins(0) = USDC (0x8335..., 6 dec), coins(1) = USDbC (0xd9aA..., 6 dec)
+        #   coins(2) = axlUSDC (0xEB46..., 6 dec), coins(3) = crvUSD (0x417A..., 18 dec)
+        # Pool reserves (2026-03-23): ~$50K USDC, ~$50K USDbC, ~$50K axlUSDC, ~$91K crvUSD
+        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.virtual_price() at runtime.
+        # Queried on-chain 2026-03-23: pool.get_virtual_price() = 1019566780337011070 -> 1.0196
+        "4pool": {
+            "address": "0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f",
+            "lp_token": "0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f",  # StableSwap NG: LP = pool
+            "coins": ["USDC", "USDbC", "axlUSDC", "crvUSD"],
+            "coin_addresses": [
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",  # USDC (native) on Base
+                "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",  # USDbC (bridged) on Base
+                "0xEB466342C4d449BC9f53A865D5Cb90586f405215",  # axlUSDC (Axelar bridged)
+                "0x417Ac0e078398C154EdFadD9Ef675d30Be60Af93",  # crvUSD on Base
+            ],
+            "pool_type": "stableswap",
+            "n_coins": 4,
+            "virtual_price": Decimal("1.0196"),
+        },
     },
     "optimism": {
         "3pool": {
@@ -227,6 +249,7 @@ CURVE_GAS_ESTIMATES: dict[str, int] = {
     "exchange_underlying": 300000,
     "add_liquidity_2": 250000,
     "add_liquidity_3": 350000,
+    "add_liquidity_4": 450000,
     "remove_liquidity": 200000,
     "remove_liquidity_one_coin": 250000,
     "remove_liquidity_imbalance": 300000,
@@ -239,8 +262,10 @@ EXCHANGE_UINT256_SELECTOR = "0x5b41b908"  # exchange(uint256,uint256,uint256,uin
 EXCHANGE_UNDERLYING_SELECTOR = "0xa6417ed6"  # exchange_underlying(int128,int128,uint256,uint256)
 ADD_LIQUIDITY_2_SELECTOR = "0x0b4c7e4d"  # add_liquidity(uint256[2],uint256)
 ADD_LIQUIDITY_3_SELECTOR = "0x4515cef3"  # add_liquidity(uint256[3],uint256)
+ADD_LIQUIDITY_4_SELECTOR = "0x029b2f34"  # add_liquidity(uint256[4],uint256)
 REMOVE_LIQUIDITY_2_SELECTOR = "0x5b36389c"  # remove_liquidity(uint256,uint256[2])
 REMOVE_LIQUIDITY_3_SELECTOR = "0xecb586a5"  # remove_liquidity(uint256,uint256[3])
+REMOVE_LIQUIDITY_4_SELECTOR = "0x7d49d875"  # remove_liquidity(uint256,uint256[4])
 REMOVE_LIQUIDITY_ONE_SELECTOR = "0x1a4d01d2"  # remove_liquidity_one_coin(uint256,int128,uint256)
 GET_DY_SELECTOR = "0x5e0d443f"  # get_dy(int128,int128,uint256)
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"  # approve(address,uint256)
@@ -1046,9 +1071,14 @@ class CurveAdapter:
         if n_coins == 2:
             selector = ADD_LIQUIDITY_2_SELECTOR
             gas_estimate = CURVE_GAS_ESTIMATES["add_liquidity_2"]
-        else:  # n_coins == 3
+        elif n_coins == 3:
             selector = ADD_LIQUIDITY_3_SELECTOR
             gas_estimate = CURVE_GAS_ESTIMATES["add_liquidity_3"]
+        elif n_coins == 4:
+            selector = ADD_LIQUIDITY_4_SELECTOR
+            gas_estimate = CURVE_GAS_ESTIMATES["add_liquidity_4"]
+        else:
+            raise ValueError(f"Unsupported n_coins={n_coins} for add_liquidity (expected 2, 3, or 4)")
 
         # Encode amounts array
         calldata = selector
@@ -1080,8 +1110,12 @@ class CurveAdapter:
         # Select correct selector based on n_coins
         if n_coins == 2:
             selector = REMOVE_LIQUIDITY_2_SELECTOR
-        else:  # n_coins == 3
+        elif n_coins == 3:
             selector = REMOVE_LIQUIDITY_3_SELECTOR
+        elif n_coins == 4:
+            selector = REMOVE_LIQUIDITY_4_SELECTOR
+        else:
+            raise ValueError(f"Unsupported n_coins={n_coins} for remove_liquidity (expected 2, 3, or 4)")
 
         # Encode calldata
         calldata = selector + self._pad_uint256(lp_amount)

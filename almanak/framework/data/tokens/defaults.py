@@ -71,6 +71,7 @@ SYMBOL_ALIASES: dict[tuple[str, str], str] = {
     ("optimism", "USDC.E"): "0x7F5c764cBc14f9669B88837ca1490cCa17c31607",  # Bridged USDC
     # Base bridged tokens
     ("base", "USDBC"): "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",  # USD Base Coin
+    ("base", "AXLUSDC"): "0xEB466342C4d449BC9f53A865D5Cb90586f405215",  # Axelar Wrapped USDC
     # Polygon bridged tokens
     ("polygon", "USDC.E"): "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",  # Bridged USDC (PoS Bridge)
     # Avalanche bridged tokens
@@ -379,6 +380,26 @@ USDBC = Token(
     chain_overrides={
         "base": ChainTokenConfig(
             address="0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
+            decimals=6,
+            is_native=False,
+            bridge_type=BridgeType.BRIDGED,
+        ),
+    },
+)
+
+# Axelar-bridged USDC on Base (axlUSDC)
+AXLUSDC = Token(
+    symbol="axlUSDC",
+    name="Axelar Wrapped USDC",
+    decimals=6,
+    addresses={
+        "base": "0xEB466342C4d449BC9f53A865D5Cb90586f405215",
+    },
+    coingecko_id="axlusdc",
+    is_stablecoin=True,
+    chain_overrides={
+        "base": ChainTokenConfig(
+            address="0xEB466342C4d449BC9f53A865D5Cb90586f405215",
             decimals=6,
             is_native=False,
             bridge_type=BridgeType.BRIDGED,
@@ -1209,6 +1230,7 @@ DEFAULT_TOKENS: list[Token] = [
     USDC_E_POLYGON,
     USDC_E_AVALANCHE,
     USDBC,
+    AXLUSDC,
     USDT_E_AVALANCHE,
     WETH_E_AVALANCHE,
     # Wrapped Bitcoin
@@ -1361,6 +1383,7 @@ __all__ = [
     "USDC_E_POLYGON",
     "USDC_E_AVALANCHE",
     "USDBC",
+    "AXLUSDC",
     "USDT_E_AVALANCHE",
     "WETH_E_AVALANCHE",
     # Wrapped Bitcoin

@@ -34,6 +34,8 @@ EVENT_TOPICS: dict[str, str] = {
     # AddLiquidity(address,uint256[2],uint256[2],uint256,uint256) — includes fees array
     "AddLiquidity2": "0x26f55a85081d24974e85c6c00045d0f0453991e95873f52bff0d21af4079a768",
     "AddLiquidity3": "0x423f6495a08fc652425cf4ed0d1f9e37e571d9b9529b1c1c23cce780b2e7df0d",
+    # AddLiquidity(address,uint256[4],uint256[4],uint256,uint256) — 4-coin NG pool
+    "AddLiquidity4": "0x3f1915775e0c9a38a57a7bb7f1f9005f486fb904e1f84aa215364d567319a58d",
     # AddLiquidity for old-style Twocrypto (pre-NG, no fees array):
     # AddLiquidity(address,uint256[2],uint256,uint256) — provider, amounts, invariant, supply
     "AddLiquidityV2Crypto2": "0x540ab385f9b5d450a27404172caade516b3ba3f4be88239ac56a2ad1de2a1f5a",
@@ -41,6 +43,8 @@ EVENT_TOPICS: dict[str, str] = {
     # RemoveLiquidity(address,uint256[2],uint256[2],uint256)
     "RemoveLiquidity2": "0x7c363854ccf79623411f8995b362bce5eddff18c927edc6f5dbbb5e05819a82c",
     "RemoveLiquidity3": "0xa49d4cf02656aebf8c771f5a8585638a2a15ee6c97cf7205d4208ed7c1df252d",
+    # RemoveLiquidity(address,uint256[4],uint256[4],uint256) — 4-coin NG pool
+    "RemoveLiquidity4": "0x9878ca375e106f2a43c3b599fc624568131c4c9a4ba66a14563715763be9d59d",
     # RemoveLiquidity for old-style Twocrypto (no fees array):
     # RemoveLiquidity(address,uint256[2],uint256)
     "RemoveLiquidityV2Crypto2": "0xdd3c0336a16f1b64f172b7bb0dad5b2b3c7c76f91e8c4aafd6aae60dce800153",
@@ -80,9 +84,11 @@ EVENT_NAME_TO_TYPE: dict[str, CurveEventType] = {
     "TokenExchangeUnderlying": CurveEventType.TOKEN_EXCHANGE_UNDERLYING,
     "AddLiquidity2": CurveEventType.ADD_LIQUIDITY,
     "AddLiquidity3": CurveEventType.ADD_LIQUIDITY,
+    "AddLiquidity4": CurveEventType.ADD_LIQUIDITY,
     "AddLiquidityV2Crypto2": CurveEventType.ADD_LIQUIDITY,  # old-style Twocrypto (pre-NG)
     "RemoveLiquidity2": CurveEventType.REMOVE_LIQUIDITY,
     "RemoveLiquidity3": CurveEventType.REMOVE_LIQUIDITY,
+    "RemoveLiquidity4": CurveEventType.REMOVE_LIQUIDITY,
     "RemoveLiquidityV2Crypto2": CurveEventType.REMOVE_LIQUIDITY,  # old-style Twocrypto (pre-NG)
     "RemoveLiquidityOne": CurveEventType.REMOVE_LIQUIDITY_ONE,
     "RemoveLiquidityImbalance": CurveEventType.REMOVE_LIQUIDITY_IMBALANCE,
@@ -507,9 +513,12 @@ class CurveReceiptParser:
                 }
 
             # NG pools: amounts + fees + invariant + supply
-            # Determine 2-coin vs 3-coin based on data length
+            # Determine n_coins from data length: n_coins*2 + 2 fields, each 64 hex chars
+            # 2-coin: 6 * 64 = 384, 3-coin: 8 * 64 = 512, 4-coin: 10 * 64 = 640
             data_len = len(data)
-            if data_len >= 512:  # 8 * 64 for 3-coin
+            if data_len >= 640:  # 10 * 64 for 4-coin
+                n_coins = 4
+            elif data_len >= 512:  # 8 * 64 for 3-coin
                 n_coins = 3
             else:
                 n_coins = 2
@@ -578,9 +587,12 @@ class CurveReceiptParser:
                 }
 
             # NG pools: amounts + fees + supply (no invariant)
-            # Determine 2-coin vs 3-coin based on data length
+            # Determine n_coins from data length: n_coins*2 + 1 fields, each 64 hex chars
+            # 2-coin: 5 * 64 = 320, 3-coin: 7 * 64 = 448, 4-coin: 9 * 64 = 576
             data_len = len(data)
-            if data_len >= 448:  # 7 * 64 for 3-coin
+            if data_len >= 576:  # 9 * 64 for 4-coin
+                n_coins = 4
+            elif data_len >= 448:  # 7 * 64 for 3-coin
                 n_coins = 3
             else:
                 n_coins = 2
