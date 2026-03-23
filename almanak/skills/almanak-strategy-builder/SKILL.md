@@ -12,7 +12,7 @@ description: >-
   debugging strategy execution on Anvil forks. Do NOT use for general
   smart contract development, Solidity code, or non-strategy SDK internals.
 metadata:
-  version: "2.0.0"
+  version: "2.6.0"
   author: Almanak
   license: Apache-2.0
   type: documentation
@@ -596,35 +596,6 @@ sma = market.sma("WETH", period=20)
 ema = market.ema("WETH", period=12)
 # Both return MAData with: .value, .is_price_above, .is_price_below, .signal
 
-adx = market.adx("WETH", period=14)
-adx.adx             # Decimal (0-100, trend strength)
-adx.plus_di          # Decimal (+DI)
-adx.minus_di         # Decimal (-DI)
-adx.is_strong_trend  # bool (adx >= 25)
-adx.is_uptrend       # bool (+DI > -DI)
-adx.is_downtrend     # bool (-DI > +DI)
-
-obv = market.obv("WETH")
-obv.obv              # Decimal (OBV value)
-obv.signal_line      # Decimal (SMA of OBV)
-obv.is_bullish       # bool (OBV > signal)
-obv.is_bearish       # bool (OBV < signal)
-
-cci = market.cci("WETH", period=20)
-cci.value            # Decimal
-cci.is_oversold      # bool (value <= -100)
-cci.is_overbought    # bool (value >= 100)
-
-ich = market.ichimoku("WETH")
-ich.tenkan_sen       # Decimal (conversion line)
-ich.kijun_sen        # Decimal (base line)
-ich.senkou_span_a    # Decimal (leading span A)
-ich.senkou_span_b    # Decimal (leading span B)
-ich.cloud_top        # Decimal
-ich.cloud_bottom     # Decimal
-ich.is_bullish_crossover  # bool (tenkan > kijun)
-ich.is_above_cloud   # bool
-ich.signal           # "BUY" | "SELL" | "HOLD"
 ```
 
 ### Multi-Token Queries
@@ -1156,7 +1127,6 @@ class MyStrategy(IntentStrategy):
 | Blast | `BLAST` | `blast` |
 | Mantle | `MANTLE` | `mantle` |
 | Berachain | `BERACHAIN` | `berachain` |
-| Monad | `MONAD` | `monad` |
 | Solana | `SOLANA` | `solana` |
 
 <!-- almanak-sdk-end: supported-chains -->

@@ -30,7 +30,7 @@ El SDK de Almanak proporciona un framework completo para desarrollar, probar y d
 - **Arquitectura basada en intenciones** - Expresa tu lógica de trading como intenciones de alto nivel (Swap, LP, Borrow, etc.). El framework se encarga de la compilación y ejecución.
 - **Gestión de estado de tres niveles** - Persistencia automática con niveles HOT/WARM/COLD para mayor fiabilidad.
 - **Backtesting completo** - Simulación PnL, paper trading en forks de Anvil y barrido de parámetros.
-- **Soporte multi-cadena** - Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Plasma, Blast, Mantle, Berachain, y más.
+- **Soporte multi-cadena** - Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Plasma, Blast, Mantle, Berachain, Solana, y más.
 - **Integración de protocolos** - Uniswap V3, Aave V3, Morpho Blue, GMX V2, Pendle, Polymarket, Kraken, y más.
 - **Diseño sin custodia** - Control total de tus fondos a través de cuentas inteligentes Safe con generación automática del manifiesto de permisos Zodiac Roles.
 - **Listo para producción** - Alertas integradas, detección de bloqueos, gestión de emergencias y despliegues canary.

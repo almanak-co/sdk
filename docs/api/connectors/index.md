@@ -27,8 +27,10 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [Kraken](kraken.md) | CEX | N/A | `kraken` |
 | [Bridges](bridges.md) | Bridge | Multi-chain | `bridges` |
 | [Flash Loan](flash_loan.md) | Utility | Multi-chain | `flash_loan` |
+| Agni Finance | DEX | Mantle | `agni_finance` |
 | BenQi | Lending | Avalanche | `benqi` |
 | Drift | Perpetuals | Solana | `drift` |
+| Fluid DEX | DEX | Arbitrum | `fluid` |
 | Jupiter | DEX Aggregator | Solana | `jupiter` |
 | Jupiter Lend | Lending | Solana | `jupiter_lend` |
 | Kamino | Lending | Solana | `kamino` |
