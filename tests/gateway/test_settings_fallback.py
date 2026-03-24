@@ -63,3 +63,42 @@ class TestSettingsFallback:
         with patch.dict(os.environ, env, clear=False):
             settings = GatewaySettings()
             assert settings.private_key == "0xKEY"
+
+    # --- Third-party API key fallbacks (bare name -> Pydantic field) ---
+
+    def test_alchemy_api_key_bare_fallback(self):
+        """ALCHEMY_API_KEY populates alchemy_api_key when prefixed var is unset."""
+        env = {"ALCHEMY_API_KEY": "alchemy-test-key", "ALMANAK_GATEWAY_ALCHEMY_API_KEY": ""}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.alchemy_api_key == "alchemy-test-key"
+
+    def test_coingecko_api_key_bare_fallback(self):
+        """COINGECKO_API_KEY populates coingecko_api_key when prefixed var is unset."""
+        env = {"COINGECKO_API_KEY": "cg-test-key", "ALMANAK_GATEWAY_COINGECKO_API_KEY": ""}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.coingecko_api_key == "cg-test-key"
+
+    def test_prefixed_alchemy_key_takes_precedence(self):
+        """ALMANAK_GATEWAY_ALCHEMY_API_KEY takes priority over bare ALCHEMY_API_KEY."""
+        env = {
+            "ALMANAK_GATEWAY_ALCHEMY_API_KEY": "prefixed-key",
+            "ALCHEMY_API_KEY": "bare-key",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.alchemy_api_key == "prefixed-key"
+
+    def test_api_keys_empty_when_neither_set(self):
+        """alchemy_api_key and coingecko_api_key remain empty when no env vars are set."""
+        env = {
+            "ALMANAK_GATEWAY_ALCHEMY_API_KEY": "",
+            "ALCHEMY_API_KEY": "",
+            "ALMANAK_GATEWAY_COINGECKO_API_KEY": "",
+            "COINGECKO_API_KEY": "",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert not settings.alchemy_api_key
+            assert not settings.coingecko_api_key

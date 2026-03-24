@@ -342,7 +342,7 @@ class GatewayServer:
         if not self.settings.coingecko_api_key:
             logger.info(
                 "No CoinGecko API key -- using on-chain pricing (Chainlink oracles) "
-                "with free CoinGecko as fallback. Set ALMANAK_GATEWAY_COINGECKO_API_KEY "
+                "with free CoinGecko as fallback. Set COINGECKO_API_KEY "
                 "for CoinGecko as primary source."
             )
 

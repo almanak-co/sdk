@@ -138,6 +138,20 @@ class GatewaySettings(BaseSettings):
             if fallback:
                 self.signer_service_jwt = fallback
 
+        # Third-party API keys: the deployer and docker-compose inject these
+        # under their bare names (e.g. ALCHEMY_API_KEY, not
+        # ALMANAK_GATEWAY_ALCHEMY_API_KEY).  Fall back to the bare name so
+        # both Pydantic settings consumers and direct os.environ readers
+        # (like rpc_provider.py) work from the same env var.
+        if not self.alchemy_api_key:
+            fallback = os.environ.get("ALCHEMY_API_KEY")
+            if fallback:
+                self.alchemy_api_key = fallback
+        if not self.coingecko_api_key:
+            fallback = os.environ.get("COINGECKO_API_KEY")
+            if fallback:
+                self.coingecko_api_key = fallback
+
         return self
 
 
