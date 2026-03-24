@@ -2961,6 +2961,7 @@ class StrategyRunner:
         failed_step: str | None = None
         error_message: str | None = None
         failed_result = None  # Explicitly track the result of the failed step
+        callback_fired = False  # Track whether on_intent_executed was called for the failing step
 
         for i, intent in enumerate(intents):
             # Skip already-completed steps when resuming
@@ -3001,12 +3002,26 @@ class StrategyRunner:
                 result = await orchestrator.execute(intent_to_execute, price_map=price_map, price_oracle=price_oracle)
             except Exception as e:
                 logger.error(f"Step {step_num} execution failed: {e}")
+                # Notify strategy of failed execution (mirrors _execute_single_chain)
+                if hasattr(strategy, "on_intent_executed"):
+                    try:
+                        strategy.on_intent_executed(intent, success=False, result=None)
+                    except Exception as cb_err:
+                        logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+                callback_fired = True
                 failed_step = f"step-{step_num}"
                 error_message = str(e)
                 break
 
             if not result.success:
                 logger.error(f"Step {step_num} failed: {result.error}")
+                # Notify strategy of failed execution (mirrors _execute_single_chain)
+                if hasattr(strategy, "on_intent_executed"):
+                    try:
+                        strategy.on_intent_executed(intent, success=False, result=result)
+                    except Exception as cb_err:
+                        logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+                callback_fired = True
                 failed_result = result
                 failed_step = f"step-{step_num}"
                 error_message = result.error
@@ -3173,6 +3188,13 @@ class StrategyRunner:
                                     "Bridge normalization failed due to unresolved token metadata: %s",
                                     exc,
                                 )
+                                # Notify strategy of bridge failure (source tx succeeded but bridge normalization failed)
+                                if hasattr(strategy, "on_intent_executed"):
+                                    try:
+                                        strategy.on_intent_executed(intent, success=False, result=result)
+                                    except Exception as cb_err:
+                                        logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+                                callback_fired = True
                                 failed_step = f"step-{step_num}-bridge"
                                 error_message = str(exc)
                                 break
@@ -3195,21 +3217,59 @@ class StrategyRunner:
                                 )
                     else:
                         logger.error(f"Bridge failed: {bridge_status}")
+                        # Notify strategy of bridge failure (source tx succeeded but bridge failed)
+                        if hasattr(strategy, "on_intent_executed"):
+                            try:
+                                strategy.on_intent_executed(intent, success=False, result=result)
+                            except Exception as cb_err:
+                                logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+                        callback_fired = True
                         failed_step = f"step-{step_num}-bridge"
                         error_message = f"Bridge transfer failed: {bridge_status.get('error', 'Unknown')}"
                         break
 
                 except TimeoutError as e:
                     logger.error(f"Bridge timeout: {e}")
+                    # Notify strategy of bridge timeout (source tx succeeded but bridge timed out)
+                    if hasattr(strategy, "on_intent_executed"):
+                        try:
+                            strategy.on_intent_executed(intent, success=False, result=result)
+                        except Exception as cb_err:
+                            logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+                    callback_fired = True
                     failed_step = f"step-{step_num}-bridge"
                     error_message = "Bridge transfer timed out after 5 minutes"
                     break
+
+            # Notify strategy of successful execution (mirrors _execute_single_chain lines 2459-2478)
+            if hasattr(strategy, "on_intent_executed"):
+                try:
+                    strategy.on_intent_executed(intent, success=True, result=result)
+                except Exception as e:
+                    logger.warning(f"Error in on_intent_executed callback: {e}")
+
+            # Save strategy state after successful execution
+            if hasattr(strategy, "save_state"):
+                try:
+                    strategy.save_state()
+                except Exception as e:
+                    logger.warning(f"Error saving strategy state: {e}")
 
             # Save progress after each step completes successfully
             progress.completed_step_index = i
             progress.previous_amount_received = previous_amount_received
             await self._save_execution_progress(strategy_id, progress)
             logger.info(f"Step {step_num}/{len(intents)} completed, progress saved")
+
+        # Ensure strategy is notified of failure even for paths that didn't fire the callback
+        # inline (e.g. source TX verification failures, no-tx_hash, no-RPC-URL).
+        # This single finalization block covers all break exits without per-exit patching.
+        if failed_step and not callback_fired:
+            if hasattr(strategy, "on_intent_executed"):
+                try:
+                    strategy.on_intent_executed(intent, success=False, result=failed_result)
+                except Exception as cb_err:
+                    logger.warning(f"Error in on_intent_executed callback: {cb_err}")
 
         # Build result
         if failed_step:
