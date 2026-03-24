@@ -47,6 +47,12 @@ from almanak.framework.execution.simulator.config import is_local_rpc
 
 logger = logging.getLogger(__name__)
 
+# Timeout for waiting for transaction receipts during simulation state setup.
+# 30s accommodates slower chains (Avalanche, Ethereum mainnet forks) where
+# Aave V3 supply and similar complex transactions can take 12-15s.
+# 10s was too short and caused spurious failures on non-L2 chains (VIB-1842).
+_STATE_SETUP_TX_TIMEOUT = 30
+
 
 class LocalSimulator(Simulator):
     """Simulator that uses eth_estimateGas against a local or remote RPC.
@@ -258,7 +264,7 @@ class LocalSimulator(Simulator):
                 tx_params["to"] = web3.to_checksum_address(tx.to)
 
             tx_hash = await web3.eth.send_transaction(tx_params)
-            receipt = await web3.eth.wait_for_transaction_receipt(tx_hash, timeout=10)
+            receipt = await web3.eth.wait_for_transaction_receipt(tx_hash, timeout=_STATE_SETUP_TX_TIMEOUT)
 
             if receipt["status"] != 1:
                 return False, "Transaction reverted"

@@ -481,3 +481,16 @@ class TestMultiTxSimulationSkip:
 
         assert not result.success
         assert "Approve transaction" in result.revert_reason
+
+
+class TestStateSetupTimeout:
+    """Tests for state setup transaction timeout (VIB-1842)."""
+
+    def test_state_setup_timeout_is_at_least_30s(self):
+        """State setup timeout must be >= 30s for slower chains (Avalanche, Ethereum)."""
+        from almanak.framework.execution.simulator.local import _STATE_SETUP_TX_TIMEOUT
+
+        assert _STATE_SETUP_TX_TIMEOUT >= 30, (
+            f"State setup timeout is {_STATE_SETUP_TX_TIMEOUT}s, must be >= 30s "
+            "to accommodate Avalanche/Ethereum Anvil forks (VIB-1842)"
+        )
