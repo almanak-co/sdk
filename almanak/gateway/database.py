@@ -145,6 +145,26 @@ CREATE INDEX IF NOT EXISTS idx_v2_clob_orders_status
 
 CREATE INDEX IF NOT EXISTS idx_v2_clob_orders_market
     ON v2_clob_orders (agent_id, market_id, status);
+
+-- Timeline events table (dashboard data) ------------------------------------
+CREATE TABLE IF NOT EXISTS v2_timeline_events (
+    id            BIGSERIAL PRIMARY KEY,
+    event_id      TEXT NOT NULL UNIQUE,
+    agent_id      TEXT NOT NULL,
+    timestamp     TIMESTAMPTZ NOT NULL,
+    event_type    TEXT NOT NULL,
+    description   TEXT,
+    tx_hash       TEXT,
+    chain         TEXT,
+    details_json  JSONB,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_v2_timeline_events_agent_time
+    ON v2_timeline_events (agent_id, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_v2_timeline_events_agent_type
+    ON v2_timeline_events (agent_id, event_type);
 """
 
 

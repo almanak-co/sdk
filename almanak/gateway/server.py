@@ -302,13 +302,15 @@ class GatewayServer:
             interceptors=interceptors,
         )
 
-        # Determine effective DB path for timeline: explicit override or unified gateway DB
-        effective_timeline_db = self.settings.timeline_db_path or self.settings.gateway_db_path
-
-        # Initialize TimelineStore with persistent path
-        # This must happen before services are created so they all share the same store
-        get_timeline_store(db_path=effective_timeline_db)
-        logger.debug(f"TimelineStore initialized with persistent storage: {effective_timeline_db}")
+        # Initialize TimelineStore: PostgreSQL for deployed mode, SQLite for local dev.
+        # This must happen before services are created so they all share the same store.
+        if self.settings.database_url:
+            get_timeline_store(database_url=self.settings.database_url)
+            logger.debug("TimelineStore initialized with PostgreSQL backend")
+        else:
+            effective_timeline_db = self.settings.timeline_db_path or self.settings.gateway_db_path
+            get_timeline_store(db_path=effective_timeline_db)
+            logger.debug(f"TimelineStore initialized with SQLite: {effective_timeline_db}")
 
         # Initialize InstanceRegistry with the same gateway DB
         from almanak.gateway.registry import get_instance_registry
