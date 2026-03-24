@@ -898,6 +898,19 @@ class UniswapV3ReceiptParser:
         t1_symbol = overrides.get("token1_symbol", self.token1_symbol) or ""
         t1_decimals = overrides.get("token1_decimals", self.token1_decimals)
 
+        # Track whether decimals are resolved or still at the 18-default (VIB-592).
+        # Branch 1 of _resolve_tokens_from_transfers sets self._token*_decimals_resolved.
+        # Branch 2 provides decimals via overrides dict without setting the flag.
+        t0_unresolved = not self._token0_decimals_resolved and "token0_decimals" not in overrides
+        t1_unresolved = not self._token1_decimals_resolved and "token1_decimals" not in overrides
+        if t0_unresolved or t1_unresolved:
+            logger.warning(
+                f"Token decimals unresolved after Transfer analysis "
+                f"(token0={'unresolved' if t0_unresolved else 'ok'}, "
+                f"token1={'unresolved' if t1_unresolved else 'ok'}). "
+                f"Decimal amounts may be incorrect for non-18-decimal tokens."
+            )
+
         # Determine which token is in/out
         if swap_event.token0_is_input:
             token_in = t0_addr

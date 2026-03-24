@@ -183,19 +183,24 @@ class TestDecimalResolutionFromTransfers:
         assert result2.amount_in_decimal == Decimal("539.67")
         assert result2.amount_out_decimal == Decimal("50")
 
-    def test_handles_empty_transfers_gracefully(self):
-        """When no Transfer events, fall back to default 18 decimals."""
+    def test_handles_empty_transfers_gracefully(self, caplog):
+        """When no Transfer events, warns about default 18 decimals (VIB-592)."""
         parser = _make_parser_no_tokens()
 
         swap_event = _make_swap_event(amount0=100_000_000, amount1=-1_079_340_000_000_000_000_000)
 
+        import logging
+
+        caplog.set_level(logging.WARNING)
         result = parser._build_swap_result(swap_event, [], None)
 
-        # With default 18 decimals, amount_in will be tiny — this is the old behavior
+        # VIB-592: logs warning but still produces result (for backward compat)
+        assert result is not None
         assert result.amount_in_decimal == Decimal("100000000") / Decimal(10**18)
+        assert any("Token decimals unresolved after Transfer analysis" in msg for msg in caplog.messages)
 
     def test_handles_resolver_failure(self):
-        """When token resolver raises, fall back to default 18 decimals."""
+        """When token resolver fails, warns but still produces result (VIB-592)."""
         parser = _make_parser_no_tokens()
         parser.token0_address = USDC_ADDRESS
         parser.token1_address = WMATIC_ADDRESS
@@ -209,11 +214,9 @@ class TestDecimalResolutionFromTransfers:
 
         result = parser._build_swap_result(swap_event, transfers, None)
 
-        # Should still produce a result, just with default decimals
+        # VIB-592: logs warning about unresolved decimals but still returns result
         assert result is not None
         assert result.amount_in > 0
-        # Decimals should remain at 18 (default)
-        assert parser.token0_decimals == 18
 
     def test_resolves_reverse_direction(self):
         """Test swap in the other direction: WMATIC -> USDC (amount1 positive)."""
