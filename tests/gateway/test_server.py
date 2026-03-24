@@ -1,6 +1,7 @@
 """Tests for gateway gRPC server."""
 
 import asyncio
+from unittest.mock import AsyncMock, patch
 
 import grpc
 import pytest
@@ -8,7 +9,7 @@ import pytest_asyncio
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.server import GatewayServer
+from almanak.gateway.server import GatewayServer, _AIOHTTP_SHUTDOWN_GRACE_SECONDS
 
 
 @pytest_asyncio.fixture
@@ -108,3 +109,25 @@ async def test_heartbeat_ttl_task_lifecycle():
 
     await server.stop()
     assert server._heartbeat_ttl_task.done()
+
+
+@pytest.mark.asyncio
+async def test_stop_awaits_aiohttp_grace_period():
+    """stop() sleeps for _AIOHTTP_SHUTDOWN_GRACE_SECONDS to let aiohttp connectors drain (VIB-1832)."""
+    settings = GatewaySettings(grpc_port=50057, metrics_enabled=False, audit_enabled=False, allow_insecure=True)
+    server = GatewayServer(settings)
+    await server.start()
+
+    original_sleep = asyncio.sleep
+    sleep_calls: list[float] = []
+
+    async def tracking_sleep(delay, *args, **kwargs):
+        sleep_calls.append(delay)
+        await original_sleep(delay, *args, **kwargs)
+
+    with patch("almanak.gateway.server.asyncio.sleep", side_effect=tracking_sleep):
+        await server.stop()
+
+    assert _AIOHTTP_SHUTDOWN_GRACE_SECONDS in sleep_calls, (
+        f"Expected asyncio.sleep({_AIOHTTP_SHUTDOWN_GRACE_SECONDS}) during stop(), got calls: {sleep_calls}"
+    )

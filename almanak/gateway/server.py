@@ -44,6 +44,10 @@ from almanak.gateway.timeline import get_timeline_store
 
 logger = logging.getLogger(__name__)
 
+# Grace period (seconds) after closing servicer sessions to let aiohttp's
+# underlying TCP connectors finalize cleanup before the event loop exits.
+_AIOHTTP_SHUTDOWN_GRACE_SECONDS = 0.25
+
 
 class _RegisterChainsServicer(gateway_pb2_grpc.HealthServicer):
     """Custom Health servicer that adds RegisterChains RPC.
@@ -593,6 +597,10 @@ class GatewayServer:
         ):
             if servicer:
                 await servicer.close()
+        # Allow aiohttp's underlying connectors to finalize cleanup.
+        # Without this yield, session.__del__ fires the "Unclosed client session"
+        # warning before the TCP transport has been torn down (VIB-1832).
+        await asyncio.sleep(_AIOHTTP_SHUTDOWN_GRACE_SECONDS)
         # Reset LifecycleStore singleton so a subsequent start() gets a fresh instance
         reset_lifecycle_store()
 
