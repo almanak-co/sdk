@@ -219,9 +219,17 @@ class ResultEnricher:
             return result
         logger.debug(f"Enrichment: found {len(receipts)} receipt(s) to process")
 
-        # Extract each field in the spec
-        for field in spec:
-            self._extract_field(result, parser, receipts, field, intent_type)
+        # Install a temporary parse_receipt cache to avoid redundant parsing.
+        # Without this, each extract_* method calls parse_receipt() independently,
+        # meaning the same receipt is parsed N times for N extraction fields
+        # (e.g., 5x for PERP_OPEN with position_id, size_delta, collateral, entry_price, leverage).
+        self._install_parse_cache(parser)
+        try:
+            # Extract each field in the spec
+            for field in spec:
+                self._extract_field(result, parser, receipts, field, intent_type)
+        finally:
+            self._remove_parse_cache(parser)
 
         # Log enrichment summary with actual extracted values
         extracted_parts = []
@@ -423,6 +431,49 @@ class ResultEnricher:
             Protocol name or None
         """
         return getattr(intent, "protocol", None)
+
+    @staticmethod
+    def _install_parse_cache(parser: Any) -> None:
+        """Install a temporary cache on the parser's parse_receipt method.
+
+        This wraps the parser's parse_receipt() so repeated calls with the same
+        receipt return the cached result. The cache key is the receipt's
+        transactionHash (or id() as fallback for receipts without a hash).
+
+        This is critical for performance: PERP_OPEN enrichment calls 5
+        extract_* methods, each internally calling parse_receipt(). Without
+        caching, the same receipt is parsed 5x per TX.
+        """
+        if not hasattr(parser, "parse_receipt"):
+            return
+
+        original = parser.parse_receipt
+        # Guard against double-wrapping (e.g., if enrich() is called recursively)
+        if getattr(original, "_is_cached_wrapper", False):
+            return
+
+        cache: dict[str, Any] = {}
+
+        def cached_parse_receipt(receipt: dict[str, Any]) -> Any:
+            # Use transactionHash as key, fall back to id() for hashability
+            tx_hash = receipt.get("transactionHash") or receipt.get("tx_hash")
+            if tx_hash is None:
+                tx_hash = id(receipt)
+            key = str(tx_hash)
+            if key not in cache:
+                cache[key] = original(receipt)
+            return cache[key]
+
+        cached_parse_receipt._is_cached_wrapper = True  # type: ignore[attr-defined]
+        cached_parse_receipt._original = original  # type: ignore[attr-defined]
+        parser.parse_receipt = cached_parse_receipt
+
+    @staticmethod
+    def _remove_parse_cache(parser: Any) -> None:
+        """Remove the temporary parse_receipt cache, restoring the original method."""
+        current = getattr(parser, "parse_receipt", None)
+        if current is not None and getattr(current, "_is_cached_wrapper", False):
+            parser.parse_receipt = current._original
 
     def _collect_receipts(self, result: ExecutionResult) -> list[dict[str, Any]]:
         """Collect receipts from successful transaction results.
