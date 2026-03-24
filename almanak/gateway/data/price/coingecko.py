@@ -19,7 +19,6 @@ Example:
 
 import asyncio
 import logging
-import os
 import random
 import time
 from dataclasses import dataclass
@@ -36,6 +35,7 @@ from almanak.framework.data.interfaces import (
     DataSourceUnavailable,
     PriceResult,
 )
+from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -303,7 +303,7 @@ class CoinGeckoPriceSource(BasePriceSource):
             stale_confidence_multiplier: Confidence multiplier for stale data (0-1).
                 Default 0.7 means stale data has 70% of original confidence.
         """
-        self._api_key = os.environ.get("COINGECKO_API_KEY", "") if api_key is None else api_key
+        self._api_key = (_get_gateway_api_key("COINGECKO_API_KEY") or "") if api_key is None else api_key
         self._cache_ttl = cache_ttl
         self._request_timeout = request_timeout
         self._stale_confidence_multiplier = stale_confidence_multiplier

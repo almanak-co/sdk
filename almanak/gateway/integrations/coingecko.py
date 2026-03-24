@@ -9,12 +9,12 @@ Supports both free and pro API endpoints based on API key availability.
 """
 
 import logging
-import os
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from almanak.gateway.integrations.base import BaseIntegration
+from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +78,9 @@ class CoinGeckoIntegration(BaseIntegration):
             api_key: Optional CoinGecko API key. Uses pro API if provided.
             request_timeout: HTTP request timeout in seconds
         """
-        # Check for API key in environment
-        api_key = api_key or os.environ.get("COINGECKO_API_KEY")
+        # Check for API key in environment (prefixed for V2 sidecar, bare for local dev)
+        if api_key is None:
+            api_key = _get_gateway_api_key("COINGECKO_API_KEY")
 
         # Select API base and rate limit based on API key
         if api_key:
