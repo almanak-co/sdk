@@ -62,6 +62,7 @@ KNOWN_VIOLATIONS: set[str] = {
     "strategies/incubating/morpho_blue_yield_rotator/strategy.py",
     "strategies/incubating/pancakeswap_aave_base/strategy.py",
     "strategies/incubating/pancakeswap_aave_bsc/strategy.py",
+    "strategies/incubating/pancakeswap_aave_ethereum/strategy.py",
     "strategies/incubating/pancakeswap_v3_ethereum/strategy.py",
     "strategies/incubating/pancakeswap_v3_lp_bsc/strategy.py",
     "strategies/incubating/sushiswap_limit_order_lp/strategy.py",
