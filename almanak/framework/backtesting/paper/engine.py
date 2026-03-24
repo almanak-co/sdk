@@ -593,7 +593,29 @@ async def create_market_snapshot_from_fork(
             snapshot._balance_cache[token] = TokenBalance(  # type: ignore[assignment]
                 symbol=token, balance=amount, balance_usd=balance_usd
             )
+            logger.debug(f"Cached balance: {token} = {amount} (${balance_usd:.2f})")
 
+        # Cross-populate native <-> wrapped alias for the snapshot's chain only.
+        # Strategies may query market.balance("WETH") when the engine funded "ETH" (or vice versa).
+        from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
+
+        chain_lower = chain.lower() if isinstance(chain, str) else str(chain).lower()
+        chain_native = NATIVE_TOKEN_SYMBOLS.get(chain_lower)
+        if chain_native:
+            from almanak.framework.data.models import _NATIVE_TO_WRAPPED
+
+            chain_wrapped = _NATIVE_TO_WRAPPED.get(chain_native)
+            if chain_wrapped:
+                if chain_native in snapshot._balance_cache and chain_wrapped not in snapshot._balance_cache:
+                    src_bal: TokenBalance = snapshot._balance_cache[chain_native]  # type: ignore[assignment]
+                    snapshot._balance_cache[chain_wrapped] = TokenBalance(  # type: ignore[assignment]
+                        symbol=chain_wrapped, balance=src_bal.balance, balance_usd=src_bal.balance_usd
+                    )
+                elif chain_wrapped in snapshot._balance_cache and chain_native not in snapshot._balance_cache:
+                    src_bal = snapshot._balance_cache[chain_wrapped]  # type: ignore[assignment]
+                    snapshot._balance_cache[chain_native] = TokenBalance(  # type: ignore[assignment]
+                        symbol=chain_native, balance=src_bal.balance, balance_usd=src_bal.balance_usd
+                    )
     return snapshot
 
 
@@ -662,6 +684,7 @@ class PaperTrader:
     _used_hardcoded_fallback: bool = field(default=False, init=False, repr=False)
     _fallback_usage: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _rsi_calculator: "RSICalculator | None" = field(default=None, init=False, repr=False)
+    _cached_prices: dict[str, Decimal] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
