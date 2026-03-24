@@ -305,7 +305,7 @@ Intent.borrow(
     collateral_amount=Decimal("10"),
     borrow_token="USDC",
     borrow_amount=Decimal("5000"),
-    interest_rate_mode="variable",  # Aave: "variable" or "stable"
+    interest_rate_mode="variable",  # Aave: "variable" only (stable deprecated)
     market_id=None,                 # Required for Morpho Blue
 )
 ```

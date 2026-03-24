@@ -760,17 +760,19 @@ class TestRepayIntentInterestRateMode:
         )
         assert intent.interest_rate_mode == "variable"
 
-    def test_repay_accepts_stable_interest_rate_mode(self) -> None:
-        """Intent.repay() should accept interest_rate_mode='stable'."""
+    def test_repay_rejects_stable_interest_rate_mode(self) -> None:
+        """Intent.repay() should reject interest_rate_mode='stable' (deprecated on Aave V3)."""
+        from pydantic import ValidationError
+
         from almanak.framework.intents.vocabulary import Intent
 
-        intent = Intent.repay(
-            protocol="aave_v3",
-            token="USDC",
-            amount=Decimal("500"),
-            interest_rate_mode="stable",
-        )
-        assert intent.interest_rate_mode == "stable"
+        with pytest.raises(ValidationError, match="Input should be 'variable'"):
+            Intent.repay(
+                protocol="aave_v3",
+                token="USDC",
+                amount=Decimal("500"),
+                interest_rate_mode="stable",
+            )
 
     def test_repay_defaults_to_none_interest_rate_mode(self) -> None:
         """Intent.repay() should default interest_rate_mode to None."""

@@ -94,7 +94,7 @@ class InvalidProtocolParameterError(ValueError):
     """Raised when a protocol-specific parameter is invalid or not supported.
 
     Protocol-specific parameters are validated against the protocol's capabilities.
-    For example, Aave supports 'variable' and 'stable' interest rate modes, while
+    For example, Aave supports 'variable' interest rate mode, while
     other protocols may not support interest rate mode selection at all.
 
     Attributes:
@@ -148,8 +148,8 @@ ChainedAmount = Decimal | Literal["all"]
 
 # Interest rate mode type for lending protocols like Aave
 # - 'variable': Interest rate fluctuates based on supply/demand
-# - 'stable': Interest rate is fixed (may be higher than variable)
-InterestRateMode = Literal["variable", "stable"]
+# Note: 'stable' rate was deprecated on Aave V3 and Spark (most assets disabled)
+InterestRateMode = Literal["variable"]
 
 
 # =============================================================================
@@ -161,7 +161,7 @@ InterestRateMode = Literal["variable", "stable"]
 PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
     "aave_v3": {
         "supports_interest_rate_mode": True,
-        "interest_rate_modes": ["variable", "stable"],
+        "interest_rate_modes": ["variable"],  # stable rate deprecated on Aave V3 (most assets disabled)
         "supports_collateral_toggle": True,
         "operations": ["supply", "withdraw", "borrow", "repay"],
     },
@@ -179,7 +179,7 @@ PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
     },
     "spark": {
         "supports_interest_rate_mode": True,
-        "interest_rate_modes": ["variable", "stable"],
+        "interest_rate_modes": ["variable"],  # stable rate deprecated on Spark (most assets disabled)
         "supports_collateral_toggle": True,
         "operations": ["supply", "withdraw", "borrow", "repay"],
     },
@@ -598,7 +598,7 @@ class BorrowIntent(AlmanakImmutableModel):
         collateral_amount: Amount of collateral to supply, or "all" for previous step output
         borrow_token: Token to borrow
         borrow_amount: Amount to borrow
-        interest_rate_mode: Interest rate mode for protocols that support it (Aave: 'variable' | 'stable')
+        interest_rate_mode: Interest rate mode for protocols that support it (Aave: 'variable')
         chain: Optional target chain for execution (defaults to strategy's primary chain)
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
@@ -608,7 +608,7 @@ class BorrowIntent(AlmanakImmutableModel):
         the previous step in a sequence as collateral.
 
         The interest_rate_mode parameter is protocol-specific:
-        - Aave V3: Supports 'variable' (default) and 'stable' modes
+        - Aave V3: Supports 'variable' (default). Stable rate is deprecated.
         - Morpho: Does not support rate mode selection (parameter is rejected)
         - Compound V3: Does not support rate mode selection (parameter is rejected)
 
@@ -710,7 +710,7 @@ class RepayIntent(AlmanakImmutableModel):
         token: Token to repay
         amount: Amount to repay, or "all" to use output from previous step
         repay_full: If True, repay the full outstanding debt
-        interest_rate_mode: Interest rate mode for protocols that support it (Aave: 'variable' | 'stable')
+        interest_rate_mode: Interest rate mode for protocols that support it (Aave: 'variable')
         chain: Optional target chain for execution (defaults to strategy's primary chain)
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
@@ -720,8 +720,8 @@ class RepayIntent(AlmanakImmutableModel):
         step in a sequence.
 
         The interest_rate_mode parameter is protocol-specific:
-        - Aave V3: Supports 'variable' (default) and 'stable' modes. Must match the
-          rate mode used when borrowing.
+        - Aave V3: Supports 'variable' (default). Stable rate is deprecated. Must match
+          the rate mode used when borrowing.
         - Morpho: Does not support rate mode selection (parameter is rejected)
         - Compound V3: Does not support rate mode selection (parameter is rejected)
 
@@ -2458,7 +2458,7 @@ class Intent:
             collateral_amount: Amount of collateral to supply, or "all" for previous step output
             borrow_token: Token to borrow
             borrow_amount: Amount to borrow
-            interest_rate_mode: Interest rate mode for Aave ('variable' | 'stable').
+            interest_rate_mode: Interest rate mode for Aave ('variable' only, stable is deprecated).
                 Only applies to protocols that support rate mode selection.
                 For Aave V3, defaults to 'variable' if not specified.
             market_id: Market identifier for isolated lending protocols (e.g., Morpho Blue).
@@ -2520,8 +2520,8 @@ class Intent:
             amount: Amount to repay, or "all" to use previous step output
             repay_full: If True, repay the full outstanding debt
             interest_rate_mode: Interest rate mode for protocols that support it.
-                Aave V3: 'variable' (default) or 'stable'. Must match the rate mode
-                used when borrowing.
+                Aave V3: 'variable' (default). Stable rate is deprecated. Must match
+                the rate mode used when borrowing.
             market_id: Market identifier for isolated lending protocols (e.g., Morpho Blue).
                 Required for morpho/morpho_blue, ignored for aave_v3.
             chain: Target chain for execution (defaults to strategy's primary chain)

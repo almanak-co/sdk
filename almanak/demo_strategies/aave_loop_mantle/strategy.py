@@ -61,7 +61,7 @@ class AaveLoopMantleStrategy(IntentStrategy):
         max_loops: Number of supply/borrow cycles (default: 3)
         min_health_factor: Safety floor (default: 1.5)
         max_slippage_bps: Swap slippage tolerance (default: 100 = 1%)
-        interest_rate_mode: "variable" or "stable" (default: variable)
+        interest_rate_mode: "variable" (stable rate deprecated on Aave V3) (default: variable)
     """
 
     def __init__(self, *args, **kwargs):

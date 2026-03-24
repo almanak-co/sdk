@@ -34,7 +34,6 @@ from .bridge import (
     InvalidBridgeError,
 )
 from .compiler import (
-    AAVE_STABLE_RATE_MODE,
     AAVE_VARIABLE_RATE_MODE,
     DEFAULT_GAS_ESTIMATES,
     LENDING_POOL_ADDRESSES,
@@ -195,7 +194,6 @@ __all__ = [
     "LP_POSITION_MANAGERS",
     "LENDING_POOL_ADDRESSES",
     "AAVE_VARIABLE_RATE_MODE",
-    "AAVE_STABLE_RATE_MODE",
     # State Machine
     "IntentState",
     "IntentStateMachine",

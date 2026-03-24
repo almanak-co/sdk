@@ -579,8 +579,7 @@ AAVE_FLASH_LOAN_SELECTOR = "0xab9c4b5d"
 AAVE_FLASH_LOAN_SIMPLE_SELECTOR = "0x42b0b77c"
 
 # Aave interest rate modes
-AAVE_VARIABLE_RATE_MODE = 2  # Variable rate (most common)
-AAVE_STABLE_RATE_MODE = 1  # Stable rate (being deprecated on most assets)
+AAVE_VARIABLE_RATE_MODE = 2  # Variable rate (stable rate deprecated on Aave V3)
 
 
 # Balancer Vault function selectors
@@ -7703,12 +7702,9 @@ class IntentCompiler:
                     warnings.append("No collateral supplied - borrowing against existing collateral")
 
                 # Resolve interest rate mode: use intent value or default to variable
+                # Note: stable rate is deprecated on Aave V3, rejected at intent layer
                 aave_borrow_rate_mode = AAVE_VARIABLE_RATE_MODE
                 borrow_rate_mode_label = "variable"
-                if intent.interest_rate_mode is not None:
-                    if intent.interest_rate_mode == "stable":
-                        aave_borrow_rate_mode = AAVE_STABLE_RATE_MODE
-                        borrow_rate_mode_label = "stable"
 
                 # Build borrow TX
                 borrow_calldata = adapter.get_borrow_calldata(
@@ -7767,7 +7763,6 @@ class IntentCompiler:
             elif protocol_lower == "spark":
                 from ..connectors.spark import (
                     SPARK_POOL_ADDRESSES,
-                    SPARK_STABLE_RATE_MODE,
                     SPARK_VARIABLE_RATE_MODE,
                     SparkAdapter,
                     SparkConfig,
@@ -7867,12 +7862,9 @@ class IntentCompiler:
                     warnings.append("No collateral supplied - borrowing against existing collateral")
 
                 # Resolve interest rate mode: use intent value or default to variable
+                # Note: stable rate is deprecated on Spark, rejected at intent layer
                 spark_borrow_rate_mode = SPARK_VARIABLE_RATE_MODE
                 spark_borrow_rate_label = "variable"
-                if intent.interest_rate_mode is not None:
-                    if intent.interest_rate_mode == "stable":
-                        spark_borrow_rate_mode = SPARK_STABLE_RATE_MODE
-                        spark_borrow_rate_label = "stable"
 
                 # Build borrow TX via Spark adapter
                 borrow_result = spark_adapter.borrow(
@@ -8461,12 +8453,9 @@ class IntentCompiler:
                         actual_repay_address = weth_address
 
                 # Resolve interest rate mode: use intent value or default to variable
+                # Note: stable rate is deprecated on Aave V3, rejected at intent layer
                 aave_rate_mode = AAVE_VARIABLE_RATE_MODE
                 rate_mode_label = "variable"
-                if intent.interest_rate_mode is not None:
-                    if intent.interest_rate_mode == "stable":
-                        aave_rate_mode = AAVE_STABLE_RATE_MODE
-                        rate_mode_label = "stable"
 
                 repay_calldata = adapter.get_repay_calldata(
                     asset=actual_repay_address,
@@ -8516,7 +8505,6 @@ class IntentCompiler:
             elif protocol_lower == "spark":
                 from ..connectors.spark import (
                     SPARK_POOL_ADDRESSES,
-                    SPARK_STABLE_RATE_MODE,
                     SPARK_VARIABLE_RATE_MODE,
                     SparkAdapter,
                     SparkConfig,
@@ -8565,12 +8553,9 @@ class IntentCompiler:
                         warnings.append("Native token debt: using WETH for repayment")
 
                 # Resolve interest rate mode: use intent value or default to variable
+                # Note: stable rate is deprecated on Spark, rejected at intent layer
                 spark_repay_rate_mode = SPARK_VARIABLE_RATE_MODE
                 spark_repay_rate_label = "variable"
-                if intent.interest_rate_mode is not None:
-                    if intent.interest_rate_mode == "stable":
-                        spark_repay_rate_mode = SPARK_STABLE_RATE_MODE
-                        spark_repay_rate_label = "stable"
 
                 # Build repay TX via Spark adapter
                 repay_result = spark_adapter.repay(
@@ -12725,5 +12710,4 @@ __all__ = [
     "LP_POSITION_MANAGERS",
     "LENDING_POOL_ADDRESSES",
     "AAVE_VARIABLE_RATE_MODE",
-    "AAVE_STABLE_RATE_MODE",
 ]

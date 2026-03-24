@@ -122,7 +122,7 @@ class AaveBorrowStrategy(IntentStrategy):
     - borrow_token: Token to borrow (default: "USDC")
     - ltv_target: Target LTV ratio (default: 0.5 = 50%)
     - min_health_factor: Minimum health factor to maintain (default: 2.0)
-    - interest_rate_mode: "variable" or "stable" (default: "variable")
+    - interest_rate_mode: "variable" (stable rate deprecated on Aave V3) (default: "variable")
 
     Example Config:
     ---------------
@@ -165,7 +165,7 @@ class AaveBorrowStrategy(IntentStrategy):
         # Risk parameters
         self.min_health_factor = Decimal(str(self.get_config("min_health_factor", "2.0")))
 
-        # Interest rate mode: "variable" or "stable"
+        # Interest rate mode: "variable" (stable rate deprecated on Aave V3)
         self.interest_rate_mode = self.get_config("interest_rate_mode", "variable")
 
         # Force action for testing
