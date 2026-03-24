@@ -27,6 +27,7 @@ Usage:
 import asyncio
 import logging
 import os
+import re
 import socket
 import subprocess
 import time
@@ -35,6 +36,51 @@ from decimal import Decimal
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+_cached_anvil_version: tuple[int, int, int] | None = None
+_anvil_version_detected: bool = False
+
+
+def _get_anvil_version() -> tuple[int, int, int] | None:
+    """Detect the installed Anvil version.
+
+    Returns:
+        (major, minor, patch) tuple, or None if detection fails.
+        On failure, returns None so callers can fail-safe (skip unsupported flags).
+        Only caches successful detections — transient failures are retried on next call.
+    """
+    global _cached_anvil_version, _anvil_version_detected
+    if _anvil_version_detected:
+        return _cached_anvil_version
+    try:
+        output = subprocess.run(
+            ["anvil", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        match = re.search(r"(\d+)\.(\d+)\.(\d+)", output)
+        if match:
+            _cached_anvil_version = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            _anvil_version_detected = True
+            return _cached_anvil_version
+    except Exception:
+        pass
+    return None
+
+
+def _anvil_supports_no_gas_cap() -> bool:
+    """Check if the installed Anvil version supports --no-gas-cap.
+
+    The --no-gas-cap flag was added in Anvil 0.4.0. On older versions (e.g. 0.3.0)
+    it crashes with "unexpected argument". If version detection fails, default to
+    False (fail-safe: skip the flag rather than crash Anvil).
+    """
+    version = _get_anvil_version()
+    if version is None:
+        return False
+    return version >= (0, 4, 0)
 
 
 # =============================================================================
@@ -846,20 +892,10 @@ class RollingForkManager:
         cmd.extend(["--timeout", "120000"])  # 120s upstream RPC timeout
         cmd.extend(["--retries", "3"])  # Retry failed upstream calls
 
-        # Disable gas price cap so high-gas chains (e.g. Polygon) don't fail
-        # --no-gas-cap requires Anvil >=0.4.0; skip on older versions to avoid startup failure
-        try:
-            import subprocess as _sp
-
-            _ver_out = _sp.check_output(["anvil", "--version"], text=True, timeout=5).strip()
-            _ver = _ver_out.split()[1] if len(_ver_out.split()) > 1 else "0.0.0"
-            _major, _minor = (int(x) for x in _ver.split(".")[:2])
-            if (_major, _minor) >= (0, 4):
-                cmd.append("--no-gas-cap")
-            else:
-                logger.debug("Anvil %s does not support --no-gas-cap, skipping", _ver)
-        except Exception:
-            logger.debug("Could not detect Anvil version, skipping --no-gas-cap")
+        # Disable gas price cap so high-gas chains (e.g. Polygon) don't fail.
+        # --no-gas-cap was added in Anvil 0.4.0; older versions crash on this flag.
+        if _anvil_supports_no_gas_cap():
+            cmd.append("--no-gas-cap")
 
         # Silent mode for cleaner logs
         cmd.append("--silent")
