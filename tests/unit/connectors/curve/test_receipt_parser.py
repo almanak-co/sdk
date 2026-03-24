@@ -392,25 +392,21 @@ def _build_cryptoswap_receipt(
 
 
 class TestExtractPositionId:
-    """Test extract_position_id returns LP token amount string for Curve LP.
+    """Test extract_position_id returns LP token address for Curve LP.
 
     Curve uses pool-based LP (no NFT tokenId). The position_id is the LP token
-    amount as a decimal string so it can be fed directly into
-    Intent.lp_close(position_id=...), which _compile_lp_close_curve() interprets
-    as the amount to burn.
+    contract address — a stable identifier for the position. The minted LP token
+    *amount* is available separately via extract_liquidity().
     """
 
-    def test_returns_lp_amount_string_for_add_liquidity(self):
-        """AddLiquidity receipt should return LP token amount as decimal string."""
+    def test_returns_lp_token_address_for_add_liquidity(self):
+        """AddLiquidity receipt should return LP token address (not amount)."""
         lp_minted = 99_000_000_000_000_000_000  # 99 LP tokens (18 decimals)
         receipt = _build_add_liquidity_receipt(lp_minted=lp_minted)
-        # 3CRV LP token address from receipt; mock resolver so decimals are returned
-        resolver = _mock_resolver({LP_TOKEN_3CRV: 18})
         parser = CurveReceiptParser(chain="ethereum")
-        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
-            position_id = parser.extract_position_id(receipt)
-        # Should be compatible with Intent.lp_close(position_id=position_id)
-        assert position_id == "99"
+        position_id = parser.extract_position_id(receipt)
+        # Should return the LP token address, not the minted amount
+        assert position_id == LP_TOKEN_3CRV
 
     def test_returns_none_for_swap_receipt(self):
         """Swap receipt (no AddLiquidity) should return None."""
@@ -424,6 +420,15 @@ class TestExtractPositionId:
         parser = CurveReceiptParser(chain="ethereum")
         position_id = parser.extract_position_id({"status": 1, "logs": []})
         assert position_id is None
+
+    def test_position_id_is_address_not_amount(self):
+        """Verify position_id looks like an Ethereum address, not a decimal number."""
+        receipt = _build_add_liquidity_receipt(lp_minted=96_167_061_043_518_866_468)
+        parser = CurveReceiptParser(chain="ethereum")
+        position_id = parser.extract_position_id(receipt)
+        assert position_id is not None
+        assert position_id.startswith("0x")
+        assert len(position_id) == 42
 
 
 class TestExtractLiquidity:
@@ -619,16 +624,13 @@ class TestNG4CoinPool:
     POOL_4POOL = "0xf6c5f01c7f3148891ad0e19df78743d31e390d1f"
 
     def test_extract_position_id_ng_pool(self):
-        """NG 4-coin pool should return LP token amount as decimal string."""
+        """NG 4-coin pool should return LP token address (pool address for NG)."""
         lp_minted = 98_133_240_027_002_648_655
         receipt = _build_add_liquidity_4coin_receipt(lp_minted=lp_minted)
-        # NG pool: LP token = pool address, 18 decimals
-        resolver = _mock_resolver({self.POOL_4POOL: 18})
         parser = CurveReceiptParser(chain="base")
-        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
-            position_id = parser.extract_position_id(receipt)
-        expected = Decimal(lp_minted) / Decimal(10**18)
-        assert position_id == str(expected)
+        position_id = parser.extract_position_id(receipt)
+        # NG pool: LP token address IS the pool address
+        assert position_id == self.POOL_4POOL
 
     def test_extract_liquidity_ng_pool(self):
         """NG 4-coin pool should return human-readable LP amount."""

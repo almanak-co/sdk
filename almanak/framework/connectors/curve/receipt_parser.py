@@ -778,24 +778,50 @@ class CurveReceiptParser:
     def extract_position_id(self, receipt: dict[str, Any]) -> int | str | None:
         """Extract position identifier from LP transaction receipt.
 
-        For Curve (pool-based LP, no NFT positions), returns the LP token amount
-        as a decimal string so it can be stored and passed directly to
-        Intent.lp_close(position_id=...) — which _compile_lp_close_curve()
-        interprets as the LP token amount to burn (e.g., "99").
+        For Curve (pool-based LP, no NFT positions), returns the LP token
+        contract address.  Unlike V3 DEXes where position_id is an NFT tokenId,
+        Curve LP tokens are fungible ERC-20s — the LP token address is the
+        stable identifier for the position.
+
+        The minted LP token *amount* is available separately via
+        ``extract_liquidity()``.
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
 
         Returns:
-            LP token amount as decimal string (e.g., "99"), or None if not found
+            LP token address as hex string, or None if not found
         """
         try:
-            # extract_lp_tokens_received already returns human-readable Decimal
-            lp_amount = self.extract_lp_tokens_received(receipt)
-            if lp_amount is None:
-                return None
+            # Find the mint Transfer event (from zero address) and return the
+            # emitting contract address — that is the LP token contract.
+            zero_addr = "0x0000000000000000000000000000000000000000"
+            transfer_topic = EVENT_TOPICS["Transfer"].lower()
 
-            return str(lp_amount)
+            for log in receipt.get("logs", []):
+                topics = log.get("topics", [])
+                if len(topics) < 3:
+                    continue
+
+                first_topic = topics[0]
+                if isinstance(first_topic, bytes):
+                    first_topic = "0x" + first_topic.hex()
+                first_topic = str(first_topic).lower()
+
+                if first_topic != transfer_topic:
+                    continue
+
+                from_addr = HexDecoder.topic_to_address(topics[1])
+                if from_addr.lower() == zero_addr:
+                    lp_token_address = log.get("address", "")
+                    if isinstance(lp_token_address, bytes):
+                        lp_token_address = "0x" + lp_token_address.hex()
+                    lp_token_address = str(lp_token_address).strip()
+                    if lp_token_address.startswith("0x") and len(lp_token_address) == 42:
+                        return lp_token_address
+                    return None
+
+            return None
         except Exception as e:
             logger.warning(f"Failed to extract position_id: {e}")
             return None

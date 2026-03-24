@@ -332,16 +332,19 @@ class ResultEnricher:
         # Core typed fields - set directly on result
         if field == "position_id" and isinstance(value, int | str):
             if isinstance(value, str):
-                try:
-                    parsed = Decimal(value)
-                    if not parsed.is_finite():
-                        logger.warning(f"Ignoring non-finite string position_id {value!r}")
+                # Accept hex addresses (e.g. Curve LP token addresses) as valid position IDs
+                is_hex_address = bool(re.fullmatch(r"0x[a-fA-F0-9]{40}", value))
+                if not is_hex_address:
+                    try:
+                        parsed = Decimal(value)
+                        if not parsed.is_finite():
+                            logger.warning(f"Ignoring non-finite string position_id {value!r}")
+                            result.extracted_data[field] = value
+                            return
+                    except InvalidOperation:
+                        logger.warning(f"Ignoring invalid string position_id {value!r}: not a valid decimal or address")
                         result.extracted_data[field] = value
                         return
-                except InvalidOperation:
-                    logger.warning(f"Ignoring invalid string position_id {value!r}: not a valid decimal")
-                    result.extracted_data[field] = value
-                    return
             result.position_id = value
         elif field == "swap_amounts" and isinstance(value, SwapAmounts):
             result.swap_amounts = value
