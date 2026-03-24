@@ -3328,7 +3328,8 @@ class IntentCompiler:
         if protocol == "lifi":
             return self._compile_lifi_swap(intent)
 
-        # Handle Aerodrome separately (Solidly-fork with different swap interface)
+        # Handle Aerodrome/Velodrome separately (Solidly-fork with different swap interface)
+        # protocol is already resolved via _resolve_protocol() above (velodrome -> aerodrome on Optimism)
         if protocol == "aerodrome":
             return self._compile_swap_aerodrome(intent)
 
@@ -4219,8 +4220,9 @@ class IntentCompiler:
         if intent.protocol == "traderjoe_v2":
             return self._compile_lp_open_traderjoe_v2(intent)
 
-        # Handle Aerodrome separately (Solidly-fork with fungible LP tokens)
-        if intent.protocol == "aerodrome":
+        # Handle Aerodrome/Velodrome separately (Solidly-fork with fungible LP tokens)
+        # Resolve alias so velodrome -> aerodrome on Optimism (LP dispatch doesn't pre-resolve)
+        if self._resolve_protocol(intent.protocol) == "aerodrome":
             return self._compile_lp_open_aerodrome(intent)
 
         # Handle Pendle LP (single-token liquidity provision)
@@ -4795,8 +4797,9 @@ class IntentCompiler:
         if intent.protocol == "traderjoe_v2":
             return self._compile_lp_close_traderjoe_v2(intent)
 
-        # Handle Aerodrome separately (Solidly-fork with fungible LP tokens)
-        if intent.protocol == "aerodrome":
+        # Handle Aerodrome/Velodrome separately (Solidly-fork with fungible LP tokens)
+        # Resolve alias so velodrome -> aerodrome on Optimism (LP dispatch doesn't pre-resolve)
+        if self._resolve_protocol(intent.protocol) == "aerodrome":
             return self._compile_lp_close_aerodrome(intent)
 
         # Handle Pendle LP close
@@ -5682,10 +5685,10 @@ class IntentCompiler:
         return result
 
     def _compile_swap_aerodrome(self, intent: SwapIntent) -> CompilationResult:
-        """Compile SWAP intent for Aerodrome Finance (Solidly fork on Base).
+        """Compile SWAP intent for Aerodrome/Velodrome (Solidly forks).
 
-        By default, routes through Slipstream CL (concentrated liquidity) pools.
-        Classic (v1) routing is available as opt-in via swap_params={"classic": True}.
+        On Base (Aerodrome): defaults to Slipstream CL pools; classic via swap_params={"classic": True}.
+        On Optimism (Velodrome): defaults to classic routing (no CL/Slipstream contracts).
 
         swap_params options:
         - tick_spacing (int): CL pool tick spacing, default 100
@@ -5747,17 +5750,31 @@ class IntentCompiler:
 
             # Extract routing params from swap_params
             swap_params = intent.swap_params if hasattr(intent, "swap_params") and intent.swap_params else {}
-            use_classic = swap_params.get("classic", False)
             tick_spacing = swap_params.get("tick_spacing", 100)
             stable = swap_params.get("stable", False)
 
-            # Check chain support
-            if self.chain != "base":
+            # Check chain support dynamically from contract addresses
+            from almanak.core.contracts import AERODROME as AERODROME_ADDRESSES
+
+            if self.chain not in AERODROME_ADDRESSES:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=f"Aerodrome is only available on Base, not {self.chain}",
+                    error=f"Aerodrome/Velodrome is not supported on {self.chain}. Supported: {list(AERODROME_ADDRESSES.keys())}",
                     intent_id=intent.intent_id,
                 )
+
+            # Auto-detect CL (Slipstream) availability from contract addresses.
+            # Only Base has cl_router/cl_factory; Optimism (Velodrome) uses classic only.
+            chain_addrs = AERODROME_ADDRESSES[self.chain]
+            has_cl = bool(chain_addrs.get("cl_router") and chain_addrs.get("cl_factory"))
+            requested_classic = swap_params.get("classic")
+            if requested_classic is False and not has_cl:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"CL (Slipstream) routing is not available on {self.chain}; use classic routing instead.",
+                    intent_id=intent.intent_id,
+                )
+            use_classic = requested_classic if requested_classic is not None else not has_cl
 
             routing = "classic" if use_classic else "cl"
             logger.info(
