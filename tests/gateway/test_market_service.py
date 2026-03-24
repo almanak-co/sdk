@@ -1,5 +1,6 @@
 """Tests for MarketService gateway implementation."""
 
+import os
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -162,7 +163,11 @@ class TestMarketServiceInitialization:
     @pytest.mark.asyncio
     async def test_evm_chain_has_four_sources(self):
         """EVM chain gets 4-source pricing: Chainlink + Binance + DexScreener + CoinGecko."""
-        settings = GatewaySettings(coingecko_api_key=None, chains=["arbitrum"])
+        env = os.environ.copy()
+        env.pop("COINGECKO_API_KEY", None)
+        env.pop("ALMANAK_GATEWAY_COINGECKO_API_KEY", None)
+        with patch.dict(os.environ, env, clear=True):
+            settings = GatewaySettings(coingecko_api_key=None, chains=["arbitrum"])
         service = MarketServiceServicer(settings)
 
         try:
