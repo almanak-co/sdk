@@ -700,3 +700,122 @@ class TestProtocolDerivation:
         assert dashboard_service._derive_protocol_from_config({}, "aerodrome_lp") == "Aerodrome"
         assert dashboard_service._derive_protocol_from_config({}, "tj_liquidity") == "TraderJoe V2"
         assert dashboard_service._derive_protocol_from_config({}, "unknown_strategy") == "Unknown"
+
+
+class TestDeployedModeAgentIdResolution:
+    """Tests for AGENT_ID normalization in deployed (K8s) mode.
+
+    When the platform injects AGENT_ID into the container, all gateway
+    service methods should use that ID for registry and state lookups,
+    regardless of the strategy_id sent by the SDK runner.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_strategy_details_resolves_agent_id(
+        self, dashboard_service, mock_context, monkeypatch
+    ):
+        """GetStrategyDetails uses AGENT_ID for registry lookup when env var is set."""
+        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        inst = _make_instance("platform-uuid-1234", strategy_name="uniswap_rsi")
+        mock_registry.get.return_value = inst
+
+        with patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry):
+            # Dashboard sends the SDK strategy_id, but it gets resolved to AGENT_ID
+            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="uniswap_rsi")
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        # Registry was queried with the resolved AGENT_ID
+        mock_registry.get.assert_called_with("platform-uuid-1234")
+        assert response.summary.strategy_id == "platform-uuid-1234"
+
+    @pytest.mark.asyncio
+    async def test_register_instance_resolves_agent_id(
+        self, dashboard_service, mock_context, monkeypatch
+    ):
+        """RegisterStrategyInstance stores under AGENT_ID when env var is set."""
+        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = None
+        mock_registry.register.return_value = True
+
+        with patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry):
+            request = gateway_pb2.RegisterInstanceRequest(
+                strategy_id="uniswap_rsi:abc123",
+                strategy_name="uniswap_rsi",
+                chain="arbitrum",
+                protocol="Uniswap V3",
+            )
+            response = await dashboard_service.RegisterStrategyInstance(request, mock_context)
+
+        assert response.success
+        # The registered instance should have strategy_id = AGENT_ID
+        registered = mock_registry.register.call_args[0][0]
+        assert registered.strategy_id == "platform-uuid-1234"
+
+    @pytest.mark.asyncio
+    async def test_update_status_resolves_agent_id(
+        self, dashboard_service, mock_context, monkeypatch
+    ):
+        """UpdateStrategyInstanceStatus uses AGENT_ID for registry lookup."""
+        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+
+        mock_registry = MagicMock()
+        mock_registry.heartbeat.return_value = True
+
+        with patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry):
+            request = gateway_pb2.UpdateInstanceStatusRequest(
+                strategy_id="uniswap_rsi:abc123",
+                heartbeat_only=True,
+            )
+            response = await dashboard_service.UpdateStrategyInstanceStatus(request, mock_context)
+
+        assert response.success
+        mock_registry.heartbeat.assert_called_with("platform-uuid-1234")
+
+    @pytest.mark.asyncio
+    async def test_local_mode_passes_through(
+        self, dashboard_service, mock_context, monkeypatch
+    ):
+        """Without AGENT_ID, strategy_id passes through unchanged (local mode)."""
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = _make_instance("uniswap_rsi:abc123")
+
+        with patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry):
+            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="uniswap_rsi:abc123")
+            await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        # Registry queried with the original strategy_id
+        mock_registry.get.assert_called_with("uniswap_rsi:abc123")
+
+    @pytest.mark.asyncio
+    async def test_get_strategy_config_falls_back_to_registry(
+        self, dashboard_service, mock_context, monkeypatch
+    ):
+        """GetStrategyConfig serves config from registry when filesystem has no match (deployed mode)."""
+        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        config_data = {"strategy_name": "uniswap_rsi", "chain": "arbitrum"}
+        mock_registry = MagicMock()
+        inst = _make_instance("platform-uuid-1234", strategy_name="uniswap_rsi")
+        inst.config_json = json.dumps(config_data)
+        inst.updated_at = datetime.now(UTC)
+        mock_registry.get.return_value = inst
+
+        with patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry):
+            request = gateway_pb2.GetStrategyConfigRequest(strategy_id="uniswap_rsi")
+            response = await dashboard_service.GetStrategyConfig(request, mock_context)
+
+        assert response.strategy_id == "platform-uuid-1234"
+        assert response.strategy_name == "uniswap_rsi"
+        assert json.loads(response.config_json) == config_data

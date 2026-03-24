@@ -651,3 +651,74 @@ class TestInstanceRegistrySingleton:
     def teardown_method(self):
         """Reset singleton after each test."""
         reset_instance_registry()
+
+
+class TestAgentIdResolution:
+    """Tests for AGENT_ID normalization in deployed mode.
+
+    When AGENT_ID env var is set, the registry should use it as the key
+    for all operations, ensuring write/read consistency with the dashboard.
+    """
+
+    def test_register_uses_agent_id(self, tmp_path, monkeypatch):
+        """Register stores instance under AGENT_ID when env var is set."""
+        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+        registry = InstanceRegistry(db_path=tmp_path / "test.db")
+        registry.initialize()
+
+        instance = _make_instance(strategy_id="uniswap_rsi:abc123")
+        registry.register(instance)
+
+        # Stored under AGENT_ID, not the original strategy_id
+        assert registry.get("platform-uuid-1234") is not None
+        assert registry.get("platform-uuid-1234").strategy_name == "test_strat"
+
+    def test_get_resolves_agent_id(self, tmp_path, monkeypatch):
+        """Get resolves AGENT_ID so lookups match registered data."""
+        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+        registry = InstanceRegistry(db_path=tmp_path / "test.db")
+        registry.initialize()
+
+        instance = _make_instance(strategy_id="uniswap_rsi:abc123")
+        registry.register(instance)
+
+        # Querying with SDK strategy_id also resolves to AGENT_ID
+        result = registry.get("uniswap_rsi:abc123")
+        assert result is not None
+        assert result.strategy_id == "platform-uuid-1234"
+
+    def test_heartbeat_resolves_agent_id(self, tmp_path, monkeypatch):
+        """Heartbeat finds the instance via resolved AGENT_ID."""
+        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+        registry = InstanceRegistry(db_path=tmp_path / "test.db")
+        registry.initialize()
+
+        instance = _make_instance(strategy_id="uniswap_rsi:abc123")
+        registry.register(instance)
+
+        # Heartbeat with SDK strategy_id resolves to AGENT_ID
+        assert registry.heartbeat("uniswap_rsi:abc123") is True
+
+    def test_update_status_resolves_agent_id(self, tmp_path, monkeypatch):
+        """Status update finds the instance via resolved AGENT_ID."""
+        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+        registry = InstanceRegistry(db_path=tmp_path / "test.db")
+        registry.initialize()
+
+        instance = _make_instance(strategy_id="uniswap_rsi:abc123")
+        registry.register(instance)
+
+        assert registry.update_status("uniswap_rsi:abc123", "PAUSED") is True
+        assert registry.get("platform-uuid-1234").status == "PAUSED"
+
+    def test_no_env_var_passes_through(self, tmp_path, monkeypatch):
+        """Without AGENT_ID, strategy_id passes through unchanged (local mode)."""
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        registry = InstanceRegistry(db_path=tmp_path / "test.db")
+        registry.initialize()
+
+        instance = _make_instance(strategy_id="uniswap_rsi:abc123")
+        registry.register(instance)
+
+        assert registry.get("uniswap_rsi:abc123") is not None
+        assert registry.get("platform-uuid-1234") is None

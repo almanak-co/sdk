@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from almanak.gateway.validation import resolve_agent_id as _resolve_agent_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -183,6 +185,9 @@ class InstanceRegistry:
         if not self._initialized:
             self.initialize()
 
+        # In deployed mode, normalise the instance key to AGENT_ID
+        instance.strategy_id = _resolve_agent_id(instance.strategy_id)
+
         with self._lock:
             already_existed = instance.strategy_id in self._cache
             self._cache[instance.strategy_id] = instance
@@ -240,6 +245,8 @@ class InstanceRegistry:
         if not self._initialized:
             self.initialize()
 
+        strategy_id = _resolve_agent_id(strategy_id)
+
         with self._lock:
             instance = self._cache.get(strategy_id)
             if instance is None:
@@ -265,6 +272,8 @@ class InstanceRegistry:
         """
         if not self._initialized:
             self.initialize()
+
+        strategy_id = _resolve_agent_id(strategy_id)
 
         recovered = False
         with self._lock:
@@ -525,6 +534,8 @@ class InstanceRegistry:
         """
         if not self._initialized:
             self.initialize()
+
+        strategy_id = _resolve_agent_id(strategy_id)
 
         with self._lock:
             return self._cache.get(strategy_id)

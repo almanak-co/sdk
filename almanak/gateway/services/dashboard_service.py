@@ -24,7 +24,7 @@ from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.registry import get_instance_registry
 from almanak.gateway.timeline.store import get_timeline_store
-from almanak.gateway.validation import ValidationError, validate_strategy_id
+from almanak.gateway.validation import ValidationError, resolve_agent_id, validate_strategy_id
 
 logger = logging.getLogger(__name__)
 
@@ -199,8 +199,15 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         return "Unknown"
 
-    async def _get_strategy_state_data(self, strategy_id: str) -> dict | None:
+    async def _get_strategy_state_data(self, strategy_id: str, fallback_strategy_id: str | None = None) -> dict | None:
         """Get strategy state from StateManager.
+
+        Args:
+            strategy_id: Primary key to look up.
+            fallback_strategy_id: If provided and different from strategy_id,
+                tried when the primary lookup returns nothing.  This bridges
+                legacy warm state written under the SDK key before AGENT_ID
+                normalization was deployed.
 
         Returns:
             State dict or None if not found
@@ -210,6 +217,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         try:
             state = await self._state_manager.load_state(strategy_id)
+            if state is None and fallback_strategy_id and fallback_strategy_id != strategy_id:
+                state = await self._state_manager.load_state(fallback_strategy_id)
             if state is not None:
                 return state.state
         except Exception as e:
@@ -372,7 +381,11 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 )
 
                 for inst in registered:
-                    registry_template_ids.add(self._canonical_template_id(inst.strategy_id))
+                    # Use strategy_name for dedupe — after AGENT_ID normalization,
+                    # strategy_id may be a platform UUID that won't match filesystem
+                    # template names.  strategy_name preserves the original template ID.
+                    template_key = inst.strategy_name or self._canonical_template_id(inst.strategy_id)
+                    registry_template_ids.add(template_key)
 
                     if include_registry:
                         effective_status = self._compute_effective_status(inst)
@@ -523,6 +536,10 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.StrategyDetails()
 
+        # In deployed mode, use platform AGENT_ID for consistent data access
+        original_strategy_id = strategy_id
+        strategy_id = resolve_agent_id(strategy_id)
+
         # Check registry first, then fall back to filesystem
         strategy_info = None
         try:
@@ -585,8 +602,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             context.set_details(f"Strategy not found: {strategy_id}")
             return gateway_pb2.StrategyDetails()
 
-        # Enrich with state data
-        state = await self._get_strategy_state_data(strategy_id)
+        # Enrich with state data (fallback bridges legacy pre-normalization state)
+        state = await self._get_strategy_state_data(strategy_id, fallback_strategy_id=original_strategy_id)
         if state:
             total_value, pnl = self._extract_portfolio_value_from_state(state)
             strategy_info["total_value_usd"] = total_value
@@ -753,6 +770,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.GetTimelineResponse()
 
+        # In deployed mode, use platform AGENT_ID for consistent data access
+        strategy_id = resolve_agent_id(strategy_id)
+
         limit = request.limit if request.limit > 0 else 50
         event_type_filter = request.event_type_filter if request.event_type_filter else None
         since = datetime.fromtimestamp(request.since_timestamp, tz=UTC) if request.since_timestamp > 0 else None
@@ -858,27 +878,51 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.StrategyConfigResponse()
 
-        # Find config file
-        if self._strategies_root is None:
-            context.set_code(grpc.StatusCode.NOT_FOUND)
-            context.set_details("Strategies directory not found")
+        # In deployed mode, use platform AGENT_ID for consistent data access
+        strategy_id = resolve_agent_id(strategy_id)
+
+        # Try filesystem first (local development)
+        if self._strategies_root is not None:
+            for category in STRATEGY_CATEGORIES:
+                config_file = self._strategies_root / category / strategy_id / "config.json"
+                if config_file.exists():
+                    try:
+                        config = json.loads(config_file.read_text())
+                        return gateway_pb2.StrategyConfigResponse(
+                            strategy_id=strategy_id,
+                            strategy_name=config.get("strategy_name", strategy_id),
+                            config_json=json.dumps(config),
+                            last_updated=int(config_file.stat().st_mtime),
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to read config file for {strategy_id}: {e}")
+                        context.set_code(grpc.StatusCode.INTERNAL)
+                        context.set_details("Failed to read strategy config")
+                        return gateway_pb2.StrategyConfigResponse()
+
+        # Fallback to instance registry (deployed mode — config was stored at registration)
+        try:
+            registry = get_instance_registry()
+            inst = registry.get(strategy_id)
+        except Exception as e:
+            logger.error(f"Failed to get config from registry for {strategy_id}: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("Failed to read strategy config")
             return gateway_pb2.StrategyConfigResponse()
 
-        for category in STRATEGY_CATEGORIES:
-            config_file = self._strategies_root / category / strategy_id / "config.json"
-            if config_file.exists():
-                try:
-                    config = json.loads(config_file.read_text())
-                    return gateway_pb2.StrategyConfigResponse(
-                        strategy_id=strategy_id,
-                        strategy_name=config.get("strategy_name", strategy_id),
-                        config_json=json.dumps(config),
-                        last_updated=int(config_file.stat().st_mtime),
-                    )
-                except Exception as e:
-                    context.set_code(grpc.StatusCode.INTERNAL)
-                    context.set_details(f"Failed to read config: {e}")
-                    return gateway_pb2.StrategyConfigResponse()
+        if inst is not None and inst.config_json:
+            try:
+                config = json.loads(inst.config_json)
+            except json.JSONDecodeError:
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("Stored config is invalid JSON")
+                return gateway_pb2.StrategyConfigResponse()
+            return gateway_pb2.StrategyConfigResponse(
+                strategy_id=strategy_id,
+                strategy_name=config.get("strategy_name", inst.strategy_name),
+                config_json=inst.config_json,
+                last_updated=int(inst.updated_at.timestamp()) if inst.updated_at else 0,
+            )
 
         context.set_code(grpc.StatusCode.NOT_FOUND)
         context.set_details(f"Config not found for strategy: {strategy_id}")
@@ -907,7 +951,11 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.StrategyStateResponse()
 
-        state = await self._get_strategy_state_data(strategy_id)
+        # In deployed mode, use platform AGENT_ID for consistent data access
+        original_strategy_id = strategy_id
+        strategy_id = resolve_agent_id(strategy_id)
+
+        state = await self._get_strategy_state_data(strategy_id, fallback_strategy_id=original_strategy_id)
         if state is None:
             context.set_code(grpc.StatusCode.NOT_FOUND)
             context.set_details(f"State not found for strategy: {strategy_id}")
@@ -961,6 +1009,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.ExecuteActionResponse(success=False, error=str(e))
+
+        # In deployed mode, use platform AGENT_ID for consistent data access
+        strategy_id = resolve_agent_id(strategy_id)
 
         action = request.action.upper()
         reason = request.reason
@@ -1027,6 +1078,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         except ValidationError as e:
             return gateway_pb2.RegisterInstanceResponse(success=False, error=str(e))
 
+        # In deployed mode, use platform AGENT_ID for consistent data access
+        strategy_id = resolve_agent_id(strategy_id)
+
         try:
             from almanak.gateway.registry.store import StrategyInstance
 
@@ -1079,6 +1133,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         except ValidationError as e:
             return gateway_pb2.UpdateInstanceStatusResponse(success=False, error=str(e))
 
+        # In deployed mode, use platform AGENT_ID for consistent data access
+        strategy_id = resolve_agent_id(strategy_id)
+
         try:
             registry = get_instance_registry()
 
@@ -1115,6 +1172,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         except ValidationError as e:
             return gateway_pb2.ArchiveInstanceResponse(success=False, error=str(e))
 
+        # In deployed mode, use platform AGENT_ID for consistent data access
+        strategy_id = resolve_agent_id(strategy_id)
+
         try:
             registry = get_instance_registry()
             success = registry.archive(strategy_id)
@@ -1141,6 +1201,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             strategy_id = validate_strategy_id(request.strategy_id)
         except ValidationError as e:
             return gateway_pb2.PurgeInstanceResponse(success=False, error=str(e))
+
+        # In deployed mode, use platform AGENT_ID for consistent data access
+        strategy_id = resolve_agent_id(strategy_id)
 
         if not request.reason:
             return gateway_pb2.PurgeInstanceResponse(

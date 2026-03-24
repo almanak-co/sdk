@@ -245,6 +245,23 @@ def validate_address_for_chain(address: str, chain: str, field: str = "address")
     return address
 
 
+def resolve_agent_id(strategy_id: str) -> str:
+    """Use platform AGENT_ID if set and non-blank, otherwise pass through.
+
+    In deployed mode (K8s), the platform injects AGENT_ID into every container.
+    This ensures all data paths (state, registry, timeline) use the platform
+    identifier consistently. In local mode, AGENT_ID is not set and the
+    original strategy_id passes through unchanged.
+    """
+    import os
+
+    env_agent_id = os.environ.get("AGENT_ID")
+    if env_agent_id is None:
+        return strategy_id
+    resolved = env_agent_id.strip()
+    return resolved or strategy_id
+
+
 def validate_strategy_id(strategy_id: str, field: str = "strategy_id") -> str:
     """Validate strategy ID format.
 

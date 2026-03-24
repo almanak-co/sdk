@@ -22,6 +22,7 @@ from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.validation import (
     ValidationError,
+    resolve_agent_id,
     validate_state_size,
     validate_strategy_id,
 )
@@ -98,11 +99,21 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.StateData()
 
+        # In deployed mode, use platform AGENT_ID for consistent data access
+        original_strategy_id = strategy_id
+        strategy_id = resolve_agent_id(strategy_id)
+
         await self._ensure_initialized()
         assert self._state_manager is not None
 
         try:
             state = await self._state_manager.load_state(strategy_id)
+
+            # Fallback: if AGENT_ID resolved to a different key and no state was
+            # found, try the original strategy_id.  This bridges legacy warm state
+            # written under the SDK key before this normalization was deployed.
+            if state is None and strategy_id != original_strategy_id:
+                state = await self._state_manager.load_state(original_strategy_id)
 
             if state is None:
                 context.set_code(grpc.StatusCode.NOT_FOUND)
@@ -157,6 +168,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.SaveStateResponse(success=False, error=str(e))
+
+        # In deployed mode, use platform AGENT_ID for consistent data access
+        strategy_id = resolve_agent_id(strategy_id)
 
         try:
             validate_state_size(request.data)
@@ -227,6 +241,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.DeleteStateResponse(success=False, error=str(e))
+
+        # In deployed mode, use platform AGENT_ID for consistent data access
+        strategy_id = resolve_agent_id(strategy_id)
 
         await self._ensure_initialized()
         assert self._state_manager is not None
