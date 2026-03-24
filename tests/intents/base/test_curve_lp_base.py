@@ -163,7 +163,7 @@ class TestCurveWethCbethLPOpen:
         # --- Layer 3: Receipt Parsing ---
         parser = CurveReceiptParser(chain=CHAIN_NAME)
         lp_open_receipt_parsed = False
-        lp_tokens_from_receipt: int | None = None
+        lp_tokens_from_receipt: Decimal | None = None
 
         for tx_result in execution_result.transaction_results:
             if not tx_result.receipt:
@@ -213,8 +213,11 @@ class TestCurveWethCbethLPOpen:
             f"Expected: {expected_cbeth_spent}, Got: {cbeth_spent}"
         )
         assert lp_received > 0, f"LP tokens received must be > 0, got {lp_received}"
-        assert lp_received == lp_tokens_from_receipt, (
-            f"LP tokens from balance delta ({lp_received}) must match receipt ({lp_tokens_from_receipt})"
+        # extract_lp_tokens_received() returns human-readable Decimal (PR #999),
+        # so convert raw wei balance delta to match
+        lp_received_decimal = Decimal(lp_received) / Decimal(10**18)
+        assert lp_received_decimal == lp_tokens_from_receipt, (
+            f"LP tokens from balance delta ({lp_received_decimal}) must match receipt ({lp_tokens_from_receipt})"
         )
 
         logger.info(
