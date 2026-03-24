@@ -908,12 +908,22 @@ class CurveReceiptParser:
                     fees0 = fees[0] if len(fees) > 0 else 0
                     fees1 = fees[1] if len(fees) > 1 else 0
 
+                    # Capture additional amounts for 3/4-coin pools
+                    additional_amounts = None
+                    additional_fees = None
+                    if len(token_amounts) > 2:
+                        additional_amounts = {i: token_amounts[i] for i in range(2, len(token_amounts))}
+                    if len(fees) > 2:
+                        additional_fees = {i: fees[i] for i in range(2, len(fees))}
+
                     return LPCloseData(
                         amount0_collected=amount0,
                         amount1_collected=amount1,
                         fees0=fees0,
                         fees1=fees1,
                         liquidity_removed=None,  # LP tokens burned
+                        additional_amounts=additional_amounts,
+                        additional_fees=additional_fees,
                     )
 
             return None

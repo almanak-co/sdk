@@ -1887,3 +1887,30 @@ class TestPendleYTTokenResolution:
         resolver = TokenResolver()
         with pytest.raises(TokenResolutionError):
             resolver.resolve("YT-wstETH-25JUN2026", "ethereum")
+
+
+class TestCurveNGLPTokenResolution:
+    """Test that Curve NG pool LP tokens resolve by address without gateway.
+
+    NG pools use LP token == pool address. Registering these in defaults.py
+    prevents a ~30s gateway timeout during LP_CLOSE compilation.
+    """
+
+    @pytest.mark.parametrize(
+        "address,chain,expected_decimals",
+        [
+            # Optimism 3pool NG
+            ("0x1337BedC9D22ecbe766dF105c9623922A27963EC", "optimism", 18),
+            # Optimism crvUSD/USDC NG
+            ("0x03771e24b7C9172d163Bf447490B142a15be3485", "optimism", 18),
+            # Base 4pool NG
+            ("0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f", "base", 18),
+        ],
+    )
+    def test_ng_lp_token_resolves_by_address(self, address, chain, expected_decimals):
+        """NG pool LP token should resolve by address from static registry."""
+        resolver = TokenResolver()
+        result = resolver.resolve(address, chain)
+        assert result is not None
+        assert result.decimals == expected_decimals
+        assert result.address == address.lower()

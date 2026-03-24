@@ -697,6 +697,42 @@ CRV_WETH_CBETH_LP = Token(
     is_stablecoin=False,
 )
 
+# Curve 3pool LP -- DAI/USDC.e/USDT StableSwap NG on Optimism (LP = pool address)
+CRV_3POOL_OPT_LP = Token(
+    symbol="crv3pool-opt",
+    name="Curve 3pool LP (Optimism)",
+    decimals=18,
+    addresses={
+        "optimism": "0x1337BedC9D22ecbe766dF105c9623922A27963EC",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
+# Curve crvUSD/USDC LP -- StableSwap NG on Optimism (LP = pool address)
+CRV_CRVUSD_USDC_OPT_LP = Token(
+    symbol="crvUSDC-opt",
+    name="Curve crvUSD/USDC LP (Optimism)",
+    decimals=18,
+    addresses={
+        "optimism": "0x03771e24b7C9172d163Bf447490B142a15be3485",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
+# Curve 4pool LP -- USDC/USDbC/axlUSDC/crvUSD StableSwap NG on Base (LP = pool address)
+CRV_4POOL_BASE_LP = Token(
+    symbol="crv4pool-base",
+    name="Curve 4pool LP (Base)",
+    decimals=18,
+    addresses={
+        "base": "0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
 # =============================================================================
 # ETHENA PROTOCOL TOKENS
 # =============================================================================
@@ -1253,6 +1289,9 @@ DEFAULT_TOKENS: list[Token] = [
     CRV_2CRV,
     CRV_TRICRYPTO_ARB_LP,
     CRV_WETH_CBETH_LP,
+    CRV_3POOL_OPT_LP,
+    CRV_CRVUSD_USDC_OPT_LP,
+    CRV_4POOL_BASE_LP,
     # Ethena tokens
     USDe,
     sUSDe,
@@ -1406,6 +1445,9 @@ __all__ = [
     "CRV_2CRV",
     "CRV_TRICRYPTO_ARB_LP",
     "CRV_WETH_CBETH_LP",
+    "CRV_3POOL_OPT_LP",
+    "CRV_CRVUSD_USDC_OPT_LP",
+    "CRV_4POOL_BASE_LP",
     # Ethena tokens
     "USDe",
     "sUSDe",

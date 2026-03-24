@@ -14,6 +14,7 @@ import pytest
 
 from almanak.framework.connectors.curve.receipt_parser import (
     EVENT_TOPICS,
+    CurveEventType,
     CurveReceiptParser,
 )
 
@@ -474,12 +475,246 @@ class TestExtractLPCloseData:
         assert result.amount0_collected == amounts[0]
         assert result.amount1_collected == amounts[1]
 
+    def test_3coin_pool_includes_all_amounts(self):
+        """3-coin pool should include amount2 in additional_amounts."""
+        amounts = [33_000_000_000_000_000_000, 33_000_000, 33_000_000]
+        receipt = _build_remove_liquidity_receipt(token_amounts=amounts)
+        parser = CurveReceiptParser(chain="ethereum")
+        result = parser.extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.additional_amounts == {2: 33_000_000}
+        assert result.all_amounts == amounts
+
+    def test_4coin_pool_includes_all_amounts(self):
+        """4-coin NG pool should include amount2 and amount3."""
+        # Simulate Base 4pool: USDC/USDbC/axlUSDC/crvUSD
+        pool = "0xf6c5f01c7f3148891ad0e19df78743d31e390d1f"
+        amounts = [
+            50_000_000,  # 50 USDC (6 dec)
+            50_000_000,  # 50 USDbC (6 dec)
+            50_000_000,  # 50 axlUSDC (6 dec)
+            91_000_000_000_000_000_000,  # 91 crvUSD (18 dec)
+        ]
+        receipt = _build_remove_liquidity_4coin_receipt(
+            pool=pool, token_amounts=amounts,
+        )
+        parser = CurveReceiptParser(chain="base")
+        result = parser.extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount0_collected == amounts[0]
+        assert result.amount1_collected == amounts[1]
+        assert result.additional_amounts == {2: amounts[2], 3: amounts[3]}
+        assert result.all_amounts == amounts
+        assert len(result.all_fees) == 4
+
     def test_returns_none_for_swap_receipt(self):
         """Swap receipt should return None."""
         receipt = _build_swap_receipt()
         parser = CurveReceiptParser(chain="ethereum")
         result = parser.extract_lp_close_data(receipt)
         assert result is None
+
+
+def _build_add_liquidity_4coin_receipt(
+    pool: str = "0xf6c5f01c7f3148891ad0e19df78743d31e390d1f",
+    wallet: str = WALLET,
+    token_amounts: list[int] | None = None,
+    lp_minted: int = 98_133_240_027_002_648_655,
+) -> dict:
+    """Build a synthetic Curve AddLiquidity4 receipt for a 4-coin NG pool.
+
+    NG pools: LP token address = pool address.
+    """
+    if token_amounts is None:
+        token_amounts = [50_000_000, 50_000_000, 50_000_000, 91_000_000_000_000_000_000]
+
+    # AddLiquidity4 event data: 4 amounts + 4 fees + invariant + token_supply
+    add_liq_topic = _make_topic(EVENT_TOPICS["AddLiquidity4"])
+    provider_topic = "0x" + "00" * 12 + wallet[2:]
+    fees = [0, 0, 0, 0]
+    invariant = 241_000_000_000_000_000_000
+    token_supply = 1_000_000_000_000_000_000_000
+
+    data_parts = [_pad_hex(a) for a in token_amounts]
+    data_parts += [_pad_hex(f) for f in fees]
+    data_parts += [_pad_hex(invariant), _pad_hex(token_supply)]
+    add_liq_data = "0x" + "".join(data_parts)
+
+    # ERC-20 Transfer: mint LP tokens (from zero address to wallet)
+    # NG pool: LP token address IS the pool address
+    transfer_topic = _make_topic(EVENT_TOPICS["Transfer"])
+    zero_topic = "0x" + "00" * 12 + ZERO_ADDR[2:]
+    wallet_topic = "0x" + "00" * 12 + wallet[2:]
+    mint_data = "0x" + _pad_hex(lp_minted)
+
+    return {
+        "status": 1,
+        "from": wallet,
+        "transactionHash": "0x" + "ee" * 32,
+        "blockNumber": 25_000_000,
+        "gasUsed": 450_000,
+        "logs": [
+            {
+                "address": pool,
+                "topics": [add_liq_topic, provider_topic],
+                "data": add_liq_data,
+                "logIndex": 0,
+            },
+            # NG pool: LP token = pool address
+            {
+                "address": pool,
+                "topics": [transfer_topic, zero_topic, wallet_topic],
+                "data": mint_data,
+                "logIndex": 1,
+            },
+        ],
+    }
+
+
+def _build_remove_liquidity_4coin_receipt(
+    pool: str = "0xf6c5f01c7f3148891ad0e19df78743d31e390d1f",
+    wallet: str = WALLET,
+    token_amounts: list[int] | None = None,
+) -> dict:
+    """Build a synthetic Curve RemoveLiquidity4 receipt for a 4-coin NG pool."""
+    if token_amounts is None:
+        token_amounts = [50_000_000, 50_000_000, 50_000_000, 91_000_000_000_000_000_000]
+
+    # RemoveLiquidity4 event data: 4 amounts + 4 fees + token_supply
+    remove_liq_topic = _make_topic(EVENT_TOPICS["RemoveLiquidity4"])
+    provider_topic = "0x" + "00" * 12 + wallet[2:]
+    fees = [100_000, 200_000, 50_000, 1_000_000_000_000_000]
+    token_supply = 900_000_000_000_000_000_000
+
+    data_parts = [_pad_hex(a) for a in token_amounts]
+    data_parts += [_pad_hex(f) for f in fees]
+    data_parts += [_pad_hex(token_supply)]
+    remove_liq_data = "0x" + "".join(data_parts)
+
+    return {
+        "status": 1,
+        "from": wallet,
+        "transactionHash": "0x" + "ff" * 32,
+        "blockNumber": 25_000_001,
+        "gasUsed": 350_000,
+        "logs": [
+            {
+                "address": pool,
+                "topics": [remove_liq_topic, provider_topic],
+                "data": remove_liq_data,
+                "logIndex": 0,
+            },
+        ],
+    }
+
+
+class TestNG4CoinPool:
+    """Tests for Curve StableSwap NG 4-coin pool receipt parsing.
+
+    Validates that extract_position_id(), extract_liquidity(), and
+    extract_lp_close_data() work correctly for NG pools where
+    LP token address == pool address and n_coins > 2.
+    """
+
+    POOL_4POOL = "0xf6c5f01c7f3148891ad0e19df78743d31e390d1f"
+
+    def test_extract_position_id_ng_pool(self):
+        """NG 4-coin pool should return LP token amount as decimal string."""
+        lp_minted = 98_133_240_027_002_648_655
+        receipt = _build_add_liquidity_4coin_receipt(lp_minted=lp_minted)
+        # NG pool: LP token = pool address, 18 decimals
+        resolver = _mock_resolver({self.POOL_4POOL: 18})
+        parser = CurveReceiptParser(chain="base")
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
+            position_id = parser.extract_position_id(receipt)
+        expected = Decimal(lp_minted) / Decimal(10**18)
+        assert position_id == str(expected)
+
+    def test_extract_liquidity_ng_pool(self):
+        """NG 4-coin pool should return human-readable LP amount."""
+        lp_minted = 98_133_240_027_002_648_655
+        receipt = _build_add_liquidity_4coin_receipt(lp_minted=lp_minted)
+        resolver = _mock_resolver({self.POOL_4POOL: 18})
+        parser = CurveReceiptParser(chain="base")
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
+            result = parser.extract_liquidity(receipt)
+        assert isinstance(result, Decimal)
+        expected = Decimal(lp_minted) / Decimal(10**18)
+        assert result == expected
+
+    def test_extract_liquidity_ng_pool_resolver_fallback(self):
+        """When resolver can't resolve NG LP token, should fall back to 18 decimals."""
+        lp_minted = 98_133_240_027_002_648_655
+        receipt = _build_add_liquidity_4coin_receipt(lp_minted=lp_minted)
+        parser = CurveReceiptParser(chain="base")
+        # No resolver mock — will fail to resolve, should fall back to 18
+        with patch(
+            "almanak.framework.data.tokens.get_token_resolver",
+            side_effect=Exception("No resolver"),
+        ):
+            result = parser.extract_liquidity(receipt)
+        assert isinstance(result, Decimal)
+        expected = Decimal(lp_minted) / Decimal(10**18)
+        assert result == expected
+
+    def test_add_liquidity_4coin_event_parsing(self):
+        """AddLiquidity4 event should decode all 4 token amounts."""
+        amounts = [50_000_000, 50_000_000, 50_000_000, 91_000_000_000_000_000_000]
+        receipt = _build_add_liquidity_4coin_receipt(token_amounts=amounts)
+        parser = CurveReceiptParser(chain="base")
+        result = parser.parse_receipt(receipt)
+        assert result.success
+        add_events = [e for e in result.events if e.event_type == CurveEventType.ADD_LIQUIDITY]
+        assert len(add_events) == 1
+        assert add_events[0].data["token_amounts"] == amounts
+
+
+class TestLPCloseDataModel:
+    """Test LPCloseData model's all_amounts/all_fees properties."""
+
+    def test_all_amounts_2coin(self):
+        """2-coin pool should return [amount0, amount1]."""
+        from almanak.framework.execution.extracted_data import LPCloseData
+
+        data = LPCloseData(amount0_collected=100, amount1_collected=200)
+        assert data.all_amounts == [100, 200]
+        assert data.all_fees == [0, 0]
+
+    def test_all_amounts_4coin(self):
+        """4-coin pool should return all 4 amounts in order."""
+        from almanak.framework.execution.extracted_data import LPCloseData
+
+        data = LPCloseData(
+            amount0_collected=100,
+            amount1_collected=200,
+            fees0=10,
+            fees1=20,
+            additional_amounts={2: 300, 3: 400},
+            additional_fees={2: 30, 3: 40},
+        )
+        assert data.all_amounts == [100, 200, 300, 400]
+        assert data.all_fees == [10, 20, 30, 40]
+
+    def test_to_dict_includes_additional(self):
+        """to_dict should include additional amounts when present."""
+        from almanak.framework.execution.extracted_data import LPCloseData
+
+        data = LPCloseData(
+            amount0_collected=100,
+            amount1_collected=200,
+            additional_amounts={2: 300},
+        )
+        d = data.to_dict()
+        assert "additional_amounts" in d
+        assert d["additional_amounts"] == {"2": "300"}
+
+    def test_to_dict_omits_additional_when_none(self):
+        """to_dict should not include additional_amounts when None."""
+        from almanak.framework.execution.extracted_data import LPCloseData
+
+        data = LPCloseData(amount0_collected=100, amount1_collected=200)
+        d = data.to_dict()
+        assert "additional_amounts" not in d
 
 
 class TestCryptoSwapReceiptParsing:

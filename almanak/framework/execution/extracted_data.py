@@ -88,11 +88,17 @@ class LPCloseData:
         fees0: Fees earned in token0 (if separately tracked)
         fees1: Fees earned in token1 (if separately tracked)
         liquidity_removed: Amount of liquidity removed (if available)
+        additional_amounts: Amounts for coins beyond token0/token1 (e.g., Curve 3/4-coin pools).
+            Maps coin index to raw amount: {2: 50000000, 3: 91000000000000000000}.
+        additional_fees: Fees for coins beyond token0/token1.
+            Maps coin index to fee amount: {2: 100000, 3: 0}.
 
     Example:
         if result.lp_close_data:
             total_0 = result.lp_close_data.amount0_collected
             fees_0 = result.lp_close_data.fees0
+            # For 4-coin pools (e.g., Curve NG):
+            all_amounts = result.lp_close_data.all_amounts  # [amt0, amt1, amt2, amt3]
     """
 
     amount0_collected: int
@@ -100,16 +106,41 @@ class LPCloseData:
     fees0: int = 0
     fees1: int = 0
     liquidity_removed: int | None = None
+    additional_amounts: dict[int, int] | None = None
+    additional_fees: dict[int, int] | None = None
+
+    @property
+    def all_amounts(self) -> list[int]:
+        """Return all coin amounts as a list, including additional coins."""
+        result = [self.amount0_collected, self.amount1_collected]
+        if self.additional_amounts:
+            for i in sorted(self.additional_amounts):
+                result.append(self.additional_amounts[i])
+        return result
+
+    @property
+    def all_fees(self) -> list[int]:
+        """Return all fee amounts as a list, including additional coins."""
+        result = [self.fees0, self.fees1]
+        if self.additional_fees:
+            for i in sorted(self.additional_fees):
+                result.append(self.additional_fees[i])
+        return result
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        d: dict[str, Any] = {
             "amount0_collected": str(self.amount0_collected),
             "amount1_collected": str(self.amount1_collected),
             "fees0": str(self.fees0),
             "fees1": str(self.fees1),
             "liquidity_removed": str(self.liquidity_removed) if self.liquidity_removed else None,
         }
+        if self.additional_amounts:
+            d["additional_amounts"] = {str(k): str(v) for k, v in self.additional_amounts.items()}
+        if self.additional_fees:
+            d["additional_fees"] = {str(k): str(v) for k, v in self.additional_fees.items()}
+        return d
 
 
 @dataclass(frozen=True)

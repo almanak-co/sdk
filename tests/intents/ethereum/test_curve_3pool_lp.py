@@ -212,7 +212,7 @@ class TestCurve3poolLPOpen:
 
         logger.info(
             f"LP_OPEN success: spent {LP_AMOUNT_DAI} DAI + {LP_AMOUNT_USDC} USDC, "
-            f"received {lp_received / 1e18:.6f} 3Crv LP tokens"
+            f"received {lp_received_decimal} 3Crv LP tokens"
         )
 
 
