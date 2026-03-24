@@ -6120,9 +6120,21 @@ class IntentCompiler:
                 quote = sdk.get_swap_quote(pool_addr, swap0to1, amount_in_wei, self.wallet_address)
                 min_out = quote * (10000 - slippage_bps) // 10000
             except Exception as e:
+                from almanak.framework.connectors.fluid.sdk import FluidMinAmountError
+
+                if isinstance(e, FluidMinAmountError):
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=(
+                            f"Fluid swap amount too small: {amount_decimal} {intent.from_token} "
+                            f"({amount_in_wei} wei) is below the pool's minimum. {e}"
+                        ),
+                        intent_id=intent.intent_id,
+                    )
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
                     error=f"Fluid swap quote failed: {e}",
+                    intent_id=intent.intent_id,
                 )
 
             # Build swap TX

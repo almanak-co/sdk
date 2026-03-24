@@ -229,6 +229,81 @@ class FluidSDKError(Exception):
     """Raised when a Fluid SDK operation fails."""
 
 
+class FluidMinAmountError(FluidSDKError):
+    """Raised when a swap amount is below the pool's minimum threshold."""
+
+
+# Known Fluid DEX custom error selectors (first 4 bytes of keccak256)
+# Decoded from on-chain reverts observed in production
+FLUID_ERROR_SELECTORS: dict[str, str] = {
+    "dee51a8a": "FluidDexSwapTooSmall",  # amount below pool minimum
+    "4e487b71": "Panic",  # Solidity panic (overflow, division by zero, etc.)
+}
+
+
+def decode_fluid_revert(raw_hex: str) -> str:
+    """Decode a Fluid DEX revert into a human-readable error message.
+
+    Args:
+        raw_hex: Raw hex revert data (with or without 0x prefix)
+
+    Returns:
+        Human-readable error message
+    """
+    data = raw_hex.removeprefix("0x")
+    if len(data) < 8:
+        return f"Unknown revert: 0x{data}"
+
+    selector = data[:8]
+
+    # Handle standard Solidity Error(string) — preserve the human-readable reason
+    if selector == "08c379a0" and len(data) >= 136:
+        try:
+            offset = int(data[8:72], 16)
+            length = int(data[72:136], 16)
+            start = 8 + offset * 2 + 64  # selector + offset word + length word
+            message_hex = data[start : start + length * 2]
+            return bytes.fromhex(message_hex).decode("utf-8", errors="replace")
+        except (ValueError, IndexError):
+            pass  # Fall through to unknown
+
+    error_name = FLUID_ERROR_SELECTORS.get(selector)
+
+    if error_name == "FluidDexSwapTooSmall":
+        # Parameter is the minimum amount required (uint256)
+        if len(data) >= 72:
+            min_amount_hex = data[8:72]
+            min_amount = int(min_amount_hex, 16)
+            return (
+                f"Swap amount below pool minimum. The Fluid DEX pool requires a minimum "
+                f"input of {min_amount} wei (raw). Increase your trade size."
+            )
+        return "Swap amount below the Fluid DEX pool minimum. Increase your trade size."
+
+    if error_name == "Panic":
+        if len(data) >= 72:
+            panic_code = int(data[8:72], 16)
+            return f"Solidity Panic(0x{panic_code:02x})"
+        return "Solidity Panic"
+
+    return f"Unknown revert (selector=0x{selector}): 0x{data[:40]}..."
+
+
+def _extract_revert_hex(error_str: str) -> str | None:
+    """Extract raw hex revert data from a Web3 error message.
+
+    Web3's ContractLogicError includes the raw hex in various formats:
+    - "execution reverted: 0xdee51a8a..."
+    - "0xdee51a8a..."
+    """
+    import re
+
+    match = re.search(r"(0x[0-9a-fA-F]{8,})", error_str)
+    if match:
+        return match.group(1)
+    return None
+
+
 class FluidSDK:
     """Low-level Fluid DEX protocol SDK.
 
@@ -442,6 +517,23 @@ class FluidSDK:
             )
             return amount_out
         except Exception as e:
+            # Try to decode Fluid-specific revert errors for better diagnostics
+            # First try structured error formats (Alchemy/Infura: error.args[0]["data"])
+            raw_hex = None
+            if hasattr(e, "data") and isinstance(e.data, str) and e.data.startswith("0x"):
+                raw_hex = e.data
+            elif e.args and isinstance(e.args[0], dict) and "data" in e.args[0]:
+                data = e.args[0]["data"]
+                if isinstance(data, str) and data.startswith("0x"):
+                    raw_hex = data
+            # Fall back to regex extraction from error message text
+            if not raw_hex:
+                raw_hex = _extract_revert_hex(str(e))
+            if raw_hex:
+                decoded = decode_fluid_revert(raw_hex)
+                if "minimum" in decoded.lower() or "FluidDexSwapTooSmall" in decoded:
+                    raise FluidMinAmountError(decoded) from e
+                raise FluidSDKError(f"Fluid swap quote failed: {decoded}") from e
             raise FluidSDKError(f"Failed to get swap quote: {e}") from e
 
     def build_swap_tx(
