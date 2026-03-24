@@ -49,6 +49,7 @@ SWEEPABLE PARAMETERS:
     amount0: Token0 (WETH) amount per LP position
     amount1: Token1 (USDC) amount per LP position
     reentry_cooldown: Ticks to wait before re-opening after close
+    range_width_pct: LP range width as % of current price (e.g. 10 = +/-5%)
 
 STRATEGY LOGIC:
 ---------------
@@ -107,6 +108,8 @@ class AerodromeSweepLPStrategy(IntentStrategy):
         rsi_overbought: RSI threshold for LP exit (sweepable, default: 70)
         reentry_cooldown: Ticks to wait before re-entering (sweepable, default: 2)
         max_lp_cycles: Max open/close cycles before stopping (default: 5)
+        range_width_pct: LP range width as % of current price (sweepable, default: 0
+            meaning full range). E.g. 10 = +/-5% around current price.
     """
 
     def __init__(self, *args, **kwargs):
@@ -136,6 +139,11 @@ class AerodromeSweepLPStrategy(IntentStrategy):
         self.reentry_cooldown = int(self.get_config("reentry_cooldown", 2))
         self.max_lp_cycles = int(self.get_config("max_lp_cycles", 5))
 
+        # Sweepable range width parameter (0 = full range)
+        self.range_width_pct = Decimal(str(self.get_config("range_width_pct", "0")))
+        if self.range_width_pct < 0:
+            raise ValueError(f"range_width_pct must be >= 0, got {self.range_width_pct}")
+
         # Internal state
         self._has_position = False
         self._lp_token_balance = Decimal("0")
@@ -143,13 +151,16 @@ class AerodromeSweepLPStrategy(IntentStrategy):
         self._cooldown_remaining = 0
         self._tick_count = 0
         self._ticks_with_position = 0
+        self._current_price: Decimal | None = None
 
         pool_type = "stable" if self.stable else "volatile"
+        range_info = f"range_width={self.range_width_pct}%" if self.range_width_pct > 0 else "full_range"
         logger.info(
             f"AerodromeSweepLP initialized: pool={self.pool} ({pool_type}), "
             f"amounts={self.amount0} {self.token0} + {self.amount1} {self.token1}, "
             f"RSI({self.rsi_period}) range=[{self.rsi_oversold}, {self.rsi_overbought}], "
-            f"cooldown={self.reentry_cooldown}, max_cycles={self.max_lp_cycles}"
+            f"cooldown={self.reentry_cooldown}, max_cycles={self.max_lp_cycles}, "
+            f"{range_info}"
         )
 
     # =========================================================================
@@ -159,6 +170,12 @@ class AerodromeSweepLPStrategy(IntentStrategy):
     def decide(self, market: MarketSnapshot) -> Intent | None:
         """RSI-gated LP with cooldown and cycle limit."""
         self._tick_count += 1
+
+        # Capture current price for range width calculation
+        try:
+            self._current_price = market.price(self.token0)
+        except (ValueError, KeyError, AttributeError):
+            self._current_price = None  # Clear stale price; falls back to full range
 
         # Get RSI
         try:
@@ -229,19 +246,35 @@ class AerodromeSweepLPStrategy(IntentStrategy):
     # =========================================================================
 
     def _create_open_intent(self) -> Intent:
-        """Create LP_OPEN intent for Aerodrome."""
+        """Create LP_OPEN intent for Aerodrome.
+
+        If range_width_pct > 0, computes concentrated range bounds around
+        the current price. Otherwise uses full range (1 to 1,000,000).
+        """
         pool_type = "stable" if self.stable else "volatile"
         pool_with_type = f"{self.pool}/{pool_type}"
+
+        # Compute range bounds
+        if self.range_width_pct > 0 and self._current_price and self._current_price > 0:
+            half_width = self._current_price * self.range_width_pct / Decimal("200")
+            range_lower = max(self._current_price - half_width, Decimal("0.01"))
+            range_upper = self._current_price + half_width
+            range_info = f"range=[{range_lower:.2f}, {range_upper:.2f}] ({self.range_width_pct}% width)"
+        else:
+            range_lower = Decimal("1")
+            range_upper = Decimal("1000000")
+            range_info = "full_range"
+
         logger.info(
             f"LP_OPEN: {format_token_amount_human(self.amount0, self.token0)} + "
-            f"{format_token_amount_human(self.amount1, self.token1)} ({pool_with_type})"
+            f"{format_token_amount_human(self.amount1, self.token1)} ({pool_with_type}) {range_info}"
         )
         return Intent.lp_open(
             pool=pool_with_type,
             amount0=self.amount0,
             amount1=self.amount1,
-            range_lower=Decimal("1"),
-            range_upper=Decimal("1000000"),
+            range_lower=range_lower,
+            range_upper=range_upper,
             protocol="aerodrome",
             chain=self.chain,
         )

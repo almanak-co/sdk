@@ -11,6 +11,7 @@
     "rsi_overbought": "70",
     "reentry_cooldown": 2,
     "max_lp_cycles": 5,
+    "range_width_pct": "0",
     "chain": "base",
     "network": "mainnet",
     "anvil_funding": {
