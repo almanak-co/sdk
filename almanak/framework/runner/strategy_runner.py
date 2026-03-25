@@ -2770,8 +2770,8 @@ class StrategyRunner:
                             try:
                                 market.price(token, chain=intent_chain)
                                 fetched_any = True
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.warning(f"Failed to pre-fetch price for {token} on {intent_chain}: {e}")
                 if fetched_any:
                     price_oracle = market.get_price_oracle_dict()
             if price_oracle:

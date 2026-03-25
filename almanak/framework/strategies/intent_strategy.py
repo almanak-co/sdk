@@ -3598,6 +3598,12 @@ def almanak_strategy(
         cls.STRATEGY_METADATA = metadata  # type: ignore[attr-defined]
         cls.STRATEGY_NAME = name  # type: ignore[attr-defined]
 
+        # NOTE: Do NOT set cls.SUPPORTED_CHAINS here. The CLI's is_multi_chain_strategy()
+        # in run.py checks SUPPORTED_CHAINS as a runtime multi-chain signal (MultiChainOrchestrator).
+        # Decorator's supported_chains is portability metadata, not a runtime signal.
+        # The instance methods is_multi_chain() and get_supported_chains() fall back to
+        # STRATEGY_METADATA.supported_chains when SUPPORTED_CHAINS is not manually set.
+
         # Register in the global registry
         if name not in STRATEGY_REGISTRY:
             STRATEGY_REGISTRY[name] = cls
@@ -4117,7 +4123,12 @@ class IntentStrategy(StrategyBase[ConfigT]):
         self._aave_health_factor_provider = aave_health_factor_provider
 
     def is_multi_chain(self) -> bool:
-        """Check if this strategy is multi-chain.
+        """Check if this strategy is running in multi-chain mode.
+
+        Returns True only when SUPPORTED_CHAINS is explicitly set (manually or by
+        the CLI multi-chain path) AND has >1 chain. Does NOT use decorator metadata
+        because that is portability info, not a runtime signal. The CLI's
+        is_multi_chain_strategy() makes the runtime decision based on config.chains.
 
         Returns:
             True if SUPPORTED_CHAINS has multiple chains
@@ -4130,10 +4141,22 @@ class IntentStrategy(StrategyBase[ConfigT]):
     def get_supported_chains(self) -> list[str]:
         """Get the chains supported by this strategy.
 
+        Returns SUPPORTED_CHAINS if explicitly set, otherwise falls back to
+        STRATEGY_METADATA.supported_chains (decorator portability metadata),
+        then to [self._chain].
+
         Returns:
             List of supported chain names
         """
-        return list(getattr(self.__class__, "SUPPORTED_CHAINS", [self._chain]))
+        chains = getattr(self.__class__, "SUPPORTED_CHAINS", None)
+        if chains:
+            return list(chains)
+        # Fallback: decorator portability metadata (safe for informational use,
+        # but does NOT affect is_multi_chain() or create_market_snapshot())
+        metadata = getattr(self.__class__, "STRATEGY_METADATA", None)
+        if metadata and hasattr(metadata, "supported_chains") and metadata.supported_chains:
+            return list(metadata.supported_chains)
+        return [self._chain]
 
     def create_market_snapshot(self) -> MarketSnapshot:
         """Create a market snapshot for the current iteration.
