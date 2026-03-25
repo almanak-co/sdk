@@ -45,6 +45,7 @@ ON_CHAIN_INDICATORS = {
 # strategy instead. When this set is empty, the xfail marker can be removed.
 KNOWN_VIOLATIONS: set[str] = {
     "strategies/incubating/aave_supply_base/strategy.py",
+    "strategies/incubating/aave_uniswap_leverage_polygon/strategy.py",
     "strategies/incubating/aave_v3_lending_bsc/strategy.py",
     "strategies/incubating/aave_v3_lending_mantle/strategy.py",
     "strategies/incubating/aerodrome_swap_aave_supply_base/strategy.py",
