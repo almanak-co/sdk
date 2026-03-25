@@ -101,6 +101,16 @@ class PendleYTYieldStrategy(IntentStrategy):
 
         # Risk parameters
         self.stop_loss_pct = int(self.get_config("stop_loss_pct", 50))
+        # YT tokens are illiquid near maturity — use a wider teardown slippage
+        # Default 1500bps (15%) for HARD mode, 500bps (5%) for SOFT mode
+        self.teardown_hard_slippage_bps = int(self.get_config("teardown_hard_slippage_bps", 1500))
+        self.teardown_soft_slippage_bps = int(self.get_config("teardown_soft_slippage_bps", 500))
+        for _name, _bps in (
+            ("teardown_hard_slippage_bps", self.teardown_hard_slippage_bps),
+            ("teardown_soft_slippage_bps", self.teardown_soft_slippage_bps),
+        ):
+            if not 0 <= _bps <= 10_000:
+                raise ValueError(f"{_name} must be between 0 and 10000 bps, got {_bps}")
 
         # State
         self._has_entered_position = False
@@ -269,21 +279,27 @@ class PendleYTYieldStrategy(IntentStrategy):
         """Generate intents to close YT position.
 
         Swaps YT back to the base token via Pendle.
+
+        NOTE: YT tokens are inherently illiquid near maturity because their
+        value decays toward zero as implied yield is realized. The teardown
+        uses significantly wider slippage (default 15% HARD, 5% SOFT) to
+        account for thin AMM liquidity. If the YT cannot be sold even at
+        max slippage, the TeardownManager will escalate further.
         """
         from almanak.framework.teardown import TeardownMode
 
         if not self._has_entered_position:
             return []
 
-        # Use wider slippage for emergency teardown
+        # Use wider slippage — YT AMMs are thin near maturity
         if mode == TeardownMode.HARD:
-            max_slippage = Decimal("0.05")  # 5%
+            max_slippage = Decimal(str(self.teardown_hard_slippage_bps)) / Decimal("10000")
         else:
-            max_slippage = Decimal(str(self.max_slippage_bps)) / Decimal("10000")
+            max_slippage = Decimal(str(self.teardown_soft_slippage_bps)) / Decimal("10000")
 
         logger.info(
             f"Generating teardown: swap {self.yt_token} -> {self.base_token} "
-            f"(mode={mode.value}, slippage={max_slippage})"
+            f"(mode={mode.value}, slippage={max_slippage:.2%})"
         )
 
         # Swap YT back to base token via Pendle

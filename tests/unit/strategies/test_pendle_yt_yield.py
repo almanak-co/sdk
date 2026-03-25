@@ -33,6 +33,8 @@ def strategy():
     strat.yt_token = "YT-wstETH-25JUN2026"
     strat.yt_token_symbol = "YT-wstETH"
     strat.stop_loss_pct = 50
+    strat.teardown_hard_slippage_bps = 1500
+    strat.teardown_soft_slippage_bps = 500
     strat._has_entered_position = False
     strat._consecutive_holds = 0
     strat._entry_value_usd = Decimal("0")
@@ -163,7 +165,7 @@ class TestTeardown:
         strategy._has_entered_position = True
         intents = strategy.generate_teardown_intents(TeardownMode.HARD)
 
-        assert intents[0].max_slippage == Decimal("0.05")
+        assert intents[0].max_slippage == Decimal("0.15")
 
     def test_teardown_empty_when_no_position(self, strategy):
         from almanak.framework.teardown import TeardownMode
