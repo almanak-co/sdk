@@ -525,6 +525,265 @@ class TestSimulatorPayloadNoGasCap:
             )
 
 
+class TestAlchemyMultiCallGasAggregation:
+    """Verify Alchemy simulator sums sub-call gas per transaction, not per call.
+
+    Alchemy's simulateExecutionBundle returns ALL internal sub-calls in a flat
+    `calls` array for each transaction. The simulator must sum gas across all
+    sub-calls within a transaction to produce one gas estimate per TX.
+
+    Bug fixed: VIB-1861 — framework previously appended each sub-call's gas
+    individually, producing N gas estimates (where N = total sub-calls) instead
+    of one per transaction. This caused the orchestrator to assign the wrong
+    sub-call's gas to transactions.
+    """
+
+    @pytest.mark.asyncio
+    async def test_multi_call_tx_sums_gas_across_subcalls(self):
+        """A 3-TX bundle where TX[1] has 9 internal sub-calls should produce 3 gas estimates."""
+        import json as json_mod
+
+        from almanak.framework.execution.interfaces import TransactionType, UnsignedTransaction
+
+        sim = AlchemySimulator(api_key="fake-key")
+
+        txs = [
+            UnsignedTransaction(
+                to="0x" + "a1" * 20,
+                value=0,
+                data="0x095ea7b3" + "00" * 64,
+                chain_id=42161,
+                tx_type=TransactionType.EIP_1559,
+                from_address="0x" + "cd" * 20,
+                gas_limit=75_000_000,
+                max_fee_per_gas=1000000000,
+                max_priority_fee_per_gas=0,
+            ),
+            UnsignedTransaction(
+                to="0x" + "a2" * 20,
+                value=0,
+                data="0x12345678" + "00" * 64,
+                chain_id=42161,
+                tx_type=TransactionType.EIP_1559,
+                from_address="0x" + "cd" * 20,
+                gas_limit=75_000_000,
+                max_fee_per_gas=1000000000,
+                max_priority_fee_per_gas=0,
+            ),
+            UnsignedTransaction(
+                to="0x" + "a3" * 20,
+                value=0,
+                data="0xaabbccdd" + "00" * 64,
+                chain_id=42161,
+                tx_type=TransactionType.EIP_1559,
+                from_address="0x" + "cd" * 20,
+                gas_limit=75_000_000,
+                max_fee_per_gas=1000000000,
+                max_priority_fee_per_gas=0,
+            ),
+        ]
+
+        # Simulate Alchemy response: TX[0] has 1 call, TX[1] has 9 sub-calls, TX[2] has 3 sub-calls
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.text = AsyncMock(
+            return_value=json_mod.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": [
+                        {
+                            "calls": [
+                                {"status": "0x1", "gasUsed": hex(50000), "returnValue": "0x"},
+                            ]
+                        },
+                        {
+                            "calls": [
+                                {"status": "0x1", "gasUsed": hex(10000), "returnValue": "0x"},
+                                {"status": "0x1", "gasUsed": hex(20000), "returnValue": "0x"},
+                                {"status": "0x1", "gasUsed": hex(30000), "returnValue": "0x"},
+                                {"status": "0x1", "gasUsed": hex(40000), "returnValue": "0x"},
+                                {"status": "0x1", "gasUsed": hex(50000), "returnValue": "0x"},
+                                {"status": "0x1", "gasUsed": hex(60000), "returnValue": "0x"},
+                                {"status": "0x1", "gasUsed": hex(70000), "returnValue": "0x"},
+                                {"status": "0x1", "gasUsed": hex(80000), "returnValue": "0x"},
+                                {"status": "0x1", "gasUsed": hex(90000), "returnValue": "0x"},
+                            ]
+                        },
+                        {
+                            "calls": [
+                                {"status": "0x1", "gasUsed": hex(100000), "returnValue": "0x"},
+                                {"status": "0x1", "gasUsed": hex(200000), "returnValue": "0x"},
+                                {"status": "0x1", "gasUsed": hex(46642), "returnValue": "0x"},
+                            ]
+                        },
+                    ],
+                }
+            )
+        )
+
+        mock_post_cm = AsyncMock()
+        mock_post_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_post_cm.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.post = MagicMock(return_value=mock_post_cm)
+
+        mock_session_cm = AsyncMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session_cm):
+            result = await sim.simulate(txs, "arbitrum")
+
+        assert result.success is True
+        # Must produce exactly 3 gas estimates (one per TX), not 13 (one per sub-call)
+        assert len(result.gas_estimates) == 3, (
+            f"Expected 3 gas estimates (one per TX), got {len(result.gas_estimates)}. "
+            f"Sub-call gas must be summed per transaction, not flattened."
+        )
+        # TX[0]: 1 call with 50000 gas
+        assert result.gas_estimates[0] == 50000
+        # TX[1]: 9 sub-calls summed: 10k+20k+30k+40k+50k+60k+70k+80k+90k = 450000
+        assert result.gas_estimates[1] == 450000
+        # TX[2]: 3 sub-calls summed: 100k+200k+46642 = 346642
+        assert result.gas_estimates[2] == 346642
+
+    @pytest.mark.asyncio
+    async def test_single_call_tx_unchanged(self):
+        """A bundle where every TX has exactly 1 call should behave the same as before."""
+        import json as json_mod
+
+        from almanak.framework.execution.interfaces import TransactionType, UnsignedTransaction
+
+        sim = AlchemySimulator(api_key="fake-key")
+
+        txs = [
+            UnsignedTransaction(
+                to="0x" + "a1" * 20,
+                value=0,
+                data="0x095ea7b3" + "00" * 64,
+                chain_id=42161,
+                gas_limit=75_000_000,
+                tx_type=TransactionType.EIP_1559,
+                from_address="0x" + "cd" * 20,
+                max_fee_per_gas=1000000000,
+                max_priority_fee_per_gas=0,
+            ),
+            UnsignedTransaction(
+                to="0x" + "a2" * 20,
+                value=0,
+                data="0x12345678" + "00" * 64,
+                chain_id=42161,
+                gas_limit=75_000_000,
+                tx_type=TransactionType.EIP_1559,
+                from_address="0x" + "cd" * 20,
+                max_fee_per_gas=1000000000,
+                max_priority_fee_per_gas=0,
+            ),
+        ]
+
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.text = AsyncMock(
+            return_value=json_mod.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": [
+                        {
+                            "calls": [
+                                {"status": "0x1", "gasUsed": hex(46000), "returnValue": "0x"},
+                            ]
+                        },
+                        {
+                            "calls": [
+                                {"status": "0x1", "gasUsed": hex(917902), "returnValue": "0x"},
+                            ]
+                        },
+                    ],
+                }
+            )
+        )
+
+        mock_post_cm = AsyncMock()
+        mock_post_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_post_cm.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.post = MagicMock(return_value=mock_post_cm)
+
+        mock_session_cm = AsyncMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session_cm):
+            result = await sim.simulate(txs, "arbitrum")
+
+        assert result.success is True
+        assert len(result.gas_estimates) == 2
+        assert result.gas_estimates[0] == 46000
+        assert result.gas_estimates[1] == 917902
+
+    @pytest.mark.asyncio
+    async def test_zero_gas_subcall_uses_default(self):
+        """If all sub-calls in a TX return 0 gas, the TX should get a conservative default."""
+        import json as json_mod
+
+        from almanak.framework.execution.interfaces import TransactionType, UnsignedTransaction
+
+        sim = AlchemySimulator(api_key="fake-key")
+
+        tx = UnsignedTransaction(
+            to="0x" + "a1" * 20,
+            value=0,
+            data="0x095ea7b3" + "00" * 64,
+            chain_id=42161,
+            gas_limit=75_000_000,
+            tx_type=TransactionType.EIP_1559,
+            from_address="0x" + "cd" * 20,
+            max_fee_per_gas=1000000000,
+            max_priority_fee_per_gas=0,
+        )
+
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.text = AsyncMock(
+            return_value=json_mod.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": [
+                        {
+                            "calls": [
+                                {"status": "0x1", "gasUsed": "0x0", "returnValue": "0x"},
+                                {"status": "0x1", "gasUsed": "0x0", "returnValue": "0x"},
+                            ]
+                        },
+                    ],
+                }
+            )
+        )
+
+        mock_post_cm = AsyncMock()
+        mock_post_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_post_cm.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.post = MagicMock(return_value=mock_post_cm)
+
+        mock_session_cm = AsyncMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session_cm):
+            result = await sim.simulate([tx], "arbitrum")
+
+        assert result.success is True
+        assert len(result.gas_estimates) == 1
+        assert result.gas_estimates[0] == 100000  # Conservative default
+
+
 class TestMantleFallbackGasEstimates:
     """Verify Mantle fallback gas estimates are calibrated to measured on-chain values.
 
