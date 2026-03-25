@@ -608,12 +608,32 @@ class TeardownManager:
                         if _is_dict
                         else getattr(intent_with_slippage, "amount", None)
                     )
+                    # Check from_token first (SwapIntent), then token (Withdraw/Supply/Repay)
                     from_token = (
-                        intent_with_slippage.get("from_token")
+                        intent_with_slippage.get("from_token") or intent_with_slippage.get("token")
                         if _is_dict
                         else getattr(intent_with_slippage, "from_token", None)
+                        or getattr(intent_with_slippage, "token", None)
                     )
-                    if amount_value == "all":
+                    # Skip wallet-balance resolution for withdraw intents —
+                    # withdraw positions live in the protocol, not the wallet.
+                    # Also skip when withdraw_all is set (adapter uses MAX_UINT256).
+                    _withdraw_all = (
+                        intent_with_slippage.get("withdraw_all")
+                        if _is_dict
+                        else getattr(intent_with_slippage, "withdraw_all", False)
+                    )
+                    _intent_type_val = (
+                        intent_with_slippage.get("intent_type")
+                        if _is_dict
+                        else getattr(intent_with_slippage, "intent_type", None)
+                    )
+                    _is_withdraw = (
+                        str(_intent_type_val).upper() in ("WITHDRAW", "INTENTTYPE.WITHDRAW")
+                        if _intent_type_val
+                        else False
+                    )
+                    if amount_value == "all" and not _withdraw_all and not _is_withdraw:
                         if not from_token or market is None:
                             return ExecutionAttempt(
                                 success=False,

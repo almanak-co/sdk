@@ -98,3 +98,44 @@ def test_get_open_positions_returns_none_falls_back() -> None:
     # Should fall back to internal state
     assert len(summary.positions) == 2
     assert {p.position_type.value for p in summary.positions} == {"SUPPLY", "BORROW"}
+
+
+def test_teardown_intents_withdraw_uses_concrete_amount() -> None:
+    """Withdraw intent must use a concrete amount, not 'all'.
+
+    The TeardownManager now resolves amount='all' via from_token with token
+    fallback. Using a concrete amount with withdraw_all=True remains a robust
+    guard against resolver/path regressions (VIB-1851).
+    """
+    from almanak.framework.teardown import TeardownMode
+
+    strategy = _make_strategy()
+
+    intents = strategy.generate_teardown_intents(TeardownMode.SOFT)
+
+    # Should have: REPAY, WITHDRAW, SWAP
+    assert len(intents) == 3
+
+    # The withdraw intent (index 1) must NOT use amount="all"
+    withdraw_intent = intents[1]
+    assert withdraw_intent.intent_type.value == "WITHDRAW"
+    assert withdraw_intent.amount != "all"
+    assert withdraw_intent.amount == Decimal("0.5")
+    assert withdraw_intent.withdraw_all is True
+
+
+def test_teardown_intents_supply_only_no_repay() -> None:
+    """When only supply exists (no borrow), teardown skips repay."""
+    from almanak.framework.teardown import TeardownMode
+
+    strategy = _make_strategy()
+    strategy._borrowed_amount = Decimal("0")
+
+    intents = strategy.generate_teardown_intents(TeardownMode.SOFT)
+
+    # Should have: WITHDRAW, SWAP (no REPAY)
+    assert len(intents) == 2
+    assert intents[0].intent_type.value == "WITHDRAW"
+    assert intents[0].amount == Decimal("0.5")
+    assert intents[1].intent_type.value == "SWAP"
+    assert intents[1].from_token == "WETH"
