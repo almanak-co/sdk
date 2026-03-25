@@ -68,6 +68,7 @@ class BalancerFlashArbStrategy(IntentStrategy):
         self.quote_token = self.get_config("quote_token", "USDC")
         self.force_action = self.get_config("force_action", None)
         self._trades_executed = 0
+        self._fell_back_to_swap = False
 
         # flash_loan_amount_usd is passed as raw token units to Intent.flash_loan,
         # so quote_token must be a dollar-pegged stablecoin for the amount to make sense.
@@ -89,10 +90,26 @@ class BalancerFlashArbStrategy(IntentStrategy):
 
         In force_action="flash_loan" mode, creates a Balancer flash loan
         that borrows USDC and swaps through Enso (round-trip arbitrage pattern).
+        NOTE: Flash loans require a smart contract receiver — EOA wallets will
+        revert because they can't implement the receiveFlashLoan callback.
+        Since the gateway compiler is not available at decide() time, flash_loan
+        mode always falls back to swap on local/Anvil runs (EOA wallets).
 
         In force_action="swap" mode, creates a simple Enso swap as fallback.
         """
         if self.force_action == "flash_loan":
+            # Flash loans revert on EOA wallets (no receiveFlashLoan callback).
+            # The compiler (with gateway RPC) is not available at decide() time,
+            # so we cannot do an on-chain eth_getCode check here. Instead, check
+            # using the compiler's cached result if available, otherwise assume EOA.
+            if not self._is_contract_wallet():
+                logger.warning(
+                    "flash_loan requested but wallet is an EOA (or wallet type unknown) — "
+                    "flash loans require a smart contract receiver with "
+                    "receiveFlashLoan() callback. Falling back to swap mode."
+                )
+                self._fell_back_to_swap = True
+                return self._create_swap_intent()
             logger.info("Force action: Balancer flash loan with Enso swap callbacks")
             return self._create_flash_loan_intent()
         elif self.force_action == "swap":
@@ -100,6 +117,45 @@ class BalancerFlashArbStrategy(IntentStrategy):
             return self._create_swap_intent()
         else:
             return Intent.hold(reason="No action forced -- set force_action in config.json")
+
+    def _is_contract_wallet(self) -> bool:
+        """Check if the wallet address is a smart contract (e.g., Safe).
+
+        Returns False (assumes EOA) if the check fails or no gateway is available.
+        Flash loans require a contract wallet with callback support.
+
+        NOTE: At decide() time, self._compiler is typically None because the
+        runner creates the compiler after decide() returns. This means this
+        method will return False for most local/Anvil runs, which is the safe
+        default (fall back to swap instead of guaranteed-revert flash loan).
+        """
+        compiler = getattr(self, "_compiler", None)
+        if compiler is None:
+            return False
+        gateway_client = getattr(compiler, "_gateway_client", None)
+        if gateway_client is None:
+            return False
+
+        import json
+
+        try:
+            from almanak.gateway.proto import gateway_pb2
+
+            response = gateway_client.rpc.Call(
+                gateway_pb2.RpcRequest(
+                    chain=self.chain,
+                    method="eth_getCode",
+                    params=json.dumps([self.wallet_address, "latest"]),
+                    id="check-eoa",
+                ),
+                timeout=5.0,
+            )
+            if response.success and response.result:
+                code = json.loads(response.result)
+                return code not in (None, "0x", "0x0")
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not check wallet bytecode, assuming EOA")
+        return False
 
     def _create_flash_loan_intent(self) -> Intent:
         """Create a Balancer flash loan intent with swap callbacks.
@@ -175,8 +231,9 @@ class BalancerFlashArbStrategy(IntentStrategy):
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
         positions = []
-        # Only report a position if a swap was actually executed (not just a flash loan round-trip)
-        if self._trades_executed > 0 and self.force_action == "swap":
+        # Report a position if a swap was executed (either direct swap mode or EOA fallback)
+        _did_swap = self.force_action == "swap" or self._fell_back_to_swap
+        if self._trades_executed > 0 and _did_swap:
             positions.append(
                 PositionInfo(
                     position_type=PositionType.TOKEN,
@@ -198,7 +255,8 @@ class BalancerFlashArbStrategy(IntentStrategy):
         from almanak.framework.teardown import TeardownMode
 
         # Only generate teardown intents if a swap was actually executed
-        if self._trades_executed == 0 or self.force_action != "swap":
+        _did_swap = self.force_action == "swap" or self._fell_back_to_swap
+        if self._trades_executed == 0 or not _did_swap:
             return []
 
         max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal(str(self.max_slippage_pct)) / Decimal("100")

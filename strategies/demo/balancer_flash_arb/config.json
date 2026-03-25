@@ -4,7 +4,7 @@
     "base_token": "WETH",
     "quote_token": "USDC",
     "chain": "arbitrum",
-    "force_action": "flash_loan",
+    "force_action": "swap",
     "anvil_funding": {
         "ETH": 100,
         "WETH": 1,
