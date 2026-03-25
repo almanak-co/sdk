@@ -18,6 +18,9 @@ Key differences from traditional Compound:
 Supported chains:
 - Ethereum
 - Arbitrum
+- Base
+- Optimism
+- Polygon
 
 Example:
     from almanak.framework.connectors.compound_v3 import CompoundV3Adapter, CompoundV3Config
@@ -87,6 +90,11 @@ COMPOUND_V3_COMET_ADDRESSES: dict[str, dict[str, str]] = {
     "optimism": {
         # Verified on-chain: baseToken() returns 0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85 (USDC on Optimism)
         "usdc": "0x2e44e174f7D53F0212823acC11C01A11d58c5bCB",
+    },
+    "polygon": {
+        # Verified on-chain: baseToken() returns 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 (USDC.e bridged on Polygon)
+        # Collateral: WETH (80% CF), WBTC (75%), WMATIC (65%), MaticX (55%)
+        "usdc_e": "0xF25212E676D1F7F89Cd72fFEe66158f541246445",
     },
 }
 
@@ -372,6 +380,40 @@ COMPOUND_V3_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
                     "borrow_collateral_factor": Decimal("0.65"),
                     "liquidation_collateral_factor": Decimal("0.70"),
                     "liquidation_factor": Decimal("0.93"),
+                },
+            },
+        },
+    },
+    "polygon": {
+        # USDC.e Comet on Polygon -- verified on-chain: baseToken() = 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 (USDC.e)
+        "usdc_e": {
+            "name": "USDC.e Market",
+            "base_token": "USDC.e",
+            "base_token_address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+            "collaterals": {
+                "WETH": {
+                    "address": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+                    "borrow_collateral_factor": Decimal("0.80"),
+                    "liquidation_collateral_factor": Decimal("0.85"),
+                    "liquidation_factor": Decimal("0.93"),
+                },
+                "WBTC": {
+                    "address": "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",
+                    "borrow_collateral_factor": Decimal("0.75"),
+                    "liquidation_collateral_factor": Decimal("0.85"),
+                    "liquidation_factor": Decimal("0.90"),
+                },
+                "WMATIC": {
+                    "address": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+                    "borrow_collateral_factor": Decimal("0.65"),
+                    "liquidation_collateral_factor": Decimal("0.80"),
+                    "liquidation_factor": Decimal("0.90"),
+                },
+                "MaticX": {
+                    "address": "0xfa68FB4628DFF1028CFEc22b4162FCcd0d45efb6",
+                    "borrow_collateral_factor": Decimal("0.55"),
+                    "liquidation_collateral_factor": Decimal("0.65"),
+                    "liquidation_factor": Decimal("0.90"),
                 },
             },
         },
@@ -1262,6 +1304,8 @@ class CompoundV3Adapter:
             "rETH": Decimal("2700.0"),
             "ARB": Decimal("1.5"),
             "GMX": Decimal("40.0"),
+            "WMATIC": Decimal("0.50"),
+            "MaticX": Decimal("0.55"),
             "USDS": Decimal("1.0"),
             "sUSDe": Decimal("1.0"),
         }
