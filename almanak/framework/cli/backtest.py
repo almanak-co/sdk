@@ -2496,13 +2496,16 @@ def optimize_backtest(
     to efficiently explore the parameter space and find configurations that
     maximize (or minimize) the specified objective metric.
 
-    The optimization config file (--config-file) must contain parameter ranges:
+    The optimization config file (--config-file) must contain parameter ranges.
+    These are typically your strategy's own parameters (the ones your decide()
+    method uses), but PnLBacktestConfig fields are also supported:
 
     \b
     {
         "param_ranges": {
-            "threshold": {"type": "continuous", "min": 0.01, "max": 0.1},
-            "window": {"type": "discrete", "min": 10, "max": 100, "step": 10},
+            "rsi_oversold": {"type": "discrete", "min": 20, "max": 40, "step": 5},
+            "rsi_overbought": {"type": "discrete", "min": 60, "max": 80, "step": 5},
+            "trade_size_usd": {"type": "continuous", "min": 100, "max": 5000},
             "mode": {"type": "categorical", "choices": ["aggressive", "conservative"]}
         },
         "objective": "sharpe_ratio",
@@ -2510,11 +2513,15 @@ def optimize_backtest(
         "patience": 10
     }
 
+    Strategy param names are merged into the strategy config dict.
+    PnLBacktestConfig field names are applied to the backtest config.
+    The optimizer automatically routes each key to the right place.
+
     Parameter types:
     \b
-        - continuous: Float range with optional log scale
+        - continuous: Float range with optional log scale and step
         - discrete: Integer range with optional step
-        - categorical: List of choices
+        - categorical: List of choices (strings, ints, or floats)
 
     Supported objectives:
     \b
@@ -2531,13 +2538,13 @@ def optimize_backtest(
     Examples:
 
     \b
-        # Basic optimization
-        almanak backtest optimize -s momentum \\
+        # Optimize RSI strategy parameters
+        almanak backtest optimize -s uniswap_rsi \\
             --start 2024-01-01 --end 2024-06-01 \\
             --config-file optimize_config.json
 
     \b
-        # With custom settings
+        # With custom objective and more trials
         almanak backtest optimize -s mean_reversion \\
             --start 2024-01-01 --end 2024-03-01 \\
             --config-file config.json \\
@@ -2546,7 +2553,7 @@ def optimize_backtest(
             --output results.json
 
     \b
-        # Dry run to verify configuration
+        # Dry run to verify config is parsed correctly
         almanak backtest optimize -s test_strategy \\
             --start 2024-01-01 --end 2024-02-01 \\
             --config-file config.json --dry-run
@@ -3054,19 +3061,26 @@ def walk_forward_backtest(
     This provides a more realistic estimate of live trading performance than
     a single in-sample optimization.
 
-    The optimization config file (--config-file) must contain parameter ranges:
+    The optimization config file (--config-file) must contain parameter ranges.
+    These are typically your strategy's own parameters (the ones your decide()
+    method uses), but PnLBacktestConfig fields are also supported:
 
     \b
     {
         "param_ranges": {
-            "threshold": {"type": "continuous", "min": 0.01, "max": 0.1},
-            "window": {"type": "discrete", "min": 10, "max": 100, "step": 10},
+            "rsi_oversold": {"type": "discrete", "min": 20, "max": 40, "step": 5},
+            "rsi_overbought": {"type": "discrete", "min": 60, "max": 80, "step": 5},
+            "trade_size_usd": {"type": "continuous", "min": 100, "max": 5000},
             "mode": {"type": "categorical", "choices": ["aggressive", "conservative"]}
         },
         "objective": "sharpe_ratio",
         "n_trials": 50,
         "patience": 10
     }
+
+    Strategy param names are merged into the strategy config dict.
+    PnLBacktestConfig field names are applied to the backtest config.
+    The optimizer automatically routes each key to the right place.
 
     Window configuration:
 
@@ -3080,7 +3094,7 @@ def walk_forward_backtest(
 
     \b
         # Basic walk-forward with 90-day train, 30-day test
-        almanak backtest walk-forward -s momentum \\
+        almanak backtest walk-forward -s uniswap_rsi \\
             --start 2023-01-01 --end 2024-01-01 \\
             --config-file optimize_config.json \\
             --train-days 90 --test-days 30
