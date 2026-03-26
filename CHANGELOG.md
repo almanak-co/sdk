@@ -6,6 +6,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.6.4] - 2026-03-26
+
+### Added
+- Compound V3 WETH market lifecycle on Arbitrum (#1016)
+- PostgreSQL backend for TimelineStore for deployed dashboards (#1022)
+- Fluid DEX swap intent test with 4-layer verification (#1013)
+- BENQI full lending lifecycle on Avalanche (#1049)
+- Curve 3pool paper trade strategy on Ethereum (#1057)
+- TraderJoe V2 LP bin-width sweep on Avalanche (#1015)
+- Aerodrome LP range_width_pct parameter sweep on Base (#1043)
+- Crisis scenario backtest for Uniswap V3 swap on Arbitrum (#1042)
+- PancakeSwap V3 PnL backtest swap strategy on BSC (#1053)
+- Aave V3 lending parameter sweep on Arbitrum (#1052)
+- Aave V3 paper trade leverage loop on Polygon (#1069)
+- Aave V3 paper trade lending strategy on Polygon (#1074)
+- Uniswap V3 RSI PnL backtest on Arbitrum (#1075)
+- Uniswap V3 RSI parameter sweep on Arbitrum (#1073)
+- SushiSwap V3 PnL backtest on Base (#1072)
+- Aerodrome SWAP + Compound V3 lending lifecycle on Base (#1071)
+- Compound V3 PnL backtest on Base (#1068)
+- SDK marketing video composition (#1076)
+- Bump almanak-code to v0.2.8
+
+### Changed
+- Feature strategy params in optimize/walk-forward CLI help text (#1064)
+
+### Fixed
+- GMX V2 Reader position queries with fallback mechanisms (#1067)
+- Bridge gas estimation: raise default and enable eth_estimateGas for all TXs (#1063)
+- GMX V2 close_position uses sentinel value for full close without cache (#1062)
+- Set SUPPORTED_CHAINS in decorator for multi-chain detection (#1040)
+- Sum Alchemy sub-call gas per transaction instead of flattening (#1061)
+- Balancer flash_arb EOA fallback to swap mode (#1056)
+- Increase pendle_yt_yield teardown slippage for illiquid YT (#1055)
+- Aave borrow teardown withdraw amount resolution (#1054)
+- Suppress unclosed aiohttp ClientSession warning on gateway shutdown (#1047)
+- Increase LocalSimulator state setup timeout from 10s to 30s (#1046)
+- Enable Velodrome/Aerodrome swap compilation on Optimism (#1045)
+- Resolve gateway API keys from ALMANAK_GATEWAY_ prefixed env vars (#1041)
+- Reject deprecated stable interest rate mode for Aave V3 and Spark (#1033)
+- Decode Fluid DEX revert errors and lower demo trade size (#1032)
+- Add on_intent_executed/save_state callbacks to bridge-waiting path (#1031)
+- Use bare API key env var names, add settings fallbacks (#1037)
+- Restore almanak.wallets entry point for sidecar wallet resolution (#1035)
+- Curve LP position_id as address with on-chain balance query (#1030)
+- Initialize EXECUTE_SKIPPED_BACKPRESSURE to prevent unbound variable crash (#1029)
+- Register Curve NG pool LP tokens in token resolver (#1025)
+- Curve NG 4-coin pool receipt parsing: include all coin amounts (#1024)
+- Address 5 chronic Kitchen Loop issues from meta-analysis (#1023)
+- Strip pool-type suffixes from token extraction (#1000)
+- Curve LP extract_liquidity() returns human-readable Decimal (#999)
+- Resolve swap amount decimals from Transfer events instead of defaulting to 18 (#1009)
+- Case-insensitive collateral lookup in Compound V3 adapter (#1017)
+- Increase Anvil funding for 2 failing strategies (#1012)
+- Allow single-chain sidecar mode with ALMANAK_GATEWAY_WALLETS (#1010)
+- Resolve empty wallet_address in multi-chain sidecar mode (#1006)
+- Anvil version detection to skip --no-gas-cap on 0.3.x (#996)
+- Cache parse_receipt in ResultEnricher (#989)
+- Paper trading balance cache and RSI return type (#965)
+- Align Curve LP intent tests with human-readable extract_liquidity() (#1026)
+- Normalize AGENT_ID across all deployed dashboard data paths (#1028)
+- Isolate market service test from CI env vars (#1038)
+- Use COVERAGE_CORE=sysmon for near-zero coverage overhead (#1005)
+
 ## [2.6.3] - 2026-03-23
 
 ### Added
