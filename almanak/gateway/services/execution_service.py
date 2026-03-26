@@ -119,6 +119,14 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             val = getattr(intent, attr, None)
             if val and isinstance(val, str):
                 tokens.append(val)
+        # LP intents carry pool (e.g. "WETH/USDC/500") but no explicit token fields.
+        # Extract token symbols from the pool string so prices can be self-served.
+        pool = getattr(intent, "pool", None)
+        if pool and isinstance(pool, str) and "/" in pool:
+            parts = pool.split("/")
+            for p in parts:
+                if p and not p.isdigit() and p not in tokens:
+                    tokens.append(p)
         return tokens
 
     async def _ensure_initialized(self) -> None:
@@ -524,7 +532,29 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                     self_served = await self._fetch_prices_for_tokens(intent_tokens) if intent_tokens else {}
                     # Require prices for ALL extracted tokens to prevent partial placeholder usage
                     all_covered = intent_tokens and all(t.upper() in self_served for t in intent_tokens)
-                    if all_covered and hasattr(compiler, "update_prices"):
+                    # LP_CLOSE/PERP_CLOSE with only position_id may have no extractable
+                    # tokens — these operations don't need prices (decreaseLiquidity/collect).
+                    # Only bypass the price gate for close-type intents; all others must
+                    # fail-closed to prevent compiling with placeholder prices.
+                    normalized_type = self._normalize_intent_type(intent_type).upper()
+                    if not intent_tokens and normalized_type in ("LPCLOSE", "PERPCLOSE"):
+                        logger.info(
+                            f"No token symbols extractable from {intent_type} intent — "
+                            f"skipping price gate for close-type intent, letting compiler proceed."
+                        )
+                    elif not intent_tokens:
+                        error_msg = (
+                            f"No real prices available for {intent_type} compilation on mainnet. "
+                            f"Could not extract token symbols from intent to self-serve prices. "
+                            f"Refusing to compile with placeholder prices."
+                        )
+                        logger.warning(error_msg)
+                        return gateway_pb2.CompilationResult(
+                            success=False,
+                            error=error_msg,
+                            error_code="NO_PRICES_AVAILABLE",
+                        )
+                    elif all_covered and hasattr(compiler, "update_prices"):
                         compiler.update_prices(self_served)
                         logger.info(
                             f"Self-served {len(self_served)} prices for {intent_type} compilation: "
