@@ -51,6 +51,7 @@ KNOWN_VIOLATIONS: set[str] = {
     "strategies/incubating/aerodrome_swap_aave_supply_base/strategy.py",
     "strategies/incubating/agni_swap_aave_supply_mantle/strategy.py",
     "strategies/incubating/benqi_leverage_loop/strategy.py",
+    "strategies/incubating/benqi_lifecycle_avalanche/strategy.py",
     "strategies/incubating/curve_aave_yield_optimism/strategy.py",
     "strategies/incubating/curve_aave_yield_pipeline/strategy.py",
     "strategies/incubating/curve_stableswap_lp_base/strategy.py",
