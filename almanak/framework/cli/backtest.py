@@ -68,7 +68,7 @@ from ..backtesting import (
     PnLBacktester,
     RollingForkManager,
 )
-from ..backtesting.paper.background import BackgroundPaperTrader
+from ..backtesting.paper.background import BackgroundPaperTrader, PaperTraderState, PIDFile
 from ..backtesting.pnl.config_loader import ConfigLoadError, load_config_from_result
 from ..backtesting.pnl.logging_utils import configure_backtest_logging
 from ..backtesting.scenarios import (
@@ -4785,6 +4785,7 @@ def paper_start(
     # CLI flags override config values when both are provided.
     config_eth: Decimal | None = None
     config_tokens: dict[str, Decimal] = {}
+    strategy_config: dict[str, Any] | None = None
     try:
         strategy_config = load_strategy_config(strategy, chain)
         anvil_funding = strategy_config.get("anvil_funding", {})
@@ -4864,6 +4865,16 @@ def paper_start(
 
     if output_path:
         click.echo(f"Output: {output_path}")
+
+    # Warn if force_action is set — bypasses indicator logic (VIB-1954)
+    force_action = strategy_config.get("force_action") if strategy_config else None
+    if force_action:
+        click.echo()
+        click.echo(
+            f"  WARNING: force_action='{force_action}' detected in config. "
+            f"Strategy will bypass indicator logic for every tick.",
+            err=True,
+        )
 
     click.echo("=" * 60)
 
@@ -5162,6 +5173,183 @@ def paper_stop(strategy: str, force: bool) -> None:
         click.echo()
         click.echo("No PID recorded for this session.")
         update_paper_session_status(strategy, "stopped")
+
+
+@paper.command("resume")
+@click.option(
+    "--strategy",
+    "-s",
+    required=True,
+    help="Name of the strategy to resume",
+)
+@click.option(
+    "--duration",
+    type=str,
+    default=None,
+    help="Additional duration to run (e.g., '1h', '48h'). Extends max_ticks from current count.",
+)
+@click.option(
+    "--max-ticks",
+    type=int,
+    default=None,
+    help="New max tick count (absolute, not additional). Mutually exclusive with --duration.",
+)
+def paper_resume(strategy: str, duration: str | None, max_ticks: int | None) -> None:
+    """
+    Resume a stopped paper trading session.
+
+    Continues a previously stopped session from where it left off,
+    preserving tick count, trades, errors, and balances.
+
+    Handles dead process detection, state status reset, PID cleanup,
+    and max_ticks extension automatically.
+
+    Examples:
+
+        # Resume for another 48 hours
+        almanak strat backtest paper resume -s momentum_v1 --duration 48h
+
+        # Resume with a specific tick limit
+        almanak strat backtest paper resume -s momentum_v1 --max-ticks 5000
+
+        # Resume indefinitely (until manual stop)
+        almanak strat backtest paper resume -s momentum_v1
+    """
+    if duration is not None and max_ticks is not None:
+        click.echo("Error: --duration and --max-ticks are mutually exclusive.", err=True)
+        raise click.Abort()
+
+    # Load saved state to get config (chain, RPC, tick_interval, etc.)
+    bg_trader = BackgroundPaperTrader(
+        config=PaperTraderConfig(
+            chain="arbitrum",  # Placeholder — will be overridden from saved config
+            rpc_url="http://placeholder",
+            strategy_id=strategy,
+        ),
+    )
+
+    if not bg_trader.state_file.exists():
+        click.echo(f"Error: No saved state found for '{strategy}'.", err=True)
+        click.echo("Use 'paper start' to begin a new session.", err=True)
+        raise click.Abort()
+
+    state = PaperTraderState.load(bg_trader.state_file)
+
+    # Handle dead process: if status is "running" but process is dead, reset to "stopped"
+    if state.status == "running":
+        if state.pid and not is_process_running(state.pid):
+            click.echo(f"Process {state.pid} is no longer running. Resetting status to stopped.")
+            state.status = "stopped"
+            state.save(bg_trader.state_file)
+            # Clean up stale PID file
+            pid_file = PIDFile(path=bg_trader.pid_file_path, strategy_id=strategy)
+            pid_file.release()
+        else:
+            click.echo(f"Error: Session '{strategy}' is still running (PID: {state.pid}).", err=True)
+            click.echo(f"Use 'paper stop -s {strategy}' first.", err=True)
+            raise click.Abort()
+
+    if not state.can_resume():
+        click.echo(f"Error: Cannot resume session (status={state.status}).", err=True)
+        raise click.Abort()
+
+    # Reconstruct config from saved state
+    saved_config = state.config
+    if not saved_config:
+        click.echo("Error: Saved state has no config. Cannot resume.", err=True)
+        raise click.Abort()
+
+    chain = saved_config.get("chain", "arbitrum")
+    tick_interval = saved_config.get("tick_interval_seconds", 60) or 60
+
+    # Determine RPC URL from saved config or environment
+    rpc_url = saved_config.get("rpc_url")
+    if not rpc_url or "***" in str(rpc_url):
+        # Masked URL — resolve from environment
+        chain_upper = chain.upper()
+        for env_var in [f"ALMANAK_{chain_upper}_RPC_URL", f"{chain_upper}_RPC_URL", "ALMANAK_RPC_URL", "RPC_URL"]:
+            rpc_url = os.environ.get(env_var)
+            if rpc_url:
+                break
+        if not rpc_url:
+            click.echo(f"Error: Saved RPC URL is masked and no env var found for '{chain}'.", err=True)
+            click.echo(f"Set ALMANAK_{chain_upper}_RPC_URL or use 'paper start' instead.", err=True)
+            raise click.Abort()
+
+    # Handle --duration -> extend max_ticks from current count
+    new_max_ticks = saved_config.get("max_ticks")
+    if duration is not None:
+        duration_seconds = _parse_duration(duration)
+        if duration_seconds is None:
+            click.echo(f"Error: Invalid duration '{duration}'. Use format like '1h', '48h'.", err=True)
+            raise click.Abort()
+        additional_ticks = max(1, duration_seconds // tick_interval + 1)
+        new_max_ticks = state.tick_count + additional_ticks
+        click.echo(f"Duration {duration} -> {additional_ticks} additional ticks (total: {new_max_ticks})")
+    elif max_ticks is not None:
+        if max_ticks <= state.tick_count:
+            click.echo(
+                f"Error: --max-ticks ({max_ticks}) must be greater than current tick count ({state.tick_count}).",
+                err=True,
+            )
+            raise click.Abort()
+        new_max_ticks = max_ticks
+
+    # Build the resume config
+    resume_config = PaperTraderConfig(
+        chain=chain,
+        rpc_url=rpc_url,
+        strategy_id=strategy,
+        tick_interval_seconds=tick_interval,
+        max_ticks=new_max_ticks,
+        anvil_port=saved_config.get("anvil_port", 8546),
+        reset_fork_every_tick=saved_config.get("reset_fork_every_tick", True),
+        initial_eth=Decimal(str(saved_config.get("initial_eth", "10"))),
+        initial_tokens={k: Decimal(str(v)) for k, v in saved_config.get("initial_tokens", {}).items()},
+    )
+
+    bg_trader_resume = BackgroundPaperTrader(config=resume_config)
+
+    # Resolve strategy module/class
+    strategy_cls = get_strategy(strategy)
+    strategy_config = load_strategy_config(strategy, chain)
+
+    click.echo()
+    click.echo(f"  Resuming: {strategy}")
+    click.echo(f"  Chain: {chain}")
+    click.echo(f"  Current ticks: {state.tick_count}")
+    click.echo(f"  Trades so far: {len(state.trades)}")
+    if new_max_ticks:
+        remaining = new_max_ticks - state.tick_count
+        click.echo(f"  Remaining ticks: {remaining}")
+    else:
+        click.echo("  Duration: unlimited")
+    click.echo()
+
+    try:
+        pid = bg_trader_resume.resume(
+            strategy_module=strategy_cls.__module__,
+            strategy_class=strategy_cls.__name__,
+            strategy_config=strategy_config,
+        )
+    except (RuntimeError, FileNotFoundError) as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort() from e
+
+    # Update CLI session state
+    update_paper_session_status(strategy, "running")
+    save_paper_session_state(
+        strategy_id=strategy,
+        pid=pid,
+        config=resume_config,
+        start_time=state.session_start,
+    )
+
+    click.echo(f"  Resumed in background (PID: {pid})")
+    click.echo()
+    click.echo(f"  Status: almanak strat backtest paper status -s {strategy}")
+    click.echo(f"  Logs:   almanak strat backtest paper logs -s {strategy}")
+    click.echo(f"  Stop:   almanak strat backtest paper stop -s {strategy}")
 
 
 @paper.command("status")

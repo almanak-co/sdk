@@ -750,6 +750,7 @@ class PaperTrader:
         self._errors = []
         self._equity_curve = []
         self._tick_count = 0
+        self._last_execution_result: ExecutionResult | None = None  # For on_intent_executed callback (VIB-1951)
 
         # Generate unique backtest_id for correlation across all log messages
         self._backtest_id = str(uuid.uuid4())
@@ -1081,6 +1082,7 @@ class PaperTrader:
         self._errors = []
         self._equity_curve = []
         self._tick_count = 0
+        self._last_execution_result = None
 
         # Generate unique backtest_id for correlation across all log messages
         self._backtest_id = str(uuid.uuid4())
@@ -1421,6 +1423,11 @@ class PaperTrader:
             if intent is not None and not self._is_hold_intent(intent):
                 trade_result = await self._execute_intent(intent, strategy, snapshot)
 
+                # Notify strategy of execution result (VIB-1951: callback parity)
+                # StrategyRunner calls on_intent_executed after every intent execution.
+                # Paper engine must do the same so strategies can track position state.
+                self._notify_strategy_callback(strategy, intent, trade_result)
+
             # Record equity point
             await self._record_equity_point()
 
@@ -1496,6 +1503,9 @@ class PaperTrader:
         # Serialize intent for storage
         intent_dict = self._serialize_intent(intent)
 
+        # Reset so callback never sees stale data from a previous tick
+        self._last_execution_result = None
+
         try:
             # Compile intent to ActionBundle
             action_bundle = self._compile_intent(intent)
@@ -1523,6 +1533,9 @@ class PaperTrader:
 
             # Execute on fork
             result = await self._orchestrator.execute(action_bundle, context)
+
+            # Store for on_intent_executed callback (VIB-1951)
+            self._last_execution_result = result
 
             # Calculate execution time
             execution_end = datetime.now(UTC)
@@ -1927,6 +1940,50 @@ class PaperTrader:
                 return Decimal(str(fee))
         return Decimal("0")
 
+    def _notify_strategy_callback(
+        self,
+        strategy: PaperTradeableStrategy,
+        intent: Any,
+        trade_result: PaperTrade | None,
+    ) -> None:
+        """Notify strategy of intent execution via on_intent_executed callback.
+
+        This provides callback parity with StrategyRunner, which calls
+        on_intent_executed(intent, success, result) after every intent execution.
+        Without this, strategies that track position state in the callback
+        (e.g., LP strategies setting _has_position) will never work in paper mode.
+
+        The result object is the ExecutionResult from the orchestrator, matching
+        what StrategyRunner passes. If no ExecutionResult is available (e.g.,
+        compilation failure), a SimpleNamespace with an error attribute is used.
+
+        Args:
+            strategy: Strategy that generated the intent
+            intent: The intent that was executed
+            trade_result: PaperTrade if successful, None if failed
+        """
+        if not hasattr(strategy, "on_intent_executed"):
+            return
+
+        success = trade_result is not None
+        callback_result: Any = self._last_execution_result
+        if callback_result is None:
+            # Compilation failure — no ExecutionResult available
+            from types import SimpleNamespace
+
+            callback_result = SimpleNamespace(
+                error="Intent compilation failed in paper trading",
+                success=False,
+                swap_amounts=None,
+                position_id=None,
+                transaction_results=None,
+            )
+
+        try:
+            strategy.on_intent_executed(intent, success=success, result=callback_result)
+        except Exception as e:
+            logger.warning(f"[{self._backtest_id}] Error in on_intent_executed callback: {e}")
+
     def _serialize_intent(self, intent: Any) -> dict[str, Any]:
         """Serialize an intent to a dictionary for storage.
 
@@ -1992,33 +2049,48 @@ class PaperTrader:
         tokens_in: dict[str, Decimal] = {}
         tokens_out: dict[str, Decimal] = {}
 
-        # Try to extract actual token flows from receipt
+        # Try to extract actual token flows from receipt (VIB-1952: receipt parsing for PnL)
         if receipt is not None and wallet_address:
-            receipt_dict = receipt.to_dict()
-            flows = extract_receipt_token_flows(receipt_dict, wallet_address)
+            try:
+                receipt_dict = receipt.to_dict()
+                log_count = len(receipt_dict.get("logs", []))
+                flows = extract_receipt_token_flows(receipt_dict, wallet_address)
 
-            # Get chain_id and RPC URL for decimal lookups
-            chain_id = self.fork_manager.chain_id
-            rpc_url = self.fork_manager.get_rpc_url() if self.fork_manager.is_running else None
+                # Get chain_id and RPC URL for decimal lookups
+                chain_id = self.fork_manager.chain_id
+                rpc_url = self.fork_manager.get_rpc_url() if self.fork_manager.is_running else None
 
-            # Convert from smallest unit to Decimal with correct token decimals
-            # Use symbol mapping for human-readable portfolio keys (US-065c)
-            for token_addr, amount in flows.tokens_in.items():
-                decimals = await get_token_decimals_with_fallback(chain_id, token_addr, rpc_url)
-                symbol = await get_token_symbol_with_fallback(chain_id, token_addr, rpc_url)
-                tokens_in[symbol] = Decimal(str(amount)) / Decimal(10**decimals)
+                # Convert from smallest unit to Decimal with correct token decimals
+                # Use symbol mapping for human-readable portfolio keys (US-065c)
+                for token_addr, amount in flows.tokens_in.items():
+                    decimals = await get_token_decimals_with_fallback(chain_id, token_addr, rpc_url)
+                    symbol = await get_token_symbol_with_fallback(chain_id, token_addr, rpc_url)
+                    tokens_in[symbol] = Decimal(str(amount)) / Decimal(10**decimals)
 
-            for token_addr, amount in flows.tokens_out.items():
-                decimals = await get_token_decimals_with_fallback(chain_id, token_addr, rpc_url)
-                symbol = await get_token_symbol_with_fallback(chain_id, token_addr, rpc_url)
-                tokens_out[symbol] = Decimal(str(amount)) / Decimal(10**decimals)
+                for token_addr, amount in flows.tokens_out.items():
+                    decimals = await get_token_decimals_with_fallback(chain_id, token_addr, rpc_url)
+                    symbol = await get_token_symbol_with_fallback(chain_id, token_addr, rpc_url)
+                    tokens_out[symbol] = Decimal(str(amount)) / Decimal(10**decimals)
 
-            # If we got flows from receipt, return them
-            if tokens_in or tokens_out:
-                logger.debug(
-                    f"[{self._backtest_id}] Extracted token flows from receipt: {len(tokens_in)} tokens in, {len(tokens_out)} tokens out"
+                # If we got flows from receipt, return them
+                if tokens_in or tokens_out:
+                    logger.debug(
+                        f"[{self._backtest_id}] Extracted token flows from receipt: "
+                        f"{len(tokens_in)} tokens in, {len(tokens_out)} tokens out"
+                    )
+                    return tokens_in, tokens_out
+
+                # Receipt had logs but no wallet-relevant transfers
+                if log_count > 0:
+                    logger.warning(
+                        f"[{self._backtest_id}] Receipt had {log_count} logs but no Transfer events "
+                        f"involving wallet {wallet_address[:10]}... Falling back to intent-based estimation."
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"[{self._backtest_id}] Failed to parse receipt for token flows: {e}. "
+                    "Falling back to intent-based estimation."
                 )
-                return tokens_in, tokens_out
 
         # Fallback: Extract expected flows from intent attributes
         intent_type = self._get_intent_type(intent)
