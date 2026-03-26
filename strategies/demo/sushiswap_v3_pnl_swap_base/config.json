@@ -1,0 +1,19 @@
+{
+    "strategy_id": "demo_sushiswap_v3_pnl_swap_base",
+    "strategy_name": "demo_sushiswap_v3_pnl_swap_base",
+    "description": "SushiSwap V3 RSI swap strategy for PnL backtesting on Base",
+    "base_token": "WETH",
+    "quote_token": "USDC",
+    "trade_size_usd": 100,
+    "rsi_period": 14,
+    "rsi_oversold": 30,
+    "rsi_overbought": 70,
+    "max_slippage_bps": 100,
+    "chain": "base",
+    "network": "mainnet",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}
