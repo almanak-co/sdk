@@ -1,0 +1,17 @@
+{
+    "strategy_id": "demo_aave_paper_trade_leverage_polygon",
+    "strategy_name": "demo_aave_paper_trade_leverage_polygon",
+    "description": "Paper trading demo: Aave V3 + Uniswap V3 leverage loop on Polygon",
+    "chain": "polygon",
+    "collateral_token": "USDC",
+    "collateral_amount": "500",
+    "borrow_token": "WETH",
+    "swap_to_token": "WMATIC",
+    "ltv_target": "0.3",
+    "swap_protocol": "uniswap_v3",
+    "anvil_funding": {
+        "MATIC": 1000,
+        "USDC": 5000,
+        "WETH": 1
+    }
+}
