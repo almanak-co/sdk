@@ -13,6 +13,7 @@ import os
 import signal
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 import pytest
 
@@ -821,3 +822,87 @@ class TestGracefulShutdown:
 
         loaded = PaperTraderState.load(state_file)
         assert loaded.status == "completed"
+
+
+class TestBatch1Fixes:
+    """Tests for Paper Trading Batch 1 fixes (resume raw_rpc_url, hex crash, port contention)."""
+
+    @staticmethod
+    def create_config(**overrides) -> PaperTraderConfig:
+        defaults = {
+            "chain": "arbitrum",
+            "rpc_url": "https://arb-mainnet.g.alchemy.com/v2/test-key",
+            "strategy_id": "test_strategy",
+            "tick_interval_seconds": 60,
+            "max_ticks": 10,
+        }
+        defaults.update(overrides)
+        return PaperTraderConfig(**defaults)
+
+    def test_resume_passes_raw_rpc_url(self, tmp_path):
+        """Fix #1: resume() must pass raw_rpc_url to child process kwargs."""
+        config = self.create_config()
+        bg_trader = BackgroundPaperTrader(config=config, state_dir=tmp_path)
+
+        # Create a valid state file so resume doesn't fail on missing state
+        now = datetime.now(UTC)
+        state = PaperTraderState(
+            strategy_id="test_strategy",
+            session_start=now,
+            last_save=now,
+            tick_count=5,
+            trades=[],
+            errors=[],
+            current_balances={"ETH": Decimal("10")},
+            initial_balances={"ETH": Decimal("10")},
+            equity_curve=[],
+            config=config.to_dict(),
+            pid=12345,
+            status="stopped",
+        )
+        state_file = tmp_path / "test_strategy.state.json"
+        state.save(state_file)
+
+        # Capture the kwargs passed to Process
+        captured_kwargs = {}
+
+        class MockProcess:
+            def __init__(self, target, args, kwargs, daemon=False):
+                captured_kwargs.update(kwargs)
+                self.pid = 99999
+
+            def start(self):
+                pass
+
+        with patch("almanak.framework.backtesting.paper.background.multiprocessing.Process", MockProcess):
+            bg_trader.resume(
+                strategy_module="test_module",
+                strategy_class="Strategy",
+            )
+        assert "raw_rpc_url" in captured_kwargs, "resume() must pass raw_rpc_url in kwargs"
+        assert captured_kwargs["raw_rpc_url"] == config.rpc_url
+
+    def test_find_free_port_returns_valid_port(self):
+        """Fix #6: _find_free_port() returns a usable TCP port."""
+        from almanak.framework.backtesting.paper.background import _find_free_port
+
+        port = _find_free_port()
+        assert 1024 <= port <= 65535
+        # Port should be different from the default
+        # (very unlikely to be exactly 8546 on a random OS assignment)
+
+    def test_find_free_port_avoids_used_ports(self):
+        """Fix #3: _find_free_port() must not return a port that is already in use."""
+        import socket
+
+        from almanak.framework.backtesting.paper.background import _find_free_port
+
+        port1 = _find_free_port()
+
+        # Bind to the first port to ensure it's in use
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", port1))
+
+            # The next call should return a different, free port
+            port2 = _find_free_port()
+            assert port1 != port2

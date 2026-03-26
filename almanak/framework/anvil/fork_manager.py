@@ -1041,7 +1041,7 @@ class RollingForkManager:
             [{"to": token_address, "data": data}, "latest"],
         )
 
-        if result:
+        if result and result != "0x":
             return int(result, 16)
         return 0
 

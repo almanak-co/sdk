@@ -47,6 +47,7 @@ import logging
 import multiprocessing
 import os
 import signal
+import socket
 import sys
 import time
 from dataclasses import dataclass, field
@@ -57,6 +58,17 @@ from typing import Any
 
 from almanak.core.redaction import install_redaction
 from almanak.framework.backtesting.paper.config import PaperTraderConfig
+
+_DEFAULT_ANVIL_PORT = 8546
+
+
+def _find_free_port() -> int:
+    """Find a free TCP port by binding to port 0 and reading the OS-assigned port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 from almanak.framework.backtesting.paper.models import (
     PaperTrade,
     PaperTradeError,
@@ -972,7 +984,7 @@ class BackgroundPaperTrader:
                 str(self.state_dir),
                 self.save_interval_seconds,
             ),
-            kwargs={"resume": True, "strategy_config": strategy_config},
+            kwargs={"resume": True, "strategy_config": strategy_config, "raw_rpc_url": self.config.rpc_url},
             daemon=False,
         )
 
@@ -1214,11 +1226,20 @@ def _run_background_paper_trader(
         from almanak.framework.backtesting.paper.engine import PaperTrader
         from almanak.framework.backtesting.paper.portfolio_tracker import PaperPortfolioTracker
 
+        # Auto-assign a free port when using the default to avoid contention
+        # between concurrent paper trading sessions
+        anvil_port = config.anvil_port
+        if anvil_port == _DEFAULT_ANVIL_PORT:
+            anvil_port = _find_free_port()
+            bg_logger.info(
+                f"Auto-assigned Anvil port {anvil_port} (default {_DEFAULT_ANVIL_PORT} avoided for concurrency)"
+            )
+
         # Create components
         fork_manager = RollingForkManager(
             rpc_url=config.rpc_url,
             chain=config.chain,
-            anvil_port=config.anvil_port,
+            anvil_port=anvil_port,
         )
 
         portfolio_tracker = PaperPortfolioTracker(

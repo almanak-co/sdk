@@ -149,3 +149,42 @@ class TestBuildAnvilCommand:
         assert "--timeout" in cmd
         assert "--retries" in cmd
         assert "--silent" in cmd
+
+
+class TestGetTokenBalance:
+    """Fix #2: _get_token_balance must handle empty hex '0x' responses."""
+
+    @pytest.fixture()
+    def manager(self):
+        _clear_version_cache()
+        with patch("almanak.framework.anvil.fork_manager._get_anvil_version", return_value=(0, 2, 0)):
+            mgr = RollingForkManager(rpc_url="http://rpc.test", chain="arbitrum", anvil_port=9999)
+        return mgr
+
+    @pytest.mark.asyncio()
+    async def test_empty_hex_0x_returns_zero(self, manager):
+        """'0x' (empty hex) from eth_call must return 0, not crash."""
+        with patch.object(manager, "_rpc_call", return_value="0x"):
+            result = await manager._get_token_balance("0x" + "a" * 40, "0x" + "b" * 40)
+            assert result == 0
+
+    @pytest.mark.asyncio()
+    async def test_none_returns_zero(self, manager):
+        """None from eth_call must return 0."""
+        with patch.object(manager, "_rpc_call", return_value=None):
+            result = await manager._get_token_balance("0x" + "a" * 40, "0x" + "b" * 40)
+            assert result == 0
+
+    @pytest.mark.asyncio()
+    async def test_valid_hex_returns_int(self, manager):
+        """Valid hex response must be parsed correctly."""
+        with patch.object(manager, "_rpc_call", return_value="0x64"):
+            result = await manager._get_token_balance("0x" + "a" * 40, "0x" + "b" * 40)
+            assert result == 100
+
+    @pytest.mark.asyncio()
+    async def test_zero_balance_hex(self, manager):
+        """0x0 (zero balance) must return 0."""
+        with patch.object(manager, "_rpc_call", return_value="0x0"):
+            result = await manager._get_token_balance("0x" + "a" * 40, "0x" + "b" * 40)
+            assert result == 0
