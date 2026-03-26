@@ -309,6 +309,13 @@ class TestTeardown:
         assert intents[0].max_slippage == Decimal("0.03")
 
     def test_open_positions(self, strategy):
+        mock_market = MagicMock()
+        balance_obj = MagicMock()
+        balance_obj.balance = Decimal("0.5")
+        balance_obj.balance_usd = Decimal("1700")
+        mock_market.balance.return_value = balance_obj
+        strategy.create_market_snapshot = MagicMock(return_value=mock_market)
+
         summary = strategy.get_open_positions()
         assert len(summary.positions) == 1
         assert summary.positions[0].chain == "arbitrum"

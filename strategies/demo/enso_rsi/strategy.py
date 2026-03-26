@@ -361,26 +361,28 @@ class EnsoRSIStrategy(IntentStrategy):
 
         positions: list[PositionInfo] = []
 
-        # For swap strategies, we track base token as the "position"
-        # The value would come from actual balance queries in production
-        # Here we estimate based on trade size
-        estimated_value = self.trade_size_usd
-
-        positions.append(
-            PositionInfo(
-                position_type=PositionType.TOKEN,
-                position_id="enso_rsi_token_0",
-                chain=self.chain,
-                protocol="enso",
-                value_usd=estimated_value,
-                details={
-                    "asset": self.base_token,
-                    "base_token": self.base_token,
-                    "quote_token": self.quote_token,
-                    "trades_executed": self._trades_executed,
-                },
-            )
-        )
+        # Query on-chain balance instead of unconditionally reporting a position
+        try:
+            market = self.create_market_snapshot()
+            base_balance = market.balance(self.base_token)
+            if base_balance.balance > 0:
+                positions.append(
+                    PositionInfo(
+                        position_type=PositionType.TOKEN,
+                        position_id="enso_rsi_token_0",
+                        chain=self.chain,
+                        protocol="enso",
+                        value_usd=base_balance.balance_usd,
+                        details={
+                            "asset": self.base_token,
+                            "balance": str(base_balance.balance),
+                            "base_token": self.base_token,
+                            "quote_token": self.quote_token,
+                        },
+                    )
+                )
+        except Exception:
+            logger.warning("Failed to query balance for teardown; reporting no positions")
 
         return TeardownPositionSummary(
             strategy_id=getattr(self, "strategy_id", "demo_enso_rsi"),

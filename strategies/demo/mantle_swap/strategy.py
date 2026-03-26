@@ -95,19 +95,29 @@ class MantleSwapStrategy(IntentStrategy):
     def get_open_positions(self):
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
+        positions: list[PositionInfo] = []
+
+        try:
+            market = self.create_market_snapshot()
+            to_balance = market.balance(self.to_token)
+            if to_balance.balance > 0:
+                positions.append(
+                    PositionInfo(
+                        position_type=PositionType.TOKEN,
+                        position_id="mantle_swap_wmnt",
+                        chain=self.chain,
+                        protocol="agni",
+                        value_usd=to_balance.balance_usd,
+                        details={"asset": self.to_token, "balance": str(to_balance.balance)},
+                    )
+                )
+        except Exception:
+            logger.warning("Failed to query balance for teardown; reporting no positions")
+
         return TeardownPositionSummary(
             strategy_id=getattr(self, "strategy_id", "demo_mantle_swap"),
             timestamp=datetime.now(UTC),
-            positions=[
-                PositionInfo(
-                    position_type=PositionType.TOKEN,
-                    position_id="mantle_swap_wmnt",
-                    chain=self.chain,
-                    protocol="agni",
-                    value_usd=self.trade_size_usd,
-                    details={"asset": self.to_token},
-                )
-            ],
+            positions=positions,
         )
 
     def generate_teardown_intents(self, mode, market=None) -> list[Intent]:

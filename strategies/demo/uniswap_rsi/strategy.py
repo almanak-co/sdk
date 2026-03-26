@@ -446,26 +446,28 @@ class UniswapRSIStrategy(IntentStrategy):
 
         positions: list[PositionInfo] = []
 
-        # For swap strategies, we track base token as the "position"
-        # The value would come from actual balance queries in production
-        # TODO: That's not true - what if you buy several times? Need to check on-chain balance here.
-        estimated_value = self.trade_size_usd
-
-        positions.append(
-            PositionInfo(
-                position_type=PositionType.TOKEN,
-                position_id="uniswap_rsi_token_0",
-                chain=self.chain,
-                protocol="uniswap_v3",
-                value_usd=estimated_value,
-                details={
-                    "asset": self.base_token,
-                    "base_token": self.base_token,
-                    "quote_token": self.quote_token,
-                    "consecutive_holds": self._consecutive_holds,
-                },
-            )
-        )
+        # Query on-chain balance instead of unconditionally reporting a position
+        try:
+            market = self.create_market_snapshot()
+            base_balance = market.balance(self.base_token)
+            if base_balance.balance > 0:
+                positions.append(
+                    PositionInfo(
+                        position_type=PositionType.TOKEN,
+                        position_id="uniswap_rsi_token_0",
+                        chain=self.chain,
+                        protocol="uniswap_v3",
+                        value_usd=base_balance.balance_usd,
+                        details={
+                            "asset": self.base_token,
+                            "balance": str(base_balance.balance),
+                            "base_token": self.base_token,
+                            "quote_token": self.quote_token,
+                        },
+                    )
+                )
+        except Exception:
+            logger.warning("Failed to query balance for teardown; reporting no positions")
 
         return TeardownPositionSummary(
             strategy_id=getattr(self, "strategy_id", "demo_uniswap_rsi"),

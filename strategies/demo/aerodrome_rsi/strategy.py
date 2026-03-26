@@ -166,23 +166,35 @@ class AerodromeRSIStrategy(IntentStrategy):
     def get_open_positions(self) -> "TeardownPositionSummary":
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
+        positions: list[PositionInfo] = []
+
+        # Query on-chain balance instead of unconditionally reporting a position
+        try:
+            market = self.create_market_snapshot()
+            base_balance = market.balance(self.base_token)
+            if base_balance.balance > 0:
+                positions.append(
+                    PositionInfo(
+                        position_type=PositionType.TOKEN,
+                        position_id="aerodrome_rsi_base_token",
+                        chain=self.chain,
+                        protocol="aerodrome",
+                        value_usd=base_balance.balance_usd,
+                        details={
+                            "asset": self.base_token,
+                            "balance": str(base_balance.balance),
+                            "base_token": self.base_token,
+                            "quote_token": self.quote_token,
+                        },
+                    )
+                )
+        except Exception:
+            logger.warning("Failed to query balance for teardown; reporting no positions")
+
         return TeardownPositionSummary(
             strategy_id=getattr(self, "strategy_id", "demo_aerodrome_rsi"),
             timestamp=datetime.now(UTC),
-            positions=[
-                PositionInfo(
-                    position_type=PositionType.TOKEN,
-                    position_id="aerodrome_rsi_base_token",
-                    chain=self.chain,
-                    protocol="aerodrome",
-                    value_usd=self.trade_size_usd,
-                    details={
-                        "asset": self.base_token,
-                        "base_token": self.base_token,
-                        "quote_token": self.quote_token,
-                    },
-                )
-            ],
+            positions=positions,
         )
 
     def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
