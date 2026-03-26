@@ -1014,6 +1014,8 @@ class GMXv2Adapter:
 
         Uses the GMX V2 SyntheticsReader contract to query the DataStore
         for all positions belonging to the configured wallet address.
+        Includes fallback mechanisms for when Reader methods revert
+        (e.g. after GMX contract upgrades).
 
         Args:
             rpc_url: RPC endpoint URL for on-chain queries
@@ -1036,28 +1038,51 @@ class GMXv2Adapter:
 
         from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
 
-        sdk = GMXV2SDK(rpc_url, chain="arbitrum") if self.chain == "arbitrum" else None
-        if sdk is None:
-            # For non-arbitrum chains, use direct Web3 with the reader ABI
-            import json
-            import os
-
-            w3 = Web3(Web3.HTTPProvider(rpc_url))
-            abi_dir = os.path.join(os.path.dirname(__file__), "abis")
-            with open(os.path.join(abi_dir, "reader.json")) as f:
-                reader_abi = json.load(f)
-            reader = w3.eth.contract(address=w3.to_checksum_address(reader_address), abi=reader_abi)
-            ds = w3.to_checksum_address(data_store_address)
-            acct = w3.to_checksum_address(self.wallet_address)
-
-            count = reader.functions.getAccountPositionCount(ds, acct).call()
-            if count == 0:
-                return []
-            raw_positions = reader.functions.getAccountPositions(ds, acct, 0, count).call()
-        else:
+        if self.chain == "arbitrum":
+            # SDK handles fallback logic internally
+            sdk = GMXV2SDK(rpc_url, chain="arbitrum")
             raw_positions_dicts = sdk.get_account_positions(self.wallet_address)
-            # Convert from dict format to raw tuple format for unified processing
             return self._parse_position_dicts(raw_positions_dicts)
+
+        # For non-arbitrum chains, use direct Web3 with the reader ABI
+        import json
+        import os
+
+        w3 = Web3(Web3.HTTPProvider(rpc_url))
+        abi_dir = os.path.join(os.path.dirname(__file__), "abis")
+        with open(os.path.join(abi_dir, "reader.json")) as f:
+            reader_abi = json.load(f)
+        reader = w3.eth.contract(address=w3.to_checksum_address(reader_address), abi=reader_abi)
+        ds = w3.to_checksum_address(data_store_address)
+        acct = w3.to_checksum_address(self.wallet_address)
+
+        # Try count-first approach with fallback to range query
+        count = 0
+        try:
+            count = reader.functions.getAccountPositionCount(ds, acct).call()
+        except Exception as e:
+            logger.warning("Reader.getAccountPositionCount reverted on %s: %s", self.chain, e)
+
+        if count > 0:
+            try:
+                raw_positions = reader.functions.getAccountPositions(ds, acct, 0, count).call()
+            except Exception as e:
+                logger.warning(
+                    "Reader.getAccountPositions exact range failed on %s (count=%d): %s", self.chain, count, e
+                )
+                return []
+        else:
+            # Fallback: range query — Reader returns only existing positions
+            try:
+                from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
+
+                raw_positions = reader.functions.getAccountPositions(ds, acct, 0, GMXV2SDK.MAX_POSITION_RANGE).call()
+            except Exception as e:
+                logger.warning("Reader.getAccountPositions range query failed on %s: %s", self.chain, e)
+                return []
+
+        if not raw_positions:
+            return []
 
         return self._parse_raw_positions(raw_positions)
 

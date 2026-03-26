@@ -20,6 +20,7 @@ This SDK is ported from src-v0 and simplified for the new intent-based architect
 """
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from enum import IntEnum
@@ -28,7 +29,20 @@ from typing import Any
 from web3 import Web3
 from web3.contract import Contract
 
+logger = logging.getLogger(__name__)
+
 from almanak.core.contracts import GMX_V2, GMX_V2_TOKENS
+
+# Minimal ABI for DataStore.getBytes32Count — used by the position count fallback
+_DATASTORE_GETBYTES32COUNT_ABI = [
+    {
+        "inputs": [{"internalType": "bytes32", "name": "setKey", "type": "bytes32"}],
+        "name": "getBytes32Count",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
 
 
 class OrderType(IntEnum):
@@ -173,24 +187,62 @@ class GMXV2SDK:
         abi = self._load_abi(abi_name)
         return self.web3.eth.contract(address=self.web3.to_checksum_address(address), abi=abi)
 
+    # Maximum positions to fetch in a single range query. GMX V2 Reader handles
+    # ranges gracefully — returns only existing positions within [start, end).
+    MAX_POSITION_RANGE = 100
+
     def get_account_position_count(self, account: str) -> int:
         """Get the number of open positions for an account.
+
+        Tries SyntheticsReader.getAccountPositionCount first. If it reverts
+        (e.g. after a GMX contract upgrade removed the function), falls back
+        to a DataStore getBytes32Count query using the account position list key.
 
         Args:
             account: Wallet address to query
 
         Returns:
-            Number of open positions
+            Number of open positions (0 if both methods fail)
         """
         account_cs = self.web3.to_checksum_address(account)
         data_store_cs = self.web3.to_checksum_address(self.DATA_STORE_ADDRESS)
-        return self.reader.functions.getAccountPositionCount(data_store_cs, account_cs).call()
+
+        # Primary: Reader.getAccountPositionCount
+        try:
+            return self.reader.functions.getAccountPositionCount(data_store_cs, account_cs).call()
+        except Exception as e:
+            logger.warning("Reader.getAccountPositionCount reverted: %s. Trying DataStore fallback.", e)
+
+        # Fallback: DataStore.getBytes32Count with account position list key
+        try:
+            return self._get_position_count_from_datastore(account_cs, data_store_cs)
+        except Exception as e:
+            logger.warning("DataStore position count fallback also failed: %s", e)
+            return 0
+
+    def _get_position_count_from_datastore(self, account_cs: str, data_store_cs: str) -> int:
+        """Query DataStore directly for position count using the account position list key.
+
+        GMX V2 key derivation: keccak256(abi.encode(keccak256("ACCOUNT_POSITION_LIST"), account))
+        """
+        from eth_abi import encode
+
+        # Compute key: keccak256(abi.encode(keccak256("ACCOUNT_POSITION_LIST"), account))
+        list_key_hash = Web3.keccak(text="ACCOUNT_POSITION_LIST")
+        position_list_key = Web3.keccak(encode(["bytes32", "address"], [list_key_hash, account_cs]))
+
+        datastore = self.web3.eth.contract(
+            address=self.web3.to_checksum_address(data_store_cs), abi=_DATASTORE_GETBYTES32COUNT_ABI
+        )
+        return datastore.functions.getBytes32Count(position_list_key).call()
 
     def get_account_positions(self, account: str) -> list[dict]:
         """Read all open positions for an account from on-chain state.
 
-        Calls SyntheticsReader.getAccountPositions(dataStore, account, start, end)
-        on the GMX V2 Reader contract.
+        Uses a resilient two-step approach:
+        1. Try to get position count (with fallbacks), then fetch exact range
+        2. If count query fails entirely, fetch with a generous range — the Reader
+           returns only existing positions within the range
 
         Args:
             account: Wallet address to query
@@ -203,14 +255,45 @@ class GMXV2SDK:
         account_cs = self.web3.to_checksum_address(account)
         data_store_cs = self.web3.to_checksum_address(self.DATA_STORE_ADDRESS)
 
-        # First get count so we know the range
-        count = self.reader.functions.getAccountPositionCount(data_store_cs, account_cs).call()
+        # Try to get exact count first (uses fallbacks internally)
+        count = self.get_account_position_count(account)
         if count == 0:
-            return []
+            # Count methods might have failed (returned 0 as fallback).
+            # Try a direct range query as last resort — Reader.getAccountPositions
+            # handles ranges gracefully and returns only existing positions.
+            try:
+                raw_positions = self.reader.functions.getAccountPositions(
+                    data_store_cs, account_cs, 0, self.MAX_POSITION_RANGE
+                ).call()
+                if not raw_positions:
+                    return []
+                logger.info(
+                    "Count was 0 but range query found %d positions (count method may be broken)",
+                    len(raw_positions),
+                )
+            except Exception as e:
+                logger.warning("Reader.getAccountPositions range query failed: %s", e)
+                return []
+        else:
+            # Fetch exact range
+            try:
+                raw_positions = self.reader.functions.getAccountPositions(data_store_cs, account_cs, 0, count).call()
+            except Exception as e:
+                logger.error("Reader.getAccountPositions failed for count=%d: %s", count, e)
+                return []
 
-        # Fetch all positions (start=0, end=count)
-        raw_positions = self.reader.functions.getAccountPositions(data_store_cs, account_cs, 0, count).call()
+        return self._parse_raw_positions(raw_positions)
 
+    @staticmethod
+    def _parse_raw_positions(raw_positions: list) -> list[dict]:
+        """Parse raw position tuples from the Reader contract into dicts.
+
+        Args:
+            raw_positions: List of (addresses, numbers, flags) tuples
+
+        Returns:
+            List of position dicts
+        """
         positions = []
         for raw in raw_positions:
             # raw is a tuple: (addresses, numbers, flags)
