@@ -120,16 +120,17 @@ class TestGMXV2SDKGetPositions:
         assert len(positions) == 1
         assert positions[0]["market"] == "0xMarket"
 
-    def test_positions_everything_reverts_returns_empty(self):
-        """All queries revert → returns empty list, no crash."""
+    def test_positions_everything_reverts_raises_error(self):
+        """All queries revert → raises PositionQueryError (not silent empty)."""
+        from almanak.framework.connectors.gmx_v2.sdk import PositionQueryError
+
         sdk = self._make_sdk()
         sdk.reader.functions.getAccountPositionCount.return_value.call.side_effect = Exception("reverted")
         sdk.reader.functions.getAccountPositions.return_value.call.side_effect = Exception("also reverted")
 
         with patch.object(sdk, "_get_position_count_from_datastore", side_effect=Exception("nope")):
-            positions = sdk.get_account_positions("0x1234")
-
-        assert positions == []
+            with pytest.raises(PositionQueryError):
+                sdk.get_account_positions("0x1234")
 
     def test_positions_empty_when_genuinely_no_positions(self):
         """Account has zero positions — returns empty list."""
