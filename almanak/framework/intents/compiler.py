@@ -159,7 +159,7 @@ DEFAULT_GAS_ESTIMATES: dict[str, int] = {
     # Flash loan operations (Balancer)
     "balancer_flash_loan": 400000,  # Balancer multi-token flash loan base gas
     "balancer_flash_loan_simple": 250000,  # Balancer single-token flash loan base gas
-    "bridge_deposit": 450000,  # Cross-chain bridge deposit tx (quote-dependent)
+    "bridge_deposit": 800000,  # Cross-chain bridge deposit tx (quote-dependent, Across can exceed 675K)
     # MetaMorpho vault operations (ERC-4626)
     "vault_deposit": 200000,  # MetaMorpho deposit (approve handled separately)
     "vault_redeem": 250000,  # MetaMorpho redeem (multi-market withdrawal)

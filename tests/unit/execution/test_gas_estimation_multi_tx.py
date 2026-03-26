@@ -1,12 +1,11 @@
 """Tests for gas estimation behavior on multi-TX bundles.
 
-Verifies that gas estimation failures for non-first TXs in multi-TX bundles
-(e.g., approve + supply) are treated as expected and logged at DEBUG level,
-not WARNING level. These failures are inherent because later TXs depend on
-state changes from prior TXs that haven't been executed yet during estimation.
+Verifies that gas estimation is attempted for ALL TXs in multi-TX bundles
+(e.g., approve + bridge deposit), with graceful fallback to compiler gas
+when estimation fails. Failures are logged at DEBUG level (non-actionable).
 
-Regression test for VIB-137: Spark SUPPLY consistently reverts on first
-attempt due to approve+supply gas estimation producing noisy warnings.
+VIB-1885: Bridge deposits after approvals can now get dynamic gas estimates.
+VIB-137: Gas estimation failures produce DEBUG, not WARNING.
 """
 
 import logging
@@ -50,12 +49,12 @@ class TestGasEstimationMultiTxBundle:
         return orch
 
     @pytest.mark.asyncio
-    async def test_multi_tx_bundle_skips_non_first_estimation(self, orchestrator, caplog):
-        """Gas estimation for TX 2+ in a multi-TX bundle is skipped entirely.
+    async def test_multi_tx_bundle_estimates_all_txs(self, orchestrator, caplog):
+        """Gas estimation is attempted for all TXs in a multi-TX bundle (VIB-1885).
 
-        Instead of making a doomed RPC call (which always reverts because prior TXs
-        haven't been applied yet), we skip estimation for idx > 0 and use compiler gas.
-        This eliminates the wasted RPC call and any debug/warning noise.
+        Previously only the first TX was estimated. Now all TXs are attempted,
+        with graceful fallback to compiler gas on failure. This enables accurate
+        gas estimation for bridge deposits after approvals.
         """
         mock_web3 = AsyncMock()
         mock_web3.to_checksum_address = lambda x: x
@@ -65,7 +64,7 @@ class TestGasEstimationMultiTxBundle:
         async def mock_estimate_gas(params):
             nonlocal rpc_call_count
             rpc_call_count += 1
-            return 50_000  # TX 1 (approve) succeeds
+            return 50_000  # Both TXs succeed estimation
 
         mock_web3.eth.estimate_gas = mock_estimate_gas
 
@@ -84,14 +83,14 @@ class TestGasEstimationMultiTxBundle:
         ):
             updated_txs, warnings = await orchestrator._maybe_estimate_gas_limits(txs, context)
 
-        # Both TXs should be returned (TX 1 estimated, TX 2 uses compiler gas)
+        # Both TXs should be returned
         assert len(updated_txs) == 2
 
-        # No warnings: TX 1 succeeded, TX 2 was skipped (not attempted)
+        # No warnings: both TXs succeeded estimation
         assert len(warnings) == 0
 
-        # Only one RPC call was made (for TX 1 only, TX 2 was skipped)
-        assert rpc_call_count == 1
+        # Both TXs had estimation attempted
+        assert rpc_call_count == 2
 
     @pytest.mark.asyncio
     async def test_first_tx_revert_is_warning_level(self, orchestrator, caplog):
@@ -153,8 +152,8 @@ class TestGasEstimationMultiTxBundle:
         assert len(debug_msgs) == 1
 
     @pytest.mark.asyncio
-    async def test_three_tx_bundle_only_estimates_first(self, orchestrator, caplog):
-        """In a 3-TX bundle, only the first TX is estimated; TXs 2 and 3 use compiler gas."""
+    async def test_three_tx_bundle_estimates_all_with_fallback(self, orchestrator, caplog):
+        """In a 3-TX bundle, all TXs are estimated; failures fall back to compiler gas (VIB-1885)."""
         mock_web3 = AsyncMock()
         mock_web3.to_checksum_address = lambda x: x
 
@@ -163,7 +162,7 @@ class TestGasEstimationMultiTxBundle:
         async def mock_estimate_gas(params):
             nonlocal rpc_call_count
             rpc_call_count += 1
-            raise Exception("execution reverted")  # TX 1 also fails (for this test)
+            raise Exception("execution reverted")  # All TXs fail estimation
 
         mock_web3.eth.estimate_gas = mock_estimate_gas
 
@@ -184,15 +183,15 @@ class TestGasEstimationMultiTxBundle:
 
         assert len(updated_txs) == 3
 
-        # Only TX 1 was attempted; TX 2 and TX 3 were skipped
-        assert rpc_call_count == 1
+        # All 3 TXs had estimation attempted
+        assert rpc_call_count == 3
 
-        # Only TX 1's failure produces a warning entry
-        assert len(warnings) == 1
+        # All 3 failures produce warning entries
+        assert len(warnings) == 3
 
-        # TX 1 failed but gas estimation failures are DEBUG (non-actionable, fallback used)
+        # All failures are DEBUG level (non-actionable, fallback used)
         debug_msgs = [r for r in caplog.records if r.levelno == logging.DEBUG and "Gas estimation" in r.message]
-        assert len(debug_msgs) == 1, "TX 1 failure should produce DEBUG (non-actionable)"
+        assert len(debug_msgs) == 3, "All TX failures should produce DEBUG (non-actionable)"
 
 
 class TestZeroGasEstimateFallback:

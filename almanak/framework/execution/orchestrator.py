@@ -2189,24 +2189,18 @@ class ExecutionOrchestrator:
         except ExecutionError:
             return unsigned_txs, gas_warnings
 
-        is_multi_tx_bundle = len(unsigned_txs) > 1
-
         updated: list[UnsignedTransaction] = []
         for idx, tx in enumerate(unsigned_txs):
             if not tx.to:
                 updated.append(tx)
                 continue
 
-            # For multi-TX bundles, only estimate gas for the first transaction.
-            # Subsequent TXs depend on state changes from prior TXs (e.g., approve must
-            # execute before addLiquidity), so eth_estimateGas against the current
-            # chain state will always revert. The compiler-provided gas limit is the
-            # correct estimate for dependent transactions (approve ~65k, action uses
-            # connector defaults). Attempting estimation wastes an RPC round-trip.
-            if is_multi_tx_bundle and idx > 0:
-                updated.append(tx)
-                continue
-
+            # For multi-TX bundles, non-first TXs may depend on state changes from
+            # prior TXs (e.g., approve must execute before addLiquidity). Gas estimation
+            # may revert for these — the exception handler below gracefully falls back
+            # to the compiler-provided gas limit. However, some non-first TXs (like
+            # bridge deposits after approvals) may be estimatable if the wallet already
+            # has sufficient allowance from a previous attempt.
             try:
                 tx_params: dict[str, Any] = {
                     "from": web3.to_checksum_address(context.wallet_address),
