@@ -1,7 +1,16 @@
 """Uniswap V4 Adapter — compile SwapIntent to ActionBundle.
 
 Follows the same pattern as UniswapV3Adapter but targets V4's
-singleton PoolManager architecture.
+singleton PoolManager architecture via the canonical UniversalRouter.
+
+ERC-20 swap flow (3 transactions):
+  1. ERC-20 approve input token to Permit2
+  2. Permit2.approve(universalRouter, token, amount, expiration)
+  3. UniversalRouter.execute([V4_SWAP_EXACT_IN_SINGLE], [params], deadline)
+
+Native ETH swap flow (1 transaction):
+  1. UniversalRouter.execute([V4_SWAP_EXACT_IN_SINGLE], [params], deadline)
+     with msg.value = amountIn
 
 Example:
     from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4Adapter
@@ -19,6 +28,8 @@ from typing import TYPE_CHECKING, Any
 
 from almanak.core.contracts import UNISWAP_V4
 from almanak.framework.connectors.uniswap_v4.sdk import (
+    NATIVE_CURRENCY,
+    PERMIT2_ADDRESS,
     SwapTransaction,
     UniswapV4SDK,
 )
@@ -147,14 +158,27 @@ class UniswapV4Adapter:
         # Build transactions
         transactions: list[SwapTransaction] = []
 
-        # Add approve if not native ETH
-        if token_in_addr.lower() != "0x0000000000000000000000000000000000000000":
+        # For ERC-20 tokens, use Permit2 flow:
+        #   1. ERC-20 approve input token to Permit2
+        #   2. Permit2.approve(universalRouter, token, amount, expiration)
+        # Native ETH skips both (sent as msg.value)
+        is_native = token_in_addr.lower() == NATIVE_CURRENCY
+        if not is_native:
+            # TX 1: Approve Permit2 to spend input token
             approve_tx = self._sdk.build_approve_tx(
                 token_address=token_in_addr,
-                spender=self.addresses["v4_swap_router"],
+                spender=PERMIT2_ADDRESS,
                 amount=amount_in_raw,
             )
             transactions.append(approve_tx)
+
+            # TX 2: Grant UniversalRouter allowance via Permit2
+            permit2_tx = self._sdk.build_permit2_approve_tx(
+                token_address=token_in_addr,
+                spender=self.addresses["universal_router"],
+                amount=amount_in_raw,
+            )
+            transactions.append(permit2_tx)
 
         # Build swap tx
         if not self.wallet_address:
@@ -171,7 +195,7 @@ class UniswapV4Adapter:
         )
         transactions.append(swap_tx)
 
-        amount_out_minimum = int(quote.amount_out * (10000 - slippage_bps) / 10000)
+        amount_out_minimum = quote.amount_out * (10000 - slippage_bps) // 10000
 
         return SwapResult(
             success=True,
@@ -294,22 +318,30 @@ class UniswapV4Adapter:
                 "amount_out_minimum": str(result.amount_out_minimum),
                 "slippage_bps": slippage_bps,
                 "chain": self.chain,
-                "router": self.addresses["v4_swap_router"],
+                "router": self.addresses["universal_router"],
                 "pool_manager": self.addresses["pool_manager"],
                 "gas_estimate": result.gas_estimate,
                 "protocol_version": "v4",
             },
         )
 
-    def _resolve_token(self, token: str) -> tuple[str, int]:
+    def _resolve_token(self, token: str, for_v4_pool: bool = False) -> tuple[str, int]:
         """Resolve token symbol to (address, decimals).
 
         Args:
             token: Token symbol (e.g. "USDC") or address.
+            for_v4_pool: If True, remap native tokens (ETH/AVAX/MATIC) to
+                V4's zero address instead of their wrapped equivalents.
+                V4 pools support native ETH directly via address(0).
 
         Returns:
             Tuple of (address, decimals).
         """
+        # Check for native token symbols — V4 supports native ETH as address(0)
+        native_symbols = {"ETH", "AVAX", "MATIC", "BNB"}
+        if for_v4_pool and token.upper() in native_symbols:
+            return NATIVE_CURRENCY, 18
+
         # If already an address, resolve decimals (never assume 18)
         if token.startswith("0x") and len(token) == 42:
             if self._token_resolver:

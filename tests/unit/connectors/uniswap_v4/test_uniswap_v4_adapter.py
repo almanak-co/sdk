@@ -79,7 +79,7 @@ class TestSwapExactInput:
             slippage_bps=50,
         )
         assert result.success is True
-        assert len(result.transactions) == 2  # approve + swap
+        assert len(result.transactions) == 3  # approve Permit2 + Permit2 approve router + swap
         assert result.amount_in > 0
         assert result.amount_out_minimum > 0
 

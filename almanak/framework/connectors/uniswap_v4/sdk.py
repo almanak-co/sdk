@@ -4,6 +4,12 @@ Uniswap V4 uses a singleton PoolManager contract that manages all pools.
 Pool keys include (currency0, currency1, fee, tickSpacing, hooks).
 Native ETH is supported directly (address(0) for currency).
 
+Swaps are routed through the canonical UniversalRouter which uses Permit2
+for token transfers. The flow is:
+  1. ERC-20 approve input token to Permit2
+  2. Permit2.approve(universalRouter, token, amount, expiration)
+  3. UniversalRouter.execute([V4_SWAP_EXACT_IN_SINGLE], [params], deadline)
+
 Example:
     from almanak.framework.connectors.uniswap_v4.sdk import UniswapV4SDK
 
@@ -13,6 +19,7 @@ Example:
 
 import logging
 import math
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -52,21 +59,40 @@ FEE_TIERS: list[int] = [100, 500, 3000, 10000]
 # Zero address represents native ETH in V4
 NATIVE_CURRENCY = "0x0000000000000000000000000000000000000000"
 
-# V4SwapRouter function selectors
+# Canonical Permit2 address (CREATE2, same on all EVM chains)
+PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+
+# --- Function selectors ---
+
+# V4SwapRouter (legacy, non-canonical — kept for reference only)
 # swap(PoolKey,IPoolManager.SwapParams,uint256,uint256,bytes)
 SWAP_SELECTOR = "0xf3cd914c"
+
+# UniversalRouter.execute(bytes commands, bytes[] inputs, uint256 deadline)
+UNIVERSAL_ROUTER_EXECUTE_SELECTOR = "0x3593564c"
+
+# Permit2.approve(address token, address spender, uint160 amount, uint48 expiration)
+PERMIT2_APPROVE_SELECTOR = "0x87517c45"
+
+# V4 command bytes for UniversalRouter
+V4_SWAP_EXACT_IN_SINGLE = 0x06
+V4_SWAP_EXACT_IN = 0x07
+V4_SWAP_EXACT_OUT_SINGLE = 0x08
+V4_SWAP_EXACT_OUT = 0x09
 
 # Gas estimates
 UNISWAP_V4_GAS_ESTIMATES = {
     "approve": 50_000,
-    "swap": 200_000,
-    "swap_with_hooks": 350_000,
+    "permit2_approve": 55_000,
+    "swap": 250_000,  # Higher than V3 due to PoolManager unlock callback overhead
+    "swap_with_hooks": 400_000,
 }
 
 # PoolManager addresses per chain
 POOL_MANAGER_ADDRESSES: dict[str, str] = {chain: addrs["pool_manager"] for chain, addrs in UNISWAP_V4.items()}
 
-ROUTER_ADDRESSES: dict[str, str] = {chain: addrs["v4_swap_router"] for chain, addrs in UNISWAP_V4.items()}
+# UniversalRouter addresses (canonical V4 swap entry point)
+ROUTER_ADDRESSES: dict[str, str] = {chain: addrs["universal_router"] for chain, addrs in UNISWAP_V4.items()}
 
 QUOTER_ADDRESSES: dict[str, str] = {chain: addrs["quoter"] for chain, addrs in UNISWAP_V4.items()}
 
@@ -132,6 +158,8 @@ class SwapTransaction:
 class UniswapV4SDK:
     """Uniswap V4 SDK for pool operations and swap encoding.
 
+    Routes swaps through the canonical UniversalRouter with Permit2 flow.
+
     Args:
         chain: Chain name (e.g. "arbitrum", "ethereum").
         rpc_url: Optional RPC URL for on-chain queries.
@@ -148,7 +176,7 @@ class UniswapV4SDK:
 
         self.addresses = UNISWAP_V4[self.chain]
         self.pool_manager = self.addresses["pool_manager"]
-        self.router = self.addresses["v4_swap_router"]
+        self.router = self.addresses["universal_router"]
         self.quoter = self.addresses["quoter"]
 
     def compute_pool_key(
@@ -244,7 +272,7 @@ class UniswapV4SDK:
 
         Args:
             token_address: Token contract address.
-            spender: Address to approve (typically the router).
+            spender: Address to approve (Permit2 for V4 flow).
             amount: Amount to approve.
 
         Returns:
@@ -263,6 +291,48 @@ class UniswapV4SDK:
             description=f"Approve {spender[:10]}... to spend {amount} tokens",
         )
 
+    def build_permit2_approve_tx(
+        self,
+        token_address: str,
+        spender: str,
+        amount: int,
+        expiration: int = 0,
+    ) -> SwapTransaction:
+        """Build a Permit2.approve transaction to grant the UniversalRouter allowance.
+
+        Args:
+            token_address: Token address to approve.
+            spender: Address to grant allowance to (UniversalRouter).
+            amount: Amount to approve (uint160 max = 2^160-1).
+            expiration: Expiration timestamp (0 = default 30 days from now).
+
+        Returns:
+            SwapTransaction targeting the Permit2 contract.
+        """
+        if expiration == 0:
+            expiration = int(time.time()) + 30 * 86400  # 30 days
+
+        # Permit2.approve(address token, address spender, uint160 amount, uint48 expiration)
+        # Clamp amount to uint160 max
+        uint160_max = (1 << 160) - 1
+        amount = min(amount, uint160_max)
+
+        data = (
+            PERMIT2_APPROVE_SELECTOR
+            + _pad_address(token_address)
+            + _pad_address(spender)
+            + _pad_uint(amount)
+            + _pad_uint(expiration)
+        )
+
+        return SwapTransaction(
+            to=PERMIT2_ADDRESS,
+            value=0,
+            data=data,
+            gas_estimate=UNISWAP_V4_GAS_ESTIMATES["permit2_approve"],
+            description=f"Permit2 approve {spender[:10]}... for {token_address[:10]}...",
+        )
+
     def build_swap_tx(
         self,
         quote: SwapQuote,
@@ -270,70 +340,36 @@ class UniswapV4SDK:
         slippage_bps: int = 50,
         deadline: int = 0,
     ) -> SwapTransaction:
-        """Build a V4 swap transaction via the V4SwapRouter.
+        """Build a V4 swap transaction via the UniversalRouter.
 
-        Encodes an exactInputSingle swap through the V4 swap router.
+        Encodes UniversalRouter.execute() with a V4_SWAP_EXACT_IN_SINGLE command.
 
         Args:
             quote: Swap quote with amounts.
             recipient: Address to receive output tokens.
             slippage_bps: Slippage tolerance in basis points.
-            deadline: Transaction deadline (0 = no deadline).
+            deadline: Transaction deadline (0 = 30 minutes from now).
 
         Returns:
             SwapTransaction with encoded calldata.
         """
-        amount_out_minimum = int(quote.amount_out * (10000 - slippage_bps) / 10000)
+        amount_out_minimum = quote.amount_out * (10000 - slippage_bps) // 10000
         is_native_in = quote.token_in.lower() == NATIVE_CURRENCY
 
-        # Encode exactInputSingle parameters
-        # The V4SwapRouter uses a different encoding than V3:
-        # exactInputSingle(ExactInputSingleParams)
-        # struct ExactInputSingleParams {
-        #   PoolKey poolKey;
-        #   bool zeroForOne;
-        #   uint128 amountIn;
-        #   uint128 amountOutMinimum;
-        #   uint160 sqrtPriceLimitX96;
-        #   bytes hookData;
-        # }
+        if deadline == 0:
+            deadline = int(time.time()) + 1800  # 30 minutes
 
-        # Determine swap direction
-        pool_key = self.compute_pool_key(quote.token_in, quote.token_out, quote.fee_tier)
-        zero_for_one = quote.token_in.lower() == pool_key.currency0
-
-        # Encode PoolKey struct
-        pool_key_encoded = (
-            _pad_address(pool_key.currency0)
-            + _pad_address(pool_key.currency1)
-            + _pad_uint24(pool_key.fee)
-            + _pad_int24(pool_key.tick_spacing)
-            + _pad_address(pool_key.hooks)
+        # Encode the ExactInputSingleParams struct for V4_SWAP_EXACT_IN_SINGLE
+        params_encoded = self._encode_exact_input_single_params(
+            quote=quote,
+            amount_out_minimum=amount_out_minimum,
         )
 
-        # Encode swap params
-        zero_for_one_encoded = _pad_bool(zero_for_one)
-        amount_in_encoded = _pad_uint(quote.amount_in)
-        amount_out_min_encoded = _pad_uint(amount_out_minimum)
-
-        # sqrtPriceLimitX96: must be within bounds per PoolManager requirements
-        # zeroForOne: MIN_SQRT_PRICE + 1, !zeroForOne: MAX_SQRT_PRICE - 1
-        sqrt_price_limit_value = (MIN_SQRT_PRICE + 1) if zero_for_one else (MAX_SQRT_PRICE - 1)
-        sqrt_price_limit = _pad_uint(sqrt_price_limit_value)
-
-        # hookData: empty bytes (offset + length + no data)
-        hook_data_offset = _pad_uint(7 * 32)  # offset to hookData
-        hook_data_length = _pad_uint(0)  # empty bytes
-
-        calldata = (
-            SWAP_SELECTOR
-            + pool_key_encoded
-            + zero_for_one_encoded
-            + amount_in_encoded
-            + amount_out_min_encoded
-            + sqrt_price_limit
-            + hook_data_offset
-            + hook_data_length
+        # Encode UniversalRouter.execute(bytes commands, bytes[] inputs, uint256 deadline)
+        calldata = _encode_execute(
+            commands=bytes([V4_SWAP_EXACT_IN_SINGLE]),
+            inputs=[params_encoded],
+            deadline=deadline,
         )
 
         return SwapTransaction(
@@ -343,6 +379,51 @@ class UniswapV4SDK:
             gas_estimate=UNISWAP_V4_GAS_ESTIMATES["swap"],
             description=(f"Uniswap V4 swap {quote.token_in[:10]}... -> {quote.token_out[:10]}..."),
         )
+
+    def _encode_exact_input_single_params(
+        self,
+        quote: SwapQuote,
+        amount_out_minimum: int,
+    ) -> str:
+        """Encode ExactInputSingleParams struct for V4_SWAP_EXACT_IN_SINGLE.
+
+        Struct layout (solidity):
+            struct ExactInputSingleParams {
+                PoolKey poolKey;        // (currency0, currency1, fee, tickSpacing, hooks)
+                bool zeroForOne;
+                uint128 amountIn;
+                uint128 amountOutMinimum;
+                uint160 sqrtPriceLimitX96;
+                bytes hookData;         // dynamic
+            }
+
+        Returns:
+            Hex string (no 0x prefix) of ABI-encoded params.
+        """
+        pool_key = self.compute_pool_key(quote.token_in, quote.token_out, quote.fee_tier)
+        zero_for_one = quote.token_in.lower() == pool_key.currency0
+
+        sqrt_price_limit = (MIN_SQRT_PRICE + 1) if zero_for_one else (MAX_SQRT_PRICE - 1)
+
+        # Head: 9 static fields + 1 offset for hookData = 10 words
+        # hookData offset from start of struct: 10 * 32 = 320 = 0x140
+        head = (
+            _pad_address(pool_key.currency0)
+            + _pad_address(pool_key.currency1)
+            + _pad_uint24(pool_key.fee)
+            + _pad_int24(pool_key.tick_spacing)
+            + _pad_address(pool_key.hooks)
+            + _pad_bool(zero_for_one)
+            + _pad_uint(quote.amount_in)
+            + _pad_uint(amount_out_minimum)
+            + _pad_uint(sqrt_price_limit)
+            + _pad_uint(0x140)  # offset to hookData
+        )
+
+        # Tail: hookData = empty bytes
+        tail = _pad_uint(0)  # hookData length = 0
+
+        return head + tail
 
     @staticmethod
     def tick_to_price(tick: int, decimals0: int = 18, decimals1: int = 18) -> Decimal:
@@ -400,9 +481,65 @@ def _pad_bool(value: bool) -> str:
     return "0" * 63 + ("1" if value else "0")
 
 
+def _encode_execute(commands: bytes, inputs: list[str], deadline: int) -> str:
+    """Encode UniversalRouter.execute(bytes commands, bytes[] inputs, uint256 deadline).
+
+    Args:
+        commands: Command bytes (each byte is a command ID).
+        inputs: List of hex-encoded input data (no 0x prefix) for each command.
+        deadline: Transaction deadline timestamp.
+
+    Returns:
+        Full calldata hex string with 0x prefix.
+    """
+    # Head: 3 slots (offset_commands, offset_inputs, deadline)
+    # commands starts at 3 * 32 = 96 = 0x60
+
+    # Commands section: length (32 bytes) + data (padded to 32 bytes)
+    commands_hex = commands.hex()
+    commands_padded = commands_hex.ljust(64, "0")  # right-pad to 32 bytes
+    commands_section = _pad_uint(len(commands)) + commands_padded
+
+    # Offset to inputs = 0x60 + len(commands_section in bytes)
+    # commands_section is 2 words = 64 bytes
+    offset_inputs = 0x60 + 64  # = 0xa0
+
+    # Inputs section: array length + offsets + elements
+    num_inputs = len(inputs)
+    # After array length, there are num_inputs offset words
+    # First element data starts at num_inputs * 32 bytes after offsets start
+    offsets_area_size = num_inputs * 32
+    element_data = ""
+    offsets = []
+    current_offset = offsets_area_size
+
+    for inp in inputs:
+        offsets.append(current_offset)
+        # Each element: length (32 bytes) + data (padded to 32-byte boundary)
+        byte_len = len(inp) // 2
+        padded_data = inp
+        # Pad data to 32-byte boundary
+        if len(padded_data) % 64 != 0:
+            padded_data = padded_data + "0" * (64 - len(padded_data) % 64)
+        element_data += _pad_uint(byte_len) + padded_data
+        current_offset += 32 + len(padded_data) // 2  # length word + data bytes
+
+    inputs_section = _pad_uint(num_inputs)
+    for off in offsets:
+        inputs_section += _pad_uint(off)
+    inputs_section += element_data
+
+    # Assemble
+    head = _pad_uint(0x60) + _pad_uint(offset_inputs) + _pad_uint(deadline)
+
+    return "0x" + UNIVERSAL_ROUTER_EXECUTE_SELECTOR[2:] + head + commands_section + inputs_section
+
+
 __all__ = [
     "FEE_TIERS",
     "NATIVE_CURRENCY",
+    "PERMIT2_ADDRESS",
+    "PERMIT2_APPROVE_SELECTOR",
     "POOL_MANAGER_ADDRESSES",
     "PoolKey",
     "QUOTER_ADDRESSES",
@@ -411,5 +548,10 @@ __all__ = [
     "SwapTransaction",
     "TICK_SPACING",
     "UNISWAP_V4_GAS_ESTIMATES",
+    "UNIVERSAL_ROUTER_EXECUTE_SELECTOR",
     "UniswapV4SDK",
+    "V4_SWAP_EXACT_IN",
+    "V4_SWAP_EXACT_IN_SINGLE",
+    "V4_SWAP_EXACT_OUT",
+    "V4_SWAP_EXACT_OUT_SINGLE",
 ]
