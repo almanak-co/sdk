@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
@@ -751,6 +751,20 @@ class TeardownManager:
                         error=str(e),
                     )
 
+            # Extract strategy-configured slippage from the intent so the
+            # escalation manager can use it as a floor (e.g., Pendle YT
+            # teardowns need 15% slippage due to thin AMM liquidity).
+            # Handle both object intents (live) and dict intents (resumed from JSON).
+            raw_intent_slippage = (
+                intent.get("max_slippage") if isinstance(intent, dict) else getattr(intent, "max_slippage", None)
+            )
+            intent_slippage: Decimal | None = None
+            if raw_intent_slippage is not None:
+                try:
+                    intent_slippage = Decimal(str(raw_intent_slippage))
+                except (InvalidOperation, TypeError, ValueError):
+                    logger.warning("Could not parse intent max_slippage=%r, ignoring.", raw_intent_slippage)
+
             exec_result = await self.slippage_manager.execute_with_escalation(
                 intent=intent,
                 position_value=positions.total_value_usd,
@@ -759,6 +773,7 @@ class TeardownManager:
                 teardown_id=teardown_id,
                 strategy_id=strategy.strategy_id,
                 is_auto_mode=is_auto_mode,
+                intent_slippage=intent_slippage,
             )
 
             if exec_result.success:

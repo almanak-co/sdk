@@ -144,12 +144,20 @@ class EscalatingSlippageManager:
         teardown_id: str = "",
         strategy_id: str = "",
         is_auto_mode: bool = False,
+        intent_slippage: Decimal | None = None,
     ) -> ExecutionResult:
         """Execute an intent with escalating slippage.
 
         Tries execution at increasing slippage levels. For auto-approve
         levels, retries automatically. For approval-required levels,
         pauses and requests human approval.
+
+        When ``intent_slippage`` is provided (from the strategy's teardown
+        intent), the manager uses it as a ceiling for auto-approval: all
+        escalation levels at or below ``intent_slippage`` are auto-approved,
+        and a new level is injected at ``intent_slippage`` if one doesn't
+        already exist.  The ladder is then sorted to ensure monotonic
+        escalation.
 
         Args:
             intent: The intent to execute
@@ -159,6 +167,7 @@ class EscalatingSlippageManager:
             teardown_id: ID of the teardown operation
             strategy_id: ID of the strategy
             is_auto_mode: Whether this is an auto-protect triggered exit
+            intent_slippage: Strategy-configured slippage ceiling for auto-approval
 
         Returns:
             ExecutionResult with outcome and details
@@ -166,7 +175,59 @@ class EscalatingSlippageManager:
         attempts: list[ExecutionAttempt] = []
         max_loss_percent = calculate_max_acceptable_loss(position_value)
 
-        for level_config in self.levels:
+        # Build effective levels: if intent_slippage is provided, ensure all
+        # levels up to that slippage are auto-approved and the ladder remains
+        # monotonically increasing.  Deep-copy to avoid mutating self.levels.
+        effective_levels = [
+            EscalationConfig(
+                level=lc.level,
+                slippage=lc.slippage,
+                auto_approve=lc.auto_approve,
+                retries=lc.retries,
+            )
+            for lc in self.levels
+        ]
+        if intent_slippage is not None and intent_slippage > Decimal("0"):
+            # Clamp to absolute_max_slippage to prevent misconfigured strategies
+            # from auto-approving arbitrarily high slippage.
+            if intent_slippage > self.config.absolute_max_slippage:
+                logger.warning(
+                    "Intent slippage %.1f%% exceeds absolute max %.1f%%, clamping.",
+                    float(intent_slippage * 100),
+                    float(self.config.absolute_max_slippage * 100),
+                )
+                intent_slippage = self.config.absolute_max_slippage
+
+            # Inject a level at intent_slippage if one doesn't already exist
+            if not any(lc.slippage == intent_slippage for lc in effective_levels):
+                injected_level = self.get_level_for_slippage(intent_slippage) or EscalationLevel.LEVEL_4
+                logger.info(
+                    "Injecting auto-approve level at %.1f%% from strategy teardown config.",
+                    float(intent_slippage * 100),
+                )
+                effective_levels.append(
+                    EscalationConfig(
+                        level=injected_level,
+                        slippage=intent_slippage,
+                        auto_approve=True,
+                        retries=1,
+                    ),
+                )
+
+            # Auto-approve all levels at or below intent_slippage
+            for level in effective_levels:
+                if level.slippage <= intent_slippage and not level.auto_approve:
+                    logger.info(
+                        "Overriding level at %.1f%% to auto-approve (at or below intent slippage %.1f%%).",
+                        float(level.slippage * 100),
+                        float(intent_slippage * 100),
+                    )
+                    level.auto_approve = True
+
+            # Sort by slippage to maintain monotonic escalation
+            effective_levels.sort(key=lambda lc: lc.slippage)
+
+        for level_config in effective_levels:
             slippage = level_config.slippage
 
             # In auto mode, don't exceed configured max
@@ -285,7 +346,7 @@ class EscalatingSlippageManager:
         # All levels exhausted
         return ExecutionResult(
             success=False,
-            final_slippage=self.levels[-1].slippage,
+            final_slippage=effective_levels[-1].slippage,
             status="failed_manual_intervention_required",
             attempts=attempts,
             current_level=EscalationLevel.LEVEL_5,
