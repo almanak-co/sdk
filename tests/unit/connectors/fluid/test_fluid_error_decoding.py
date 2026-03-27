@@ -33,14 +33,23 @@ class TestDecodeFluidRevert:
         # Real revert from nightly: 0xdee51a8a + uint256(0x11559 = 71001)
         raw = "0xdee51a8a0000000000000000000000000000000000000000000000000000000000011559"
         result = decode_fluid_revert(raw)
-        assert "minimum" in result.lower()
+        assert "FluidDexSwapTooSmall" in result
         assert "71001" in result  # 0x11559 = 71001
-        assert "Increase your trade size" in result
+        assert "too small" in result.lower()
 
     def test_decode_swap_too_small_without_param(self):
         raw = "0xdee51a8a"
         result = decode_fluid_revert(raw)
-        assert "minimum" in result.lower()
+        assert "too small" in result.lower()
+
+    def test_decode_swap_too_small_no_contradictory_claim(self):
+        """VIB-1969: error must NOT claim amount is below minimum when it isn't."""
+        raw = "0xdee51a8a0000000000000000000000000000000000000000000000000000000000011559"
+        result = decode_fluid_revert(raw)
+        # Must not say "minimum input" — the parameter may be the output threshold
+        assert "minimum input" not in result.lower()
+        # Must include the raw threshold for debugging
+        assert "71001" in result
 
     def test_decode_panic(self):
         raw = "0x4e487b710000000000000000000000000000000000000000000000000000000000000011"
@@ -74,7 +83,7 @@ class TestDecodeFluidRevert:
     def test_decode_no_prefix(self):
         raw = "dee51a8a0000000000000000000000000000000000000000000000000000000000011559"
         result = decode_fluid_revert(raw)
-        assert "minimum" in result.lower()
+        assert "too small" in result.lower()
 
 
 class TestExtractRevertHex:
@@ -113,5 +122,5 @@ class TestFluidMinAmountError:
         assert isinstance(err, Exception)
 
     def test_message(self):
-        err = FluidMinAmountError("Swap amount below pool minimum")
-        assert "pool minimum" in str(err)
+        err = FluidMinAmountError("FluidDexSwapTooSmall: the pool rejected this swap as too small")
+        assert "too small" in str(err)

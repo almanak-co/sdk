@@ -270,15 +270,18 @@ def decode_fluid_revert(raw_hex: str) -> str:
     error_name = FLUID_ERROR_SELECTORS.get(selector)
 
     if error_name == "FluidDexSwapTooSmall":
-        # Parameter is the minimum amount required (uint256)
+        # The uint256 parameter is the pool's internal threshold (could be
+        # a minimum output, a liquidity check, etc.).  Do NOT claim the
+        # user's input is "below" this value — the comparison may not be
+        # input-vs-threshold (see VIB-1969).
         if len(data) >= 72:
-            min_amount_hex = data[8:72]
-            min_amount = int(min_amount_hex, 16)
+            threshold = int(data[8:72], 16)
             return (
-                f"Swap amount below pool minimum. The Fluid DEX pool requires a minimum "
-                f"input of {min_amount} wei (raw). Increase your trade size."
+                f"FluidDexSwapTooSmall: the pool rejected this swap as too small "
+                f"(pool threshold parameter: {threshold} wei). "
+                f"Try a larger trade size."
             )
-        return "Swap amount below the Fluid DEX pool minimum. Increase your trade size."
+        return "FluidDexSwapTooSmall: the pool rejected this swap as too small. Try a larger trade size."
 
     if error_name == "Panic":
         if len(data) >= 72:
@@ -531,7 +534,7 @@ class FluidSDK:
                 raw_hex = _extract_revert_hex(str(e))
             if raw_hex:
                 decoded = decode_fluid_revert(raw_hex)
-                if "minimum" in decoded.lower() or "FluidDexSwapTooSmall" in decoded:
+                if "FluidDexSwapTooSmall" in decoded or "too small" in decoded.lower():
                     raise FluidMinAmountError(decoded) from e
                 raise FluidSDKError(f"Fluid swap quote failed: {decoded}") from e
             raise FluidSDKError(f"Failed to get swap quote: {e}") from e

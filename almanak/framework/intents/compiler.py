@@ -6142,8 +6142,8 @@ class IntentCompiler:
                     return CompilationResult(
                         status=CompilationStatus.FAILED,
                         error=(
-                            f"Fluid swap amount too small: {amount_decimal} {intent.from_token} "
-                            f"({amount_in_wei} wei) is below the pool's minimum. {e}"
+                            f"Fluid swap rejected: {amount_decimal} {intent.from_token} "
+                            f"({amount_in_wei} wei) too small for pool. {e}"
                         ),
                         intent_id=intent.intent_id,
                     )
