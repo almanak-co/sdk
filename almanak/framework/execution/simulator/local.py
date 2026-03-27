@@ -253,15 +253,23 @@ class LocalSimulator(Simulator):
         """
         web3 = await self._get_web3()
         try:
+            # Use explicit legacy gasPrice to bypass web3.py's EIP-1559 middleware
+            # which calls eth_feeHistory/eth_maxPriorityFeePerGas and can hang
+            # on Anvil forks (VIB-1831). On Anvil 0.4.0+ with --no-gas-cap,
+            # gasPrice=0 works. On older Anvil (0.3.x), the gas cap is enforced
+            # so we must use the block's base fee to avoid rejection.
+            try:
+                block = await web3.eth.get_block("latest")
+                gas_price = Wei(block.get("baseFeePerGas", 0))
+            except Exception as e:
+                logger.warning(f"Failed to query baseFeePerGas, using gasPrice=0: {e}")
+                gas_price = Wei(0)
+
             tx_params: TxParams = {
                 "value": Wei(tx.value),
                 "data": HexBytes(tx.data) if tx.data else HexBytes("0x"),
                 "gas": gas_limit,
-                # Explicit legacy gas price bypasses web3.py's EIP-1559 middleware
-                # which calls eth_feeHistory/eth_maxPriorityFeePerGas and can hang
-                # on Anvil forks with high base fees (VIB-1831). Anvil doesn't
-                # enforce gas prices, so gasPrice=0 is safe for state-setup TXs.
-                "gasPrice": Wei(0),
+                "gasPrice": gas_price,
             }
             if tx.from_address:
                 tx_params["from"] = web3.to_checksum_address(tx.from_address)
