@@ -8,6 +8,7 @@ import almanak.framework.anvil.fork_manager as fm
 from almanak.framework.anvil.fork_manager import (
     RollingForkManager,
     _anvil_supports_no_gas_cap,
+    _get_anvil_supported_flags,
     _get_anvil_version,
 )
 
@@ -16,6 +17,8 @@ def _clear_version_cache():
     """Reset the module-level version cache between tests."""
     fm._cached_anvil_version = None
     fm._anvil_version_detected = False
+    fm._cached_anvil_flags = None
+    fm._anvil_flags_detected = False
 
 
 class TestGetAnvilVersion:
@@ -87,6 +90,86 @@ class TestGetAnvilVersion:
         assert mock_run.call_count == 1
 
 
+class TestGetAnvilSupportedFlags:
+    """Tests for _get_anvil_supported_flags()."""
+
+    def setup_method(self):
+        _clear_version_cache()
+
+    def teardown_method(self):
+        _clear_version_cache()
+
+    @patch("almanak.framework.anvil.fork_manager.subprocess.run")
+    def test_parses_flags_from_help(self, mock_run):
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = (
+            "Usage: anvil [OPTIONS]\n\n"
+            "Options:\n"
+            "  --fork-url <URL>   Fork from URL\n"
+            "  --port <PORT>      Listen on port\n"
+            "  --no-gas-cap       Disable gas cap\n"
+            "  --silent           Silent mode\n"
+        )
+        flags = _get_anvil_supported_flags()
+        assert "--no-gas-cap" in flags
+        assert "--fork-url" in flags
+        assert "--silent" in flags
+
+    @patch("almanak.framework.anvil.fork_manager.subprocess.run")
+    def test_returns_empty_on_failure(self, mock_run):
+        mock_run.side_effect = FileNotFoundError("anvil not found")
+        assert _get_anvil_supported_flags() == set()
+
+    @patch("almanak.framework.anvil.fork_manager.subprocess.run")
+    def test_help_without_no_gas_cap(self, mock_run):
+        """Newer Foundry (1.x) that removed --no-gas-cap."""
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = (
+            "Usage: anvil [OPTIONS]\n\n"
+            "Options:\n"
+            "  --fork-url <URL>   Fork from URL\n"
+            "  --port <PORT>      Listen on port\n"
+            "  --silent           Silent mode\n"
+        )
+        flags = _get_anvil_supported_flags()
+        assert "--no-gas-cap" not in flags
+        assert "--fork-url" in flags
+
+    @patch("almanak.framework.anvil.fork_manager.subprocess.run")
+    def test_non_zero_returncode_not_cached(self, mock_run):
+        """Non-zero returncode should not cache and should return empty set."""
+        mock_run.return_value.returncode = 1
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.stderr = "error"
+        assert _get_anvil_supported_flags() == set()
+        # Should retry on next call (not cached)
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "--fork-url --no-gas-cap"
+        flags = _get_anvil_supported_flags()
+        assert "--no-gas-cap" in flags
+
+    @patch("almanak.framework.anvil.fork_manager.subprocess.run")
+    def test_caches_successful_detection(self, mock_run):
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "--fork-url --silent"
+        flags1 = _get_anvil_supported_flags()
+        assert mock_run.call_count == 1
+        flags2 = _get_anvil_supported_flags()
+        assert mock_run.call_count == 1
+        assert flags1 == flags2
+
+    @patch("almanak.framework.anvil.fork_manager.subprocess.run")
+    def test_transient_failure_not_cached(self, mock_run):
+        mock_run.side_effect = FileNotFoundError("anvil not found")
+        assert _get_anvil_supported_flags() == set()
+
+        mock_run.side_effect = None
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "--fork-url --no-gas-cap"
+        flags = _get_anvil_supported_flags()
+        assert "--no-gas-cap" in flags
+
+
 class TestAnvilSupportsNoGasCap:
     """Tests for _anvil_supports_no_gas_cap()."""
 
@@ -96,23 +179,38 @@ class TestAnvilSupportsNoGasCap:
     def teardown_method(self):
         _clear_version_cache()
 
-    @patch("almanak.framework.anvil.fork_manager._get_anvil_version")
-    def test_returns_false_for_0_3_0(self, mock_ver):
-        mock_ver.return_value = (0, 3, 0)
+    @patch("almanak.framework.anvil.fork_manager._get_anvil_supported_flags")
+    def test_returns_true_when_flag_in_help(self, mock_flags):
+        mock_flags.return_value = {"--fork-url", "--no-gas-cap", "--silent"}
+        assert _anvil_supports_no_gas_cap() is True
+
+    @patch("almanak.framework.anvil.fork_manager._get_anvil_supported_flags")
+    def test_returns_false_when_flag_not_in_help(self, mock_flags):
+        """Foundry 1.5.x removed the flag — should return False."""
+        mock_flags.return_value = {"--fork-url", "--silent"}
         assert _anvil_supports_no_gas_cap() is False
 
     @patch("almanak.framework.anvil.fork_manager._get_anvil_version")
-    def test_returns_true_for_0_4_0(self, mock_ver):
+    @patch("almanak.framework.anvil.fork_manager._get_anvil_supported_flags")
+    def test_falls_back_to_version_when_help_fails(self, mock_flags, mock_ver):
+        """When help probe fails (empty set), fall back to version check."""
+        mock_flags.return_value = set()  # help probe failed
         mock_ver.return_value = (0, 4, 0)
         assert _anvil_supports_no_gas_cap() is True
 
     @patch("almanak.framework.anvil.fork_manager._get_anvil_version")
-    def test_returns_true_for_1_0_0(self, mock_ver):
-        mock_ver.return_value = (1, 0, 0)
-        assert _anvil_supports_no_gas_cap() is True
+    @patch("almanak.framework.anvil.fork_manager._get_anvil_supported_flags")
+    def test_version_fallback_old_version(self, mock_flags, mock_ver):
+        """Help probe fails + old version = False."""
+        mock_flags.return_value = set()
+        mock_ver.return_value = (0, 3, 0)
+        assert _anvil_supports_no_gas_cap() is False
 
     @patch("almanak.framework.anvil.fork_manager._get_anvil_version")
-    def test_returns_false_when_detection_fails(self, mock_ver):
+    @patch("almanak.framework.anvil.fork_manager._get_anvil_supported_flags")
+    def test_both_fail_returns_false(self, mock_flags, mock_ver):
+        """Both help probe and version detection fail = fail-safe False."""
+        mock_flags.return_value = set()
         mock_ver.return_value = None
         assert _anvil_supports_no_gas_cap() is False
 

@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 
 _cached_anvil_version: tuple[int, int, int] | None = None
 _anvil_version_detected: bool = False
+_cached_anvil_flags: set[str] | None = None
+_anvil_flags_detected: bool = False
 
 
 def _get_anvil_version() -> tuple[int, int, int] | None:
@@ -70,13 +72,53 @@ def _get_anvil_version() -> tuple[int, int, int] | None:
     return None
 
 
+def _get_anvil_supported_flags() -> set[str]:
+    """Probe anvil --help to discover which flags are actually supported.
+
+    Returns:
+        Set of long flag names (e.g. {"--no-gas-cap", "--silent", ...}).
+        On failure, returns an empty set so callers can fail-safe.
+        Only caches successful detections — transient failures are retried.
+    """
+    global _cached_anvil_flags, _anvil_flags_detected
+    if _anvil_flags_detected:
+        return _cached_anvil_flags  # type: ignore[return-value]
+    try:
+        completed = subprocess.run(
+            ["anvil", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if completed.returncode != 0:
+            logger.debug("anvil --help failed (rc=%s): %s", completed.returncode, completed.stderr.strip())
+            return set()
+        output = completed.stdout
+        # Extract all --long-flag patterns from help output
+        flags = set(re.findall(r"(--[a-z][a-z0-9-]*)", output))
+        if not flags:
+            logger.debug("anvil --help returned no parseable long flags")
+            return set()
+        _cached_anvil_flags = flags
+        _anvil_flags_detected = True
+        return flags
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        logger.debug("Failed to probe anvil flags: %s", exc)
+    return set()
+
+
 def _anvil_supports_no_gas_cap() -> bool:
     """Check if the installed Anvil version supports --no-gas-cap.
 
-    The --no-gas-cap flag was added in Anvil 0.4.0. On older versions (e.g. 0.3.0)
-    it crashes with "unexpected argument". If version detection fails, default to
-    False (fail-safe: skip the flag rather than crash Anvil).
+    Probes `anvil --help` for the flag rather than relying on version comparison,
+    because Foundry changed versioning schemes (0.x -> 1.x) and the flag was
+    removed in newer releases. If help probe fails, falls back to version check
+    (>= 0.4.0). If both fail, defaults to False (fail-safe: skip the flag).
     """
+    flags = _get_anvil_supported_flags()
+    if flags:
+        return "--no-gas-cap" in flags
+    # Fallback: version-based check (original logic) if help probe failed
     version = _get_anvil_version()
     if version is None:
         return False

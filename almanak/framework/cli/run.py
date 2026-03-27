@@ -19,6 +19,7 @@ Multi-chain example:
 
 import asyncio
 import dataclasses
+import inspect
 import json
 import logging
 import os
@@ -2008,13 +2009,28 @@ def run(
             if chain_wallets:
                 strat_wallet = chain_wallets.get(primary_chain, strat_wallet)
 
-            strategy_instance = strategy_class(
-                config=config_instance,
-                chain=primary_chain,
-                wallet_address=strat_wallet,
-                chains=list(chain_wallets.keys()) if chain_wallets else None,
-                chain_wallets=chain_wallets or None,
-            )
+            # Build kwargs, then filter to only those the strategy __init__ accepts.
+            # This prevents TypeError for user strategies that don't accept **kwargs
+            # or newer framework params like chains/chain_wallets.
+            init_kwargs: dict[str, Any] = {
+                "config": config_instance,
+                "chain": primary_chain,
+                "wallet_address": strat_wallet,
+                "chains": list(chain_wallets.keys()) if chain_wallets else None,
+                "chain_wallets": chain_wallets or None,
+            }
+            try:
+                sig = inspect.signature(strategy_class.__init__)
+                params = sig.parameters
+                # If __init__ accepts **kwargs, pass everything
+                has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+                if not has_var_keyword:
+                    # Filter to only accepted parameter names
+                    init_kwargs = {k: v for k, v in init_kwargs.items() if k in params}
+            except (ValueError, TypeError) as exc:
+                logger.debug("Strategy __init__ introspection failed, passing all kwargs: %s", exc)
+
+            strategy_instance = strategy_class(**init_kwargs)
         else:
             # Try dict config first, then no config
             try:
