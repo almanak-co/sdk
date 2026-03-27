@@ -90,15 +90,35 @@ class TestSettingsFallback:
             settings = GatewaySettings()
             assert settings.alchemy_api_key == "prefixed-key"
 
+    def test_enso_api_key_bare_fallback(self):
+        """ENSO_API_KEY populates enso_api_key when prefixed var is unset."""
+        env = {"ENSO_API_KEY": "enso-test-key", "ALMANAK_GATEWAY_ENSO_API_KEY": ""}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.enso_api_key == "enso-test-key"
+
+    def test_prefixed_enso_key_takes_precedence(self):
+        """ALMANAK_GATEWAY_ENSO_API_KEY takes priority over bare ENSO_API_KEY."""
+        env = {
+            "ALMANAK_GATEWAY_ENSO_API_KEY": "prefixed-enso-key",
+            "ENSO_API_KEY": "bare-enso-key",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.enso_api_key == "prefixed-enso-key"
+
     def test_api_keys_empty_when_neither_set(self):
-        """alchemy_api_key and coingecko_api_key remain empty when no env vars are set."""
+        """alchemy_api_key, coingecko_api_key, and enso_api_key remain empty when no env vars are set."""
         env = {
             "ALMANAK_GATEWAY_ALCHEMY_API_KEY": "",
             "ALCHEMY_API_KEY": "",
             "ALMANAK_GATEWAY_COINGECKO_API_KEY": "",
             "COINGECKO_API_KEY": "",
+            "ALMANAK_GATEWAY_ENSO_API_KEY": "",
+            "ENSO_API_KEY": "",
         }
         with patch.dict(os.environ, env, clear=False):
             settings = GatewaySettings()
             assert not settings.alchemy_api_key
             assert not settings.coingecko_api_key
+            assert not settings.enso_api_key

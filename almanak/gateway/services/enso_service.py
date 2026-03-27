@@ -11,7 +11,6 @@ API key is held in gateway, keeping credentials secure.
 
 import json
 import logging
-import os
 from typing import Any
 
 import aiohttp
@@ -128,8 +127,8 @@ class EnsoServiceServicer(gateway_pb2_grpc.EnsoServiceServicer):
         self.settings = settings
         self._http_session: aiohttp.ClientSession | None = None
 
-        # Load API key from settings or environment
-        self._api_key = getattr(settings, "enso_api_key", None) or os.environ.get("ENSO_API_KEY")
+        # Load API key from settings (includes env fallback via _fallback_env_vars)
+        self._api_key = settings.enso_api_key
 
         self._available = bool(self._api_key)
 

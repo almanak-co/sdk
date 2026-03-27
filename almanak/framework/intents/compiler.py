@@ -3623,9 +3623,13 @@ class IntentCompiler:
         Enso provides DEX aggregation which may find better prices by routing
         through multiple DEXes. This method:
         1. Resolves token addresses
-        2. Gets optimal route from Enso API
+        2. Gets optimal route from Enso API (via gateway gRPC or direct client)
         3. Builds approve TX if needed
         4. Returns the transaction from Enso
+
+        When a gateway_client is available, the route is fetched via the gateway's
+        EnsoService gRPC, keeping the API key in the gateway process. Falls back to
+        the direct EnsoClient only when no gateway is connected (local dev).
 
         Args:
             intent: SwapIntent with protocol="enso"
@@ -3633,8 +3637,6 @@ class IntentCompiler:
         Returns:
             CompilationResult with Enso swap ActionBundle
         """
-        from ..connectors.enso import EnsoClient, EnsoConfig
-
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
             intent_id=intent.intent_id,
@@ -3679,25 +3681,14 @@ class IntentCompiler:
                     intent_id=intent.intent_id,
                 )
 
-            # Step 3: Get route from Enso
+            # Step 3: Get route from Enso (via gateway gRPC or direct client)
             logger.info(f"Getting Enso route: {from_token.symbol} -> {to_token.symbol}, amount={amount_in}")
 
-            config = EnsoConfig(
-                chain=self.chain,
-                wallet_address=self.wallet_address,
-            )
-            client = EnsoClient(config)
-
             slippage_bps = int(intent.max_slippage * 10000)
-            route = client.get_route(
-                token_in=from_token.address,
-                token_out=to_token.address,
-                amount_in=amount_in,
-                slippage_bps=slippage_bps,
-            )
+            route_data = self._get_enso_route(from_token.address, to_token.address, str(amount_in), slippage_bps)
 
             # Step 4: Build approve TX if needed (skip for native token)
-            router_address = route.tx.to
+            router_address = route_data["to"]
             if not from_token.is_native:
                 approve_txs = self._build_approve_tx(
                     from_token.address,
@@ -3707,12 +3698,12 @@ class IntentCompiler:
                 transactions.extend(approve_txs)
 
             # Step 5: Build swap TX from Enso route
-            value = int(route.tx.value) if route.tx.value else 0
+            value = int(route_data["value"]) if route_data["value"] else 0
             swap_tx = TransactionData(
-                to=route.tx.to,
+                to=route_data["to"],
                 value=value,
-                data=route.tx.data,
-                gas_estimate=int(route.gas) if route.gas else 200000,
+                data=route_data["data"],
+                gas_estimate=route_data["gas"] if route_data["gas"] else 200000,
                 description=(
                     f"Swap via Enso: {self._format_amount(amount_in, from_token.decimals)} {from_token.symbol} -> {to_token.symbol}"
                 ),
@@ -3722,7 +3713,7 @@ class IntentCompiler:
 
             # Step 6: Build ActionBundle
             total_gas = sum(tx.gas_estimate for tx in transactions)
-            amount_out = route.get_amount_out_wei()
+            amount_out = int(route_data["amount_out"]) if route_data["amount_out"] else 0
 
             # Calculate minimum output with slippage
             min_output = int(Decimal(str(amount_out)) * (Decimal("1") - intent.max_slippage))
@@ -3739,7 +3730,7 @@ class IntentCompiler:
                     "slippage": str(intent.max_slippage),
                     "protocol": "enso",
                     "router": router_address,
-                    "price_impact_bps": route.price_impact,
+                    "price_impact_bps": route_data.get("price_impact", 0),
                 },
             )
 
@@ -3753,7 +3744,8 @@ class IntentCompiler:
             amount_out_fmt = format_token_amount(amount_out, to_token.symbol, to_token.decimals)
             min_out_fmt = format_token_amount(min_output, to_token.symbol, to_token.decimals)
             slippage_fmt = format_percentage(intent.max_slippage)
-            price_impact_fmt = format_slippage_bps(route.price_impact) if route.price_impact else "N/A"
+            price_impact_val = route_data.get("price_impact")
+            price_impact_fmt = format_slippage_bps(price_impact_val) if price_impact_val is not None else "N/A"
 
             ok = "✅" if _emojis_enabled() else "[OK]"
             logger.info(f"{ok} Compiled SWAP (Enso): {amount_in_fmt} → {amount_out_fmt} (min: {min_out_fmt})")
@@ -3765,6 +3757,171 @@ class IntentCompiler:
             logger.exception(f"Failed to compile Enso SWAP intent: {e}")
             result.status = CompilationStatus.FAILED
             result.error = str(e)
+
+        return result
+
+    def _get_enso_route(
+        self,
+        token_in: str,
+        token_out: str,
+        amount_in: str,
+        slippage_bps: int,
+        *,
+        chain: str | None = None,
+        destination_chain_id: int | None = None,
+        receiver: str | None = None,
+        refund_receiver: str | None = None,
+    ) -> dict[str, Any]:
+        """Get Enso route via gateway gRPC or direct client.
+
+        When a gateway_client is connected, routes through the gateway's
+        EnsoService gRPC (API key stays in the gateway). Falls back to
+        the direct EnsoClient for local development without a gateway.
+
+        In deployed/managed mode (AGENT_ID set), the gateway is mandatory
+        and no fallback to direct HTTP is attempted.
+
+        Args:
+            token_in: Input token address.
+            token_out: Output token address.
+            amount_in: Input amount in wei (as string).
+            slippage_bps: Slippage tolerance in basis points.
+            chain: Source chain override (defaults to self.chain).
+            destination_chain_id: Target chain ID for cross-chain routes.
+            receiver: Receiver address for cross-chain routes.
+            refund_receiver: Refund receiver for cross-chain routes.
+
+        Returns:
+            Dict with keys: to, data, value, gas (int|None), amount_out, price_impact,
+            and optionally bridge_fee, estimated_time, is_cross_chain for cross-chain routes.
+        """
+        if self._gateway_client is not None:
+            if not self._gateway_client.is_connected:
+                raise RuntimeError(
+                    "Gateway client is configured but not connected; cannot fetch Enso route. "
+                    "Ensure the gateway is running before compiling Enso intents."
+                )
+            return self._get_enso_route_via_gateway(
+                token_in,
+                token_out,
+                amount_in,
+                slippage_bps,
+                chain=chain,
+                destination_chain_id=destination_chain_id,
+                receiver=receiver,
+                refund_receiver=refund_receiver,
+            )
+
+        # No gateway client configured — only allowed in local dev.
+        # In managed deployments the deployer always injects a gateway client;
+        # this guard catches misconfiguration.
+        if os.environ.get("AGENT_ID"):
+            raise RuntimeError(
+                "Enso route request failed: no gateway client configured. "
+                "In deployed mode, all Enso API calls must go through the gateway."
+            )
+
+        return self._get_enso_route_direct(
+            token_in,
+            token_out,
+            int(amount_in),
+            slippage_bps,
+            chain=chain,
+            destination_chain_id=destination_chain_id,
+            receiver=receiver,
+            refund_receiver=refund_receiver,
+        )
+
+    def _get_enso_route_via_gateway(
+        self,
+        token_in: str,
+        token_out: str,
+        amount_in: str,
+        slippage_bps: int,
+        *,
+        chain: str | None = None,
+        destination_chain_id: int | None = None,
+        receiver: str | None = None,
+        refund_receiver: str | None = None,
+    ) -> dict[str, Any]:
+        """Get Enso route via gateway's EnsoService gRPC."""
+        from almanak.gateway.proto import gateway_pb2
+
+        request = gateway_pb2.EnsoRouteRequest(
+            chain=chain or self.chain,
+            token_in=token_in,
+            token_out=token_out,
+            amount_in=amount_in,
+            from_address=self.wallet_address,
+            slippage_bps=slippage_bps,
+            destination_chain_id=destination_chain_id or 0,
+            receiver=receiver or "",
+            refund_receiver=refund_receiver or "",
+        )
+        response = self._gateway_client.enso.GetRoute(request, timeout=30.0)  # type: ignore[union-attr]
+
+        if not response.success:
+            raise RuntimeError(f"Gateway Enso GetRoute failed: {response.error}")
+
+        gas_str = response.gas or response.gas_estimate
+        result = {
+            "to": response.to,
+            "data": response.data,
+            "value": response.value,
+            "gas": int(gas_str) if gas_str and gas_str != "0" else None,
+            "amount_out": response.amount_out,
+            "price_impact": response.price_impact,
+        }
+
+        if response.is_cross_chain:
+            result["bridge_fee"] = response.bridge_fee
+            result["estimated_time"] = response.estimated_time
+            result["is_cross_chain"] = True
+
+        return result
+
+    def _get_enso_route_direct(
+        self,
+        token_in: str,
+        token_out: str,
+        amount_in: int,
+        slippage_bps: int,
+        *,
+        chain: str | None = None,
+        destination_chain_id: int | None = None,
+        receiver: str | None = None,
+        refund_receiver: str | None = None,
+    ) -> dict[str, Any]:
+        """Get Enso route via direct HTTP client (local dev fallback)."""
+        from ..connectors.enso import EnsoClient, EnsoConfig
+
+        config = EnsoConfig(
+            chain=chain or self.chain,
+            wallet_address=self.wallet_address,
+        )
+        client = EnsoClient(config)
+        route = client.get_route(
+            token_in=token_in,
+            token_out=token_out,
+            amount_in=amount_in,
+            slippage_bps=slippage_bps,
+            destination_chain_id=destination_chain_id,
+            refund_receiver=refund_receiver,
+        )
+
+        result: dict[str, Any] = {
+            "to": route.tx.to,
+            "data": route.tx.data,
+            "value": str(route.tx.value) if route.tx.value else "0",
+            "gas": int(route.gas) if route.gas else None,
+            "amount_out": str(route.get_amount_out_wei()),
+            "price_impact": route.price_impact,
+        }
+
+        if destination_chain_id:
+            result["bridge_fee"] = getattr(route, "bridge_fee", None)
+            result["estimated_time"] = getattr(route, "estimated_time", None)
+            result["is_cross_chain"] = True
 
         return result
 
@@ -4007,7 +4164,7 @@ class IntentCompiler:
         Cross-chain swaps use Enso's routing which handles bridging automatically.
         This method:
         1. Resolves token addresses for source and destination chains
-        2. Gets cross-chain route from Enso API
+        2. Gets cross-chain route from Enso API (via gateway gRPC or direct client)
         3. Builds approve TX if needed
         4. Returns the transaction from Enso
 
@@ -4017,7 +4174,7 @@ class IntentCompiler:
         Returns:
             CompilationResult with cross-chain swap ActionBundle
         """
-        from ..connectors.enso import CHAIN_MAPPING, EnsoClient, EnsoConfig
+        from ..connectors.enso import CHAIN_MAPPING
 
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
@@ -4074,16 +4231,10 @@ class IntentCompiler:
                     intent_id=intent.intent_id,
                 )
 
-            # Step 3: Get cross-chain route from Enso
+            # Step 3: Get cross-chain route from Enso (via gateway gRPC or direct client)
             logger.info(
                 f"Getting cross-chain route: {source_chain} {from_token.symbol} -> {dest_chain} {to_token.symbol}, amount={amount_in}"
             )
-
-            config = EnsoConfig(
-                chain=source_chain,
-                wallet_address=self.wallet_address,
-            )
-            client = EnsoClient(config)
 
             slippage_bps = int(intent.max_slippage * 10000)
             dest_chain_id = CHAIN_MAPPING.get(dest_chain.lower())
@@ -4095,17 +4246,19 @@ class IntentCompiler:
                 )
 
             dest_wallet = self._resolve_dest_wallet(dest_chain)
-            route = client.get_route(
-                token_in=from_token.address,
-                token_out=to_token.address,
-                amount_in=amount_in,
-                slippage_bps=slippage_bps,
+            route_data = self._get_enso_route(
+                from_token.address,
+                to_token.address,
+                str(amount_in),
+                slippage_bps,
+                chain=source_chain,
                 destination_chain_id=dest_chain_id,
+                receiver=dest_wallet,
                 refund_receiver=dest_wallet,
             )
 
             # Step 4: Build approve TX if needed (skip for native token)
-            router_address = route.tx.to
+            router_address = route_data["to"]
             if not from_token.is_native:
                 approve_txs = self._build_approve_tx(
                     from_token.address,
@@ -4115,12 +4268,12 @@ class IntentCompiler:
                 transactions.extend(approve_txs)
 
             # Step 5: Build swap TX from Enso route
-            value = int(route.tx.value) if route.tx.value else 0
+            value = int(route_data["value"]) if route_data["value"] else 0
             swap_tx = TransactionData(
-                to=route.tx.to,
+                to=route_data["to"],
                 value=value,
-                data=route.tx.data,
-                gas_estimate=int(route.gas) if route.gas else 300000,
+                data=route_data["data"],
+                gas_estimate=route_data["gas"] if route_data["gas"] else 300000,
                 description=(
                     f"Cross-chain swap via Enso: {self._format_amount(amount_in, from_token.decimals)} {from_token.symbol} ({source_chain}) -> {to_token.symbol} ({dest_chain})"
                 ),
@@ -4130,7 +4283,9 @@ class IntentCompiler:
 
             # Step 6: Build ActionBundle
             total_gas = sum(tx.gas_estimate for tx in transactions)
-            amount_out = route.get_amount_out_wei()
+            amount_out = int(route_data["amount_out"]) if route_data["amount_out"] else 0
+            bridge_fee = route_data.get("bridge_fee")
+            estimated_time = route_data.get("estimated_time")
 
             action_bundle = ActionBundle(
                 intent_type=IntentType.SWAP.value,
@@ -4146,8 +4301,8 @@ class IntentCompiler:
                     "source_chain": source_chain,
                     "destination_chain": dest_chain,
                     "is_cross_chain": True,
-                    "bridge_fee": route.bridge_fee,
-                    "estimated_time": route.estimated_time,
+                    "bridge_fee": bridge_fee,
+                    "estimated_time": estimated_time,
                 },
             )
 
@@ -4157,7 +4312,7 @@ class IntentCompiler:
             result.warnings = warnings
 
             logger.info(
-                f"Compiled cross-chain SWAP intent: {from_token.symbol} ({source_chain}) -> {to_token.symbol} ({dest_chain}), {len(transactions)} txs, bridge_fee={route.bridge_fee}, est_time={route.estimated_time}s"
+                f"Compiled cross-chain SWAP intent: {from_token.symbol} ({source_chain}) -> {to_token.symbol} ({dest_chain}), {len(transactions)} txs, bridge_fee={bridge_fee}, est_time={estimated_time}s"
             )
 
         except Exception as e:

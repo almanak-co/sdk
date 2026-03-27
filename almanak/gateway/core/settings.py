@@ -49,6 +49,7 @@ class GatewaySettings(BaseSettings):
     # Platform secrets - only gateway has access to these
     alchemy_api_key: str | None = None
     coingecko_api_key: str | None = None
+    enso_api_key: str | None = None
     pendle_api_key: str | None = None
 
     # Pendle API settings
@@ -151,6 +152,10 @@ class GatewaySettings(BaseSettings):
             fallback = os.environ.get("COINGECKO_API_KEY")
             if fallback:
                 self.coingecko_api_key = fallback
+        if not self.enso_api_key:
+            fallback = os.environ.get("ENSO_API_KEY")
+            if fallback:
+                self.enso_api_key = fallback
 
         return self
 
