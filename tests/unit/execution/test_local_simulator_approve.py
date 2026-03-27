@@ -494,3 +494,100 @@ class TestStateSetupTimeout:
             f"State setup timeout is {_STATE_SETUP_TX_TIMEOUT}s, must be >= 30s "
             "to accommodate Avalanche/Ethereum Anvil forks (VIB-1842)"
         )
+
+
+class TestExecuteTxGasPricing:
+    """Tests for explicit gas pricing in _execute_tx (VIB-1831).
+
+    _execute_tx must set gasPrice=0 to bypass web3.py's EIP-1559 middleware
+    which calls eth_feeHistory and can hang on Anvil forks with high base fees.
+    """
+
+    @pytest.mark.asyncio
+    async def test_execute_tx_sets_gas_price_zero(self):
+        """_execute_tx should include gasPrice=0 in tx_params to avoid EIP-1559 hang."""
+        sim = LocalSimulator(rpc_url="http://localhost:8545")
+
+        mock_web3 = MagicMock()
+        mock_web3.to_checksum_address = lambda x: x
+
+        # Capture the tx_params passed to send_transaction
+        captured_params = {}
+
+        async def capture_send_tx(params):
+            captured_params.update(params)
+            return b"\x00" * 32
+
+        mock_web3.eth.send_transaction = AsyncMock(side_effect=capture_send_tx)
+        mock_web3.eth.wait_for_transaction_receipt = AsyncMock(return_value={"status": 1})
+        sim._web3 = mock_web3
+
+        tx = _make_tx(data=TRANSFER_SELECTOR + "0" * 56, gas_limit=200000)
+        success, error = await sim._execute_tx(tx, gas_limit=200000)
+
+        assert success
+        assert error is None
+        # gasPrice must be explicitly set to 0 (Wei)
+        assert "gasPrice" in captured_params, (
+            "_execute_tx must set gasPrice to bypass EIP-1559 middleware (VIB-1831)"
+        )
+        assert captured_params["gasPrice"] == 0
+
+    @pytest.mark.asyncio
+    async def test_execute_tx_no_eip1559_fields(self):
+        """_execute_tx should NOT set maxFeePerGas or maxPriorityFeePerGas."""
+        sim = LocalSimulator(rpc_url="http://localhost:8545")
+
+        mock_web3 = MagicMock()
+        mock_web3.to_checksum_address = lambda x: x
+
+        captured_params = {}
+
+        async def capture_send_tx(params):
+            captured_params.update(params)
+            return b"\x00" * 32
+
+        mock_web3.eth.send_transaction = AsyncMock(side_effect=capture_send_tx)
+        mock_web3.eth.wait_for_transaction_receipt = AsyncMock(return_value={"status": 1})
+        sim._web3 = mock_web3
+
+        tx = _make_tx(data=TRANSFER_SELECTOR + "0" * 56, gas_limit=200000)
+        await sim._execute_tx(tx, gas_limit=200000)
+
+        # Legacy gasPrice=0 means EIP-1559 fields should not be present
+        assert "maxFeePerGas" not in captured_params
+        assert "maxPriorityFeePerGas" not in captured_params
+
+    @pytest.mark.asyncio
+    async def test_execute_tx_in_multi_tx_bundle_uses_gas_price(self):
+        """In a 3-TX bundle, state-setup TXs use gasPrice=0 (VIB-1831 regression guard)."""
+        sim = LocalSimulator(rpc_url="http://localhost:8545", gas_buffer=1.0)
+
+        mock_web3 = MagicMock()
+        mock_web3.to_checksum_address = lambda x: x
+        mock_web3.provider.make_request = AsyncMock(return_value={"result": "0x1"})
+
+        sent_params_list = []
+
+        async def capture_send_tx(params):
+            sent_params_list.append(dict(params))
+            return b"\x00" * 32
+
+        mock_web3.eth.send_transaction = AsyncMock(side_effect=capture_send_tx)
+        mock_web3.eth.wait_for_transaction_receipt = AsyncMock(return_value={"status": 1})
+        sim._web3 = mock_web3
+
+        tx1 = _make_approve_tx(gas_limit=65000)
+        tx2 = _make_approve_tx(gas_limit=65000)
+        tx3 = _make_tx(data=TRANSFER_SELECTOR + "0" * 56, gas_limit=400000)
+
+        result = await sim.simulate([tx1, tx2, tx3], chain="ethereum")
+
+        assert result.success
+        # TX 1 and TX 2 are executed for state setup (TX 3 is last, not executed)
+        assert len(sent_params_list) == 2
+        for i, params in enumerate(sent_params_list):
+            assert "gasPrice" in params, (
+                f"State-setup TX {i} must set gasPrice=0 (VIB-1831)"
+            )
+            assert params["gasPrice"] == 0

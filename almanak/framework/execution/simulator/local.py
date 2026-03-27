@@ -257,6 +257,11 @@ class LocalSimulator(Simulator):
                 "value": Wei(tx.value),
                 "data": HexBytes(tx.data) if tx.data else HexBytes("0x"),
                 "gas": gas_limit,
+                # Explicit legacy gas price bypasses web3.py's EIP-1559 middleware
+                # which calls eth_feeHistory/eth_maxPriorityFeePerGas and can hang
+                # on Anvil forks with high base fees (VIB-1831). Anvil doesn't
+                # enforce gas prices, so gasPrice=0 is safe for state-setup TXs.
+                "gasPrice": Wei(0),
             }
             if tx.from_address:
                 tx_params["from"] = web3.to_checksum_address(tx.from_address)
