@@ -415,6 +415,11 @@ class PaperTraderState:
         is_resumed: Whether this session was resumed from saved state
         resume_count: Number of times this session has been resumed
         last_resume_time: When the session was last resumed (if resumed)
+        ticks_with_fork: Ticks where fork was healthy (VIB-1957)
+        ticks_with_indicators: Ticks where indicators computed successfully (VIB-1957)
+        ticks_with_action: Ticks where strategy returned a non-HOLD actionable intent (VIB-1957)
+        last_successful_decision_at: Timestamp of last non-HOLD decision (VIB-1957)
+        last_trade_at: Timestamp of last successful trade execution (VIB-1957)
     """
 
     strategy_id: str
@@ -432,6 +437,12 @@ class PaperTraderState:
     is_resumed: bool = False
     resume_count: int = 0
     last_resume_time: datetime | None = None
+    # Health telemetry (VIB-1957)
+    ticks_with_fork: int = 0
+    ticks_with_indicators: int = 0
+    ticks_with_action: int = 0
+    last_successful_decision_at: datetime | None = None
+    last_trade_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize state to dictionary.
@@ -461,10 +472,18 @@ class PaperTraderState:
             "status": self.status,
             "is_resumed": self.is_resumed,
             "resume_count": self.resume_count,
+            # Health telemetry (VIB-1957)
+            "ticks_with_fork": self.ticks_with_fork,
+            "ticks_with_indicators": self.ticks_with_indicators,
+            "ticks_with_action": self.ticks_with_action,
         }
-        # Optional field
+        # Optional fields
         if self.last_resume_time is not None:
             result["last_resume_time"] = self.last_resume_time.isoformat()
+        if self.last_successful_decision_at is not None:
+            result["last_successful_decision_at"] = self.last_successful_decision_at.isoformat()
+        if self.last_trade_at is not None:
+            result["last_trade_at"] = self.last_trade_at.isoformat()
         return result
 
     @classmethod
@@ -477,10 +496,18 @@ class PaperTraderState:
         Returns:
             PaperTraderState instance
         """
-        # Parse optional last_resume_time
+        # Parse optional datetime fields
         last_resume_time = None
         if data.get("last_resume_time"):
             last_resume_time = datetime.fromisoformat(data["last_resume_time"])
+
+        last_successful_decision_at = None
+        if data.get("last_successful_decision_at"):
+            last_successful_decision_at = datetime.fromisoformat(data["last_successful_decision_at"])
+
+        last_trade_at = None
+        if data.get("last_trade_at"):
+            last_trade_at = datetime.fromisoformat(data["last_trade_at"])
 
         return cls(
             strategy_id=data["strategy_id"],
@@ -505,6 +532,12 @@ class PaperTraderState:
             is_resumed=data.get("is_resumed", False),
             resume_count=data.get("resume_count", 0),
             last_resume_time=last_resume_time,
+            # Health telemetry (VIB-1957) — defaults for backward compat with old state files
+            ticks_with_fork=data.get("ticks_with_fork", 0),
+            ticks_with_indicators=data.get("ticks_with_indicators", 0),
+            ticks_with_action=data.get("ticks_with_action", 0),
+            last_successful_decision_at=last_successful_decision_at,
+            last_trade_at=last_trade_at,
         )
 
     def save(self, path: Path) -> None:
@@ -1269,6 +1302,12 @@ def _run_background_paper_trader(
                 trader._tick_count = state.tick_count
                 trader._trades = list(state.trades)  # Copy to avoid mutations
                 trader._errors = list(state.errors)
+                # Restore health telemetry (VIB-1957)
+                trader._ticks_with_fork = state.ticks_with_fork
+                trader._ticks_with_indicators = state.ticks_with_indicators
+                trader._ticks_with_action = state.ticks_with_action
+                trader._last_successful_decision_at = state.last_successful_decision_at
+                trader._last_trade_at = state.last_trade_at
                 # Restore balances to portfolio tracker
                 for token, amount in state.current_balances.items():
                     portfolio_tracker.current_balances[token] = amount
@@ -1283,6 +1322,12 @@ def _run_background_paper_trader(
                 trader._tick_count = 0
                 trader._trades = []
                 trader._errors = []
+                # Initialize health telemetry (VIB-1957)
+                trader._ticks_with_fork = 0
+                trader._ticks_with_indicators = 0
+                trader._ticks_with_action = 0
+                trader._last_successful_decision_at = None
+                trader._last_trade_at = None
 
             last_save_time = time.time()
             # Track number of trades/errors for incremental saving
@@ -1332,6 +1377,12 @@ def _run_background_paper_trader(
                 state.equity_curve = [
                     (p.timestamp, p.value_usd, getattr(p, "eth_price_usd", None)) for p in trader._equity_curve
                 ]
+                # Health telemetry (VIB-1957)
+                state.ticks_with_fork = getattr(trader, "_ticks_with_fork", 0)
+                state.ticks_with_indicators = getattr(trader, "_ticks_with_indicators", 0)
+                state.ticks_with_action = getattr(trader, "_ticks_with_action", 0)
+                state.last_successful_decision_at = getattr(trader, "_last_successful_decision_at", None)
+                state.last_trade_at = getattr(trader, "_last_trade_at", None)
 
                 # Periodic save of full state
                 current_time = time.time()

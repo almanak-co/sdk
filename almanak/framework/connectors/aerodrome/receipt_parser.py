@@ -985,7 +985,10 @@ class AerodromeReceiptParser:
             amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
             amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
         else:
-            logger.warning(
+            # DEBUG not WARNING: this is expected in the enrichment path where the
+            # parser is constructed without token metadata.  extract_swap_amounts()
+            # has its own fallback that resolves decimals from Transfer events.
+            logger.debug(
                 "Token decimals unresolved (in=%s, out=%s); omitting swap_result",
                 token_in_decimals,
                 token_out_decimals,
@@ -1110,8 +1113,20 @@ class AerodromeReceiptParser:
             else:
                 return None
 
-            # Resolve decimals independently from Transfer events in the receipt.
+            # Resolve token addresses from Transfer events in the receipt.
             token_in_addr, token_out_addr, _, _ = self._extract_swap_tokens_from_transfers(receipt)
+
+            # Fallback: identify tokens by pool address from the Swap event.
+            # In Solidly V2, the pool always receives token_in and sends token_out.
+            # Only safe for single-hop swaps; multi-hop would pick the intermediate token.
+            if (not token_in_addr or not token_out_addr) and len(parse_result.swap_events) == 1:
+                pool_addr = parse_result.swap_events[0].pool_address
+                if pool_addr:
+                    p_in, p_out = self._extract_tokens_by_pool(receipt, pool_addr)
+                    if not token_in_addr and p_in:
+                        token_in_addr = p_in
+                    if not token_out_addr and p_out:
+                        token_out_addr = p_out
 
             if not token_in_addr:
                 token_in_addr = token_in_hint
@@ -1196,6 +1211,53 @@ class AerodromeReceiptParser:
         token_in_addr, amount_in = transfers_from[0] if transfers_from else ("", 0)
         token_out_addr, amount_out = transfers_to[-1] if transfers_to else ("", 0)
         return token_in_addr, token_out_addr, amount_in, amount_out
+
+    def _extract_tokens_by_pool(self, receipt: dict[str, Any], pool_address: str) -> tuple[str, str]:
+        """Identify token_in and token_out from Transfer events using the pool address.
+
+        In Solidly V2 swaps, the pool receives token_in and sends token_out.
+        We find Transfers TO the pool (token_in) and FROM the pool (token_out).
+
+        Args:
+            receipt: Transaction receipt dict
+            pool_address: Pool contract address (lowercase)
+
+        Returns:
+            Tuple of (token_in_addr, token_out_addr), empty strings if not found.
+        """
+        pool = pool_address.lower()
+        transfer_topic = EVENT_TOPICS["Transfer"].lower()
+        token_in = ""
+        token_out = ""
+
+        for log in receipt.get("logs", []):
+            topics = log.get("topics", [])
+            if not topics or len(topics) < 3:
+                continue
+
+            topic0 = HexDecoder.normalize_hex(topics[0])
+            if not topic0:
+                continue
+            if not topic0.startswith("0x"):
+                topic0 = "0x" + topic0
+            if topic0.lower() != transfer_topic:
+                continue
+
+            log_to = HexDecoder.topic_to_address(topics[2])
+            log_from = HexDecoder.topic_to_address(topics[1])
+
+            raw_token = log.get("address") or ""
+            token_address = str(raw_token).lower() if raw_token else ""
+
+            if log_to == pool and not token_in:
+                token_in = token_address
+            if log_from == pool and not token_out:
+                token_out = token_address
+
+            if token_in and token_out:
+                break
+
+        return token_in, token_out
 
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> "LPCloseData | None":
         """Extract LP close data from transaction receipt.

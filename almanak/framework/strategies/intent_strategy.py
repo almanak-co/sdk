@@ -835,6 +835,10 @@ class MarketSnapshot:
         self._cci_values: dict[str, tuple[CCIData, str | None]] = {}
         self._ichimoku_values: dict[str, tuple[IchimokuData, str | None]] = {}
 
+        # Fork RPC URL for paper trading on-chain reads (VIB-1956)
+        self._fork_rpc_url: str | None = None
+        self._fork_block: int | None = None
+
     @property
     def chain(self) -> str:
         """Get the chain name."""
@@ -849,6 +853,29 @@ class MarketSnapshot:
     def timestamp(self) -> datetime:
         """Get the snapshot timestamp."""
         return self._timestamp
+
+    @property
+    def fork_rpc_url(self) -> str | None:
+        """Get the Anvil fork RPC URL for on-chain reads (paper trading only).
+
+        Returns the fork's JSON-RPC endpoint when running in paper trading mode,
+        allowing strategies to perform protocol-level reads directly against the fork.
+        Returns None when not in paper trading mode.
+
+        VIB-1956: Enables strategies to do protocol-level reads (e.g., Aave
+        getReserveData, DEX pool state) during paper trading.
+
+        WARNING: This is a paper-trading-only escape hatch. In production,
+        this returns None. Do NOT gate trading logic on fork_rpc_url
+        availability — strategies that behave differently based on this
+        property will diverge between paper trading and production.
+        """
+        return self._fork_rpc_url
+
+    @property
+    def fork_block(self) -> int | None:
+        """Get the current fork block number (paper trading only)."""
+        return self._fork_block
 
     def price(self, token: str, quote: str = "USD") -> Decimal:
         """Get the price of a token.

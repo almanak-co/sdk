@@ -727,6 +727,10 @@ class MarketSnapshot:
         self._stochastic_calculator: StochasticCalculator | None = None
         self._atr_calculator: ATRCalculator | None = None
 
+        # Fork RPC URL for paper trading on-chain reads (VIB-1956)
+        self._fork_rpc_url: str | None = None
+        self._fork_block: int | None = None
+
         # Gas price cache with timestamp for TTL (12 seconds = 1 block)
         self._gas_cache: dict[str, tuple[GasPrice, datetime]] = {}
         self._gas_cache_ttl_seconds: float = 12.0
@@ -759,6 +763,36 @@ class MarketSnapshot:
     def timestamp(self) -> datetime:
         """Get the snapshot creation timestamp."""
         return self._timestamp
+
+    @property
+    def fork_rpc_url(self) -> str | None:
+        """Get the Anvil fork RPC URL for on-chain reads (paper trading only).
+
+        Returns the fork's JSON-RPC endpoint when running in paper trading mode,
+        allowing strategies to perform protocol-level reads (e.g., Aave
+        getReserveData, pool state queries) directly against the fork.
+
+        Returns None when not in paper trading mode.
+
+        VIB-1956: Previously, strategies couldn't access on-chain data during
+        paper trading because no gateway client was available.
+
+        Example:
+            def decide(self, market: MarketSnapshot) -> Intent:
+                if market.fork_rpc_url:
+                    from web3 import Web3
+                    w3 = Web3(Web3.HTTPProvider(market.fork_rpc_url))
+                    # Read Aave pool data, DEX reserves, etc.
+        """
+        return self._fork_rpc_url
+
+    @property
+    def fork_block(self) -> int | None:
+        """Get the current fork block number (paper trading only).
+
+        Returns None when not in paper trading mode.
+        """
+        return self._fork_block
 
     def wallet_activity(
         self,

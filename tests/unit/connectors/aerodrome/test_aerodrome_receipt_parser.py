@@ -1,5 +1,6 @@
 """Tests for Aerodrome receipt parser — V1/V2 and Slipstream CL swap events."""
 
+import logging
 from decimal import Decimal
 
 from almanak.framework.connectors.aerodrome.receipt_parser import (
@@ -352,3 +353,140 @@ class TestCLSwapEdgeCases:
         assert result.success
         assert len(result.swap_events) == 0
         assert result.swap_result is None
+
+
+# ---------------------------------------------------------------------------
+# Tests — Enrichment path (parser without token metadata)
+# ---------------------------------------------------------------------------
+
+
+class TestEnrichmentPathSwapAmounts:
+    """Verify extract_swap_amounts works when parser has no token metadata.
+
+    This simulates the ResultEnricher path where AerodromeReceiptParser is
+    constructed with only chain= and no token addresses/decimals.
+    """
+
+    def test_enrichment_v1_swap_with_transfers(self):
+        """V1 swap with Transfer events should resolve amounts via pool fallback."""
+        # Real Optimism addresses
+        usdc_addr = "0x0b2c639c533813f4aa9d7837caf62653d097ff85"
+        weth_addr = "0x4200000000000000000000000000000000000006"
+        pool_addr = "0x" + "cc" * 20
+        wallet = "0x" + "aa" * 20
+
+        # Parser created without any token metadata (enrichment path)
+        parser = AerodromeReceiptParser(chain="optimism")
+
+        receipt = _build_v1_swap_receipt(
+            amount0_in=5_000_000,  # 5 USDC
+            amount1_in=0,
+            amount0_out=0,
+            amount1_out=2 * 10**15,  # 0.002 WETH
+            sender="0x" + "dd" * 20,
+            to=wallet,
+            pool=pool_addr,
+        )
+        receipt["from_address"] = wallet
+
+        # Add Transfer events: wallet->pool (USDC), pool->wallet (WETH)
+        transfer_topic = EVENT_TOPICS["Transfer"]
+        receipt["logs"].insert(0, {
+            "address": usdc_addr,
+            "topics": [transfer_topic, _addr_topic(wallet), _addr_topic(pool_addr)],
+            "data": "0x" + _pad32(5_000_000),
+            "logIndex": 10,
+        })
+        receipt["logs"].append({
+            "address": weth_addr,
+            "topics": [transfer_topic, _addr_topic(pool_addr), _addr_topic(wallet)],
+            "data": "0x" + _pad32(2 * 10**15),
+            "logIndex": 11,
+        })
+
+        swap_amounts = parser.extract_swap_amounts(receipt)
+        assert swap_amounts is not None
+        assert swap_amounts.amount_in == 5_000_000
+        assert swap_amounts.amount_out == 2 * 10**15
+
+    def test_enrichment_pool_fallback_no_wallet_match(self):
+        """When Transfer events don't match wallet, pool-based fallback identifies tokens."""
+        usdc_addr = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        weth_addr = "0x4200000000000000000000000000000000000006"
+        pool_addr = "0x" + "cc" * 20
+        router_addr = "0x" + "dd" * 20
+
+        parser = AerodromeReceiptParser(chain="base")
+
+        receipt = _build_v1_swap_receipt(
+            amount0_in=10_000_000,
+            amount1_in=0,
+            amount0_out=0,
+            amount1_out=4 * 10**15,
+            sender=router_addr,
+            to=router_addr,
+            pool=pool_addr,
+        )
+        # Wallet is some random address that doesn't match any Transfer
+        receipt["from_address"] = "0x" + "ff" * 20
+
+        # Transfers are between router and pool, NOT matching wallet
+        transfer_topic = EVENT_TOPICS["Transfer"]
+        receipt["logs"].insert(0, {
+            "address": usdc_addr,
+            "topics": [transfer_topic, _addr_topic(router_addr), _addr_topic(pool_addr)],
+            "data": "0x" + _pad32(10_000_000),
+            "logIndex": 10,
+        })
+        receipt["logs"].append({
+            "address": weth_addr,
+            "topics": [transfer_topic, _addr_topic(pool_addr), _addr_topic(router_addr)],
+            "data": "0x" + _pad32(4 * 10**15),
+            "logIndex": 11,
+        })
+
+        swap_amounts = parser.extract_swap_amounts(receipt)
+        assert swap_amounts is not None
+        assert swap_amounts.amount_in == 10_000_000
+        assert swap_amounts.amount_out == 4 * 10**15
+
+    def test_build_swap_result_logs_debug_not_warning(self):
+        """_build_swap_result should log at DEBUG, not WARNING, for unresolved decimals."""
+        parser = AerodromeReceiptParser(chain="base")
+
+        receipt = _build_v1_swap_receipt(
+            amount0_in=1000, amount1_in=0, amount0_out=0, amount1_out=2000,
+        )
+
+        logger = logging.getLogger("almanak.framework.connectors.aerodrome.receipt_parser")
+        with CaptureHandler(logger) as captured:
+            parser.parse_receipt(receipt)
+
+        # Should NOT have any WARNING about "Token decimals unresolved"
+        warnings = [r for r in captured.records if r.levelno >= logging.WARNING]
+        decimals_warnings = [r for r in warnings if "decimals unresolved" in r.getMessage()]
+        assert len(decimals_warnings) == 0, (
+            f"Expected no WARNING about decimals, got: {[r.getMessage() for r in decimals_warnings]}"
+        )
+
+
+class CaptureHandler(logging.Handler):
+    """Logging handler that captures records for test assertions."""
+
+    def __init__(self, logger: logging.Logger):
+        super().__init__()
+        self.logger = logger
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+    def __enter__(self) -> "CaptureHandler":
+        self.logger.addHandler(self)
+        self._old_level = self.logger.level
+        self.logger.setLevel(logging.DEBUG)
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.logger.removeHandler(self)
+        self.logger.setLevel(self._old_level)

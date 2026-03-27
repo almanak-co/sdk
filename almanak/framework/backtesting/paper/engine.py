@@ -552,10 +552,10 @@ async def create_market_snapshot_from_fork(
         rsi_calculator=rsi_calculator,
     )
 
-    # Add metadata about fork state
+    # Add metadata about fork state (VIB-1956: expose for on-chain reads)
     if fork_manager.is_running:
-        snapshot._fork_block = fork_manager.current_block  # type: ignore[attr-defined]
-        snapshot._fork_rpc_url = fork_manager.get_rpc_url()  # type: ignore[attr-defined]
+        snapshot._fork_block = fork_manager.current_block
+        snapshot._fork_rpc_url = fork_manager.get_rpc_url()
 
     # If we have a portfolio tracker, use its balances
     if portfolio_tracker:
@@ -617,6 +617,84 @@ async def create_market_snapshot_from_fork(
                         symbol=chain_native, balance=src_bal.balance, balance_usd=src_bal.balance_usd
                     )
     return snapshot
+
+
+# =============================================================================
+# Adapters
+# =============================================================================
+
+
+class _BinanceDataProviderAdapter:
+    """Adapts BinanceOHLCVProvider to the DataProvider protocol for OHLCVRouter.
+
+    BinanceOHLCVProvider implements the OHLCVProvider protocol (async get_ohlcv)
+    but not DataProvider (sync fetch). This thin adapter bridges that gap so
+    Binance can participate in the router's multi-source fallback chain.
+    """
+
+    def __init__(self, binance_provider: Any) -> None:
+        self._provider = binance_provider
+        self._consecutive_failures: int = 0
+
+    @property
+    def name(self) -> str:
+        return "binance"
+
+    @property
+    def data_class(self) -> Any:
+        from almanak.framework.data.models import DataClassification
+
+        return DataClassification.INFORMATIONAL
+
+    def fetch(self, **kwargs: object) -> Any:
+        import asyncio
+        import time
+
+        from almanak.framework.data.models import DataClassification, DataEnvelope, DataMeta
+
+        token = str(kwargs.get("token", ""))
+        quote = str(kwargs.get("quote", "USD"))
+        timeframe = str(kwargs.get("timeframe", "1h"))
+        limit = int(kwargs.get("limit", 100))  # type: ignore[call-overload]
+
+        start = time.monotonic()
+        # fetch() is called by OHLCVRouter.get_ohlcv() which runs synchronously
+        # from a worker thread (no running event loop), so asyncio.run() is safe.
+        try:
+            candles = asyncio.run(self._provider.get_ohlcv(token=token, quote=quote, timeframe=timeframe, limit=limit))
+            self._consecutive_failures = 0
+        except RuntimeError as e:
+            if "cannot be called from a running event loop" in str(e):
+                raise RuntimeError(
+                    "BinanceDataProviderAdapter.fetch() must be called from a non-async thread. "
+                    "Use RoutingOHLCVProvider.get_ohlcv() instead."
+                ) from e
+            self._consecutive_failures += 1
+            raise
+        except Exception:
+            self._consecutive_failures += 1
+            raise
+
+        latency_ms = int((time.monotonic() - start) * 1000)
+        from datetime import UTC, datetime
+
+        # 0.9 = default CEX confidence; OHLCVRouter may clamp to 0.7
+        # for CEX-sourced DeFi pairs (basis risk adjustment)
+        meta = DataMeta(
+            source="binance",
+            observed_at=datetime.now(UTC),
+            finality="off_chain",
+            staleness_ms=0,
+            latency_ms=latency_ms,
+            confidence=0.9,
+            cache_hit=False,
+        )
+        return DataEnvelope(value=candles, meta=meta, classification=DataClassification.INFORMATIONAL)
+
+    def health(self) -> dict[str, Any]:
+        if self._consecutive_failures >= 3:
+            return {"status": "degraded", "provider": "binance", "consecutive_failures": self._consecutive_failures}
+        return {"status": "healthy", "provider": "binance"}
 
 
 # =============================================================================
@@ -698,6 +776,13 @@ class PaperTrader:
             "default_usd_amount": 0,
         }
 
+        # Health telemetry counters (VIB-1957)
+        self._ticks_with_fork: int = 0
+        self._ticks_with_indicators: int = 0
+        self._ticks_with_action: int = 0
+        self._last_successful_decision_at: datetime | None = None
+        self._last_trade_at: datetime | None = None
+
         # Initialize price provider based on config
         self._init_price_provider()
 
@@ -751,6 +836,12 @@ class PaperTrader:
         self._equity_curve = []
         self._tick_count = 0
         self._last_execution_result: ExecutionResult | None = None  # For on_intent_executed callback (VIB-1951)
+        # Reset health telemetry counters (VIB-1957)
+        self._ticks_with_fork = 0
+        self._ticks_with_indicators = 0
+        self._ticks_with_action = 0
+        self._last_successful_decision_at = None
+        self._last_trade_at = None
 
         # Generate unique backtest_id for correlation across all log messages
         self._backtest_id = str(uuid.uuid4())
@@ -1083,6 +1174,12 @@ class PaperTrader:
         self._equity_curve = []
         self._tick_count = 0
         self._last_execution_result = None
+        # Reset health telemetry counters (VIB-1957)
+        self._ticks_with_fork = 0
+        self._ticks_with_indicators = 0
+        self._ticks_with_action = 0
+        self._last_successful_decision_at = None
+        self._last_trade_at = None
 
         # Generate unique backtest_id for correlation across all log messages
         self._backtest_id = str(uuid.uuid4())
@@ -1356,6 +1453,9 @@ class PaperTrader:
                     logger.error(f"[{self._backtest_id}] Fork recovery failed, skipping tick")
                     return None
 
+            # VIB-1957: Fork is healthy at this point
+            self._ticks_with_fork += 1
+
             # Fetch prices for portfolio tokens (cached for IntentCompiler use)
             token_prices = await self._get_portfolio_prices()
             self._cached_prices = token_prices
@@ -1392,6 +1492,10 @@ class PaperTrader:
                             except Exception as e:
                                 logger.warning(f"RSI pre-compute failed for {token} ({timeframe}): {e}")
 
+            # VIB-1957: Indicators computed if calculator exists and RSI cache was populated
+            if self._rsi_calculator is not None and snapshot._rsi_cache:
+                self._ticks_with_indicators += 1
+
             logger.info(f"[{self._backtest_id}] Calling strategy.decide()...")
             # Call strategy decide
             try:
@@ -1421,7 +1525,15 @@ class PaperTrader:
 
             # Execute if not HOLD
             if intent is not None and not self._is_hold_intent(intent):
+                # VIB-1957: Strategy made a non-HOLD decision
+                self._ticks_with_action += 1
+                self._last_successful_decision_at = datetime.now(UTC)
+
                 trade_result = await self._execute_intent(intent, strategy, snapshot)
+
+                # VIB-1957: Track last successful trade
+                if trade_result is not None:
+                    self._last_trade_at = datetime.now(UTC)
 
                 # Notify strategy of execution result (VIB-1951: callback parity)
                 # StrategyRunner calls on_intent_executed after every intent execution.
@@ -2417,21 +2529,27 @@ class PaperTrader:
                 )
 
     def _init_indicator_calculators(self) -> None:
-        """Initialize indicator calculators (RSI, MACD, BB, ATR) using Binance OHLCV.
+        """Initialize indicator calculators (RSI, MACD, BB, ATR) with multi-source OHLCV.
 
-        Creates an RSICalculator backed by BinanceOHLCVProvider. The RSI calculator
-        also exposes its OHLCV provider, which MarketSnapshot uses lazily for
-        MACD, Bollinger Bands, ATR, SMA, and EMA calculations.
+        Creates an RSICalculator backed by RoutingOHLCVProvider, which chains
+        multiple OHLCV sources (GeckoTerminal -> Binance). Falls back to
+        Binance-only if the routing infrastructure fails to initialize.
+
+        VIB-1955: Previously used BinanceOHLCVProvider alone, which caused
+        indicator failures when Binance had SSL/connectivity issues (~70% of
+        ticks returned None in batch 1 testing).
         """
         try:
             from almanak.framework.data.indicators.rsi import RSICalculator as RSICalc
-            from almanak.framework.data.ohlcv.binance_provider import BinanceOHLCVProvider
 
-            ohlcv_provider = BinanceOHLCVProvider(cache_ttl=120)
+            ohlcv_provider = self._create_ohlcv_provider()
             self._rsi_calculator = RSICalc(ohlcv_provider=ohlcv_provider)
+
+            provider_name = type(ohlcv_provider).__name__
             logger.info(
-                "[%s] Initialized indicator calculators (RSI, MACD, BB, ATR) via Binance OHLCV",
+                "[%s] Initialized indicator calculators (RSI, MACD, BB, ATR) via %s",
                 self._backtest_id,
+                provider_name,
             )
         except Exception as e:
             logger.warning(
@@ -2441,6 +2559,55 @@ class PaperTrader:
                 str(e),
             )
             self._rsi_calculator = None
+
+    def _create_ohlcv_provider(self) -> Any:
+        """Create the best available OHLCV provider for indicator computation.
+
+        Tries to create a RoutingOHLCVProvider (multi-source with fallback),
+        falling back to BinanceOHLCVProvider if routing infrastructure fails.
+
+        Returns:
+            An OHLCVProvider-compatible object with get_ohlcv() and supported_timeframes.
+        """
+        try:
+            from almanak.framework.data.ohlcv.binance_provider import BinanceOHLCVProvider
+            from almanak.framework.data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
+            from almanak.framework.data.ohlcv.ohlcv_router import OHLCVRouter
+            from almanak.framework.data.ohlcv.routing_provider import RoutingOHLCVProvider
+
+            chain = self.config.chain.lower() if isinstance(self.config.chain, str) else str(self.config.chain).lower()
+
+            # Create router with providers
+            router = OHLCVRouter(default_chain=chain)
+
+            # GeckoTerminal: DEX-native data, no API key needed
+            gecko = GeckoTerminalOHLCVProvider()
+            router.register_provider(gecko)
+
+            # Binance: CEX data via DataProvider adapter
+            binance = BinanceOHLCVProvider(cache_ttl=120)
+            router.register_provider(_BinanceDataProviderAdapter(binance))
+
+            provider = RoutingOHLCVProvider(
+                router=router,
+                chain=chain,
+                closeable_providers=[gecko],
+            )
+            logger.info(
+                "[%s] Created multi-source OHLCV provider (GeckoTerminal + Binance) for chain=%s",
+                self._backtest_id,
+                chain,
+            )
+            return provider
+        except Exception as e:
+            logger.warning(
+                "[%s] Failed to create multi-source OHLCV provider: %s. Falling back to Binance-only.",
+                self._backtest_id,
+                str(e),
+            )
+            from almanak.framework.data.ohlcv.binance_provider import BinanceOHLCVProvider
+
+            return BinanceOHLCVProvider(cache_ttl=120)
 
     async def _get_token_price(self, token: str) -> Decimal:
         """Get token price in USD using the configured fallback chain.

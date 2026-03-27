@@ -705,6 +705,8 @@ signals = market.wallet_activity(action_types=["SWAP", "LP_OPEN"])  # list
 market.chain            # str - current chain name
 market.wallet_address   # str - wallet address
 market.timestamp        # datetime - snapshot timestamp
+market.fork_rpc_url     # str | None - Local Anvil fork RPC URL (paper trading only; bypasses the gateway and is None in production)
+market.fork_block       # int | None - current fork block number (paper trading only)
 ```
 
 <!-- almanak-sdk-end: market-snapshot-api -->
