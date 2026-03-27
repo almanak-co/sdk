@@ -172,11 +172,6 @@ DEFAULT_EXECUTION_FEE: dict[str, int] = {
     "avalanche": int(0.02 * 10**18),  # 0.02 AVAX
 }
 
-# Sentinel value for "close full position" when no cached position exists.
-# GMX V2 contracts clamp sizeDeltaUsd to position.sizeInUsd on-chain,
-# so any value larger than any real position effectively closes 100%.
-GMX_V2_MAX_CLOSE_SIZE_USD = Decimal(10**12)  # $1 trillion
-
 # Gas estimates for GMX v2 operations
 GMX_V2_GAS_ESTIMATES: dict[str, int] = {
     "create_increase_order": 800000,
@@ -817,14 +812,18 @@ class GMXv2Adapter:
                 if position:
                     size_delta_usd = position.size_in_usd
                 else:
-                    # No cached position and no explicit size — use a large sentinel value.
-                    # GMX V2 contracts clamp sizeDeltaUsd to position.sizeInUsd on-chain,
-                    # so this effectively closes the full position without needing an
-                    # on-chain query first. This is the standard GMX V2 "close all" pattern.
-                    size_delta_usd = GMX_V2_MAX_CLOSE_SIZE_USD
-                    logger.info(
-                        "No cached position and no size_delta_usd specified — "
-                        "using max close size to close full position on-chain"
+                    # No cached position and no explicit size.
+                    # GMX V2 validates sizeDeltaUsd <= position.sizeInUsd — any
+                    # overshoot burns keeper execution fees (VIB-1946).
+                    # The compiler should query on-chain size; the adapter without
+                    # a cached position should fail-safe rather than guess.
+                    return OrderResult(
+                        success=False,
+                        error=(
+                            "Cannot close full position: no cached position data and no "
+                            "size_delta_usd specified. Query on-chain position size first "
+                            "or provide explicit size_delta_usd to avoid burning keeper fees."
+                        ),
                     )
 
             # Pre-flight check: warn about keeper execution fee for close orders

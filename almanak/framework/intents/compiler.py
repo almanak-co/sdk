@@ -10394,23 +10394,8 @@ class IntentCompiler:
             else:
                 acceptable_price = Decimal(10**30)  # Max price for closing short
 
-            # Step 4: Build position close order
-            order_result = adapter.close_position(
-                market=intent.market,
-                collateral_token=intent.collateral_token,
-                is_long=intent.is_long,
-                size_delta_usd=intent.size_usd,  # None means close full position
-                acceptable_price=acceptable_price,
-            )
-
-            if not order_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=order_result.error or "Failed to create close order",
-                    intent_id=intent.intent_id,
-                )
-
-            # Step 5: Create transaction data using GMX V2 SDK
+            # Step 4: Initialize SDK and resolve addresses (needed before adapter call
+            # so we can query on-chain position size for full closes — VIB-1946)
             from ..connectors.gmx_v2 import GMX_V2_MARKETS, GMX_V2_TOKENS, GMXV2SDK, GMXV2OrderParams
 
             # Get RPC URL via centralized resolver
@@ -10450,12 +10435,45 @@ class IntentCompiler:
                         intent_id=intent.intent_id,
                     )
 
-            # Calculate size in USD (GMX uses 30 decimals for USD)
-            # If size_usd is None, close full position (use max uint)
+            # Step 5: Resolve position size in USD (GMX uses 30 decimals)
+            # GMX V2 validates sizeDeltaUsd <= position.sizeInUsd — max uint and any
+            # overshoot burns keeper fees without closing (VIB-1946).
+            resolved_size_usd = intent.size_usd
             if intent.size_usd:
                 size_delta_usd = int(intent.size_usd * Decimal(10**30))
             else:
-                size_delta_usd = 2**256 - 1  # Max uint to close full position
+                queried_size = self._get_gmx_position_size_onchain(
+                    sdk, market_address, collateral_address, intent.is_long
+                )
+                if queried_size is None:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=(
+                            "Cannot close full GMX V2 position: unable to read position size on-chain. "
+                            "Either specify size_usd explicitly or ensure RPC/API connectivity. "
+                            "Refusing to guess — incorrect sizes burn keeper execution fees."
+                        ),
+                        intent_id=intent.intent_id,
+                    )
+                size_delta_usd = queried_size
+                # Convert on-chain size (30-decimal int) to Decimal for adapter
+                resolved_size_usd = Decimal(size_delta_usd) / Decimal(10**30)
+
+            # Step 6: Build position close order via adapter (with resolved size)
+            order_result = adapter.close_position(
+                market=intent.market,
+                collateral_token=intent.collateral_token,
+                is_long=intent.is_long,
+                size_delta_usd=resolved_size_usd,
+                acceptable_price=acceptable_price,
+            )
+
+            if not order_result.success:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=order_result.error or "Failed to create close order",
+                    intent_id=intent.intent_id,
+                )
 
             # Calculate acceptable price (GMX uses 30 decimals)
             acceptable_price_wei = int(acceptable_price)
@@ -10523,6 +10541,69 @@ class IntentCompiler:
             result.error = str(e)
 
         return result
+
+    def _get_gmx_position_size_onchain(
+        self,
+        sdk: Any,
+        market_address: str,
+        collateral_address: str,
+        is_long: bool,
+    ) -> int | None:
+        """Read exact GMX V2 position size from on-chain for close-full-position.
+
+        GMX V2 validates sizeDeltaUsd <= position.sizeInUsd strictly.
+        Any overshoot burns keeper fees without closing the position (VIB-1946).
+
+        Args:
+            sdk: GMXV2SDK instance (already initialized with RPC)
+            market_address: Market contract address
+            collateral_address: Collateral token address
+            is_long: Position direction
+
+        Returns:
+            size_in_usd in 30-decimal int format, or None if query failed.
+        """
+        from ..connectors.gmx_v2.sdk import PositionQueryError
+
+        try:
+            positions = sdk.get_account_positions(self.wallet_address)
+        except PositionQueryError as e:
+            logger.warning("GMX V2 position query failed: %s", e)
+            return None
+        except Exception as e:
+            logger.warning("Unexpected error querying GMX V2 positions: %s", e)
+            return None
+
+        if not positions:
+            logger.warning("No GMX V2 positions found for %s", self.wallet_address)
+            return None
+
+        # Match position by (market, collateral_token, is_long)
+        market_lower = market_address.lower()
+        collateral_lower = collateral_address.lower()
+        for pos in positions:
+            if (
+                pos.get("market", "").lower() == market_lower
+                and pos.get("collateral_token", "").lower() == collateral_lower
+                and pos.get("is_long") == is_long
+                and pos.get("size_in_usd", 0) > 0
+            ):
+                size_in_usd = pos["size_in_usd"]  # Already in 30 decimals from chain
+                logger.info(
+                    "Read on-chain GMX V2 position size: %s (30-decimal) for market=%s is_long=%s",
+                    size_in_usd,
+                    market_address,
+                    is_long,
+                )
+                return int(size_in_usd)
+
+        logger.warning(
+            "No matching GMX V2 position found for market=%s collateral=%s is_long=%s",
+            market_address,
+            collateral_address,
+            is_long,
+        )
+        return None
 
     # ==========================================================================
     # DRIFT PERPS (Solana)

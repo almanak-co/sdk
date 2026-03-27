@@ -1,16 +1,15 @@
-"""Tests for GMX V2 close_position full-close fallback (VIB-1886).
+"""Tests for GMX V2 close_position full-close behavior (VIB-1886, VIB-1946).
 
 When size_delta_usd=None (close full position) and no cached position
-exists, the adapter should use a large sentinel value instead of failing.
-GMX V2 contracts clamp sizeDeltaUsd to position.sizeInUsd on-chain.
+exists, the adapter should FAIL SAFE rather than send a sentinel value
+that burns keeper execution fees (VIB-1946).
 """
 
 from decimal import Decimal
-from unittest.mock import patch
 
 import pytest
 
-from almanak.framework.connectors.gmx_v2.adapter import GMX_V2_MAX_CLOSE_SIZE_USD, GMXv2Adapter, GMXv2Config
+from almanak.framework.connectors.gmx_v2.adapter import GMXv2Adapter, GMXv2Config
 
 
 @pytest.fixture
@@ -24,14 +23,15 @@ def adapter():
     return GMXv2Adapter(config)
 
 
-class TestClosePositionFullCloseFallback:
-    """Verify close_position handles size_delta_usd=None without cached positions."""
+class TestClosePositionFullClose:
+    """Verify close_position handles size_delta_usd=None safely."""
 
-    def test_close_full_position_without_cached_position_succeeds(self, adapter):
-        """close_position(size_delta_usd=None) should NOT fail when _positions is empty.
+    def test_close_full_no_cached_position_fails_safe(self, adapter):
+        """close_position(size_delta_usd=None) must FAIL when _positions is empty.
 
-        Previously returned: OrderResult(success=False, error="No size specified and no existing position found")
-        Now should: use a sentinel large value and succeed.
+        VIB-1946: sending a sentinel/max-uint value burns keeper fees without
+        closing the position. The adapter should refuse and require either a
+        cached position or an explicit size_delta_usd.
         """
         assert adapter._positions == {}, "Precondition: positions cache must be empty"
 
@@ -39,14 +39,11 @@ class TestClosePositionFullCloseFallback:
             market="ETH/USD",
             collateral_token="USDC",
             is_long=True,
-            size_delta_usd=None,  # "close full position"
+            size_delta_usd=None,
         )
 
-        assert result.success is True, (
-            f"close_position(size_delta_usd=None) should succeed with sentinel value, "
-            f"but got error: {result.error}"
-        )
-        assert result.order_key is not None
+        assert result.success is False
+        assert "no cached position" in result.error.lower()
 
     def test_close_explicit_size_still_works(self, adapter):
         """Explicit size_delta_usd should work as before, no fallback needed."""
@@ -60,19 +57,6 @@ class TestClosePositionFullCloseFallback:
         assert result.success is True
         assert result.order is not None
         assert result.order.size_delta_usd == Decimal("1000")
-
-    def test_close_full_uses_sentinel_value_larger_than_any_position(self, adapter):
-        """The sentinel value should be large enough that GMX clamps it to position size."""
-        result = adapter.close_position(
-            market="ETH/USD",
-            collateral_token="USDC",
-            is_long=True,
-            size_delta_usd=None,
-        )
-
-        assert result.success is True
-        # The order should have the sentinel value ($1 trillion)
-        assert result.order.size_delta_usd == GMX_V2_MAX_CLOSE_SIZE_USD
 
     def test_close_with_cached_position_uses_position_size(self, adapter):
         """When a cached position exists, close_position should use its size."""
