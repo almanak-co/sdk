@@ -18,10 +18,12 @@ from almanak.framework.portfolio.models import (
     PositionValue,
     ValueConfidence,
 )
+from almanak.framework.valuation.lp_position_reader import LPPositionReader
+from almanak.framework.valuation.lp_valuer import value_lp_position
 from almanak.framework.valuation.spot_valuer import total_value, value_tokens
 
 if TYPE_CHECKING:
-    from almanak.framework.teardown.models import TeardownPositionSummary
+    from almanak.framework.teardown.models import PositionInfo, TeardownPositionSummary
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +64,27 @@ class PortfolioValuer:
     Usage:
         valuer = PortfolioValuer()
         snapshot = valuer.value(strategy, market)
+
+        # With gateway client for on-chain LP re-pricing:
+        valuer = PortfolioValuer(gateway_client=client)
     """
+
+    def __init__(self, gateway_client: object | None = None) -> None:
+        """Initialize the valuer.
+
+        Args:
+            gateway_client: Optional GatewayClient for on-chain LP position
+                queries. If None, LP positions use strategy-reported values.
+                Can also be set later via set_gateway_client().
+        """
+        self._lp_reader = LPPositionReader(gateway_client)
+
+    def set_gateway_client(self, gateway_client: object | None) -> None:
+        """Update the gateway client for on-chain LP queries.
+
+        Called by StrategyRunner once the gateway connection is established.
+        """
+        self._lp_reader = LPPositionReader(gateway_client)
 
     def value(
         self,
@@ -132,7 +154,7 @@ class PortfolioValuer:
             wallet_value = total_value(wallet_balances)
 
             # Step 4: Get non-wallet positions (LP, lending, perps) if available
-            positions, position_value, positions_unavailable = self._get_positions(strategy, prices)
+            positions, position_value, positions_unavailable = self._get_positions(strategy, market, prices)
 
             # Step 5: Determine confidence level
             has_any_value = bool(wallet_balances or positions)
@@ -172,13 +194,14 @@ class PortfolioValuer:
     def _get_positions(
         self,
         strategy: StrategyLike,
+        market: MarketDataSource,
         prices: dict[str, Decimal],
     ) -> tuple[list[PositionValue], Decimal, bool]:
         """Extract non-wallet positions from strategy.get_open_positions().
 
-        Treats strategy-reported value_usd as a hint. For Week 1 (spot-only MVP),
-        we pass through the strategy's reported values. Week 2+ will re-price
-        LP positions via gateway.
+        For LP positions with on-chain data available, re-prices using V3 math
+        instead of trusting strategy-reported values. Falls back to strategy
+        values when on-chain query fails or position type is not LP.
 
         Returns:
             (positions, total_position_value, positions_unavailable)
@@ -193,12 +216,14 @@ class PortfolioValuer:
 
             positions: list[PositionValue] = []
             for p in summary.positions:
+                value_usd = self._reprice_position(p, strategy.chain, market)
+
                 positions.append(
                     PositionValue(
                         position_type=p.position_type,
                         protocol=p.protocol,
                         chain=p.chain,
-                        value_usd=p.value_usd,
+                        value_usd=value_usd,
                         label=f"{p.protocol} {p.position_type.value}",
                         tokens=p.details.get("tokens", []),
                         details=p.details,
@@ -211,3 +236,248 @@ class PortfolioValuer:
         except Exception as e:
             logger.warning("Failed to get open positions: %s", e)
             return [], Decimal("0"), True
+
+    def _reprice_position(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> Decimal:
+        """Re-price a single position using on-chain data when possible.
+
+        For LP positions: query on-chain V3 data and re-calculate value.
+        For other types: pass through strategy-reported value (Week 3+).
+
+        Falls back to strategy-reported value_usd on any failure.
+        """
+        from almanak.framework.teardown.models import PositionType
+
+        if position.position_type != PositionType.LP:
+            return position.value_usd
+
+        # Try on-chain re-pricing for LP positions
+        repriced = self._reprice_lp_on_chain(position, chain, market)
+        if repriced is not None:
+            return repriced
+
+        # Fall back to strategy-reported value
+        return position.value_usd
+
+    def _reprice_lp_on_chain(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> Decimal | None:
+        """Attempt to re-price an LP position using on-chain V3 math.
+
+        Queries the NonfungiblePositionManager for full position data
+        (tick range, liquidity), then calculates token amounts and
+        prices them with live market data.
+
+        Returns:
+            USD value if successful, None to signal fallback needed.
+        """
+        try:
+            # Need a numeric token ID for on-chain query
+            token_id = self._extract_token_id(position)
+            if token_id is None:
+                return None
+
+            # Query on-chain position details
+            on_chain = self._lp_reader.read_position(
+                chain=chain,
+                token_id=token_id,
+                protocol=position.protocol,
+            )
+            if on_chain is None:
+                return None
+
+            # Position with zero liquidity AND zero fees = truly empty
+            if on_chain.liquidity == 0 and on_chain.tokens_owed0 == 0 and on_chain.tokens_owed1 == 0:
+                return Decimal("0")
+
+            # Resolve token symbols for pricing
+            token0_symbol = self._resolve_token_symbol(on_chain.token0, position, "token0")
+            token1_symbol = self._resolve_token_symbol(on_chain.token1, position, "token1")
+            if not token0_symbol or not token1_symbol:
+                return None
+
+            # Get live prices
+            try:
+                token0_price = Decimal(str(market.price(token0_symbol)))
+                token1_price = Decimal(str(market.price(token1_symbol)))
+            except Exception:
+                logger.debug("Could not get prices for LP tokens %s/%s", token0_symbol, token1_symbol)
+                return None
+
+            if token0_price <= 0 or token1_price <= 0:
+                return None
+
+            # Get token decimals -- abort if unknown (never guess)
+            token0_decimals = self._get_token_decimals(token0_symbol, chain)
+            token1_decimals = self._get_token_decimals(token1_symbol, chain)
+            if token0_decimals is None or token1_decimals is None:
+                logger.debug("Unknown decimals for LP tokens %s/%s, falling back", token0_symbol, token1_symbol)
+                return None
+
+            # Query pool slot0 for exact price and current tick
+            pool_address = position.details.get("pool") or position.details.get("pool_address")
+            current_tick: int | None = None
+            sqrt_price_x96: int | None = None
+            if pool_address:
+                slot0 = self._lp_reader.read_pool_slot0(chain, pool_address)
+                if slot0:
+                    current_tick = slot0.tick
+                    sqrt_price_x96 = slot0.sqrt_price_x96
+
+            if current_tick is None:
+                # Derive approximate tick from price ratio
+                current_tick = self._price_ratio_to_tick(token0_price, token1_price, token0_decimals, token1_decimals)
+
+            # Calculate position value using V3 math
+            # Prefer exact sqrtPriceX96 for mid-tick precision in narrow ranges
+            lp_value = value_lp_position(
+                liquidity=on_chain.liquidity,
+                tick_lower=on_chain.tick_lower,
+                tick_upper=on_chain.tick_upper,
+                current_tick=current_tick,
+                token0_price_usd=token0_price,
+                token1_price_usd=token1_price,
+                token0_decimals=token0_decimals,
+                token1_decimals=token1_decimals,
+                sqrt_price_x96=sqrt_price_x96,
+            )
+
+            # Add uncollected fees
+            fees_usd = Decimal("0")
+            if on_chain.tokens_owed0 > 0:
+                fees_usd += Decimal(on_chain.tokens_owed0) / Decimal(10**token0_decimals) * token0_price
+            if on_chain.tokens_owed1 > 0:
+                fees_usd += Decimal(on_chain.tokens_owed1) / Decimal(10**token1_decimals) * token1_price
+
+            total = lp_value.value_usd + fees_usd
+
+            logger.debug(
+                "LP re-priced: position=%s value=$%s (lp=$%s fees=$%s) in_range=%s",
+                position.position_id,
+                total,
+                lp_value.value_usd,
+                fees_usd,
+                lp_value.in_range,
+            )
+
+            return total
+
+        except Exception:
+            logger.debug("LP on-chain re-pricing failed for %s", position.position_id, exc_info=True)
+            return None
+
+    @staticmethod
+    def _extract_token_id(position: "PositionInfo") -> int | None:
+        """Extract numeric NFT token ID from position data."""
+        pid = position.position_id
+        if not pid:
+            return None
+
+        # Try direct numeric parse
+        try:
+            token_id = int(pid)
+            if token_id >= 0:
+                return token_id
+        except (ValueError, TypeError):
+            pass
+
+        # Check details dict
+        for key in ("token_id", "tokenId", "nft_id"):
+            val = position.details.get(key)
+            if val is not None:
+                try:
+                    return int(val)
+                except (ValueError, TypeError):
+                    pass
+
+        return None
+
+    @staticmethod
+    def _resolve_token_symbol(
+        token_address: str,
+        position: "PositionInfo",
+        field_name: str,
+    ) -> str | None:
+        """Resolve a token address to a symbol.
+
+        Prefers the authoritative on-chain address via TokenResolver,
+        then falls back to strategy-reported metadata.
+        """
+        # Primary: resolve from on-chain address (authoritative)
+        try:
+            from almanak.framework.data.tokens import get_token_resolver
+
+            resolver = get_token_resolver()
+            resolved = resolver.resolve(token_address, position.chain)
+            if resolved and resolved.symbol:
+                return resolved.symbol
+        except Exception:
+            pass
+
+        # Fallback: strategy-reported metadata
+        symbol = position.details.get(field_name)
+        if symbol:
+            return symbol
+
+        # Fallback: tokens list
+        tokens = position.details.get("tokens", [])
+        idx = 0 if field_name == "token0" else 1
+        if len(tokens) > idx:
+            return tokens[idx]
+
+        return None
+
+    @staticmethod
+    def _get_token_decimals(symbol: str, chain: str) -> int | None:
+        """Get token decimals. Returns None if unknown (never defaults to 18).
+
+        Per codebase rules: "NEVER default to 18 decimals -- always raise
+        TokenNotFoundError if decimals unknown."
+        """
+        try:
+            from almanak.framework.data.tokens import get_token_resolver
+
+            resolver = get_token_resolver()
+            return resolver.get_decimals(chain, symbol)
+        except Exception:
+            # Common known decimals as last resort
+            if symbol.upper() in ("USDC", "USDT"):
+                return 6
+            if symbol.upper() == "WBTC":
+                return 8
+            return None
+
+    @staticmethod
+    def _price_ratio_to_tick(
+        token0_price: Decimal,
+        token1_price: Decimal,
+        token0_decimals: int,
+        token1_decimals: int,
+    ) -> int:
+        """Derive approximate V3 tick from USD prices and decimals.
+
+        V3 price = token1_amount / token0_amount (in wei terms).
+        tick = log(price) / log(1.0001)
+        """
+        import math
+
+        if token0_price <= 0 or token1_price <= 0:
+            return 0
+
+        # V3 price is token1/token0 in wei terms
+        # price = (token0_price / token1_price) * (10^token1_decimals / 10^token0_decimals)
+        price_ratio = float(token0_price / token1_price) * (10**token1_decimals / 10**token0_decimals)
+
+        if price_ratio <= 0:
+            return 0
+
+        # tick = log(price) / log(1.0001)
+        tick = math.log(price_ratio) / math.log(1.0001)
+        return int(tick)

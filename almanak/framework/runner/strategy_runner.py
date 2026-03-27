@@ -4534,6 +4534,11 @@ class StrategyRunner:
                 and not self._is_multi_chain
             ):
                 try:
+                    # Ensure valuer has gateway client for LP re-pricing
+                    gw = self._get_gateway_client()
+                    if gw is not None:
+                        self._portfolio_valuer.set_gateway_client(gw)
+
                     market = strategy.create_market_snapshot()
                     snapshot = self._portfolio_valuer.value(
                         strategy=strategy,  # type: ignore[arg-type]
