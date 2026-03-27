@@ -126,12 +126,18 @@ class SwapRoute:
     factory: str | None = None
 
     def to_tuple(self, default_factory: str) -> tuple:
-        """Convert to tuple format for contract call."""
+        """Convert to tuple format for contract call.
+
+        All addresses are checksummed to prevent web3.py rejection
+        which would silently fall back to zero slippage protection.
+        """
+        from web3 import Web3
+
         return (
-            self.from_token,
-            self.to_token,
+            Web3.to_checksum_address(self.from_token),
+            Web3.to_checksum_address(self.to_token),
             self.stable,
-            self.factory or default_factory,
+            Web3.to_checksum_address(self.factory or default_factory),
         )
 
     def to_dict(self) -> dict[str, Any]:

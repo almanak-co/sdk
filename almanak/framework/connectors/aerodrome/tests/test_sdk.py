@@ -213,28 +213,42 @@ class TestSwapRoute:
 
     def test_swap_route_to_tuple(self) -> None:
         """Test SwapRoute to tuple conversion."""
+        from web3 import Web3
+
         route = SwapRoute(
-            from_token="0xToken0",
-            to_token="0xToken1",
+            from_token="0x" + "aa" * 20,
+            to_token="0x" + "bb" * 20,
             stable=False,
         )
 
-        result = route.to_tuple("0xDefaultFactory")
+        result = route.to_tuple("0x" + "cc" * 20)
 
-        assert result == ("0xToken0", "0xToken1", False, "0xDefaultFactory")
+        assert result == (
+            Web3.to_checksum_address("0x" + "aa" * 20),
+            Web3.to_checksum_address("0x" + "bb" * 20),
+            False,
+            Web3.to_checksum_address("0x" + "cc" * 20),
+        )
 
     def test_swap_route_to_tuple_with_factory(self) -> None:
         """Test SwapRoute to tuple with custom factory."""
+        from web3 import Web3
+
         route = SwapRoute(
-            from_token="0xToken0",
-            to_token="0xToken1",
+            from_token="0x" + "aa" * 20,
+            to_token="0x" + "bb" * 20,
             stable=True,
-            factory="0xCustomFactory",
+            factory="0x" + "dd" * 20,
         )
 
-        result = route.to_tuple("0xDefaultFactory")
+        result = route.to_tuple("0x" + "cc" * 20)
 
-        assert result == ("0xToken0", "0xToken1", True, "0xCustomFactory")
+        assert result == (
+            Web3.to_checksum_address("0x" + "aa" * 20),
+            Web3.to_checksum_address("0x" + "bb" * 20),
+            True,
+            Web3.to_checksum_address("0x" + "dd" * 20),
+        )
 
     def test_swap_route_to_dict(self) -> None:
         """Test SwapRoute serialization."""
