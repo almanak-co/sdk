@@ -4594,6 +4594,17 @@ class StrategyRunner:
                     snapshot.value_confidence.value,
                 )
 
+            # Write valuation fields into strategy state so DashboardService can read them.
+            # Always persist (even zero) to avoid stale dashboard values.
+            try:
+                state = await self.state_manager.load_state(strategy.strategy_id)
+                if state is not None:
+                    state.state["total_value_usd"] = str(snapshot.total_value_usd)
+                    state.state["value_confidence"] = snapshot.value_confidence.value
+                    await self.state_manager.save_state(state, expected_version=state.version)
+            except Exception as ve:
+                logger.debug("Failed to write valuation into strategy state: %s", ve)
+
             # Initialize or update portfolio metrics for PnL tracking
             await self._update_portfolio_metrics(strategy.strategy_id, snapshot)
 

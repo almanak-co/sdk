@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -215,6 +215,199 @@ class TestGatewayStateManager:
 
         assert result.version == 6
         assert result.checksum == "new_checksum"
+
+
+class TestGatewayStateManagerSnapshotFallback:
+    """Tests for GatewayStateManager SQLite snapshot fallback."""
+
+    @pytest.fixture
+    def mock_client(self):
+        """Create mock gateway client."""
+        client = MagicMock(spec=GatewayClient)
+        client.state = MagicMock()
+        return client
+
+    @pytest.fixture
+    def sample_snapshot(self):
+        """Create a sample PortfolioSnapshot for testing."""
+        from decimal import Decimal
+
+        from almanak.framework.portfolio.models import PortfolioSnapshot, ValueConfidence
+
+        return PortfolioSnapshot(
+            timestamp=datetime.now(UTC),
+            strategy_id="test-strategy",
+            total_value_usd=Decimal("1000.50"),
+            available_cash_usd=Decimal("500.25"),
+            value_confidence=ValueConfidence.HIGH,
+            chain="arbitrum",
+        )
+
+    def test_save_portfolio_snapshot_success(self, mock_client, sample_snapshot):
+        """save_portfolio_snapshot delegates to SQLite fallback and returns snapshot ID."""
+        import asyncio
+
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        manager = GatewayStateManager(mock_client)
+
+        # Mock the SQLiteStore that _get_sqlite_fallback creates
+        mock_store = MagicMock()
+        mock_store.initialize = AsyncMock()
+        mock_store.save_portfolio_snapshot = AsyncMock(return_value=42)
+        mock_store.close = AsyncMock()
+
+        # Inject mock store directly
+        manager._sqlite_fallback = mock_store
+
+        result = asyncio.run(manager.save_portfolio_snapshot(sample_snapshot))
+
+        assert result == 42
+        mock_store.save_portfolio_snapshot.assert_called_once_with(sample_snapshot)
+
+    def test_save_portfolio_snapshot_failure_returns_zero(self, mock_client, sample_snapshot):
+        """save_portfolio_snapshot returns 0 on SQLite failure."""
+        import asyncio
+
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        manager = GatewayStateManager(mock_client)
+
+        mock_store = MagicMock()
+        mock_store.save_portfolio_snapshot = AsyncMock(side_effect=RuntimeError("DB write failed"))
+        manager._sqlite_fallback = mock_store
+
+        result = asyncio.run(manager.save_portfolio_snapshot(sample_snapshot))
+
+        assert result == 0
+
+    def test_get_latest_snapshot_success(self, mock_client, sample_snapshot):
+        """get_latest_snapshot returns snapshot from SQLite fallback."""
+        import asyncio
+
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        manager = GatewayStateManager(mock_client)
+
+        mock_store = MagicMock()
+        mock_store.get_latest_snapshot = AsyncMock(return_value=sample_snapshot)
+        manager._sqlite_fallback = mock_store
+
+        result = asyncio.run(manager.get_latest_snapshot("test-strategy"))
+
+        assert result is not None
+        assert result.strategy_id == "test-strategy"
+
+    def test_get_latest_snapshot_failure_returns_none(self, mock_client):
+        """get_latest_snapshot returns None on SQLite failure."""
+        import asyncio
+
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        manager = GatewayStateManager(mock_client)
+
+        mock_store = MagicMock()
+        mock_store.get_latest_snapshot = AsyncMock(side_effect=RuntimeError("DB read failed"))
+        manager._sqlite_fallback = mock_store
+
+        result = asyncio.run(manager.get_latest_snapshot("test-strategy"))
+
+        assert result is None
+
+    def test_get_snapshots_since_success(self, mock_client, sample_snapshot):
+        """get_snapshots_since returns snapshots from SQLite fallback."""
+        import asyncio
+
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        manager = GatewayStateManager(mock_client)
+
+        mock_store = MagicMock()
+        mock_store.get_snapshots_since = AsyncMock(return_value=[sample_snapshot])
+        manager._sqlite_fallback = mock_store
+
+        since = datetime.now(UTC)
+        result = asyncio.run(manager.get_snapshots_since("test-strategy", since))
+
+        assert len(result) == 1
+        assert result[0].strategy_id == "test-strategy"
+
+    def test_get_snapshots_since_failure_returns_empty(self, mock_client):
+        """get_snapshots_since returns empty list on SQLite failure."""
+        import asyncio
+
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        manager = GatewayStateManager(mock_client)
+
+        mock_store = MagicMock()
+        mock_store.get_snapshots_since = AsyncMock(side_effect=RuntimeError("DB failed"))
+        manager._sqlite_fallback = mock_store
+
+        since = datetime.now(UTC)
+        result = asyncio.run(manager.get_snapshots_since("test-strategy", since))
+
+        assert result == []
+
+    def test_close_cleans_up_sqlite_fallback(self, mock_client):
+        """close() properly shuts down the SQLite fallback store."""
+        import asyncio
+
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        manager = GatewayStateManager(mock_client)
+
+        mock_store = MagicMock()
+        mock_store.close = AsyncMock()
+        manager._sqlite_fallback = mock_store
+
+        asyncio.run(manager.close())
+
+        mock_store.close.assert_called_once()
+        assert manager._sqlite_fallback is None
+
+    def test_close_without_sqlite_fallback_is_safe(self, mock_client):
+        """close() works fine when no SQLite fallback was initialized."""
+        import asyncio
+
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        manager = GatewayStateManager(mock_client)
+        assert manager._sqlite_fallback is None
+
+        # Should not raise
+        asyncio.run(manager.close())
+
+    def test_sqlite_fallback_lazy_init_caches_store(self, mock_client, monkeypatch):
+        """_get_sqlite_fallback creates store once and caches it."""
+        import asyncio
+
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        manager = GatewayStateManager(mock_client)
+
+        mock_store = MagicMock()
+        mock_store.initialize = AsyncMock()
+
+        mock_sqlite_config = MagicMock()
+        mock_sqlite_store_cls = MagicMock(return_value=mock_store)
+
+        monkeypatch.setattr(
+            "almanak.framework.state.backends.sqlite.SQLiteStore",
+            mock_sqlite_store_cls,
+        )
+        monkeypatch.setattr(
+            "almanak.framework.state.backends.sqlite.SQLiteConfig",
+            mock_sqlite_config,
+        )
+
+        # First call initializes
+        store1 = asyncio.run(manager._get_sqlite_fallback())
+        # Second call returns cached
+        store2 = asyncio.run(manager._get_sqlite_fallback())
+
+        assert store1 is store2
+        mock_store.initialize.assert_called_once()
 
 
 class TestGatewayExecutionOrchestrator:
