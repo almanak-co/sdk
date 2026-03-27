@@ -367,7 +367,9 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                     stale=result.stale,
                 )
             except Exception as e:
-                logger.warning(f"BatchGetBalances: failed for {token} on {chain}: {e}")
+                # Log at DEBUG for batch context — individual token failures (e.g. USDT not
+                # existing on Base) are expected and should not spam user-facing logs.
+                logger.debug("BatchGetBalances: skipped %s on %s: %s", token, chain, e)
                 return gateway_pb2.BalanceResponse(error=str(e))
 
         tasks = [_get_single_balance(req) for req in request.requests]

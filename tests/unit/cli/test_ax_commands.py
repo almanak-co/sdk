@@ -246,6 +246,111 @@ class TestAxSwap:
         assert result.exit_code == 0
         assert captured_args["protocol"] == "uniswap_v3"
 
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_swap_dry_run_eth_shows_weth_note(self, mock_get_exec):
+        """When swapping to ETH in dry-run, output should note that DEX produces WETH."""
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        response = ToolResponse(
+            status="simulated",
+            data={"estimated_output": "0.04 ETH"},
+        )
+
+        async def mock_execute(tool_name, args):
+            return response
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--dry-run", "swap", "USDC", "ETH", "100"])
+        assert result.exit_code == 0
+        assert "WETH" in result.output
+        assert "unwrap" in result.output.lower()
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_swap_yes_eth_shows_unwrap_tip(self, mock_get_exec):
+        """When swapping to ETH with --yes, output should show unwrap tip."""
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        response = ToolResponse(
+            status="success",
+            data={"tx_hash": "0xabc123", "amount_out": "0.04"},
+        )
+
+        async def mock_execute(tool_name, args):
+            return response
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--yes", "swap", "USDC", "ETH", "100"])
+        assert result.exit_code == 0
+        assert "WETH" in result.output
+        assert "unwrap" in result.output.lower()
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_swap_usdc_no_weth_note(self, mock_get_exec):
+        """When swapping to USDC (not native), no WETH note should appear."""
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        response = ToolResponse(
+            status="simulated",
+            data={"estimated_output": "100 USDC"},
+        )
+
+        async def mock_execute(tool_name, args):
+            return response
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--dry-run", "swap", "ETH", "USDC", "0.1"])
+        assert result.exit_code == 0
+        assert "unwrap" not in result.output.lower()
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_swap_avax_shows_wavax_note(self, mock_get_exec):
+        """Swapping to AVAX should note WAVAX output."""
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        response = ToolResponse(status="simulated", data={})
+
+        async def mock_execute(tool_name, args):
+            return response
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(
+            almanak, ["ax", "--dry-run", "--chain", "avalanche", "swap", "USDC", "AVAX", "10"]
+        )
+        assert result.exit_code == 0
+        assert "WAVAX" in result.output
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_swap_bnb_shows_wbnb_note(self, mock_get_exec):
+        """Swapping to BNB on BSC should note WBNB output."""
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        response = ToolResponse(status="simulated", data={})
+
+        async def mock_execute(tool_name, args):
+            return response
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(
+            almanak, ["ax", "--dry-run", "--chain", "bsc", "swap", "USDC", "BNB", "10"]
+        )
+        assert result.exit_code == 0
+        assert "WBNB" in result.output
+
     def test_swap_help(self):
         runner = CliRunner()
         result = runner.invoke(almanak, ["ax", "swap", "--help"])

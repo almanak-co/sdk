@@ -128,6 +128,8 @@ NATIVE_TOKEN_SYMBOLS: dict[str, str] = {
     "polygon": "MATIC",
     "base": "ETH",
     "avalanche": "AVAX",
+    "bsc": "BNB",
+    "sonic": "S",
     "plasma": "XPL",
     "mantle": "MNT",
 }

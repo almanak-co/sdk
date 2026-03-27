@@ -14,6 +14,9 @@ from typing import TYPE_CHECKING
 
 import click
 
+from almanak.framework.data.models import _NATIVE_TO_WRAPPED
+from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
+
 if TYPE_CHECKING:
     from almanak.gateway.managed import ManagedGateway
 
@@ -557,7 +560,17 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_yes, sub_dry
 
     yes, dry_run, json_output = _merge_flags(ctx, sub_yes, sub_dry_run, sub_json_output)
 
-    action_desc = f"Swap {amount} {from_token.upper()} -> {to_token.upper()} on {ctx.obj['chain']}"
+    _chain = ctx.obj["chain"]
+    _network = ctx.obj.get("network")
+
+    # Detect native token output -- DEX swaps produce the wrapped version (e.g. WETH on Ethereum).
+    # Check chain-aware: only show the hint when to_token IS this chain's native token.
+    _chain_native = NATIVE_TOKEN_SYMBOLS.get(_chain.lower(), "ETH")
+    wrapped_name = _NATIVE_TO_WRAPPED.get(to_token.upper()) if to_token.upper() == _chain_native else None
+    is_native_output = wrapped_name is not None
+    _ax_flags = f"--chain {_chain}" + (f" --network {_network}" if _network and _network != "mainnet" else "")
+
+    action_desc = f"Swap {amount} {from_token.upper()} -> {to_token.upper()} on {_chain}"
 
     try:
         # Build tool arguments
@@ -576,11 +589,20 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_yes, sub_dry
             args["dry_run"] = True
             response = _run_tool(ctx, "swap_tokens", args)
             render_simulation(response, json_output=json_output)
+            if is_native_output and not json_output and response.status != "error":
+                click.echo(
+                    f"\nNote: DEX swaps produce {wrapped_name}, not native {to_token.upper()}. "
+                    f"To get native {to_token.upper()}, run: almanak ax {_ax_flags} unwrap {wrapped_name} <amount>"
+                )
             if response.status == "error":
                 sys.exit(1)
             return
 
         # Safety gate: confirm before executing
+        if is_native_output and not json_output:
+            action_desc += (
+                f" (output will be {wrapped_name} -- use 'almanak ax {_ax_flags} unwrap' for native {to_token.upper()})"
+            )
         proceed = check_safety_gate(dry_run=False, yes=yes, action_description=action_desc)
         if not proceed:
             click.echo("Cancelled.")
@@ -589,6 +611,11 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_yes, sub_dry
         # Execute
         response = _run_tool(ctx, "swap_tokens", args)
         render_result(response, json_output=json_output, title="Swap")
+        if is_native_output and not json_output and response.status != "error":
+            click.echo(
+                f"\nTip: Output is {wrapped_name} (ERC-20). To unwrap to native {to_token.upper()}: "
+                f"almanak ax {_ax_flags} unwrap {wrapped_name} <amount>"
+            )
         if response.status == "error":
             sys.exit(1)
     except click.ClickException:

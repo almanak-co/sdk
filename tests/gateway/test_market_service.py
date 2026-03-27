@@ -1,5 +1,6 @@
 """Tests for MarketService gateway implementation."""
 
+import logging
 import os
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -155,6 +156,44 @@ class TestMarketServiceGetBalance:
 
                 assert response.balance == "10.5"
                 assert response.decimals == 18
+
+
+class TestMarketServiceBatchGetBalances:
+    """Tests for MarketService.BatchGetBalances."""
+
+    @pytest.mark.asyncio
+    async def test_batch_get_balances_partial_failure_logs_debug(self, market_service, mock_context, caplog):
+        """BatchGetBalances logs per-token failures at DEBUG, not WARNING."""
+        valid_address = "0x1234567890123456789012345678901234567890"
+
+        mock_provider = MagicMock()
+        mock_provider.get_balance = AsyncMock(side_effect=Exception("token not found on chain"))
+
+        with patch.object(market_service, "_get_balance_provider", return_value=mock_provider):
+            market_service._initialized = True
+
+            request = gateway_pb2.BatchBalanceRequest(
+                requests=[
+                    gateway_pb2.BalanceRequest(
+                        token="USDT",
+                        chain="base",
+                        wallet_address=valid_address,
+                    )
+                ]
+            )
+
+            with caplog.at_level(logging.DEBUG, logger="almanak.gateway.services.market_service"):
+                response = await market_service.BatchGetBalances(request, mock_context)
+
+        # Partial failure is returned in response, not raised
+        assert len(response.responses) == 1
+        assert response.responses[0].error != ""
+
+        # Failure is logged at DEBUG, not WARNING
+        debug_msgs = [r for r in caplog.records if r.levelno == logging.DEBUG and "BatchGetBalances" in r.message]
+        warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING and "BatchGetBalances" in r.message]
+        assert len(debug_msgs) >= 1
+        assert len(warning_msgs) == 0
 
 
 class TestMarketServiceInitialization:

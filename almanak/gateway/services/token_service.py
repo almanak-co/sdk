@@ -551,7 +551,9 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
 
         for token in tokens:
             try:
-                resolved = self._resolver.resolve(token, chain)
+                # Suppress per-token resolution warnings in batch context to avoid
+                # noisy logs for tokens that don't exist on a chain (e.g. USDT on Base)
+                resolved = self._resolver.resolve(token, chain, log_errors=False)
                 results.append(self._resolved_to_response(resolved))
 
             except TokenResolutionError as e:
