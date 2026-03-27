@@ -47,6 +47,7 @@ class TokenBalance:
     balance: Decimal
     value_usd: Decimal
     address: str = ""
+    price_usd: Decimal | None = None  # Per-token price; enables redenomination (DB persistence is Week 2)
 
     def __post_init__(self) -> None:
         """Normalize numeric fields to Decimal."""
@@ -54,6 +55,8 @@ class TokenBalance:
             self.balance = Decimal(str(self.balance))
         if isinstance(self.value_usd, int | float | str):
             self.value_usd = Decimal(str(self.value_usd))
+        if self.price_usd is not None and isinstance(self.price_usd, int | float | str):
+            self.price_usd = Decimal(str(self.price_usd))
 
 
 @dataclass
@@ -164,6 +167,8 @@ class PortfolioSnapshot:
                     "symbol": b.symbol,
                     "balance": str(b.balance),
                     "value_usd": str(b.value_usd),
+                    "price_usd": str(b.price_usd) if b.price_usd is not None else None,
+                    "address": b.address,
                 }
                 for b in self.wallet_balances
             ],
@@ -192,11 +197,14 @@ class PortfolioSnapshot:
 
         wallet_balances = []
         for b in data.get("wallet_balances", []):
+            price_usd = b.get("price_usd")
             wallet_balances.append(
                 TokenBalance(
                     symbol=b["symbol"],
                     balance=Decimal(b["balance"]),
                     value_usd=Decimal(b["value_usd"]),
+                    address=b.get("address", ""),
+                    price_usd=Decimal(price_usd) if price_usd is not None else None,
                 )
             )
 

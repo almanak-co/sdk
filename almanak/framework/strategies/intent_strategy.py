@@ -4673,6 +4673,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
                                 symbol=token,
                                 balance=balance_data.balance,
                                 value_usd=value_usd,
+                                price_usd=price,
                             )
                         )
                 except Exception as e:  # noqa: BLE001  # Intentional graceful degradation

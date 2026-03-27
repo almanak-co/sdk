@@ -101,6 +101,7 @@ from ..utils.log_formatters import (
     format_usd,
 )
 from ..utils.logging import add_context, clear_context
+from ..valuation.portfolio_valuer import PortfolioValuer
 
 logger = logging.getLogger(__name__)
 
@@ -662,6 +663,7 @@ class StrategyRunner:
         # Portfolio snapshot tracking
         self._last_snapshot_time: datetime | None = None
         self._snapshot_interval_seconds = 300  # Capture time-series snapshot every 5 min
+        self._portfolio_valuer = PortfolioValuer()
 
         # Optional explicit gateway client (set via set_gateway_client for multi-chain)
         self._gateway_client: Any | None = None
@@ -4499,13 +4501,11 @@ class StrategyRunner:
     ) -> PortfolioSnapshot | None:
         """Capture and persist portfolio snapshot after iteration.
 
-        This method:
-        1. Calls strategy.get_portfolio_snapshot() if available
-        2. Stores in portfolio_snapshots table for dashboard/PnL charts
-        3. Initializes portfolio_metrics on first run for baseline tracking
+        Uses the framework-owned PortfolioValuer as the primary valuation path.
+        Falls back to strategy.get_portfolio_snapshot() if the valuer cannot
+        produce a valid snapshot (migration fallback for Week 1).
 
-        Portfolio snapshots are captured at a configurable interval (default 5 min)
-        to avoid storing excessive data while providing good chart resolution.
+        Pipeline: PortfolioValuer -> PortfolioSnapshot -> StateManager -> Dashboard
 
         Args:
             strategy: The strategy to capture snapshot from
@@ -4514,10 +4514,6 @@ class StrategyRunner:
         Returns:
             PortfolioSnapshot if captured, None if skipped or not supported
         """
-        # Check if strategy supports get_portfolio_snapshot
-        if not hasattr(strategy, "get_portfolio_snapshot"):
-            return None
-
         now = datetime.now(UTC)
 
         # Rate-limit snapshot persistence (store every 5 min for time-series)
@@ -4527,21 +4523,75 @@ class StrategyRunner:
                 return None
 
         try:
-            # Get snapshot from strategy
-            snapshot = strategy.get_portfolio_snapshot()
+            snapshot: PortfolioSnapshot | None = None
+
+            # Primary path: framework-owned PortfolioValuer
+            # Skip for multi-chain strategies -- their MarketSnapshot requires
+            # chain= argument that PortfolioValuer doesn't pass yet.
+            if (
+                hasattr(strategy, "_get_tracked_tokens")
+                and hasattr(strategy, "create_market_snapshot")
+                and not self._is_multi_chain
+            ):
+                try:
+                    market = strategy.create_market_snapshot()
+                    snapshot = self._portfolio_valuer.value(
+                        strategy=strategy,  # type: ignore[arg-type]
+                        market=market,
+                        iteration_number=iteration_number,
+                    )
+                    # If valuer produced a valid snapshot, use it
+                    if snapshot and snapshot.value_confidence != ValueConfidence.UNAVAILABLE:
+                        logger.debug(
+                            "Portfolio valued by PortfolioValuer for %s: $%.2f (%s)",
+                            strategy.strategy_id,
+                            snapshot.total_value_usd,
+                            snapshot.value_confidence.value,
+                        )
+                except Exception as e:
+                    logger.debug("PortfolioValuer failed, trying fallback: %s", e)
+                    snapshot = None
+
+            # Fallback: strategy's own get_portfolio_snapshot (migration path)
+            if (snapshot is None or snapshot.value_confidence == ValueConfidence.UNAVAILABLE) and hasattr(
+                strategy, "get_portfolio_snapshot"
+            ):
+                fallback = strategy.get_portfolio_snapshot()
+                if fallback is not None:
+                    fallback.iteration_number = iteration_number
+                if fallback is not None and fallback.value_confidence != ValueConfidence.UNAVAILABLE:
+                    snapshot = fallback
+                    logger.debug(
+                        "Portfolio valued by strategy fallback for %s: $%.2f",
+                        strategy.strategy_id,
+                        snapshot.total_value_usd,
+                    )
+                elif snapshot is None:
+                    snapshot = fallback
+
+            # Failure contract: never skip a snapshot -- construct UNAVAILABLE if needed
             if snapshot is None:
-                return None
+                snapshot = PortfolioSnapshot(
+                    timestamp=now,
+                    strategy_id=strategy.strategy_id,
+                    total_value_usd=Decimal("0"),
+                    available_cash_usd=Decimal("0"),
+                    value_confidence=ValueConfidence.UNAVAILABLE,
+                    error="No valuation path produced a portfolio snapshot",
+                    chain=getattr(strategy, "chain", ""),
+                    iteration_number=iteration_number,
+                )
 
-            # Set iteration number
-            snapshot.iteration_number = iteration_number
-
-            # Persist snapshot
+            # Persist snapshot (never skip -- failure contract)
             snapshot_id = await self.state_manager.save_portfolio_snapshot(snapshot)
             if snapshot_id > 0:
                 self._last_snapshot_time = now
                 logger.debug(
-                    f"Portfolio snapshot captured for {strategy.strategy_id}: "
-                    f"${snapshot.total_value_usd:.2f} (id={snapshot_id})"
+                    "Portfolio snapshot persisted for %s: $%.2f (id=%d, confidence=%s)",
+                    strategy.strategy_id,
+                    snapshot.total_value_usd,
+                    snapshot_id,
+                    snapshot.value_confidence.value,
                 )
 
             # Initialize or update portfolio metrics for PnL tracking
@@ -4551,6 +4601,26 @@ class StrategyRunner:
 
         except Exception as e:
             logger.warning(f"Failed to capture portfolio snapshot: {e}")
+            # Failure contract: persist UNAVAILABLE snapshot rather than skipping
+            try:
+                # Use getattr for all strategy accessors -- the main path may have
+                # failed because one of these properties raised.
+                sid = getattr(strategy, "strategy_id", "unknown")
+                chain = getattr(strategy, "chain", "")
+                unavailable_snapshot = PortfolioSnapshot(
+                    timestamp=now,
+                    strategy_id=sid,
+                    total_value_usd=Decimal("0"),
+                    available_cash_usd=Decimal("0"),
+                    value_confidence=ValueConfidence.UNAVAILABLE,
+                    error=str(e),
+                    chain=chain,
+                    iteration_number=iteration_number,
+                )
+                await self.state_manager.save_portfolio_snapshot(unavailable_snapshot)
+                self._last_snapshot_time = now
+            except Exception as persist_err:
+                logger.warning("Failed to persist UNAVAILABLE snapshot: %s", persist_err)
             return None
 
     async def _update_portfolio_metrics(
