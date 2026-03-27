@@ -152,6 +152,7 @@ class AtomicityRequirement(Enum):
 
 class Protocol(Enum):
     UNISWAP_V3 = "UNISWAP_V3"
+    UNISWAP_V4 = "UNISWAP_V4"
     PANCAKESWAP_V3 = "PANCAKESWAP_V3"
     SUSHISWAP_V3 = "SUSHISWAP_V3"
     TRADERJOE_V2 = "TRADERJOE_V2"

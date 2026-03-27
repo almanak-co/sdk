@@ -268,6 +268,6 @@ class TestIntentCompilerV4Routing:
 
         result = compiler.compile(intent)
         assert result.status.value == "FAILED"
-        assert "quarantined" in result.error.lower()
-        assert "VIB-1462" in result.error
+        assert "blocked" in result.error.lower()
+        assert "VIB-1965" in result.error
         assert "uniswap_v3" in result.error  # Should suggest V3 alternative

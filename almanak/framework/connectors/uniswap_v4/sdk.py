@@ -64,9 +64,17 @@ PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
 
 # --- Function selectors ---
 
-# V4SwapRouter (legacy, non-canonical — kept for reference only)
+# V4SwapRouter function selector (standalone router, NOT the UniversalRouter).
 # swap(PoolKey,IPoolManager.SwapParams,uint256,uint256,bytes)
+# NOTE: The v4_swap_router address in contracts.py needs on-chain verification.
+# The UniversalRouter is the canonical Uniswap-deployed swap entry point for V4.
 SWAP_SELECTOR = "0xf3cd914c"
+
+# PositionManager function selectors (canonical V4 periphery)
+# keccak256("modifyLiquidities(bytes,uint256)")[:4]
+MODIFY_LIQUIDITIES_SELECTOR = "0xdd46508f"
+# keccak256("modifyLiquiditiesWithoutUnlock(bytes,bytes[])")[:4]
+MODIFY_LIQUIDITIES_WITHOUT_UNLOCK_SELECTOR = "0x4afe393c"
 
 # UniversalRouter.execute(bytes commands, bytes[] inputs, uint256 deadline)
 UNIVERSAL_ROUTER_EXECUTE_SELECTOR = "0x3593564c"
@@ -537,6 +545,8 @@ def _encode_execute(commands: bytes, inputs: list[str], deadline: int) -> str:
 
 __all__ = [
     "FEE_TIERS",
+    "MODIFY_LIQUIDITIES_SELECTOR",
+    "MODIFY_LIQUIDITIES_WITHOUT_UNLOCK_SELECTOR",
     "NATIVE_CURRENCY",
     "PERMIT2_ADDRESS",
     "PERMIT2_APPROVE_SELECTOR",

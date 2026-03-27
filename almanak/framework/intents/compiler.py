@@ -6208,16 +6208,18 @@ class IntentCompiler:
     def _compile_swap_uniswap_v4(self, intent: SwapIntent) -> CompilationResult:
         """Compile SWAP intent for Uniswap V4.
 
-        QUARANTINED (VIB-1462): The V4SwapRouter address used by the connector
-        is fabricated (empty EOA on all chains). Swaps silently succeed as no-ops
-        because the EVM treats calldata sent to an EOA as a success. This is a
-        capital-destroying false positive. V4 compilation is blocked until the
-        connector is rewritten to use the Universal Router.
+        BLOCKED (VIB-1965): V4 core contracts (PoolManager, PositionManager,
+        UniversalRouter, Quoter, StateView) are verified canonical CREATE2
+        deployments on all supported chains. However, the V4 adapter currently
+        routes swaps through ``v4_swap_router`` which is NOT a canonical Uniswap
+        deployment — it may be an empty EOA on some chains. Phase 1 (VIB-1965)
+        will rewrite the adapter to use the canonical UniversalRouter
+        (``0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af``).
 
-        Use uniswap_v3 as a drop-in alternative for swap intents.
+        Use uniswap_v3 as a drop-in alternative for swap intents until Phase 1.
         """
         logger.warning(
-            "Uniswap V4 swap BLOCKED (VIB-1462): V4SwapRouter address is fabricated. "
+            "Uniswap V4 swap BLOCKED (VIB-1965): adapter uses unverified v4_swap_router. "
             "Use protocol='uniswap_v3' instead. Tokens: %s -> %s",
             intent.from_token,
             intent.to_token,
@@ -6226,10 +6228,11 @@ class IntentCompiler:
             status=CompilationStatus.FAILED,
             intent_id=intent.intent_id,
             error=(
-                "Uniswap V4 is quarantined (VIB-1462): The V4SwapRouter contract address "
-                "is fabricated and does not exist on any chain. Swaps would silently succeed "
-                "as no-ops (tokens don't move). Use protocol='uniswap_v3' as a drop-in "
-                "alternative until the V4 connector is rewritten to use the Universal Router."
+                "Uniswap V4 swaps are blocked pending VIB-1965: the adapter routes through "
+                "v4_swap_router (unverified, non-canonical address) instead of the canonical "
+                "UniversalRouter. Core V4 contracts (PoolManager, PositionManager) are verified. "
+                "Use protocol='uniswap_v3' as a drop-in alternative until the V4 adapter is "
+                "rewritten to use the UniversalRouter."
             ),
         )
 

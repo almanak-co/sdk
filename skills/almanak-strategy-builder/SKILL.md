@@ -1165,6 +1165,7 @@ class MyStrategy(IntentStrategy):
 | Protocol | Enum Value | Type | Config Name |
 |----------|-----------|------|-------------|
 | Uniswap V3 | `UNISWAP_V3` | DEX / LP | `uniswap_v3` |
+| Uniswap V4 | `UNISWAP_V4` | DEX / LP | `uniswap_v4` |
 | PancakeSwap V3 | `PANCAKESWAP_V3` | DEX / LP | `pancakeswap_v3` |
 | SushiSwap V3 | `SUSHISWAP_V3` | DEX / LP | `sushiswap_v3` |
 | TraderJoe V2 | `TRADERJOE_V2` | DEX / LP | `traderjoe_v2` |
