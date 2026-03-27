@@ -18,6 +18,8 @@ from almanak.framework.portfolio.models import (
     PositionValue,
     ValueConfidence,
 )
+from almanak.framework.valuation.lending_position_reader import LendingPositionReader
+from almanak.framework.valuation.lending_valuer import value_lending_position
 from almanak.framework.valuation.lp_position_reader import LPPositionReader
 from almanak.framework.valuation.lp_valuer import value_lp_position
 from almanak.framework.valuation.spot_valuer import total_value, value_tokens
@@ -78,13 +80,15 @@ class PortfolioValuer:
                 Can also be set later via set_gateway_client().
         """
         self._lp_reader = LPPositionReader(gateway_client)
+        self._lending_reader = LendingPositionReader(gateway_client)
 
     def set_gateway_client(self, gateway_client: object | None) -> None:
-        """Update the gateway client for on-chain LP queries.
+        """Update the gateway client for on-chain queries.
 
         Called by StrategyRunner once the gateway connection is established.
         """
         self._lp_reader = LPPositionReader(gateway_client)
+        self._lending_reader = LendingPositionReader(gateway_client)
 
     def value(
         self,
@@ -246,21 +250,29 @@ class PortfolioValuer:
         """Re-price a single position using on-chain data when possible.
 
         For LP positions: query on-chain V3 data and re-calculate value.
-        For other types: pass through strategy-reported value (Week 3+).
+        For SUPPLY/BORROW: query on-chain Aave data and re-calculate value.
+        For other types: pass through strategy-reported value.
 
         Falls back to strategy-reported value_usd on any failure.
         """
         from almanak.framework.teardown.models import PositionType
 
-        if position.position_type != PositionType.LP:
+        if position.position_type == PositionType.LP:
+            repriced = self._reprice_lp_on_chain(position, chain, market)
+            if repriced is not None:
+                return repriced
             return position.value_usd
 
-        # Try on-chain re-pricing for LP positions
-        repriced = self._reprice_lp_on_chain(position, chain, market)
-        if repriced is not None:
-            return repriced
+        if position.position_type in (PositionType.SUPPLY, PositionType.BORROW):
+            repriced = self._reprice_lending_on_chain(position, chain, market)
+            if repriced is not None:
+                return repriced
+            # Normalize fallback: BORROW should reduce portfolio (negative),
+            # matching the on-chain path which returns -debt_value_usd.
+            if position.position_type == PositionType.BORROW and position.value_usd > 0:
+                return -position.value_usd
+            return position.value_usd
 
-        # Fall back to strategy-reported value
         return position.value_usd
 
     def _reprice_lp_on_chain(
@@ -373,6 +385,136 @@ class PortfolioValuer:
             logger.debug("LP on-chain re-pricing failed for %s", position.position_id, exc_info=True)
             return None
 
+    def _reprice_lending_on_chain(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> Decimal | None:
+        """Attempt to re-price a lending position using on-chain Aave V3 data.
+
+        Queries getUserReserveData for the position's asset and calculates
+        supply value and/or debt value using live prices.
+
+        For SUPPLY positions: returns supply_value - debt_value (net).
+        For BORROW positions: returns negative debt_value_usd so it
+        reduces the portfolio total when summed.
+
+        Returns:
+            USD value if successful, None to signal fallback needed.
+        """
+        from almanak.framework.teardown.models import PositionType
+
+        try:
+            # Need asset address and wallet address
+            asset_address = self._extract_asset_address(position)
+
+            # Fallback: resolve asset address from symbol via TokenResolver
+            if not asset_address:
+                asset_symbol = position.details.get("asset")
+                if asset_symbol:
+                    try:
+                        from almanak.framework.data.tokens import get_token_resolver
+
+                        resolved = get_token_resolver().resolve(asset_symbol, chain)
+                        if resolved and resolved.address:
+                            asset_address = resolved.address
+                    except Exception:
+                        pass
+
+            wallet_address = (
+                position.details.get("wallet")
+                or position.details.get("wallet_address")
+                or position.details.get("owner")
+            )
+            if not asset_address or not wallet_address:
+                return None
+
+            # Query on-chain position
+            on_chain = self._lending_reader.read_position(
+                chain=chain,
+                asset_address=asset_address,
+                wallet_address=wallet_address,
+            )
+            if on_chain is None:
+                return None
+
+            # No supply and no debt = truly empty
+            if not on_chain.is_active:
+                return Decimal("0")
+
+            # Resolve token symbol for pricing
+            token_symbol = self._resolve_token_symbol(on_chain.asset_address, position, "asset")
+            if not token_symbol:
+                # Try the asset field directly
+                token_symbol = position.details.get("asset")
+            if not token_symbol:
+                return None
+
+            # Get live price
+            try:
+                token_price = Decimal(str(market.price(token_symbol)))
+            except Exception:
+                logger.debug("Could not get price for lending token %s", token_symbol)
+                return None
+
+            if token_price <= 0:
+                return None
+
+            # Get token decimals
+            token_decimals = self._get_token_decimals(token_symbol, chain)
+            if token_decimals is None:
+                logger.debug("Unknown decimals for lending token %s, falling back", token_symbol)
+                return None
+
+            # Calculate value
+            valued = value_lending_position(
+                atoken_balance=on_chain.current_atoken_balance,
+                stable_debt=on_chain.current_stable_debt,
+                variable_debt=on_chain.current_variable_debt,
+                token_price_usd=token_price,
+                token_decimals=token_decimals,
+                collateral_enabled=on_chain.usage_as_collateral_enabled,
+                asset=token_symbol,
+            )
+
+            # For SUPPLY positions: return net value (supply - debt).
+            # For BORROW positions: return negative debt value so it
+            # reduces the portfolio total when summed in _get_positions.
+            if position.position_type == PositionType.BORROW:
+                result = -valued.debt_value_usd
+            else:
+                result = valued.net_value_usd
+
+            logger.debug(
+                "Lending re-priced: position=%s type=%s value=$%s (supply=$%s debt=$%s) collateral=%s",
+                position.position_id,
+                position.position_type.value,
+                result,
+                valued.supply_value_usd,
+                valued.debt_value_usd,
+                valued.collateral_enabled,
+            )
+
+            return result
+
+        except Exception:
+            logger.debug(
+                "Lending on-chain re-pricing failed for %s",
+                position.position_id,
+                exc_info=True,
+            )
+            return None
+
+    @staticmethod
+    def _extract_asset_address(position: "PositionInfo") -> str | None:
+        """Extract the underlying asset address from position details."""
+        for key in ("asset_address", "assetAddress", "token_address", "underlying"):
+            val = position.details.get(key)
+            if val and isinstance(val, str) and len(val) >= 40:
+                return val
+        return None
+
     @staticmethod
     def _extract_token_id(position: "PositionInfo") -> int | None:
         """Extract numeric NFT token ID from position data."""
@@ -426,11 +568,12 @@ class PortfolioValuer:
         if symbol:
             return symbol
 
-        # Fallback: tokens list
-        tokens = position.details.get("tokens", [])
-        idx = 0 if field_name == "token0" else 1
-        if len(tokens) > idx:
-            return tokens[idx]
+        # Fallback: tokens list (LP-specific — only valid for token0/token1)
+        if field_name in ("token0", "token1"):
+            tokens = position.details.get("tokens", [])
+            idx = 0 if field_name == "token0" else 1
+            if len(tokens) > idx:
+                return tokens[idx]
 
         return None
 

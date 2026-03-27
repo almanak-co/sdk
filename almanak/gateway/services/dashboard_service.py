@@ -226,53 +226,47 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         return None
 
-    def _extract_portfolio_value_from_state(self, state: dict) -> tuple[str, str]:
-        """Extract portfolio value and 24h PnL from strategy state.
+    async def _get_portfolio_value_and_pnl(self, strategy_id: str, state: dict | None = None) -> tuple[str, str]:
+        """Get portfolio total value and PnL.
+
+        Primary source: PortfolioMetrics (framework-owned, populated by PortfolioValuer).
+        Fallback: strategy state dict (for strategies that haven't run since
+        the PortfolioValuer was deployed).
 
         Returns:
-            Tuple of (total_value_usd, pnl_24h_usd) as strings
+            Tuple of (total_value_usd, pnl_usd) as strings. Defaults to "0".
         """
-        total_value_usd = Decimal("0")
-        pnl_24h_usd = Decimal("0")
+        # Primary: PortfolioMetrics
+        if self._state_manager is not None:
+            try:
+                metrics = await self._state_manager.get_portfolio_metrics(strategy_id)
+                if metrics is not None:
+                    # pnl_after_gas is cumulative since deploy, not 24h.
+                    # Return "0" for pnl_24h until a true 24h window is available.
+                    return str(metrics.total_value_usd), "0"
+            except Exception:
+                logger.debug("Failed to get portfolio metrics for %s", strategy_id, exc_info=True)
 
-        value_keys = [
-            "total_value_usd",
-            "total_position_value_usd",
-            "portfolio_value_usd",
-            "total_collateral_value_usd",
-            "position_value_usd",
-            "net_value_usd",
-        ]
+        # Fallback: extract from state dict (legacy strategies)
+        if state:
+            total_value_usd = Decimal("0")
+            for key in (
+                "total_value_usd",
+                "total_position_value_usd",
+                "portfolio_value_usd",
+                "total_collateral_value_usd",
+                "position_value_usd",
+                "net_value_usd",
+            ):
+                if key in state:
+                    try:
+                        total_value_usd = Decimal(str(state[key]))
+                        break
+                    except (ValueError, TypeError):
+                        continue
+            return str(total_value_usd), "0"
 
-        for key in value_keys:
-            if key in state:
-                try:
-                    total_value_usd = Decimal(str(state[key]))
-                    break
-                except (ValueError, TypeError):
-                    continue
-
-        # For lending strategies, try collateral - debt
-        if total_value_usd == Decimal("0"):
-            collateral = state.get("total_collateral_value_usd")
-            debt = state.get("total_debt_value_usd")
-            if collateral is not None and debt is not None:
-                try:
-                    total_value_usd = Decimal(str(collateral)) - Decimal(str(debt))
-                except (ValueError, TypeError):
-                    pass
-
-        # Try to extract PnL
-        pnl_keys = ["pnl_24h_usd", "pnl_today_usd", "daily_pnl_usd", "total_profit_usd"]
-        for key in pnl_keys:
-            if key in state:
-                try:
-                    pnl_24h_usd = Decimal(str(state[key]))
-                    break
-                except (ValueError, TypeError):
-                    continue
-
-        return str(total_value_usd), str(pnl_24h_usd)
+        return "0", "0"
 
     async def _get_portfolio_metrics(self, strategy_id: str) -> Decimal | None:
         """Return pnl_after_gas for a strategy, or None if unavailable."""
@@ -433,11 +427,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
                         # Enrich with state data
                         state = await self._get_strategy_state_data(inst.strategy_id)
-                        if state:
-                            total_value, pnl = self._extract_portfolio_value_from_state(state)
-                            strategy_info["total_value_usd"] = total_value
-                            strategy_info["pnl_24h_usd"] = pnl
 
+                        # Portfolio metrics (framework-owned, state fallback for legacy)
+                        total_value, pnl = await self._get_portfolio_value_and_pnl(inst.strategy_id, state)
+                        strategy_info["total_value_usd"] = total_value
+                        strategy_info["pnl_24h_usd"] = pnl
+
+                        if state:
                             try:
                                 strategy_info["consecutive_errors"] = int(state.get("consecutive_errors", 0) or 0)
                             except (TypeError, ValueError):
@@ -604,11 +600,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         # Enrich with state data (fallback bridges legacy pre-normalization state)
         state = await self._get_strategy_state_data(strategy_id, fallback_strategy_id=original_strategy_id)
-        if state:
-            total_value, pnl = self._extract_portfolio_value_from_state(state)
-            strategy_info["total_value_usd"] = total_value
-            strategy_info["pnl_24h_usd"] = pnl
 
+        # Portfolio metrics (framework-owned, state fallback for legacy)
+        total_value, pnl = await self._get_portfolio_value_and_pnl(strategy_id, state)
+        strategy_info["total_value_usd"] = total_value
+        strategy_info["pnl_24h_usd"] = pnl
+
+        if state:
             # Derive status from state, but never downgrade a registry-set PAUSED to ERROR.
             # The runner explicitly sets PAUSED in the registry via _gateway_update_status();
             # that signal must take precedence over a stale last_iteration error status.
