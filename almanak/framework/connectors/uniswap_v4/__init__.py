@@ -21,18 +21,28 @@ from almanak.framework.connectors.uniswap_v4.adapter import (
     UniswapV4Adapter,
     UniswapV4Config,
 )
+from almanak.framework.connectors.uniswap_v4.hooks import (
+    HookDataEncoder,
+    HookFlags,
+    PoolDiscoveryResult,
+    PoolState,
+    discover_pool,
+)
 from almanak.framework.connectors.uniswap_v4.receipt_parser import (
     UniswapV4ReceiptParser,
 )
 from almanak.framework.connectors.uniswap_v4.sdk import (
-    HookFlags,
     UniswapV4SDK,
 )
 
 __all__ = [
+    "HookDataEncoder",
     "HookFlags",
+    "PoolDiscoveryResult",
+    "PoolState",
     "UniswapV4Adapter",
     "UniswapV4Config",
     "UniswapV4ReceiptParser",
     "UniswapV4SDK",
+    "discover_pool",
 ]
