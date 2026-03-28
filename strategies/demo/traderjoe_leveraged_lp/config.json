@@ -1,0 +1,20 @@
+{
+    "strategy_id": "traderjoe_leveraged_lp",
+    "strategy_name": "traderjoe_leveraged_lp",
+    "description": "Leveraged LP with auto-compound: Aave V3 collateral+borrow -> TraderJoe V2 LP -> fee harvest+reinvest on Avalanche (VIB-111)",
+    "collateral_token": "WAVAX",
+    "collateral_amount": "5",
+    "borrow_token": "USDC",
+    "ltv_target": 0.3,
+    "interest_rate_mode": "variable",
+    "lp_pool": "WAVAX/USDC/20",
+    "lp_range_width_pct": 0.1,
+    "compound_min_usd": 5,
+    "health_factor_floor": 1.5,
+    "liquidation_threshold": 0.65,
+    "chain": "avalanche",
+    "anvil_funding": {
+        "AVAX": 100,
+        "WAVAX": 10
+    }
+}
