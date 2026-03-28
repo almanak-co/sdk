@@ -260,10 +260,10 @@ class LocalSimulator(Simulator):
             # so we must use the block's base fee to avoid rejection.
             try:
                 block = await web3.eth.get_block("latest")
-                gas_price = Wei(block.get("baseFeePerGas", 0))
+                gas_price = Wei(block.get("baseFeePerGas", 1_000_000_000))
             except Exception as e:
-                logger.warning(f"Failed to query baseFeePerGas, using gasPrice=0: {e}")
-                gas_price = Wei(0)
+                logger.warning(f"Failed to query baseFeePerGas, falling back to 1 gwei: {e}")
+                gas_price = Wei(1_000_000_000)
 
             tx_params: TxParams = {
                 "value": Wei(tx.value),

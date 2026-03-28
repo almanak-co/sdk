@@ -504,8 +504,11 @@ class TestExecuteTxGasPricing:
     """
 
     @pytest.mark.asyncio
-    async def test_execute_tx_sets_gas_price_zero(self):
-        """_execute_tx should include gasPrice=0 in tx_params to avoid EIP-1559 hang."""
+    async def test_execute_tx_sets_gas_price_fallback(self):
+        """_execute_tx should fall back to gasPrice=1gwei when baseFee query fails (VIB-1831).
+
+        Wei(0) is rejected by Anvil 0.3.x, so the fallback must be 1 gwei (safe for all versions).
+        """
         sim = LocalSimulator(rpc_url="http://localhost:8545")
 
         mock_web3 = MagicMock()
@@ -527,11 +530,12 @@ class TestExecuteTxGasPricing:
 
         assert success
         assert error is None
-        # gasPrice must be explicitly set to 0 (Wei)
+        # gasPrice must be explicitly set to bypass EIP-1559 middleware (VIB-1831)
         assert "gasPrice" in captured_params, (
             "_execute_tx must set gasPrice to bypass EIP-1559 middleware (VIB-1831)"
         )
-        assert captured_params["gasPrice"] == 0
+        # Fallback is 1 gwei (not 0) to avoid Anvil 0.3.x rejection
+        assert captured_params["gasPrice"] == 1_000_000_000
 
     @pytest.mark.asyncio
     async def test_execute_tx_no_eip1559_fields(self):
@@ -560,7 +564,10 @@ class TestExecuteTxGasPricing:
 
     @pytest.mark.asyncio
     async def test_execute_tx_in_multi_tx_bundle_uses_gas_price(self):
-        """In a 3-TX bundle, state-setup TXs use gasPrice=0 (VIB-1831 regression guard)."""
+        """In a 3-TX bundle, state-setup TXs use legacy gasPrice (VIB-1831 regression guard).
+
+        When baseFee query fails, fallback is 1 gwei (not 0) to avoid Anvil 0.3.x rejection.
+        """
         sim = LocalSimulator(rpc_url="http://localhost:8545", gas_buffer=1.0)
 
         mock_web3 = MagicMock()
@@ -588,6 +595,7 @@ class TestExecuteTxGasPricing:
         assert len(sent_params_list) == 2
         for i, params in enumerate(sent_params_list):
             assert "gasPrice" in params, (
-                f"State-setup TX {i} must set gasPrice=0 (VIB-1831)"
+                f"State-setup TX {i} must set gasPrice to bypass EIP-1559 (VIB-1831)"
             )
-            assert params["gasPrice"] == 0
+            # Fallback is 1 gwei when baseFee query fails
+            assert params["gasPrice"] == 1_000_000_000
