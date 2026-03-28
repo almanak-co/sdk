@@ -238,14 +238,14 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "uniswap_v2": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
         "sushiswap_v3": "0x2E6cd2d30aa43f40aa81619ff4b6E0a41479B13F",  # SushiSwap V3 SwapRouter
         "pancakeswap_v3": "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",  # SmartRouter (7-param)
-        # traderjoe_v2 removed (VIB-1406): LBRouter2 incompatible with DefaultSwapAdapter
+        # traderjoe_v2: uses dedicated _compile_swap_traderjoe_v2() (VIB-1928), not DefaultSwapAdapter
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
     },
     "arbitrum": {
         "uniswap_v3": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",  # SwapRouter02
         "sushiswap_v3": "0x8A21F6768C1f8075791D08546Dadf6daA0bE820c",  # SushiSwap V3 SwapRouter
         "pancakeswap_v3": "0x32226588378236Fd0c7c4053999F88aC0e5cAc77",  # SmartRouter (7-param)
-        # traderjoe_v2 removed (VIB-1406): LBRouter2 incompatible with DefaultSwapAdapter
+        # traderjoe_v2: uses dedicated _compile_swap_traderjoe_v2() (VIB-1928), not DefaultSwapAdapter
         "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
         "camelot": "0xc873fEcbd354f5A56E00E710B90EF4201db2448d",
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
@@ -269,7 +269,7 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "pancakeswap_v3": "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86",  # SmartRouter (7-param)
     },
     "avalanche": {
-        # traderjoe_v2 removed (VIB-1406): LBRouter2 incompatible with DefaultSwapAdapter
+        # traderjoe_v2: uses dedicated _compile_swap_traderjoe_v2() (VIB-1928), not DefaultSwapAdapter
         "uniswap_v3": "0xbb00FF08d01D300023C629E8fFfFcb65A5a578cE",  # SwapRouter02
         "sushiswap_v3": "0x717b7948AA264DeCf4D780aa6914482e5F46Da3e",  # SushiSwap V3 SwapRouter
     },
@@ -278,7 +278,7 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "pancakeswap_v2": "0x10ED43C718714eb63d5aA57B78B54704E256024E",
         "uniswap_v3": "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2",  # SwapRouter02
         "sushiswap_v3": "0xB45e53277a7e0F1D35f2a77160e91e25507f1763",  # SushiSwap V3 SwapRouter
-        # traderjoe_v2 removed (VIB-1406): LBRouter2 incompatible with DefaultSwapAdapter
+        # traderjoe_v2: uses dedicated _compile_swap_traderjoe_v2() (VIB-1928), not DefaultSwapAdapter
         "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
     },
     "linea": {
@@ -3356,20 +3356,11 @@ class IntentCompiler:
         if protocol == "fluid":
             return self._compile_swap_fluid(intent)
 
-        # Guard: TraderJoe V2 uses LBRouter2 (bin-based AMM), NOT Uniswap V3 interface.
-        # DefaultSwapAdapter generates exactInputSingle calldata which reverts on LBRouter2.
-        # LP operations still work via the dedicated TraderJoe V2 connector. (VIB-1406)
+        # Handle TraderJoe V2 swaps via dedicated LBRouter2 interface (VIB-1928).
+        # LBRouter2 uses swapExactTokensForTokens with Path struct, NOT Uniswap V3's
+        # exactInputSingle. Routed to dedicated method like Aerodrome/Curve.
         if protocol == "traderjoe_v2":
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=(
-                    "TraderJoe V2 swap is not yet supported (VIB-1406): LBRouter2 uses a "
-                    "bin-based AMM interface incompatible with the default swap adapter. "
-                    "Use protocol='uniswap_v3' or protocol='enso' for swaps on Avalanche/Arbitrum. "
-                    "TraderJoe V2 LP operations (LPOpenIntent/LPCloseIntent) still work."
-                ),
-            )
+            return self._compile_swap_traderjoe_v2(intent)
 
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
@@ -6509,6 +6500,233 @@ class IntentCompiler:
 
         except Exception as e:
             logger.exception("Failed to compile Curve SWAP intent")
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+
+        return result
+
+    def _compile_swap_traderjoe_v2(self, intent: SwapIntent) -> CompilationResult:
+        """Compile SWAP intent for TraderJoe V2 Liquidity Book (VIB-1928).
+
+        TraderJoe V2 uses LBRouter2 with a bin-based AMM interface:
+        - swapExactTokensForTokens(amountIn, amountOutMin, Path, to, deadline)
+        - Path struct: {pairBinSteps, versions, tokenPath}
+
+        This is incompatible with DefaultSwapAdapter (Uniswap V3 exactInputSingle),
+        hence the dedicated compilation path.
+
+        Bin step is auto-detected across common bin steps (20, 25, 15, 10, 50, 5, 100, 1).
+
+        Args:
+            intent: SwapIntent with from_token, to_token, and amount
+
+        Returns:
+            CompilationResult with TraderJoe V2 swap ActionBundle
+        """
+        result = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=intent.intent_id,
+        )
+        transactions: list[TransactionData] = []
+
+        try:
+            # Check chain support
+            from almanak.core.contracts import TRADERJOE_V2 as TJ_ADDRESSES
+            from almanak.framework.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
+            from almanak.framework.connectors.traderjoe_v2.sdk import PoolNotFoundError
+
+            if self.chain not in TJ_ADDRESSES:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"TraderJoe V2 is not supported on {self.chain}. Supported: {list(TJ_ADDRESSES.keys())}",
+                    intent_id=intent.intent_id,
+                )
+
+            # Resolve tokens (use the compiler's injected resolver to keep this
+            # path consistent with _resolve_token() and test-time overrides)
+            resolver = self._token_resolver
+            from_token = self._resolve_token(intent.from_token)
+            to_token = self._resolve_token(intent.to_token)
+
+            if from_token is None:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Unknown from_token: {intent.from_token}",
+                    intent_id=intent.intent_id,
+                )
+            if to_token is None:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Unknown to_token: {intent.to_token}",
+                    intent_id=intent.intent_id,
+                )
+
+            # Wrap native tokens for pool probing/validation (LB pairs use ERC-20s)
+            swap_from_token = (
+                resolver.resolve_for_swap(intent.from_token, self.chain) if from_token.is_native else from_token
+            )
+            swap_to_token = resolver.resolve_for_swap(intent.to_token, self.chain) if to_token.is_native else to_token
+
+            # Calculate input amount
+            amount_decimal: Decimal
+            if intent.amount_usd is not None:
+                price = self._require_token_price(from_token.symbol)
+                amount_decimal = intent.amount_usd / price
+            elif intent.amount is not None:
+                if intent.amount == "all":
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error="amount='all' must be resolved before compilation. Use Intent.set_resolved_amount() to resolve chained amounts.",
+                        intent_id=intent.intent_id,
+                    )
+                amount_decimal = intent.amount  # type: ignore[assignment]
+            else:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error="Either amount_usd or amount must be provided",
+                    intent_id=intent.intent_id,
+                )
+
+            amount_in_wei = int(amount_decimal * Decimal(10**from_token.decimals))
+
+            # Get RPC URL
+            rpc_url = self._get_chain_rpc_url()
+            if not rpc_url:
+                raise ValueError(
+                    "RPC URL required for TraderJoe V2 swap compilation. "
+                    "Either provide rpc_url to IntentCompiler or use GatewayExecutionOrchestrator."
+                )
+
+            # Auto-detect bin_step (swap_params.bin_step override is not yet supported; see VIB-1846)
+            requested_bin_step = None
+
+            # Get router address for approvals
+            router_address = TJ_ADDRESSES[self.chain]["router"]
+
+            # Create adapter
+            slippage_bps = int(intent.max_slippage * Decimal("10000"))
+            config = TraderJoeV2Config(
+                chain=self.chain,
+                wallet_address=self.wallet_address,
+                rpc_url=rpc_url,
+                default_slippage_bps=slippage_bps,
+            )
+            tj_adapter = TraderJoeV2Adapter(config)
+
+            # Auto-detect bin_step if not specified: try common bin steps
+            bin_step: int
+            if requested_bin_step is not None:
+                bin_step = int(requested_bin_step)
+            else:
+                # Try common bin steps in order of popularity (20 is most common)
+                bin_step_order = [20, 25, 15, 10, 50, 5, 100, 1]
+                found_bin_step = None
+                for bs in bin_step_order:
+                    try:
+                        tj_adapter.sdk.get_pool_address(swap_from_token.address, swap_to_token.address, bs)
+                        found_bin_step = bs
+                        break
+                    except PoolNotFoundError:
+                        continue
+                    except Exception as exc:
+                        return CompilationResult(
+                            status=CompilationStatus.FAILED,
+                            error=f"Failed to probe TraderJoe V2 pool for bin_step={bs}: {exc}",
+                            intent_id=intent.intent_id,
+                        )
+
+                if found_bin_step is None:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=(
+                            f"No TraderJoe V2 pool found for {from_token.symbol}/{to_token.symbol} on {self.chain}. "
+                            f"Tried bin steps: {bin_step_order}. "
+                            f"The pair may not have a Liquidity Book pool."
+                        ),
+                        intent_id=intent.intent_id,
+                    )
+                bin_step = found_bin_step
+
+            logger.info(
+                "Compiling TraderJoe V2 SWAP: %s -> %s, amount=%s, bin_step=%d",
+                from_token.symbol,
+                to_token.symbol,
+                amount_decimal,
+                bin_step,
+            )
+
+            # Validate pool existence
+            from .pool_validation import validate_traderjoe_pool
+
+            pool_check = validate_traderjoe_pool(
+                self.chain, swap_from_token.address, swap_to_token.address, bin_step, rpc_url
+            )
+            failed = self._validate_pool(pool_check, intent.intent_id)
+            if failed is not None:
+                return failed
+
+            # Build approve TX for input token
+            if not from_token.is_native:
+                approve_txs = self._build_approve_tx(
+                    from_token.address,
+                    router_address,
+                    amount_in_wei,
+                )
+                transactions.extend(approve_txs)
+
+            # Build swap TX using adapter
+            swap_tx = tj_adapter.build_swap_transaction(
+                token_in=from_token.symbol,
+                token_out=to_token.symbol,
+                amount_in=amount_decimal,
+                bin_step=bin_step,
+                slippage_bps=slippage_bps,
+            )
+
+            # Convert adapter TransactionData to compiler TransactionData
+            swap_tx_data = TransactionData(
+                to=swap_tx.to,
+                value=swap_tx.value,
+                data=swap_tx.data if isinstance(swap_tx.data, str) else f"0x{swap_tx.data.hex()}",
+                gas_estimate=swap_tx.gas or DEFAULT_GAS_ESTIMATES.get("traderjoe_v2_swap", 200_000),
+                description=(
+                    f"TraderJoe V2 swap: {amount_decimal} {from_token.symbol} -> {to_token.symbol} (bin_step={bin_step})"
+                ),
+                tx_type="traderjoe_v2_swap",
+            )
+            transactions.append(swap_tx_data)
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+
+            action_bundle = ActionBundle(
+                intent_type=IntentType.SWAP.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "from_token": from_token.to_dict(),
+                    "to_token": to_token.to_dict(),
+                    "amount_in": str(amount_in_wei),
+                    "bin_step": bin_step,
+                    "protocol": "traderjoe_v2",
+                    "router": router_address,
+                    "chain": self.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+
+            logger.info(
+                "Compiled TraderJoe V2 SWAP: %s -> %s, bin_step=%d, %d txs, %d gas",
+                from_token.symbol,
+                to_token.symbol,
+                bin_step,
+                len(transactions),
+                total_gas,
+            )
+
+        except Exception as e:
+            logger.exception("Failed to compile TraderJoe V2 SWAP intent: %s", e)
             result.status = CompilationStatus.FAILED
             result.error = str(e)
 

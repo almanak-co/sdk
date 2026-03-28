@@ -15,6 +15,9 @@ Key Concepts:
 
 Supported chains:
 - Avalanche (Chain ID: 43114)
+- Arbitrum (Chain ID: 42161)
+- BSC (Chain ID: 56)
+- Ethereum (Chain ID: 1)
 
 Example:
     from almanak.framework.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
@@ -282,8 +285,12 @@ class TraderJoeV2Adapter:
         self.chain = config.chain.lower()
 
         # Validate chain
-        if self.chain != "avalanche":
-            raise TraderJoeV2SDKError(f"Chain '{config.chain}' not supported. TraderJoe V2 is only on Avalanche.")
+        from almanak.core.contracts import TRADERJOE_V2 as TJ_ADDRESSES
+
+        if self.chain not in TJ_ADDRESSES:
+            raise TraderJoeV2SDKError(
+                f"Chain '{config.chain}' not supported. TraderJoe V2 supported on: {list(TJ_ADDRESSES.keys())}"
+            )
 
         # Initialize SDK
         self.sdk = TraderJoeV2SDK(
@@ -301,6 +308,12 @@ class TraderJoeV2Adapter:
             self._token_resolver = get_token_resolver()
 
         logger.info(f"TraderJoeV2Adapter initialized for {self.chain}: wallet={config.wallet_address[:10]}...")
+
+    def _get_chain_id(self) -> int:
+        """Get the EIP-155 chain ID for the configured chain."""
+        from almanak.core.constants import get_chain_id
+
+        return get_chain_id(self.chain)
 
     # =========================================================================
     # Token Utilities
@@ -430,13 +443,10 @@ class TraderJoeV2Adapter:
             ).call()
             amount_out_wei = swap_out[1]  # (amountInLeft, amountOut, fee)
         except Exception as e:
-            # Fallback: estimate from spot rate
-            logger.warning(f"getSwapOut failed, using spot rate estimate: {e}")
-            spot_rate = self.sdk.get_pool_spot_rate(pool_addr)
-            if swap_for_y:
-                amount_out_wei = int(amount_in_wei * Decimal(str(spot_rate)))
-            else:
-                amount_out_wei = int(amount_in_wei / Decimal(str(spot_rate)))
+            raise TraderJoeV2SDKError(
+                f"On-chain quote failed for {token_in}->{token_out} (bin_step={bin_step}): {e}. "
+                f"Cannot safely estimate swap output without router quote."
+            ) from e
 
         amount_out = self.from_wei(amount_out_wei, token_out)
 
@@ -514,7 +524,7 @@ class TraderJoeV2Adapter:
             data=tx["data"].hex() if isinstance(tx["data"], bytes) else tx["data"],
             value=tx.get("value", 0),
             gas=gas,
-            chain_id=43114,
+            chain_id=self._get_chain_id(),
         )
 
     def swap_exact_input(
@@ -738,7 +748,7 @@ class TraderJoeV2Adapter:
             data=tx["data"].hex() if isinstance(tx["data"], bytes) else tx["data"],
             value=tx.get("value", 0),
             gas=gas,
-            chain_id=43114,
+            chain_id=self._get_chain_id(),
         )
 
     def build_remove_liquidity_transaction(
@@ -792,7 +802,7 @@ class TraderJoeV2Adapter:
             data=tx["data"].hex() if isinstance(tx["data"], bytes) else tx["data"],
             value=tx.get("value", 0),
             gas=gas,
-            chain_id=43114,
+            chain_id=self._get_chain_id(),
         )
 
     # =========================================================================
@@ -869,5 +879,5 @@ class TraderJoeV2Adapter:
             data=tx["data"].hex() if isinstance(tx["data"], bytes) else tx["data"],
             value=tx.get("value", 0),
             gas=gas,
-            chain_id=43114,
+            chain_id=self._get_chain_id(),
         )
