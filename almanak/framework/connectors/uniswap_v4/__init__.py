@@ -25,10 +25,12 @@ from almanak.framework.connectors.uniswap_v4.receipt_parser import (
     UniswapV4ReceiptParser,
 )
 from almanak.framework.connectors.uniswap_v4.sdk import (
+    HookFlags,
     UniswapV4SDK,
 )
 
 __all__ = [
+    "HookFlags",
     "UniswapV4Adapter",
     "UniswapV4Config",
     "UniswapV4ReceiptParser",

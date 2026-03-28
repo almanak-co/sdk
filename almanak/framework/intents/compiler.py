@@ -294,12 +294,14 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
 LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     "ethereum": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
         "sushiswap_v3": "0x2214A42d8e2A1d20635c2cb0664422c528B6A432",
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
         "traderjoe_v2": "0x9A93a421b74F1c5755b83dD2C211614dC419C44b",  # LBRouter v2.1
     },
     "arbitrum": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
         "sushiswap_v3": "0xF0cBce1942A68BEB3d1b73F0dd86C8DCc363eF49",
         "camelot": "0x00c7f3082833e796A5b3e4Bd59f6642FF44DCD15",
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
@@ -308,16 +310,19 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     },
     "optimism": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
         "sushiswap_v3": "0x1af415a1EbA07a4986a52B6f2e7dE7003D82231e",
         # Velodrome V2 uses the Router for liquidity operations (fungible LP tokens, same as Aerodrome)
         "aerodrome": "0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858",  # Velodrome V2 Router
     },
     "polygon": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
         "sushiswap_v3": "0xb7402ee99F0A008e461098AC3A27F4957Df89a40",
     },
     "base": {
         "uniswap_v3": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
+        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
         "sushiswap_v3": "0x80C7DD17B01855a6D2347444a0FCC36136a314de",
         # Aerodrome uses the Router for liquidity operations (fungible LP tokens)
         "aerodrome": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",  # Aerodrome Router
@@ -325,12 +330,14 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     },
     "avalanche": {
         "uniswap_v3": "0x655C406EBFa14EE2006250925e54ec43AD184f8B",
+        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
         "sushiswap_v3": "0x18350b048AB366ed601fFDbC669110Ecb36016f3",
         # TraderJoe V2 uses the LBRouter for liquidity operations (not NFT-based)
         "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter2
     },
     "bsc": {
         "uniswap_v3": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
+        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
         "sushiswap_v3": "0xF70c086618dcf2b1A461311275e00D6B722ef914",
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
         "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter v2.1
@@ -4371,6 +4378,10 @@ class IntentCompiler:
                 error=f"Protocol '{intent.protocol}' is not supported for LP_OPEN on Solana. Supported: {', '.join(sorted(allowed_solana_lp))}",
             )
 
+        # Handle Uniswap V4 LP separately (flash accounting via PositionManager)
+        if self._resolve_protocol(intent.protocol) == "uniswap_v4":
+            return self._compile_lp_open_uniswap_v4(intent)
+
         # Handle TraderJoe V2 separately (different architecture - bins vs ticks)
         if intent.protocol == "traderjoe_v2":
             return self._compile_lp_open_traderjoe_v2(intent)
@@ -4714,6 +4725,182 @@ class IntentCompiler:
 
         return result
 
+    def _compile_lp_open_uniswap_v4(self, intent: LPOpenIntent) -> CompilationResult:
+        """Compile LP_OPEN intent for Uniswap V4 via PositionManager.
+
+        V4 uses flash accounting (modifyLiquidities + Actions-encoded bytes).
+        This delegates to the UniswapV4Adapter which handles the full encoding.
+        """
+        from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4Adapter, UniswapV4Config
+
+        result = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=intent.intent_id,
+        )
+
+        try:
+            config = UniswapV4Config(
+                chain=self.chain,
+                wallet_address=self.wallet_address,
+            )
+            adapter = UniswapV4Adapter(config=config, token_resolver=self._token_resolver)
+            bundle = adapter.compile_lp_open_intent(intent, self.price_oracle)
+
+            if not bundle.transactions:
+                error_msg = bundle.metadata.get("error", "Unknown error during V4 LP_OPEN compilation")
+                result.status = CompilationStatus.FAILED
+                result.error = error_msg
+                return result
+
+            result.action_bundle = bundle
+            result.transactions = [
+                TransactionData(
+                    to=tx["to"],
+                    value=int(tx.get("value", 0)),
+                    data=tx["data"],
+                    gas_estimate=tx.get("gas_estimate", 0),
+                    description=tx.get("description", ""),
+                    tx_type="approve" if "approve" in tx.get("description", "").lower() else "lp_mint",
+                )
+                for tx in bundle.transactions
+            ]
+            result.total_gas_estimate = bundle.metadata.get("gas_estimate", 0)
+
+            # Forward warnings
+            if bundle.metadata.get("warnings"):
+                result.warnings = bundle.metadata["warnings"]
+
+            logger.info(
+                "Compiled V4 LP_OPEN intent: %d txs, %d gas, pool=%s",
+                len(bundle.transactions),
+                result.total_gas_estimate,
+                intent.pool,
+            )
+
+        except Exception as e:
+            logger.exception("Failed to compile V4 LP_OPEN intent: %s", e)
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+
+        return result
+
+    def _compile_lp_close_uniswap_v4(self, intent: LPCloseIntent) -> CompilationResult:
+        """Compile LP_CLOSE intent for Uniswap V4 via PositionManager.
+
+        V4 uses flash accounting (modifyLiquidities + Actions-encoded bytes).
+        This delegates to the UniswapV4Adapter which handles the full encoding.
+
+        Note: In production, the caller should provide liquidity and currency addresses
+        from an on-chain position query. For offline compilation, we use placeholder
+        values that will be updated at execution time.
+        """
+        from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4Adapter, UniswapV4Config
+
+        result = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=intent.intent_id,
+        )
+
+        try:
+            config = UniswapV4Config(
+                chain=self.chain,
+                wallet_address=self.wallet_address,
+            )
+            adapter = UniswapV4Adapter(config=config, token_resolver=self._token_resolver)
+
+            # Extract liquidity and currency addresses from protocol_params if available
+            # LPCloseIntent may not have protocol_params field
+            liquidity = 0
+            currency0 = ""
+            currency1 = ""
+            protocol_params = getattr(intent, "protocol_params", None) or {}
+            if protocol_params:
+                liquidity = int(protocol_params.get("liquidity", 0))
+                currency0 = protocol_params.get("currency0", "")
+                currency1 = protocol_params.get("currency1", "")
+
+            # If pool is specified, try to resolve currency addresses
+            if (not currency0 or not currency1) and intent.pool:
+                try:
+                    parts = intent.pool.split("/")
+                    if len(parts) >= 2:
+                        addr0, _ = adapter._resolve_token(parts[0], for_v4_pool=True)
+                        addr1, _ = adapter._resolve_token(parts[1], for_v4_pool=True)
+                        # Ensure sorted order
+                        if int(addr0, 16) > int(addr1, 16):
+                            addr0, addr1 = addr1, addr0
+                        currency0 = addr0
+                        currency1 = addr1
+                except (ValueError, KeyError) as e:
+                    logger.debug("Could not resolve currencies from pool '%s': %s", type(e).__name__, e)
+                except Exception as e:
+                    # TokenNotFoundError/TokenResolutionError or unexpected errors — log, don't swallow
+                    logger.warning("Failed to resolve currencies from pool '%s': %s", intent.pool, e)
+
+            # Fail fast: liquidity and currency addresses are required for a valid close
+            if liquidity == 0:
+                result.status = CompilationStatus.FAILED
+                result.error = (
+                    "V4 LP_CLOSE requires 'liquidity' in protocol_params (query on-chain position first). "
+                    "Example: intent.protocol_params = {'liquidity': <int>, 'currency0': '<addr>', 'currency1': '<addr>'}"
+                )
+                return result
+            if not currency0 or not currency1:
+                result.status = CompilationStatus.FAILED
+                result.error = (
+                    "V4 LP_CLOSE requires 'currency0' and 'currency1' in protocol_params "
+                    "or a resolvable 'pool' string (e.g. 'WETH/USDC/3000')."
+                )
+                return result
+
+            # Enforce canonical V4 ordering: currency0 < currency1
+            if int(currency0, 16) > int(currency1, 16):
+                currency0, currency1 = currency1, currency0
+
+            bundle = adapter.compile_lp_close_intent(
+                intent,
+                liquidity=liquidity,
+                currency0=currency0,
+                currency1=currency1,
+            )
+
+            if not bundle.transactions:
+                error_msg = bundle.metadata.get("error", "Unknown error during V4 LP_CLOSE compilation")
+                result.status = CompilationStatus.FAILED
+                result.error = error_msg
+                return result
+
+            result.action_bundle = bundle
+            result.transactions = [
+                TransactionData(
+                    to=tx["to"],
+                    value=int(tx.get("value", 0)),
+                    data=tx["data"],
+                    gas_estimate=tx.get("gas_estimate", 0),
+                    description=tx.get("description", ""),
+                    tx_type="lp_close",
+                )
+                for tx in bundle.transactions
+            ]
+            result.total_gas_estimate = bundle.metadata.get("gas_estimate", 0)
+
+            if bundle.metadata.get("warnings"):
+                result.warnings = bundle.metadata["warnings"]
+
+            logger.info(
+                "Compiled V4 LP_CLOSE intent: position_id=%s, %d txs, %d gas",
+                intent.position_id,
+                len(bundle.transactions),
+                result.total_gas_estimate,
+            )
+
+        except Exception as e:
+            logger.exception("Failed to compile V4 LP_CLOSE intent: %s", e)
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+
+        return result
+
     def _compile_lp_open_traderjoe_v2(self, intent: LPOpenIntent) -> CompilationResult:
         """Compile LP_OPEN intent for TraderJoe V2 Liquidity Book.
 
@@ -4947,6 +5134,10 @@ class IntentCompiler:
                 intent_id=intent.intent_id,
                 error=f"Protocol '{intent.protocol}' is not supported for LP_CLOSE on Solana. Supported: {', '.join(sorted(allowed_solana_lp))}",
             )
+
+        # Handle Uniswap V4 LP close separately (flash accounting via PositionManager)
+        if self._resolve_protocol(intent.protocol) == "uniswap_v4":
+            return self._compile_lp_close_uniswap_v4(intent)
 
         # Handle TraderJoe V2 separately
         if intent.protocol == "traderjoe_v2":
@@ -5340,13 +5531,16 @@ class IntentCompiler:
                 intent_id=intent.intent_id,
             )
 
-        protocol = intent.protocol.lower()
+        protocol = self._resolve_protocol(intent.protocol)
         if protocol == "traderjoe_v2":
             return self._compile_collect_fees_traderjoe_v2(intent)
 
+        if protocol == "uniswap_v4":
+            return self._compile_collect_fees_uniswap_v4(intent)
+
         return CompilationResult(
             status=CompilationStatus.FAILED,
-            error=f"Protocol '{intent.protocol}' does not support LP_COLLECT_FEES. Supported: traderjoe_v2",
+            error=f"Protocol '{intent.protocol}' does not support LP_COLLECT_FEES. Supported: traderjoe_v2, uniswap_v4",
             intent_id=intent.intent_id,
         )
 
@@ -5491,6 +5685,122 @@ class IntentCompiler:
 
         except Exception as e:
             logger.exception(f"Failed to compile TraderJoe V2 LP_COLLECT_FEES intent: {e}")
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+
+        return result
+
+    def _compile_collect_fees_uniswap_v4(self, intent: "CollectFeesIntent") -> CompilationResult:
+        """Compile LP_COLLECT_FEES intent for Uniswap V4 via PositionManager.
+
+        Decreases liquidity by 0 (triggers fee accrual update) then takes the
+        accrued fees via TAKE_PAIR.
+
+        Args:
+            intent: CollectFeesIntent to compile
+
+        Returns:
+            CompilationResult with V4 fee collection ActionBundle
+        """
+        from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4Adapter, UniswapV4Config
+
+        result = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=intent.intent_id,
+        )
+
+        try:
+            config = UniswapV4Config(
+                chain=self.chain,
+                wallet_address=self.wallet_address,
+            )
+            adapter = UniswapV4Adapter(config=config, token_resolver=self._token_resolver)
+
+            # Extract required params
+            protocol_params = getattr(intent, "protocol_params", None) or {}
+            position_id = protocol_params.get("position_id") or getattr(intent, "position_id", None)
+            if not position_id:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error="V4 LP_COLLECT_FEES requires 'position_id' in protocol_params.",
+                    intent_id=intent.intent_id,
+                )
+
+            currency0 = protocol_params.get("currency0", "")
+            currency1 = protocol_params.get("currency1", "")
+
+            # Try resolving from pool string if currencies not provided
+            if (not currency0 or not currency1) and intent.pool:
+                try:
+                    parts = intent.pool.split("/")
+                    if len(parts) >= 2:
+                        addr0, _ = adapter._resolve_token(parts[0], for_v4_pool=True)
+                        addr1, _ = adapter._resolve_token(parts[1], for_v4_pool=True)
+                        if int(addr0, 16) > int(addr1, 16):
+                            addr0, addr1 = addr1, addr0
+                        currency0 = currency0 or addr0
+                        currency1 = currency1 or addr1
+                except Exception as e:
+                    logger.warning("Failed to resolve currencies from pool '%s': %s", intent.pool, e)
+
+            if not currency0 or not currency1:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        "V4 LP_COLLECT_FEES requires 'currency0' and 'currency1' in protocol_params "
+                        "or a resolvable 'pool' string (e.g. 'WETH/USDC/3000')."
+                    ),
+                    intent_id=intent.intent_id,
+                )
+
+            # Enforce canonical V4 ordering: currency0 < currency1
+            if int(currency0, 16) > int(currency1, 16):
+                currency0, currency1 = currency1, currency0
+
+            hook_data = b""
+            hook_data_hex = protocol_params.get("hook_data", "")
+            if hook_data_hex:
+                hook_data = bytes.fromhex(hook_data_hex.replace("0x", ""))
+
+            bundle = adapter.compile_collect_fees_intent(
+                position_id=int(position_id),
+                currency0=currency0,
+                currency1=currency1,
+                hook_data=hook_data,
+            )
+
+            if not bundle.transactions:
+                error_msg = bundle.metadata.get("error", "Unknown error during V4 LP_COLLECT_FEES compilation")
+                result.status = CompilationStatus.FAILED
+                result.error = error_msg
+                return result
+
+            result.action_bundle = bundle
+            result.transactions = [
+                TransactionData(
+                    to=tx["to"],
+                    value=int(tx.get("value", 0)),
+                    data=tx["data"],
+                    gas_estimate=tx.get("gas_estimate", 0),
+                    description=tx.get("description", ""),
+                    tx_type="lp_collect_fees",
+                )
+                for tx in bundle.transactions
+            ]
+            result.total_gas_estimate = bundle.metadata.get("gas_estimate", 0)
+
+            # Forward warnings (e.g. hook warnings)
+            if bundle.metadata.get("warnings"):
+                result.warnings = bundle.metadata["warnings"]
+
+            logger.info(
+                "Compiled V4 LP_COLLECT_FEES intent: position_id=%s, %d txs",
+                position_id,
+                len(bundle.transactions),
+            )
+
+        except Exception as e:
+            logger.exception("Failed to compile V4 LP_COLLECT_FEES intent: %s", e)
             result.status = CompilationStatus.FAILED
             result.error = str(e)
 

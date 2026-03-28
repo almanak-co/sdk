@@ -1,8 +1,10 @@
 """Uniswap V4 Receipt Parser.
 
-Parses transaction receipts for V4 swap events emitted by the PoolManager.
-V4 uses a different Swap event signature than V3 since all swaps go through
-the singleton PoolManager contract.
+Parses transaction receipts for V4 events emitted by PoolManager and
+PositionManager:
+- Swap events (PoolManager)
+- ModifyLiquidity events (PoolManager)
+- ERC-721 Transfer events (PositionManager, for position ID extraction)
 
 V4 Swap event:
     event Swap(
@@ -14,6 +16,16 @@ V4 Swap event:
         uint128 liquidity,
         int24 tick,
         uint24 fee
+    )
+
+V4 ModifyLiquidity event:
+    event ModifyLiquidity(
+        PoolId indexed id,
+        address indexed sender,
+        int24 tickLower,
+        int24 tickUpper,
+        int256 liquidityDelta,
+        bytes32 salt
     )
 """
 
@@ -28,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 from almanak.framework.connectors.base import HexDecoder
 
 if TYPE_CHECKING:
-    from almanak.framework.execution.extracted_data import SwapAmounts
+    from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +64,7 @@ EVENT_TOPICS: dict[str, str] = {
 }
 
 SWAP_EVENT_TOPIC = EVENT_TOPICS["Swap"]
+MODIFY_LIQUIDITY_TOPIC = EVENT_TOPICS["ModifyLiquidity"]
 TRANSFER_EVENT_TOPIC = EVENT_TOPICS["Transfer"]
 
 
@@ -90,8 +103,20 @@ class SwapEventData:
 
 
 @dataclass
+class ModifyLiquidityEventData:
+    """Decoded V4 ModifyLiquidity event data."""
+
+    pool_id: str
+    sender: str
+    tick_lower: int
+    tick_upper: int
+    liquidity_delta: int
+    salt: str
+
+
+@dataclass
 class TransferEventData:
-    """Decoded ERC-20 Transfer event."""
+    """Decoded ERC-20/ERC-721 Transfer event."""
 
     token: str
     from_address: str
@@ -121,6 +146,7 @@ class ParseResult:
     """Full parse result from a V4 transaction receipt."""
 
     swap_events: list[SwapEventData] = field(default_factory=list)
+    modify_liquidity_events: list[ModifyLiquidityEventData] = field(default_factory=list)
     transfer_events: list[TransferEventData] = field(default_factory=list)
     swap_result: ParsedSwapResult | None = None
     error: str | None = None
@@ -146,16 +172,24 @@ class UniswapV4ReceiptParser:
         self,
         chain: str = "ethereum",
         pool_manager_address: str | None = None,
+        position_manager_address: str | None = None,
         token_resolver: Any | None = None,
     ) -> None:
         self.chain = chain.lower()
         self._token_resolver = token_resolver
+
+        from almanak.core.contracts import UNISWAP_V4
+
+        chain_addrs = UNISWAP_V4.get(self.chain, {})
         if pool_manager_address:
             self.pool_manager = pool_manager_address.lower()
         else:
-            from almanak.core.contracts import UNISWAP_V4
+            self.pool_manager = chain_addrs.get("pool_manager", "").lower()
 
-            self.pool_manager = UNISWAP_V4.get(self.chain, {}).get("pool_manager", "").lower()
+        if position_manager_address:
+            self.position_manager = position_manager_address.lower()
+        else:
+            self.position_manager = chain_addrs.get("position_manager", "").lower()
 
     def parse_receipt(
         self,
@@ -185,6 +219,11 @@ class UniswapV4ReceiptParser:
                 swap_event = self._decode_swap_event(log)
                 if swap_event:
                     result.swap_events.append(swap_event)
+
+            elif topic0 == MODIFY_LIQUIDITY_TOPIC.lower():
+                ml_event = self._decode_modify_liquidity_event(log)
+                if ml_event:
+                    result.modify_liquidity_events.append(ml_event)
 
             elif topic0 == TRANSFER_EVENT_TOPIC.lower():
                 transfer = self._decode_transfer_event(log)
@@ -229,7 +268,150 @@ class UniswapV4ReceiptParser:
             token_out=sr.token_out,
         )
 
+    def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
+        """Extract LP position NFT tokenId from ERC-721 Transfer event.
+
+        Looks for a Transfer event emitted by the PositionManager contract
+        where from_address is the zero address (indicating a mint).
+
+        Called by ResultEnricher for LP_OPEN intents.
+
+        Args:
+            receipt: Transaction receipt dict.
+
+        Returns:
+            Position ID (tokenId) or None if not found.
+        """
+        logs = receipt.get("logs", [])
+        for log in logs:
+            topics = log.get("topics", [])
+            if len(topics) < 4:
+                continue
+
+            topic0 = topics[0].lower() if isinstance(topics[0], str) else hex(topics[0])
+            if topic0 != TRANSFER_EVENT_TOPIC.lower():
+                continue
+
+            # Check if emitted by PositionManager
+            log_address = log.get("address", "").lower()
+            if log_address != self.position_manager:
+                continue
+
+            # ERC-721 Transfer: topic[1]=from, topic[2]=to, topic[3]=tokenId
+            from_addr = topics[1] if isinstance(topics[1], str) else hex(topics[1])
+            # Mint: from = zero address
+            if int(from_addr, 16) == 0:
+                token_id_hex = topics[3] if isinstance(topics[3], str) else hex(topics[3])
+                return int(token_id_hex, 16)
+
+        return None
+
+    def extract_liquidity(self, receipt: dict[str, Any]) -> int | None:
+        """Extract liquidity delta from ModifyLiquidity event.
+
+        Called by ResultEnricher for LP_OPEN intents.
+
+        Args:
+            receipt: Transaction receipt dict.
+
+        Returns:
+            Liquidity amount or None if not found.
+        """
+        parsed = self.parse_receipt(receipt)
+        if not parsed.modify_liquidity_events:
+            return None
+
+        # Return the first positive (mint) liquidity delta
+        for event in parsed.modify_liquidity_events:
+            if event.liquidity_delta > 0:
+                return event.liquidity_delta
+
+        return None
+
+    def extract_lp_close_data(self, receipt: dict[str, Any]) -> LPCloseData | None:
+        """Extract LP close data from ModifyLiquidity and Transfer events.
+
+        Called by ResultEnricher for LP_CLOSE intents.
+
+        Args:
+            receipt: Transaction receipt dict.
+
+        Returns:
+            LPCloseData with collected amounts, or None if not found.
+        """
+        from almanak.framework.execution.extracted_data import LPCloseData
+
+        parsed = self.parse_receipt(receipt)
+
+        # Find the decrease event (negative liquidity delta)
+        liquidity_removed = None
+        for event in parsed.modify_liquidity_events:
+            if event.liquidity_delta < 0:
+                liquidity_removed = abs(event.liquidity_delta)
+                break
+
+        if liquidity_removed is None and not parsed.modify_liquidity_events:
+            return None
+
+        # Sum Transfer events FROM the pool manager TO the wallet (tokens collected)
+        amount0_collected = 0
+        amount1_collected = 0
+
+        # Group transfers from PoolManager by token address
+        collected_by_token: dict[str, int] = {}
+        for transfer in parsed.transfer_events:
+            if transfer.from_address.lower() == self.pool_manager:
+                token = transfer.token.lower()
+                collected_by_token[token] = collected_by_token.get(token, 0) + transfer.amount
+
+        # Assign to amount0/amount1 by sorted token address order
+        sorted_tokens = sorted(collected_by_token.keys())
+        if len(sorted_tokens) >= 1:
+            amount0_collected = collected_by_token[sorted_tokens[0]]
+        if len(sorted_tokens) >= 2:
+            amount1_collected = collected_by_token[sorted_tokens[1]]
+
+        return LPCloseData(
+            amount0_collected=amount0_collected,
+            amount1_collected=amount1_collected,
+            liquidity_removed=liquidity_removed,
+        )
+
     # -- Decoding helpers -----------------------------------------------------
+
+    def _decode_modify_liquidity_event(self, log: dict[str, Any]) -> ModifyLiquidityEventData | None:
+        """Decode a V4 ModifyLiquidity event from a log entry."""
+        topics = log.get("topics", [])
+        data = log.get("data", "0x")
+
+        if len(topics) < 3:
+            return None
+
+        try:
+            pool_id = topics[1] if isinstance(topics[1], str) else hex(topics[1])
+            sender = (
+                HexDecoder.decode_address_from_data(topics[2][2:]) if isinstance(topics[2], str) else hex(topics[2])
+            )
+
+            # Data layout: int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt
+            clean_data = data[2:] if data.startswith("0x") else data
+
+            tick_lower = HexDecoder.decode_int24(clean_data[0:64])
+            tick_upper = HexDecoder.decode_int24(clean_data[64:128])
+            liquidity_delta = HexDecoder.decode_int256(clean_data[128:192])
+            salt = "0x" + clean_data[192:256] if len(clean_data) >= 256 else "0x0"
+
+            return ModifyLiquidityEventData(
+                pool_id=pool_id,
+                sender=sender,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                liquidity_delta=liquidity_delta,
+                salt=salt,
+            )
+        except Exception as e:
+            logger.warning("Failed to decode V4 ModifyLiquidity event: %s", e)
+            return None
 
     def _decode_swap_event(self, log: dict[str, Any]) -> SwapEventData | None:
         """Decode a V4 Swap event from a log entry."""
@@ -401,6 +583,7 @@ class UniswapV4ReceiptParser:
 
 __all__ = [
     "EVENT_TOPICS",
+    "ModifyLiquidityEventData",
     "ParsedSwapResult",
     "ParseResult",
     "SwapEventData",
