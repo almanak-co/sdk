@@ -74,6 +74,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from almanak.framework.data.indicators.rsi import RSICalculator
+    from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
 from almanak.framework.anvil.fork_manager import RollingForkManager
 from almanak.framework.backtesting.models import (
@@ -763,6 +764,9 @@ class PaperTrader:
     _fallback_usage: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _rsi_calculator: "RSICalculator | None" = field(default=None, init=False, repr=False)
     _cached_prices: dict[str, Decimal] = field(default_factory=dict, init=False, repr=False)
+    _portfolio_valuer: "PortfolioValuer | None" = field(default=None, init=False, repr=False)
+    _last_market_snapshot: MarketSnapshot | None = field(default=None, init=False, repr=False)
+    _valuer_available: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -799,6 +803,91 @@ class PaperTrader:
             self._fallback_usage[fallback_type] += 1
         else:
             self._fallback_usage[fallback_type] = 1
+
+    def _init_portfolio_valuer(self) -> None:
+        """Initialize the PortfolioValuer with a direct RPC adapter.
+
+        Uses the Anvil fork's RPC URL so the LP and lending position
+        readers can query on-chain state without a running gateway.
+        Falls back gracefully if the fork isn't running or the valuer
+        can't be created.
+        """
+        try:
+            from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+            from almanak.framework.valuation.rpc_adapter import DirectRpcAdapter
+
+            fork_rpc = self.fork_manager.get_rpc_url()
+            if not fork_rpc:
+                logger.debug("[%s] No fork RPC URL, portfolio valuer not available", self._backtest_id)
+                return
+
+            adapter = DirectRpcAdapter(fork_rpc)
+            self._portfolio_valuer = PortfolioValuer(gateway_client=adapter)
+            self._valuer_available = True
+            logger.debug("[%s] Portfolio valuer initialized with fork RPC", self._backtest_id)
+        except ImportError:
+            logger.debug(
+                "[%s] Portfolio valuer not available (import failed), using simple valuation", self._backtest_id
+            )
+            self._valuer_available = False
+        except Exception:
+            logger.warning(
+                "[%s] Portfolio valuer init failed, using simple valuation", self._backtest_id, exc_info=True
+            )
+            self._valuer_available = False
+
+    async def _seed_initial_market_snapshot(self) -> None:
+        """Create an initial market snapshot so the first equity point can use PortfolioValuer."""
+        if not self._valuer_available:
+            return
+        try:
+            # Refresh prices so the snapshot values balances accurately.
+            self._cached_prices = await self._get_portfolio_prices()
+            wallet_address = self._orchestrator.signer.address if self._orchestrator else ""
+            self._last_market_snapshot = await create_market_snapshot_from_fork(
+                fork_manager=self.fork_manager,
+                chain=self.config.chain,
+                wallet_address=wallet_address,
+                portfolio_tracker=self.portfolio_tracker,
+                token_prices=self._cached_prices,
+                price_oracle=self._price_aggregator,
+                rsi_calculator=self._rsi_calculator,
+            )
+        except Exception:
+            logger.debug("[%s] Failed to seed initial market snapshot", self._backtest_id, exc_info=True)
+
+    def _value_portfolio_rich(self) -> tuple[Decimal, Decimal, Decimal] | None:
+        """Calculate portfolio value using PortfolioValuer (LP + lending aware).
+
+        Returns (total_value_usd, spot_value_usd, position_value_usd) or None
+        if the valuer is unavailable or the strategy doesn't satisfy StrategyLike.
+        """
+        if not self._valuer_available or self._portfolio_valuer is None:
+            return None
+
+        strategy = self._current_strategy
+        market = self._last_market_snapshot
+        if strategy is None or market is None:
+            return None
+
+        # PortfolioValuer requires StrategyLike (strategy_id, chain, _get_tracked_tokens)
+        from almanak.framework.valuation.portfolio_valuer import StrategyLike
+
+        if not isinstance(strategy, StrategyLike):
+            return None
+
+        try:
+            snapshot = self._portfolio_valuer.value(strategy, market, iteration_number=self._tick_count)
+            if snapshot.value_confidence.value == "UNAVAILABLE":
+                return None
+            return (
+                snapshot.total_value_usd,
+                snapshot.available_cash_usd,
+                snapshot.position_value_usd,
+            )
+        except Exception:
+            logger.debug("[%s] Portfolio valuer failed, falling back to simple", self._backtest_id, exc_info=True)
+            return None
 
     async def run(
         self,
@@ -881,6 +970,13 @@ class PaperTrader:
             # Initialize orchestrator with fork RPC
             await self._initialize_orchestrator()
 
+            # Initialize portfolio valuer with fork RPC for LP/lending repricing
+            self._init_portfolio_valuer()
+
+            # Seed initial market snapshot so the first equity point can use
+            # PortfolioValuer (not just simple token x price).
+            await self._seed_initial_market_snapshot()
+
             # Record initial equity point
             await self._record_equity_point()
 
@@ -925,6 +1021,19 @@ class PaperTrader:
                 logger.exception(f"[{self._backtest_id}] Paper trading session failed: {e}")
             error = str(e)
         finally:
+            # Cache final value BEFORE cleanup clears valuer state.
+            # Fallback chain: rich valuation > last equity point > simple.
+            _cached_rich = self._value_portfolio_rich()
+            if _cached_rich is not None:
+                _cached_final_value = _cached_rich[0]
+                _cached_valuation_source = "portfolio_valuer"
+            elif self._equity_curve:
+                _cached_final_value = self._equity_curve[-1].value_usd
+                _cached_valuation_source = self._equity_curve[-1].valuation_source
+            else:
+                _cached_final_value = self._calculate_portfolio_value()
+                _cached_valuation_source = "simple"
+
             self._running = False
             self._current_strategy = None
 
@@ -969,9 +1078,8 @@ class PaperTrader:
             )
             trade_records.append(record)
 
-        # Get final portfolio value from portfolio tracker PnL calculation
-        # The tracker needs current prices - we use initial balances as baseline
-        final_value = self._calculate_portfolio_value()
+        # Use cached final value (computed before cleanup cleared valuer state)
+        final_value = _cached_final_value
 
         # Get error summary from error handler
         error_summary = {}
@@ -1208,6 +1316,12 @@ class PaperTrader:
             # Initialize orchestrator with fork RPC
             await self._initialize_orchestrator()
 
+            # Initialize portfolio valuer with fork RPC for LP/lending repricing
+            self._init_portfolio_valuer()
+
+            # Seed initial market snapshot for PortfolioValuer
+            await self._seed_initial_market_snapshot()
+
             # Record initial equity point
             await self._record_equity_point()
 
@@ -1249,6 +1363,28 @@ class PaperTrader:
             )
             self._errors.append(error)
         finally:
+            # Cache final value BEFORE cleanup clears valuer state.
+            # Fallback chain: rich valuation > last equity point > simple.
+            _cached_rich = self._value_portfolio_rich()
+            if _cached_rich is not None:
+                _cached_final = _cached_rich[0]
+                _cached_val_source = "portfolio_valuer"
+            elif self._equity_curve:
+                _cached_final = self._equity_curve[-1].value_usd
+                _cached_val_source = self._equity_curve[-1].valuation_source
+            else:
+                _cached_final = self._calculate_portfolio_value()
+                _cached_val_source = "simple"
+            _cached_pnl: Decimal | None = None
+            try:
+                _cached_pnl = _cached_final - self._calculate_initial_capital()
+            except Exception:
+                logger.debug(
+                    "[%s] Failed to compute cached PnL in run_loop teardown",
+                    self._backtest_id,
+                    exc_info=True,
+                )
+
             # Signal stop and cleanup
             await self.stop()
             await self._cleanup()
@@ -1276,7 +1412,7 @@ class PaperTrader:
         total_gas_used = sum(t.gas_used for t in self._trades)
         total_gas_cost_usd = sum((t.gas_cost_usd for t in self._trades), Decimal("0"))
 
-        # Create summary
+        # Create summary (using cached values from before cleanup)
         summary = PaperTradingSummary(
             strategy_id=strategy.strategy_id,
             start_time=session_start,
@@ -1289,7 +1425,8 @@ class PaperTrader:
             final_balances=dict(self.portfolio_tracker.current_balances),
             total_gas_used=total_gas_used,
             total_gas_cost_usd=total_gas_cost_usd,
-            pnl_usd=self._calculate_pnl_usd(),
+            pnl_usd=_cached_pnl,
+            valuation_source=_cached_val_source,
             error_summary=error_summary,
             trades=list(self._trades),
             errors=list(self._errors),
@@ -1306,12 +1443,15 @@ class PaperTrader:
     def _calculate_pnl_usd(self) -> Decimal | None:
         """Calculate PnL in USD from portfolio changes.
 
+        Uses PortfolioValuer for final value when available (LP + lending aware).
+
         Returns:
             Estimated PnL or None if calculation not possible
         """
         try:
             initial_value = self._calculate_initial_capital()
-            final_value = self._calculate_portfolio_value()
+            rich = self._value_portfolio_rich()
+            final_value = rich[0] if rich is not None else self._calculate_portfolio_value()
             return final_value - initial_value
         except Exception:
             return None
@@ -1415,6 +1555,9 @@ class PaperTrader:
             logger.warning(f"[{self._backtest_id}] Error stopping fork: {e}")
 
         self._orchestrator = None
+        self._portfolio_valuer = None
+        self._valuer_available = False
+        self._last_market_snapshot = None
 
     async def _execute_tick(self, strategy: PaperTradeableStrategy) -> PaperTrade | None:
         """Execute a single trading tick.
@@ -1472,6 +1615,9 @@ class PaperTrader:
                 price_oracle=self._price_aggregator,
                 rsi_calculator=self._rsi_calculator,
             )
+
+            # Store for PortfolioValuer access in _record_equity_point
+            self._last_market_snapshot = snapshot
 
             logger.info(f"[{self._backtest_id}] Snapshot created, pre-computing indicators...")
             # Pre-compute common indicators in async context for performance.
@@ -1539,6 +1685,21 @@ class PaperTrader:
                 # StrategyRunner calls on_intent_executed after every intent execution.
                 # Paper engine must do the same so strategies can track position state.
                 self._notify_strategy_callback(strategy, intent, trade_result)
+
+                # Refresh market snapshot after trade so PortfolioValuer sees
+                # post-trade wallet balances (not pre-trade snapshot).
+                # Re-fetch prices in case the trade introduced new tokens.
+                if trade_result is not None and self._valuer_available:
+                    self._cached_prices = await self._get_portfolio_prices()
+                    self._last_market_snapshot = await create_market_snapshot_from_fork(
+                        fork_manager=self.fork_manager,
+                        chain=self.config.chain,
+                        wallet_address=wallet_address,
+                        portfolio_tracker=self.portfolio_tracker,
+                        token_prices=self._cached_prices,
+                        price_oracle=self._price_aggregator,
+                        rsi_calculator=self._rsi_calculator,
+                    )
 
             # Record equity point
             await self._record_equity_point()
@@ -1807,6 +1968,9 @@ class PaperTrader:
     async def _record_equity_point(self) -> None:
         """Record current portfolio value as equity point.
 
+        Tries the PortfolioValuer first (LP + lending aware). Falls back
+        to simple token×price calculation if the valuer is unavailable.
+
         Note: This method refreshes the price cache before calculating portfolio
         value to ensure newly acquired tokens have prices and to avoid using
         stale prices across ticks.
@@ -1819,13 +1983,26 @@ class PaperTrader:
         await self._get_portfolio_prices()
 
         now = datetime.now(UTC)
-        value = self._calculate_portfolio_value()
+
+        # Try rich valuation first (includes LP + lending positions)
+        rich = self._value_portfolio_rich()
+        if rich is not None:
+            value, spot_value, position_value = rich
+            valuation_source = "portfolio_valuer"
+        else:
+            value = self._calculate_portfolio_value()
+            spot_value = None
+            position_value = None
+            valuation_source = "simple"
 
         eth_price = self._cached_prices.get("ETH") or self._cached_prices.get("WETH")
         point = EquityPoint(
             timestamp=now,
             value_usd=value,
             eth_price_usd=eth_price,
+            spot_value_usd=spot_value,
+            position_value_usd=position_value,
+            valuation_source=valuation_source,
         )
 
         self._equity_curve.append(point)
@@ -1834,6 +2011,7 @@ class PaperTrader:
             PaperTradeEventType.PORTFOLIO_UPDATED,
             {
                 "value_usd": str(value),
+                "valuation_source": valuation_source,
                 "timestamp": now.isoformat(),
             },
         )

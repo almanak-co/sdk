@@ -338,6 +338,7 @@ class PaperTradingSummary:
     total_gas_used: int = 0
     total_gas_cost_usd: Decimal = Decimal("0")
     pnl_usd: Decimal | None = None
+    valuation_source: str = "simple"
     error_summary: dict[str, int] = field(default_factory=dict)
     trades: list[PaperTrade] = field(default_factory=list)
     errors: list[PaperTradeError] = field(default_factory=list)
@@ -482,6 +483,7 @@ class PaperTradingSummary:
             "total_gas_used": self.total_gas_used,
             "total_gas_cost_usd": str(self.total_gas_cost_usd),
             "pnl_usd": str(self.pnl_usd) if self.pnl_usd is not None else None,
+            "valuation_source": self.valuation_source,
             "error_summary": self.error_summary,
             "trades": [t.to_dict() for t in self.trades],
             "errors": [e.to_dict() for e in self.errors],
@@ -518,6 +520,7 @@ class PaperTradingSummary:
             total_gas_used=data.get("total_gas_used", 0),
             total_gas_cost_usd=Decimal(data.get("total_gas_cost_usd", "0")),
             pnl_usd=Decimal(data["pnl_usd"]) if data.get("pnl_usd") is not None else None,
+            valuation_source=data.get("valuation_source", "simple"),
             error_summary=data.get("error_summary", {}),
             trades=trades,
             errors=errors,

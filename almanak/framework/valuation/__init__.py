@@ -16,9 +16,11 @@ from almanak.framework.valuation.position_discovery import (
     DiscoveryResult,
     PositionDiscoveryService,
 )
+from almanak.framework.valuation.rpc_adapter import DirectRpcAdapter
 from almanak.framework.valuation.spot_valuer import value_tokens
 
 __all__ = [
+    "DirectRpcAdapter",
     "DiscoveryConfig",
     "DiscoveryResult",
     "LPPositionReader",

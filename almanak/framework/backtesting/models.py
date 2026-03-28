@@ -1434,20 +1434,32 @@ class EquityPoint:
     Attributes:
         timestamp: When this value was recorded
         value_usd: Portfolio value in USD at this timestamp
+        eth_price_usd: ETH price at this point (for gas normalization)
+        spot_value_usd: Wallet token balances value (when using PortfolioValuer)
+        position_value_usd: LP + lending position value (when using PortfolioValuer)
+        valuation_source: "portfolio_valuer" or "simple" — indicates which pricing path was used
     """
 
     timestamp: datetime
     value_usd: Decimal
     eth_price_usd: Decimal | None = None
+    spot_value_usd: Decimal | None = None
+    position_value_usd: Decimal | None = None
+    valuation_source: str = "simple"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
-        d = {
+        d: dict[str, Any] = {
             "timestamp": self.timestamp.isoformat(),
             "value_usd": str(self.value_usd),
+            "valuation_source": self.valuation_source,
         }
         if self.eth_price_usd is not None:
             d["eth_price_usd"] = str(self.eth_price_usd)
+        if self.spot_value_usd is not None:
+            d["spot_value_usd"] = str(self.spot_value_usd)
+        if self.position_value_usd is not None:
+            d["position_value_usd"] = str(self.position_value_usd)
         return d
 
 
@@ -2389,6 +2401,11 @@ class BacktestResult:
                     timestamp=datetime.fromisoformat(e_data["timestamp"]),
                     value_usd=Decimal(e_data["value_usd"]),
                     eth_price_usd=Decimal(e_data["eth_price_usd"]) if "eth_price_usd" in e_data else None,
+                    spot_value_usd=Decimal(e_data["spot_value_usd"]) if "spot_value_usd" in e_data else None,
+                    position_value_usd=(
+                        Decimal(e_data["position_value_usd"]) if "position_value_usd" in e_data else None
+                    ),
+                    valuation_source=e_data.get("valuation_source", "simple"),
                 )
             )
 
