@@ -113,16 +113,17 @@ def _anvil_supports_no_gas_cap() -> bool:
     Probes `anvil --help` for the flag rather than relying on version comparison,
     because Foundry changed versioning schemes (0.x -> 1.x) and the flag was
     removed in newer releases. If help probe fails, falls back to version check
-    (>= 0.4.0). If both fail, defaults to False (fail-safe: skip the flag).
+    (0.4.0 <= v < 1.0.0). If both fail, defaults to False (fail-safe: skip the flag).
     """
     flags = _get_anvil_supported_flags()
     if flags:
         return "--no-gas-cap" in flags
-    # Fallback: version-based check (original logic) if help probe failed
+    # Fallback: version-based check (original logic) if help probe failed.
+    # --no-gas-cap existed only in Anvil 0.4.x series; Foundry 1.x removed it.
     version = _get_anvil_version()
     if version is None:
         return False
-    return version >= (0, 4, 0)
+    return (0, 4, 0) <= version < (1, 0, 0)
 
 
 # =============================================================================

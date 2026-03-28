@@ -46,6 +46,12 @@ class TestGetAnvilVersion:
         assert _get_anvil_version() == (1, 0, 0)
 
     @patch("almanak.framework.anvil.fork_manager.subprocess.run")
+    def test_parses_foundry_stable_suffix(self, mock_run):
+        """Foundry 1.5.1-stable should parse as (1, 5, 1)."""
+        mock_run.return_value.stdout = "anvil 1.5.1-stable (abc1234 2026-03-15)"
+        assert _get_anvil_version() == (1, 5, 1)
+
+    @patch("almanak.framework.anvil.fork_manager.subprocess.run")
     def test_returns_none_on_unexpected_format(self, mock_run):
         mock_run.return_value.stdout = "some unexpected output"
         assert _get_anvil_version() is None
@@ -204,6 +210,22 @@ class TestAnvilSupportsNoGasCap:
         """Help probe fails + old version = False."""
         mock_flags.return_value = set()
         mock_ver.return_value = (0, 3, 0)
+        assert _anvil_supports_no_gas_cap() is False
+
+    @patch("almanak.framework.anvil.fork_manager._get_anvil_version")
+    @patch("almanak.framework.anvil.fork_manager._get_anvil_supported_flags")
+    def test_version_fallback_foundry_1x_returns_false(self, mock_flags, mock_ver):
+        """Foundry 1.x removed --no-gas-cap; version fallback must reject 1.x."""
+        mock_flags.return_value = set()  # help probe failed
+        mock_ver.return_value = (1, 5, 1)
+        assert _anvil_supports_no_gas_cap() is False
+
+    @patch("almanak.framework.anvil.fork_manager._get_anvil_version")
+    @patch("almanak.framework.anvil.fork_manager._get_anvil_supported_flags")
+    def test_version_fallback_foundry_1_0_0_returns_false(self, mock_flags, mock_ver):
+        """Boundary: 1.0.0 is outside the 0.4.x range."""
+        mock_flags.return_value = set()
+        mock_ver.return_value = (1, 0, 0)
         assert _anvil_supports_no_gas_cap() is False
 
     @patch("almanak.framework.anvil.fork_manager._get_anvil_version")
