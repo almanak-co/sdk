@@ -1,11 +1,12 @@
 """Portfolio valuation orchestrator.
 
 Produces PortfolioSnapshot by querying the gateway (via MarketSnapshot)
-for wallet balances and token prices, optionally consuming
-strategy.get_open_positions() for non-wallet positions (LP, lending, perps).
+for wallet balances and token prices, using the PositionDiscoveryService
+to proactively find on-chain positions (LP, lending, perps), with
+strategy.get_open_positions() as a supplementary source.
 
 This is the single source of truth for portfolio valuation at runtime.
-Strategies declare positions; the framework owns the math.
+The framework owns both discovery and math.
 """
 
 import logging
@@ -18,14 +19,19 @@ from almanak.framework.portfolio.models import (
     PositionValue,
     ValueConfidence,
 )
+from almanak.framework.teardown.models import PositionInfo
 from almanak.framework.valuation.lending_position_reader import LendingPositionReader
 from almanak.framework.valuation.lending_valuer import value_lending_position
 from almanak.framework.valuation.lp_position_reader import LPPositionReader
 from almanak.framework.valuation.lp_valuer import value_lp_position
+from almanak.framework.valuation.position_discovery import (
+    DiscoveryConfig,
+    PositionDiscoveryService,
+)
 from almanak.framework.valuation.spot_valuer import total_value, value_tokens
 
 if TYPE_CHECKING:
-    from almanak.framework.teardown.models import PositionInfo, TeardownPositionSummary
+    from almanak.framework.teardown.models import TeardownPositionSummary
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +57,9 @@ class StrategyLike(Protocol):
 
     @property
     def chain(self) -> str: ...
+
+    @property
+    def wallet_address(self) -> str: ...
 
     def _get_tracked_tokens(self) -> list[str]: ...
 
@@ -81,6 +90,7 @@ class PortfolioValuer:
         """
         self._lp_reader = LPPositionReader(gateway_client)
         self._lending_reader = LendingPositionReader(gateway_client)
+        self._discovery = PositionDiscoveryService(gateway_client)
 
     def set_gateway_client(self, gateway_client: object | None) -> None:
         """Update the gateway client for on-chain queries.
@@ -89,6 +99,7 @@ class PortfolioValuer:
         """
         self._lp_reader = LPPositionReader(gateway_client)
         self._lending_reader = LendingPositionReader(gateway_client)
+        self._discovery.set_gateway_client(gateway_client)
 
     def value(
         self,
@@ -201,45 +212,152 @@ class PortfolioValuer:
         market: MarketDataSource,
         prices: dict[str, Decimal],
     ) -> tuple[list[PositionValue], Decimal, bool]:
-        """Extract non-wallet positions from strategy.get_open_positions().
+        """Discover and value non-wallet positions.
 
-        For LP positions with on-chain data available, re-prices using V3 math
-        instead of trusting strategy-reported values. Falls back to strategy
-        values when on-chain query fails or position type is not LP.
+        Two-source strategy:
+        1. **Discovery** (primary): Framework-owned PositionDiscoveryService
+           scans on-chain for lending/LP positions using strategy config.
+        2. **Strategy** (supplementary): strategy.get_open_positions() provides
+           position types that discovery can't detect (perps, stakes, etc.)
+           and LP token IDs that discovery uses for scanning.
+
+        Positions from both sources are deduplicated by position_id.
+        All positions are re-priced with on-chain data when possible.
 
         Returns:
             (positions, total_position_value, positions_unavailable)
         """
-        if not hasattr(strategy, "get_open_positions"):
-            return [], Decimal("0"), False
+        all_position_infos: dict[str, PositionInfo] = {}
+        strategy_failed = False
 
+        # Source 1: Strategy-reported positions (get_open_positions)
+        strategy_positions, strategy_failed = self._get_strategy_positions(strategy)
+        for p in strategy_positions:
+            all_position_infos[p.position_id] = p
+
+        # Source 2: Framework discovery (on-chain scanning)
+        discovery_had_errors = False
+        discovery_config = self._build_discovery_config(strategy, strategy_positions)
+        if discovery_config:
+            discovered = self._discovery.discover(discovery_config)
+            if discovered.errors:
+                discovery_had_errors = True
+            for p in discovered.positions:
+                if p.position_id not in all_position_infos:
+                    all_position_infos[p.position_id] = p
+                else:
+                    # Discovery found the same position — merge:
+                    # strategy has domain knowledge (position_type, value hint),
+                    # discovery has fresh on-chain details (asset_address, wallet etc.)
+                    existing = all_position_infos[p.position_id]
+                    merged_details = {**existing.details, **p.details}
+                    all_position_infos[p.position_id] = PositionInfo(
+                        position_type=existing.position_type,  # Strategy knows best
+                        position_id=p.position_id,
+                        chain=p.chain,
+                        protocol=p.protocol,
+                        value_usd=existing.value_usd,  # Keep strategy value as hint
+                        details=merged_details,
+                    )
+
+        positions_incomplete = strategy_failed or discovery_had_errors
+        if not all_position_infos:
+            return [], Decimal("0"), positions_incomplete
+
+        # Re-price all positions
+        positions: list[PositionValue] = []
+        for p in all_position_infos.values():
+            value_usd = self._reprice_position(p, strategy.chain, market)
+
+            positions.append(
+                PositionValue(
+                    position_type=p.position_type,
+                    protocol=p.protocol,
+                    chain=p.chain,
+                    value_usd=value_usd,
+                    label=f"{p.protocol} {p.position_type.value}",
+                    tokens=p.details.get("tokens", []),
+                    details=p.details,
+                )
+            )
+
+        position_value = sum((p.value_usd for p in positions), Decimal("0"))
+        # Signal incomplete if strategy failed OR discovery had errors.
+        # Even if some positions were found, we may be missing others.
+        return positions, position_value, positions_incomplete
+
+    def _get_strategy_positions(self, strategy: StrategyLike) -> tuple[list["PositionInfo"], bool]:
+        """Get positions from strategy.get_open_positions(), gracefully.
+
+        Returns:
+            (positions, failed) — failed is True if get_open_positions raised.
+        """
+        if not hasattr(strategy, "get_open_positions"):
+            return [], False
         try:
             summary: TeardownPositionSummary = strategy.get_open_positions()
-            if not summary or not summary.positions:
-                return [], Decimal("0"), False
-
-            positions: list[PositionValue] = []
-            for p in summary.positions:
-                value_usd = self._reprice_position(p, strategy.chain, market)
-
-                positions.append(
-                    PositionValue(
-                        position_type=p.position_type,
-                        protocol=p.protocol,
-                        chain=p.chain,
-                        value_usd=value_usd,
-                        label=f"{p.protocol} {p.position_type.value}",
-                        tokens=p.details.get("tokens", []),
-                        details=p.details,
-                    )
-                )
-
-            position_value = sum((p.value_usd for p in positions), Decimal("0"))
-            return positions, position_value, False
-
+            if summary and summary.positions:
+                return list(summary.positions), False
+            return [], False
         except Exception as e:
             logger.warning("Failed to get open positions: %s", e)
-            return [], Decimal("0"), True
+            return [], True
+
+    def _build_discovery_config(
+        self,
+        strategy: StrategyLike,
+        strategy_positions: list["PositionInfo"],
+    ) -> DiscoveryConfig | None:
+        """Build discovery config from strategy metadata.
+
+        Returns None if we don't have enough information to discover anything.
+        """
+        try:
+            chain = strategy.chain
+            wallet = strategy.wallet_address
+            if not chain or not wallet:
+                return None
+
+            # Get protocols from strategy metadata
+            protocols: list[str] = []
+            metadata = getattr(strategy, "STRATEGY_METADATA", None)
+            if metadata and hasattr(metadata, "supported_protocols"):
+                protocols = list(metadata.supported_protocols)
+
+            # Get tracked tokens
+            tracked_tokens: list[str] = []
+            try:
+                tracked_tokens = strategy._get_tracked_tokens()
+            except Exception:
+                pass
+
+            # Extract LP token IDs from strategy-reported positions
+            lp_token_ids: list[int] = []
+            lp_protocol = "uniswap_v3"
+            for p in strategy_positions:
+                from almanak.framework.teardown.models import PositionType as PT
+
+                if p.position_type == PT.LP:
+                    token_id = self._extract_token_id(p)
+                    if token_id is not None:
+                        lp_token_ids.append(token_id)
+                    if p.protocol:
+                        lp_protocol = p.protocol
+
+            if not protocols and not tracked_tokens:
+                return None
+
+            return DiscoveryConfig(
+                chain=chain,
+                wallet_address=wallet,
+                protocols=protocols,
+                tracked_tokens=tracked_tokens,
+                lp_token_ids=lp_token_ids,
+                lp_protocol=lp_protocol,
+            )
+        except Exception:
+            logger.debug("Could not build discovery config", exc_info=True)
+            return None
 
     def _reprice_position(
         self,
@@ -590,11 +708,6 @@ class PortfolioValuer:
             resolver = get_token_resolver()
             return resolver.get_decimals(chain, symbol)
         except Exception:
-            # Common known decimals as last resort
-            if symbol.upper() in ("USDC", "USDT"):
-                return 6
-            if symbol.upper() == "WBTC":
-                return 8
             return None
 
     @staticmethod
