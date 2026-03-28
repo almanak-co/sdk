@@ -9,6 +9,7 @@ This module provides metrics collection for the gateway server including:
 Metrics are exposed via HTTP endpoint for Prometheus scraping.
 """
 
+import errno
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -360,8 +361,25 @@ class MetricsServer:
         self._thread: Thread | None = None
 
     def start(self) -> None:
-        """Start the metrics HTTP server in a background thread."""
-        self._server = HTTPServer(("", self.port), MetricsHTTPHandler)
+        """Start the metrics HTTP server in a background thread.
+
+        If the configured port is already in use (e.g., another gateway is
+        running), falls back to an ephemeral port so metrics are still available.
+        """
+        try:
+            self._server = HTTPServer(("", self.port), MetricsHTTPHandler)
+        except OSError as e:
+            if getattr(e, "errno", None) == errno.EADDRINUSE or "Address already in use" in str(e):
+                logger.warning(
+                    "Metrics port %d already in use — binding to ephemeral port instead. "
+                    "Another gateway may already be serving metrics on port %d.",
+                    self.port,
+                    self.port,
+                )
+                self._server = HTTPServer(("", 0), MetricsHTTPHandler)
+                self.port = self._server.server_address[1]
+            else:
+                raise
         self._thread = Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         logger.info(f"Metrics server started on http://0.0.0.0:{self.port}/metrics")

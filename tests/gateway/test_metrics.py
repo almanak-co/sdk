@@ -194,6 +194,28 @@ class TestMetricsServer:
         time.sleep(0.1)
         # Thread may still be alive briefly, but server should be shutdown
 
+    def test_port_conflict_falls_back_to_ephemeral(self):
+        """When the configured port is busy, server binds to an ephemeral port."""
+        # Occupy a port
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind(("", 0))
+        busy_port = blocker.getsockname()[1]
+        blocker.listen(1)
+
+        try:
+            server = MetricsServer(port=busy_port)
+            server.start()
+            try:
+                # Server should have picked a different port
+                assert server.port != busy_port
+                assert server.port > 0
+                assert server._thread.is_alive()
+            finally:
+                server.stop()
+        finally:
+            blocker.close()
+
 
 class TestMetricsRegistry:
     """Tests for custom metrics registry."""
