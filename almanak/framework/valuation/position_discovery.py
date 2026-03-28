@@ -1,8 +1,8 @@
 """Framework-owned position discovery service.
 
 Proactively discovers on-chain positions without relying on
-strategy.get_open_positions(). Uses existing LP and lending readers
-to scan for active positions based on strategy configuration.
+strategy.get_open_positions(). Uses existing LP, lending, and perps
+readers to scan for active positions based on strategy configuration.
 
 This decouples portfolio valuation from strategy cooperation:
 strategies that don't implement get_open_positions() (or implement it
@@ -14,6 +14,8 @@ Discovery strategies by protocol:
 - **LP (Uniswap V3 / forks)**: LP positions require a token ID that
   can't be enumerated cheaply. Discovery accepts explicit token IDs
   from strategy state or prior execution results.
+- **GMX V2 perps**: Query all open positions for the wallet via
+  Reader contract (with REST API fallback).
 """
 
 import logging
@@ -27,6 +29,7 @@ from almanak.framework.valuation.lending_position_reader import (
     LendingPositionReader,
 )
 from almanak.framework.valuation.lp_position_reader import LPPositionReader
+from almanak.framework.valuation.perps_position_reader import PerpsPositionReader
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,7 @@ class DiscoveryResult:
     scanned_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     lending_assets_scanned: int = 0
     lp_ids_scanned: int = 0
+    perps_scanned: bool = False
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -99,11 +103,13 @@ class PositionDiscoveryService:
     def __init__(self, gateway_client: object | None = None) -> None:
         self._lp_reader = LPPositionReader(gateway_client)
         self._lending_reader = LendingPositionReader(gateway_client)
+        self._perps_reader = PerpsPositionReader.from_gateway_client(gateway_client)
 
     def set_gateway_client(self, gateway_client: object | None) -> None:
         """Update the gateway client (called when connection is established)."""
         self._lp_reader = LPPositionReader(gateway_client)
         self._lending_reader = LendingPositionReader(gateway_client)
+        self._perps_reader = PerpsPositionReader.from_gateway_client(gateway_client)
 
     def discover(self, config: DiscoveryConfig) -> DiscoveryResult:
         """Scan for on-chain positions based on the discovery config.
@@ -126,13 +132,18 @@ class PositionDiscoveryService:
         if config.lp_token_ids and _has_lp_protocol(config.protocols):
             self._discover_lp(config, result)
 
+        # Discover perpetual positions (GMX V2)
+        if _has_perps_protocol(config.protocols):
+            self._discover_perps(config, result)
+
         if result.has_positions:
             logger.info(
-                "Position discovery found %d positions on %s (lending_scanned=%d, lp_scanned=%d)",
+                "Position discovery found %d positions on %s (lending_scanned=%d, lp_scanned=%d, perps_scanned=%s)",
                 len(result.positions),
                 config.chain,
                 result.lending_assets_scanned,
                 result.lp_ids_scanned,
+                result.perps_scanned,
             )
 
         return result
@@ -208,6 +219,40 @@ class PositionDiscoveryService:
                 logger.debug(error_msg, exc_info=True)
                 result.errors.append(error_msg)
 
+    def _discover_perps(self, config: DiscoveryConfig, result: DiscoveryResult) -> None:
+        """Scan for GMX V2 perpetual positions."""
+        result.perps_scanned = True
+        try:
+            positions = self._perps_reader.read_positions(
+                chain=config.chain,
+                wallet_address=config.wallet_address,
+            )
+            for pos in positions:
+                side = "long" if pos.is_long else "short"
+                result.positions.append(
+                    PositionInfo(
+                        position_type=PositionType.PERP,
+                        position_id=pos.position_key,
+                        chain=config.chain,
+                        protocol="gmx_v2",
+                        value_usd=Decimal("0"),  # Repriced by portfolio_valuer
+                        details={
+                            "market": pos.market,
+                            "collateral_token": pos.collateral_token,
+                            "is_long": pos.is_long,
+                            "size_in_usd": str(pos.size_in_usd),
+                            "size_in_tokens": str(pos.size_in_tokens),
+                            "collateral_amount": str(pos.collateral_amount),
+                            "wallet_address": config.wallet_address,
+                            "side": side,
+                        },
+                    )
+                )
+        except Exception as e:
+            error_msg = f"Perps discovery failed on {config.chain}: {e}"
+            logger.debug(error_msg, exc_info=True)
+            result.errors.append(error_msg)
+
     @staticmethod
     def _resolve_token_addresses(symbols: list[str], chain: str) -> dict[str, str]:
         """Resolve token symbols to addresses for on-chain queries.
@@ -255,6 +300,12 @@ def _has_lp_protocol(protocols: list[str]) -> bool:
         "velodrome",
     }
     return bool({p.lower() for p in protocols} & lp_protocols)
+
+
+def _has_perps_protocol(protocols: list[str]) -> bool:
+    """Check if any protocol in the list is a GMX V2 perpetuals protocol."""
+    perps_protocols = {"gmx_v2", "gmx"}
+    return bool({p.lower() for p in protocols} & perps_protocols)
 
 
 def _lending_to_position_infos(

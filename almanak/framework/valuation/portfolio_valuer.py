@@ -24,6 +24,8 @@ from almanak.framework.valuation.lending_position_reader import LendingPositionR
 from almanak.framework.valuation.lending_valuer import value_lending_position
 from almanak.framework.valuation.lp_position_reader import LPPositionReader
 from almanak.framework.valuation.lp_valuer import value_lp_position
+from almanak.framework.valuation.perps_position_reader import PerpsPositionReader
+from almanak.framework.valuation.perps_valuer import value_perps_position
 from almanak.framework.valuation.position_discovery import (
     DiscoveryConfig,
     PositionDiscoveryService,
@@ -90,6 +92,7 @@ class PortfolioValuer:
         """
         self._lp_reader = LPPositionReader(gateway_client)
         self._lending_reader = LendingPositionReader(gateway_client)
+        self._perps_reader = PerpsPositionReader.from_gateway_client(gateway_client)
         self._discovery = PositionDiscoveryService(gateway_client)
 
     def set_gateway_client(self, gateway_client: object | None) -> None:
@@ -99,6 +102,7 @@ class PortfolioValuer:
         """
         self._lp_reader = LPPositionReader(gateway_client)
         self._lending_reader = LendingPositionReader(gateway_client)
+        self._perps_reader = PerpsPositionReader.from_gateway_client(gateway_client)
         self._discovery.set_gateway_client(gateway_client)
 
     def value(
@@ -242,7 +246,19 @@ class PortfolioValuer:
             discovered = self._discovery.discover(discovery_config)
             if discovered.errors:
                 discovery_had_errors = True
+            # Track which (protocol, position_type) combos the strategy reported.
+            # For perps, strategy-reported positions take priority since
+            # discovery and strategy use different ID formats.
+            from almanak.framework.teardown.models import PositionType as _PT
+
+            strategy_protocol_types = {(sp.protocol, sp.position_type) for sp in strategy_positions}
+
             for p in discovered.positions:
+                # Skip discovered perps if strategy already reported perps
+                # for the same protocol (avoids double-counting from ID mismatch)
+                if p.position_type == _PT.PERP and (p.protocol, _PT.PERP) in strategy_protocol_types:
+                    continue
+
                 if p.position_id not in all_position_infos:
                     all_position_infos[p.position_id] = p
                 else:
@@ -389,6 +405,12 @@ class PortfolioValuer:
             # matching the on-chain path which returns -debt_value_usd.
             if position.position_type == PositionType.BORROW and position.value_usd > 0:
                 return -position.value_usd
+            return position.value_usd
+
+        if position.position_type == PositionType.PERP:
+            repriced = self._reprice_perps_on_chain(position, chain, market)
+            if repriced is not None:
+                return repriced
             return position.value_usd
 
         return position.value_usd
@@ -623,6 +645,171 @@ class PortfolioValuer:
                 exc_info=True,
             )
             return None
+
+    def _reprice_perps_on_chain(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> Decimal | None:
+        """Attempt to re-price a GMX V2 perp position using on-chain data.
+
+        Queries the wallet's open GMX V2 positions, matches by market address
+        and direction (long/short), then computes mark-to-market value using
+        the perps_valuer pure math.
+
+        Returns:
+            Net USD value (collateral + unrealized PnL - fees) if successful,
+            None to signal fallback needed.
+        """
+        try:
+            # Need wallet address and market info from position details
+            wallet_address = (
+                position.details.get("wallet")
+                or position.details.get("wallet_address")
+                or position.details.get("owner")
+            )
+            if not wallet_address:
+                return None
+
+            # Query all positions for this wallet
+            on_chain_positions = self._perps_reader.read_positions(chain, wallet_address)
+            if not on_chain_positions:
+                return None
+
+            # Match position by market address and direction
+            market_address = position.details.get("market", "").lower()
+            if "is_long" not in position.details:
+                # Direction is money-critical — never assume long/short
+                return None
+            is_long = position.details["is_long"]
+            collateral_token = position.details.get("collateral_token", "").lower()
+
+            matched = None
+            for ocp in on_chain_positions:
+                if ocp.market.lower() == market_address and ocp.is_long == is_long:
+                    # If collateral token specified, match it too
+                    if collateral_token and ocp.collateral_token.lower() != collateral_token:
+                        continue
+                    matched = ocp
+                    break
+
+            if matched is None:
+                logger.debug(
+                    "No matching GMX V2 position found for %s (market=%s, is_long=%s)",
+                    position.position_id,
+                    market_address,
+                    is_long,
+                )
+                return None
+
+            # Resolve index token price (mark price)
+            index_token_symbol = self._resolve_perps_index_token(matched.market, chain)
+            if not index_token_symbol:
+                return None
+
+            try:
+                mark_price = Decimal(str(market.price(index_token_symbol)))
+            except Exception:
+                logger.debug("Could not get mark price for %s", index_token_symbol)
+                return None
+
+            if mark_price <= 0:
+                return None
+
+            # Resolve collateral token price
+            collateral_symbol = self._resolve_token_symbol(matched.collateral_token, position, "collateral_token")
+            if not collateral_symbol:
+                return None
+
+            try:
+                collateral_price = Decimal(str(market.price(collateral_symbol)))
+            except Exception:
+                logger.debug("Could not get collateral price for %s", collateral_symbol)
+                return None
+
+            if collateral_price <= 0:
+                return None
+
+            # Get token decimals
+            collateral_decimals = self._get_token_decimals(collateral_symbol, chain)
+            index_decimals = self._get_perps_index_decimals(matched.market, chain)
+            if collateral_decimals is None or index_decimals is None:
+                return None
+
+            # Compute mark-to-market value.
+            # Note: pending funding/borrowing fees are NOT included yet —
+            # computing them requires cumulative rate data from DataStore.
+            # Net value is therefore an upper bound (fees would reduce it).
+            valued = value_perps_position(
+                size_in_usd=matched.size_in_usd,
+                size_in_tokens=matched.size_in_tokens,
+                collateral_amount=matched.collateral_amount,
+                is_long=matched.is_long,
+                mark_price_usd=mark_price,
+                collateral_token_price_usd=collateral_price,
+                collateral_token_decimals=collateral_decimals,
+                index_token_decimals=index_decimals,
+                market=matched.market,
+            )
+
+            logger.debug(
+                "Perps re-priced: position=%s value=$%s (size=$%s pnl=$%s fees=$%s leverage=%sx)",
+                position.position_id,
+                valued.net_value_usd,
+                valued.size_usd,
+                valued.unrealized_pnl_usd,
+                valued.pending_fees_usd,
+                valued.leverage,
+            )
+
+            return valued.net_value_usd
+
+        except Exception:
+            logger.debug(
+                "Perps on-chain re-pricing failed for %s",
+                position.position_id,
+                exc_info=True,
+            )
+            return None
+
+    @staticmethod
+    def _resolve_perps_index_token(market_address: str, chain: str) -> str | None:
+        """Map a GMX V2 market address to its index token symbol.
+
+        Uses the market address tables from the GMX V2 adapter.
+        """
+        try:
+            from almanak.framework.connectors.gmx_v2.adapter import GMX_V2_MARKETS
+
+            markets = GMX_V2_MARKETS.get(chain, {})
+            addr_lower = market_address.lower()
+            for name, addr in markets.items():
+                if addr.lower() == addr_lower:
+                    # name is like "ETH/USD" — extract index token
+                    return name.split("/")[0]
+        except ImportError:
+            pass
+        return None
+
+    @staticmethod
+    def _get_perps_index_decimals(market_address: str, chain: str) -> int | None:
+        """Get the index token decimals for a GMX V2 market.
+
+        Uses the decimal table from the GMX V2 adapter.
+        Case-insensitive lookup to handle both checksummed and lowercased addresses.
+        """
+        try:
+            from almanak.framework.connectors.gmx_v2.adapter import _GMX_V2_INDEX_TOKEN_DECIMALS
+
+            chain_decimals = _GMX_V2_INDEX_TOKEN_DECIMALS.get(chain, {})
+            addr_lower = market_address.lower()
+            for addr, decimals in chain_decimals.items():
+                if addr.lower() == addr_lower:
+                    return decimals
+        except ImportError:
+            pass
+        return None
 
     @staticmethod
     def _extract_asset_address(position: "PositionInfo") -> str | None:
