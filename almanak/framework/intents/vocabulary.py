@@ -503,6 +503,9 @@ class LPCloseIntent(AlmanakImmutableModel):
         collect_fees: Whether to collect accumulated fees
         protocol: LP protocol (e.g., "uniswap_v3", "camelot")
         chain: Optional target chain for execution (defaults to strategy's primary chain)
+        protocol_params: Optional protocol-specific parameters (e.g., V4 requires
+            ``{"liquidity": <int>, "currency0": "<addr>", "currency1": "<addr>"}``
+            from an on-chain position query)
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
     """
@@ -512,6 +515,7 @@ class LPCloseIntent(AlmanakImmutableModel):
     collect_fees: bool = True
     protocol: str = "uniswap_v3"
     chain: str | None = None
+    protocol_params: dict[str, Any] | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
 
@@ -542,9 +546,12 @@ class CollectFeesIntent(AlmanakImmutableModel):
     to claim earned fees while keeping their liquidity position open.
 
     Attributes:
-        pool: Pool identifier (format: TOKEN_X/TOKEN_Y/BIN_STEP for TraderJoe V2)
-        protocol: LP protocol (e.g., "traderjoe_v2")
+        pool: Pool identifier (format: TOKEN_X/TOKEN_Y/BIN_STEP for TraderJoe V2,
+            or TOKEN_A/TOKEN_B/FEE for Uniswap V4)
+        protocol: LP protocol (e.g., "traderjoe_v2", "uniswap_v4")
         chain: Optional target chain for execution (defaults to strategy's primary chain)
+        protocol_params: Optional protocol-specific parameters. For Uniswap V4:
+            ``{"position_id": <int>, "currency0": "<addr>", "currency1": "<addr>"}``
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
 
@@ -559,6 +566,7 @@ class CollectFeesIntent(AlmanakImmutableModel):
     pool: str
     protocol: str = "traderjoe_v2"
     chain: str | None = None
+    protocol_params: dict[str, Any] | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
 
@@ -2385,6 +2393,7 @@ class Intent:
         collect_fees: bool = True,
         protocol: str = "uniswap_v3",
         chain: str | None = None,
+        protocol_params: dict[str, Any] | None = None,
     ) -> LPCloseIntent:
         """Create an LP close intent.
 
@@ -2394,6 +2403,8 @@ class Intent:
             collect_fees: Whether to collect accumulated fees (default True)
             protocol: LP protocol (default "uniswap_v3")
             chain: Target chain for execution (defaults to strategy's primary chain)
+            protocol_params: Optional protocol-specific parameters (e.g., V4 requires
+                liquidity, currency0, currency1 from an on-chain position query)
 
         Returns:
             LPCloseIntent: The created LP close intent
@@ -2411,6 +2422,7 @@ class Intent:
             collect_fees=collect_fees,
             protocol=protocol,
             chain=chain,
+            protocol_params=protocol_params,
         )
 
     @staticmethod
@@ -2418,6 +2430,7 @@ class Intent:
         pool: str,
         protocol: str = "traderjoe_v2",
         chain: str | None = None,
+        protocol_params: dict[str, Any] | None = None,
     ) -> CollectFeesIntent:
         """Create a collect fees intent to harvest LP fees without closing the position.
 
@@ -2425,6 +2438,8 @@ class Intent:
             pool: Pool identifier (e.g., "WAVAX/USDC/20" for TraderJoe V2)
             protocol: LP protocol (default "traderjoe_v2")
             chain: Target chain for execution (defaults to strategy's primary chain)
+            protocol_params: Optional protocol-specific parameters. For Uniswap V4:
+                position_id, currency0, currency1
 
         Returns:
             CollectFeesIntent: The created collect fees intent
@@ -2437,6 +2452,7 @@ class Intent:
             pool=pool,
             protocol=protocol,
             chain=chain,
+            protocol_params=protocol_params,
         )
 
     @staticmethod
