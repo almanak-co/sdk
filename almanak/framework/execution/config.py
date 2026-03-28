@@ -152,7 +152,7 @@ CHAIN_IDS: dict[str, int] = {
 
 # Supported protocols and which chains they are available on
 SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
-    "aave_v3": {"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "linea", "plasma", "blast"},
+    "aave_v3": {"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "linea", "plasma"},
     "uniswap_v3": {
         "ethereum",
         "arbitrum",
