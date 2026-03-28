@@ -22,6 +22,11 @@ class TestFluidErrorSelectors:
         assert "dee51a8a" in FLUID_ERROR_SELECTORS
         assert FLUID_ERROR_SELECTORS["dee51a8a"] == "FluidDexSwapTooSmall"
 
+    def test_liquidity_limit_registered(self):
+        """VIB-1702: 0x2fee3e0e error from wstETH/ETH and weETH/ETH pools."""
+        assert "2fee3e0e" in FLUID_ERROR_SELECTORS
+        assert FLUID_ERROR_SELECTORS["2fee3e0e"] == "FluidDexLiquidityLimit"
+
     def test_panic_registered(self):
         assert "4e487b71" in FLUID_ERROR_SELECTORS
 
@@ -35,12 +40,18 @@ class TestDecodeFluidRevert:
         result = decode_fluid_revert(raw)
         assert "FluidDexSwapTooSmall" in result
         assert "71001" in result  # 0x11559 = 71001
-        assert "too small" in result.lower()
+        assert "insufficient liquidity" in result.lower()
 
     def test_decode_swap_too_small_without_param(self):
         raw = "0xdee51a8a"
         result = decode_fluid_revert(raw)
-        assert "too small" in result.lower()
+        assert "insufficient liquidity" in result.lower()
+
+    def test_decode_swap_too_small_suggests_smaller_size(self):
+        """VIB-1702: error should suggest reducing trade size or using another protocol."""
+        raw = "0xdee51a8a0000000000000000000000000000000000000000000000000000000000011559"
+        result = decode_fluid_revert(raw)
+        assert "smaller trade size" in result.lower() or "different protocol" in result.lower()
 
     def test_decode_swap_too_small_no_contradictory_claim(self):
         """VIB-1969: error must NOT claim amount is below minimum when it isn't."""
@@ -50,6 +61,25 @@ class TestDecodeFluidRevert:
         assert "minimum input" not in result.lower()
         # Must include the raw threshold for debugging
         assert "71001" in result
+
+    def test_decode_liquidity_limit_with_param(self):
+        """VIB-1702: 0x2fee3e0e error from wstETH/ETH pools."""
+        raw = "0x2fee3e0e000000000000000000000000000000000000000000000000000000000000c769"
+        result = decode_fluid_revert(raw)
+        assert "FluidDexLiquidityLimit" in result
+        assert "51049" in result  # 0xc769 = 51049
+        assert "capacity exceeded" in result.lower()
+
+    def test_decode_liquidity_limit_without_param(self):
+        raw = "0x2fee3e0e"
+        result = decode_fluid_revert(raw)
+        assert "capacity exceeded" in result.lower()
+
+    def test_decode_liquidity_limit_suggests_smaller_size(self):
+        """VIB-1702: liquidity limit error should suggest alternatives."""
+        raw = "0x2fee3e0e000000000000000000000000000000000000000000000000000000000000c769"
+        result = decode_fluid_revert(raw)
+        assert "smaller trade size" in result.lower() or "different protocol" in result.lower()
 
     def test_decode_panic(self):
         raw = "0x4e487b710000000000000000000000000000000000000000000000000000000000000011"
@@ -83,7 +113,7 @@ class TestDecodeFluidRevert:
     def test_decode_no_prefix(self):
         raw = "dee51a8a0000000000000000000000000000000000000000000000000000000000011559"
         result = decode_fluid_revert(raw)
-        assert "too small" in result.lower()
+        assert "FluidDexSwapTooSmall" in result
 
 
 class TestExtractRevertHex:

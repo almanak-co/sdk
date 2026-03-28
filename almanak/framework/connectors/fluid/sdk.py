@@ -236,7 +236,8 @@ class FluidMinAmountError(FluidSDKError):
 # Known Fluid DEX custom error selectors (first 4 bytes of keccak256)
 # Decoded from on-chain reverts observed in production
 FLUID_ERROR_SELECTORS: dict[str, str] = {
-    "dee51a8a": "FluidDexSwapTooSmall",  # amount below pool minimum
+    "dee51a8a": "FluidDexSwapTooSmall",  # pool rejected swap — insufficient liquidity for amount
+    "2fee3e0e": "FluidDexLiquidityLimit",  # pool capacity exceeded — seen on wstETH/ETH, weETH/ETH
     "4e487b71": "Panic",  # Solidity panic (overflow, division by zero, etc.)
 }
 
@@ -270,18 +271,34 @@ def decode_fluid_revert(raw_hex: str) -> str:
     error_name = FLUID_ERROR_SELECTORS.get(selector)
 
     if error_name == "FluidDexSwapTooSmall":
-        # The uint256 parameter is the pool's internal threshold (could be
-        # a minimum output, a liquidity check, etc.).  Do NOT claim the
-        # user's input is "below" this value — the comparison may not be
-        # input-vs-threshold (see VIB-1969).
+        # Despite the name, this error fires when the pool lacks sufficient
+        # liquidity for the requested swap size (not when the input is too small).
+        # Pools like USDC/USDT on Arbitrum reject swaps above ~$100.
         if len(data) >= 72:
             threshold = int(data[8:72], 16)
             return (
-                f"FluidDexSwapTooSmall: the pool rejected this swap as too small "
-                f"(pool threshold parameter: {threshold} wei). "
-                f"Try a larger trade size."
+                f"FluidDexSwapTooSmall: the pool rejected this swap — insufficient "
+                f"liquidity for the requested amount (pool threshold: {threshold} wei). "
+                f"Fluid DEX pools have undocumented per-pool size limits. "
+                f"Try a smaller trade size or use a different protocol."
             )
-        return "FluidDexSwapTooSmall: the pool rejected this swap as too small. Try a larger trade size."
+        return (
+            "FluidDexSwapTooSmall: the pool rejected this swap — insufficient "
+            "liquidity for the requested amount. Try a smaller trade size."
+        )
+
+    if error_name == "FluidDexLiquidityLimit":
+        # Observed on wstETH/ETH and weETH/ETH pools — same root cause
+        # as FluidDexSwapTooSmall but different error selector.
+        if len(data) >= 72:
+            threshold = int(data[8:72], 16)
+            return (
+                f"FluidDexLiquidityLimit: pool capacity exceeded for this swap "
+                f"(pool threshold: {threshold} wei). "
+                f"Fluid DEX pools have per-pool swap size limits. "
+                f"Try a smaller trade size or use a different protocol."
+            )
+        return "FluidDexLiquidityLimit: pool capacity exceeded. Try a smaller trade size or use a different protocol."
 
     if error_name == "Panic":
         if len(data) >= 72:
@@ -534,7 +551,10 @@ class FluidSDK:
                 raw_hex = _extract_revert_hex(str(e))
             if raw_hex:
                 decoded = decode_fluid_revert(raw_hex)
-                if "FluidDexSwapTooSmall" in decoded or "too small" in decoded.lower():
+                if (
+                    any(s in decoded for s in ("FluidDexSwapTooSmall", "FluidDexLiquidityLimit", "pool capacity"))
+                    or "too small" in decoded.lower()
+                ):
                     raise FluidMinAmountError(decoded) from e
                 raise FluidSDKError(f"Fluid swap quote failed: {decoded}") from e
             raise FluidSDKError(f"Failed to get swap quote: {e}") from e

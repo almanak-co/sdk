@@ -6608,7 +6608,9 @@ class IntentCompiler:
                         status=CompilationStatus.FAILED,
                         error=(
                             f"Fluid swap rejected: {amount_decimal} {intent.from_token} "
-                            f"({amount_in_wei} wei) too small for pool. {e}"
+                            f"exceeds pool capacity ({amount_in_wei} wei). "
+                            f"Fluid DEX pools have per-pool swap size limits. "
+                            f"Try a smaller amount or use protocol='uniswap_v3'. {e}"
                         ),
                         intent_id=intent.intent_id,
                     )
