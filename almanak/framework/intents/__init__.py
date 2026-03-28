@@ -82,6 +82,14 @@ from .state_machine import (
     is_sadflow_state,
     is_validating_state,
 )
+from .tick_utils import (
+    get_max_tick,
+    get_min_tick,
+    get_tick_spacing,
+    price_to_tick,
+    snap_to_tick_spacing,
+    tick_to_price,
+)
 from .vocabulary import (
     PROTOCOL_CAPABILITIES,
     BorrowIntent,
@@ -212,6 +220,13 @@ __all__ = [
     "is_sadflow_state",
     "get_metrics",
     "clear_metrics",
+    # Tick/Price Utilities
+    "price_to_tick",
+    "tick_to_price",
+    "get_tick_spacing",
+    "snap_to_tick_spacing",
+    "get_min_tick",
+    "get_max_tick",
     # Sadflow hooks
     "SadflowActionType",
     "SadflowAction",
