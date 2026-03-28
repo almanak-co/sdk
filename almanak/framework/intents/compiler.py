@@ -6675,33 +6675,106 @@ class IntentCompiler:
     def _compile_swap_uniswap_v4(self, intent: SwapIntent) -> CompilationResult:
         """Compile SWAP intent for Uniswap V4.
 
-        BLOCKED (VIB-1965): V4 core contracts (PoolManager, PositionManager,
-        UniversalRouter, Quoter, StateView) are verified canonical CREATE2
-        deployments on all supported chains. However, the V4 adapter currently
-        routes swaps through ``v4_swap_router`` which is NOT a canonical Uniswap
-        deployment — it may be an empty EOA on some chains. Phase 1 (VIB-1965)
-        will rewrite the adapter to use the canonical UniversalRouter
-        (``0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af``).
+        Delegates to ``UniswapV4Adapter.compile_swap_intent()`` which handles
+        amount resolution, slippage, token metadata (including ``is_native``),
+        and ActionBundle construction via the canonical UniversalRouter.
 
-        Use uniswap_v3 as a drop-in alternative for swap intents until Phase 1.
+        Args:
+            intent: SwapIntent with from_token, to_token, and amount
+
+        Returns:
+            CompilationResult with V4 swap ActionBundle
         """
-        logger.warning(
-            "Uniswap V4 swap BLOCKED (VIB-1965): adapter uses unverified v4_swap_router. "
-            "Use protocol='uniswap_v3' instead. Tokens: %s -> %s",
-            intent.from_token,
-            intent.to_token,
-        )
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            intent_id=intent.intent_id,
-            error=(
-                "Uniswap V4 swaps are blocked pending VIB-1965: the adapter routes through "
-                "v4_swap_router (unverified, non-canonical address) instead of the canonical "
-                "UniversalRouter. Core V4 contracts (PoolManager, PositionManager) are verified. "
-                "Use protocol='uniswap_v3' as a drop-in alternative until the V4 adapter is "
-                "rewritten to use the UniversalRouter."
-            ),
-        )
+        try:
+            from almanak.core.contracts import UNISWAP_V4
+            from almanak.framework.connectors.uniswap_v4.adapter import (
+                UniswapV4Adapter,
+                UniswapV4Config,
+            )
+
+            # Check chain support before creating adapter
+            if self.chain not in UNISWAP_V4:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Uniswap V4 is not supported on {self.chain}. Supported: {list(UNISWAP_V4.keys())}",
+                    intent_id=intent.intent_id,
+                )
+
+            slippage_bps = int(intent.max_slippage * 10000)
+
+            config = UniswapV4Config(
+                chain=self.chain,
+                wallet_address=self.wallet_address,
+                rpc_url=self._get_chain_rpc_url(),
+                default_slippage_bps=slippage_bps,
+            )
+            adapter = UniswapV4Adapter(config=config, token_resolver=self._token_resolver)
+
+            action_bundle = adapter.compile_swap_intent(intent, price_oracle=self.price_oracle)
+
+            # Empty bundles are invalid for swaps, even if the adapter did not
+            # populate metadata["error"].
+            if not action_bundle.transactions:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=action_bundle.metadata.get(
+                        "error",
+                        "Uniswap V4 swap compilation returned no transactions",
+                    ),
+                    intent_id=intent.intent_id,
+                )
+
+            # Add protocol identifier to metadata (adapter sets protocol_version but not protocol)
+            action_bundle.metadata["protocol"] = "uniswap_v4"
+
+            total_gas = action_bundle.metadata.get("gas_estimate", 0)
+
+            # Populate result.transactions for callers that read it directly
+            # (e.g., permissions/discovery.py, cli/intent_debug.py)
+            transactions = []
+            for tx_dict in action_bundle.transactions:
+                desc = tx_dict.get("description", "")
+                if "approve" in desc.lower() and "permit2" not in desc.lower():
+                    tx_type = "approve"
+                elif "permit2" in desc.lower():
+                    tx_type = "permit2_approve"
+                else:
+                    tx_type = "swap"
+                value = tx_dict.get("value", 0)
+                if isinstance(value, str):
+                    value = int(value, 0) if value.startswith("0x") else int(value)
+                transactions.append(
+                    TransactionData(
+                        to=tx_dict["to"],
+                        value=value,
+                        data=tx_dict["data"],
+                        gas_estimate=tx_dict.get("gas_estimate", 0),
+                        description=desc,
+                        tx_type=tx_type,
+                    )
+                )
+
+            return CompilationResult(
+                status=CompilationStatus.SUCCESS,
+                intent_id=intent.intent_id,
+                action_bundle=action_bundle,
+                transactions=transactions,
+                total_gas_estimate=total_gas,
+            )
+
+        except ValueError as e:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=str(e),
+                intent_id=intent.intent_id,
+            )
+        except Exception as e:
+            logger.exception("Failed to compile Uniswap V4 SWAP intent: %s", e)
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=str(e),
+                intent_id=intent.intent_id,
+            )
 
     def _compile_lp_open_curve(self, intent: LPOpenIntent) -> CompilationResult:
         """Compile LP_OPEN intent for Curve Finance.

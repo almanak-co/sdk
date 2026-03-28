@@ -198,13 +198,13 @@ class TestV4Selectors:
 
 
 # =============================================================================
-# Compiler quarantine
+# Compiler V4 routing (quarantine removed — V4 now routes via UniversalRouter)
 # =============================================================================
 
 
-class TestCompilerQuarantine:
-    def test_v4_swap_is_blocked(self):
-        """V4 swaps should be blocked with a clear error referencing VIB-1965."""
+class TestCompilerV4Unblocked:
+    def test_v4_swap_compiles_via_universal_router(self):
+        """V4 swaps compile successfully via the canonical UniversalRouter."""
         from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
 
         compiler = IntentCompiler(
@@ -221,6 +221,7 @@ class TestCompilerQuarantine:
             protocol="uniswap_v4",
         )
         result = compiler.compile(intent)
-        assert result.status == CompilationStatus.FAILED
-        assert "VIB-1965" in (result.error or "")
-        assert "UniversalRouter" in (result.error or "")
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle is not None
+        assert result.action_bundle.metadata["protocol_version"] == "v4"
+        assert result.action_bundle.metadata["router"] == "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af"
