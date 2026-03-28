@@ -18,8 +18,9 @@ KEY V4 HOOK CONCEPTS:
 - Empty hookData on hooked pools causes on-chain revert — must encode properly
 - Pools are identified by PoolKey = (currency0, currency1, fee, tickSpacing, hooks)
 
-NOTE: This is a forward-looking design document. It will compile and run
-once V4 Phases 0-3 are merged. Created to define the target hooks API surface.
+SCOPE: Hooks support is reference-only. The V4 hooks ecosystem is still
+maturing and most mainnet V4 pools use the zero-address (no hooks). This
+strategy demonstrates the hooks API surface for when hooked pools are common.
 
 ===============================================================================
 """
@@ -105,9 +106,12 @@ class UniswapV4HooksConfig:
     default_chain="ethereum",
 )
 class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
-    """Hook-aware Uniswap V4 LP strategy.
+    """Hook-aware Uniswap V4 LP strategy (reference implementation).
 
-    Demonstrates the full hooks API:
+    Demonstrates the hooks API surface for future use when V4 hooked pools
+    are common on mainnet. Currently uses zero-address (no hooks) by default.
+
+    Hooks API demonstrated:
     - Discover hook capabilities via HookFlags.from_address()
     - Select appropriate HookDataEncoder based on capabilities
     - Pass encoded hookData via protocol_params={"hook_data": ...}

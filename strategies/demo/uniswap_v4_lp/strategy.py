@@ -19,8 +19,8 @@ KEY V4 DIFFERENCES FROM V3:
 - Native ETH support (no mandatory WETH wrapping for pools)
 - Uses protocol="uniswap_v4" in all intents
 
-NOTE: This is a forward-looking design document. It will compile and run
-once V4 Phases 0-3 are merged. Created to define the target LP API surface.
+V4 compilation and execution are functional on all supported chains.
+LP positions use the PositionManager's flash accounting model.
 
 ===============================================================================
 """
