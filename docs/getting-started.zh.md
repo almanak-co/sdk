@@ -200,6 +200,8 @@ class MyStrategy(IntentStrategy):
 | `PredictionRedeemIntent` | 赎回预测市场收益 |
 | `VaultDepositIntent` | 存入金库 |
 | `VaultRedeemIntent` | 从金库赎回 |
+| `WrapNativeIntent` | 包装原生代币（例如 ETH 转 WETH） |
+| `UnwrapNativeIntent` | 解包原生代币（例如 WETH 转 ETH） |
 | `BridgeIntent` | 跨链桥接代币 |
 | `EnsureBalanceIntent` | 元意图，解析为 `BridgeIntent` 或 `HoldIntent`，确保目标链上的最低代币余额 |
 

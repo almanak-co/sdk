@@ -62,6 +62,7 @@ message RegisterChainsResponse {
   repeated string initialized_chains = 2;  // Chains successfully initialized
   string wallet_address = 3;               // Wallet address derived from gateway private key
   string error = 4;
+  map<string, string> chain_wallets = 5;   // Per-chain wallet addresses resolved from wallet registry
 }
 ```
 
@@ -178,16 +179,20 @@ rpc LoadState(LoadStateRequest) returns (StateData)
 ```protobuf
 message LoadStateRequest {
   string strategy_id = 1;
-  string key = 2;          // Optional key within state
 }
 ```
 
 **Response:**
 ```protobuf
 message StateData {
-  bytes data = 1;          // Serialized state data
+  string strategy_id = 1;
   int64 version = 2;
-  int64 timestamp = 3;
+  bytes data = 3;              // JSON-serialized state
+  int32 schema_version = 4;
+  string checksum = 5;         // SHA-256 hex
+  int64 created_at = 6;
+  int64 updated_at = 7;
+  string loaded_from = 8;      // "hot", "warm"
 }
 ```
 
@@ -203,8 +208,19 @@ rpc SaveState(SaveStateRequest) returns (SaveStateResponse)
 ```protobuf
 message SaveStateRequest {
   string strategy_id = 1;
-  bytes data = 2;          // Max 1MB
-  string key = 3;          // Optional key
+  int64 expected_version = 2;  // For optimistic locking (0 = new state)
+  bytes data = 3;              // JSON-serialized state
+  int32 schema_version = 4;
+}
+```
+
+**Response:**
+```protobuf
+message SaveStateResponse {
+  bool success = 1;
+  int64 new_version = 2;
+  string error = 3;
+  string checksum = 4;
 }
 ```
 
@@ -220,47 +236,39 @@ rpc DeleteState(DeleteStateRequest) returns (DeleteStateResponse)
 
 ### CompileIntent
 
-Compile a strategy intent into executable transactions.
+Compile a strategy intent into an action bundle.
 
 ```protobuf
-rpc CompileIntent(IntentRequest) returns (IntentResponse)
+rpc CompileIntent(CompileIntentRequest) returns (CompilationResult)
 ```
 
 **Request:**
 ```protobuf
-message IntentRequest {
-  string chain = 1;
-  string wallet_address = 2;
-  string intent_json = 3;   // Serialized intent
-}
-```
-
-### Execute
-
-Execute a compiled intent.
-
-```protobuf
-rpc Execute(ExecuteRequest) returns (ExecutionResult)
-```
-
-**Request:**
-```protobuf
-message ExecuteRequest {
-  string chain = 1;
-  string wallet_address = 2;
-  string transaction_json = 3;
-  bool simulate = 4;        // Dry run without execution
+message CompileIntentRequest {
+  string intent_type = 1;          // Case-insensitive with aliases: "swap", "lp_open", etc.
+  bytes intent_data = 2;           // JSON-serialized intent
+  string chain = 3;
+  string wallet_address = 4;
+  map<string, string> price_map = 5;  // Token symbol -> USD price string (empty = use placeholder prices)
 }
 ```
 
 **Response:**
 ```protobuf
-message ExecutionResult {
+message CompilationResult {
   bool success = 1;
-  string tx_hash = 2;
+  bytes action_bundle = 2;     // JSON-serialized ActionBundle
   string error = 3;
-  string receipt_json = 4;
+  string error_code = 4;       // Structured error code
 }
+```
+
+### Execute
+
+Execute an action bundle (sign, submit, confirm).
+
+```protobuf
+rpc Execute(ExecuteRequest) returns (ExecutionResult)
 ```
 
 ### GetTransactionStatus
@@ -268,7 +276,7 @@ message ExecutionResult {
 Get the status of a submitted transaction.
 
 ```protobuf
-rpc GetTransactionStatus(TxStatusRequest) returns (TxStatusResponse)
+rpc GetTransactionStatus(TxStatusRequest) returns (TxStatus)
 ```
 
 ## ObserveService
@@ -278,17 +286,7 @@ rpc GetTransactionStatus(TxStatusRequest) returns (TxStatusResponse)
 Send log entries to the platform.
 
 ```protobuf
-rpc Log(LogRequest) returns (LogResponse)
-```
-
-**Request:**
-```protobuf
-message LogRequest {
-  string level = 1;        // debug, info, warning, error
-  string message = 2;
-  string strategy_id = 3;
-  map<string, string> metadata = 4;
-}
+rpc Log(LogEntry) returns (Empty)
 ```
 
 ### Alert

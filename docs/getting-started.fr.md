@@ -200,6 +200,8 @@ class MyStrategy(IntentStrategy):
 | `PredictionRedeemIntent` | Racheter les gains de marché prédictif |
 | `VaultDepositIntent` | Déposer dans un coffre |
 | `VaultRedeemIntent` | Racheter depuis un coffre |
+| `WrapNativeIntent` | Envelopper des tokens natifs (ex: ETH vers WETH) |
+| `UnwrapNativeIntent` | Désenvelopper des tokens natifs (ex: WETH vers ETH) |
 | `BridgeIntent` | Transférer des tokens entre chaînes |
 | `EnsureBalanceIntent` | Meta-intent qui se résout en `BridgeIntent` ou `HoldIntent` pour assurer un solde minimum de tokens sur la chaîne cible |
 
