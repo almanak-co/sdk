@@ -274,6 +274,7 @@ class FreshnessConfig:
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
+    from almanak.framework.strategies.intent_strategy import RSIData
 
     from .defi.gas import GasOracle, GasPrice
     from .defi.pools import PoolReserves, UniswapV3PoolReader
@@ -712,7 +713,7 @@ class MarketSnapshot:
         # Internal caches to avoid redundant async calls within same snapshot
         self._price_cache: dict[str, Decimal] = {}
         self._balance_cache: dict[str, Decimal] = {}
-        self._rsi_cache: dict[str, float] = {}
+        self._rsi_cache: dict[str, Any] = {}  # float (legacy) or RSIData
         self._sma_cache: dict[str, float] = {}
         self._ema_cache: dict[str, float] = {}
         self._bollinger_cache: dict[str, BollingerBandsResult] = {}
@@ -1012,11 +1013,12 @@ class MarketSnapshot:
         except Exception as e:
             raise BalanceUnavailableError(token, f"Unexpected error: {e}") from e
 
-    def rsi(self, token: str, period: int = 14, timeframe: str = "4h") -> float:
+    def rsi(self, token: str, period: int = 14, timeframe: str = "4h") -> "RSIData":
         """Get the RSI (Relative Strength Index) for a token.
 
         Calculates RSI using the configured RSI calculator with
-        historical price data.
+        historical price data. Returns RSIData for compatibility with
+        strategies that use .value attribute.
 
         Args:
             token: Token symbol (e.g., "WETH", "ETH")
@@ -1026,7 +1028,7 @@ class MarketSnapshot:
                 Note: 1m/5m/15m may return 30-min candles (CoinGecko limitation)
 
         Returns:
-            RSI value from 0 to 100 as a float
+            RSIData object with .value (Decimal, 0-100), .period, .signal, .is_oversold, .is_overbought
 
         Raises:
             RSIUnavailableError: If RSI cannot be calculated
@@ -1047,19 +1049,25 @@ class MarketSnapshot:
                 # Short-term oversold, long-term not overbought
                 return SwapIntent(...)
         """
+        from almanak.framework.strategies.intent_strategy import RSIData
+
         cache_key = f"{token}:{period}:{timeframe}"
 
         # Return cached value if available
         if cache_key in self._rsi_cache:
-            return self._rsi_cache[cache_key]
+            cached = self._rsi_cache[cache_key]
+            if isinstance(cached, RSIData):
+                return cached
+            return RSIData(value=Decimal(str(cached)), period=period)
 
         if self._rsi_calculator is None:
             raise ValueError("No RSI calculator configured for MarketSnapshot")
 
         try:
             rsi_value = self._run_async(self._rsi_calculator.calculate_rsi(token, period, timeframe))
-            self._rsi_cache[cache_key] = rsi_value
-            return rsi_value
+            rsi_data = RSIData(value=Decimal(str(rsi_value)), period=period)
+            self._rsi_cache[cache_key] = rsi_data
+            return rsi_data
         except InsufficientDataError as e:
             raise RSIUnavailableError(
                 token, f"Insufficient historical data: need {e.required}, have {e.available}"

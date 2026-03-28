@@ -7,6 +7,7 @@ This is especially useful for chains without Chainlink feeds (e.g., Mantle)
 where CoinGecko free tier rate-limits aggressively.
 """
 
+import asyncio
 import logging
 import time
 from datetime import UTC, datetime
@@ -71,18 +72,30 @@ class BinancePriceSource(BasePriceSource):
         self._request_timeout = request_timeout
         self._cache: dict[str, tuple[PriceResult, float]] = {}
         self._session: aiohttp.ClientSession | None = None
+        self._session_loop: asyncio.AbstractEventLoop | None = None
         logger.info("Initialized BinancePriceSource (cache_ttl=%ds)", cache_ttl)
 
     async def _get_session(self) -> aiohttp.ClientSession:
+        current_loop = asyncio.get_running_loop()
+        if self._session is not None and not self._session.closed:
+            if self._session_loop is not None and self._session_loop is not current_loop:
+                try:
+                    await self._session.close()
+                except Exception:
+                    pass
+                self._session = None
+                self._session_loop = None
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=self._request_timeout)
             self._session = aiohttp.ClientSession(timeout=timeout)
+            self._session_loop = current_loop
         return self._session
 
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+            self._session_loop = None
 
     async def get_price(self, token: str, quote: str = "USD", *, resolved_token: object | None = None) -> PriceResult:
         quote_upper = quote.upper()

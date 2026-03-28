@@ -322,6 +322,7 @@ class CoinGeckoPriceSource(BasePriceSource):
 
         # HTTP session (created on first request)
         self._session: aiohttp.ClientSession | None = None
+        self._session_loop: asyncio.AbstractEventLoop | None = None
 
         logger.info(
             "Initialized CoinGeckoPriceSource",
@@ -333,10 +334,20 @@ class CoinGeckoPriceSource(BasePriceSource):
         )
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create HTTP session."""
+        """Get or create HTTP session, recreating if event loop changed."""
+        current_loop = asyncio.get_running_loop()
+        if self._session is not None and not self._session.closed:
+            if self._session_loop is not None and self._session_loop is not current_loop:
+                try:
+                    await self._session.close()
+                except Exception:
+                    pass
+                self._session = None
+                self._session_loop = None
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=self._request_timeout)
             self._session = aiohttp.ClientSession(timeout=timeout)
+            self._session_loop = current_loop
         return self._session
 
     async def close(self) -> None:
@@ -344,6 +355,7 @@ class CoinGeckoPriceSource(BasePriceSource):
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+            self._session_loop = None
 
     def _get_cache_key(self, token: str, quote: str) -> str:
         """Generate cache key for token/quote pair."""

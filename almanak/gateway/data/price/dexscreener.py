@@ -10,6 +10,7 @@ No API key required. Rate limit: 300 requests/minute.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -126,13 +127,24 @@ class DexScreenerPriceSource(BasePriceSource):
         self._stale_confidence = stale_confidence
         self._cache: dict[str, _CacheEntry] = {}
         self._session: aiohttp.ClientSession | None = None
+        self._session_loop: asyncio.AbstractEventLoop | None = None
         self._token_resolver = token_resolver or get_token_resolver()
 
     async def _get_session(self) -> aiohttp.ClientSession:
+        current_loop = asyncio.get_running_loop()
+        if self._session is not None and not self._session.closed:
+            if self._session_loop is not None and self._session_loop is not current_loop:
+                try:
+                    await self._session.close()
+                except Exception:
+                    pass
+                self._session = None
+                self._session_loop = None
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=self._request_timeout),
             )
+            self._session_loop = current_loop
         return self._session
 
     async def close(self) -> None:
@@ -140,6 +152,7 @@ class DexScreenerPriceSource(BasePriceSource):
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+            self._session_loop = None
 
     @property
     def source_name(self) -> str:

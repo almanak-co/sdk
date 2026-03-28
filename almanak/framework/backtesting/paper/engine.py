@@ -107,7 +107,7 @@ from almanak.framework.backtesting.pnl.providers.chainlink import (
 from almanak.framework.backtesting.pnl.receipt_utils import (
     extract_token_flows as extract_receipt_token_flows,
 )
-from almanak.framework.data.interfaces import AllDataSourcesFailed
+from almanak.framework.data.interfaces import AllDataSourcesFailed, BasePriceSource
 from almanak.framework.data.market_snapshot import MarketSnapshot
 from almanak.framework.data.price.dex_twap import DEXTWAPDataProvider, LowLiquidityWarning
 from almanak.framework.execution.orchestrator import (
@@ -117,6 +117,8 @@ from almanak.framework.execution.orchestrator import (
 )
 from almanak.framework.models.reproduction_bundle import ActionBundle, TransactionReceipt
 from almanak.gateway.data.price import CoinGeckoPriceSource, PriceAggregator
+from almanak.gateway.data.price.binance import BinancePriceSource
+from almanak.gateway.data.price.dexscreener import DexScreenerPriceSource
 
 logger = logging.getLogger(__name__)
 
@@ -1627,13 +1629,16 @@ class PaperTrader:
             #   - rsi() defaults to "4h"
             #   - sma/ema/macd/bollinger_bands/atr default to "1h"
             if self._rsi_calculator:
+                from almanak.framework.strategies.intent_strategy import RSIData
+
                 for token in list(token_prices.keys()):
                     for period in [14]:
                         for timeframe in ["1h", "4h", "1d"]:
                             cache_key = f"{token}:{period}:{timeframe}"
                             try:
                                 rsi_val = await self._rsi_calculator.calculate_rsi(token, period, timeframe)
-                                snapshot._rsi_cache[cache_key] = rsi_val
+                                rsi_data = RSIData(value=Decimal(str(rsi_val)), period=period)
+                                snapshot._rsi_cache[cache_key] = rsi_data
                                 logger.debug(f"Pre-computed RSI({period},{timeframe}) for {token}: {rsi_val:.2f}")
                             except Exception as e:
                                 logger.warning(f"RSI pre-compute failed for {token} ({timeframe}): {e}")
@@ -2604,23 +2609,50 @@ class PaperTrader:
                 price_source,
             )
 
-        # Initialize CoinGecko provider (always available as fallback)
+        # Initialize multi-source price aggregator (matching production gateway)
+        # Paper trading previously only used CoinGecko, which caused "Event loop
+        # is closed" failures after the first tick. Adding Binance + DexScreener
+        # provides the same resilience as the production MarketService.
+        # Initialize each source independently so partial failure doesn't kill all
+        sources: list[BasePriceSource] = []
         try:
             coingecko_source = CoinGeckoPriceSource()
-            self._price_aggregator = PriceAggregator(sources=[coingecko_source])
-            logger.info(
-                "[%s] Initialized CoinGecko price provider",
-                self._backtest_id,
-            )
+            sources.append(coingecko_source)
         except Exception as e:
-            # Use error handler for consistent classification
-            if self._error_handler:
-                self._error_handler.handle_error(e, context="init_coingecko_provider")
-            logger.warning(
-                "[%s] Failed to initialize CoinGecko provider: %s",
-                self._backtest_id,
-                str(e),
+            logger.warning("[%s] Failed to initialize CoinGecko provider: %s", self._backtest_id, e)
+
+        try:
+            binance_source = BinancePriceSource(cache_ttl=30, request_timeout=5.0)
+            sources.append(binance_source)
+        except Exception as e:
+            logger.warning("[%s] Failed to initialize Binance provider: %s", self._backtest_id, e)
+
+        try:
+            dexscreener_source = DexScreenerPriceSource(
+                chain_id=self.config.chain.lower(),
+                cache_ttl=30,
+                token_resolver=_get_resolver(),
             )
+            sources.append(dexscreener_source)
+        except Exception as e:
+            logger.warning("[%s] Failed to initialize DexScreener provider: %s", self._backtest_id, e)
+
+        if sources:
+            self._price_aggregator = PriceAggregator(sources=sources)
+            source_names = [type(s).__name__ for s in sources]
+            logger.info(
+                "[%s] Initialized price provider with %d sources: %s",
+                self._backtest_id,
+                len(sources),
+                ", ".join(source_names),
+            )
+        else:
+            if self._error_handler:
+                self._error_handler.handle_error(
+                    RuntimeError("All price source initializations failed"),
+                    context="init_price_providers",
+                )
+            logger.warning("[%s] Failed to initialize any price provider", self._backtest_id)
             self._price_aggregator = None
 
         # Initialize Chainlink provider if needed
