@@ -33,10 +33,10 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.contracts import UNISWAP_V4
+from almanak.framework.connectors.uniswap_v4.hooks import HookFlags
 from almanak.framework.connectors.uniswap_v4.sdk import (
     NATIVE_CURRENCY,
     PERMIT2_ADDRESS,
-    HookFlags,
     LPDecreaseParams,
     LPMintParams,
     SwapTransaction,
@@ -453,8 +453,8 @@ class UniswapV4Adapter:
 
             # Hook warning: pool has hooks but hookData is empty
             if hooks != NATIVE_CURRENCY:
-                hook_flags = HookFlags(hooks)
-                if hook_flags.has_liquidity_hooks and not hook_data:
+                hook_flags = HookFlags.from_address(hooks)
+                if hook_flags.has_any_liquidity_hooks and not hook_data:
                     warnings.append(
                         f"Pool uses hooks ({hooks[:10]}...) with liquidity callbacks "
                         f"({', '.join(hook_flags.active_flags)}), but hookData is empty. "

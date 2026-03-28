@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.framework.connectors.uniswap_v4.hooks import HookFlags
 from almanak.framework.connectors.uniswap_v4.sdk import (
     MODIFY_LIQUIDITIES_SELECTOR,
     NATIVE_CURRENCY,
@@ -20,7 +21,6 @@ from almanak.framework.connectors.uniswap_v4.sdk import (
     PM_TAKE_PAIR,
     POSITION_MANAGER_ADDRESSES,
     UNISWAP_V4_GAS_ESTIMATES,
-    HookFlags,
     LPDecreaseParams,
     LPMintParams,
     PoolKey,
@@ -43,37 +43,37 @@ class TestHookFlags:
     """Test HookFlags utility for decoding hook address capability bitmask."""
 
     def test_no_hooks_zero_address(self):
-        flags = HookFlags(NATIVE_CURRENCY)
-        assert not flags.has_any_permissions
+        flags = HookFlags.from_address(NATIVE_CURRENCY)
+        assert flags.is_empty
         assert flags.active_flags == []
 
     def test_before_swap_flag(self):
         # Bit 7 = 0x80
         addr = "0x0000000000000000000000000000000000000080"
-        flags = HookFlags(addr)
+        flags = HookFlags.from_address(addr)
         assert flags.before_swap
         assert not flags.after_swap
-        assert flags.has_any_permissions
+        assert not flags.is_empty
         assert "before_swap" in flags.active_flags
 
     def test_after_swap_flag(self):
         # Bit 6 = 0x40
         addr = "0x0000000000000000000000000000000000000040"
-        flags = HookFlags(addr)
+        flags = HookFlags.from_address(addr)
         assert flags.after_swap
         assert not flags.before_swap
 
     def test_liquidity_hooks(self):
         # Bit 11 (before_add_liquidity) = 0x800
         addr = "0x0000000000000000000000000000000000000800"
-        flags = HookFlags(addr)
+        flags = HookFlags.from_address(addr)
         assert flags.before_add_liquidity
-        assert flags.has_liquidity_hooks
+        assert flags.has_any_liquidity_hooks
 
     def test_multiple_flags(self):
         # Bits 7 + 6 = 0xC0
         addr = "0x00000000000000000000000000000000000000C0"
-        flags = HookFlags(addr)
+        flags = HookFlags.from_address(addr)
         assert flags.before_swap
         assert flags.after_swap
         assert "before_swap" in flags.active_flags
@@ -82,7 +82,7 @@ class TestHookFlags:
     def test_all_flags_set(self):
         # All 14 bits = 0x3FFF
         addr = "0x0000000000000000000000000000000000003FFF"
-        flags = HookFlags(addr)
+        flags = HookFlags.from_address(addr)
         assert flags.before_initialize
         assert flags.after_initialize
         assert flags.before_add_liquidity
@@ -93,13 +93,13 @@ class TestHookFlags:
         assert flags.after_swap
         assert flags.before_donate
         assert flags.after_donate
-        assert flags.has_any_permissions
-        assert flags.has_liquidity_hooks
+        assert not flags.is_empty
+        assert flags.has_any_liquidity_hooks
 
     def test_realistic_hook_address(self):
         # A realistic hook address with before_swap + after_swap (bits 7+6 = 0xC0)
         addr = "0x1234567890abcdef1234567890abcdef000000C0"
-        flags = HookFlags(addr)
+        flags = HookFlags.from_address(addr)
         assert flags.before_swap
         assert flags.after_swap
         assert not flags.before_add_liquidity

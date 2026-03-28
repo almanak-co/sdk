@@ -139,126 +139,6 @@ POSITION_MANAGER_ADDRESSES: dict[str, str] = {chain: addrs["position_manager"] f
 
 
 # =============================================================================
-# HookFlags — decode the last 14 bits of a hook address as capability bitmask
-# =============================================================================
-
-
-class HookFlags:
-    """Decode Uniswap V4 hook capabilities from a hook contract address.
-
-    In V4, the last 14 bits of the hook address encode which callbacks
-    are active. This lets the PoolManager validate hook permissions
-    without any external calls at deployment time.
-
-    Usage:
-        flags = HookFlags("0x...hookAddress")
-        if flags.before_swap:
-            print("Hook has beforeSwap callback")
-    """
-
-    # Bit positions (from LSB)
-    BEFORE_INITIALIZE = 13
-    AFTER_INITIALIZE = 12
-    BEFORE_ADD_LIQUIDITY = 11
-    AFTER_ADD_LIQUIDITY = 10
-    BEFORE_REMOVE_LIQUIDITY = 9
-    AFTER_REMOVE_LIQUIDITY = 8
-    BEFORE_SWAP = 7
-    AFTER_SWAP = 6
-    BEFORE_DONATE = 5
-    AFTER_DONATE = 4
-    BEFORE_SWAP_RETURNS_DELTA = 3
-    AFTER_SWAP_RETURNS_DELTA = 2
-    AFTER_ADD_LIQUIDITY_RETURNS_DELTA = 1
-    AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA = 0
-
-    def __init__(self, hook_address: str) -> None:
-        self.address = hook_address.lower()
-        addr_int = int(self.address, 16)
-        self._flags = addr_int & 0x3FFF  # last 14 bits
-
-    def _has(self, bit: int) -> bool:
-        return bool(self._flags & (1 << bit))
-
-    @property
-    def before_initialize(self) -> bool:
-        return self._has(self.BEFORE_INITIALIZE)
-
-    @property
-    def after_initialize(self) -> bool:
-        return self._has(self.AFTER_INITIALIZE)
-
-    @property
-    def before_add_liquidity(self) -> bool:
-        return self._has(self.BEFORE_ADD_LIQUIDITY)
-
-    @property
-    def after_add_liquidity(self) -> bool:
-        return self._has(self.AFTER_ADD_LIQUIDITY)
-
-    @property
-    def before_remove_liquidity(self) -> bool:
-        return self._has(self.BEFORE_REMOVE_LIQUIDITY)
-
-    @property
-    def after_remove_liquidity(self) -> bool:
-        return self._has(self.AFTER_REMOVE_LIQUIDITY)
-
-    @property
-    def before_swap(self) -> bool:
-        return self._has(self.BEFORE_SWAP)
-
-    @property
-    def after_swap(self) -> bool:
-        return self._has(self.AFTER_SWAP)
-
-    @property
-    def before_donate(self) -> bool:
-        return self._has(self.BEFORE_DONATE)
-
-    @property
-    def after_donate(self) -> bool:
-        return self._has(self.AFTER_DONATE)
-
-    @property
-    def has_any_permissions(self) -> bool:
-        return self._flags != 0
-
-    @property
-    def has_liquidity_hooks(self) -> bool:
-        """True if hook has any add/remove liquidity callbacks."""
-        return (
-            self.before_add_liquidity
-            or self.after_add_liquidity
-            or self.before_remove_liquidity
-            or self.after_remove_liquidity
-        )
-
-    # Explicit mapping from bit position to flag name for active_flags enumeration.
-    _FLAG_NAMES: dict[int, str] = {
-        BEFORE_INITIALIZE: "before_initialize",
-        AFTER_INITIALIZE: "after_initialize",
-        BEFORE_ADD_LIQUIDITY: "before_add_liquidity",
-        AFTER_ADD_LIQUIDITY: "after_add_liquidity",
-        BEFORE_REMOVE_LIQUIDITY: "before_remove_liquidity",
-        AFTER_REMOVE_LIQUIDITY: "after_remove_liquidity",
-        BEFORE_SWAP: "before_swap",
-        AFTER_SWAP: "after_swap",
-        BEFORE_DONATE: "before_donate",
-        AFTER_DONATE: "after_donate",
-        BEFORE_SWAP_RETURNS_DELTA: "before_swap_returns_delta",
-        AFTER_SWAP_RETURNS_DELTA: "after_swap_returns_delta",
-        AFTER_ADD_LIQUIDITY_RETURNS_DELTA: "after_add_liquidity_returns_delta",
-        AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA: "after_remove_liquidity_returns_delta",
-    }
-
-    @property
-    def active_flags(self) -> list[str]:
-        """Return list of active hook capability names."""
-        return sorted(name for bit, name in self._FLAG_NAMES.items() if self._has(bit))
-
-
-# =============================================================================
 # Data Models
 # =============================================================================
 
@@ -1150,7 +1030,6 @@ def _encode_execute(commands: bytes, inputs: list[str], deadline: int) -> str:
 
 __all__ = [
     "FEE_TIERS",
-    "HookFlags",
     "LPDecreaseParams",
     "LPMintParams",
     "MODIFY_LIQUIDITIES_SELECTOR",
