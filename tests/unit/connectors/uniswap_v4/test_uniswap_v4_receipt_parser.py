@@ -240,3 +240,173 @@ class TestExtractSwapAmounts:
         parser = UniswapV4ReceiptParser(chain="arbitrum")
         amounts = parser.extract_swap_amounts({"logs": []})
         assert amounts is None
+
+    def test_extract_with_transfer_events_pool_manager_match(self):
+        """Transfer events to/from PoolManager enable token identification."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        pool_mgr = "0x000000000004444c5dc75cb358380d2e3de08a90"
+
+        swap_log = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+        # USDC transfer TO PoolManager (input)
+        transfer_in = _build_transfer_log(
+            token="0xaf88d065e77c8cc2239327c5edb3a432268e5831",  # USDC
+            from_addr="0x1111111111111111111111111111111111111111",
+            to_addr=pool_mgr,
+            amount=1000 * 10**6,
+        )
+        # WETH transfer FROM PoolManager (output)
+        transfer_out = _build_transfer_log(
+            token="0x82af49447d8a07e3bd95bd0d56f35241523fbab1",  # WETH
+            from_addr=pool_mgr,
+            to_addr="0x1111111111111111111111111111111111111111",
+            amount=5 * 10**17,
+        )
+
+        receipt = {"logs": [swap_log, transfer_in, transfer_out]}
+        amounts = parser.extract_swap_amounts(receipt)
+
+        assert amounts is not None
+        assert amounts.amount_in == 1000 * 10**6
+        assert amounts.amount_out == 5 * 10**17
+        assert amounts.token_in == "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        assert amounts.token_out == "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+
+    def test_extract_with_transfer_events_amount_fallback(self):
+        """When Transfers go via UniversalRouter (not directly to PoolManager),
+        fall back to matching by amount."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        router = "0x66a9893cc07d91d95644aedd05d03f95e1dba8af"
+
+        swap_log = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+        # USDC transfer to UniversalRouter (not PoolManager) — amount matches swap input
+        transfer_in = _build_transfer_log(
+            token="0xaf88d065e77c8cc2239327c5edb3a432268e5831",  # USDC
+            from_addr="0x1111111111111111111111111111111111111111",
+            to_addr=router,
+            amount=1000 * 10**6,
+        )
+        # WETH transfer from UniversalRouter — amount matches swap output
+        transfer_out = _build_transfer_log(
+            token="0x82af49447d8a07e3bd95bd0d56f35241523fbab1",  # WETH
+            from_addr=router,
+            to_addr="0x1111111111111111111111111111111111111111",
+            amount=5 * 10**17,
+        )
+
+        receipt = {"logs": [swap_log, transfer_in, transfer_out]}
+        amounts = parser.extract_swap_amounts(receipt)
+
+        assert amounts is not None
+        assert amounts.amount_in == 1000 * 10**6
+        assert amounts.amount_out == 5 * 10**17
+        # Amount-based fallback should identify tokens
+        assert amounts.token_in == "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        assert amounts.token_out == "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+
+    def test_extract_reverse_direction(self):
+        """SELL direction: token1 is input, token0 is output."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+
+        swap_log = _build_swap_log(
+            amount0=-(1000 * 10**6),  # USDC out (negative)
+            amount1=5 * 10**17,  # WETH in (positive)
+        )
+        receipt = {"logs": [swap_log]}
+
+        amounts = parser.extract_swap_amounts(receipt)
+
+        assert amounts is not None
+        assert amounts.amount_in == 5 * 10**17
+        assert amounts.amount_out == 1000 * 10**6
+
+    def test_extract_amount_fallback_equal_amounts(self):
+        """When amount_in == amount_out (e.g. stablecoin-to-stablecoin swap),
+        both tokens must still be identified by using different transfer events."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        router = "0x66a9893cc07d91d95644aedd05d03f95e1dba8af"
+        amount = 1000 * 10**6  # Same raw amount for both USDC and USDT (6 decimals)
+
+        swap_log = _build_swap_log(amount0=amount, amount1=-amount)
+        # USDC transfer (input) — same amount
+        transfer_in = _build_transfer_log(
+            token="0xaf88d065e77c8cc2239327c5edb3a432268e5831",  # USDC
+            from_addr="0x1111111111111111111111111111111111111111",
+            to_addr=router,
+            amount=amount,
+        )
+        # USDT transfer (output) — same amount, different token
+        transfer_out = _build_transfer_log(
+            token="0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",  # USDT
+            from_addr=router,
+            to_addr="0x1111111111111111111111111111111111111111",
+            amount=amount,
+        )
+
+        receipt = {"logs": [swap_log, transfer_in, transfer_out]}
+        amounts = parser.extract_swap_amounts(receipt)
+
+        assert amounts is not None
+        assert amounts.amount_in == amount
+        assert amounts.amount_out == amount
+        # Both tokens must be identified despite equal amounts
+        assert amounts.token_in == "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        assert amounts.token_out == "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"
+
+    def test_extract_amount_fallback_duplicate_transfers(self):
+        """With multiple transfers of the same amount (Permit2 relay chain),
+        the fallback picks distinct tokens for in and out."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        router = "0x66a9893cc07d91d95644aedd05d03f95e1dba8af"
+        permit2 = "0x000000000022d473030f116ddee9f6b43ac78ba3"
+
+        swap_log = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+        # Permit2 relay: user -> Permit2 (same USDC amount as swap input)
+        relay = _build_transfer_log(
+            token="0xaf88d065e77c8cc2239327c5edb3a432268e5831",  # USDC
+            from_addr="0x1111111111111111111111111111111111111111",
+            to_addr=permit2,
+            amount=1000 * 10**6,
+        )
+        # Permit2 -> Router (same USDC amount)
+        relay2 = _build_transfer_log(
+            token="0xaf88d065e77c8cc2239327c5edb3a432268e5831",  # USDC
+            from_addr=permit2,
+            to_addr=router,
+            amount=1000 * 10**6,
+        )
+        # WETH output from Router
+        transfer_out = _build_transfer_log(
+            token="0x82af49447d8a07e3bd95bd0d56f35241523fbab1",  # WETH
+            from_addr=router,
+            to_addr="0x1111111111111111111111111111111111111111",
+            amount=5 * 10**17,
+        )
+
+        receipt = {"logs": [swap_log, relay, relay2, transfer_out]}
+        amounts = parser.extract_swap_amounts(receipt)
+
+        assert amounts is not None
+        # First USDC transfer matched for token_in, WETH for token_out
+        assert amounts.token_in == "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        assert amounts.token_out == "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+
+    def test_extract_single_transfer_event(self):
+        """When only one Transfer event exists, only one side gets identified."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        router = "0x66a9893cc07d91d95644aedd05d03f95e1dba8af"
+
+        swap_log = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+        # Only one transfer — matches input amount
+        single_transfer = _build_transfer_log(
+            token="0xaf88d065e77c8cc2239327c5edb3a432268e5831",  # USDC
+            from_addr="0x1111111111111111111111111111111111111111",
+            to_addr=router,
+            amount=1000 * 10**6,
+        )
+
+        receipt = {"logs": [swap_log, single_transfer]}
+        amounts = parser.extract_swap_amounts(receipt)
+
+        assert amounts is not None
+        assert amounts.token_in == "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        assert amounts.token_out is None  # Only one Transfer, cannot identify output

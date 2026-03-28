@@ -519,6 +519,18 @@ class UniswapV4ReceiptParser:
             elif transfer.from_address.lower() == pool_manager:
                 token_out_addr = transfer.token
 
+        # Fallback: V4 flash accounting routes tokens through UniversalRouter/Permit2,
+        # so Transfers may not be directly to/from PoolManager. Match by amount instead.
+        # Skip transfers for tokens already identified to avoid mismatches when
+        # amount_in == amount_out (e.g. stablecoin-to-stablecoin swaps).
+        if (token_in_addr is None or token_out_addr is None) and transfer_events:
+            for transfer in transfer_events:
+                # Skip transfers for tokens already assigned to the other side
+                if token_in_addr is None and transfer.amount == amount_in and transfer.token != token_out_addr:
+                    token_in_addr = transfer.token
+                elif token_out_addr is None and transfer.amount == amount_out and transfer.token != token_in_addr:
+                    token_out_addr = transfer.token
+
         # Resolve decimals via token_resolver (lazy-load if not injected)
         resolver = self._token_resolver
         if resolver is None:
