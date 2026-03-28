@@ -1,0 +1,11 @@
+{
+    "pool": "WETH/USDC/3000",
+    "range_width_pct": 0.20,
+    "amount0": "0.01",
+    "amount1": "30",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

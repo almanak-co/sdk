@@ -1,0 +1,13 @@
+{
+    "pool": "WETH/USDC/3000",
+    "hook_address": "0x0000000000000000000000000000000000000000",
+    "range_width_pct": 0.30,
+    "amount0": "0.01",
+    "amount1": "30",
+    "fee_hint": null,
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}
