@@ -1696,7 +1696,7 @@ class StrategyRunner:
 
                 # Update state
                 if self.config.enable_state_persistence:
-                    await self._update_state(strategy_id, result)
+                    await self._update_state(strategy_id, result, strategy=strategy)
 
                 # Persist copy trading cursor state (if configured)
                 if activity_provider is not None and self.config.enable_state_persistence:
@@ -4413,6 +4413,7 @@ class StrategyRunner:
         self,
         strategy_id: str,
         result: IterationResult,
+        strategy: object | None = None,
     ) -> None:
         """Update persisted state after an iteration."""
         try:
@@ -4432,6 +4433,21 @@ class StrategyRunner:
                 )
                 expected_version = None  # No version check for new state
                 logger.debug(f"Creating initial state for {strategy_id}")
+
+            # Merge strategy's persistent state first (position_id, etc.)
+            # strategy.save_state() uses ensure_future (fire-and-forget) which
+            # races with this method. Merge here to avoid clobbering.
+            if hasattr(strategy, "get_persistent_state"):
+                try:
+                    strat_state = strategy.get_persistent_state()
+                    if strat_state:
+                        state.state.update(strat_state)
+                except Exception:
+                    logger.warning(
+                        "Failed to merge strategy persistent state for %s, position tracking data may be stale",
+                        strategy_id,
+                        exc_info=True,
+                    )
 
             # Update state with iteration info
             state.state["last_iteration"] = {
