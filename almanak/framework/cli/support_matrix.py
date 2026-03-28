@@ -76,12 +76,11 @@ def _build_matrix() -> dict:
         all_chains.add(chain)
         lending_protocols.setdefault("morpho_blue", set()).add(chain)
 
-    # Compound V3 — check connector existence
+    # Compound V3 — derive chains from adapter's COMET_ADDRESSES (single source of truth)
     try:
-        from almanak.framework.connectors.compound_v3 import CompoundV3Adapter  # noqa: F401
+        from almanak.framework.connectors.compound_v3 import COMPOUND_V3_COMET_ADDRESSES
 
-        # Compound V3 supports these chains (from adapter)
-        compound_chains = ["ethereum", "arbitrum", "base", "polygon"]
+        compound_chains = list(COMPOUND_V3_COMET_ADDRESSES.keys())
         lending_protocols.setdefault("compound_v3", set()).update(compound_chains)
         all_chains.update(compound_chains)
     except ImportError:

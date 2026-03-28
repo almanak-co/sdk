@@ -224,3 +224,24 @@ class TestCurveMatrixEntry:
         categories = {p["category"] for p in data["protocols"]}
         assert "swap" in categories, "Curve should have swap category"
         assert "lp" in categories, "Curve should have lp category"
+
+
+# =============================================================================
+# Compound V3 Matrix Entry Tests
+# =============================================================================
+
+
+class TestCompoundV3MatrixEntry:
+    """Tests for Compound V3 chains matching adapter's COMET_ADDRESSES."""
+
+    def test_compound_v3_chains_match_comet_addresses(self, matrix_data: dict) -> None:
+        """Compound V3 chains in matrix must match COMPOUND_V3_COMET_ADDRESSES keys."""
+        from almanak.framework.connectors.compound_v3 import COMPOUND_V3_COMET_ADDRESSES
+
+        expected_chains = set(COMPOUND_V3_COMET_ADDRESSES.keys())
+        compound_protos = [p for p in matrix_data["protocols"] if p["name"] == "compound_v3"]
+        assert len(compound_protos) == 1, "compound_v3 should appear in matrix"
+        actual_chains = set(compound_protos[0]["chains"])
+        assert actual_chains == expected_chains, (
+            f"Matrix has {actual_chains} but adapter has {expected_chains}"
+        )
