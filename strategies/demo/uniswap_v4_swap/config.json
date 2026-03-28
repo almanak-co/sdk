@@ -1,10 +1,11 @@
 {
-    "trade_size_usd": 5,
-    "max_slippage_bps": 100,
+    "trade_size_usd": 3,
+    "max_slippage_bps": 200,
     "base_token": "WETH",
     "quote_token": "USDC",
     "anvil_funding": {
         "ETH": 100,
+        "WETH": 1,
         "USDC": 10000
     }
 }

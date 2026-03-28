@@ -1,4 +1,4 @@
-"""Tests for V4 demo strategies — LP and hook-aware.
+"""Tests for V4 demo strategies — swap, LP, and hook-aware.
 
 Tests validate strategy configuration, intent creation, hook discovery
 integration, and teardown support. These strategies are forward-looking
@@ -235,3 +235,149 @@ class TestV4StrategyConfigs:
         d = config.to_dict()
         assert "hook_address" in d
         assert d["fee_hint"] is None
+
+
+# =============================================================================
+# V4 Swap Strategy Tests
+# =============================================================================
+
+
+class TestV4SwapStrategy:
+    """Test V4 swap demo strategy decide() logic and teardown."""
+
+    def _make_strategy(self, last_action="SELL"):
+        """Create a V4 swap strategy with mocked dependencies."""
+        from strategies.demo.uniswap_v4_swap.strategy import UniswapV4SwapStrategy
+
+        strategy = UniswapV4SwapStrategy.__new__(UniswapV4SwapStrategy)
+        strategy._chain = "ethereum"
+        strategy.trade_size_usd = Decimal("3")
+        strategy.max_slippage_bps = 200
+        strategy.base_token = "WETH"
+        strategy.quote_token = "USDC"
+        strategy._max_slippage = Decimal("0.02")
+        strategy.state = {"last_action": last_action}
+        return strategy
+
+    def _make_market(self, base_price=Decimal("3000"), quote_usd=Decimal("10000"), base_usd=Decimal("6000")):
+        """Create a mock MarketSnapshot."""
+        market = MagicMock()
+
+        def price_fn(token):
+            if token == "WETH":
+                return base_price
+            if token == "USDC":
+                return Decimal("1")
+            return None
+
+        def balance_fn(token):
+            bal = MagicMock()
+            if token == "USDC":
+                bal.balance = quote_usd
+                bal.balance_usd = quote_usd
+            elif token == "WETH":
+                bal.balance = base_usd / base_price if base_price > 0 else Decimal("0")
+                bal.balance_usd = base_usd
+            else:
+                bal.balance = Decimal("0")
+                bal.balance_usd = Decimal("0")
+            return bal
+
+        market.price = price_fn
+        market.balance = balance_fn
+        return market
+
+    def test_first_run_buys(self):
+        """First run (last_action=SELL) should BUY: USDC -> WETH."""
+        strategy = self._make_strategy(last_action="SELL")
+        market = self._make_market()
+        intent = strategy.decide(market)
+
+        assert intent.intent_type == IntentType.SWAP
+        assert intent.from_token == "USDC"
+        assert intent.to_token == "WETH"
+        assert intent.protocol == "uniswap_v4"
+        assert intent.amount_usd == Decimal("3")
+
+    def test_after_buy_sells(self):
+        """After BUY (last_action=BUY) should SELL: WETH -> USDC."""
+        strategy = self._make_strategy(last_action="BUY")
+        market = self._make_market()
+        intent = strategy.decide(market)
+
+        assert intent.intent_type == IntentType.SWAP
+        assert intent.from_token == "WETH"
+        assert intent.to_token == "USDC"
+        assert intent.protocol == "uniswap_v4"
+
+    def test_insufficient_balance_holds(self):
+        """Should HOLD when insufficient balance for the action."""
+        strategy = self._make_strategy(last_action="SELL")
+        market = self._make_market(quote_usd=Decimal("0.01"))
+        intent = strategy.decide(market)
+
+        assert intent.intent_type == IntentType.HOLD
+
+    def test_sell_computes_amount_from_price(self):
+        """SELL should compute base token amount from trade_size_usd / price."""
+        strategy = self._make_strategy(last_action="BUY")
+        market = self._make_market(base_price=Decimal("3000"))
+        intent = strategy.decide(market)
+
+        assert intent.amount == Decimal("3") / Decimal("3000")
+
+    def test_strategy_import(self):
+        """Strategy should be importable from the package."""
+        from strategies.demo.uniswap_v4_swap import UniswapV4SwapStrategy
+
+        assert UniswapV4SwapStrategy is not None
+
+    def test_insufficient_sell_balance_holds(self):
+        """Should HOLD when insufficient base balance for SELL."""
+        strategy = self._make_strategy(last_action="BUY")
+        market = self._make_market(base_usd=Decimal("0.01"))
+        intent = strategy.decide(market)
+
+        assert intent.intent_type == IntentType.HOLD
+
+    def test_swap_intent_uses_v4_protocol(self):
+        """All swap intents should use protocol='uniswap_v4'."""
+        strategy = self._make_strategy(last_action="SELL")
+        market = self._make_market()
+        buy_intent = strategy.decide(market)
+        assert buy_intent.protocol == "uniswap_v4"
+
+        strategy.state["last_action"] = "BUY"
+        sell_intent = strategy.decide(market)
+        assert sell_intent.protocol == "uniswap_v4"
+
+    def test_decide_does_not_mutate_state(self):
+        """decide() must NOT update state — only on_intent_executed() should."""
+        strategy = self._make_strategy(last_action="SELL")
+        market = self._make_market()
+        strategy.decide(market)
+        assert strategy.state["last_action"] == "SELL"
+
+        strategy.state["last_action"] = "BUY"
+        strategy.decide(market)
+        assert strategy.state["last_action"] == "BUY"
+
+    def test_on_intent_executed_updates_state_on_success(self):
+        """on_intent_executed() should update state only on success."""
+        strategy = self._make_strategy(last_action="SELL")
+        market = self._make_market()
+        intent = strategy.decide(market)
+
+        # Simulate successful execution
+        strategy.on_intent_executed(intent, success=True, result=None)
+        assert strategy.state["last_action"] == "BUY"
+
+    def test_on_intent_executed_no_update_on_failure(self):
+        """on_intent_executed() should NOT update state on failure."""
+        strategy = self._make_strategy(last_action="SELL")
+        market = self._make_market()
+        intent = strategy.decide(market)
+
+        # Simulate failed execution
+        strategy.on_intent_executed(intent, success=False, result=None)
+        assert strategy.state["last_action"] == "SELL"

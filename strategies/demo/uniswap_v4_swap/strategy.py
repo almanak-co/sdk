@@ -1,28 +1,35 @@
 """
 ===============================================================================
-Uniswap V4 Swap Strategy — BUY + SELL via UniversalRouter
+Uniswap V4 Swap Demo — BUY + SELL Lifecycle via UniversalRouter
 ===============================================================================
 
-Demonstrates Uniswap V4 token swaps using the UniversalRouter with Permit2
-approval flow. This is the simplest V4 strategy — pure swap lifecycle.
+Demonstrates the Uniswap V4 swap path end-to-end:
 
-WHAT THIS STRATEGY DOES:
-1. BUY: Swaps USDC -> WETH via Uniswap V4 UniversalRouter
-2. SELL: Swaps WETH -> USDC via Uniswap V4 UniversalRouter
-3. DONE: Holds after completing the full cycle
+1. First run: BUY — swap USDC -> WETH via V4 UniversalRouter (Permit2 flow)
+2. Second run: SELL — swap WETH -> USDC via V4 UniversalRouter
+3. Subsequent runs: alternate BUY/SELL
 
-KEY V4 SWAP DIFFERENCES FROM V3:
-- Routes through UniversalRouter (not SwapRouter)
-- Uses Permit2 for token approvals (ERC-20 approve -> Permit2 -> UniversalRouter)
-- V4_SWAP_EXACT_IN_SINGLE command (0x06) in UniversalRouter.execute()
-- Pool keys include hooks address (zero address for hookless pools)
+KEY V4 SWAP CONCEPTS:
+- V4 uses a singleton PoolManager (all pools in one contract)
+- Swaps route through the canonical UniversalRouter with Permit2 approvals
+- Pool identified by PoolKey = (currency0, currency1, fee, tickSpacing, hooks)
+- V4SwapExactInSingle command encoded in UniversalRouter.execute()
+- Receipt events: PoolManager emits Swap(poolId, sender, amount0, amount1, ...)
+
+USAGE:
+    # Run on Anvil fork (auto-starts Anvil + gateway)
+    almanak strat run -d strategies/demo/uniswap_v4_swap --network anvil --once
+
+    # Run twice to see BUY then SELL
+    almanak strat run -d strategies/demo/uniswap_v4_swap --network anvil --once
+    almanak strat run -d strategies/demo/uniswap_v4_swap --network anvil --once
 
 ===============================================================================
 """
 
 import logging
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
 from almanak.framework.intents import Intent
@@ -38,125 +45,123 @@ logger = logging.getLogger(__name__)
 
 @almanak_strategy(
     name="demo_uniswap_v4_swap",
-    description="Uniswap V4 swap demo — BUY + SELL lifecycle via UniversalRouter on Arbitrum",
+    description="V4 swap demo — BUY/SELL lifecycle via UniversalRouter with Permit2",
     version="1.0.0",
     author="Almanak",
-    tags=["demo", "swap", "uniswap-v4", "arbitrum", "v4", "universal-router"],
-    supported_chains=["arbitrum", "ethereum", "base"],
+    tags=["demo", "v4", "swap", "uniswap", "permit2"],
+    supported_chains=["ethereum", "arbitrum", "base", "optimism"],
     supported_protocols=["uniswap_v4"],
     intent_types=["SWAP", "HOLD"],
-    default_chain="arbitrum",
+    default_chain="ethereum",
 )
 class UniswapV4SwapStrategy(IntentStrategy):
-    """Uniswap V4 swap strategy demonstrating BUY + SELL lifecycle.
+    """Uniswap V4 swap demo: alternates BUY and SELL each iteration.
 
-    State machine:
-        BUY -> SELL -> DONE
-
-    Uses protocol="uniswap_v4" to route through the V4 compiler path,
-    which builds UniversalRouter.execute() transactions with Permit2 approvals.
+    Configuration Parameters (from config.json):
+        trade_size_usd: Amount to trade per signal (default: 3)
+        max_slippage_bps: Maximum slippage in basis points (default: 200 = 2%)
+        base_token: Token to buy/sell (default: WETH)
+        quote_token: Stable token (default: USDC)
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
-        self.trade_size_usd = Decimal(str(self.get_config("trade_size_usd", "5")))
-        self.max_slippage_bps = int(self.get_config("max_slippage_bps", 100))
-        self.base_token = self.get_config("base_token", "WETH")
-        self.quote_token = self.get_config("quote_token", "USDC")
+        self.trade_size_usd = Decimal(str(self.get_config("trade_size_usd", "3")))
+        self.max_slippage_bps = int(self.get_config("max_slippage_bps", 200))
+        self.base_token: str = self.get_config("base_token", "WETH")
+        self.quote_token: str = self.get_config("quote_token", "USDC")
 
-        # State machine: BUY -> SELL -> DONE
-        self._phase = "BUY"
-
-        logger.info(
-            f"UniswapV4SwapStrategy initialized: "
-            f"trade_size=${self.trade_size_usd}, "
-            f"pair={self.base_token}/{self.quote_token}, "
-            f"slippage={self.max_slippage_bps}bps"
-        )
+        self._max_slippage = Decimal(self.max_slippage_bps) / Decimal(10000)
 
     def decide(self, market: MarketSnapshot) -> Intent:
-        """Execute BUY -> SELL -> DONE lifecycle."""
-        max_slippage = Decimal(str(self.max_slippage_bps)) / Decimal("10000")
+        """Decide whether to BUY or SELL based on state.
+
+        First call: BUY (swap quote -> base).
+        After a BUY: SELL (swap base -> quote).
+        After a SELL: BUY again.
+        """
+        # Determine action from persisted state
+        last_action = self.state.get("last_action", "SELL")  # default triggers BUY first
 
         base_price = market.price(self.base_token)
-        logger.info(f"{self.base_token} price: {format_usd(base_price)}")
+        quote_balance = market.balance(self.quote_token)
+        base_balance = market.balance(self.base_token)
 
-        if self._phase == "BUY":
-            quote_bal = market.balance(self.quote_token)
-            if quote_bal.balance_usd < self.trade_size_usd:
+        logger.info(
+            "V4 swap decision | last=%s | %s=%s | %s=%s | %s=%s",
+            last_action,
+            self.base_token,
+            format_usd(base_price),
+            self.quote_token,
+            format_usd(quote_balance.balance_usd),
+            self.base_token,
+            format_usd(base_balance.balance_usd),
+        )
+
+        if last_action == "SELL":
+            # BUY: swap quote -> base
+            if quote_balance.balance_usd < self.trade_size_usd:
                 return Intent.hold(
-                    reason=f"Insufficient {self.quote_token}: "
-                    f"{format_usd(quote_bal.balance_usd)} < {format_usd(self.trade_size_usd)}"
+                    reason=f"Insufficient {self.quote_token} for BUY "
+                    f"(need {format_usd(self.trade_size_usd)}, have {format_usd(quote_balance.balance_usd)})"
                 )
 
-            logger.info(
-                f"V4 BUY: {format_usd(self.trade_size_usd)} "
-                f"{self.quote_token} -> {self.base_token}"
-            )
+            logger.info("BUY: %s %s -> %s via Uniswap V4", format_usd(self.trade_size_usd), self.quote_token, self.base_token)
+
             return Intent.swap(
                 from_token=self.quote_token,
                 to_token=self.base_token,
                 amount_usd=self.trade_size_usd,
-                max_slippage=max_slippage,
-                protocol="uniswap_v4",
-            )
-
-        elif self._phase == "SELL":
-            base_bal = market.balance(self.base_token)
-            if base_bal.balance <= 0:
-                return Intent.hold(
-                    reason=f"No {self.base_token} to sell"
-                )
-
-            logger.info(
-                f"V4 SELL: all {self.base_token} ({base_bal.balance:.6f}) "
-                f"-> {self.quote_token}"
-            )
-            return Intent.swap(
-                from_token=self.base_token,
-                to_token=self.quote_token,
-                amount="all",
-                max_slippage=max_slippage,
+                max_slippage=self._max_slippage,
                 protocol="uniswap_v4",
             )
 
         else:
-            return Intent.hold(reason="V4 swap lifecycle complete (BUY + SELL done)")
+            # SELL: swap base -> quote
+            if base_balance.balance_usd < self.trade_size_usd:
+                return Intent.hold(
+                    reason=f"Insufficient {self.base_token} for SELL "
+                    f"(need {format_usd(self.trade_size_usd)}, have {format_usd(base_balance.balance_usd)})"
+                )
+
+            # Compute base token amount from USD (round down to avoid overspend)
+            if base_price and base_price > 0:
+                sell_amount = (self.trade_size_usd / base_price).quantize(Decimal("1E-18"), rounding=ROUND_DOWN)
+            else:
+                return Intent.hold(reason=f"No price available for {self.base_token}")
+
+            logger.info("SELL: %s %s -> %s via Uniswap V4", sell_amount, self.base_token, self.quote_token)
+
+            return Intent.swap(
+                from_token=self.base_token,
+                to_token=self.quote_token,
+                amount=sell_amount,
+                max_slippage=self._max_slippage,
+                protocol="uniswap_v4",
+            )
 
     def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
-        """Advance state machine on successful execution."""
+        """Update state only after successful execution."""
         if not success:
-            logger.warning(f"V4 swap failed in {self._phase} phase")
             return
-
-        if self._phase == "BUY":
-            swap_amounts = getattr(result, "swap_amounts", None)
-            if swap_amounts:
-                logger.info(
-                    f"V4 BUY complete: "
-                    f"in={swap_amounts.amount_in_decimal:.6f} {swap_amounts.token_in or self.quote_token}, "
-                    f"out={swap_amounts.amount_out_decimal:.6f} {swap_amounts.token_out or self.base_token}"
-                )
-            self._phase = "SELL"
-            logger.info("Phase advanced: BUY -> SELL")
-
-        elif self._phase == "SELL":
-            swap_amounts = getattr(result, "swap_amounts", None)
-            if swap_amounts:
-                logger.info(
-                    f"V4 SELL complete: "
-                    f"in={swap_amounts.amount_in_decimal:.6f} {swap_amounts.token_in or self.base_token}, "
-                    f"out={swap_amounts.amount_out_decimal:.6f} {swap_amounts.token_out or self.quote_token}"
-                )
-            self._phase = "DONE"
-            logger.info("Phase advanced: SELL -> DONE. V4 swap lifecycle complete.")
+        intent_type = getattr(intent, "intent_type", None)
+        if intent_type is None:
+            return
+        from_token = getattr(intent, "from_token", None)
+        if from_token == self.quote_token:
+            self.state["last_action"] = "BUY"
+            logger.info("BUY executed successfully")
+        elif from_token == self.base_token:
+            self.state["last_action"] = "SELL"
+            logger.info("SELL executed successfully")
 
     # =========================================================================
-    # TEARDOWN
+    # TEARDOWN SUPPORT
     # =========================================================================
 
     def get_open_positions(self) -> "TeardownPositionSummary":
+        """Return open positions (base token holdings) for teardown preview."""
         from almanak.framework.teardown import (
             PositionInfo,
             PositionType,
@@ -166,24 +171,23 @@ class UniswapV4SwapStrategy(IntentStrategy):
         positions: list[PositionInfo] = []
 
         try:
-            market = self.create_market_snapshot()
-            base_balance = market.balance(self.base_token)
-            if base_balance.balance > 0:
+            base_balance = self.market.balance(self.base_token) if hasattr(self, "market") and self.market else None
+            if base_balance and base_balance.balance_usd > Decimal("0.01"):
                 positions.append(
                     PositionInfo(
                         position_type=PositionType.TOKEN,
-                        position_id="v4_swap_token_0",
+                        position_id=f"v4_swap_{self.base_token.lower()}",
                         chain=self.chain,
                         protocol="uniswap_v4",
                         value_usd=base_balance.balance_usd,
                         details={
-                            "asset": self.base_token,
+                            "token": self.base_token,
                             "balance": str(base_balance.balance),
                         },
                     )
                 )
         except Exception:
-            logger.warning("Failed to query balance for teardown")
+            logger.warning("Failed to query balance for teardown; reporting no positions", exc_info=True)
 
         return TeardownPositionSummary(
             strategy_id=getattr(self, "strategy_id", "demo_uniswap_v4_swap"),
@@ -192,16 +196,29 @@ class UniswapV4SwapStrategy(IntentStrategy):
         )
 
     def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
+        """Generate intents to close all positions (swap base -> quote)."""
         from almanak.framework.teardown import TeardownMode
 
-        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.01")
+        intents: list[Intent] = []
 
-        return [
-            Intent.swap(
-                from_token=self.base_token,
-                to_token=self.quote_token,
-                amount="all",
-                max_slippage=max_slippage,
-                protocol="uniswap_v4",
-            )
-        ]
+        try:
+            m = market or (self.market if hasattr(self, "market") else None)
+            if m is None:
+                return intents
+
+            base_balance = m.balance(self.base_token)
+            if base_balance and base_balance.balance > Decimal("0"):
+                slippage = max(Decimal("0.03"), self._max_slippage) if mode == TeardownMode.HARD else self._max_slippage
+                intents.append(
+                    Intent.swap(
+                        from_token=self.base_token,
+                        to_token=self.quote_token,
+                        amount=base_balance.balance,
+                        max_slippage=slippage,
+                        protocol="uniswap_v4",
+                    )
+                )
+        except Exception:
+            logger.warning("Failed to generate teardown intents", exc_info=True)
+
+        return intents
