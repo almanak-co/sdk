@@ -179,9 +179,10 @@ CREATE TABLE IF NOT EXISTS strategies (
 );
 
 -- --------------------------------------------------------------------------
--- v2_strategy_state: Single row per agent with CAS (Compare-And-Swap) via version
+-- v2_strategy_state: Single row per strategy with CAS (Compare-And-Swap) via version
 -- --------------------------------------------------------------------------
--- Each gateway serves exactly one strategy; no two strategies share a gateway.
+-- This relational schema is distinct from the deployed gateway PostgreSQL
+-- schema in almanak.gateway.database, which uses agent_id for platform mode.
 CREATE TABLE IF NOT EXISTS v2_strategy_state (
     strategy_id UUID PRIMARY KEY REFERENCES strategies(id) ON DELETE CASCADE,
 
@@ -726,7 +727,7 @@ ORDER BY
 -- ============================================================================
 
 COMMENT ON TABLE strategies IS 'Core strategy metadata including name, chain, protocol, and operational status';
-COMMENT ON TABLE v2_strategy_state IS 'Single row per agent state storage with CAS semantics via version field';
+COMMENT ON TABLE v2_strategy_state IS 'Single row per strategy state storage with CAS semantics via version field';
 COMMENT ON TABLE strategy_events IS 'Chronological event timeline for audit and debugging';
 COMMENT ON TABLE strategy_versions IS 'Code and configuration version tracking for deployments and rollbacks';
 COMMENT ON TABLE alerts IS 'Alert instances with status tracking and escalation support';

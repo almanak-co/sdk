@@ -186,8 +186,9 @@ class TimelineEvent:
 # =============================================================================
 
 SCHEMA_SQL = """
--- Strategy state table (matches PostgreSQL schema)
--- Single row per agent with CAS via version field.
+-- Strategy state table for local SQLite mode.
+-- Deployed PostgreSQL uses agent_id; local SQLite keeps strategy_id and
+-- relies on resolve_agent_id() to make the logical identifier match.
 CREATE TABLE IF NOT EXISTS v2_strategy_state (
     strategy_id TEXT PRIMARY KEY,
     version INTEGER NOT NULL DEFAULT 1,
