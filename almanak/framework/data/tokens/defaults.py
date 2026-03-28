@@ -1240,6 +1240,33 @@ YT_wstETH = Token(
 
 
 # =============================================================================
+# PORTFOLIO MANAGER CUSTOM TOKENS
+# =============================================================================
+
+ATH = Token(
+    symbol="ATH",
+    name="Aethir Token",
+    decimals=18,
+    addresses={
+        "arbitrum": "0xc87B37a581ec3257B734886d9d3a581F5A9d056c",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
+TORIVA = Token(
+    symbol="TORIVA",
+    name="Toriva",
+    decimals=18,
+    addresses={
+        "base": "0xb886Cf1444BFF05e9a99E00543BC4054d423ebFD",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
+
+# =============================================================================
 # DEFAULT TOKENS LIST
 # =============================================================================
 
@@ -1333,6 +1360,9 @@ DEFAULT_TOKENS: list[Token] = [
     MON,
     WMON,
     USDT0_MONAD,
+    # Portfolio Manager custom tokens (LP strategies)
+    ATH,
+    TORIVA,
     # Pendle PT tokens (used as collateral)
     PT_sUSDe,
     PT_eUSDe,
