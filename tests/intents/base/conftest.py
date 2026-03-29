@@ -18,6 +18,7 @@ from tests.intents.conftest import (
     TEST_TX_TIMEOUT_SECONDS,
     TEST_WALLET,
     TEST_WEB3_REQUEST_TIMEOUT,
+    _retry_rpc_call,
     _wrap_native_token,
     fund_erc20_token,
     fund_native_token,
@@ -33,6 +34,14 @@ REQUIRED_CHAIN_ID = 8453
 def _seed_wallet_state(web3: Web3, rpc_url: str) -> str:
     """Seed test wallet balances for Base on the current fork instance."""
     config = CHAIN_CONFIGS[CHAIN_NAME]
+
+    # Clear EIP-7702 delegation code on the test wallet.
+    # On mainnet forks, Anvil's default accounts (0xf39Fd...) may have delegation
+    # code that forwards received ETH, causing V4 swaps to revert unexpectedly.
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    wallet_code = w3.eth.get_code(Web3.to_checksum_address(TEST_WALLET))
+    if len(wallet_code) > 0:
+        _retry_rpc_call(w3, "anvil_setCode", [TEST_WALLET, "0x"])
 
     # Fund with 100 native tokens
     fund_native_token(TEST_WALLET, 100 * 10**18, rpc_url)

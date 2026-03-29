@@ -489,14 +489,21 @@ class UniswapV4ReceiptParser:
         # Use the first swap event (single-hop)
         swap = swap_events[0]
 
-        # In V4 Swap events: positive = tokens entering the pool, negative = leaving
-        # For exactInput: amount0 > 0 means token0 was input, amount1 < 0 means token1 was output
+        # V4 Swap event sign convention (from swapper's perspective):
+        #   positive = tokens RECEIVED by the swapper from the pool
+        #   negative = tokens PAID by the swapper to the pool
+        # Verified against real mainnet transactions (2026-03-29).
         if swap.amount0 > 0:
-            amount_in = swap.amount0
-            amount_out = abs(swap.amount1)
+            # Swapper received token0, paid token1
+            amount_in = abs(swap.amount1)
+            amount_out = swap.amount0
         else:
-            amount_in = swap.amount1
-            amount_out = abs(swap.amount0)
+            # Swapper paid token0, received token1
+            amount_in = abs(swap.amount0)
+            amount_out = swap.amount1
+
+        if amount_out <= 0 or amount_in <= 0:
+            logger.warning("V4 Swap event has unexpected signs: amount0=%s, amount1=%s", swap.amount0, swap.amount1)
 
         # Calculate slippage vs quote
         slippage_bps = None
@@ -530,6 +537,43 @@ class UniswapV4ReceiptParser:
                     token_in_addr = transfer.token
                 elif token_out_addr is None and transfer.amount == amount_out and transfer.token != token_in_addr:
                     token_out_addr = transfer.token
+
+        # Fallback 2: For WETH-routed swaps, amounts may differ due to WRAP_ETH/UNWRAP_WETH.
+        # Identify tokens by transfer direction relative to known infrastructure addresses.
+        if (token_in_addr is None or token_out_addr is None) and transfer_events:
+            # Known addresses: PoolManager and common router patterns
+            infra = {pool_manager}
+            seen_tokens = set()
+            if token_in_addr:
+                seen_tokens.add(token_in_addr.lower())
+            if token_out_addr:
+                seen_tokens.add(token_out_addr.lower())
+            for transfer in transfer_events:
+                token_lower = transfer.token.lower()
+                if token_lower in seen_tokens:
+                    continue
+                from_lower = transfer.from_address.lower()
+                to_lower = transfer.to_address.lower()
+                # Token sent FROM infrastructure TO non-infra = output (user receives)
+                if token_out_addr is None and from_lower in infra:
+                    token_out_addr = transfer.token
+                    seen_tokens.add(token_lower)
+                # Token sent TO infrastructure FROM non-infra = input (user pays)
+                elif token_in_addr is None and to_lower in infra:
+                    token_in_addr = transfer.token
+                    seen_tokens.add(token_lower)
+            # Last resort: assign remaining unseen tokens by elimination
+            if token_in_addr is None or token_out_addr is None:
+                for transfer in transfer_events:
+                    token_lower = transfer.token.lower()
+                    if token_lower in seen_tokens:
+                        continue
+                    if token_out_addr is None:
+                        token_out_addr = transfer.token
+                        seen_tokens.add(token_lower)
+                    elif token_in_addr is None:
+                        token_in_addr = transfer.token
+                        seen_tokens.add(token_lower)
 
         # Resolve decimals via token_resolver (lazy-load if not injected)
         resolver = self._token_resolver

@@ -251,6 +251,95 @@ class TestBuildSwapTx:
         assert tx.value == 10**18  # ETH value set
 
 
+class TestWethRouting:
+    """Test WETH -> native ETH routing in build_swap_tx."""
+
+    WETH_ETHEREUM = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+    USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+    RECIPIENT = "0x1234567890123456789012345678901234567890"
+
+    @staticmethod
+    def _extract_commands(calldata: str) -> list[int]:
+        """Extract UniversalRouter command bytes from execute() calldata.
+
+        execute(bytes commands, bytes[] inputs, uint256 deadline)
+        ABI layout: selector(4) + offset_commands(32) + offset_inputs(32) + deadline(32)
+                    + commands_len(32) + commands_data(padded)
+        """
+        raw = calldata[2:]  # strip 0x
+        # offset to commands data: read first 32-byte word after selector
+        cmd_offset = int(raw[8:72], 16) * 2  # byte offset -> hex char offset
+        # commands data starts at: selector(8) + cmd_offset
+        cmd_start = 8 + cmd_offset
+        cmd_len = int(raw[cmd_start : cmd_start + 64], 16)
+        cmd_hex = raw[cmd_start + 64 : cmd_start + 64 + cmd_len * 2]
+        return [int(cmd_hex[i : i + 2], 16) for i in range(0, len(cmd_hex), 2)]
+
+    def test_weth_in_produces_permit2_transfer_and_unwrap(self):
+        """WETH -> ERC20: commands = [PERMIT2_TRANSFER_FROM, UNWRAP_WETH, V4_SWAP]."""
+        sdk = UniswapV4SDK(chain="ethereum")
+        quote = SwapQuote(
+            amount_in=5 * 10**16, amount_out=100 * 10**6,
+            fee_tier=500, token_in=self.WETH_ETHEREUM, token_out=self.USDC,
+        )
+        tx = sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
+        assert tx.value == 0, "WETH-in should not send native ETH"
+        cmds = self._extract_commands(tx.data)
+        assert cmds == [0x02, 0x0C, 0x10], (
+            f"Expected [PERMIT2_TRANSFER_FROM, UNWRAP_WETH, V4_SWAP], got {[hex(c) for c in cmds]}"
+        )
+
+    def test_weth_out_produces_wrap_eth(self):
+        """ERC20 -> WETH: commands = [V4_SWAP, WRAP_ETH]."""
+        sdk = UniswapV4SDK(chain="ethereum")
+        quote = SwapQuote(
+            amount_in=100 * 10**6, amount_out=5 * 10**16,
+            fee_tier=500, token_in=self.USDC, token_out=self.WETH_ETHEREUM,
+        )
+        tx = sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
+        assert tx.value == 0, "ERC20-in should not send native ETH"
+        cmds = self._extract_commands(tx.data)
+        assert cmds == [0x10, 0x0B], (
+            f"Expected [V4_SWAP, WRAP_ETH], got {[hex(c) for c in cmds]}"
+        )
+
+    def test_weth_to_weth_raises(self):
+        """WETH -> WETH: should raise ValueError."""
+        sdk = UniswapV4SDK(chain="ethereum")
+        quote = SwapQuote(
+            amount_in=10**18, amount_out=10**18,
+            fee_tier=500, token_in=self.WETH_ETHEREUM, token_out=self.WETH_ETHEREUM,
+        )
+        with pytest.raises(ValueError, match="Cannot swap wrapped native token to itself"):
+            sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
+
+    def test_native_eth_passthrough_unchanged(self):
+        """Native ETH swap should NOT trigger WETH routing."""
+        sdk = UniswapV4SDK(chain="ethereum")
+        quote = SwapQuote(
+            amount_in=10**18, amount_out=100 * 10**6,
+            fee_tier=500, token_in=NATIVE_CURRENCY, token_out=self.USDC,
+        )
+        tx = sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
+        assert tx.value == 10**18, "Native ETH-in should set msg.value"
+        cmds = self._extract_commands(tx.data)
+        assert cmds == [0x10], f"Native ETH should be single V4_SWAP, got {[hex(c) for c in cmds]}"
+
+    def test_native_eth_out_has_sweep(self):
+        """ERC20 -> native ETH: commands = [V4_SWAP, SWEEP]."""
+        sdk = UniswapV4SDK(chain="ethereum")
+        quote = SwapQuote(
+            amount_in=100 * 10**6, amount_out=5 * 10**16,
+            fee_tier=500, token_in=self.USDC, token_out=NATIVE_CURRENCY,
+        )
+        tx = sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
+        assert tx.value == 0
+        cmds = self._extract_commands(tx.data)
+        assert cmds == [0x10, 0x04], (
+            f"Expected [V4_SWAP, SWEEP], got {[hex(c) for c in cmds]}"
+        )
+
+
 class TestBuildApproveTx:
     def test_build_approve(self):
         sdk = UniswapV4SDK(chain="arbitrum")

@@ -68,6 +68,10 @@ FEE_TIERS: list[int] = [100, 500, 3000, 10000]
 # Zero address represents native ETH in V4
 NATIVE_CURRENCY = "0x0000000000000000000000000000000000000000"
 
+# address(2) = ADDRESS_THIS in the UniversalRouter (used as intermediate recipient
+# when the router needs to hold tokens temporarily, e.g. for WRAP_ETH/SWEEP)
+ADDRESS_THIS = "0x0000000000000000000000000000000000000002"
+
 # Canonical Permit2 address (CREATE2, same on all EVM chains)
 PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
 
@@ -95,6 +99,8 @@ PERMIT2_APPROVE_SELECTOR = "0x87517c45"
 # Source: https://github.com/Uniswap/universal-router/blob/main/contracts/base/Dispatcher.sol
 PERMIT2_TRANSFER_FROM = 0x02  # abi.decode(inputs, (address token, address recipient, uint160 amount))
 _UR_SWEEP = 0x04  # sweep(address token, address recipient, uint256 amountMin)
+_UR_WRAP_ETH = 0x0B  # wrap ETH to WETH: abi.decode(inputs, (address recipient, uint256 amountMin))
+_UR_UNWRAP_WETH = 0x0C  # unwrap WETH to ETH: abi.decode(inputs, (address recipient, uint256 amountMin))
 V4_SWAP = 0x10  # V4 swap via two-layer encoding: abi.encode(bytes actions, bytes[] params)
 # Aliases for backward compat with existing code
 V4_SWAP_EXACT_IN_SINGLE = V4_SWAP
@@ -163,6 +169,11 @@ QUOTER_ADDRESSES: dict[str, str] = {chain: addrs["quoter"] for chain, addrs in U
 # PositionManager addresses per chain
 POSITION_MANAGER_ADDRESSES: dict[str, str] = {chain: addrs["position_manager"] for chain, addrs in UNISWAP_V4.items()}
 
+# Wrapped native token addresses per chain (for WETH <-> native ETH routing in V4).
+# V4's primary liquidity uses native ETH (address(0)), not WETH. When users swap
+# to/from WETH, we route through the native ETH pool and add WRAP/UNWRAP commands.
+# Imported from the canonical token defaults to avoid address duplication.
+from almanak.framework.data.tokens.defaults import WRAPPED_NATIVE as WRAPPED_NATIVE_ADDRESSES
 
 # =============================================================================
 # Data Models
@@ -425,6 +436,11 @@ class UniswapV4SDK:
             description=f"Permit2 approve {spender[:10]}... for {token_address[:10]}...",
         )
 
+    def _is_wrapped_native(self, token: str) -> bool:
+        """Check if a token is the wrapped native token (WETH/WMATIC/etc) for this chain."""
+        wrapped = WRAPPED_NATIVE_ADDRESSES.get(self.chain)
+        return wrapped is not None and token.lower() == wrapped.lower()
+
     def build_swap_tx(
         self,
         quote: SwapQuote,
@@ -439,6 +455,10 @@ class UniswapV4SDK:
           Inner: v4_input = abi.encode(bytes actions, bytes[] params)
                  actions = [SWAP_EXACT_IN_SINGLE, SETTLE, TAKE]
 
+        WETH routing: V4 pools primarily use native ETH (address(0)), not WETH.
+        When token_in or token_out is WETH, the swap routes through the native ETH
+        pool and adds UNWRAP_WETH or WRAP_ETH commands at the UniversalRouter level.
+
         Args:
             quote: Swap quote with amounts.
             recipient: Address to receive output tokens.
@@ -449,43 +469,93 @@ class UniswapV4SDK:
             SwapTransaction with encoded calldata.
         """
         amount_out_minimum = quote.amount_out * (10000 - slippage_bps) // 10000
-        is_native_in = quote.token_in.lower() == NATIVE_CURRENCY
-        is_native_out = quote.token_out.lower() == NATIVE_CURRENCY
+
+        # Detect WETH and substitute native ETH for the V4 pool
+        weth_in = self._is_wrapped_native(quote.token_in)
+        weth_out = self._is_wrapped_native(quote.token_out)
+        if weth_in and weth_out:
+            raise ValueError("Cannot swap wrapped native token to itself")
+        pool_token_in = NATIVE_CURRENCY if weth_in else quote.token_in
+        pool_token_out = NATIVE_CURRENCY if weth_out else quote.token_out
+
+        is_native_in = pool_token_in.lower() == NATIVE_CURRENCY
+        is_native_out = pool_token_out.lower() == NATIVE_CURRENCY
 
         if deadline == 0:
             deadline = int(time.time()) + 1800  # 30 minutes
 
+        # Build a modified quote that uses native ETH for the pool key
+        pool_quote = SwapQuote(
+            token_in=pool_token_in,
+            token_out=pool_token_out,
+            amount_in=quote.amount_in,
+            amount_out=quote.amount_out,
+            fee_tier=quote.fee_tier,
+        )
+
         # 1. Encode the ExactInputSingleParams for the swap action
         swap_params = self._encode_exact_input_single_params(
-            quote=quote,
+            quote=pool_quote,
             amount_out_minimum=amount_out_minimum,
         )
 
         # 2. Encode SETTLE params: (Currency currency, uint256 maxAmount, bool payerIsUser)
         #    maxAmount=0 means "settle entire debt", payerIsUser=true for user-funded swaps
-        settle_params = _pad_address(quote.token_in) + _pad_uint(0) + _pad_bool(True)
+        settle_params = _pad_address(pool_token_in) + _pad_uint(0) + _pad_bool(True)
 
         # 3. Encode TAKE params: (Currency currency, address recipient, uint256 amount)
         #    For native ETH output: recipient = address(2) (ADDRESS_THIS = the UniversalRouter),
-        #    then use outer SWEEP command to forward ETH to the actual recipient.
+        #    then use outer SWEEP/WRAP_ETH to forward to the actual recipient.
         #    For ERC-20 output: recipient = actual wallet address.
         #    amount=0 means "take all available".
-        take_recipient = "0x0000000000000000000000000000000000000002" if is_native_out else recipient
-        take_params = _pad_address(quote.token_out) + _pad_address(take_recipient) + _pad_uint(0)
+        take_recipient = ADDRESS_THIS if is_native_out else recipient
+        take_params = _pad_address(pool_token_out) + _pad_address(take_recipient) + _pad_uint(0)
 
         # 4. Build the two-layer V4_SWAP input: abi.encode(bytes actions, bytes[] params)
         inner_actions = bytes([ACTION_SWAP_EXACT_IN_SINGLE, ACTION_SETTLE, ACTION_TAKE])
         v4_swap_input = _encode_v4_actions(inner_actions, [swap_params, settle_params, take_params])
 
-        # 5. Build UniversalRouter commands
-        if is_native_out:
-            # Native ETH output: V4_SWAP + SWEEP to forward ETH from router to recipient
+        # 5. Build UniversalRouter commands with WETH wrap/unwrap if needed
+        ur_commands_list: list[int] = []
+        ur_inputs_list: list[str] = []
+
+        if weth_in:
+            # WETH input: transfer WETH to router via Permit2, then unwrap to ETH.
+            # Step 1: PERMIT2_TRANSFER_FROM pulls WETH from user to router
+            # Step 2: UNWRAP_WETH converts WETH to ETH in the router
+            # The V4_SWAP's SETTLE then uses the router's ETH balance.
+            transfer_params = (
+                _pad_address(quote.token_in)  # WETH address
+                + _pad_address(ADDRESS_THIS)  # recipient = ADDRESS_THIS
+                + _pad_uint(min(quote.amount_in, (1 << 160) - 1))  # uint160 amount
+            )
+            ur_commands_list.append(PERMIT2_TRANSFER_FROM)
+            ur_inputs_list.append(transfer_params)
+
+            unwrap_params = (
+                _pad_address(ADDRESS_THIS)  # recipient = ADDRESS_THIS
+                + _pad_uint(quote.amount_in)
+            )
+            ur_commands_list.append(_UR_UNWRAP_WETH)
+            ur_inputs_list.append(unwrap_params)
+
+        ur_commands_list.append(V4_SWAP)
+        ur_inputs_list.append(v4_swap_input)
+
+        if is_native_out and weth_out:
+            # WETH output: ETH comes out of pool -> WRAP to WETH -> send to recipient
+            # WRAP_ETH params: (address recipient, uint256 amountMin)
+            wrap_params = _pad_address(recipient) + _pad_uint(amount_out_minimum)
+            ur_commands_list.append(_UR_WRAP_ETH)
+            ur_inputs_list.append(wrap_params)
+        elif is_native_out and not weth_out:
+            # Pure native ETH output: SWEEP to forward ETH from router to recipient
             sweep_params = _pad_address(NATIVE_CURRENCY) + _pad_address(recipient) + _pad_uint(amount_out_minimum)
-            ur_commands = bytes([V4_SWAP, _UR_SWEEP])
-            ur_inputs = [v4_swap_input, sweep_params]
-        else:
-            ur_commands = bytes([V4_SWAP])
-            ur_inputs = [v4_swap_input]
+            ur_commands_list.append(_UR_SWEEP)
+            ur_inputs_list.append(sweep_params)
+
+        ur_commands = bytes(ur_commands_list)
+        ur_inputs = ur_inputs_list
 
         # 6. Wrap in UniversalRouter.execute()
         calldata = _encode_execute(
@@ -494,9 +564,13 @@ class UniswapV4SDK:
             deadline=deadline,
         )
 
+        # Native ETH value: only when token_in is actually native ETH (not WETH)
+        # WETH-in uses Permit2 transfer (no ETH value needed)
+        native_value = quote.amount_in if (is_native_in and not weth_in) else 0
+
         return SwapTransaction(
             to=self.router,
-            value=quote.amount_in if is_native_in else 0,
+            value=native_value,
             data=calldata,
             gas_estimate=UNISWAP_V4_GAS_ESTIMATES["swap"],
             description=(f"Uniswap V4 swap {quote.token_in[:10]}... -> {quote.token_out[:10]}..."),
