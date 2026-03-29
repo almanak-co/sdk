@@ -1,0 +1,16 @@
+{
+    "strategy_id": "demo_traderjoe_lp_lifecycle",
+    "strategy_name": "demo_traderjoe_lp_lifecycle",
+    "description": "TraderJoe V2 LP lifecycle (OPEN + CLOSE) on Avalanche",
+    "pool": "WAVAX/USDC/20",
+    "range_width_pct": "0.10",
+    "amount_x": "0.001",
+    "amount_y": "3",
+    "force_action": "open",
+    "chain": "avalanche",
+    "anvil_funding": {
+        "AVAX": 100,
+        "WAVAX": 100,
+        "USDC": 10000
+    }
+}
