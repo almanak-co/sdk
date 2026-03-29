@@ -112,8 +112,11 @@ class TestHookFlags:
 
 class TestLPConstants:
     def test_position_manager_addresses_exist(self):
-        for chain, addr in POSITION_MANAGER_ADDRESSES.items():
-            assert addr.lower() == "0xbd216513d74c8cf14cf4747e6aae6fdf64e83b24"
+        # V4 PositionManager addresses are per-chain (not same CREATE2)
+        expected_chains = {"ethereum", "base", "arbitrum", "optimism", "polygon", "avalanche", "bsc"}
+        assert expected_chains.issubset(set(POSITION_MANAGER_ADDRESSES.keys()))
+        # Spot-check Ethereum address
+        assert POSITION_MANAGER_ADDRESSES["ethereum"].lower() == "0xbd216513d74c8cf14cf4747e6aaa6420ff64ee9e"
 
     def test_lp_gas_estimates(self):
         assert UNISWAP_V4_GAS_ESTIMATES["lp_mint"] == 450_000
@@ -145,7 +148,7 @@ class TestLPConstants:
 class TestSDKLPMethods:
     @pytest.fixture()
     def sdk(self):
-        return UniswapV4SDK(chain="arbitrum")
+        return UniswapV4SDK(chain="ethereum")
 
     def test_compute_liquidity_from_amounts_in_range(self, sdk):
         """Liquidity from amounts when price is in the tick range."""
@@ -225,7 +228,7 @@ class TestSDKLPMethods:
         )
 
         tx = sdk.build_mint_position_tx(params)
-        assert tx.to.lower() == POSITION_MANAGER_ADDRESSES["arbitrum"].lower()
+        assert tx.to.lower() == POSITION_MANAGER_ADDRESSES["ethereum"].lower()
         assert tx.data.startswith("0x" + MODIFY_LIQUIDITIES_SELECTOR[2:])
         assert tx.gas_estimate == UNISWAP_V4_GAS_ESTIMATES["lp_mint"]
         assert tx.value == 0
@@ -243,7 +246,7 @@ class TestSDKLPMethods:
             recipient="0x1234567890abcdef1234567890abcdef12345678",
             burn=True,
         )
-        assert tx.to.lower() == POSITION_MANAGER_ADDRESSES["arbitrum"].lower()
+        assert tx.to.lower() == POSITION_MANAGER_ADDRESSES["ethereum"].lower()
         assert tx.data.startswith("0x" + MODIFY_LIQUIDITIES_SELECTOR[2:])
         assert tx.gas_estimate == UNISWAP_V4_GAS_ESTIMATES["lp_decrease"]
         assert "close" in tx.description.lower()
@@ -266,7 +269,7 @@ class TestSDKLPMethods:
             currency1="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
             recipient="0x1234567890abcdef1234567890abcdef12345678",
         )
-        assert tx.to.lower() == POSITION_MANAGER_ADDRESSES["arbitrum"].lower()
+        assert tx.to.lower() == POSITION_MANAGER_ADDRESSES["ethereum"].lower()
         assert tx.data.startswith("0x" + MODIFY_LIQUIDITIES_SELECTOR[2:])
         assert tx.gas_estimate == UNISWAP_V4_GAS_ESTIMATES["lp_collect_fees"]
         assert "collect" in tx.description.lower()
@@ -364,7 +367,7 @@ class TestAdapterLPCompilation:
         from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4Adapter, UniswapV4Config
 
         config = UniswapV4Config(
-            chain="arbitrum",
+            chain="ethereum",
             wallet_address="0x1234567890abcdef1234567890abcdef12345678",
         )
         return UniswapV4Adapter(config=config, token_resolver=mock_resolver)
@@ -387,13 +390,13 @@ class TestAdapterLPCompilation:
         assert bundle.intent_type == "LP_OPEN"
         assert len(bundle.transactions) > 0
         assert bundle.metadata.get("protocol_version") == "v4"
-        assert bundle.metadata.get("chain") == "arbitrum"
+        assert bundle.metadata.get("chain") == "ethereum"
         assert bundle.metadata.get("position_manager") is not None
 
     def test_compile_lp_open_intent_no_wallet_raises(self, mock_resolver):
         from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4Adapter, UniswapV4Config
 
-        config = UniswapV4Config(chain="arbitrum", wallet_address="")
+        config = UniswapV4Config(chain="ethereum", wallet_address="")
         adapter = UniswapV4Adapter(config=config, token_resolver=mock_resolver)
 
         from almanak.framework.intents.vocabulary import LPOpenIntent
@@ -512,7 +515,7 @@ class TestReceiptParserLP:
     @pytest.fixture()
     def parser(self):
         return UniswapV4ReceiptParser(
-            chain="arbitrum",
+            chain="ethereum",
             pool_manager_address=self.POOL_MANAGER,
             position_manager_address=self.POSITION_MANAGER,
         )
@@ -655,7 +658,7 @@ class TestCompilerV4LPRouting:
         )
 
         compiler = IntentCompiler.__new__(IntentCompiler)
-        compiler.chain = "arbitrum"
+        compiler.chain = "ethereum"
         compiler.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
         compiler.price_oracle = {}
         compiler._token_resolver = None
@@ -678,7 +681,7 @@ class TestCompilerV4LPRouting:
         )
 
         compiler = IntentCompiler.__new__(IntentCompiler)
-        compiler.chain = "arbitrum"
+        compiler.chain = "ethereum"
         compiler.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
         compiler.price_oracle = {}
         compiler._token_resolver = None
@@ -690,8 +693,12 @@ class TestCompilerV4LPRouting:
 
     def test_v4_in_lp_position_managers(self):
         """Verify V4 PositionManager is in LP_POSITION_MANAGERS for supported chains."""
+        from almanak.core.contracts import UNISWAP_V4
         from almanak.framework.intents.compiler import LP_POSITION_MANAGERS
 
         for chain in ["ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc"]:
             assert "uniswap_v4" in LP_POSITION_MANAGERS[chain], f"uniswap_v4 missing from {chain}"
-            assert LP_POSITION_MANAGERS[chain]["uniswap_v4"].lower() == "0xbd216513d74c8cf14cf4747e6aae6fdf64e83b24"
+            # LP_POSITION_MANAGERS must match the per-chain address from contracts.py
+            expected = UNISWAP_V4[chain]["position_manager"].lower()
+            actual = LP_POSITION_MANAGERS[chain]["uniswap_v4"].lower()
+            assert actual == expected, f"{chain}: LP_POSITION_MANAGERS has {actual}, expected {expected}"

@@ -43,8 +43,8 @@ def _make_resolver():
 
 class TestAdapterInit:
     def test_init_with_chain(self):
-        adapter = UniswapV4Adapter(chain="arbitrum")
-        assert adapter.chain == "arbitrum"
+        adapter = UniswapV4Adapter(chain="ethereum")
+        assert adapter.chain == "ethereum"
 
     def test_init_with_config(self):
         config = UniswapV4Config(
@@ -70,7 +70,7 @@ _TEST_WALLET = "0x1234567890123456789012345678901234567890"
 
 class TestSwapExactInput:
     def test_basic_swap(self):
-        config = UniswapV4Config(chain="arbitrum", wallet_address=_TEST_WALLET)
+        config = UniswapV4Config(chain="ethereum", wallet_address=_TEST_WALLET)
         adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
         result = adapter.swap_exact_input(
             token_in="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
@@ -84,7 +84,7 @@ class TestSwapExactInput:
         assert result.amount_out_minimum > 0
 
     def test_no_wallet_address_raises(self):
-        adapter = UniswapV4Adapter(chain="arbitrum", token_resolver=_make_resolver())
+        adapter = UniswapV4Adapter(chain="ethereum", token_resolver=_make_resolver())
         with pytest.raises(ValueError, match="wallet_address must be set"):
             adapter.swap_exact_input(
                 token_in="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
@@ -93,7 +93,7 @@ class TestSwapExactInput:
             )
 
     def test_native_eth_no_approve(self):
-        config = UniswapV4Config(chain="arbitrum", wallet_address=_TEST_WALLET)
+        config = UniswapV4Config(chain="ethereum", wallet_address=_TEST_WALLET)
         adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
         result = adapter.swap_exact_input(
             token_in="0x0000000000000000000000000000000000000000",
@@ -105,7 +105,7 @@ class TestSwapExactInput:
         assert len(result.transactions) == 1
 
     def test_slippage_applied(self):
-        config = UniswapV4Config(chain="arbitrum", wallet_address=_TEST_WALLET)
+        config = UniswapV4Config(chain="ethereum", wallet_address=_TEST_WALLET)
         adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
         result = adapter.swap_exact_input(
             token_in="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
@@ -120,21 +120,21 @@ class TestSwapExactInput:
 
 class TestTokenResolution:
     def test_resolve_by_address(self):
-        adapter = UniswapV4Adapter(chain="arbitrum", token_resolver=_make_resolver())
+        adapter = UniswapV4Adapter(chain="ethereum", token_resolver=_make_resolver())
         addr, dec = adapter._resolve_token("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
         assert addr == "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
         assert dec == 6
 
     def test_resolve_by_address_without_resolver_raises(self):
         """Raw address without resolver must raise, not fallback to 18 decimals."""
-        adapter = UniswapV4Adapter(chain="arbitrum")
+        adapter = UniswapV4Adapter(chain="ethereum")
         with pytest.raises(TokenNotFoundError):
             adapter._resolve_token("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
 
     def test_resolve_by_symbol_fallback(self):
-        adapter = UniswapV4Adapter(chain="arbitrum")
+        adapter = UniswapV4Adapter(chain="ethereum")
         addr, dec = adapter._resolve_token("USDC")
-        assert addr.lower() == "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        assert addr.lower() == "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
         assert dec == 6
 
     def test_resolve_with_token_resolver(self):
@@ -144,13 +144,13 @@ class TestTokenResolution:
         resolved.decimals = 6
         resolver.resolve_for_swap.return_value = resolved
 
-        adapter = UniswapV4Adapter(chain="arbitrum", token_resolver=resolver)
+        adapter = UniswapV4Adapter(chain="ethereum", token_resolver=resolver)
         addr, dec = adapter._resolve_token("USDC")
         assert addr == "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
         assert dec == 6
 
     def test_resolve_unknown_token_raises_token_not_found(self):
-        adapter = UniswapV4Adapter(chain="arbitrum")
+        adapter = UniswapV4Adapter(chain="ethereum")
         with pytest.raises(TokenNotFoundError):
             adapter._resolve_token("UNKNOWN_TOKEN_XYZ")
 
@@ -159,14 +159,14 @@ class TestTokenResolution:
         from unittest.mock import patch
 
         fake_tokens = {"arbitrum": {"FAKECOIN": "0x1234567890123456789012345678901234567890"}}
-        adapter = UniswapV4Adapter(chain="arbitrum")
+        adapter = UniswapV4Adapter(chain="ethereum")
         with patch("almanak.core.contracts.UNISWAP_V3_TOKENS", fake_tokens):
             with pytest.raises(TokenNotFoundError):
                 adapter._resolve_token("FAKECOIN")
 
     def test_raw_address_without_resolver_raises(self):
         """Raw addresses without a token_resolver must fail, not assume 18 decimals."""
-        adapter = UniswapV4Adapter(chain="arbitrum")
+        adapter = UniswapV4Adapter(chain="ethereum")
         with pytest.raises(TokenNotFoundError):
             adapter.swap_exact_input(
                 token_in="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
@@ -177,7 +177,7 @@ class TestTokenResolution:
 
 class TestCompileSwapIntent:
     def test_compile_with_amount(self):
-        config = UniswapV4Config(chain="arbitrum", wallet_address=_TEST_WALLET)
+        config = UniswapV4Config(chain="ethereum", wallet_address=_TEST_WALLET)
         adapter = UniswapV4Adapter(config=config)
 
         # Create a mock SwapIntent
@@ -199,7 +199,7 @@ class TestCompileSwapIntent:
         assert bundle.metadata["to_token"]["address"] is not None
 
     def test_compile_with_amount_usd(self):
-        config = UniswapV4Config(chain="arbitrum", wallet_address=_TEST_WALLET)
+        config = UniswapV4Config(chain="ethereum", wallet_address=_TEST_WALLET)
         adapter = UniswapV4Adapter(config=config)
 
         intent = MagicMock()
@@ -216,7 +216,7 @@ class TestCompileSwapIntent:
         assert len(bundle.transactions) > 0
 
     def test_compile_amount_all_raises(self):
-        adapter = UniswapV4Adapter(chain="arbitrum")
+        adapter = UniswapV4Adapter(chain="ethereum")
 
         intent = MagicMock()
         intent.from_token = "USDC"
@@ -230,7 +230,7 @@ class TestCompileSwapIntent:
             adapter.compile_swap_intent(intent)
 
     def test_compile_no_amount_raises(self):
-        adapter = UniswapV4Adapter(chain="arbitrum")
+        adapter = UniswapV4Adapter(chain="ethereum")
 
         intent = MagicMock()
         intent.from_token = "USDC"
@@ -253,7 +253,7 @@ class TestIntentCompilerV4Routing:
         from almanak.framework.intents.compiler import IntentCompiler
 
         compiler = IntentCompiler(
-            chain="arbitrum",
+            chain="ethereum",
             wallet_address=_TEST_WALLET,
             price_oracle={"USDC": Decimal("1.0"), "WETH": Decimal("2500.0")},
         )
@@ -263,11 +263,11 @@ class TestIntentCompilerV4Routing:
             amount=Decimal("100"),
             max_slippage=Decimal("0.20"),
             protocol="uniswap_v4",
-            chain="arbitrum",
+            chain="ethereum",
         )
 
         result = compiler.compile(intent)
         assert result.status.value == "SUCCESS"
         assert result.action_bundle is not None
         assert result.action_bundle.metadata["protocol"] == "uniswap_v4"
-        assert result.action_bundle.metadata["router"] == "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af"
+        assert result.action_bundle.metadata["router"].lower() == "0x66a9893cc07d91d95644aedd05d03f95e1dba8af"

@@ -90,11 +90,15 @@ UNIVERSAL_ROUTER_EXECUTE_SELECTOR = "0x3593564c"
 # Permit2.approve(address token, address spender, uint160 amount, uint48 expiration)
 PERMIT2_APPROVE_SELECTOR = "0x87517c45"
 
-# V4 command bytes for UniversalRouter
-V4_SWAP_EXACT_IN_SINGLE = 0x06
-V4_SWAP_EXACT_IN = 0x07
-V4_SWAP_EXACT_OUT_SINGLE = 0x08
-V4_SWAP_EXACT_OUT = 0x09
+# UniversalRouter command bytes
+# Source: https://github.com/Uniswap/universal-router/blob/main/contracts/base/Dispatcher.sol
+PERMIT2_TRANSFER_FROM = 0x02  # abi.decode(inputs, (address token, address recipient, uint160 amount))
+V4_SWAP = 0x10  # V4 swap execution (handles ExactInputSingle params)
+# Aliases for backward compat with existing code
+V4_SWAP_EXACT_IN_SINGLE = V4_SWAP
+V4_SWAP_EXACT_IN = V4_SWAP
+V4_SWAP_EXACT_OUT_SINGLE = V4_SWAP
+V4_SWAP_EXACT_OUT = V4_SWAP
 
 # --- PositionManager Action bytes ---
 # V4 PositionManager uses modifyLiquidities(bytes unlockData, uint256 deadline)
@@ -431,10 +435,23 @@ class UniswapV4SDK:
             amount_out_minimum=amount_out_minimum,
         )
 
+        if is_native_in:
+            # Native ETH: no Permit2 transfer needed, ETH sent as msg.value
+            commands = bytes([V4_SWAP_EXACT_IN_SINGLE])
+            inputs = [params_encoded]
+        else:
+            # ERC-20: prepend PERMIT2_TRANSFER_FROM to pull tokens into the router
+            # before the swap executes. The UniversalRouter reads its own balance
+            # during V4_SWAP, so tokens must arrive first.
+            # PERMIT2_TRANSFER_FROM params: abi.encode(address token, address recipient, uint160 amount)
+            transfer_params = _pad_address(quote.token_in) + _pad_address(self.router) + _pad_uint(quote.amount_in)
+            commands = bytes([PERMIT2_TRANSFER_FROM, V4_SWAP_EXACT_IN_SINGLE])
+            inputs = [transfer_params, params_encoded]
+
         # Encode UniversalRouter.execute(bytes commands, bytes[] inputs, uint256 deadline)
         calldata = _encode_execute(
-            commands=bytes([V4_SWAP_EXACT_IN_SINGLE]),
-            inputs=[params_encoded],
+            commands=commands,
+            inputs=inputs,
             deadline=deadline,
         )
 

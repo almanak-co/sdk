@@ -114,8 +114,8 @@ class TestParserInit:
         assert parser.chain == "ethereum"
 
     def test_init_with_chain(self):
-        parser = UniswapV4ReceiptParser(chain="arbitrum")
-        assert parser.chain == "arbitrum"
+        parser = UniswapV4ReceiptParser(chain="ethereum")
+        assert parser.chain == "ethereum"
         assert parser.pool_manager == "0x000000000004444c5dc75cb358380d2e3de08a90"
 
 
@@ -126,7 +126,7 @@ class TestParserInit:
 
 class TestParseReceipt:
     def test_parse_swap_receipt(self):
-        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        parser = UniswapV4ReceiptParser(chain="ethereum")
 
         # token0 in (+1000 USDC), token1 out (-0.5 WETH)
         swap_log = _build_swap_log(
@@ -144,7 +144,7 @@ class TestParseReceipt:
 
     def test_parse_reverse_direction(self):
         """Test swap where token1 is input."""
-        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        parser = UniswapV4ReceiptParser(chain="ethereum")
 
         swap_log = _build_swap_log(
             amount0=-(1000 * 10**6),
@@ -159,7 +159,7 @@ class TestParseReceipt:
         assert result.swap_result.amount_out == 1000 * 10**6
 
     def test_parse_with_transfer_events(self):
-        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        parser = UniswapV4ReceiptParser(chain="ethereum")
 
         swap_log = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
         transfer_log = _build_transfer_log(
@@ -176,14 +176,14 @@ class TestParseReceipt:
         assert len(result.transfer_events) == 1
 
     def test_parse_empty_receipt(self):
-        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        parser = UniswapV4ReceiptParser(chain="ethereum")
         result = parser.parse_receipt({"logs": []})
 
         assert len(result.swap_events) == 0
         assert result.swap_result is None
 
     def test_slippage_calculation(self):
-        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        parser = UniswapV4ReceiptParser(chain="ethereum")
 
         swap_log = _build_swap_log(
             amount0=1000 * 10**6,
@@ -200,7 +200,7 @@ class TestParseReceipt:
 
     def test_effective_price_without_transfers(self):
         """Without Transfer events, token decimals can't be resolved so effective_price is None."""
-        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        parser = UniswapV4ReceiptParser(chain="ethereum")
 
         swap_log = _build_swap_log(
             amount0=2000 * 10**6,
@@ -220,7 +220,7 @@ class TestParseReceipt:
 
 class TestExtractSwapAmounts:
     def test_extract_swap_amounts(self):
-        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        parser = UniswapV4ReceiptParser(chain="ethereum")
 
         swap_log = _build_swap_log(
             amount0=1000 * 10**6,
@@ -237,13 +237,13 @@ class TestExtractSwapAmounts:
         assert amounts.effective_price == Decimal(0)
 
     def test_extract_no_swap(self):
-        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        parser = UniswapV4ReceiptParser(chain="ethereum")
         amounts = parser.extract_swap_amounts({"logs": []})
         assert amounts is None
 
     def test_extract_with_transfer_events_pool_manager_match(self):
         """Transfer events to/from PoolManager enable token identification."""
-        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        parser = UniswapV4ReceiptParser(chain="ethereum")
         pool_mgr = "0x000000000004444c5dc75cb358380d2e3de08a90"
 
         swap_log = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
@@ -274,7 +274,7 @@ class TestExtractSwapAmounts:
     def test_extract_with_transfer_events_amount_fallback(self):
         """When Transfers go via UniversalRouter (not directly to PoolManager),
         fall back to matching by amount."""
-        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        parser = UniswapV4ReceiptParser(chain="ethereum")
         router = "0x66a9893cc07d91d95644aedd05d03f95e1dba8af"
 
         swap_log = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
@@ -305,7 +305,7 @@ class TestExtractSwapAmounts:
 
     def test_extract_reverse_direction(self):
         """SELL direction: token1 is input, token0 is output."""
-        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        parser = UniswapV4ReceiptParser(chain="ethereum")
 
         swap_log = _build_swap_log(
             amount0=-(1000 * 10**6),  # USDC out (negative)
@@ -322,7 +322,7 @@ class TestExtractSwapAmounts:
     def test_extract_amount_fallback_equal_amounts(self):
         """When amount_in == amount_out (e.g. stablecoin-to-stablecoin swap),
         both tokens must still be identified by using different transfer events."""
-        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        parser = UniswapV4ReceiptParser(chain="ethereum")
         router = "0x66a9893cc07d91d95644aedd05d03f95e1dba8af"
         amount = 1000 * 10**6  # Same raw amount for both USDC and USDT (6 decimals)
 
@@ -355,7 +355,7 @@ class TestExtractSwapAmounts:
     def test_extract_amount_fallback_duplicate_transfers(self):
         """With multiple transfers of the same amount (Permit2 relay chain),
         the fallback picks distinct tokens for in and out."""
-        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        parser = UniswapV4ReceiptParser(chain="ethereum")
         router = "0x66a9893cc07d91d95644aedd05d03f95e1dba8af"
         permit2 = "0x000000000022d473030f116ddee9f6b43ac78ba3"
 
@@ -392,7 +392,7 @@ class TestExtractSwapAmounts:
 
     def test_extract_single_transfer_event(self):
         """When only one Transfer event exists, only one side gets identified."""
-        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        parser = UniswapV4ReceiptParser(chain="ethereum")
         router = "0x66a9893cc07d91d95644aedd05d03f95e1dba8af"
 
         swap_log = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
