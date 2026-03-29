@@ -55,7 +55,7 @@ class TestUniswapV4SwapIntent:
     - Balance changes match expected amounts
     """
 
-    @pytest.mark.xfail(reason="V4 swap executes but receipt parser finds no Swap events on Anvil fork (VIB-2024)", strict=False)
+    @pytest.mark.xfail(reason="V4 swap reverts on Anvil fork — execution still broken post-#1160 (VIB-2024)", strict=False)
     @pytest.mark.asyncio
     async def test_swap_usdc_to_weth_using_intent(
         self,
@@ -179,7 +179,7 @@ class TestUniswapV4SwapIntent:
 
         print("\nALL 4 LAYERS PASSED")
 
-    @pytest.mark.xfail(reason="V4 swap executes but receipt parser finds no Swap events on Anvil fork (VIB-2024)", strict=False)
+    @pytest.mark.xfail(reason="V4 swap reverts on Anvil fork — execution still broken post-#1160 (VIB-2024)", strict=False)
     @pytest.mark.asyncio
     async def test_swap_weth_to_usdc_using_intent(
         self,

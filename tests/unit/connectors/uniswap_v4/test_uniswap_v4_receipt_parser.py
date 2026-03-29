@@ -91,6 +91,28 @@ class TestEventTopics:
         assert "Swap" in EVENT_TOPICS
         assert EVENT_TOPICS["Swap"].startswith("0x")
 
+    def test_swap_topic_keccak_matches(self):
+        """Verify V4 PoolManager Swap topic matches keccak256 of the event signature."""
+        from web3 import Web3
+
+        expected = Web3.keccak(
+            text="Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)"
+        ).hex()
+        assert EVENT_TOPICS["Swap"] == "0x" + expected, (
+            f"V4 Swap topic mismatch: expected 0x{expected}, got {EVENT_TOPICS['Swap']}"
+        )
+
+    def test_modify_liquidity_topic_keccak_matches(self):
+        """Verify V4 PoolManager ModifyLiquidity topic matches keccak256."""
+        from web3 import Web3
+
+        expected = Web3.keccak(
+            text="ModifyLiquidity(bytes32,address,int24,int24,int256,bytes32)"
+        ).hex()
+        assert EVENT_TOPICS["ModifyLiquidity"] == "0x" + expected, (
+            f"V4 ModifyLiquidity topic mismatch: expected 0x{expected}, got {EVENT_TOPICS['ModifyLiquidity']}"
+        )
+
     def test_transfer_topic(self):
         assert EVENT_TOPICS["Transfer"] == "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
