@@ -128,8 +128,8 @@ class TestLPConstants:
         assert PM_MINT_POSITION == 0x02
         assert PM_DECREASE_LIQUIDITY == 0x01
         assert PM_BURN_POSITION == 0x03
-        assert PM_SETTLE_PAIR == 0x0B
-        assert PM_TAKE_PAIR == 0x0E
+        assert PM_SETTLE_PAIR == 0x0D  # Canonical Actions.sol value
+        assert PM_TAKE_PAIR == 0x11  # Canonical Actions.sol value
 
     def test_modify_liquidities_selector(self):
         from eth_hash.auto import keccak

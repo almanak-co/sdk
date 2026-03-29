@@ -11,7 +11,8 @@ flash accounting (modifyLiquidities + Actions-encoded bytes).
 Swap flow:
   1. ERC-20 approve input token to Permit2
   2. Permit2.approve(universalRouter, token, amount, expiration)
-  3. UniversalRouter.execute([V4_SWAP_EXACT_IN_SINGLE], [params], deadline)
+  3. UniversalRouter.execute([V4_SWAP], [abi.encode(actions, params)], deadline)
+     where actions = [SWAP_EXACT_IN_SINGLE, SETTLE, TAKE]
 
 LP flow (mint):
   1. ERC-20 approve token0 + token1 to Permit2
@@ -93,30 +94,51 @@ PERMIT2_APPROVE_SELECTOR = "0x87517c45"
 # UniversalRouter command bytes
 # Source: https://github.com/Uniswap/universal-router/blob/main/contracts/base/Dispatcher.sol
 PERMIT2_TRANSFER_FROM = 0x02  # abi.decode(inputs, (address token, address recipient, uint160 amount))
-V4_SWAP = 0x10  # V4 swap execution (handles ExactInputSingle params)
+_UR_SWEEP = 0x04  # sweep(address token, address recipient, uint256 amountMin)
+V4_SWAP = 0x10  # V4 swap via two-layer encoding: abi.encode(bytes actions, bytes[] params)
 # Aliases for backward compat with existing code
 V4_SWAP_EXACT_IN_SINGLE = V4_SWAP
 V4_SWAP_EXACT_IN = V4_SWAP
 V4_SWAP_EXACT_OUT_SINGLE = V4_SWAP
 V4_SWAP_EXACT_OUT = V4_SWAP
 
-# --- PositionManager Action bytes ---
-# V4 PositionManager uses modifyLiquidities(bytes unlockData, uint256 deadline)
-# where unlockData = abi.encode(bytes actions, bytes[] params)
+# --- V4 Action bytes (v4-periphery Actions.sol) ---
+# Shared between PositionManager and V4Router (same Actions.sol library).
+# Source: https://github.com/Uniswap/v4-periphery/blob/main/src/libraries/Actions.sol
+# Verified against on-chain transactions on Ethereum mainnet (2026-03-29).
+#
+# Liquidity actions
 PM_INCREASE_LIQUIDITY = 0x00
 PM_DECREASE_LIQUIDITY = 0x01
 PM_MINT_POSITION = 0x02
 PM_BURN_POSITION = 0x03
-PM_CLOSE_CURRENCY = 0x04
-PM_CLEAR_OR_TAKE = 0x05
-PM_SWEEP = 0x06
-PM_SETTLE = 0x09
-PM_SETTLE_ALL = 0x0A
-PM_SETTLE_PAIR = 0x0B
-PM_TAKE = 0x0C
-PM_TAKE_ALL = 0x0D
-PM_TAKE_PAIR = 0x0E
-PM_TAKE_PORTION = 0x0F
+# Swap actions (used inside V4_SWAP two-layer encoding)
+ACTION_SWAP_EXACT_IN_SINGLE = 0x06
+ACTION_SWAP_EXACT_IN = 0x07
+ACTION_SWAP_EXACT_OUT_SINGLE = 0x08
+ACTION_SWAP_EXACT_OUT = 0x09
+# Settlement actions
+ACTION_SETTLE = 0x0B
+ACTION_SETTLE_ALL = 0x0C
+ACTION_SETTLE_PAIR = 0x0D
+ACTION_TAKE = 0x0E
+ACTION_TAKE_ALL = 0x0F
+ACTION_TAKE_PORTION = 0x10
+ACTION_TAKE_PAIR = 0x11
+ACTION_CLOSE_CURRENCY = 0x12
+ACTION_CLEAR_OR_TAKE = 0x13
+ACTION_SWEEP = 0x14
+# Legacy aliases (deprecated -- use ACTION_* constants above)
+PM_CLOSE_CURRENCY = ACTION_CLOSE_CURRENCY
+PM_CLEAR_OR_TAKE = ACTION_CLEAR_OR_TAKE
+PM_SWEEP = ACTION_SWEEP
+PM_SETTLE = ACTION_SETTLE
+PM_SETTLE_ALL = ACTION_SETTLE_ALL
+PM_SETTLE_PAIR = ACTION_SETTLE_PAIR
+PM_TAKE = ACTION_TAKE
+PM_TAKE_ALL = ACTION_TAKE_ALL
+PM_TAKE_PAIR = ACTION_TAKE_PAIR
+PM_TAKE_PORTION = ACTION_TAKE_PORTION
 
 # Gas estimates
 UNISWAP_V4_GAS_ESTIMATES = {
@@ -412,7 +434,10 @@ class UniswapV4SDK:
     ) -> SwapTransaction:
         """Build a V4 swap transaction via the UniversalRouter.
 
-        Encodes UniversalRouter.execute() with a V4_SWAP_EXACT_IN_SINGLE command.
+        Uses the two-layer V4_SWAP encoding verified against real Ethereum mainnet txns:
+          Outer: UniversalRouter.execute([V4_SWAP], [v4_input], deadline)
+          Inner: v4_input = abi.encode(bytes actions, bytes[] params)
+                 actions = [SWAP_EXACT_IN_SINGLE, SETTLE, TAKE]
 
         Args:
             quote: Swap quote with amounts.
@@ -425,33 +450,47 @@ class UniswapV4SDK:
         """
         amount_out_minimum = quote.amount_out * (10000 - slippage_bps) // 10000
         is_native_in = quote.token_in.lower() == NATIVE_CURRENCY
+        is_native_out = quote.token_out.lower() == NATIVE_CURRENCY
 
         if deadline == 0:
             deadline = int(time.time()) + 1800  # 30 minutes
 
-        # Encode the ExactInputSingleParams struct for V4_SWAP_EXACT_IN_SINGLE
-        params_encoded = self._encode_exact_input_single_params(
+        # 1. Encode the ExactInputSingleParams for the swap action
+        swap_params = self._encode_exact_input_single_params(
             quote=quote,
             amount_out_minimum=amount_out_minimum,
         )
 
-        if is_native_in:
-            # Native ETH: no Permit2 transfer needed, ETH sent as msg.value
-            commands = bytes([V4_SWAP_EXACT_IN_SINGLE])
-            inputs = [params_encoded]
-        else:
-            # ERC-20: prepend PERMIT2_TRANSFER_FROM to pull tokens into the router
-            # before the swap executes. The UniversalRouter reads its own balance
-            # during V4_SWAP, so tokens must arrive first.
-            # PERMIT2_TRANSFER_FROM params: abi.encode(address token, address recipient, uint160 amount)
-            transfer_params = _pad_address(quote.token_in) + _pad_address(self.router) + _pad_uint(quote.amount_in)
-            commands = bytes([PERMIT2_TRANSFER_FROM, V4_SWAP_EXACT_IN_SINGLE])
-            inputs = [transfer_params, params_encoded]
+        # 2. Encode SETTLE params: (Currency currency, uint256 maxAmount, bool payerIsUser)
+        #    maxAmount=0 means "settle entire debt", payerIsUser=true for user-funded swaps
+        settle_params = _pad_address(quote.token_in) + _pad_uint(0) + _pad_bool(True)
 
-        # Encode UniversalRouter.execute(bytes commands, bytes[] inputs, uint256 deadline)
+        # 3. Encode TAKE params: (Currency currency, address recipient, uint256 amount)
+        #    For native ETH output: recipient = address(2) (ADDRESS_THIS = the UniversalRouter),
+        #    then use outer SWEEP command to forward ETH to the actual recipient.
+        #    For ERC-20 output: recipient = actual wallet address.
+        #    amount=0 means "take all available".
+        take_recipient = "0x0000000000000000000000000000000000000002" if is_native_out else recipient
+        take_params = _pad_address(quote.token_out) + _pad_address(take_recipient) + _pad_uint(0)
+
+        # 4. Build the two-layer V4_SWAP input: abi.encode(bytes actions, bytes[] params)
+        inner_actions = bytes([ACTION_SWAP_EXACT_IN_SINGLE, ACTION_SETTLE, ACTION_TAKE])
+        v4_swap_input = _encode_v4_actions(inner_actions, [swap_params, settle_params, take_params])
+
+        # 5. Build UniversalRouter commands
+        if is_native_out:
+            # Native ETH output: V4_SWAP + SWEEP to forward ETH from router to recipient
+            sweep_params = _pad_address(NATIVE_CURRENCY) + _pad_address(recipient) + _pad_uint(amount_out_minimum)
+            ur_commands = bytes([V4_SWAP, _UR_SWEEP])
+            ur_inputs = [v4_swap_input, sweep_params]
+        else:
+            ur_commands = bytes([V4_SWAP])
+            ur_inputs = [v4_swap_input]
+
+        # 6. Wrap in UniversalRouter.execute()
         calldata = _encode_execute(
-            commands=commands,
-            inputs=inputs,
+            commands=ur_commands,
+            inputs=ur_inputs,
             deadline=deadline,
         )
 
@@ -468,17 +507,19 @@ class UniswapV4SDK:
         quote: SwapQuote,
         amount_out_minimum: int,
     ) -> str:
-        """Encode ExactInputSingleParams struct for V4_SWAP_EXACT_IN_SINGLE.
+        """Encode ExactInputSingleParams struct for V4 SWAP_EXACT_IN_SINGLE action.
 
-        Struct layout (solidity):
+        Deployed struct layout (v4-periphery IV4Router.sol):
             struct ExactInputSingleParams {
                 PoolKey poolKey;        // (currency0, currency1, fee, tickSpacing, hooks)
                 bool zeroForOne;
                 uint128 amountIn;
                 uint128 amountOutMinimum;
-                uint160 sqrtPriceLimitX96;
                 bytes hookData;         // dynamic
             }
+
+        Note: sqrtPriceLimitX96 was removed in the deployed V4 contracts.
+        The V4Router hardcodes it internally (MIN_SQRT_PRICE+1 or MAX_SQRT_PRICE-1).
 
         Returns:
             Hex string (no 0x prefix) of ABI-encoded params.
@@ -486,10 +527,13 @@ class UniswapV4SDK:
         pool_key = self.compute_pool_key(quote.token_in, quote.token_out, quote.fee_tier)
         zero_for_one = quote.token_in.lower() == pool_key.currency0
 
-        sqrt_price_limit = (MIN_SQRT_PRICE + 1) if zero_for_one else (MAX_SQRT_PRICE - 1)
+        # Clamp amounts to uint128 (V4 uses uint128 not uint256)
+        uint128_max = (1 << 128) - 1
+        amount_in = min(quote.amount_in, uint128_max)
+        amount_out_min = min(amount_out_minimum, uint128_max)
 
-        # Head: 9 static fields + 1 offset for hookData = 10 words
-        # hookData offset from start of struct: 10 * 32 = 320 = 0x140
+        # Head: 8 static fields + 1 offset for hookData = 9 words
+        # hookData offset from start of struct: 9 * 32 = 288 = 0x120
         head = (
             _pad_address(pool_key.currency0)
             + _pad_address(pool_key.currency1)
@@ -497,10 +541,9 @@ class UniswapV4SDK:
             + _pad_int24(pool_key.tick_spacing)
             + _pad_address(pool_key.hooks)
             + _pad_bool(zero_for_one)
-            + _pad_uint(quote.amount_in)
-            + _pad_uint(amount_out_minimum)
-            + _pad_uint(sqrt_price_limit)
-            + _pad_uint(0x140)  # offset to hookData
+            + _pad_uint(amount_in)
+            + _pad_uint(amount_out_min)
+            + _pad_uint(0x120)  # offset to hookData
         )
 
         # Tail: hookData = empty bytes
@@ -900,6 +943,53 @@ def _encode_bytes(data: bytes) -> str:
     return _pad_uint(length) + hex_data
 
 
+def _encode_v4_actions(actions: bytes, params: list[str]) -> str:
+    """Encode V4 two-layer action data: abi.encode(bytes actions, bytes[] params).
+
+    Used as input for both V4_SWAP (UniversalRouter command 0x10) and
+    PositionManager.modifyLiquidities unlockData.
+
+    Args:
+        actions: Packed action bytes (each byte is a v4-periphery action type).
+        params: List of hex-encoded param blobs (no 0x prefix) for each action.
+
+    Returns:
+        Hex string (no 0x prefix) of the ABI-encoded (bytes, bytes[]) tuple.
+    """
+    # Actions section: at offset 0x40 (2 words for the two offsets)
+    actions_hex = actions.hex()
+    actions_padded = actions_hex
+    if len(actions_padded) % 64 != 0:
+        actions_padded = actions_padded + "0" * (64 - len(actions_padded) % 64)
+    actions_section = _pad_uint(len(actions)) + actions_padded
+
+    # Params section: bytes[] array
+    num_params = len(params)
+    offsets_area = num_params * 32
+    element_data = ""
+    offsets = []
+    current_offset = offsets_area
+
+    for p in params:
+        offsets.append(current_offset)
+        byte_len = len(p) // 2
+        padded = p
+        if len(padded) % 64 != 0:
+            padded = padded + "0" * (64 - len(padded) % 64)
+        element_data += _pad_uint(byte_len) + padded
+        current_offset += 32 + len(padded) // 2
+
+    params_section = _pad_uint(num_params)
+    for off in offsets:
+        params_section += _pad_uint(off)
+    params_section += element_data
+
+    offset_actions = 0x40
+    offset_params = offset_actions + len(actions_section) // 2
+
+    return _pad_uint(offset_actions) + _pad_uint(offset_params) + actions_section + params_section
+
+
 def _encode_modify_liquidities(actions: bytes, params: list[str], deadline: int) -> str:
     """Encode PositionManager.modifyLiquidities(bytes unlockData, uint256 deadline).
 
@@ -913,48 +1003,9 @@ def _encode_modify_liquidities(actions: bytes, params: list[str], deadline: int)
     Returns:
         Full calldata hex string with 0x prefix.
     """
-    # unlockData = abi.encode(bytes actions, bytes[] params)
-    # This is two dynamic types, so:
-    # [offset_actions, offset_params, actions_data, params_data]
-
-    # Actions section: at offset 0x40 (2 words for the two offsets)
-    actions_hex = actions.hex()
-    actions_padded = actions_hex
-    if len(actions_padded) % 64 != 0:
-        actions_padded = actions_padded + "0" * (64 - len(actions_padded) % 64)
-    actions_section = _pad_uint(len(actions)) + actions_padded
-
-    # Params section: bytes[] array
-    # Array layout: [length, offset0, offset1, ..., element0, element1, ...]
-    num_params = len(params)
-    offsets_area = num_params * 32  # offset words
-    element_data = ""
-    offsets = []
-    current_offset = offsets_area
-
-    for p in params:
-        offsets.append(current_offset)
-        byte_len = len(p) // 2
-        padded = p
-        if len(padded) % 64 != 0:
-            padded = padded + "0" * (64 - len(padded) % 64)
-        element_data += _pad_uint(byte_len) + padded
-        current_offset += 32 + len(padded) // 2  # length word + data
-
-    params_section = _pad_uint(num_params)
-    for off in offsets:
-        params_section += _pad_uint(off)
-    params_section += element_data
-
-    # Offset to actions: 0x40 (starts after 2 offset words)
-    offset_actions = 0x40
-    # Offset to params: 0x40 + len(actions_section) in bytes
-    offset_params = offset_actions + len(actions_section) // 2
-
-    unlock_data_hex = _pad_uint(offset_actions) + _pad_uint(offset_params) + actions_section + params_section
+    unlock_data_hex = _encode_v4_actions(actions, params)
 
     # Now encode the outer call: modifyLiquidities(bytes unlockData, uint256 deadline)
-    # unlockData is dynamic bytes, so: [offset_unlockData, deadline, unlockData_section]
     unlock_data_bytes_len = len(unlock_data_hex) // 2
     unlock_data_padded = unlock_data_hex
     if len(unlock_data_padded) % 64 != 0:
@@ -1046,6 +1097,16 @@ def _encode_execute(commands: bytes, inputs: list[str], deadline: int) -> str:
 
 
 __all__ = [
+    "ACTION_SETTLE",
+    "ACTION_SETTLE_ALL",
+    "ACTION_SETTLE_PAIR",
+    "ACTION_SWAP_EXACT_IN",
+    "ACTION_SWAP_EXACT_IN_SINGLE",
+    "ACTION_SWAP_EXACT_OUT",
+    "ACTION_SWAP_EXACT_OUT_SINGLE",
+    "ACTION_TAKE",
+    "ACTION_TAKE_ALL",
+    "ACTION_TAKE_PAIR",
     "FEE_TIERS",
     "LPDecreaseParams",
     "LPMintParams",
@@ -1065,6 +1126,7 @@ __all__ = [
     "PoolKey",
     "QUOTER_ADDRESSES",
     "ROUTER_ADDRESSES",
+    "SWAP_SELECTOR",
     "SwapQuote",
     "SwapTransaction",
     "TICK_SPACING",

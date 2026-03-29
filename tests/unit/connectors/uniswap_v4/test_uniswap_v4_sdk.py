@@ -409,9 +409,10 @@ class TestEncodeExactInputSingleParams:
         params = sdk._encode_exact_input_single_params(quote, amount_out_minimum=990 * 10**15)
         # Should be hex string (no 0x prefix)
         assert not params.startswith("0x")
-        # 11 words: 5 pool key + zeroForOne + amountIn + amountOutMin + sqrtPriceLimit + hookData offset + hookData length
+        # 10 words: 5 pool key + zeroForOne + amountIn + amountOutMin + hookData offset + hookData length
+        # (sqrtPriceLimitX96 removed in deployed V4 contracts)
         words = [params[i : i + 64] for i in range(0, len(params), 64)]
-        assert len(words) == 11, f"Expected 11 words, got {len(words)}"
+        assert len(words) == 10, f"Expected 10 words, got {len(words)}"
         # Verify fee tier (word 2), amountIn (word 6), amountOutMinimum (word 7)
         assert int(words[2], 16) == 3000  # fee_tier
         assert int(words[6], 16) == 10**18  # amount_in
