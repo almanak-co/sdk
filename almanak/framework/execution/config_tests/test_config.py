@@ -471,8 +471,8 @@ class TestFromEnv:
                 config = LocalRuntimeConfig.from_env()
         assert config.max_gas_price_gwei == 50  # berachain entry in CHAIN_GAS_PRICE_CAPS_GWEI
 
-    def test_from_env_explicit_override_respected(self):
-        """Explicit ALMANAK_MAX_GAS_PRICE_GWEI should override chain-specific default."""
+    def test_from_env_explicit_override_respected_on_mainnet(self):
+        """Explicit ALMANAK_MAX_GAS_PRICE_GWEI should override chain-specific default on mainnet."""
         env_vars = {
             "ALMANAK_CHAIN": "polygon",
             "ALMANAK_RPC_URL": "https://polygon-rpc.com",
@@ -495,16 +495,34 @@ class TestFromEnv:
                 config = LocalRuntimeConfig.from_env(chain="arbitrum", network="anvil")
         assert config.max_gas_price_gwei == 9999
 
-    def test_from_env_anvil_mode_override_still_works(self):
-        """Users can still set a lower cap in Anvil mode if needed."""
+    def test_from_env_anvil_mode_ignores_low_override(self):
+        """VIB-1719: In Anvil mode, low gas cap from env is overridden to 9999.
+
+        Gas costs nothing on Anvil, so low caps only cause false positives
+        (especially on high-gas chains like Polygon).
+        """
         env_vars = {
             "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
-            "ALMANAK_MAX_GAS_PRICE_GWEI": "5",
+            "ALMANAK_MAX_GAS_PRICE_GWEI": "100",
         }
         with patch("almanak.framework.execution.config.load_dotenv"):
             with patch.dict(os.environ, env_vars, clear=True):
-                config = LocalRuntimeConfig.from_env(chain="arbitrum", network="anvil")
-        assert config.max_gas_price_gwei == 5
+                config = LocalRuntimeConfig.from_env(chain="polygon", network="anvil")
+        assert config.max_gas_price_gwei == 9999
+
+    def test_from_env_anvil_mode_warns_on_low_override(self):
+        """VIB-1719: Should warn when user sets a gas cap too low for Anvil mode."""
+        env_vars = {
+            "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
+            "ALMANAK_MAX_GAS_PRICE_GWEI": "100",
+        }
+        with patch("almanak.framework.execution.config.load_dotenv"):
+            with patch.dict(os.environ, env_vars, clear=True):
+                with patch("almanak.framework.execution.config.logger") as mock_logger:
+                    LocalRuntimeConfig.from_env(chain="polygon", network="anvil")
+                mock_logger.warning.assert_called()
+                warning_messages = [str(call) for call in mock_logger.warning.call_args_list]
+                assert any("too low for Anvil" in msg for msg in warning_messages)
 
     # VIB-308: Warning for unprefixed env vars
     def test_from_env_warns_on_unprefixed_max_gas_price_gwei(self):

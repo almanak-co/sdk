@@ -292,7 +292,8 @@ class LocalRuntimeConfig:
         chain_id: Numeric chain ID derived from chain name
 
     Optional Fields:
-        max_gas_price_gwei: Maximum gas price in gwei (default 100)
+        max_gas_price_gwei: Maximum gas price in gwei (default: 100 when constructed directly;
+            from_env() uses chain-specific defaults, and Anvil mode always uses 9999)
         tx_timeout_seconds: Transaction confirmation timeout (default 120)
         simulation_enabled: Whether to simulate transactions before submission (default True)
         max_tx_value_eth: Maximum value per transaction in ETH (default 10.0)
@@ -600,7 +601,7 @@ class LocalRuntimeConfig:
             {prefix}CHAIN: Blockchain network (e.g., "arbitrum") - optional if chain param provided
             {prefix}RPC_URL: RPC endpoint URL - optional if ALCHEMY_API_KEY is set
             ALCHEMY_API_KEY: Alchemy API key for dynamic URL building (recommended)
-            {prefix}MAX_GAS_PRICE_GWEI: Optional, max gas price (default 100)
+            {prefix}MAX_GAS_PRICE_GWEI: Optional, max gas price (default: chain-specific; Anvil: always 9999)
             {prefix}MAX_GAS_COST_NATIVE: Optional, max gas cost per tx in native token (default 0 = no limit)
             {prefix}MAX_GAS_COST_USD: Optional, max gas cost per tx in USD (default 0 = no limit)
             {prefix}MAX_SLIPPAGE_BPS: Optional, max acceptable swap slippage in basis points (default 0 = no limit)
@@ -736,13 +737,27 @@ class LocalRuntimeConfig:
                         reason=f"Could not build RPC URL: {e}. Set {prefix}RPC_URL, {prefix}{resolved_chain.upper()}_RPC_URL, ALCHEMY_API_KEY, or TENDERLY_API_KEY_{resolved_chain.upper()}.",
                     ) from None
 
-        # VIB-303 + VIB-304: Use chain-specific gas price cap as default (not 100 gwei hardcoded).
-        # In Anvil mode, gas costs no real money -- use ANVIL_GAS_PRICE_CAP_GWEI to prevent cap errors during dev.
-        # On mainnet, use the chain-specific cap (Polygon=500, Ethereum=300, Arbitrum=10, etc.).
+        # VIB-303 + VIB-304 + VIB-1719: Chain-aware gas price cap defaults.
+        # In Anvil mode, gas costs no real money -- always use ANVIL_GAS_PRICE_CAP_GWEI
+        # to prevent false-positive cap errors on high-gas chains like Polygon.
+        # If a user's .env has ALMANAK_MAX_GAS_PRICE_GWEI=100 (from .env.example),
+        # we override it in Anvil mode and warn, because 100 gwei breaks Polygon forks.
         if network.lower() == "anvil":
             default_gas_cap = ANVIL_GAS_PRICE_CAP_GWEI
+            user_gas_cap = get_optional_int("MAX_GAS_PRICE_GWEI", default_gas_cap)
+            if user_gas_cap < ANVIL_GAS_PRICE_CAP_GWEI:
+                logger.warning(
+                    "ALMANAK_MAX_GAS_PRICE_GWEI=%d is too low for Anvil mode "
+                    "(gas costs no real money). Overriding to %d gwei to prevent "
+                    "false-positive gas cap errors on high-gas chains (e.g. Polygon).",
+                    user_gas_cap,
+                    ANVIL_GAS_PRICE_CAP_GWEI,
+                )
+            # Always use Anvil cap in Anvil mode -- env var is ignored entirely
+            gas_cap_override = ANVIL_GAS_PRICE_CAP_GWEI
         else:
             default_gas_cap = CHAIN_GAS_PRICE_CAPS_GWEI.get(resolved_chain, DEFAULT_GAS_PRICE_CAP_GWEI)
+            gas_cap_override = None  # Let env var take effect normally
 
         # Get execution mode and create Safe signer if needed
         mode_str = get_optional("EXECUTION_MODE", "eoa") or "eoa"
@@ -775,7 +790,9 @@ class LocalRuntimeConfig:
             chain=resolved_chain,
             rpc_url=rpc_url,
             private_key=private_key,
-            max_gas_price_gwei=get_optional_int("MAX_GAS_PRICE_GWEI", default_gas_cap),
+            max_gas_price_gwei=gas_cap_override
+            if gas_cap_override is not None
+            else get_optional_int("MAX_GAS_PRICE_GWEI", default_gas_cap),
             max_gas_cost_native=get_optional_float("MAX_GAS_COST_NATIVE", 0.0),
             max_gas_cost_usd=get_optional_float("MAX_GAS_COST_USD", 0.0),
             max_slippage_bps=get_optional_int("MAX_SLIPPAGE_BPS", 0),
@@ -1618,7 +1635,7 @@ class MultiChainRuntimeConfig:
             {prefix}ZODIAC_ADDRESS: Zodiac Roles module address (required for safe_zodiac)
             {prefix}SIGNER_SERVICE_URL: Remote signer URL (required for safe_zodiac)
             {prefix}SIGNER_SERVICE_JWT: JWT for signer service (required for safe_zodiac)
-            {prefix}MAX_GAS_PRICE_GWEI: Optional, max gas price (default 100)
+            {prefix}MAX_GAS_PRICE_GWEI: Optional, max gas price (default: 500 gwei global cap; Anvil: always 9999)
             {prefix}MAX_GAS_COST_NATIVE: Optional, max gas cost per tx in native token (default 0 = no limit)
             {prefix}MAX_GAS_COST_USD: Optional, max gas cost per tx in USD (default 0 = no limit)
             {prefix}MAX_SLIPPAGE_BPS: Optional, max acceptable swap slippage in basis points (default 0 = no limit)
@@ -1741,13 +1758,24 @@ class MultiChainRuntimeConfig:
                 prefix=prefix,
             )
 
-        # VIB-303 + VIB-304: Use chain-aware gas price cap as default.
-        # In Anvil mode, gas costs no real money -- use ANVIL_GAS_PRICE_CAP_GWEI to prevent cap errors during dev.
-        # For multi-chain mainnet, use DEFAULT_GAS_PRICE_CAP_GWEI (conservative but correct for all chains).
+        # VIB-303 + VIB-304 + VIB-1719: Chain-aware gas price cap defaults.
+        # In Anvil mode, gas costs no real money -- always use ANVIL_GAS_PRICE_CAP_GWEI
+        # to prevent false-positive cap errors on high-gas chains like Polygon.
         if network.lower() == "anvil":
             multi_default_gas_cap = ANVIL_GAS_PRICE_CAP_GWEI
+            user_gas_cap = get_optional_int("MAX_GAS_PRICE_GWEI", multi_default_gas_cap)
+            if user_gas_cap < ANVIL_GAS_PRICE_CAP_GWEI:
+                logger.warning(
+                    "ALMANAK_MAX_GAS_PRICE_GWEI=%d is too low for Anvil mode "
+                    "(gas costs no real money). Overriding to %d gwei to prevent "
+                    "false-positive gas cap errors on high-gas chains (e.g. Polygon).",
+                    user_gas_cap,
+                    ANVIL_GAS_PRICE_CAP_GWEI,
+                )
+            multi_gas_cap_override = ANVIL_GAS_PRICE_CAP_GWEI
         else:
             multi_default_gas_cap = DEFAULT_GAS_PRICE_CAP_GWEI
+            multi_gas_cap_override = None
 
         return cls(
             chains=chains,
@@ -1755,7 +1783,9 @@ class MultiChainRuntimeConfig:
             private_key=private_key,
             safe_signer=safe_signer,
             network=network,
-            max_gas_price_gwei=get_optional_int("MAX_GAS_PRICE_GWEI", multi_default_gas_cap),
+            max_gas_price_gwei=multi_gas_cap_override
+            if multi_gas_cap_override is not None
+            else get_optional_int("MAX_GAS_PRICE_GWEI", multi_default_gas_cap),
             max_gas_cost_native=get_optional_float("MAX_GAS_COST_NATIVE", 0.0),
             max_gas_cost_usd=get_optional_float("MAX_GAS_COST_USD", 0.0),
             max_slippage_bps=get_optional_int("MAX_SLIPPAGE_BPS", 0),
