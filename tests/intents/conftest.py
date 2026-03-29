@@ -701,6 +701,71 @@ def format_token_amount(amount: int, decimals: int) -> Decimal:
     return Decimal(amount) / Decimal(10**decimals)
 
 
+def assert_swap_bilateral_deltas(
+    web3: Web3,
+    token_in: str,
+    token_out: str,
+    wallet: str,
+    in_balance_before: int,
+    out_balance_before: int,
+    expected_in_spent: int,
+    *,
+    in_decimals: int = 18,
+    out_decimals: int = 18,
+) -> tuple[int, int]:
+    """Assert bilateral balance deltas for a successful swap.
+
+    Verifies BOTH sides of a swap:
+    - Input token MUST decrease by the exact expected amount
+    - Output token MUST increase by at least 1 unit (no-op guard)
+
+    Returns (amount_spent, amount_received) for further assertions.
+    """
+    in_after = get_token_balance(web3, token_in, wallet)
+    out_after = get_token_balance(web3, token_out, wallet)
+
+    amount_spent = in_balance_before - in_after
+    amount_received = out_after - out_balance_before
+
+    assert amount_spent == expected_in_spent, (
+        f"Input token must decrease by exact swap amount. "
+        f"Expected: {format_token_amount(expected_in_spent, in_decimals)}, "
+        f"Got: {format_token_amount(amount_spent, in_decimals)}"
+    )
+    assert amount_received > 0, (
+        f"Output token must increase (no-op guard). "
+        f"Got delta: {format_token_amount(amount_received, out_decimals)}"
+    )
+    return amount_spent, amount_received
+
+
+def assert_swap_conservation(
+    web3: Web3,
+    token_in: str,
+    token_out: str,
+    wallet: str,
+    in_balance_before: int,
+    out_balance_before: int,
+) -> None:
+    """Assert bilateral balance conservation after a failed swap.
+
+    Verifies BOTH tokens are unchanged:
+    - Input token balance must be identical to before
+    - Output token balance must be identical to before
+    """
+    in_after = get_token_balance(web3, token_in, wallet)
+    out_after = get_token_balance(web3, token_out, wallet)
+
+    assert in_after == in_balance_before, (
+        f"Input token balance must be unchanged after failed swap. "
+        f"Before: {in_balance_before}, After: {in_after}"
+    )
+    assert out_after == out_balance_before, (
+        f"Output token balance must be unchanged after failed swap. "
+        f"Before: {out_balance_before}, After: {out_after}"
+    )
+
+
 def get_chain_name_from_id(chain_id: int) -> str:
     """Get chain name from chain ID."""
     chain_id_to_name = {

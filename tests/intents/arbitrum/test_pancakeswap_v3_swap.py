@@ -281,6 +281,7 @@ class TestPancakeSwapV3SwapIntent:
         """Test that SwapIntent with insufficient balance fails gracefully."""
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         token_in = tokens["USDT"]
+        token_out = tokens["WETH"]
 
         # Reduce the balance for this specific test so the revert path is fast.
         # With forked Anvil, very large swaps that ultimately revert (STF) can
@@ -297,6 +298,7 @@ class TestPancakeSwapV3SwapIntent:
 
         # Get current balance
         usdt_balance = get_token_balance(web3, token_in, funded_wallet)
+        weth_before = get_token_balance(web3, token_out, funded_wallet)
         balance_decimal = Decimal(usdt_balance) / Decimal(10**in_decimals)
 
         # Try to swap more than we have
@@ -333,9 +335,11 @@ class TestPancakeSwapV3SwapIntent:
         assert not execution_result.success, "Execution should fail with insufficient balance"
         print(f"Execution failed as expected: {execution_result.error}")
 
-        # Verify balance unchanged (conservation check)
+        # Verify balances unchanged (bilateral conservation check)
         usdt_after = get_token_balance(web3, token_in, funded_wallet)
-        assert usdt_after == usdt_balance, "Balance must be unchanged after failed swap"
+        weth_after = get_token_balance(web3, token_out, funded_wallet)
+        assert usdt_after == usdt_balance, "Input token balance must be unchanged after failed swap"
+        assert weth_after == weth_before, "Output token balance must be unchanged after failed swap"
 
         print("\nALL CHECKS PASSED ✓")
 
