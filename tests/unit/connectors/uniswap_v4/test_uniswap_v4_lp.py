@@ -12,13 +12,36 @@ import pytest
 
 from almanak.framework.connectors.uniswap_v4.hooks import HookFlags
 from almanak.framework.connectors.uniswap_v4.sdk import (
+    ACTION_CLEAR_OR_TAKE,
+    ACTION_CLOSE_CURRENCY,
+    ACTION_SETTLE,
+    ACTION_SETTLE_ALL,
+    ACTION_SETTLE_PAIR,
+    ACTION_SWEEP,
+    ACTION_SWAP_EXACT_IN,
+    ACTION_SWAP_EXACT_IN_SINGLE,
+    ACTION_SWAP_EXACT_OUT,
+    ACTION_SWAP_EXACT_OUT_SINGLE,
+    ACTION_TAKE,
+    ACTION_TAKE_ALL,
+    ACTION_TAKE_PAIR,
+    ACTION_TAKE_PORTION,
     MODIFY_LIQUIDITIES_SELECTOR,
     NATIVE_CURRENCY,
     PM_BURN_POSITION,
+    PM_CLEAR_OR_TAKE,
+    PM_CLOSE_CURRENCY,
     PM_DECREASE_LIQUIDITY,
+    PM_INCREASE_LIQUIDITY,
     PM_MINT_POSITION,
+    PM_SETTLE,
+    PM_SETTLE_ALL,
     PM_SETTLE_PAIR,
+    PM_SWEEP,
+    PM_TAKE,
+    PM_TAKE_ALL,
     PM_TAKE_PAIR,
+    PM_TAKE_PORTION,
     POSITION_MANAGER_ADDRESSES,
     UNISWAP_V4_GAS_ESTIMATES,
     LPDecreaseParams,
@@ -32,6 +55,28 @@ from almanak.framework.connectors.uniswap_v4.receipt_parser import (
     ModifyLiquidityEventData,
     UniswapV4ReceiptParser,
 )
+
+
+def _extract_actions_from_modify_liquidities(calldata_hex: str) -> bytes:
+    """Extract the packed actions bytes from modifyLiquidities calldata.
+
+    Layout: 4-byte selector + ABI-encoded (bytes unlockData, uint256 deadline).
+    unlockData is itself ABI-encoded (bytes actions, bytes[] params).
+    """
+    raw = bytes.fromhex(calldata_hex[2:])  # strip 0x
+    # Skip 4-byte selector, then read the ABI-encoded outer tuple
+    outer = raw[4:]
+    # First word: offset to unlockData bytes (always 0x40)
+    unlock_offset = int.from_bytes(outer[0:32], "big")
+    # At unlock_offset: length of unlockData
+    unlock_len = int.from_bytes(outer[unlock_offset : unlock_offset + 32], "big")
+    unlock_data = outer[unlock_offset + 32 : unlock_offset + 32 + unlock_len]
+    # unlockData is abi.encode(bytes actions, bytes[] params)
+    # First word: offset to actions bytes (always 0x40)
+    actions_offset = int.from_bytes(unlock_data[0:32], "big")
+    # At actions_offset: length of actions
+    actions_len = int.from_bytes(unlock_data[actions_offset : actions_offset + 32], "big")
+    return unlock_data[actions_offset + 32 : actions_offset + 32 + actions_len]
 
 
 # =============================================================================
@@ -121,12 +166,58 @@ class TestLPConstants:
         assert UNISWAP_V4_GAS_ESTIMATES["lp_burn"] == 200_000
         assert UNISWAP_V4_GAS_ESTIMATES["lp_collect_fees"] == 250_000
 
-    def test_action_bytes(self):
-        assert PM_MINT_POSITION == 0x02
+    def test_action_bytes_liquidity(self):
+        """Verify liquidity action bytes match Actions.sol."""
+        assert PM_INCREASE_LIQUIDITY == 0x00
         assert PM_DECREASE_LIQUIDITY == 0x01
+        assert PM_MINT_POSITION == 0x02
         assert PM_BURN_POSITION == 0x03
-        assert PM_SETTLE_PAIR == 0x0D  # Canonical Actions.sol value
-        assert PM_TAKE_PAIR == 0x11  # Canonical Actions.sol value
+
+    def test_action_bytes_swap(self):
+        """Verify swap action bytes match Actions.sol."""
+        assert ACTION_SWAP_EXACT_IN_SINGLE == 0x06
+        assert ACTION_SWAP_EXACT_IN == 0x07
+        assert ACTION_SWAP_EXACT_OUT_SINGLE == 0x08
+        assert ACTION_SWAP_EXACT_OUT == 0x09
+
+    def test_action_bytes_settlement(self):
+        """Verify settlement action bytes match Actions.sol (PR #1160 corrected values)."""
+        assert ACTION_SETTLE == 0x0B
+        assert ACTION_SETTLE_ALL == 0x0C
+        assert ACTION_SETTLE_PAIR == 0x0D
+        assert ACTION_TAKE == 0x0E
+        assert ACTION_TAKE_ALL == 0x0F
+        assert ACTION_TAKE_PORTION == 0x10
+        assert ACTION_TAKE_PAIR == 0x11
+        assert ACTION_CLOSE_CURRENCY == 0x12
+        assert ACTION_CLEAR_OR_TAKE == 0x13
+        assert ACTION_SWEEP == 0x14
+
+    def test_pm_aliases_match_action_constants(self):
+        """Verify all PM_* aliases point to the correct ACTION_* constants."""
+        assert PM_SETTLE == ACTION_SETTLE
+        assert PM_SETTLE_ALL == ACTION_SETTLE_ALL
+        assert PM_SETTLE_PAIR == ACTION_SETTLE_PAIR
+        assert PM_TAKE == ACTION_TAKE
+        assert PM_TAKE_ALL == ACTION_TAKE_ALL
+        assert PM_TAKE_PAIR == ACTION_TAKE_PAIR
+        assert PM_TAKE_PORTION == ACTION_TAKE_PORTION
+        assert PM_CLOSE_CURRENCY == ACTION_CLOSE_CURRENCY
+        assert PM_CLEAR_OR_TAKE == ACTION_CLEAR_OR_TAKE
+        assert PM_SWEEP == ACTION_SWEEP
+
+    def test_action_bytes_no_gaps_in_sequence(self):
+        """Verify no gaps exist in the settlement action byte sequence (0x0B-0x14).
+
+        A gap would indicate a missing constant from Actions.sol.
+        """
+        settlement_bytes = sorted([
+            ACTION_SETTLE, ACTION_SETTLE_ALL, ACTION_SETTLE_PAIR,
+            ACTION_TAKE, ACTION_TAKE_ALL, ACTION_TAKE_PORTION,
+            ACTION_TAKE_PAIR, ACTION_CLOSE_CURRENCY,
+            ACTION_CLEAR_OR_TAKE, ACTION_SWEEP,
+        ])
+        assert settlement_bytes == list(range(0x0B, 0x15))
 
     def test_modify_liquidities_selector(self):
         from eth_hash.auto import keccak
@@ -230,6 +321,29 @@ class TestSDKLPMethods:
         assert tx.gas_estimate == UNISWAP_V4_GAS_ESTIMATES["lp_mint"]
         assert tx.value == 0
 
+    def test_mint_tx_encodes_correct_action_bytes(self, sdk):
+        """Verify mint calldata encodes PM_MINT_POSITION + PM_SETTLE_PAIR (VIB-2097)."""
+        pool_key = sdk.compute_pool_key(
+            "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            fee=3000,
+        )
+        params = LPMintParams(
+            pool_key=pool_key,
+            tick_lower=-60000,
+            tick_upper=60000,
+            liquidity=1_000_000,
+            amount0_max=1_000_000_000_000_000_000,
+            amount1_max=2_000_000_000,
+            owner="0x1234567890abcdef1234567890abcdef12345678",
+        )
+
+        tx = sdk.build_mint_position_tx(params)
+        actions = _extract_actions_from_modify_liquidities(tx.data)
+        assert actions == bytes([PM_MINT_POSITION, PM_SETTLE_PAIR]), (
+            f"Mint actions must be exactly [0x02, 0x0D] but got: {actions.hex()}"
+        )
+
     def test_build_decrease_liquidity_tx(self, sdk):
         params = LPDecreaseParams(
             token_id=42,
@@ -247,6 +361,24 @@ class TestSDKLPMethods:
         assert tx.data.startswith("0x" + MODIFY_LIQUIDITIES_SELECTOR[2:])
         assert tx.gas_estimate == UNISWAP_V4_GAS_ESTIMATES["lp_decrease"]
         assert "close" in tx.description.lower()
+
+    def test_decrease_tx_encodes_correct_action_bytes(self, sdk):
+        """Verify decrease calldata encodes PM_DECREASE_LIQUIDITY + PM_TAKE_PAIR (VIB-2097)."""
+        params = LPDecreaseParams(token_id=42, liquidity=500_000)
+        tx = sdk.build_decrease_liquidity_tx(
+            params=params,
+            currency0="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            currency1="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            recipient="0x1234567890abcdef1234567890abcdef12345678",
+            burn=False,
+        )
+        actions = _extract_actions_from_modify_liquidities(tx.data)
+        assert actions == bytes([PM_DECREASE_LIQUIDITY, PM_TAKE_PAIR]), (
+            f"Decrease (no burn) actions must be exactly [0x01, 0x11] but got: {actions.hex()}"
+        )
+        assert PM_BURN_POSITION not in actions, (
+            "PM_BURN_POSITION must not appear when burn=False"
+        )
 
     def test_build_decrease_liquidity_tx_no_burn(self, sdk):
         params = LPDecreaseParams(token_id=42, liquidity=500_000)
