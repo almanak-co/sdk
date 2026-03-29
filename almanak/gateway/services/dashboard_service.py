@@ -196,6 +196,20 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             return "Aerodrome"
         if "traderjoe" in strategy_id_lower or "tj_" in strategy_id_lower:
             return "TraderJoe V2"
+        if "benqi" in strategy_id_lower:
+            return "Benqi"
+        if "morpho" in strategy_id_lower:
+            return "Morpho"
+        if "compound" in strategy_id_lower:
+            return "Compound V3"
+        if "sushi" in strategy_id_lower:
+            return "SushiSwap V3"
+        if "curve" in strategy_id_lower:
+            return "Curve"
+        if "balancer" in strategy_id_lower:
+            return "Balancer"
+        if "velodrome" in strategy_id_lower:
+            return "Velodrome"
 
         return "Unknown"
 
@@ -1092,12 +1106,28 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             if request.chain_wallets:
                 chain_wallets_str = json.dumps(dict(request.chain_wallets))
 
+            # Derive protocol from strategy name/ID if not provided.
+            # Use the original strategy_name or request.strategy_id for derivation,
+            # not the resolved strategy_id which may be a platform UUID/AGENT_ID.
+            protocol = request.protocol
+            if not protocol:
+                config = {}
+                if request.config_json:
+                    try:
+                        config = json.loads(request.config_json)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                derivation_key = request.strategy_name or request.strategy_id or strategy_id
+                protocol = self._derive_protocol_from_config(config, derivation_key)
+                if protocol == "Unknown":
+                    protocol = ""
+
             instance = StrategyInstance(
                 strategy_id=strategy_id,
                 strategy_name=request.strategy_name or strategy_id,
                 template_name=request.template_name,
                 chain=request.chain,
-                protocol=request.protocol,
+                protocol=protocol,
                 wallet_address=request.wallet_address,
                 config_json=request.config_json,
                 chains=chains_str,

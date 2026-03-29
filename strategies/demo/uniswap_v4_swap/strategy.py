@@ -67,6 +67,9 @@ class UniswapV4SwapStrategy(IntentStrategy):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
+        if not hasattr(self, "state") or self.state is None:
+            self.state: dict[str, Any] = {}
+
         self.trade_size_usd = Decimal(str(self.get_config("trade_size_usd", "3")))
         self.max_slippage_bps = int(self.get_config("max_slippage_bps", 200))
         self.base_token: str = self.get_config("base_token", "WETH")

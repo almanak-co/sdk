@@ -58,6 +58,8 @@ class UniswapV4LPConfig:
     range_width_pct: Decimal = Decimal("0.20")
     amount0: Decimal = Decimal("0.01")
     amount1: Decimal = Decimal("30")
+    force_action: str = ""
+    position_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -65,6 +67,8 @@ class UniswapV4LPConfig:
             "range_width_pct": str(self.range_width_pct),
             "amount0": str(self.amount0),
             "amount1": str(self.amount1),
+            "force_action": self.force_action,
+            "position_id": self.position_id,
         }
 
     def update(self, **kwargs: Any) -> Any:
@@ -115,8 +119,16 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
         self.amount0 = Decimal(str(self.config.amount0))
         self.amount1 = Decimal(str(self.config.amount1))
 
+        self.force_action = str(self.config.force_action).lower() if self.config.force_action else ""
+        self._config_position_id = self.config.position_id
+
         self._current_position_id: str | None = None
+        self._liquidity: int | None = None
         self._load_position_from_state()
+
+        # Config position_id overrides state (for testing)
+        if self._config_position_id and not self._current_position_id:
+            self._current_position_id = self._config_position_id
 
         logger.info(
             f"UniswapV4LPStrategy initialized: pool={self.pool}, "
@@ -130,6 +142,20 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
 
     def decide(self, market: MarketSnapshot) -> Intent | None:
         """LP decision: open, rebalance, collect fees, or hold."""
+        # Forced close/collect don't need price data — handle before price fetch
+        if self.force_action == "close":
+            pos_id = self._current_position_id or self._config_position_id
+            if pos_id:
+                logger.info(f"Forced LP_CLOSE for position {pos_id}")
+                return self._create_close_intent(pos_id)
+            return Intent.hold(reason="Close requested but no position_id")
+
+        if self.force_action == "collect":
+            if self._current_position_id:
+                logger.info(f"Forced LP_COLLECT_FEES for position {self._current_position_id}")
+                return self._create_collect_fees_intent()
+            return Intent.hold(reason="Collect requested but no position")
+
         try:
             token0_price_usd = market.price(self.token0_symbol)
             token1_price_usd = market.price(self.token1_symbol)
@@ -137,10 +163,12 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
         except (ValueError, KeyError) as e:
             return Intent.hold(reason=f"Price data unavailable: {e}")
 
+        if self.force_action == "open":
+            logger.info("Forced LP_OPEN")
+            return self._create_open_intent(current_price)
+
         # If we have a position, monitor it
         if self._current_position_id:
-            # In a full implementation, query PositionManager for tick range
-            # and compare to current price. For now, hold and monitor.
             return Intent.hold(reason=f"V4 position {self._current_position_id} active — monitoring")
 
         # No position — check balances and open
@@ -195,13 +223,26 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
         )
 
     def _create_close_intent(self, position_id: str) -> Intent:
-        """Create LP_CLOSE intent for V4 PositionManager."""
-        logger.info(f"LP_CLOSE (V4): position={position_id}")
+        """Create LP_CLOSE intent for V4 PositionManager.
+
+        The compiler will query on-chain liquidity via PositionManager.getPositionLiquidity()
+        if not provided in protocol_params. We pass cached liquidity when available to
+        avoid an extra RPC call, but the compiler handles the fallback.
+        """
+        protocol_params: dict[str, Any] = {}
+
+        # Pass cached liquidity if available (saves an RPC call at compilation)
+        if self._liquidity is not None:
+            protocol_params["liquidity"] = self._liquidity
+
+        logger.info(f"LP_CLOSE (V4): position={position_id}, cached_liquidity={self._liquidity}")
+
         return Intent.lp_close(
             position_id=position_id,
             pool=self.pool,
             collect_fees=True,
             protocol="uniswap_v4",
+            protocol_params=protocol_params,
         )
 
     def _create_collect_fees_intent(self) -> Intent:
@@ -221,7 +262,13 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
             position_id = result.position_id if result else None
             if position_id:
                 self._current_position_id = str(position_id)
-                logger.info(f"V4 LP position opened: position_id={position_id}")
+                # Reset liquidity before extraction to avoid stale values from previous position
+                self._liquidity = None
+                if result and hasattr(result, "extracted_data"):
+                    liq = result.extracted_data.get("liquidity")
+                    if liq is not None:
+                        self._liquidity = int(liq)
+                logger.info(f"V4 LP position opened: position_id={position_id}, liquidity={self._liquidity}")
                 self._save_position_to_state(position_id)
             else:
                 logger.warning("V4 LP position opened but could not extract position ID")
@@ -236,6 +283,10 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
                     details={"pool": self.pool, "position_id": str(position_id) if position_id else None},
                 )
             )
+        elif success and intent.intent_type.value == "LP_CLOSE":
+            logger.info(f"V4 LP position closed: position_id={self._current_position_id}")
+            self._current_position_id = None
+            self._liquidity = None
 
     # =========================================================================
     # STATE PERSISTENCE
@@ -312,18 +363,12 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
             return []
 
         logger.info(f"V4 teardown: closing position {self._current_position_id} (mode={mode.value})")
-        return [
-            Intent.lp_close(
-                position_id=self._current_position_id,
-                pool=self.pool,
-                collect_fees=True,
-                protocol="uniswap_v4",
-            )
-        ]
+        return [self._create_close_intent(self._current_position_id)]
 
     def on_teardown_completed(self, success: bool, recovered_usd: Decimal) -> None:
         if success:
             logger.info(f"V4 LP teardown completed. Recovered: ${recovered_usd:,.2f}")
             self._current_position_id = None
+            self._liquidity = None
         else:
             logger.warning(f"V4 LP teardown failed. Partial recovery: ${recovered_usd:,.2f}")

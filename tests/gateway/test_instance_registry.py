@@ -123,14 +123,48 @@ class TestInstanceRegistryBasics:
             registry = InstanceRegistry(db_path=db_path)
             registry.initialize()
 
-            registry.register(_make_instance("strat1:aaa111"))
-            registry.register(_make_instance("strat2:bbb222"))
+            registry.register(_make_instance("strat1:aaa111", strategy_name="strat_a"))
+            registry.register(_make_instance("strat2:bbb222", strategy_name="strat_b"))
 
             instances = registry.list_all()
             assert len(instances) == 2
             ids = {i.strategy_id for i in instances}
             assert "strat1:aaa111" in ids
             assert "strat2:bbb222" in ids
+
+
+    def test_auto_archive_older_instances_same_name(self):
+        """Registering a new instance auto-archives older ones with the same strategy_name."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            registry = InstanceRegistry(db_path=db_path)
+            registry.initialize()
+
+            registry.register(_make_instance("my_strat:aaa111", strategy_name="my_strat"))
+            registry.register(_make_instance("my_strat:bbb222", strategy_name="my_strat"))
+
+            # Only the latest should be non-archived
+            non_archived = registry.list_all(include_archived=False)
+            assert len(non_archived) == 1
+            assert non_archived[0].strategy_id == "my_strat:bbb222"
+
+            # The old one should be archived
+            old = registry.get("my_strat:aaa111")
+            assert old.archived is True
+            assert old.status == "INACTIVE"
+
+    def test_auto_archive_does_not_affect_different_names(self):
+        """Instances with different strategy_names are not auto-archived."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            registry = InstanceRegistry(db_path=db_path)
+            registry.initialize()
+
+            registry.register(_make_instance("strat_a:aaa", strategy_name="alpha"))
+            registry.register(_make_instance("strat_b:bbb", strategy_name="beta"))
+
+            non_archived = registry.list_all(include_archived=False)
+            assert len(non_archived) == 2
 
 
 class TestInstanceRegistryStatus:
@@ -386,7 +420,8 @@ class TestInstanceRegistryThreadSafety:
             def register_instances(thread_id: int):
                 try:
                     for i in range(20):
-                        inst = _make_instance(f"strat_{thread_id}:{i:06d}")
+                        sid = f"strat_{thread_id}:{i:06d}"
+                        inst = _make_instance(sid, strategy_name=sid)
                         registry.register(inst)
                 except Exception as e:
                     errors.append(e)
@@ -409,9 +444,9 @@ class TestInstanceRegistryThreadSafety:
             registry = InstanceRegistry(db_path=db_path)
             registry.initialize()
 
-            # Register some instances
+            # Register some instances with unique names
             for i in range(5):
-                registry.register(_make_instance(f"strat:{i:06d}"))
+                registry.register(_make_instance(f"strat:{i:06d}", strategy_name=f"strat_{i}"))
 
             errors = []
 
@@ -442,9 +477,9 @@ class TestInstanceRegistryStartupReconciliation:
             registry = InstanceRegistry(db_path=db_path)
             registry.initialize()
 
-            registry.register(_make_instance("strat1:aaa", status="RUNNING"))
-            registry.register(_make_instance("strat2:bbb", status="RUNNING"))
-            registry.register(_make_instance("strat3:ccc", status="INACTIVE"))
+            registry.register(_make_instance("strat1:aaa", strategy_name="strat_a", status="RUNNING"))
+            registry.register(_make_instance("strat2:bbb", strategy_name="strat_b", status="RUNNING"))
+            registry.register(_make_instance("strat3:ccc", strategy_name="strat_c", status="INACTIVE"))
 
             count = registry.reconcile_stale_on_startup()
             assert count == 2
@@ -605,11 +640,11 @@ class TestInstanceRegistryHeartbeatTTL:
 
             now = datetime.now(UTC)
 
-            fresh = _make_instance("fresh:aaa", status="RUNNING")
+            fresh = _make_instance("fresh:aaa", strategy_name="fresh_strat", status="RUNNING")
             # last_heartbeat_at is now by default
             registry.register(fresh)
 
-            stale = _make_instance("stale:bbb", status="RUNNING")
+            stale = _make_instance("stale:bbb", strategy_name="stale_strat", status="RUNNING")
             stale.last_heartbeat_at = now - timedelta(seconds=400)
             registry.register(stale)
 

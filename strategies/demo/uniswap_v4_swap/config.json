@@ -1,5 +1,5 @@
 {
-    "trade_size_usd": 3,
+    "trade_size_usd": 1,
     "max_slippage_bps": 200,
     "base_token": "WETH",
     "quote_token": "USDC",

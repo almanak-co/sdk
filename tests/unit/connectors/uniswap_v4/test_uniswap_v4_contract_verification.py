@@ -29,14 +29,58 @@ from almanak.framework.connectors.uniswap_v4.sdk import (
 # Canonical address verification
 # =============================================================================
 
-# These are the canonical Uniswap V4 CREATE2 deployment addresses.
-# All chains use the same addresses due to CREATE2 deterministic deployment.
-CANONICAL_V4_ADDRESSES = {
-    "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
-    "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
-    "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
-    "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
-    "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
+# Official Uniswap V4 addresses per chain (from https://docs.uniswap.org/contracts/v4/deployments).
+# Addresses are DIFFERENT per chain — do NOT assume CREATE2 uniformity.
+CANONICAL_V4_ADDRESSES_PER_CHAIN = {
+    "ethereum": {
+        "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "position_manager": "0xbd216513d74c8cf14cf4747e6aaa6420ff64ee9e",
+        "universal_router": "0x66a9893cc07d91d95644aedd05d03f95e1dba8af",
+        "quoter": "0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203",
+        "state_view": "0x7ffe42c4a5deea5b0fec41c94c136cf115597227",
+    },
+    "base": {
+        "pool_manager": "0x498581ff718922c3f8e6a244956af099b2652b2b",
+        "position_manager": "0x7c5f5a4bbd8fd63184577525326123b519429bdc",
+        "universal_router": "0x6ff5693b99212da76ad316178a184ab56d299b43",
+        "quoter": "0x0d5e0f971ed27fbff6c2837bf31316121532048d",
+        "state_view": "0xa3c0c9b65bad0b08107aa264b0f3db444b867a71",
+    },
+    "arbitrum": {
+        "pool_manager": "0x360e68faccca8ca495c1b759fd9eee466db9fb32",
+        "position_manager": "0xd88f38f930b7952f2db2432cb002e7abbf3dd869",
+        "universal_router": "0xa51afafe0263b40edaef0df8781ea9aa03e381a3",
+        "quoter": "0x3972c00f7ed4885e145823eb7c655375d275a1c5",
+        "state_view": "0x76fd297e2d437cd7f76d50f01afe6160f86e9990",
+    },
+    "optimism": {
+        "pool_manager": "0x9a13f98cb987694c9f086b1f5eb990eea8264ec3",
+        "position_manager": "0x3c3ea4b57a46241e54610e5f022e5c45859a1017",
+        "universal_router": "0x851116d9223fabed8e56c0e6b8ad0c31d98b3507",
+        "quoter": "0x1f3131a13296fb91c90870043742c3cdbff1a8d7",
+        "state_view": "0xc18a3169788f4f75a170290584eca6395c75ecdb",
+    },
+    "polygon": {
+        "pool_manager": "0x67366782805870060151383f4bbff9dab53e5cd6",
+        "position_manager": "0x1ec2ebf4f37e7363fdfe3551602425af0b3ceef9",
+        "universal_router": "0x1095692a6237d83c6a72f3f5efedb9a670c49223",
+        "quoter": "0xb3d5c3dfc3a7aebff71895a7191796bffc2c81b9",
+        "state_view": "0x5ea1bd7974c8a611cbab0bdcafcb1d9cc9b3ba5a",
+    },
+    "avalanche": {
+        "pool_manager": "0x06380c0e0912312b5150364b9dc4542ba0dbbc85",
+        "position_manager": "0xb74b1f14d2754acfcbbe1a221023a5cf50ab8acd",
+        "universal_router": "0x94b75331ae8d42c1b61065089b7d48fe14aa73b7",
+        "quoter": "0xbe40675bb704506a3c2ccfb762dcfd1e979845c2",
+        "state_view": "0xc3c9e198c735a4b97e3e683f391ccbdd60b69286",
+    },
+    "bsc": {
+        "pool_manager": "0x28e2ea090877bf75740558f6bfb36a5ffee9e9df",
+        "position_manager": "0x7a4a5c919ae2541aed11041a1aeee68f1287f95b",
+        "universal_router": "0x1906c1d672b88cd1b9ac7593301ca990f94eae07",
+        "quoter": "0x9f75dd27d6664c475b90e105573e550ff69437b0",
+        "state_view": "0xd13dd3d6e93f276fafc9db9e6bb47c1180aee0c4",
+    },
 }
 
 # Chains that should have V4 contracts
@@ -51,20 +95,21 @@ class TestCanonicalAddresses:
         for chain in EXPECTED_V4_CHAINS:
             assert chain in UNISWAP_V4, f"Chain '{chain}' missing from UNISWAP_V4"
 
-    @pytest.mark.parametrize("contract_key", list(CANONICAL_V4_ADDRESSES.keys()))
+    @pytest.mark.parametrize("contract_key", ["pool_manager", "position_manager", "universal_router", "quoter", "state_view"])
     def test_canonical_addresses_match(self, contract_key: str):
-        """Each canonical address should be the same on all chains (CREATE2)."""
-        expected = CANONICAL_V4_ADDRESSES[contract_key].lower()
+        """Each chain's address should match the official per-chain deployment."""
         for chain, addrs in UNISWAP_V4.items():
+            expected = CANONICAL_V4_ADDRESSES_PER_CHAIN[chain][contract_key].lower()
             actual = addrs.get(contract_key, "").lower()
             assert actual == expected, (
                 f"Chain '{chain}' has wrong {contract_key}: {actual} != {expected}"
             )
 
     def test_pool_manager_is_canonical(self):
-        """PoolManager should be the well-known V4 address on all chains."""
+        """PoolManager should match the official per-chain address."""
         for chain, addr in POOL_MANAGER_ADDRESSES.items():
-            assert addr.lower() == "0x000000000004444c5dc75cb358380d2e3de08a90", (
+            expected = CANONICAL_V4_ADDRESSES_PER_CHAIN[chain]["pool_manager"].lower()
+            assert addr.lower() == expected, (
                 f"PoolManager on {chain} is not canonical: {addr}"
             )
 
@@ -97,7 +142,7 @@ class TestContractRegistryV4:
     def test_pool_manager_registered(self):
         """V4 PoolManager should be in the default registry."""
         registry = get_default_registry()
-        info = registry.lookup("ethereum", CANONICAL_V4_ADDRESSES["pool_manager"])
+        info = registry.lookup("ethereum", CANONICAL_V4_ADDRESSES_PER_CHAIN["ethereum"]["pool_manager"])
         assert info is not None, "V4 PoolManager not in registry"
         assert info.protocol == "uniswap_v4"
         assert "SWAP" in info.supported_actions
@@ -105,7 +150,7 @@ class TestContractRegistryV4:
     def test_position_manager_registered(self):
         """V4 PositionManager should be in the default registry."""
         registry = get_default_registry()
-        info = registry.lookup("ethereum", CANONICAL_V4_ADDRESSES["position_manager"])
+        info = registry.lookup("ethereum", CANONICAL_V4_ADDRESSES_PER_CHAIN["ethereum"]["position_manager"])
         assert info is not None, "V4 PositionManager not in registry"
         assert info.protocol == "uniswap_v4"
         assert "LP_OPEN" in info.supported_actions
@@ -115,25 +160,22 @@ class TestContractRegistryV4:
         """V4 PoolManager should be registered on all supported chains."""
         registry = get_default_registry()
         for chain in EXPECTED_V4_CHAINS:
-            info = registry.lookup(chain, CANONICAL_V4_ADDRESSES["pool_manager"])
+            pm_addr = CANONICAL_V4_ADDRESSES_PER_CHAIN[chain]["pool_manager"]
+            info = registry.lookup(chain, pm_addr)
             assert info is not None, f"V4 PoolManager not registered on {chain}"
 
     def test_v4_swap_action_supported(self):
         """SWAP action should be supported for V4 PoolManager."""
         registry = get_default_registry()
-        assert registry.is_action_supported(
-            "arbitrum", CANONICAL_V4_ADDRESSES["pool_manager"], "SWAP"
-        )
+        pm_addr = CANONICAL_V4_ADDRESSES_PER_CHAIN["arbitrum"]["pool_manager"]
+        assert registry.is_action_supported("arbitrum", pm_addr, "SWAP")
 
     def test_v4_lp_action_supported(self):
         """LP actions should be supported for V4 PositionManager."""
         registry = get_default_registry()
-        assert registry.is_action_supported(
-            "arbitrum", CANONICAL_V4_ADDRESSES["position_manager"], "LP_OPEN"
-        )
-        assert registry.is_action_supported(
-            "arbitrum", CANONICAL_V4_ADDRESSES["position_manager"], "LP_CLOSE"
-        )
+        pos_addr = CANONICAL_V4_ADDRESSES_PER_CHAIN["arbitrum"]["position_manager"]
+        assert registry.is_action_supported("arbitrum", pos_addr, "LP_OPEN")
+        assert registry.is_action_supported("arbitrum", pos_addr, "LP_CLOSE")
 
     def test_uniswap_v4_in_supported_protocols(self):
         """uniswap_v4 should appear in the set of supported protocols."""
@@ -226,4 +268,4 @@ class TestCompilerV4Unblocked:
         assert result.status == CompilationStatus.SUCCESS
         assert result.action_bundle is not None
         assert result.action_bundle.metadata["protocol_version"] == "v4"
-        assert result.action_bundle.metadata["router"] == "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af"
+        assert result.action_bundle.metadata["router"].lower() == CANONICAL_V4_ADDRESSES_PER_CHAIN["arbitrum"]["universal_router"].lower()

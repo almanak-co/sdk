@@ -136,9 +136,10 @@ class TestParserInit:
         assert parser.chain == "ethereum"
 
     def test_init_with_chain(self):
+        from almanak.core.contracts import UNISWAP_V4
         parser = UniswapV4ReceiptParser(chain="arbitrum")
         assert parser.chain == "arbitrum"
-        assert parser.pool_manager == "0x000000000004444c5dc75cb358380d2e3de08a90"
+        assert parser.pool_manager == UNISWAP_V4["arbitrum"]["pool_manager"].lower()
 
 
 # =============================================================================

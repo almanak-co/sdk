@@ -157,8 +157,10 @@ class TestHookFlags:
 
 class TestLPConstants:
     def test_position_manager_addresses_exist(self):
+        from almanak.core.contracts import UNISWAP_V4
         for chain, addr in POSITION_MANAGER_ADDRESSES.items():
-            assert addr.lower() == "0xbd216513d74c8cf14cf4747e6aae6fdf64e83b24"
+            expected = UNISWAP_V4[chain]["position_manager"].lower()
+            assert addr.lower() == expected, f"PositionManager on {chain} mismatch"
 
     def test_lp_gas_estimates(self):
         assert UNISWAP_V4_GAS_ESTIMATES["lp_mint"] == 450_000

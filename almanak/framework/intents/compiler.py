@@ -4793,9 +4793,11 @@ class IntentCompiler:
         )
 
         try:
+            rpc_url = self._get_chain_rpc_url()
             config = UniswapV4Config(
                 chain=self.chain,
                 wallet_address=self.wallet_address,
+                rpc_url=rpc_url,
             )
             adapter = UniswapV4Adapter(config=config, token_resolver=self._token_resolver)
 
@@ -4828,14 +4830,24 @@ class IntentCompiler:
                     # TokenNotFoundError/TokenResolutionError or unexpected errors — log, don't swallow
                     logger.warning("Failed to resolve currencies from pool '%s': %s", intent.pool, e)
 
-            # Fail fast: liquidity and currency addresses are required for a valid close
+            # If liquidity not provided, query on-chain via PositionManager.getPositionLiquidity(tokenId)
             if liquidity == 0:
-                result.status = CompilationStatus.FAILED
-                result.error = (
-                    "V4 LP_CLOSE requires 'liquidity' in protocol_params (query on-chain position first). "
-                    "Example: intent.protocol_params = {'liquidity': <int>, 'currency0': '<addr>', 'currency1': '<addr>'}"
-                )
-                return result
+                try:
+                    token_id = int(intent.position_id)
+                except (ValueError, TypeError):
+                    result.status = CompilationStatus.FAILED
+                    result.error = f"V4 LP_CLOSE: invalid position_id '{intent.position_id}' (must be numeric)"
+                    return result
+                try:
+                    liquidity = adapter.get_position_liquidity(token_id, rpc_url=rpc_url)
+                    logger.info("V4 LP_CLOSE: queried on-chain liquidity=%d for position %d", liquidity, token_id)
+                except Exception as e:
+                    result.status = CompilationStatus.FAILED
+                    result.error = (
+                        f"V4 LP_CLOSE: could not determine position liquidity. "
+                        f"Either provide 'liquidity' in protocol_params or ensure RPC is available. Error: {e}"
+                    )
+                    return result
             if not currency0 or not currency1:
                 result.status = CompilationStatus.FAILED
                 result.error = (

@@ -190,6 +190,29 @@ class InstanceRegistry:
 
         with self._lock:
             already_existed = instance.strategy_id in self._cache
+
+            # Auto-archive older instances of the same strategy_name to prevent
+            # duplicate cards after gateway restarts (new instance ID suffix).
+            if instance.strategy_name:
+                archived_count = 0
+                for sid, existing in list(self._cache.items()):
+                    if (
+                        sid != instance.strategy_id
+                        and existing.strategy_name == instance.strategy_name
+                        and not existing.archived
+                    ):
+                        existing.archived = True
+                        existing.status = "INACTIVE"
+                        existing.updated_at = instance.updated_at
+                        self._persist_instance(existing)
+                        archived_count += 1
+                if archived_count:
+                    logger.info(
+                        "Auto-archived %d older instance(s) of '%s' on re-register",
+                        archived_count,
+                        instance.strategy_name,
+                    )
+
             self._cache[instance.strategy_id] = instance
             self._persist_instance(instance)
 

@@ -121,6 +121,21 @@ class UniswapV4Adapter:
         self._sdk = UniswapV4SDK(chain=self.chain, rpc_url=self.rpc_url)
         self._token_resolver = token_resolver
 
+    def get_position_liquidity(self, token_id: int, rpc_url: str | None = None) -> int:
+        """Query on-chain liquidity for a V4 LP position.
+
+        Args:
+            token_id: NFT token ID of the LP position.
+            rpc_url: Optional RPC URL override.
+
+        Returns:
+            Liquidity amount (uint128). Raises ValueError if position is empty or query fails.
+        """
+        liquidity = self._sdk.get_position_liquidity(token_id, rpc_url=rpc_url)
+        if liquidity == 0:
+            raise ValueError(f"Position {token_id} has zero liquidity — already closed or invalid tokenId")
+        return liquidity
+
     def swap_exact_input(
         self,
         token_in: str,
@@ -463,8 +478,23 @@ class UniswapV4Adapter:
 
             pool_key = self._sdk.compute_pool_key(token0_addr, token1_addr, fee, tick_spacing, hooks)
 
-            # Compute max amounts with slippage buffer from intent (default 50 bps = 0.5%)
-            slippage_bps = int(getattr(intent, "max_slippage", Decimal("0.005")) * 10000)
+            # Compute max amounts with slippage buffer.
+            # LP mints need wider tolerance than swaps because the liquidity computation
+            # uses an estimated sqrtPrice that may not match the real pool state.
+            # Default 5% (500 bps) for LP; intent.max_slippage overrides if larger.
+            lp_default_slippage = Decimal("0.05")
+            intent_slippage = getattr(intent, "max_slippage", None)
+            if intent_slippage is None:
+                intent_slippage = Decimal("0.005")
+            effective_slippage = max(lp_default_slippage, intent_slippage)
+            if effective_slippage > intent_slippage:
+                logger.warning(
+                    "V4 LP_OPEN: overriding user slippage %s%% with LP minimum %s%% "
+                    "(V4 LP mints need wider tolerance due to sqrtPrice estimation)",
+                    intent_slippage * 100,
+                    lp_default_slippage * 100,
+                )
+            slippage_bps = int(effective_slippage * 10000)
             slippage_mult = Decimal(10000 + slippage_bps) / Decimal(10000)
             amount0_max = int(Decimal(amount0_wei) * slippage_mult)
             amount1_max = int(Decimal(amount1_wei) * slippage_mult)
@@ -593,12 +623,16 @@ class UniswapV4Adapter:
             hook_data=hook_data,
         )
 
+        # burn=False: withdraw liquidity + collect fees without burning the NFT.
+        # The BURN_POSITION action encoding has a calldata boundary issue
+        # (SliceOutOfBounds) when combined with DECREASE_LIQUIDITY + TAKE_PAIR.
+        # The position NFT remains with 0 liquidity, which is harmless.
         close_tx = self._sdk.build_decrease_liquidity_tx(
             params=decrease_params,
             currency0=currency0,
             currency1=currency1,
             recipient=self.wallet_address,
-            burn=True,
+            burn=False,
         )
 
         position_manager = self.addresses["position_manager"]

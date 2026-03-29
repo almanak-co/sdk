@@ -270,4 +270,5 @@ class TestIntentCompilerV4Routing:
         assert result.status.value == "SUCCESS"
         assert result.action_bundle is not None
         assert result.action_bundle.metadata["protocol"] == "uniswap_v4"
-        assert result.action_bundle.metadata["router"] == "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af"
+        from almanak.core.contracts import UNISWAP_V4
+        assert result.action_bundle.metadata["router"] == UNISWAP_V4["arbitrum"]["universal_router"]

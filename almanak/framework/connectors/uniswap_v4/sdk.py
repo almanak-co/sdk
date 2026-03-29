@@ -26,9 +26,11 @@ Example:
     pool_key = sdk.compute_pool_key(token0, token1, fee=3000)
 """
 
+import json
 import logging
 import math
 import time
+import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -279,8 +281,70 @@ class UniswapV4SDK:
 
         self.addresses = UNISWAP_V4[self.chain]
         self.pool_manager = self.addresses["pool_manager"]
+        self.position_manager = self.addresses["position_manager"]
         self.router = self.addresses["universal_router"]
         self.quoter = self.addresses["quoter"]
+
+    # =========================================================================
+    # On-Chain Queries
+    # =========================================================================
+
+    def get_position_liquidity(self, token_id: int, rpc_url: str | None = None) -> int:
+        """Query on-chain liquidity for a V4 LP position via PositionManager.getPositionLiquidity(uint256).
+
+        Args:
+            token_id: NFT token ID of the LP position.
+            rpc_url: RPC URL to use. Falls back to self.rpc_url.
+
+        Returns:
+            Liquidity amount (uint128) for the position.
+
+        Raises:
+            ValueError: If no RPC URL is available or the call fails.
+        """
+        url = rpc_url or self.rpc_url
+        if not url:
+            raise ValueError("RPC URL required to query on-chain position liquidity")
+
+        if not url.startswith(("http://", "https://")):
+            raise ValueError(f"RPC URL must use http:// or https:// scheme, got: {url[:20]}")
+
+        # getPositionLiquidity(uint256) selector = 0x1efeed33
+        # Verified: keccak256("getPositionLiquidity(uint256)")[:4] == 0x1efeed33
+        selector = "1efeed33"
+        token_id_hex = format(token_id, "064x")
+        calldata = "0x" + selector + token_id_hex
+
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_call",
+                "params": [{"to": self.position_manager, "data": calldata}, "latest"],
+            }
+        ).encode()
+
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+                result = json.loads(resp.read())
+        except Exception as e:
+            raise ValueError(f"RPC call to getPositionLiquidity failed: {e}") from e
+
+        if "error" in result:
+            raise ValueError(f"getPositionLiquidity reverted: {result['error']}")
+
+        if "result" not in result or not isinstance(result["result"], str):
+            raise ValueError(
+                f"Malformed RPC response for position {token_id} on {self.chain}: missing or invalid 'result' field"
+            )
+        hex_result = result["result"]
+        try:
+            liquidity = int(hex_result, 16)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"Malformed liquidity hex for position {token_id} on {self.chain}: {hex_result!r}") from e
+        logger.info("V4 position %d liquidity: %d (chain=%s)", token_id, liquidity, self.chain)
+        return liquidity
 
     def compute_pool_key(
         self,

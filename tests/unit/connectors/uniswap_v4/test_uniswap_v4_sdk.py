@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -43,9 +45,11 @@ class TestConstants:
         assert UNISWAP_V4_GAS_ESTIMATES["swap"] == 250_000
 
     def test_pool_manager_addresses(self):
-        # All chains should have the same pool manager (CREATE2 deployment)
+        # Each chain should have a non-empty pool manager address
+        from almanak.core.contracts import UNISWAP_V4
         for chain, addr in POOL_MANAGER_ADDRESSES.items():
-            assert addr.lower() == "0x000000000004444c5dc75cb358380d2e3de08a90", f"PoolManager on {chain} mismatch"
+            expected = UNISWAP_V4[chain]["pool_manager"].lower()
+            assert addr.lower() == expected, f"PoolManager on {chain} mismatch"
 
     def test_router_addresses(self):
         expected_chains = {"ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc"}
@@ -120,9 +124,10 @@ class TestPoolKey:
 
 class TestUniswapV4SDKInit:
     def test_init_supported_chain(self):
+        from almanak.core.contracts import UNISWAP_V4
         sdk = UniswapV4SDK(chain="arbitrum")
         assert sdk.chain == "arbitrum"
-        assert sdk.pool_manager.lower() == "0x000000000004444c5dc75cb358380d2e3de08a90"
+        assert sdk.pool_manager.lower() == UNISWAP_V4["arbitrum"]["pool_manager"].lower()
 
     def test_init_unsupported_chain(self):
         with pytest.raises(ValueError, match="not supported"):
@@ -523,3 +528,113 @@ class TestEncodeExactInputSingleParams:
         assert expected == 995000000000000000000000000000
         # Verify the encoded calldata contains the exact expected value
         assert f"{expected:064x}" in tx.data
+
+
+# =============================================================================
+# get_position_liquidity tests
+# =============================================================================
+
+
+class TestGetPositionLiquidity:
+    """Unit tests for on-chain liquidity query via eth_call."""
+
+    RPC_URL = "https://arb-mainnet.g.alchemy.com/v2/test"
+    TOKEN_ID = 42
+
+    def _make_sdk(self) -> UniswapV4SDK:
+        sdk = UniswapV4SDK(chain="arbitrum")
+        sdk.rpc_url = self.RPC_URL
+        return sdk
+
+    def _mock_urlopen(self, response_body: dict):
+        """Return a context-manager mock for urllib.request.urlopen."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(response_body).encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return mock_resp
+
+    def test_success_returns_liquidity(self):
+        sdk = self._make_sdk()
+        liquidity_value = 123456789
+        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1, "result": hex(liquidity_value)})
+
+        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
+            result = sdk.get_position_liquidity(self.TOKEN_ID)
+
+        assert result == liquidity_value
+        # Verify calldata includes selector and position_manager
+        call_args = mock_open.call_args[0][0]
+        payload = json.loads(call_args.data)
+        assert payload["method"] == "eth_call"
+        assert payload["params"][0]["data"].startswith("0x1efeed33")
+        assert payload["params"][0]["to"] == sdk.position_manager
+
+    def test_rpc_error_response_raises(self):
+        sdk = self._make_sdk()
+        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "revert"}})
+
+        with patch("urllib.request.urlopen", return_value=resp):
+            with pytest.raises(ValueError, match="reverted"):
+                sdk.get_position_liquidity(self.TOKEN_ID)
+
+    def test_missing_rpc_url_raises(self):
+        sdk = self._make_sdk()
+        sdk.rpc_url = None
+
+        with pytest.raises(ValueError, match="RPC URL required"):
+            sdk.get_position_liquidity(self.TOKEN_ID, rpc_url=None)
+
+    def test_malformed_result_missing_field_raises(self):
+        sdk = self._make_sdk()
+        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1})  # no "result" key
+
+        with patch("urllib.request.urlopen", return_value=resp):
+            with pytest.raises(ValueError, match="missing or invalid"):
+                sdk.get_position_liquidity(self.TOKEN_ID)
+
+    def test_malformed_result_non_hex_raises(self):
+        sdk = self._make_sdk()
+        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1, "result": "not_hex"})
+
+        with patch("urllib.request.urlopen", return_value=resp):
+            with pytest.raises(ValueError, match="Malformed liquidity hex"):
+                sdk.get_position_liquidity(self.TOKEN_ID)
+
+    def test_transport_failure_raises(self):
+        sdk = self._make_sdk()
+
+        with patch("urllib.request.urlopen", side_effect=ConnectionError("timeout")):
+            with pytest.raises(ValueError, match="RPC call to getPositionLiquidity failed"):
+                sdk.get_position_liquidity(self.TOKEN_ID)
+
+    def test_explicit_rpc_url_overrides_default(self):
+        sdk = self._make_sdk()
+        override_url = "https://other-rpc.example.com"
+        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1, "result": "0x1"})
+
+        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
+            sdk.get_position_liquidity(self.TOKEN_ID, rpc_url=override_url)
+
+        call_args = mock_open.call_args[0][0]
+        assert call_args.full_url == override_url
+
+    def test_file_scheme_rejected(self):
+        sdk = self._make_sdk()
+        with pytest.raises(ValueError, match="must use http"):
+            sdk.get_position_liquidity(self.TOKEN_ID, rpc_url="file:///etc/hosts")
+
+    def test_calldata_encodes_token_id(self):
+        sdk = self._make_sdk()
+        token_id = 9999
+        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1, "result": "0x0"})
+
+        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
+            sdk.get_position_liquidity(token_id)
+
+        call_args = mock_open.call_args[0][0]
+        payload = json.loads(call_args.data)
+        calldata = payload["params"][0]["data"]
+        # Token ID should be zero-padded to 64 hex chars after selector
+        expected_token_hex = format(token_id, "064x")
+        assert calldata == "0x1efeed33" + expected_token_hex
