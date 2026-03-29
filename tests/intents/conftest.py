@@ -701,6 +701,86 @@ def format_token_amount(amount: int, decimals: int) -> Decimal:
     return Decimal(amount) / Decimal(10**decimals)
 
 
+# =============================================================================
+# L3 Semantic Verification Helpers
+# =============================================================================
+
+
+def assert_swap_semantic_match(
+    intent_amount: Decimal,
+    intent_from_token: str,
+    intent_to_token: str,
+    swap_result: object,
+    *,
+    tolerance_bps: int = 200,
+    chain: str | None = None,
+) -> None:
+    """L3 semantic verification: cross-check intent params against receipt parser output.
+
+    Catches the case where a TX succeeds and balance deltas look plausible,
+    but the wrong operation executed (e.g., wrong token pair, wrong amount).
+
+    Args:
+        intent_amount: The amount from the SwapIntent (in token units, e.g. 100 USDC)
+        intent_from_token: The from_token symbol from the SwapIntent
+        intent_to_token: The to_token symbol from the SwapIntent
+        swap_result: The parse_result.swap_result from a receipt parser
+        tolerance_bps: Maximum acceptable deviation in basis points (default: 200 = 2%)
+        chain: Chain name for token address resolution (optional)
+    """
+    # 1. Amount match: receipt amount_in should be close to intent amount
+    actual_in = getattr(swap_result, "amount_in_decimal", None)
+    if actual_in is not None:
+        assert actual_in > 0, (
+            f"L3 semantic: receipt amount_in must be positive, got {actual_in}"
+        )
+        expected = Decimal(str(intent_amount))
+        deviation_bps = abs(actual_in - expected) / expected * 10000
+        assert deviation_bps <= tolerance_bps, (
+            f"L3 semantic: receipt amount_in ({actual_in}) deviates from intent amount ({expected}) "
+            f"by {deviation_bps} bps (tolerance: {tolerance_bps} bps)"
+        )
+
+    # 2. Effective price sanity: must be positive and finite
+    effective_price = getattr(swap_result, "effective_price", None)
+    if effective_price is not None:
+        assert effective_price > 0, (
+            f"L3 semantic: effective_price must be positive, got {effective_price}"
+        )
+
+    # 3. Token address match (if receipt parser populates token_in/token_out)
+    receipt_token_in = getattr(swap_result, "token_in", None)
+    receipt_token_out = getattr(swap_result, "token_out", None)
+    if chain and (receipt_token_in or receipt_token_out):
+        try:
+            from almanak.framework.data.tokens import get_token_resolver
+
+            resolver = get_token_resolver()
+            if receipt_token_in:
+                expected_in = resolver.resolve_for_swap(intent_from_token, chain)
+                if expected_in:
+                    assert receipt_token_in.lower() == expected_in.address.lower(), (
+                        f"L3 semantic: receipt token_in ({receipt_token_in}) != "
+                        f"intent from_token resolved ({expected_in.address})"
+                    )
+            if receipt_token_out:
+                expected_out = resolver.resolve_for_swap(intent_to_token, chain)
+                if expected_out:
+                    assert receipt_token_out.lower() == expected_out.address.lower(), (
+                        f"L3 semantic: receipt token_out ({receipt_token_out}) != "
+                        f"intent to_token resolved ({expected_out.address})"
+                    )
+        except ImportError:
+            pass  # Token resolver not available — skip address check
+
+    # 4. Receipt amounts must be bilateral (non-zero on both sides)
+    actual_out = getattr(swap_result, "amount_out_decimal", None)
+    if actual_out is not None:
+        assert actual_out > 0, (
+            f"L3 semantic: receipt amount_out must be positive, got {actual_out}"
+        )
+
+
 def assert_swap_bilateral_deltas(
     web3: Web3,
     token_in: str,
@@ -838,6 +918,7 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "perps: Tests for perps intents")
     config.addinivalue_line("markers", "supply: Tests for supply intents")
     config.addinivalue_line("markers", "borrow: Tests for borrow intents")
+    config.addinivalue_line("markers", "l3_semantic: L3 semantic verification — cross-checks intent params against receipt")
 
 
 # =============================================================================

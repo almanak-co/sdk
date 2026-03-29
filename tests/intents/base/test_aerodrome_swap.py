@@ -23,6 +23,7 @@ from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    assert_swap_semantic_match,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -151,6 +152,16 @@ class TestAerodromeSwapIntent:
                     print(f"  Amount in:  {parse_result.swap_result.amount_in_decimal}")
                     print(f"  Amount out: {parse_result.swap_result.amount_out_decimal}")
                     print(f"  Price:      {parse_result.swap_result.effective_price}")
+
+                    # L3 semantic verification
+                    assert_swap_semantic_match(
+                        intent_amount=swap_amount,
+                        intent_from_token="USDC",
+                        intent_to_token="WETH",
+                        swap_result=parse_result.swap_result,
+                        chain=CHAIN_NAME,
+                    )
+                    print("  L3 semantic check: PASSED")
 
         # Verify balance changes
         usdc_after = get_token_balance(web3, token_in, funded_wallet)
