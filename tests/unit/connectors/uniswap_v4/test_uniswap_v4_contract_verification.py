@@ -29,44 +29,44 @@ from almanak.framework.connectors.uniswap_v4.sdk import (
 # Canonical address verification
 # =============================================================================
 
-# V4 addresses are DIFFERENT per chain (not same CREATE2).
-# Source: https://docs.uniswap.org/contracts/v4/deployments
-# Ethereum addresses for spot-check verification:
-ETHEREUM_V4_ADDRESSES = {
+# These are the canonical Uniswap V4 CREATE2 deployment addresses.
+# All chains use the same addresses due to CREATE2 deterministic deployment.
+CANONICAL_V4_ADDRESSES = {
     "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
-    "position_manager": "0xbd216513d74c8cf14cf4747e6aaa6420ff64ee9e",
-    "universal_router": "0x66a9893cc07d91d95644aedd05d03f95e1dba8af",
-    "quoter": "0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203",
-    "state_view": "0x7ffe42c4a5deea5b0fec41c94c136cf115597227",
+    "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
+    "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+    "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+    "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
 }
 
 # Chains that should have V4 contracts
-EXPECTED_V4_CHAINS = {"ethereum", "base", "arbitrum", "optimism", "polygon", "avalanche", "bsc"}
+EXPECTED_V4_CHAINS = {"ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc"}
 
 
 class TestCanonicalAddresses:
-    """Verify V4 contract addresses are correct per-chain deployments."""
+    """Verify V4 contract addresses match canonical CREATE2 deployments."""
 
     def test_all_expected_chains_present(self):
         """All expected chains should have V4 contract entries."""
         for chain in EXPECTED_V4_CHAINS:
             assert chain in UNISWAP_V4, f"Chain '{chain}' missing from UNISWAP_V4"
 
-    @pytest.mark.parametrize("contract_key", list(ETHEREUM_V4_ADDRESSES.keys()))
+    @pytest.mark.parametrize("contract_key", list(CANONICAL_V4_ADDRESSES.keys()))
     def test_canonical_addresses_match(self, contract_key: str):
-        """Ethereum addresses should match the known official deployment."""
-        expected = ETHEREUM_V4_ADDRESSES[contract_key].lower()
-        actual = UNISWAP_V4["ethereum"].get(contract_key, "").lower()
-        assert actual == expected, (
-            f"Ethereum has wrong {contract_key}: {actual} != {expected}"
-        )
+        """Each canonical address should be the same on all chains (CREATE2)."""
+        expected = CANONICAL_V4_ADDRESSES[contract_key].lower()
+        for chain, addrs in UNISWAP_V4.items():
+            actual = addrs.get(contract_key, "").lower()
+            assert actual == expected, (
+                f"Chain '{chain}' has wrong {contract_key}: {actual} != {expected}"
+            )
 
-    def test_addresses_differ_across_chains(self):
-        """V4 addresses should NOT be identical across chains (not same CREATE2)."""
-        # Check that at least position_manager differs between ethereum and base
-        eth_pm = UNISWAP_V4["ethereum"]["position_manager"].lower()
-        base_pm = UNISWAP_V4["base"]["position_manager"].lower()
-        assert eth_pm != base_pm, "V4 PositionManager should differ between chains"
+    def test_pool_manager_is_canonical(self):
+        """PoolManager should be the well-known V4 address on all chains."""
+        for chain, addr in POOL_MANAGER_ADDRESSES.items():
+            assert addr.lower() == "0x000000000004444c5dc75cb358380d2e3de08a90", (
+                f"PoolManager on {chain} is not canonical: {addr}"
+            )
 
     def test_all_chains_have_all_contracts(self):
         """Every V4 chain entry should have all expected contract keys."""
@@ -97,7 +97,7 @@ class TestContractRegistryV4:
     def test_pool_manager_registered(self):
         """V4 PoolManager should be in the default registry."""
         registry = get_default_registry()
-        info = registry.lookup("ethereum", ETHEREUM_V4_ADDRESSES["pool_manager"])
+        info = registry.lookup("ethereum", CANONICAL_V4_ADDRESSES["pool_manager"])
         assert info is not None, "V4 PoolManager not in registry"
         assert info.protocol == "uniswap_v4"
         assert "SWAP" in info.supported_actions
@@ -105,7 +105,7 @@ class TestContractRegistryV4:
     def test_position_manager_registered(self):
         """V4 PositionManager should be in the default registry."""
         registry = get_default_registry()
-        info = registry.lookup("ethereum", ETHEREUM_V4_ADDRESSES["position_manager"])
+        info = registry.lookup("ethereum", CANONICAL_V4_ADDRESSES["position_manager"])
         assert info is not None, "V4 PositionManager not in registry"
         assert info.protocol == "uniswap_v4"
         assert "LP_OPEN" in info.supported_actions
@@ -115,25 +115,24 @@ class TestContractRegistryV4:
         """V4 PoolManager should be registered on all supported chains."""
         registry = get_default_registry()
         for chain in EXPECTED_V4_CHAINS:
-            pool_mgr_addr = UNISWAP_V4[chain]["pool_manager"]
-            info = registry.lookup(chain, pool_mgr_addr)
+            info = registry.lookup(chain, CANONICAL_V4_ADDRESSES["pool_manager"])
             assert info is not None, f"V4 PoolManager not registered on {chain}"
 
     def test_v4_swap_action_supported(self):
         """SWAP action should be supported for V4 PoolManager."""
         registry = get_default_registry()
         assert registry.is_action_supported(
-            "ethereum", ETHEREUM_V4_ADDRESSES["pool_manager"], "SWAP"
+            "arbitrum", CANONICAL_V4_ADDRESSES["pool_manager"], "SWAP"
         )
 
     def test_v4_lp_action_supported(self):
         """LP actions should be supported for V4 PositionManager."""
         registry = get_default_registry()
         assert registry.is_action_supported(
-            "ethereum", ETHEREUM_V4_ADDRESSES["position_manager"], "LP_OPEN"
+            "arbitrum", CANONICAL_V4_ADDRESSES["position_manager"], "LP_OPEN"
         )
         assert registry.is_action_supported(
-            "ethereum", ETHEREUM_V4_ADDRESSES["position_manager"], "LP_CLOSE"
+            "arbitrum", CANONICAL_V4_ADDRESSES["position_manager"], "LP_CLOSE"
         )
 
     def test_uniswap_v4_in_supported_protocols(self):
@@ -181,8 +180,9 @@ class TestV4Selectors:
         )
 
     def test_v4_command_bytes(self):
-        """V4 UniversalRouter command byte should be V4_SWAP (0x10)."""
-        # All swap variants now alias to V4_SWAP (0x10) per UniversalRouter Dispatcher.sol
+        """V4 UniversalRouter command byte should be V4_SWAP (0x10) via two-layer encoding."""
+        # All swap variants alias to V4_SWAP (0x10) per UniversalRouter Dispatcher.sol
+        # The specific swap type is encoded in the inner V4 actions layer.
         assert V4_SWAP_EXACT_IN_SINGLE == 0x10
         assert V4_SWAP_EXACT_IN == 0x10
         assert V4_SWAP_EXACT_OUT_SINGLE == 0x10
@@ -210,7 +210,7 @@ class TestCompilerV4Unblocked:
         from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
 
         compiler = IntentCompiler(
-            chain="ethereum",
+            chain="arbitrum",
             wallet_address="0x1234567890123456789012345678901234567890",
             config=IntentCompilerConfig(allow_placeholder_prices=True),
         )
@@ -226,4 +226,4 @@ class TestCompilerV4Unblocked:
         assert result.status == CompilationStatus.SUCCESS
         assert result.action_bundle is not None
         assert result.action_bundle.metadata["protocol_version"] == "v4"
-        assert result.action_bundle.metadata["router"].lower() == "0x66a9893cc07d91d95644aedd05d03f95e1dba8af"
+        assert result.action_bundle.metadata["router"] == "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af"

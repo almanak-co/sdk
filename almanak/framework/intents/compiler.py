@@ -294,14 +294,14 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
 LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     "ethereum": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-        "uniswap_v4": "0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e",  # V4 PositionManager (docs.uniswap.org)
+        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
         "sushiswap_v3": "0x2214A42d8e2A1d20635c2cb0664422c528B6A432",
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
         "traderjoe_v2": "0x9A93a421b74F1c5755b83dD2C211614dC419C44b",  # LBRouter v2.1
     },
     "arbitrum": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-        "uniswap_v4": "0xd88F38F930b7952f2DB2432Cb002E7abbF3dD869",  # V4 PositionManager (docs.uniswap.org)
+        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
         "sushiswap_v3": "0xF0cBce1942A68BEB3d1b73F0dd86C8DCc363eF49",
         "camelot": "0x00c7f3082833e796A5b3e4Bd59f6642FF44DCD15",
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
@@ -310,19 +310,19 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     },
     "optimism": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-        "uniswap_v4": "0x3C3Ea4B57a46241e54610e5f022E5c45859A1017",  # V4 PositionManager (docs.uniswap.org)
+        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
         "sushiswap_v3": "0x1af415a1EbA07a4986a52B6f2e7dE7003D82231e",
         # Velodrome V2 uses the Router for liquidity operations (fungible LP tokens, same as Aerodrome)
         "aerodrome": "0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858",  # Velodrome V2 Router
     },
     "polygon": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-        "uniswap_v4": "0x1Ec2eBf4F37E7363FDfe3551602425af0B3ceef9",  # V4 PositionManager (docs.uniswap.org)
+        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
         "sushiswap_v3": "0xb7402ee99F0A008e461098AC3A27F4957Df89a40",
     },
     "base": {
         "uniswap_v3": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
-        "uniswap_v4": "0x7C5f5A4bBd8fD63184577525326123B519429bDc",  # V4 PositionManager (docs.uniswap.org)
+        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
         "sushiswap_v3": "0x80C7DD17B01855a6D2347444a0FCC36136a314de",
         # Aerodrome uses the Router for liquidity operations (fungible LP tokens)
         "aerodrome": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",  # Aerodrome Router
@@ -330,14 +330,14 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     },
     "avalanche": {
         "uniswap_v3": "0x655C406EBFa14EE2006250925e54ec43AD184f8B",
-        "uniswap_v4": "0xB74b1F14d2754AcfcbBe1a221023a5cf50Ab8ACD",  # V4 PositionManager (docs.uniswap.org)
+        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
         "sushiswap_v3": "0x18350b048AB366ed601fFDbC669110Ecb36016f3",
         # TraderJoe V2 uses the LBRouter for liquidity operations (not NFT-based)
         "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter2
     },
     "bsc": {
         "uniswap_v3": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
-        "uniswap_v4": "0x7A4a5c919aE2541AeD11041A1AEeE68f1287f95b",  # V4 PositionManager (docs.uniswap.org)
+        "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
         "sushiswap_v3": "0xF70c086618dcf2b1A461311275e00D6B722ef914",
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
         "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",  # LBRouter v2.1

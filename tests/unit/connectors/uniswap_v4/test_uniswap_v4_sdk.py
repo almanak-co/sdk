@@ -43,19 +43,16 @@ class TestConstants:
         assert UNISWAP_V4_GAS_ESTIMATES["swap"] == 250_000
 
     def test_pool_manager_addresses(self):
-        # V4 PoolManager addresses are per-chain (not same CREATE2 anymore)
-        # Source: https://docs.uniswap.org/contracts/v4/deployments
-        expected_chains = {"ethereum", "base", "arbitrum", "optimism", "polygon", "avalanche", "bsc"}
-        assert expected_chains.issubset(set(POOL_MANAGER_ADDRESSES.keys()))
-        # Ethereum still uses the well-known CREATE2 address
-        assert POOL_MANAGER_ADDRESSES["ethereum"].lower() == "0x000000000004444c5dc75cb358380d2e3de08a90"
+        # All chains should have the same pool manager (CREATE2 deployment)
+        for chain, addr in POOL_MANAGER_ADDRESSES.items():
+            assert addr.lower() == "0x000000000004444c5dc75cb358380d2e3de08a90", f"PoolManager on {chain} mismatch"
 
     def test_router_addresses(self):
-        expected_chains = {"ethereum", "base", "arbitrum", "optimism", "polygon", "avalanche", "bsc"}
+        expected_chains = {"ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc"}
         assert expected_chains.issubset(set(ROUTER_ADDRESSES.keys()))
 
     def test_quoter_addresses(self):
-        expected_chains = {"ethereum", "base", "arbitrum", "optimism", "polygon", "avalanche", "bsc"}
+        expected_chains = {"ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc"}
         assert expected_chains.issubset(set(QUOTER_ADDRESSES.keys()))
 
 
@@ -123,8 +120,8 @@ class TestPoolKey:
 
 class TestUniswapV4SDKInit:
     def test_init_supported_chain(self):
-        sdk = UniswapV4SDK(chain="ethereum")
-        assert sdk.chain == "ethereum"
+        sdk = UniswapV4SDK(chain="arbitrum")
+        assert sdk.chain == "arbitrum"
         assert sdk.pool_manager.lower() == "0x000000000004444c5dc75cb358380d2e3de08a90"
 
     def test_init_unsupported_chain(self):
@@ -132,8 +129,8 @@ class TestUniswapV4SDKInit:
             UniswapV4SDK(chain="fantom")
 
     def test_init_case_insensitive(self):
-        sdk = UniswapV4SDK(chain="Ethereum")
-        assert sdk.chain == "ethereum"
+        sdk = UniswapV4SDK(chain="Arbitrum")
+        assert sdk.chain == "arbitrum"
 
 
 # =============================================================================
@@ -143,7 +140,7 @@ class TestUniswapV4SDKInit:
 
 class TestComputePoolKey:
     def test_default_tick_spacing(self):
-        sdk = UniswapV4SDK(chain="ethereum")
+        sdk = UniswapV4SDK(chain="arbitrum")
         key = sdk.compute_pool_key(
             token0="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             token1="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -152,7 +149,7 @@ class TestComputePoolKey:
         assert key.tick_spacing == 60
 
     def test_custom_tick_spacing(self):
-        sdk = UniswapV4SDK(chain="ethereum")
+        sdk = UniswapV4SDK(chain="arbitrum")
         key = sdk.compute_pool_key(
             token0="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             token1="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -162,7 +159,7 @@ class TestComputePoolKey:
         assert key.tick_spacing == 10
 
     def test_fee_100_tick_spacing(self):
-        sdk = UniswapV4SDK(chain="ethereum")
+        sdk = UniswapV4SDK(chain="arbitrum")
         key = sdk.compute_pool_key(
             token0="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             token1="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -178,7 +175,7 @@ class TestComputePoolKey:
 
 class TestGetQuoteLocal:
     def test_basic_quote(self):
-        sdk = UniswapV4SDK(chain="ethereum")
+        sdk = UniswapV4SDK(chain="arbitrum")
         quote = sdk.get_quote_local(
             token_in="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             token_out="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -190,7 +187,7 @@ class TestGetQuoteLocal:
         assert quote.amount_out < 10**18  # Less due to fees
 
     def test_quote_with_price_ratio(self):
-        sdk = UniswapV4SDK(chain="ethereum")
+        sdk = UniswapV4SDK(chain="arbitrum")
         quote = sdk.get_quote_local(
             token_in="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             token_out="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -205,7 +202,7 @@ class TestGetQuoteLocal:
 
     def test_quote_fee_deduction(self):
         """Quote should deduct fees from output."""
-        sdk = UniswapV4SDK(chain="ethereum")
+        sdk = UniswapV4SDK(chain="arbitrum")
         amount_in = 10**18
 
         # 0.3% fee tier
@@ -227,7 +224,7 @@ class TestGetQuoteLocal:
 
 class TestBuildSwapTx:
     def test_build_swap_tx(self):
-        sdk = UniswapV4SDK(chain="ethereum")
+        sdk = UniswapV4SDK(chain="arbitrum")
         quote = SwapQuote(
             amount_in=10**18,
             amount_out=997 * 10**15,
@@ -242,7 +239,7 @@ class TestBuildSwapTx:
         assert tx.value == 0  # Not native ETH
 
     def test_build_native_swap_tx(self):
-        sdk = UniswapV4SDK(chain="ethereum")
+        sdk = UniswapV4SDK(chain="arbitrum")
         quote = SwapQuote(
             amount_in=10**18,
             amount_out=997 * 10**15,
@@ -256,7 +253,7 @@ class TestBuildSwapTx:
 
 class TestBuildApproveTx:
     def test_build_approve(self):
-        sdk = UniswapV4SDK(chain="ethereum")
+        sdk = UniswapV4SDK(chain="arbitrum")
         tx = sdk.build_approve_tx(
             token_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             spender="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -296,7 +293,7 @@ class TestTickMath:
 
 class TestBuildPermit2ApproveTx:
     def test_basic_permit2_approve(self):
-        sdk = UniswapV4SDK(chain="ethereum")
+        sdk = UniswapV4SDK(chain="arbitrum")
         tx = sdk.build_permit2_approve_tx(
             token_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             spender="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -309,7 +306,7 @@ class TestBuildPermit2ApproveTx:
         assert tx.gas_estimate == UNISWAP_V4_GAS_ESTIMATES["permit2_approve"]
 
     def test_permit2_approve_clamps_uint160(self):
-        sdk = UniswapV4SDK(chain="ethereum")
+        sdk = UniswapV4SDK(chain="arbitrum")
         huge_amount = (1 << 200)  # exceeds uint160
         tx = sdk.build_permit2_approve_tx(
             token_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -326,7 +323,7 @@ class TestBuildPermit2ApproveTx:
     def test_permit2_approve_default_expiration(self):
         import time
 
-        sdk = UniswapV4SDK(chain="ethereum")
+        sdk = UniswapV4SDK(chain="arbitrum")
         before = int(time.time())
         tx = sdk.build_permit2_approve_tx(
             token_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -398,7 +395,7 @@ class TestEncodeExecute:
 class TestEncodeExactInputSingleParams:
     def test_params_contain_pool_key_and_amounts(self):
         """Verify the encoded params contain expected pool key fields."""
-        sdk = UniswapV4SDK(chain="ethereum")
+        sdk = UniswapV4SDK(chain="arbitrum")
         quote = SwapQuote(
             amount_in=10**18,
             amount_out=997 * 10**15,
@@ -420,7 +417,7 @@ class TestEncodeExactInputSingleParams:
 
     def test_integer_slippage_precision(self):
         """Verify integer floor division gives correct amount_out_minimum."""
-        sdk = UniswapV4SDK(chain="ethereum")
+        sdk = UniswapV4SDK(chain="arbitrum")
         quote = SwapQuote(
             amount_in=10**30,
             amount_out=10**30,
