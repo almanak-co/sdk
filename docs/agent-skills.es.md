@@ -272,7 +272,7 @@ La habilidad incluida cubre:
 | Resolución de tokens | get_token_resolver(), resolve_for_swap() |
 | Backtesting | Simulación PnL, paper trading, barrido de parámetros |
 | Comandos CLI | strat new/run/demo/backtest, gateway, agent |
-| Cadenas y protocolos | 12 cadenas, 10 protocolos con nombres de enumeración |
+| Cadenas y protocolos | 14 cadenas, 14 protocolos con nombres de enumeración |
 | Patrones comunes | Rebalanceo, alertas, teardown, IntentSequence |
 | Solución de problemas | Errores comunes y soluciones |
 

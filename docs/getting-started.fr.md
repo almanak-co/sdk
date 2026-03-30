@@ -155,6 +155,15 @@ almanak strat run --once
 
 Consultez [Variables d'environnement](environment-variables.md) pour la liste complète des options de configuration, y compris les clés API spécifiques aux protocoles.
 
+!!! info "Avant de passer en production"
+    - Exécutez toujours `--dry-run --once` avant votre première exécution en production pour vérifier la
+      compilation des intents sans soumettre de transactions.
+    - Si les swaps échouent avec "Too little received", passez de `amount_usd=` à `amount=` (unités de
+      tokens). `amount_usd=` repose sur l'oracle de prix de la passerelle pour la conversion USD-token,
+      qui peut diverger du prix du DEX.
+    - Commencez avec de petits montants, surveillez les premières itérations, et notez votre ID
+      d'instance pour reprendre avec `--id`.
+
 ## Structure d'une stratégie
 
 Une stratégie implémente la méthode `decide()`, qui reçoit un `MarketSnapshot` et retourne un `Intent` :
@@ -202,8 +211,68 @@ class MyStrategy(IntentStrategy):
 | `VaultRedeemIntent` | Racheter depuis un coffre |
 | `WrapNativeIntent` | Envelopper des tokens natifs (ex: ETH vers WETH) |
 | `UnwrapNativeIntent` | Désenvelopper des tokens natifs (ex: WETH vers ETH) |
-| `BridgeIntent` | Transférer des tokens entre chaînes |
-| `EnsureBalanceIntent` | Meta-intent qui se résout en `BridgeIntent` ou `HoldIntent` pour assurer un solde minimum de tokens sur la chaîne cible |
+| `Intent.bridge()` | Transférer des tokens entre chaînes (methode factory retournant un intent composite) |
+| `Intent.ensure_balance()` | Assurer un solde minimum de tokens sur la chaîne cible (methode factory se résolvant en bridge ou hold) |
+
+## Persistance de l'état (requis pour les stratégies avec état)
+
+Le framework persiste automatiquement les métadonnées du runner (compteurs d'itérations, compteurs d'erreurs) après chaque itération. Cependant, **l'état spécifique à la stratégie** -- IDs de positions, compteurs de trades, suivi de phase, timers de cooldown -- n'est sauvegardé que si vous implémentez deux hooks :
+
+```python
+from typing import Any
+from decimal import Decimal
+
+class MyStrategy(IntentStrategy):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._position_id: int | None = None
+        self._trades_today: int = 0
+
+    def get_persistent_state(self) -> dict[str, Any]:
+        """Return state to save. Called after each iteration."""
+        return {
+            "position_id": self._position_id,
+            "trades_today": self._trades_today,
+        }
+
+    def load_persistent_state(self, state: dict[str, Any]) -> None:
+        """Restore state on startup. Called when resuming a run."""
+        self._position_id = state.get("position_id")
+        self._trades_today = state.get("trades_today", 0)
+```
+
+Sans ces hooks, votre stratégie perdra tout son état interne au redémarrage. C'est particulièrement dangereux pour les stratégies LP où la perte du `position_id` signifie que la stratégie ne peut plus fermer ses propres positions.
+
+!!! warning "Ce qui est perdu sans persistance"
+    Si vous stockez l'état dans des variables d'instance (par ex. `self._position_id`) mais n'implémentez pas `get_persistent_state()` et `load_persistent_state()`, cet état est perdu quand le processus s'arrête. Au redémarrage, votre stratégie repart de zéro sans mémoire des positions ouvertes, des trades effectués ou de la phase interne.
+
+!!! tip "Conseils"
+    - Utilisez `.get()` avec des valeurs par défaut dans `load_persistent_state()` de manière défensive pour que les anciens dicts d'état ne plantent pas sur des clés manquantes.
+    - Stockez les valeurs `Decimal` sous forme de chaînes (`str(amount)`) et parsez-les au chargement (`Decimal(state["amount"])`) pour un aller-retour JSON sûr.
+    - Le callback `on_intent_executed()` est l'endroit naturel pour mettre à jour l'état après un trade (par ex. stocker un nouvel ID de position), et `get_persistent_state()` le récupère ensuite pour la sauvegarde.
+
+## Démontage de la stratégie (requis)
+
+Chaque stratégie doit implémenter le démontage pour que les opérateurs puissent fermer les positions en toute sécurité. Sans démontage, les demandes de fermeture sont silencieusement ignorées et les positions restent ouvertes. Les templates `almanak strat new` incluent des stubs -- remplissez-les au fur et à mesure que vous construisez votre stratégie.
+
+```python
+class MyStrategy(IntentStrategy):
+    def supports_teardown(self) -> bool:
+        return True
+
+    def get_open_positions(self) -> "TeardownPositionSummary":
+        """Query on-chain state and return open positions."""
+        from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
+        # ... return TeardownPositionSummary with your positions
+
+    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
+        """Return ordered intents to unwind all positions."""
+        from almanak.framework.teardown import TeardownMode
+        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
+        return [Intent.swap(from_token="WETH", to_token="USDC", amount="all", max_slippage=max_slippage)]
+```
+
+Si votre stratégie détient plusieurs types de positions, fermez-les dans l'ordre : **perpétuels -> emprunts -> fournitures -> LPs -> tokens**. Consultez le [CLI de démontage](cli/strat-teardown.md) pour savoir comment les opérateurs déclenchent le démontage.
 
 ## Génération du manifeste de permissions (portefeuilles Safe)
 
@@ -228,9 +297,35 @@ La commande lit `supported_protocols` et `intent_types` depuis votre décorateur
 !!! note "Uniquement pour les déploiements Safe/Zodiac"
     Les manifestes de permissions ne sont nécessaires que lors de l'exécution via un portefeuille Safe avec Zodiac Roles. Pour les tests Anvil locaux ou l'exécution par clé directe, aucune permission n'est requise.
 
+!!! note "CLI de backtest"
+    Contrairement à `almanak strat run` qui découvre automatiquement la stratégie depuis le répertoire courant,
+    les commandes de backtest nécessitent un nom de stratégie explicite : `almanak strat backtest pnl -s my_strategy`.
+    Utilisez `--list-strategies` pour voir les stratégies disponibles.
+
 ## Prochaines étapes
 
 - [Variables d'environnement](environment-variables.md) - Toutes les options de configuration
 - [Référence API](api/index.md) - Documentation complète de l'API Python
 - [Référence CLI](cli/almanak.md) - Toutes les commandes CLI
 - [API Passerelle](gateway/api-reference.md) - Services gRPC de la passerelle
+
+## Vous voulez qu'un LLM prenne les décisions ?
+
+Le SDK supporte aussi les **stratégies agentiques** où un LLM décide
+de manière autonome quoi faire en utilisant les 29 outils intégrés d'Almanak. Au lieu
+d'écrire la logique `decide()` en Python, vous écrivez un prompt système et laissez
+le LLM raisonner sur les données de marché.
+
+Cette approche nécessite **votre propre clé API LLM** (OpenAI, Anthropic ou tout
+fournisseur compatible OpenAI).
+
+| | Déterministe (ce guide) | Agentique |
+|---|---|---|
+| **Vous écrivez** | Méthode Python `decide()` | Prompt système + politique |
+| **Décideur** | Votre code | LLM (GPT-4, Claude, etc.) |
+| **Nécessite** | Juste le SDK | SDK + clé API LLM |
+| **Idéal pour** | Règles connues, signaux quantitatifs | Raisonnement complexe, plans multi-étapes |
+
+Les deux chemins partagent la même passerelle, les mêmes connecteurs et le même pipeline d'exécution.
+
+**Pour commencer :** [Guide de trading agentique](agentic/index.md)

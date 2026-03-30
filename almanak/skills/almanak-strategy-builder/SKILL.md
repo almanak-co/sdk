@@ -12,7 +12,7 @@ description: >-
   debugging strategy execution on Anvil forks. Do NOT use for general
   smart contract development, Solidity code, or non-strategy SDK internals.
 metadata:
-  version: "2.6.4"
+  version: "2.7.0"
   author: Almanak
   license: Apache-2.0
   type: documentation
@@ -1044,6 +1044,34 @@ almanak agent install -p claude       # Install for specific platform
 almanak agent install -p all          # Install for all 10 platforms
 almanak agent update                  # Update installed skill files
 almanak agent status                  # Check installation status
+```
+
+### Strategy Operations
+
+```bash
+almanak strat list                    # List deployed strategies
+almanak strat status                  # Show strategy status
+almanak strat logs                    # View strategy logs
+almanak strat pause                   # Pause a running strategy
+almanak strat resume                  # Resume a paused strategy
+```
+
+### Copy Trading
+
+```bash
+almanak copy validate                 # Validate a copy trading config
+almanak copy replay                   # Replay copy trades
+almanak copy report                   # Generate copy trading report
+```
+
+### Services & Tools
+
+```bash
+almanak ax                            # Almanak agentic execution
+almanak backtest-service              # Start backtest service
+almanak dashboard                     # Launch strategy dashboard
+almanak mcp serve                     # Start MCP server
+almanak info matrix                   # Show chain/protocol support matrix
 ```
 
 ### Documentation

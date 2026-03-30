@@ -272,7 +272,7 @@ almanak strat new --template mean_reversion --name my_rsi --chain arbitrum
 | 代币解析 | get_token_resolver()、resolve_for_swap() |
 | 回测 | PnL 模拟、模拟交易、参数扫描 |
 | CLI 命令 | strat new/run/demo/backtest、gateway、agent |
-| 链与协议 | 12 条链、10 个协议及枚举名称 |
+| 链与协议 | 14 条链、14 个协议及枚举名称 |
 | 常见模式 | 再平衡、告警、清仓、IntentSequence |
 | 故障排除 | 常见错误及修复方法 |
 

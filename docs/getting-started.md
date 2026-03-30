@@ -211,8 +211,8 @@ class MyStrategy(IntentStrategy):
 | `VaultRedeemIntent` | Redeem from a vault |
 | `WrapNativeIntent` | Wrap native tokens (e.g., ETH to WETH) |
 | `UnwrapNativeIntent` | Unwrap native tokens (e.g., WETH to ETH) |
-| `BridgeIntent` | Bridge tokens cross-chain |
-| `EnsureBalanceIntent` | Meta-intent that resolves to a `BridgeIntent` or `HoldIntent` to ensure minimum token balance on a target chain |
+| `Intent.bridge()` | Bridge tokens cross-chain (factory method returning a composite intent) |
+| `Intent.ensure_balance()` | Ensure minimum token balance on a target chain (factory method resolving to a bridge or hold) |
 
 ## State Persistence (Required for Stateful Strategies)
 

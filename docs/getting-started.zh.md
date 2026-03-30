@@ -155,6 +155,12 @@ almanak strat run --once
 
 请参阅[环境变量](environment-variables.md)了解完整的配置选项列表，包括协议特定的 API 密钥。
 
+!!! info "上线前注意事项"
+    - 首次实际执行前，务必先运行 `--dry-run --once` 以验证 intent 编译，而不提交交易。
+    - 如果交换因 "Too little received" 而回滚，请将 `amount_usd=` 改为 `amount=`（代币单位）。
+      `amount_usd=` 依赖网关价格预言机进行 USD 到代币的转换，可能与 DEX 价格有偏差。
+    - 从小额开始，监控前几次迭代，并记录您的实例 ID 以便使用 `--id` 恢复。
+
 ## 策略结构
 
 策略实现 `decide()` 方法，该方法接收 `MarketSnapshot` 并返回 `Intent`：
@@ -202,8 +208,68 @@ class MyStrategy(IntentStrategy):
 | `VaultRedeemIntent` | 从金库赎回 |
 | `WrapNativeIntent` | 包装原生代币（例如 ETH 转 WETH） |
 | `UnwrapNativeIntent` | 解包原生代币（例如 WETH 转 ETH） |
-| `BridgeIntent` | 跨链桥接代币 |
-| `EnsureBalanceIntent` | 元意图，解析为 `BridgeIntent` 或 `HoldIntent`，确保目标链上的最低代币余额 |
+| `Intent.bridge()` | 跨链桥接代币（工厂方法，返回复合意图） |
+| `Intent.ensure_balance()` | 确保目标链上的最低代币余额（工厂方法，解析为桥接或持有） |
+
+## 状态持久化（有状态策略必需）
+
+框架会在每次迭代后自动持久化运行器级别的元数据（迭代计数、错误计数器）。但是，**策略特定的状态** -- 头寸 ID、交易次数、阶段跟踪、冷却计时器 -- 只有在您实现两个钩子时才会保存：
+
+```python
+from typing import Any
+from decimal import Decimal
+
+class MyStrategy(IntentStrategy):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._position_id: int | None = None
+        self._trades_today: int = 0
+
+    def get_persistent_state(self) -> dict[str, Any]:
+        """返回要保存的状态。每次迭代后调用。"""
+        return {
+            "position_id": self._position_id,
+            "trades_today": self._trades_today,
+        }
+
+    def load_persistent_state(self, state: dict[str, Any]) -> None:
+        """在启动时恢复状态。恢复运行时调用。"""
+        self._position_id = state.get("position_id")
+        self._trades_today = state.get("trades_today", 0)
+```
+
+如果没有这些钩子，您的策略在重启时将丢失所有内部状态。这对于 LP 策略尤其危险，因为丢失 `position_id` 意味着策略无法关闭自己的头寸。
+
+!!! warning "没有持久化会丢失什么"
+    如果您将状态存储在实例变量中（例如 `self._position_id`）但没有实现 `get_persistent_state()` 和 `load_persistent_state()`，该状态会在进程停止时丢失。重启后，您的策略将从零开始，不记得任何已开启的头寸、已完成的交易或内部阶段。
+
+!!! tip "提示"
+    - 在 `load_persistent_state()` 中使用带默认值的 `.get()` 进行防御性编程，这样旧的状态字典不会因缺少键而崩溃。
+    - 将 `Decimal` 值存储为字符串（`str(amount)`）并在读取时解析（`Decimal(state["amount"])`），以确保 JSON 往返安全。
+    - `on_intent_executed()` 回调是在交易后更新状态的最佳位置（例如存储新的头寸 ID），然后 `get_persistent_state()` 会在保存时获取它。
+
+## 策略拆卸（必需）
+
+每个策略都必须实现拆卸功能，以便运营者可以安全地关闭头寸。没有拆卸功能，关闭请求会被静默忽略，头寸将保持开启状态。`almanak strat new` 模板包含存根 -- 在构建策略时填写它们。
+
+```python
+class MyStrategy(IntentStrategy):
+    def supports_teardown(self) -> bool:
+        return True
+
+    def get_open_positions(self) -> "TeardownPositionSummary":
+        """查询链上状态并返回已开启的头寸。"""
+        from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
+        # ... 返回包含您头寸的 TeardownPositionSummary
+
+    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
+        """返回有序的 intent 列表以平仓所有头寸。"""
+        from almanak.framework.teardown import TeardownMode
+        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
+        return [Intent.swap(from_token="WETH", to_token="USDC", amount="all", max_slippage=max_slippage)]
+```
+
+如果您的策略持有多种头寸类型，请按以下顺序关闭：**永续合约 -> 借款 -> 供应 -> LP -> 代币**。参阅[拆卸 CLI](cli/strat-teardown.md)了解运营者如何触发拆卸。
 
 ## 生成权限清单（Safe 钱包）
 
@@ -228,9 +294,34 @@ almanak strat permissions -o permissions.json
 !!! note "仅用于 Safe/Zodiac 部署"
     权限清单仅在通过带有 Zodiac Roles 的 Safe 钱包运行时需要。本地 Anvil 测试或直接密钥执行不需要权限。
 
+!!! note "回测 CLI"
+    与 `almanak strat run` 从当前目录自动发现策略不同，
+    回测命令需要明确的策略名称：`almanak strat backtest pnl -s my_strategy`。
+    使用 `--list-strategies` 查看可用的策略。
+
 ## 下一步
 
 - [环境变量](environment-variables.md) - 所有配置选项
 - [API 参考](api/index.md) - 完整的 Python API 文档
 - [CLI 参考](cli/almanak.md) - 所有 CLI 命令
 - [网关 API](gateway/api-reference.md) - 网关 gRPC 服务
+
+## 想让 LLM 来做决策？
+
+SDK 还支持**代理策略**，其中 LLM 使用 Almanak 的 29 个内置工具自主决定
+要做什么。您无需在 Python 中编写 `decide()` 逻辑，而是编写系统提示词，
+让 LLM 基于市场数据进行推理。
+
+这种方式需要**您自己的 LLM API 密钥**（OpenAI、Anthropic 或任何
+兼容 OpenAI 的提供商）。
+
+| | 确定性策略（本指南） | 代理策略 |
+|---|---|---|
+| **您编写的** | Python `decide()` 方法 | 系统提示词 + 策略 |
+| **决策者** | 您的代码 | LLM（GPT-4、Claude 等） |
+| **需要** | 仅 SDK | SDK + LLM API 密钥 |
+| **最适合** | 已知规则、量化信号 | 复杂推理、多步计划 |
+
+两种路径共享相同的网关、连接器和执行管道。
+
+**开始使用：** [代理交易指南](agentic/index.md)

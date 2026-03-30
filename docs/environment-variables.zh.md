@@ -74,6 +74,14 @@
 |----------|-------------|
 | `ALMANAK_GATEWAY_PENDLE_API_KEY` | Pendle 协议 API 密钥 |
 
+### Solana
+
+| 变量 | 描述 |
+|----------|-------------|
+| `SOLANA_PRIVATE_KEY` | Ed25519 密钥对，base58 格式（或 64 字符十六进制种子）。Solana 策略必需。 |
+| `SOLANA_RPC_URL` | Solana RPC 端点。默认为 `https://api.mainnet-beta.solana.com`（有速率限制）。生产环境请使用 Helius、QuickNode 或 Triton。 |
+| `JUPITER_API_KEY` | Jupiter 聚合器 API 密钥。未设置时使用免费层级。 |
+
 ---
 
 ## Safe 钱包

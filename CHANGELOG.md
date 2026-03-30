@@ -6,6 +6,65 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-03-30
+
+### Added
+- Uniswap V4 full support: Phase 0 contract verification (#1096), Phase 1 UniversalRouter + Permit2 swap (#1098), Phase 2 PositionManager LP adapter + HookFlags (#1100), Phase 3 hook discovery + hookData encoding (#1119), demo strategies (#1120, #1139), 4-layer intent tests for swap (#1138) and LP lifecycle (#1146)
+- Framework-owned portfolio valuation engine with protocol-specific valuers (#1103)
+- Position discovery service for on-chain position detection (#1127)
+- LP position re-pricing via V3 math (#1109)
+- Lending position re-pricing via Aave V3 on-chain data (#1115)
+- GMX V2 perps valuer for mark-to-market position pricing (#1142)
+- Paper trading valuation alignment with PortfolioValuer integration (#1137)
+- Paper trading batch 2: callback parity, resume CLI, force_action guard (#1084)
+- Paper trading batch 3: indicator fallback, fork RPC, health telemetry (#1091)
+- GMX V2 REST API fallback for position queries (#1086)
+- TraderJoe V2 swap via LBRouter2 for BTC.b routing on Avalanche (#1106)
+- Expose public price_to_tick/tick_to_price utilities (#1124)
+- L3 semantic verification for swap intent tests (#1159)
+- Reference strategies: top 3 curated DeFi examples (#1077)
+- New demo strategies: Morpho Blue paper trade (#1141), Compound V3 PnL backtest on Polygon (#1148), PancakeSwap V3 RSI parameter sweep on BSC (#1165), Velodrome V2 swap on Optimism (#1150), TraderJoe V2 LP on Avalanche (#1151), TraderJoe leveraged LP with auto-compound (#1147), PancakeSwap V3 paper trade on BSC (#1082), Uniswap V3 swap on BSC (#1085), PancakeSwap V3 swap on Ethereum (#1095), Compound V3 + Uniswap V3 leveraged yield on Arbitrum (#1104), Aave V3 + Velodrome V2 leveraged LP on Optimism (#1163), Aave V3 + Enso leveraged swap on Sonic (#1179)
+- Crisis scenario backtests: Aerodrome swap on Base (#1121), TraderJoe V2 LP on Avalanche (#1140)
+- Curve CryptoSwap 4-layer intent test on Ethereum (#1105)
+- Comprehensive V4 ACTION_* byte validation + calldata encoding tests (#1168)
+- 27 unit tests for Compound V3 PnL Polygon strategy (#1166)
+
+### Fixed
+- V4 swap two-layer encoding + correct action bytes (#1160)
+- V4 receipt parser + WETH routing via native ETH pools (#1167)
+- V4 receipt parser Transfer amount-fallback for enrichment (#1131)
+- V4 LP_CLOSE on-chain liquidity query (#1174)
+- Correct Uniswap V4 per-chain addresses from official docs (#1156)
+- Remove stale V4 swap xfail markers + add keccak topic verification (#1164)
+- Deduplicate HookFlags with single source of truth (#1130)
+- Paper trading event loop crash and RSI type mismatch (#1145)
+- Paper trading batch 1: resume URL, hex crash, port contention (#1081)
+- Merge strategy state in runner to prevent position_id loss (#1113)
+- GMX V2 PERP_CLOSE reads on-chain size to stop burning keeper fees (#1094)
+- Aerodrome enrichment swap_amounts fallback + lower log level (#1090)
+- AerodromeSDK checksum failure causes zero slippage protection (#1089)
+- Respect strategy teardown slippage in escalation manager (#1088)
+- LP_CLOSE blocked by price gate when no tokens extractable (#1078)
+- Query on-chain balance in get_open_positions() for swap strategies (#1080)
+- Route Enso API calls through gateway gRPC in deployed mode (#1102)
+- Swap ETH/WETH clarity + suppress batch token resolution warnings (#1101)
+- LocalSimulator state-setup TXs hang on EIP-1559 chains (#1097)
+- Anvil --no-gas-cap crash and strategy init kwargs TypeError (#1092)
+- Anvil mode always uses 9999 gwei gas cap (#1154)
+- Bound Anvil --no-gas-cap version fallback to 0.x series (#1122)
+- Metrics server port conflict with graceful fallback to ephemeral port (#1133)
+- Correct misleading Fluid swap min-amount error (#1093)
+- Decode Fluid DEX pool capacity errors with actionable messages (#1117)
+- Persist portfolio snapshots when using gateway state manager (#1108)
+- Derive Compound V3 support_matrix chains from COMET_ADDRESSES (#1123)
+- Add WETH.e (slot 0) to KNOWN_BALANCE_SLOTS for Avalanche (#1125)
+- Add ATH and TORIVA to default token registry (#1110)
+- Enforce bilateral balance deltas in all swap intent tests (#1158)
+- Dashboard explorer links, duplicate instances, empty protocol (#1175)
+- Publish gateway image to both registries on prod release (#1099)
+- Skip Release workflow for pre-releases (RC tags) (#1107)
+- gasPrice fallback and strategy retry from loop review (#1114)
+
 ## [2.6.4] - 2026-03-26
 
 ### Added
