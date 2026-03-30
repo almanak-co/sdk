@@ -102,10 +102,9 @@ class PendleYTYieldStrategy(IntentStrategy):
         # Risk parameters
         self.stop_loss_pct = int(self.get_config("stop_loss_pct", 50))
         # YT tokens are illiquid near maturity — use a wider teardown slippage
-        # Default 1500bps (15%) for HARD mode, 1000bps (10%) for SOFT mode
-        # (raised from 500bps after nightly failures showed 5% insufficient for YT AMMs)
+        # Default 1500bps (15%) for HARD mode, 500bps (5%) for SOFT mode
         self.teardown_hard_slippage_bps = int(self.get_config("teardown_hard_slippage_bps", 1500))
-        self.teardown_soft_slippage_bps = int(self.get_config("teardown_soft_slippage_bps", 1000))
+        self.teardown_soft_slippage_bps = int(self.get_config("teardown_soft_slippage_bps", 500))
         for _name, _bps in (
             ("teardown_hard_slippage_bps", self.teardown_hard_slippage_bps),
             ("teardown_soft_slippage_bps", self.teardown_soft_slippage_bps),
