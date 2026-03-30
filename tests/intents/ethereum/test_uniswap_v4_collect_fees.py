@@ -130,10 +130,6 @@ class TestUniswapV4CollectFeesIntent:
     - Balance deltas are non-negative (fees collected >= 0)
     """
 
-    @pytest.mark.xfail(
-        reason="V4 LP on Anvil fork may fail due to PositionManager event differences (VIB-2025)",
-        strict=False,
-    )
     @pytest.mark.asyncio
     async def test_collect_fees_weth_usdc(
         self,

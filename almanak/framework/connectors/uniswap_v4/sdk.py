@@ -150,7 +150,7 @@ PM_TAKE_PORTION = ACTION_TAKE_PORTION
 
 # Gas estimates
 UNISWAP_V4_GAS_ESTIMATES = {
-    "approve": 50_000,
+    "approve": 65_000,  # Must cover proxy ERC-20s (e.g. Ethereum USDC ~56K gas)
     "permit2_approve": 55_000,
     "swap": 250_000,  # Higher than V3 due to PoolManager unlock callback overhead
     "swap_with_hooks": 400_000,
@@ -345,6 +345,84 @@ class UniswapV4SDK:
             raise ValueError(f"Malformed liquidity hex for position {token_id} on {self.chain}: {hex_result!r}") from e
         logger.info("V4 position %d liquidity: %d (chain=%s)", token_id, liquidity, self.chain)
         return liquidity
+
+    def get_pool_sqrt_price(
+        self,
+        pool_key: PoolKey,
+        rpc_url: str | None = None,
+    ) -> int | None:
+        """Query on-chain sqrtPriceX96 for a V4 pool via StateView.getSlot0().
+
+        Args:
+            pool_key: V4 PoolKey identifying the pool.
+            rpc_url: RPC URL to use. Falls back to self.rpc_url.
+
+        Returns:
+            sqrtPriceX96 (int) if successful, None if query fails or no RPC available.
+        """
+        url = rpc_url or self.rpc_url
+        if not url:
+            return None
+
+        if not url.startswith(("http://", "https://")):
+            logger.warning("RPC URL must use http:// or https:// scheme, got: %s", url[:20])
+            return None
+
+        state_view = self.addresses.get("state_view")
+        if not state_view:
+            return None
+
+        from almanak.framework.connectors.uniswap_v4.hooks import build_get_slot0_calldata, decode_slot0_response
+
+        calldata = build_get_slot0_calldata(pool_key)
+
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_call",
+                "params": [{"to": state_view, "data": calldata}, "latest"],
+            }
+        ).encode()
+
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+                result = json.loads(resp.read())
+        except Exception as e:
+            logger.warning(
+                "V4 StateView.getSlot0 RPC call failed on %s: %s — falling back to estimated sqrtPrice",
+                self.chain,
+                e,
+            )
+            return None
+
+        if "error" in result or "result" not in result:
+            error_detail = result.get("error", "missing 'result' field")
+            logger.warning(
+                "V4 StateView.getSlot0 returned error on %s: %s — falling back to estimated sqrtPrice",
+                self.chain,
+                error_detail,
+            )
+            return None
+
+        try:
+            pool_state = decode_slot0_response(result["result"])
+        except Exception:
+            logger.warning("V4 StateView.getSlot0 decode failed on %s, falling back to estimated sqrtPrice", self.chain)
+            return None
+
+        if not pool_state.exists or pool_state.sqrt_price_x96 == 0:
+            logger.warning("V4 pool not initialized on %s, falling back to estimated sqrtPrice", self.chain)
+            return None
+
+        logger.info(
+            "V4 on-chain sqrtPriceX96=%d tick=%d (chain=%s)",
+            pool_state.sqrt_price_x96,
+            pool_state.tick,
+            self.chain,
+        )
+        return pool_state.sqrt_price_x96
 
     def compute_pool_key(
         self,

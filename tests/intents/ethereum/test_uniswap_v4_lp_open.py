@@ -67,10 +67,6 @@ class TestUniswapV4LPOpenIntent:
     - Balance changes match expected deposits
     """
 
-    @pytest.mark.xfail(
-        reason="V4 LP on Anvil fork may fail due to PositionManager event differences (VIB-2025)",
-        strict=False,
-    )
     @pytest.mark.asyncio
     async def test_lp_open_weth_usdc(
         self,

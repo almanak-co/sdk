@@ -4733,6 +4733,7 @@ class IntentCompiler:
             config = UniswapV4Config(
                 chain=self.chain,
                 wallet_address=self.wallet_address,
+                rpc_url=self._get_chain_rpc_url(),
             )
             adapter = UniswapV4Adapter(config=config, token_resolver=self._token_resolver)
             bundle = adapter.compile_lp_open_intent(intent, self.price_oracle)
@@ -5716,6 +5717,7 @@ class IntentCompiler:
             config = UniswapV4Config(
                 chain=self.chain,
                 wallet_address=self.wallet_address,
+                rpc_url=self._get_chain_rpc_url(),
             )
             adapter = UniswapV4Adapter(config=config, token_resolver=self._token_resolver)
 

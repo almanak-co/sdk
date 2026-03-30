@@ -135,10 +135,6 @@ class TestUniswapV4LPCloseIntent:
     - Balance changes match expected token returns
     """
 
-    @pytest.mark.xfail(
-        reason="V4 LP on Anvil fork may fail due to PositionManager event differences (VIB-2025)",
-        strict=False,
-    )
     @pytest.mark.asyncio
     async def test_lp_close_weth_usdc(
         self,

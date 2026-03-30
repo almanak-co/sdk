@@ -41,7 +41,7 @@ class TestConstants:
         assert TICK_SPACING[3000] == 60
 
     def test_gas_estimates(self):
-        assert UNISWAP_V4_GAS_ESTIMATES["approve"] == 50_000
+        assert UNISWAP_V4_GAS_ESTIMATES["approve"] == 65_000
         assert UNISWAP_V4_GAS_ESTIMATES["swap"] == 250_000
 
     def test_pool_manager_addresses(self):
@@ -354,7 +354,7 @@ class TestBuildApproveTx:
             amount=10**18,
         )
         assert tx.data.startswith("0x095ea7b3")
-        assert tx.gas_estimate == 50_000
+        assert tx.gas_estimate == 65_000
         assert tx.value == 0
 
 

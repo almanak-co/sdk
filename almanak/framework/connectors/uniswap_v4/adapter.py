@@ -429,35 +429,11 @@ class UniswapV4Adapter:
             if tick_lower == tick_upper:
                 tick_upper += tick_spacing
 
-            # Estimate liquidity from amounts
-            mid_price = None
-            price0 = price_oracle.get(token0_symbol.upper())
-            price1 = price_oracle.get(token1_symbol.upper())
-            if price0 and price1 and price1 > 0:
-                mid_price = Decimal(str(price0)) / Decimal(str(price1))
-            elif range_lower is not None and range_upper is not None:
-                mid_price = (range_lower + range_upper) / 2
+            # Get sqrtPriceX96: prefer on-chain query, fall back to estimate
+            sqrt_price_x96 = None
+            used_onchain_price = False
 
-            if mid_price and mid_price > 0:
-                sqrt_price_x96 = self._sdk.estimate_sqrt_price_x96(mid_price, token0_dec, token1_dec)
-            else:
-                # Fallback: use arithmetic mean of range sqrt ratios
-                from almanak.framework.connectors.uniswap_v4.sdk import _tick_to_sqrt_ratio_x96
-
-                sqrt_price_x96 = (_tick_to_sqrt_ratio_x96(tick_lower) + _tick_to_sqrt_ratio_x96(tick_upper)) // 2
-
-            liquidity = self._sdk.compute_liquidity_from_amounts(
-                sqrt_price_x96, tick_lower, tick_upper, amount0_wei, amount1_wei
-            )
-
-            if liquidity <= 0:
-                return ActionBundle(
-                    intent_type=IntentType.LP_OPEN.value,
-                    transactions=[],
-                    metadata={"error": "Computed liquidity is zero — check amounts and price range"},
-                )
-
-            # Parse hook address from protocol_params
+            # Parse hook address early (needed for pool key in StateView query)
             hooks = NATIVE_CURRENCY  # default: no hooks
             hook_data = b""
             if intent.protocol_params:
@@ -478,19 +454,59 @@ class UniswapV4Adapter:
 
             pool_key = self._sdk.compute_pool_key(token0_addr, token1_addr, fee, tick_spacing, hooks)
 
+            # Try on-chain query via StateView.getSlot0()
+            if self.rpc_url:
+                sqrt_price_x96 = self._sdk.get_pool_sqrt_price(pool_key, rpc_url=self.rpc_url)
+                if sqrt_price_x96:
+                    used_onchain_price = True
+                    logger.info("V4 LP_OPEN: using on-chain sqrtPriceX96=%d for liquidity computation", sqrt_price_x96)
+
+            # Fallback: estimate from oracle prices
+            if sqrt_price_x96 is None:
+                mid_price = None
+                price0 = price_oracle.get(token0_symbol.upper())
+                price1 = price_oracle.get(token1_symbol.upper())
+                if price0 and price1 and price1 > 0:
+                    mid_price = Decimal(str(price0)) / Decimal(str(price1))
+                elif range_lower is not None and range_upper is not None:
+                    mid_price = (range_lower + range_upper) / 2
+
+                if mid_price and mid_price > 0:
+                    sqrt_price_x96 = self._sdk.estimate_sqrt_price_x96(mid_price, token0_dec, token1_dec)
+                    logger.info("V4 LP_OPEN: using estimated sqrtPriceX96=%d from oracle prices", sqrt_price_x96)
+                else:
+                    # Last resort: arithmetic mean of range sqrt ratios
+                    from almanak.framework.connectors.uniswap_v4.sdk import _tick_to_sqrt_ratio_x96
+
+                    sqrt_price_x96 = (_tick_to_sqrt_ratio_x96(tick_lower) + _tick_to_sqrt_ratio_x96(tick_upper)) // 2
+                    logger.info("V4 LP_OPEN: using tick-range midpoint sqrtPriceX96=%d", sqrt_price_x96)
+
+            liquidity = self._sdk.compute_liquidity_from_amounts(
+                sqrt_price_x96, tick_lower, tick_upper, amount0_wei, amount1_wei
+            )
+
+            if liquidity <= 0:
+                return ActionBundle(
+                    intent_type=IntentType.LP_OPEN.value,
+                    transactions=[],
+                    metadata={"error": "Computed liquidity is zero — check amounts and price range"},
+                )
+
             # Compute max amounts with slippage buffer.
-            # LP mints need wider tolerance than swaps because the liquidity computation
-            # uses an estimated sqrtPrice that may not match the real pool state.
-            # Default 5% (500 bps) for LP; intent.max_slippage overrides if larger.
-            lp_default_slippage = Decimal("0.05")
+            # On-chain sqrtPrice is accurate so 5% covers normal price movement.
+            # Estimated sqrtPrice can diverge from actual pool state, so use 15%
+            # to avoid MaximumAmountExceeded reverts from the PoolManager.
+            if used_onchain_price:
+                lp_default_slippage = Decimal("0.05")  # 5% for on-chain price
+            else:
+                lp_default_slippage = Decimal("0.15")  # 15% for estimated price
             intent_slippage = getattr(intent, "max_slippage", None)
             if intent_slippage is None:
                 intent_slippage = Decimal("0.005")
             effective_slippage = max(lp_default_slippage, intent_slippage)
             if effective_slippage > intent_slippage:
                 logger.warning(
-                    "V4 LP_OPEN: overriding user slippage %s%% with LP minimum %s%% "
-                    "(V4 LP mints need wider tolerance due to sqrtPrice estimation)",
+                    "V4 LP_OPEN: overriding user slippage %s%% with LP minimum %s%%",
                     intent_slippage * 100,
                     lp_default_slippage * 100,
                 )
