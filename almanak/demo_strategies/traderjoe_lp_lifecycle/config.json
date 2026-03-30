@@ -1,0 +1,12 @@
+{
+    "pool": "WAVAX/USDC/20",
+    "range_width_pct": "0.10",
+    "amount_x": "0.001",
+    "amount_y": "3",
+    "force_action": "open",
+    "anvil_funding": {
+        "AVAX": 100,
+        "WAVAX": 100,
+        "USDC": 10000
+    }
+}

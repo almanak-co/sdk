@@ -22,7 +22,7 @@ class TestLoadStrategyConfigPaths:
         monkeypatch.chdir(tmp_path)
 
         # Create the demo strategy config
-        config_dir = tmp_path / "strategies" / "demo" / "uniswap_rsi"
+        config_dir = tmp_path / "almanak" / "demo_strategies" / "uniswap_rsi"
         config_dir.mkdir(parents=True)
         config_file = config_dir / "config.json"
         config_file.write_text(json.dumps({"strategy_id": "uniswap_rsi", "rsi_period": 14}))
@@ -49,7 +49,7 @@ class TestLoadStrategyConfigPaths:
         """If the full name matches a demo dir, it should still be found."""
         monkeypatch.chdir(tmp_path)
 
-        config_dir = tmp_path / "strategies" / "demo" / "demo_uniswap_rsi"
+        config_dir = tmp_path / "almanak" / "demo_strategies" / "demo_uniswap_rsi"
         config_dir.mkdir(parents=True)
         config_file = config_dir / "config.json"
         config_file.write_text(json.dumps({"strategy_id": "full_name_match"}))
@@ -77,7 +77,7 @@ class TestLoadStrategyConfigPaths:
         configs_dir.mkdir()
         (configs_dir / "my_strat.json").write_text(json.dumps({"source": "configs_dir"}))
 
-        demo_dir = tmp_path / "strategies" / "demo" / "my_strat"
+        demo_dir = tmp_path / "almanak" / "demo_strategies" / "my_strat"
         demo_dir.mkdir(parents=True)
         (demo_dir / "config.json").write_text(json.dumps({"source": "demo_dir"}))
 

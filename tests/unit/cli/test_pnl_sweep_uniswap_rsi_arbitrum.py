@@ -276,7 +276,7 @@ class TestStrategyAcceptsAllParams:
 
     @pytest.mark.parametrize("rsi_period", [7, 14, 21])
     def test_strategy_init_with_rsi_period(self, rsi_period: int) -> None:
-        from strategies.demo.uniswap_rsi_sweep.strategy import UniswapRSISweepStrategy
+        from almanak.demo_strategies.uniswap_rsi_sweep.strategy import UniswapRSISweepStrategy
 
         strat = UniswapRSISweepStrategy(
             config={
@@ -295,7 +295,7 @@ class TestStrategyAcceptsAllParams:
 
     @pytest.mark.parametrize("rsi_oversold", [25, 30, 35])
     def test_strategy_init_with_rsi_oversold(self, rsi_oversold: int) -> None:
-        from strategies.demo.uniswap_rsi_sweep.strategy import UniswapRSISweepStrategy
+        from almanak.demo_strategies.uniswap_rsi_sweep.strategy import UniswapRSISweepStrategy
 
         strat = UniswapRSISweepStrategy(
             config={
@@ -314,7 +314,7 @@ class TestStrategyAcceptsAllParams:
 
     @pytest.mark.parametrize("rsi_overbought", [65, 70, 75])
     def test_strategy_init_with_rsi_overbought(self, rsi_overbought: int) -> None:
-        from strategies.demo.uniswap_rsi_sweep.strategy import UniswapRSISweepStrategy
+        from almanak.demo_strategies.uniswap_rsi_sweep.strategy import UniswapRSISweepStrategy
 
         strat = UniswapRSISweepStrategy(
             config={
@@ -334,7 +334,7 @@ class TestStrategyAcceptsAllParams:
     @pytest.mark.parametrize("rsi_period", [7, 21])
     def test_rsi_period_passed_to_market(self, rsi_period: int) -> None:
         """Verify non-default rsi_period values are passed to market.rsi()."""
-        from strategies.demo.uniswap_rsi_sweep.strategy import UniswapRSISweepStrategy
+        from almanak.demo_strategies.uniswap_rsi_sweep.strategy import UniswapRSISweepStrategy
 
         strat = UniswapRSISweepStrategy(
             config={

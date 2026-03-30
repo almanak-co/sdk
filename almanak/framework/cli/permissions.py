@@ -2,7 +2,7 @@
 
 Usage:
     almanak strat permissions                          # from strategy directory
-    almanak strat permissions -d strategies/demo/uniswap_rsi
+    almanak strat permissions -d almanak/demo_strategies/uniswap_rsi
     almanak strat permissions --chain arbitrum          # override chain
     almanak strat permissions --output manifest.json   # write to file
 """

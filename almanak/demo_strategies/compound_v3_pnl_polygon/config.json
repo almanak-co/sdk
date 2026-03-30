@@ -1,0 +1,13 @@
+{
+    "supply_token": "USDC.e",
+    "supply_amount": "10000",
+    "market": "usdc_e",
+    "entry_rate_threshold": 0.03,
+    "exit_rate_threshold": 0.01,
+    "max_hold_ticks": 30,
+    "force_entry_if_no_rate": true,
+    "anvil_funding": {
+        "MATIC": 100,
+        "USDC.e": 50000
+    }
+}

@@ -15,7 +15,7 @@ Borrowable: USDC, USDT0, USDe, GHO.
 Teardown unwinds in reverse: repay all debt, withdraw all collateral.
 
 Usage:
-    almanak strat run -d aave_loop_mantle --network anvil --once
+    almanak strat run -d strategies/demo/aave_loop_mantle --network anvil --once
 """
 
 import logging
@@ -61,7 +61,7 @@ class AaveLoopMantleStrategy(IntentStrategy):
         max_loops: Number of supply/borrow cycles (default: 3)
         min_health_factor: Safety floor (default: 1.5)
         max_slippage_bps: Swap slippage tolerance (default: 100 = 1%)
-        interest_rate_mode: "variable" (stable rate deprecated on Aave V3) (default: variable)
+        interest_rate_mode: "variable" or "stable" (default: variable)
     """
 
     def __init__(self, *args, **kwargs):
@@ -76,6 +76,16 @@ class AaveLoopMantleStrategy(IntentStrategy):
         self.max_slippage_bps = int(self.get_config("max_slippage_bps", 100))
         self.interest_rate_mode = self.get_config("interest_rate_mode", "variable")
 
+        # Enforce min_health_factor: cap ltv_target so each borrow stays within the health factor floor.
+        # Conservative proxy: ltv_target <= 1 / min_health_factor.
+        max_safe_ltv = Decimal("1") / self.min_health_factor
+        if self.ltv_target > max_safe_ltv:
+            logger.warning(
+                f"ltv_target={self.ltv_target} exceeds 1/min_health_factor={max_safe_ltv:.4f}; "
+                f"capping to {max_safe_ltv:.4f} to respect the configured safety floor."
+            )
+            self.ltv_target = max_safe_ltv
+
         # State tracking
         self._state = "idle"  # idle, supplying, supplied, borrowing, borrowed, swapping, complete
         self._previous_stable_state = "idle"
@@ -84,6 +94,7 @@ class AaveLoopMantleStrategy(IntentStrategy):
         self._total_borrowed = Decimal("0")
         self._pending_supply_amount = Decimal("0")  # Amount to supply in current loop
         self._last_borrow_amount = Decimal("0")  # Last borrow amount for swap step
+        self._supply_price_usd = Decimal("1")  # Updated each decide() for position USD reporting
 
         logger.info(
             f"AaveLoopMantle initialized: "
@@ -108,10 +119,16 @@ class AaveLoopMantleStrategy(IntentStrategy):
 
         # Get prices for borrow calculations
         try:
-            supply_price = market.price(self.supply_token)
-            borrow_price = market.price(self.borrow_token)
+            supply_price = Decimal(str(market.price(self.supply_token)))
+            borrow_price = Decimal(str(market.price(self.borrow_token)))
+            self._supply_price_usd = supply_price
         except (ValueError, KeyError) as e:
             return Intent.hold(reason=f"Price data unavailable: {e}")
+
+        if supply_price <= 0 or borrow_price <= 0:
+            return Intent.hold(
+                reason=f"Invalid price(s): {self.supply_token}={supply_price}, {self.borrow_token}={borrow_price}"
+            )
 
         max_slippage = Decimal(str(self.max_slippage_bps)) / Decimal("10000")
 
@@ -347,21 +364,13 @@ class AaveLoopMantleStrategy(IntentStrategy):
         positions: list["PositionInfo"] = []
 
         if self._total_supplied > 0:
-            # Best-effort price lookup; fall back to zero if market data unavailable
-            supply_value_usd = Decimal("0")
-            try:
-                market = self.create_market_snapshot()
-                supply_price = market.price(self.supply_token)
-                supply_value_usd = self._total_supplied * supply_price
-            except Exception:
-                pass
             positions.append(
                 PositionInfo(
                     position_type=PositionType.SUPPLY,
                     position_id=f"aave-supply-{self.supply_token}-mantle",
                     chain=self.chain,
                     protocol="aave_v3",
-                    value_usd=supply_value_usd,
+                    value_usd=self._total_supplied * self._supply_price_usd,
                     details={"asset": self.supply_token, "amount": str(self._total_supplied)},
                 )
             )
@@ -373,7 +382,7 @@ class AaveLoopMantleStrategy(IntentStrategy):
                     position_id=f"aave-borrow-{self.borrow_token}-mantle",
                     chain=self.chain,
                     protocol="aave_v3",
-                    value_usd=self._total_borrowed,  # borrow_token is stablecoin (default USDC)
+                    value_usd=self._total_borrowed,
                     details={"asset": self.borrow_token, "amount": str(self._total_borrowed)},
                 )
             )

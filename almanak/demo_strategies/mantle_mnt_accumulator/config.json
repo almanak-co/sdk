@@ -1,11 +1,6 @@
 {
-    "strategy_id": "mantle_mnt_accumulator",
-    "strategy_name": "mantle_mnt_accumulator",
-    "description": "Aggressive MNT accumulation strategy on Mantle via Agni",
-    "chain": "mantle",
     "target_token": "WMNT",
     "stable_token": "USDT",
-    "protocol": "agni",
     "rsi_period": 14,
     "rsi_oversold_threshold": 45,
     "rsi_overbought_threshold": 55,

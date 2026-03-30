@@ -1,0 +1,14 @@
+{
+    "supply_token": "WETH",
+    "borrow_token": "USDC",
+    "supply_amount": "0.01",
+    "ltv_target": "0.4",
+    "price_drop_threshold": "0.02",
+    "price_rise_threshold": "0.03",
+    "max_borrow_cycles": 3,
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 2,
+        "USDC": 10000
+    }
+}

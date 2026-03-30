@@ -203,7 +203,7 @@ class TestV4StrategyConfigs:
 
     def test_v4_lp_config_defaults(self):
         """V4 LP config should have sensible defaults."""
-        from strategies.demo.uniswap_v4_lp.strategy import UniswapV4LPConfig
+        from almanak.demo_strategies.uniswap_v4_lp.strategy import UniswapV4LPConfig
 
         config = UniswapV4LPConfig()
         assert config.pool == "WETH/USDC/3000"
@@ -212,7 +212,7 @@ class TestV4StrategyConfigs:
         assert config.amount1 == Decimal("30")
 
     def test_v4_lp_config_to_dict(self):
-        from strategies.demo.uniswap_v4_lp.strategy import UniswapV4LPConfig
+        from almanak.demo_strategies.uniswap_v4_lp.strategy import UniswapV4LPConfig
 
         config = UniswapV4LPConfig()
         d = config.to_dict()
@@ -221,7 +221,7 @@ class TestV4StrategyConfigs:
 
     def test_v4_hooks_config_defaults(self):
         """V4 hooks config should have wider range and hook_address."""
-        from strategies.demo.uniswap_v4_hooks.strategy import UniswapV4HooksConfig
+        from almanak.demo_strategies.uniswap_v4_hooks.strategy import UniswapV4HooksConfig
 
         config = UniswapV4HooksConfig()
         assert config.hook_address == "0x" + "0" * 40
@@ -229,7 +229,7 @@ class TestV4StrategyConfigs:
         assert config.fee_hint is None
 
     def test_v4_hooks_config_to_dict(self):
-        from strategies.demo.uniswap_v4_hooks.strategy import UniswapV4HooksConfig
+        from almanak.demo_strategies.uniswap_v4_hooks.strategy import UniswapV4HooksConfig
 
         config = UniswapV4HooksConfig()
         d = config.to_dict()
@@ -247,7 +247,7 @@ class TestV4SwapStrategy:
 
     def _make_strategy(self, last_action="SELL"):
         """Create a V4 swap strategy with mocked dependencies."""
-        from strategies.demo.uniswap_v4_swap.strategy import UniswapV4SwapStrategy
+        from almanak.demo_strategies.uniswap_v4_swap.strategy import UniswapV4SwapStrategy
 
         strategy = UniswapV4SwapStrategy.__new__(UniswapV4SwapStrategy)
         strategy._chain = "ethereum"
@@ -328,7 +328,7 @@ class TestV4SwapStrategy:
 
     def test_strategy_import(self):
         """Strategy should be importable from the package."""
-        from strategies.demo.uniswap_v4_swap import UniswapV4SwapStrategy
+        from almanak.demo_strategies.uniswap_v4_swap import UniswapV4SwapStrategy
 
         assert UniswapV4SwapStrategy is not None
 

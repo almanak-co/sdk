@@ -533,6 +533,6 @@ class TestCrisisMetricsTraderJoeLP:
     @pytest.mark.asyncio
     async def test_strategy_import_from_package(self) -> None:
         """Strategy should be importable from the demo package."""
-        from strategies.demo.traderjoe_crisis_lp import TraderJoeCrisisLPStrategy
+        from almanak.demo_strategies.traderjoe_crisis_lp import TraderJoeCrisisLPStrategy
 
         assert TraderJoeCrisisLPStrategy is not None

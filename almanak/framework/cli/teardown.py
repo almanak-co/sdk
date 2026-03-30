@@ -22,8 +22,8 @@ Usage:
 
 Examples:
     # Direct execution (recommended)
-    almanak strat teardown -d strategies/demo/aerodrome_lp --preview
-    almanak strat teardown -d strategies/demo/aave_borrow --mode graceful
+    almanak strat teardown -d almanak/demo_strategies/aerodrome_lp --preview
+    almanak strat teardown -d almanak/demo_strategies/aave_borrow --mode graceful
 
     # Async request (picked up by strategy runner)
     almanak strat teardown request --strategy uniswap_lp --mode graceful
@@ -365,19 +365,19 @@ def execute_teardown(
     Examples:
 
         # Preview what will be closed (auto-starts gateway)
-        almanak strat teardown execute -d strategies/demo/aerodrome_lp --preview
+        almanak strat teardown execute -d almanak/demo_strategies/aerodrome_lp --preview
 
         # Execute graceful teardown
-        almanak strat teardown execute -d strategies/demo/aerodrome_lp
+        almanak strat teardown execute -d almanak/demo_strategies/aerodrome_lp
 
         # Emergency teardown (faster, accepts higher slippage)
-        almanak strat teardown execute -d strategies/demo/aave_borrow --mode emergency
+        almanak strat teardown execute -d almanak/demo_strategies/aave_borrow --mode emergency
 
         # Connect to an existing gateway instead of auto-starting
-        almanak strat teardown execute -d strategies/demo/uniswap_lp --no-gateway
+        almanak strat teardown execute -d almanak/demo_strategies/uniswap_lp --no-gateway
 
         # Skip confirmation
-        almanak strat teardown execute -d strategies/demo/uniswap_lp --force
+        almanak strat teardown execute -d almanak/demo_strategies/uniswap_lp --force
     """
     import os
 

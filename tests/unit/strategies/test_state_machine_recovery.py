@@ -15,8 +15,8 @@ import pytest
 _timeline_patch = patch("almanak.framework.api.timeline.add_event")
 _timeline_patch.start()
 
-from strategies.demo.aave_borrow.strategy import AaveBorrowStrategy
-from strategies.demo.morpho_looping.strategy import MorphoLoopingStrategy
+from almanak.demo_strategies.aave_borrow.strategy import AaveBorrowStrategy
+from almanak.demo_strategies.morpho_looping.strategy import MorphoLoopingStrategy
 
 _timeline_patch.stop()
 

@@ -423,7 +423,7 @@ class TestRangeWidthStrategyConfig:
         import json
         from pathlib import Path
 
-        config_path = Path(__file__).parents[3] / "strategies" / "demo" / "aerodrome_sweep_lp" / "config.json"
+        config_path = Path(__file__).parents[3] / "almanak" / "demo_strategies" / "aerodrome_sweep_lp" / "config.json"
         if not config_path.exists():
             pytest.skip("aerodrome_sweep_lp config.json not found")
 

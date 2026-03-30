@@ -1,5 +1,0 @@
-{
-    "display_name": "Aave Borrow",
-    "description": "Aave V3 borrow strategy dashboard showing collateral, health factor, interest rates, and liquidation risk",
-    "icon": "\ud83c\udfe6"
-}

@@ -1,0 +1,14 @@
+{
+    "collateral_token": "wstETH",
+    "collateral_amount": "0.05",
+    "market_usdc_id": "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
+    "market_weth_id": "0xc54d7acf14de29e0e5527cabd7a576506870346a78a11a6762e2cca66322ec41",
+    "rotation_threshold_bps": 30,
+    "cooldown_ticks": 3,
+    "anvil_funding": {
+        "ETH": 10,
+        "wstETH": 2,
+        "USDC": 5000,
+        "WETH": 1
+    }
+}

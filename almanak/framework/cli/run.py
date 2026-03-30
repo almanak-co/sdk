@@ -203,7 +203,7 @@ def find_strategy_dir(strategy_name: str) -> Path | None:
     # Handle demo_ prefix -> demo/<name> directory structure (backward compat)
     if strategy_name.startswith("demo_"):
         subdir_name = strategy_name[5:]  # Remove "demo_" prefix
-        search_paths.insert(0, Path("strategies/demo") / subdir_name)
+        search_paths.insert(0, Path("almanak/demo_strategies") / subdir_name)
 
     # Handle test_ prefix -> tests/<subdir>/<name> for LP and TA strategies
     if strategy_name.startswith("test_"):
@@ -983,11 +983,11 @@ def run(
     Examples:
 
         # Run from strategy directory (auto-starts gateway)
-        cd strategies/demo/uniswap_rsi
+        cd almanak/demo_strategies/uniswap_rsi
         almanak strat run --once
 
         # Run with explicit working directory
-        almanak strat run -d strategies/demo/uniswap_rsi --once
+        almanak strat run -d almanak/demo_strategies/uniswap_rsi --once
 
         # Run on local Anvil fork (auto-starts Anvil + gateway)
         almanak strat run --network anvil --once
@@ -1491,7 +1491,7 @@ def run(
         click.echo(f"Error: No strategy.py found in {working_dir}", err=True)
         click.echo()
         click.echo("Make sure you're in a strategy directory or use --working-dir:")
-        click.echo("  almanak strat run -d strategies/demo/uniswap_rsi --once")
+        click.echo("  almanak strat run -d almanak/demo_strategies/uniswap_rsi --once")
         sys.exit(1)
 
     if _early_strategy_class is not None:

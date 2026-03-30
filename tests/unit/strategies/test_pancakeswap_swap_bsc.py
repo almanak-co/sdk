@@ -16,7 +16,7 @@ import pytest
 
 @pytest.fixture
 def strategy():
-    from strategies.demo.pancakeswap_swap_bsc.strategy import PancakeSwapSwapBscStrategy
+    from almanak.demo_strategies.pancakeswap_swap_bsc.strategy import PancakeSwapSwapBscStrategy
 
     strat = PancakeSwapSwapBscStrategy.__new__(PancakeSwapSwapBscStrategy)
     strat.config = {}
@@ -155,16 +155,16 @@ class TestTeardown:
 
 class TestMetadata:
     def test_strategy_name(self):
-        from strategies.demo.pancakeswap_swap_bsc.strategy import PancakeSwapSwapBscStrategy
+        from almanak.demo_strategies.pancakeswap_swap_bsc.strategy import PancakeSwapSwapBscStrategy
 
         assert PancakeSwapSwapBscStrategy.STRATEGY_NAME == "demo_pancakeswap_swap_bsc"
 
     def test_supported_chains(self):
-        from strategies.demo.pancakeswap_swap_bsc.strategy import PancakeSwapSwapBscStrategy
+        from almanak.demo_strategies.pancakeswap_swap_bsc.strategy import PancakeSwapSwapBscStrategy
 
         assert "bsc" in PancakeSwapSwapBscStrategy.STRATEGY_METADATA.supported_chains
 
     def test_supported_protocols(self):
-        from strategies.demo.pancakeswap_swap_bsc.strategy import PancakeSwapSwapBscStrategy
+        from almanak.demo_strategies.pancakeswap_swap_bsc.strategy import PancakeSwapSwapBscStrategy
 
         assert "pancakeswap_v3" in PancakeSwapSwapBscStrategy.STRATEGY_METADATA.supported_protocols

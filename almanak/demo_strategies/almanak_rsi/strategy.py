@@ -17,8 +17,8 @@ WHAT THIS STRATEGY DOES:
 
 TRADING PAIR:
 -------------
-- Base Token: ALMANAK (0xdefa1d21c5f1cbeac00eeb54b44c7d86467cc3a3)
-- Quote Token: USDC (0x833589fcd6edb6e08f4c7c32d4f71b54bda02913)
+- Base Token: ALMANAK (0xDeFA1D21c5F1cbeac00eeB54B44C7D86467cc3a3)
+- Quote Token: USDC (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913)
 - Pool: 0xbDbC38652D78AF0383322bBc823E06FA108d0874
 - Fee Tier: 3000 (0.3%)
 - Chain: Base
@@ -107,31 +107,25 @@ class AlmanakRSIStrategy(IntentStrategy):
         """Initialize the strategy with configuration."""
         super().__init__(*args, **kwargs)
 
-        # Helper to get config value
-        def get_config(key: str, default: Any) -> Any:
-            if isinstance(self.config, dict):
-                return self.config.get(key, default)
-            return getattr(self.config, key, default)
-
         # Token configuration
-        self.base_token = get_config("base_token", "ALMANAK")
-        self.base_token_address = get_config("base_token_address", ALMANAK_ADDRESS)
-        self.quote_token = get_config("quote_token", "USDC")
-        self.quote_token_address = get_config("quote_token_address", USDC_ADDRESS)
-        self.pool_address = get_config("pool_address", POOL_ADDRESS)
-        self.fee_tier = int(get_config("fee_tier", 3000))
+        self.base_token = self.get_config("base_token", "ALMANAK")
+        self.base_token_address = self.get_config("base_token_address", ALMANAK_ADDRESS)
+        self.quote_token = self.get_config("quote_token", "USDC")
+        self.quote_token_address = self.get_config("quote_token_address", USDC_ADDRESS)
+        self.pool_address = self.get_config("pool_address", POOL_ADDRESS)
+        self.fee_tier = int(self.get_config("fee_tier", 3000))
 
         # RSI configuration
-        self.rsi_period = int(get_config("rsi_period", 14))
-        self.rsi_oversold = Decimal(str(get_config("rsi_oversold", 30)))
-        self.rsi_overbought = Decimal(str(get_config("rsi_overbought", 70)))
-        self.data_granularity = get_config("data_granularity", "15m")
+        self.rsi_period = int(self.get_config("rsi_period", 14))
+        self.rsi_oversold = Decimal(str(self.get_config("rsi_oversold", 30)))
+        self.rsi_overbought = Decimal(str(self.get_config("rsi_overbought", 70)))
+        self.data_granularity = self.get_config("data_granularity", "15m")
 
         # Execution configuration
-        self.initial_capital_usdc = Decimal(str(get_config("initial_capital_usdc", 20)))
-        self.position_size_pct = int(get_config("position_size_pct", 100))
-        self.cooldown_hours = int(get_config("cooldown_hours", 1))
-        self.max_slippage_pct = Decimal(str(get_config("max_slippage_pct", 1.0)))
+        self.initial_capital_usdc = Decimal(str(self.get_config("initial_capital_usdc", 20)))
+        self.position_size_pct = int(self.get_config("position_size_pct", 100))
+        self.cooldown_hours = int(self.get_config("cooldown_hours", 1))
+        self.max_slippage_pct = Decimal(str(self.get_config("max_slippage_pct", 1.0)))
 
         # =====================================================================
         # State tracking
@@ -185,122 +179,118 @@ class AlmanakRSIStrategy(IntentStrategy):
         Returns:
             Intent to execute (SWAP or HOLD)
         """
+        # =================================================================
+        # STEP 1: INITIALIZATION PHASE
+        # =================================================================
+        # On first run, buy ALMANAK for half of initial capital
+        if not self._initialized:
+            return self._handle_initialization(market)
+
+        # =================================================================
+        # STEP 2: GET CURRENT RSI
+        # =================================================================
         try:
-            # =================================================================
-            # STEP 1: INITIALIZATION PHASE
-            # =================================================================
-            # On first run, buy ALMANAK for half of initial capital
-            if not self._initialized:
-                return self._handle_initialization(market)
+            # Try to get RSI for ALMANAK
+            # Note: For new tokens, RSI might not be available via standard methods
+            # We attempt to fetch it, but handle the case where it's unavailable
+            rsi = market.rsi(self.base_token, period=self.rsi_period)
+            current_rsi = rsi.value
+            logger.debug(f"Current RSI({self.rsi_period}): {current_rsi:.2f}")
+        except ValueError as e:
+            logger.warning(f"Could not get RSI for {self.base_token}: {e}")
+            return Intent.hold(reason=f"RSI data unavailable: {e}")
 
-            # =================================================================
-            # STEP 2: GET CURRENT RSI
-            # =================================================================
-            try:
-                # Try to get RSI for ALMANAK
-                # Note: For new tokens, RSI might not be available via standard methods
-                # We attempt to fetch it, but handle the case where it's unavailable
-                rsi = market.rsi(self.base_token, period=self.rsi_period)
-                current_rsi = rsi.value
-                logger.debug(f"Current RSI({self.rsi_period}): {current_rsi:.2f}")
-            except ValueError as e:
-                logger.warning(f"Could not get RSI for {self.base_token}: {e}")
-                return Intent.hold(reason=f"RSI data unavailable: {e}")
+        # =================================================================
+        # STEP 3: RECORD PRICE AND RSI FOR CHARTING
+        # =================================================================
+        self._record_price_data(market, current_rsi)
 
-            # =================================================================
-            # STEP 3: RECORD PRICE AND RSI FOR CHARTING
-            # =================================================================
-            self._record_price_data(market, current_rsi)
+        # =================================================================
+        # STEP 4: CHECK COOLDOWN
+        # =================================================================
+        if not self._can_trade():
+            cooldown_remaining = self._get_cooldown_remaining()
+            self._consecutive_holds += 1
+            return Intent.hold(
+                reason=f"Cooldown active ({cooldown_remaining:.0f}m remaining), "
+                f"RSI={current_rsi:.2f} (hold #{self._consecutive_holds})"
+            )
 
-            # =================================================================
-            # STEP 4: CHECK COOLDOWN
-            # =================================================================
-            if not self._can_trade():
-                cooldown_remaining = self._get_cooldown_remaining()
-                self._consecutive_holds += 1
+        # =================================================================
+        # STEP 5: GET BALANCES
+        # =================================================================
+        try:
+            quote_balance = market.balance(self.quote_token)
+            base_balance = market.balance(self.base_token)
+            logger.debug(
+                f"Balances - {self.quote_token}: ${quote_balance.balance_usd:.2f}, "
+                f"{self.base_token}: {base_balance.balance}"
+            )
+        except ValueError as e:
+            logger.warning(f"Could not get balances: {e}")
+            return Intent.hold(reason=f"Balance data unavailable: {e}")
+
+        # =================================================================
+        # STEP 6: TRADING DECISION
+        # =================================================================
+
+        # OVERSOLD: RSI < 30 -> BUY ALMANAK
+        if current_rsi <= self.rsi_oversold:
+            # Check if we have USDC to buy with
+            if quote_balance.balance <= Decimal("0.01"):
                 return Intent.hold(
-                    reason=f"Cooldown active ({cooldown_remaining:.0f}m remaining), "
-                    f"RSI={current_rsi:.2f} (hold #{self._consecutive_holds})"
+                    reason=f"Oversold (RSI={current_rsi:.1f}) but no {self.quote_token} to buy with"
                 )
 
-            # =================================================================
-            # STEP 5: GET BALANCES
-            # =================================================================
-            try:
-                quote_balance = market.balance(self.quote_token)
-                base_balance = market.balance(self.base_token)
-                logger.debug(
-                    f"Balances - {self.quote_token}: ${quote_balance.balance_usd:.2f}, "
-                    f"{self.base_token}: {base_balance.balance}"
-                )
-            except ValueError as e:
-                logger.warning(f"Could not get balances: {e}")
-                return Intent.hold(reason=f"Balance data unavailable: {e}")
+            logger.info(
+                f"BUY SIGNAL: RSI={current_rsi:.2f} < {self.rsi_oversold} (oversold) | "
+                f"Buying {self.base_token} with all {self.quote_token}"
+            )
 
-            # =================================================================
-            # STEP 6: TRADING DECISION
-            # =================================================================
+            self._record_signal("BUY", current_rsi)
+            self._consecutive_holds = 0
 
-            # OVERSOLD: RSI < 30 -> BUY ALMANAK
-            if current_rsi <= self.rsi_oversold:
-                # Check if we have USDC to buy with
-                if quote_balance.balance <= Decimal("0.01"):
-                    return Intent.hold(
-                        reason=f"Oversold (RSI={current_rsi:.1f}) but no {self.quote_token} to buy with"
-                    )
+            return Intent.swap(
+                from_token=self.quote_token_address,
+                to_token=self.base_token_address,
+                amount="all",
+                max_slippage=self.max_slippage_pct / Decimal("100"),
+                protocol="uniswap_v3",
+            )
 
-                logger.info(
-                    f"BUY SIGNAL: RSI={current_rsi:.2f} < {self.rsi_oversold} (oversold) | "
-                    f"Buying {self.base_token} with all {self.quote_token}"
-                )
-
-                self._record_signal("BUY", current_rsi)
-                self._consecutive_holds = 0
-
-                return Intent.swap(
-                    from_token=self.quote_token_address,
-                    to_token=self.base_token_address,
-                    amount="all",
-                    max_slippage=self.max_slippage_pct / Decimal("100"),
-                    protocol="uniswap_v3",
-                )
-
-            # OVERBOUGHT: RSI > 70 -> SELL ALMANAK
-            elif current_rsi >= self.rsi_overbought:
-                # Check if we have ALMANAK to sell (dust threshold)
-                if base_balance.balance <= Decimal("0.0001"):
-                    return Intent.hold(
-                        reason=f"Overbought (RSI={current_rsi:.1f}) but no {self.base_token} to sell"
-                    )
-
-                logger.info(
-                    f"SELL SIGNAL: RSI={current_rsi:.2f} > {self.rsi_overbought} (overbought) | "
-                    f"Selling all {self.base_token} for {self.quote_token}"
-                )
-
-                self._record_signal("SELL", current_rsi)
-                self._consecutive_holds = 0
-
-                return Intent.swap(
-                    from_token=self.base_token_address,
-                    to_token=self.quote_token_address,
-                    amount="all",
-                    max_slippage=self.max_slippage_pct / Decimal("100"),
-                    protocol="uniswap_v3",
-                )
-
-            # NEUTRAL: HOLD
-            else:
-                self._consecutive_holds += 1
+        # OVERBOUGHT: RSI > 70 -> SELL ALMANAK
+        elif current_rsi >= self.rsi_overbought:
+            # Check if we have ALMANAK to sell (dust threshold)
+            if base_balance.balance <= Decimal("0.0001"):
                 return Intent.hold(
-                    reason=f"RSI={current_rsi:.2f} in neutral zone "
-                    f"[{self.rsi_oversold}-{self.rsi_overbought}] "
-                    f"(hold #{self._consecutive_holds})"
+                    reason=f"Overbought (RSI={current_rsi:.1f}) but no {self.base_token} to sell"
                 )
 
-        except Exception as e:
-            logger.exception(f"Error in decide(): {e}")
-            return Intent.hold(reason=f"Error: {str(e)}")
+            logger.info(
+                f"SELL SIGNAL: RSI={current_rsi:.2f} > {self.rsi_overbought} (overbought) | "
+                f"Selling all {self.base_token} for {self.quote_token}"
+            )
+
+            self._record_signal("SELL", current_rsi)
+            self._consecutive_holds = 0
+
+            return Intent.swap(
+                from_token=self.base_token_address,
+                to_token=self.quote_token_address,
+                amount="all",
+                max_slippage=self.max_slippage_pct / Decimal("100"),
+                protocol="uniswap_v3",
+            )
+
+        # NEUTRAL: HOLD
+        else:
+            self._consecutive_holds += 1
+            return Intent.hold(
+                reason=f"RSI={current_rsi:.2f} in neutral zone "
+                f"[{self.rsi_oversold}-{self.rsi_overbought}] "
+                f"(hold #{self._consecutive_holds})"
+            )
+
 
     # =========================================================================
     # INITIALIZATION HANDLER
@@ -522,13 +512,19 @@ class AlmanakRSIStrategy(IntentStrategy):
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode) -> list[Intent]:
+    def generate_teardown_intents(self, mode, market=None) -> list[Intent]:
         """Generate intents to close all positions.
 
         Sells all ALMANAK back to USDC.
 
+        Uses protocol="enso" because ALMANAK has no CoinGecko/Chainlink price
+        feed, so the standard uniswap_v3 compilation path cannot calculate
+        slippage protection. Enso handles routing and slippage via on-chain
+        pool data, bypassing the price oracle requirement.
+
         Args:
             mode: TeardownMode (SOFT or HARD) - affects slippage tolerance
+            market: Optional MarketSnapshot (passed by StrategyRunner)
 
         Returns:
             List of SWAP intents to convert to USDC
@@ -554,7 +550,7 @@ class AlmanakRSIStrategy(IntentStrategy):
                 to_token=self.quote_token_address,
                 amount="all",
                 max_slippage=max_slippage,
-                protocol="uniswap_v3",
+                protocol="enso",
             )
         )
 

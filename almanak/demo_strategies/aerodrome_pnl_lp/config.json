@@ -1,0 +1,14 @@
+{
+    "pool": "WETH/USDC",
+    "stable": false,
+    "amount0": "0.001",
+    "amount1": "3",
+    "rsi_period": 14,
+    "rsi_overbought": 70,
+    "rsi_oversold": 30,
+    "anvil_funding": {
+        "ETH": 1,
+        "WETH": 1,
+        "USDC": 5000
+    }
+}

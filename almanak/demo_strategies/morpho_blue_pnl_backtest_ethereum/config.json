@@ -1,0 +1,11 @@
+{
+    "market_id": "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
+    "supply_token": "wstETH",
+    "supply_amount": "2",
+    "min_apy_bps": 100,
+    "anvil_funding": {
+        "ETH": 10,
+        "wstETH": 5,
+        "USDC": 1000
+    }
+}

@@ -16,7 +16,7 @@ import pytest
 
 @pytest.fixture
 def strategy():
-    from strategies.demo.velodrome_swap_optimism.strategy import VelodromeSwapOptimismStrategy
+    from almanak.demo_strategies.velodrome_swap_optimism.strategy import VelodromeSwapOptimismStrategy
 
     strat = VelodromeSwapOptimismStrategy.__new__(VelodromeSwapOptimismStrategy)
     strat.config = {}
@@ -155,22 +155,22 @@ class TestTeardown:
 
 class TestMetadata:
     def test_strategy_name(self):
-        from strategies.demo.velodrome_swap_optimism.strategy import VelodromeSwapOptimismStrategy
+        from almanak.demo_strategies.velodrome_swap_optimism.strategy import VelodromeSwapOptimismStrategy
 
         assert VelodromeSwapOptimismStrategy.STRATEGY_NAME == "demo_velodrome_swap_optimism"
 
     def test_supported_chains(self):
-        from strategies.demo.velodrome_swap_optimism.strategy import VelodromeSwapOptimismStrategy
+        from almanak.demo_strategies.velodrome_swap_optimism.strategy import VelodromeSwapOptimismStrategy
 
         assert "optimism" in VelodromeSwapOptimismStrategy.STRATEGY_METADATA.supported_chains
 
     def test_supported_protocols(self):
-        from strategies.demo.velodrome_swap_optimism.strategy import VelodromeSwapOptimismStrategy
+        from almanak.demo_strategies.velodrome_swap_optimism.strategy import VelodromeSwapOptimismStrategy
 
         assert "aerodrome" in VelodromeSwapOptimismStrategy.STRATEGY_METADATA.supported_protocols
 
     def test_default_chain(self):
-        from strategies.demo.velodrome_swap_optimism.strategy import VelodromeSwapOptimismStrategy
+        from almanak.demo_strategies.velodrome_swap_optimism.strategy import VelodromeSwapOptimismStrategy
 
         assert VelodromeSwapOptimismStrategy.STRATEGY_METADATA.default_chain == "optimism"
 

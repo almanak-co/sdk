@@ -21,8 +21,8 @@ def _create_strategy(config_overrides: dict | None = None):
     """Create a TraderJoeLeveragedLPStrategy with mocked framework dependencies."""
     # Import inside function to avoid import errors when framework is not fully configured
     import sys
-    sys.path.insert(0, "strategies/demo/traderjoe_leveraged_lp")
-    from strategies.demo.traderjoe_leveraged_lp.strategy import TraderJoeLeveragedLPStrategy
+    sys.path.insert(0, "almanak/demo_strategies/traderjoe_leveraged_lp")
+    from almanak.demo_strategies.traderjoe_leveraged_lp.strategy import TraderJoeLeveragedLPStrategy
 
     config = {
         "strategy_id": "test-leveraged-lp",

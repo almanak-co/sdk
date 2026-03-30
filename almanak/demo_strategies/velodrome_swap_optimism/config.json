@@ -1,0 +1,12 @@
+{
+    "from_token": "USDC",
+    "to_token": "WETH",
+    "swap_amount": 50,
+    "max_slippage_pct": 1.0,
+    "force_action": "buy",
+    "anvil_funding": {
+        "ETH": 10,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

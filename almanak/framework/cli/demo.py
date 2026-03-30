@@ -47,7 +47,7 @@ def _build_menu_entries(strategies: list[dict]) -> list[str]:
 def demo(name: str | None, output_dir: str, list_only: bool) -> None:
     """Browse and copy a demo strategy to get started quickly.
 
-    Shows an interactive menu to pick from 16 working demo strategies,
+    Shows an interactive menu to pick from 75 working demo strategies,
     then copies the selected strategy into your working directory.
 
     \b

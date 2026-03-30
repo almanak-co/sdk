@@ -16,7 +16,7 @@ import pytest
 
 @pytest.fixture
 def strategy():
-    from strategies.demo.traderjoe_lp_lifecycle.strategy import (
+    from almanak.demo_strategies.traderjoe_lp_lifecycle.strategy import (
         LPLifecycleConfig,
         TraderJoeLPLifecycleStrategy,
     )
@@ -210,22 +210,22 @@ class TestTeardown:
 
 class TestMetadata:
     def test_strategy_name(self):
-        from strategies.demo.traderjoe_lp_lifecycle.strategy import TraderJoeLPLifecycleStrategy
+        from almanak.demo_strategies.traderjoe_lp_lifecycle.strategy import TraderJoeLPLifecycleStrategy
 
         assert TraderJoeLPLifecycleStrategy.STRATEGY_NAME == "demo_traderjoe_lp_lifecycle"
 
     def test_supported_chains(self):
-        from strategies.demo.traderjoe_lp_lifecycle.strategy import TraderJoeLPLifecycleStrategy
+        from almanak.demo_strategies.traderjoe_lp_lifecycle.strategy import TraderJoeLPLifecycleStrategy
 
         assert "avalanche" in TraderJoeLPLifecycleStrategy.STRATEGY_METADATA.supported_chains
 
     def test_supported_protocols(self):
-        from strategies.demo.traderjoe_lp_lifecycle.strategy import TraderJoeLPLifecycleStrategy
+        from almanak.demo_strategies.traderjoe_lp_lifecycle.strategy import TraderJoeLPLifecycleStrategy
 
         assert "traderjoe_v2" in TraderJoeLPLifecycleStrategy.STRATEGY_METADATA.supported_protocols
 
     def test_intent_types(self):
-        from strategies.demo.traderjoe_lp_lifecycle.strategy import TraderJoeLPLifecycleStrategy
+        from almanak.demo_strategies.traderjoe_lp_lifecycle.strategy import TraderJoeLPLifecycleStrategy
 
         types = TraderJoeLPLifecycleStrategy.STRATEGY_METADATA.intent_types
         assert "LP_OPEN" in types

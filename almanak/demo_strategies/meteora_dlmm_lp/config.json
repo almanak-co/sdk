@@ -1,0 +1,7 @@
+{
+    "pool": "",
+    "amount_sol": "0.001",
+    "amount_usdc": "0.15",
+    "range_lower": "100",
+    "range_upper": "200"
+}

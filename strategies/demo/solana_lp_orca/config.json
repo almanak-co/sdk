@@ -1,8 +1,0 @@
-{
-    "pool": "HJPjoWUrhoZzkNfRpHuieeFk9AnbKnovy8po1NtRSqX2",
-    "amount_sol": "0.001",
-    "amount_usdc": "0.15",
-    "range_lower": "80",
-    "range_upper": "200",
-    "chain": "solana"
-}

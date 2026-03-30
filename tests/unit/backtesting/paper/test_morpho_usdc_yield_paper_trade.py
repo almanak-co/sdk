@@ -25,7 +25,7 @@ def _make_strategy(
     resupply: bool = True,
 ):
     """Create a MorphoUSDCYieldPaperStrategy with mocked dependencies."""
-    from strategies.demo.morpho_paper_usdc_yield.strategy import MorphoUSDCYieldPaperStrategy
+    from almanak.demo_strategies.morpho_paper_usdc_yield.strategy import MorphoUSDCYieldPaperStrategy
 
     strategy = MorphoUSDCYieldPaperStrategy.__new__(MorphoUSDCYieldPaperStrategy)
     strategy._chain = "ethereum"
@@ -285,7 +285,7 @@ class TestMorphoUSDCYieldMisc:
 
     def test_strategy_import(self):
         """Strategy should be importable from the package."""
-        from strategies.demo.morpho_paper_usdc_yield import MorphoUSDCYieldPaperStrategy
+        from almanak.demo_strategies.morpho_paper_usdc_yield import MorphoUSDCYieldPaperStrategy
 
         assert MorphoUSDCYieldPaperStrategy is not None
 

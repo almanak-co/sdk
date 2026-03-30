@@ -443,7 +443,7 @@ def page(strategies: list[Strategy]) -> None:
 
         Run a strategy to see it here:
         ```bash
-        almanak strat run -d strategies/demo/uniswap_rsi --once
+        almanak strat run -d almanak/demo_strategies/uniswap_rsi --once
         ```
 
         Check the **Strategy Library** page to see available strategy templates.

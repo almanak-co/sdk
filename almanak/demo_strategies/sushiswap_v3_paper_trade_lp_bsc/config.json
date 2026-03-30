@@ -1,0 +1,13 @@
+{
+    "pool": "WBNB/USDT/3000",
+    "amount0": "0.1",
+    "amount1": "50",
+    "fee_tier": 3000,
+    "range_width_pct": "0.20",
+    "hold_ticks": 3,
+    "anvil_funding": {
+        "BNB": 10,
+        "WBNB": 1,
+        "USDT": 1000
+    }
+}

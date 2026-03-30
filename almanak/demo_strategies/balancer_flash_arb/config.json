@@ -1,0 +1,12 @@
+{
+    "flash_loan_amount_usd": "1000",
+    "max_slippage_pct": 1.0,
+    "base_token": "WETH",
+    "quote_token": "USDC",
+    "force_action": "swap",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

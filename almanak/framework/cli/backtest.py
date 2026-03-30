@@ -350,8 +350,8 @@ def load_strategy_config(strategy_name: str, chain: str) -> dict[str, Any]:
         Path(f"configs/{strategy_name}_{chain}.json"),
         Path(f"src/strategies/{strategy_name}/config.json"),
         # Demo and incubating strategy directories
-        Path(f"strategies/demo/{dir_name}/config.json"),
-        Path(f"strategies/demo/{strategy_name}/config.json"),
+        Path(f"almanak/demo_strategies/{dir_name}/config.json"),
+        Path(f"almanak/demo_strategies/{strategy_name}/config.json"),
         Path(f"strategies/incubating/{dir_name}/config.json"),
         Path(f"strategies/incubating/{strategy_name}/config.json"),
     ]

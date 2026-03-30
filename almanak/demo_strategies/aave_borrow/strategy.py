@@ -154,30 +154,26 @@ class AaveBorrowStrategy(IntentStrategy):
         # Extract configuration
         # =====================================================================
 
-        def get_config(key: str, default: Any) -> Any:
-            if isinstance(self.config, dict):
-                return self.config.get(key, default)
-            return getattr(self.config, key, default)
-
         # Collateral configuration
-        self.collateral_token = get_config("collateral_token", "WETH")
-        self.collateral_amount = Decimal(str(get_config("collateral_amount", "0.1")))
+        self.collateral_token = self.get_config("collateral_token", "WETH")
+        self.collateral_amount = Decimal(str(self.get_config("collateral_amount", "0.1")))
 
         # Borrow configuration
-        self.borrow_token = get_config("borrow_token", "USDC")
-        self.ltv_target = Decimal(str(get_config("ltv_target", "0.5")))  # 50% LTV
+        self.borrow_token = self.get_config("borrow_token", "USDC")
+        self.ltv_target = Decimal(str(self.get_config("ltv_target", "0.5")))  # 50% LTV
 
         # Risk parameters
-        self.min_health_factor = Decimal(str(get_config("min_health_factor", "2.0")))
+        self.min_health_factor = Decimal(str(self.get_config("min_health_factor", "2.0")))
 
-        # Interest rate mode: "variable" or "stable"
-        self.interest_rate_mode = get_config("interest_rate_mode", "variable")
+        # Interest rate mode: "variable" (stable rate deprecated on Aave V3)
+        self.interest_rate_mode = self.get_config("interest_rate_mode", "variable")
 
         # Force action for testing
-        self.force_action = str(get_config("force_action", "")).lower()
+        self.force_action = str(self.get_config("force_action", "")).lower()
 
         # Internal state tracking
-        self._loop_state = "idle"  # idle -> supplied -> borrowed -> complete
+        self._loop_state = "idle"  # idle -> supplying -> supplied -> borrowing -> complete
+        self._previous_stable_state = "idle"  # Revert target on intent failure
         self._supplied_amount = Decimal("0")
         self._borrowed_amount = Decimal("0")
 
@@ -209,101 +205,107 @@ class AaveBorrowStrategy(IntentStrategy):
         Returns:
             Intent: SUPPLY, BORROW, SWAP, or HOLD
         """
+        # =================================================================
+        # STEP 1: Handle forced supply (doesn't need prices)
+        # =================================================================
+
+        if self.force_action == "supply":
+            logger.info("Forced action: SUPPLY collateral")
+            return self._create_supply_intent()
+
+        # =================================================================
+        # STEP 2: Get current market prices
+        # =================================================================
+
         try:
-            # =================================================================
-            # STEP 1: Get current market prices
-            # =================================================================
+            collateral_price = market.price(self.collateral_token)
+            borrow_price = market.price(self.borrow_token)
+            logger.debug(
+                f"Prices: {self.collateral_token}=${collateral_price:.2f}, {self.borrow_token}=${borrow_price:.2f}"
+            )
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Could not get prices: {e}")
+            return Intent.hold(reason=f"Price data unavailable: {e}")
 
-            try:
-                collateral_price = market.price(self.collateral_token)
-                borrow_price = market.price(self.borrow_token)
-                logger.debug(
-                    f"Prices: {self.collateral_token}=${collateral_price:.2f}, {self.borrow_token}=${borrow_price:.2f}"
+        # =================================================================
+        # STEP 3: Handle forced borrow (needs prices)
+        # =================================================================
+
+        if self.force_action == "borrow":
+            logger.info("Forced action: BORROW against collateral")
+            return self._create_borrow_intent(collateral_price, borrow_price)
+
+        # =================================================================
+        # STEP 3: Check balances
+        # =================================================================
+
+        try:
+            collateral_balance = market.balance(self.collateral_token)
+            logger.debug(f"Collateral balance: {collateral_balance} {self.collateral_token}")
+        except (ValueError, KeyError):
+            logger.warning("Could not verify balances")
+            collateral_balance = self.collateral_amount  # Assume we have it
+
+        # =================================================================
+        # STEP 4: State machine logic
+        # =================================================================
+
+        # State: IDLE - need to supply collateral
+        if self._loop_state == "idle":
+            # Check we have enough collateral
+            # collateral_balance is a TokenBalance object, extract the balance value
+            balance_value = (
+                collateral_balance.balance if hasattr(collateral_balance, "balance") else collateral_balance
+            )
+            if balance_value < self.collateral_amount:
+                return Intent.hold(
+                    reason=f"Insufficient {self.collateral_token}: {balance_value} < {self.collateral_amount}"
                 )
-            except (ValueError, KeyError) as e:
-                logger.warning(f"Could not get prices: {e}")
-                # Use reasonable defaults for testing
-                collateral_price = Decimal("3400")  # ETH price
-                borrow_price = Decimal("1")  # USDC price
 
-            # =================================================================
-            # STEP 2: Handle forced actions (for testing)
-            # =================================================================
-
-            if self.force_action == "supply":
-                logger.info("Forced action: SUPPLY collateral")
-                return self._create_supply_intent()
-
-            elif self.force_action == "borrow":
-                logger.info("Forced action: BORROW against collateral")
-                return self._create_borrow_intent(collateral_price, borrow_price)
-
-            # =================================================================
-            # STEP 3: Check balances
-            # =================================================================
-
-            try:
-                collateral_balance = market.balance(self.collateral_token)
-                logger.debug(f"Collateral balance: {collateral_balance} {self.collateral_token}")
-            except (ValueError, KeyError):
-                logger.warning("Could not verify balances")
-                collateral_balance = self.collateral_amount  # Assume we have it
-
-            # =================================================================
-            # STEP 4: State machine logic
-            # =================================================================
-
-            # State: IDLE - need to supply collateral
-            if self._loop_state == "idle":
-                # Check we have enough collateral
-                # collateral_balance is a TokenBalance object, extract the balance value
-                balance_value = (
-                    collateral_balance.balance if hasattr(collateral_balance, "balance") else collateral_balance
+            logger.info("State: IDLE -> Supplying collateral")
+            add_event(
+                TimelineEvent(
+                    timestamp=datetime.now(UTC),
+                    event_type=TimelineEventType.STATE_CHANGE,
+                    description="State: IDLE -> Supplying collateral",
+                    strategy_id=self.strategy_id,
+                    details={"old_state": "idle", "new_state": "supplying"},
                 )
-                if balance_value < self.collateral_amount:
-                    return Intent.hold(
-                        reason=f"Insufficient {self.collateral_token}: {balance_value} < {self.collateral_amount}"
-                    )
+            )
+            self._previous_stable_state = self._loop_state
+            self._loop_state = "supplying"
+            return self._create_supply_intent()
 
-                logger.info("State: IDLE -> Supplying collateral")
-                add_event(
-                    TimelineEvent(
-                        timestamp=datetime.now(UTC),
-                        event_type=TimelineEventType.STATE_CHANGE,
-                        description="State: IDLE -> Supplying collateral",
-                        strategy_id=self.strategy_id,
-                        details={"old_state": "idle", "new_state": "supplying"},
-                    )
+        # State: SUPPLIED - need to borrow
+        elif self._loop_state == "supplied":
+            logger.info("State: SUPPLIED -> Borrowing")
+            add_event(
+                TimelineEvent(
+                    timestamp=datetime.now(UTC),
+                    event_type=TimelineEventType.STATE_CHANGE,
+                    description="State: SUPPLIED -> Borrowing",
+                    strategy_id=self.strategy_id,
+                    details={"old_state": "supplied", "new_state": "borrowing"},
                 )
-                self._loop_state = "supplying"
-                return self._create_supply_intent()
+            )
+            self._previous_stable_state = self._loop_state
+            self._loop_state = "borrowing"
+            return self._create_borrow_intent(collateral_price, borrow_price)
 
-            # State: SUPPLIED - need to borrow
-            elif self._loop_state == "supplied":
-                logger.info("State: SUPPLIED -> Borrowing")
-                add_event(
-                    TimelineEvent(
-                        timestamp=datetime.now(UTC),
-                        event_type=TimelineEventType.STATE_CHANGE,
-                        description="State: SUPPLIED -> Borrowing",
-                        strategy_id=self.strategy_id,
-                        details={"old_state": "supplied", "new_state": "borrowing"},
-                    )
+        # State: COMPLETE - done borrowing
+        elif self._loop_state == "complete":
+            return Intent.hold(reason="Loop complete - position established")
+
+        # Safety net: if we're in a transitional state (supplying, borrowing)
+        # it means the previous intent failed. Revert to last stable state.
+        else:
+            if self._loop_state in ("supplying", "borrowing"):
+                revert_to = self._previous_stable_state
+                logger.warning(
+                    f"Stuck in transitional state '{self._loop_state}' — reverting to '{revert_to}'"
                 )
-                self._loop_state = "borrowing"
-                return self._create_borrow_intent(collateral_price, borrow_price)
-
-            # State: COMPLETE - done borrowing
-            elif self._loop_state == "complete":
-                return Intent.hold(reason="Loop complete - position established")
-
-            # Default: Hold
-            else:
-                return Intent.hold(reason=f"Waiting for state transition (current: {self._loop_state})")
-
-        except Exception as e:
-            logger.exception(f"Error in decide(): {e}")
-            return Intent.hold(reason=f"Error: {str(e)}")
+                self._loop_state = revert_to
+            return Intent.hold(reason=f"Waiting for state transition (current: {self._loop_state})")
 
     # =========================================================================
     # INTENT CREATION HELPERS
@@ -448,9 +450,12 @@ class AaveBorrowStrategy(IntentStrategy):
                 )
 
         else:
-            # On failure, reset state
-            logger.warning(f"{intent_type} failed - resetting state")
-            self._loop_state = "idle"
+            # On failure, revert to previous stable state so decide() can retry
+            revert_to = self._previous_stable_state
+            logger.warning(
+                f"{intent_type} failed in state '{self._loop_state}' — reverting to '{revert_to}'"
+            )
+            self._loop_state = revert_to
 
     # =========================================================================
     # STATUS REPORTING
@@ -487,6 +492,7 @@ class AaveBorrowStrategy(IntentStrategy):
         """
         return {
             "loop_state": self._loop_state,
+            "previous_stable_state": self._previous_stable_state,
             "supplied_amount": str(self._supplied_amount),
             "borrowed_amount": str(self._borrowed_amount),
         }
@@ -499,6 +505,8 @@ class AaveBorrowStrategy(IntentStrategy):
         if "loop_state" in state:
             self._loop_state = state["loop_state"]
             logger.info(f"Restored loop_state: {self._loop_state}")
+        if "previous_stable_state" in state:
+            self._previous_stable_state = state["previous_stable_state"]
 
         if "supplied_amount" in state:
             self._supplied_amount = Decimal(str(state["supplied_amount"]))
@@ -616,12 +624,12 @@ class AaveBorrowStrategy(IntentStrategy):
 
             if position.has_supply:
                 supply_amount = Decimal(str(position.atoken_balance_decimal))
-                if position.asset in {"WETH", "ETH", "wstETH"}:
-                    supply_price = Decimal("3400")
-                elif position.asset == "WBTC":
-                    supply_price = Decimal("60000")
-                else:
-                    supply_price = Decimal("1")
+                try:
+                    snapshot = self.create_market_snapshot()
+                    supply_price = snapshot.price(position.asset)
+                except Exception:  # noqa: BLE001
+                    logger.debug(f"Could not get live price for {position.asset}, using fallback $0")
+                    supply_price = Decimal("0")
                 onchain_positions.append(
                     PositionInfo(
                         position_type=PositionType.SUPPLY,
@@ -635,12 +643,12 @@ class AaveBorrowStrategy(IntentStrategy):
 
             if position.has_debt:
                 debt_amount = Decimal(str(position.total_debt_decimal))
-                if position.asset in {"WETH", "ETH", "wstETH"}:
-                    debt_price = Decimal("3400")
-                elif position.asset == "WBTC":
-                    debt_price = Decimal("60000")
-                else:
-                    debt_price = Decimal("1")
+                try:
+                    snapshot = self.create_market_snapshot()
+                    debt_price = snapshot.price(position.asset)
+                except Exception:  # noqa: BLE001
+                    logger.debug(f"Could not get live price for {position.asset}, using fallback $0")
+                    debt_price = Decimal("0")
                 onchain_positions.append(
                     PositionInfo(
                         position_type=PositionType.BORROW,
@@ -695,9 +703,14 @@ class AaveBorrowStrategy(IntentStrategy):
         # Fallback to internal state tracking
         # Check for supplied collateral
         if self._supplied_amount > 0:
-            # In production, would query on-chain value
-            # For demo, estimate value based on supply amount
-            supply_value = self._supplied_amount * Decimal("3400")  # Assume ETH price
+            # Estimate value using live price if available
+            try:
+                snapshot = self.create_market_snapshot()
+                collateral_price = snapshot.price(self.collateral_token)
+            except Exception:  # noqa: BLE001
+                logger.debug(f"Could not get live price for {self.collateral_token}, using fallback $0")
+                collateral_price = Decimal("0")
+            supply_value = self._supplied_amount * collateral_price
             positions.append(
                 PositionInfo(
                     position_type=PositionType.SUPPLY,
@@ -765,6 +778,9 @@ class AaveBorrowStrategy(IntentStrategy):
             )
 
         # Step 2: Withdraw supplied collateral (if any)
+        # Note: withdraw_all=True tells the adapter to withdraw the full on-chain
+        # balance. The TeardownManager resolves amount="all" using from_token first,
+        # then token as fallback. We still pass _supplied_amount as a safer hint.
         if self._supplied_amount > 0:
             intents.append(
                 Intent.withdraw(
@@ -819,9 +835,9 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"\nStrategy Name: {AaveBorrowStrategy.STRATEGY_NAME}")
     print(f"Version: {AaveBorrowStrategy.STRATEGY_METADATA.version}")
-    print(f"Supported Chains: {AaveBorrowStrategy.SUPPORTED_CHAINS}")
-    print(f"Supported Protocols: {AaveBorrowStrategy.SUPPORTED_PROTOCOLS}")
-    print(f"Intent Types: {AaveBorrowStrategy.INTENT_TYPES}")
+    print(f"Supported Chains: {AaveBorrowStrategy.STRATEGY_METADATA.supported_chains}")
+    print(f"Supported Protocols: {AaveBorrowStrategy.STRATEGY_METADATA.supported_protocols}")
+    print(f"Intent Types: {AaveBorrowStrategy.STRATEGY_METADATA.intent_types}")
     print(f"\nDescription: {AaveBorrowStrategy.STRATEGY_METADATA.description}")
     print("\nTo run this strategy:")
     print("  python -m src.cli.run --strategy demo_aave_borrow --once")

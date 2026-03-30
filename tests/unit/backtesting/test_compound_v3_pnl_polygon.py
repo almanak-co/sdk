@@ -14,7 +14,7 @@ from almanak.framework.intents.vocabulary import IntentType
 
 def _create_strategy(config_overrides: dict | None = None):
     """Create a CompoundV3PnLPolygonStrategy with mocked framework dependencies."""
-    from strategies.demo.compound_v3_pnl_polygon.strategy import CompoundV3PnLPolygonStrategy
+    from almanak.demo_strategies.compound_v3_pnl_polygon.strategy import CompoundV3PnLPolygonStrategy
 
     with patch.object(CompoundV3PnLPolygonStrategy, "__init__", lambda self, *a, **kw: None):
         strategy = CompoundV3PnLPolygonStrategy.__new__(CompoundV3PnLPolygonStrategy)

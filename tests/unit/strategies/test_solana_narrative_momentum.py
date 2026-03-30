@@ -69,7 +69,7 @@ def _make_pair(
 
 class TestScorePoolCandidate:
     def test_high_vol_tvl_scores_high(self):
-        from strategies.demo.solana_narrative_momentum.strategy import _score_pool_candidate
+        from almanak.demo_strategies.solana_narrative_momentum.strategy import _score_pool_candidate
 
         pair = _make_pair(volume_h24=10_000_000, liquidity_usd=500_000)
         # vol/tvl = 20, buy_ratio = 0.65, h1_change = 5.0, liq = 500k
@@ -77,7 +77,7 @@ class TestScorePoolCandidate:
         assert score > 40  # Should score well across all factors
 
     def test_low_vol_tvl_scores_zero_for_vol(self):
-        from strategies.demo.solana_narrative_momentum.strategy import _score_pool_candidate
+        from almanak.demo_strategies.solana_narrative_momentum.strategy import _score_pool_candidate
 
         pair = _make_pair(volume_h24=100_000, liquidity_usd=500_000)
         # vol/tvl = 0.2, below min_vol_tvl=10
@@ -87,21 +87,21 @@ class TestScorePoolCandidate:
         assert score < 40  # but not high overall
 
     def test_zero_liquidity_safe(self):
-        from strategies.demo.solana_narrative_momentum.strategy import _score_pool_candidate
+        from almanak.demo_strategies.solana_narrative_momentum.strategy import _score_pool_candidate
 
         pair = _make_pair(liquidity_usd=0)
         score = _score_pool_candidate(pair, min_vol_tvl=10.0)
         assert score >= 0  # Should not crash
 
     def test_neutral_buy_ratio_low_score(self):
-        from strategies.demo.solana_narrative_momentum.strategy import _score_pool_candidate
+        from almanak.demo_strategies.solana_narrative_momentum.strategy import _score_pool_candidate
 
         pair = _make_pair(buy_ratio=0.50, h1_change=0, liquidity_usd=50_000, volume_h24=100)
         score = _score_pool_candidate(pair, min_vol_tvl=10.0)
         assert score == 0  # All factors at minimum
 
     def test_high_liquidity_bonus(self):
-        from strategies.demo.solana_narrative_momentum.strategy import _score_pool_candidate
+        from almanak.demo_strategies.solana_narrative_momentum.strategy import _score_pool_candidate
 
         pair_low = _make_pair(liquidity_usd=50_000, buy_ratio=0.5, h1_change=0, volume_h24=100)
         pair_high = _make_pair(liquidity_usd=1_500_000, buy_ratio=0.5, h1_change=0, volume_h24=100)
@@ -117,7 +117,7 @@ class TestScorePoolCandidate:
 
 def _make_strategy(**config_overrides):
     """Create a strategy instance with mock dependencies."""
-    from strategies.demo.solana_narrative_momentum.strategy import SolanaNarrativeMomentumStrategy
+    from almanak.demo_strategies.solana_narrative_momentum.strategy import SolanaNarrativeMomentumStrategy
 
     config = {
         "chain": "solana",
@@ -161,7 +161,7 @@ class TestScreenAndLP:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "strategies.demo.solana_narrative_momentum.strategy.DexScreenerClient",
+            "almanak.demo_strategies.solana_narrative_momentum.strategy.DexScreenerClient",
             return_value=mock_client,
         ):
             result = await strategy._screen_and_lp()
@@ -183,7 +183,7 @@ class TestScreenAndLP:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "strategies.demo.solana_narrative_momentum.strategy.DexScreenerClient",
+            "almanak.demo_strategies.solana_narrative_momentum.strategy.DexScreenerClient",
             return_value=mock_client,
         ):
             result = await strategy._screen_and_lp()
@@ -212,7 +212,7 @@ class TestScreenAndLP:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "strategies.demo.solana_narrative_momentum.strategy.DexScreenerClient",
+            "almanak.demo_strategies.solana_narrative_momentum.strategy.DexScreenerClient",
             return_value=mock_client,
         ):
             result = await strategy._screen_and_lp()
@@ -246,7 +246,7 @@ class TestScreenAndLP:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "strategies.demo.solana_narrative_momentum.strategy.DexScreenerClient",
+            "almanak.demo_strategies.solana_narrative_momentum.strategy.DexScreenerClient",
             return_value=mock_client,
         ):
             result = await strategy._screen_and_lp()
@@ -282,7 +282,7 @@ class TestScreenAndLP:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "strategies.demo.solana_narrative_momentum.strategy.DexScreenerClient",
+            "almanak.demo_strategies.solana_narrative_momentum.strategy.DexScreenerClient",
             return_value=mock_client,
         ):
             result = await strategy._screen_and_lp()
@@ -313,7 +313,7 @@ class TestScreenAndLP:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "strategies.demo.solana_narrative_momentum.strategy.DexScreenerClient",
+            "almanak.demo_strategies.solana_narrative_momentum.strategy.DexScreenerClient",
             return_value=mock_client,
         ):
             result = await strategy._screen_and_lp()
@@ -354,7 +354,7 @@ class TestManagePosition:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "strategies.demo.solana_narrative_momentum.strategy.DexScreenerClient",
+            "almanak.demo_strategies.solana_narrative_momentum.strategy.DexScreenerClient",
             return_value=mock_client,
         ):
             result = await strategy._manage_position()
@@ -391,7 +391,7 @@ class TestManagePosition:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "strategies.demo.solana_narrative_momentum.strategy.DexScreenerClient",
+            "almanak.demo_strategies.solana_narrative_momentum.strategy.DexScreenerClient",
             return_value=mock_client,
         ):
             result = await strategy._manage_position()
@@ -425,7 +425,7 @@ class TestManagePosition:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "strategies.demo.solana_narrative_momentum.strategy.DexScreenerClient",
+            "almanak.demo_strategies.solana_narrative_momentum.strategy.DexScreenerClient",
             return_value=mock_client,
         ):
             result = await strategy._manage_position()
@@ -458,7 +458,7 @@ class TestManagePosition:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "strategies.demo.solana_narrative_momentum.strategy.DexScreenerClient",
+            "almanak.demo_strategies.solana_narrative_momentum.strategy.DexScreenerClient",
             return_value=mock_client,
         ):
             result = await strategy._manage_position()

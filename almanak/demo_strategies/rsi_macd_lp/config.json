@@ -1,0 +1,16 @@
+{
+    "pool": "WETH/USDC/500",
+    "rsi_oversold": 35,
+    "rsi_overbought": 65,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    "lp_range_pct": 0.15,
+    "amount0": "0.001",
+    "amount1": "3",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

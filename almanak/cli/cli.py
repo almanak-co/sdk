@@ -1307,11 +1307,11 @@ def strategy_run(
     Examples:
 
         # Run from strategy directory (auto-starts gateway)
-        cd strategies/demo/uniswap_rsi
+        cd almanak/demo_strategies/uniswap_rsi
         almanak strat run --once
 
         # Run with explicit working directory
-        almanak strat run -d strategies/demo/uniswap_rsi --once
+        almanak strat run -d almanak/demo_strategies/uniswap_rsi --once
 
         # Connect to an existing gateway
         almanak strat run --no-gateway --once
@@ -1329,7 +1329,7 @@ def strategy_run(
         almanak strat run --fresh --once
 
         # Run with live dashboard
-        almanak strat run -d strategies/demo/uniswap_lp --network anvil --dashboard
+        almanak strat run -d almanak/demo_strategies/uniswap_lp --network anvil --dashboard
     """
     # Look for config.json or config.yaml in working directory if not specified
     if config_file is None:

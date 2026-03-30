@@ -32,25 +32,23 @@ Every Almanak strategy follows this pattern:
 
 FILE STRUCTURE:
 ---------------
-uniswap_rsi/
+strategies/demo/uniswap_rsi/
     __init__.py      - Package exports
     strategy.py      - This file (main strategy logic)
     config.json      - Default configuration
+    run_anvil.py     - Test script for running on Anvil fork
     README.md        - Documentation
 
 USAGE:
 ------
-    # Copy this demo into your working directory
-    almanak strat demo --name uniswap_rsi
-
     # Run once in dry-run mode (no real transactions)
-    almanak strat run --once --dry-run
-
-    # Run on a local Anvil fork
-    almanak strat run --network anvil --once
+    python -m src.cli.run --strategy demo_uniswap_rsi --once --dry-run
 
     # Run continuously every 60 seconds
-    almanak strat run --interval 60
+    python -m src.cli.run --strategy demo_uniswap_rsi --interval 60
+
+    # Test on Anvil (local fork)
+    python strategies/demo/uniswap_rsi/run_anvil.py
 
 ===============================================================================
 """
@@ -98,7 +96,7 @@ logger = logging.getLogger(__name__)
 
 @almanak_strategy(
     # Unique identifier - used to run the strategy via CLI
-    # Example: almanak strat run --once
+    # Example: python -m src.cli.run --strategy demo_uniswap_rsi
     name="demo_uniswap_rsi",
     # Human-readable description for documentation
     description="Tutorial RSI strategy - buys when oversold, sells when overbought on Uniswap V3",
@@ -186,32 +184,25 @@ class UniswapRSIStrategy(IntentStrategy):
         # - A custom dataclass
         # We handle all cases here for flexibility
 
-        # Helper to get config value from dict or object attributes
-        def get_config(key: str, default: Any) -> Any:
-            if isinstance(self.config, dict):
-                return self.config.get(key, default)
-            else:
-                return getattr(self.config, key, default)
-
         # Trading parameters
-        self.trade_size_usd = Decimal(str(get_config("trade_size_usd", "10")))
+        self.trade_size_usd = Decimal(str(self.get_config("trade_size_usd", "10")))
 
         # RSI parameters
         # - rsi_period: How many candles to use for RSI calculation
         # - rsi_oversold: RSI below this = buy signal
         # - rsi_overbought: RSI above this = sell signal
-        self.rsi_period = int(get_config("rsi_period", 14))
-        self.rsi_oversold = Decimal(str(get_config("rsi_oversold", "30")))
-        self.rsi_overbought = Decimal(str(get_config("rsi_overbought", "70")))
+        self.rsi_period = int(self.get_config("rsi_period", 14))
+        self.rsi_oversold = Decimal(str(self.get_config("rsi_oversold", "30")))
+        self.rsi_overbought = Decimal(str(self.get_config("rsi_overbought", "70")))
 
         # Slippage protection
         # 50 bps = 0.5% slippage tolerance
-        self.max_slippage_bps = int(get_config("max_slippage_bps", 50))
+        self.max_slippage_bps = int(self.get_config("max_slippage_bps", 50))
 
         # Token configuration
         # WETH/USDC is the most liquid pair on Uniswap
-        self.base_token = get_config("base_token", "WETH")
-        self.quote_token = get_config("quote_token", "USDC")
+        self.base_token = self.get_config("base_token", "WETH")
+        self.quote_token = self.get_config("quote_token", "USDC")
 
         # =====================================================================
         # Internal state tracking (optional but useful)
@@ -262,153 +253,141 @@ class UniswapRSIStrategy(IntentStrategy):
             4. Return appropriate Intent
 
         Error Handling:
-            Always wrap in try/except and return Intent.hold on error.
-            This prevents the strategy from crashing on bad data.
+            Catch specific exceptions (e.g., ValueError) where recovery is possible.
+            Let unexpected errors propagate to the framework's STRATEGY_ERROR handler.
         """
 
+        # =================================================================
+        # STEP 1: Get current market price
+        # =================================================================
+        # We need the price to:
+        # - Calculate how much ETH to sell for our USD trade size
+        # - Log what's happening for debugging
+
+        base_price = market.price(self.base_token)
+        logger.debug(f"Current {self.base_token} price: ${base_price:,.2f}")
+
+        # =================================================================
+        # STEP 2: Get RSI indicator
+        # =================================================================
+        # RSI is our primary signal. The market.rsi() method returns
+        # an RSI object with a .value property.
+        #
+        # If RSI data isn't available (e.g., not enough historical data),
+        # we should hold and wait.
+
         try:
-            # =================================================================
-            # STEP 1: Get current market price
-            # =================================================================
-            # We need the price to:
-            # - Calculate how much ETH to sell for our USD trade size
-            # - Log what's happening for debugging
+            rsi = market.rsi(self.base_token, period=self.rsi_period)
+            logger.debug(f"{self.base_token} RSI({self.rsi_period}): {rsi.value:.2f}")
+        except ValueError as e:
+            # RSI calculation failed - data might not be available
+            logger.warning(f"Could not get RSI: {e}")
+            return Intent.hold(reason="RSI data unavailable")
 
-            base_price = market.price(self.base_token)
-            logger.debug(f"Current {self.base_token} price: ${base_price:,.2f}")
+        # =================================================================
+        # STEP 3: Get wallet balances
+        # =================================================================
+        # Before deciding to trade, check we have sufficient funds.
+        # The balance() method returns a Balance object with:
+        # - .balance: Raw token amount (e.g., 1.5 WETH)
+        # - .balance_usd: Value in USD (e.g., $5100)
 
-            # =================================================================
-            # STEP 2: Get RSI indicator
-            # =================================================================
-            # RSI is our primary signal. The market.rsi() method returns
-            # an RSI object with a .value property.
-            #
-            # If RSI data isn't available (e.g., not enough historical data),
-            # we should hold and wait.
+        try:
+            quote_balance = market.balance(self.quote_token)  # USDC for buying
+            base_balance = market.balance(self.base_token)  # WETH for selling
 
-            try:
-                rsi = market.rsi(self.base_token, period=self.rsi_period)
-                logger.debug(f"{self.base_token} RSI({self.rsi_period}): {rsi.value:.2f}")
-            except ValueError as e:
-                # RSI calculation failed - data might not be available
-                logger.warning(f"Could not get RSI: {e}")
-                return Intent.hold(reason="RSI data unavailable")
+            logger.debug(
+                f"Balances - {self.quote_token}: ${quote_balance.balance_usd:,.2f}, "
+                f"{self.base_token}: {base_balance.balance} (${base_balance.balance_usd:,.2f})"
+            )
+        except ValueError as e:
+            logger.warning(f"Could not get balances: {e}")
+            return Intent.hold(reason="Balance data unavailable")
 
-            # =================================================================
-            # STEP 3: Get wallet balances
-            # =================================================================
-            # Before deciding to trade, check we have sufficient funds.
-            # The balance() method returns a Balance object with:
-            # - .balance: Raw token amount (e.g., 1.5 WETH)
-            # - .balance_usd: Value in USD (e.g., $5100)
+        # =================================================================
+        # STEP 4: Trading decision logic
+        # =================================================================
+        # This is where the actual strategy logic lives.
+        # We check RSI against our thresholds and decide what to do.
 
-            try:
-                quote_balance = market.balance(self.quote_token)  # USDC for buying
-                base_balance = market.balance(self.base_token)  # WETH for selling
+        # -----------------------------------------------------------------
+        # CASE 1: OVERSOLD (RSI < 30) -> BUY
+        # -----------------------------------------------------------------
+        # The asset appears undervalued. We want to buy.
 
-                logger.debug(
-                    f"Balances - {self.quote_token}: ${quote_balance.balance_usd:,.2f}, "
-                    f"{self.base_token}: {base_balance.balance} (${base_balance.balance_usd:,.2f})"
-                )
-            except ValueError as e:
-                logger.warning(f"Could not get balances: {e}")
-                return Intent.hold(reason="Balance data unavailable")
-
-            # =================================================================
-            # STEP 4: Trading decision logic
-            # =================================================================
-            # This is where the actual strategy logic lives.
-            # We check RSI against our thresholds and decide what to do.
-
-            # -----------------------------------------------------------------
-            # CASE 1: OVERSOLD (RSI < 30) -> BUY
-            # -----------------------------------------------------------------
-            # The asset appears undervalued. We want to buy.
-
-            if rsi.value <= self.rsi_oversold:
-                # First, check we have enough quote token (USDC) to buy
-                if quote_balance.balance_usd < self.trade_size_usd:
-                    return Intent.hold(
-                        reason=f"Oversold (RSI={rsi.value:.1f}) but insufficient {self.quote_token} "
-                        f"(${quote_balance.balance_usd:.2f} < ${self.trade_size_usd})"
-                    )
-
-                # We have funds! Log the buy signal with formatted amounts
-                logger.info(
-                    f"📈 BUY SIGNAL: RSI={rsi.value:.2f} < {self.rsi_oversold} (oversold) "
-                    f"| Buying {format_usd(self.trade_size_usd)} of {self.base_token}"
-                )
-
-                # Reset our hold counter
-                self._consecutive_holds = 0
-
-                # Return a SWAP intent: USDC -> WETH
-                return Intent.swap(
-                    from_token=self.quote_token,  # Selling USDC
-                    to_token=self.base_token,  # Buying WETH
-                    amount_usd=self.trade_size_usd,
-                    max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),  # Convert bps to decimal
-                    protocol="uniswap_v3",  # Explicit protocol (optional but recommended)
-                )
-
-            # -----------------------------------------------------------------
-            # CASE 2: OVERBOUGHT (RSI > 70) -> SELL
-            # -----------------------------------------------------------------
-            # The asset appears overvalued. We want to sell.
-
-            elif rsi.value >= self.rsi_overbought:
-                # Calculate how much base token we need to sell for our trade size
-                min_base_to_sell = self.trade_size_usd / base_price
-
-                # Check we have enough base token (WETH) to sell
-                if base_balance.balance < min_base_to_sell:
-                    return Intent.hold(
-                        reason=f"Overbought (RSI={rsi.value:.1f}) but insufficient {self.base_token} "
-                        f"({base_balance.balance:.4f} < {min_base_to_sell:.4f})"
-                    )
-
-                # We have funds! Log the sell signal with formatted amounts
-                logger.info(
-                    f"📉 SELL SIGNAL: RSI={rsi.value:.2f} > {self.rsi_overbought} (overbought) "
-                    f"| Selling {format_usd(self.trade_size_usd)} of {self.base_token}"
-                )
-
-                # Reset our hold counter
-                self._consecutive_holds = 0
-
-                # Return a SWAP intent: WETH -> USDC
-                return Intent.swap(
-                    from_token=self.base_token,  # Selling WETH
-                    to_token=self.quote_token,  # Buying USDC
-                    amount_usd=self.trade_size_usd,
-                    max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),  # Convert bps to decimal
-                    protocol="uniswap_v3",
-                )
-
-            # -----------------------------------------------------------------
-            # CASE 3: NEUTRAL (30 < RSI < 70) -> HOLD
-            # -----------------------------------------------------------------
-            # No clear signal. Stay on the sidelines.
-
-            else:
-                self._consecutive_holds += 1
-
+        if rsi.value <= self.rsi_oversold:
+            # First, check we have enough quote token (USDC) to buy
+            if quote_balance.balance_usd < self.trade_size_usd:
                 return Intent.hold(
-                    reason=f"RSI={rsi.value:.2f} in neutral zone "
-                    f"[{self.rsi_oversold}-{self.rsi_overbought}] "
-                    f"(hold #{self._consecutive_holds})"
+                    reason=f"Oversold (RSI={rsi.value:.1f}) but insufficient {self.quote_token} "
+                    f"(${quote_balance.balance_usd:.2f} < ${self.trade_size_usd})"
                 )
 
-        except Exception as e:
-            # =================================================================
-            # ERROR HANDLING
-            # =================================================================
-            # Always catch exceptions and return a hold.
-            # This prevents the strategy from crashing.
-            # The framework will log the error and continue running.
+            # We have funds! Log the buy signal with formatted amounts
+            logger.info(
+                f"📈 BUY SIGNAL: RSI={rsi.value:.2f} < {self.rsi_oversold} (oversold) "
+                f"| Buying {format_usd(self.trade_size_usd)} of {self.base_token}"
+            )
 
-            logger.exception(f"Error in decide(): {e}")
-            return Intent.hold(reason=f"Error: {str(e)}")
+            # Reset our hold counter
+            self._consecutive_holds = 0
+
+            # Return a SWAP intent: USDC -> WETH
+            return Intent.swap(
+                from_token=self.quote_token,  # Selling USDC
+                to_token=self.base_token,  # Buying WETH
+                amount_usd=self.trade_size_usd,
+                max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),  # Convert bps to decimal
+                protocol="uniswap_v3",  # Explicit protocol (optional but recommended)
+            )
+
+        # -----------------------------------------------------------------
+        # CASE 2: OVERBOUGHT (RSI > 70) -> SELL
+        # -----------------------------------------------------------------
+        # The asset appears overvalued. We want to sell.
+
+        elif rsi.value >= self.rsi_overbought:
+            # Calculate how much base token we need to sell for our trade size
+            min_base_to_sell = self.trade_size_usd / base_price
+
+            # Check we have enough base token (WETH) to sell
+            if base_balance.balance < min_base_to_sell:
+                return Intent.hold(
+                    reason=f"Overbought (RSI={rsi.value:.1f}) but insufficient {self.base_token} "
+                    f"({base_balance.balance:.4f} < {min_base_to_sell:.4f})"
+                )
+
+            # We have funds! Log the sell signal with formatted amounts
+            logger.info(
+                f"📉 SELL SIGNAL: RSI={rsi.value:.2f} > {self.rsi_overbought} (overbought) "
+                f"| Selling {format_usd(self.trade_size_usd)} of {self.base_token}"
+            )
+
+            # Reset our hold counter
+            self._consecutive_holds = 0
+
+            # Return a SWAP intent: WETH -> USDC
+            return Intent.swap(
+                from_token=self.base_token,  # Selling WETH
+                to_token=self.quote_token,  # Buying USDC
+                amount_usd=self.trade_size_usd,
+                max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),  # Convert bps to decimal
+                protocol="uniswap_v3",
+            )
+
+        # -----------------------------------------------------------------
+        # CASE 3: NEUTRAL (30 < RSI < 70) -> HOLD
+        # -----------------------------------------------------------------
+        # No clear signal. Stay on the sidelines.
+
+        else:
+            self._consecutive_holds += 1
+
+            return Intent.hold(
+                reason=f"RSI={rsi.value:.2f} in neutral zone "
+                f"[{self.rsi_oversold}-{self.rsi_overbought}] "
+                f"(hold #{self._consecutive_holds})"
+            )
 
     # =========================================================================
     # OPTIONAL: STATUS REPORTING
@@ -467,26 +446,28 @@ class UniswapRSIStrategy(IntentStrategy):
 
         positions: list[PositionInfo] = []
 
-        # For swap strategies, we track base token as the "position"
-        # The value would come from actual balance queries in production
-        # TODO: That's not true - what if you buy several times? Need to check on-chain balance here.
-        estimated_value = self.trade_size_usd
-
-        positions.append(
-            PositionInfo(
-                position_type=PositionType.TOKEN,
-                position_id="uniswap_rsi_token_0",
-                chain=self.chain,
-                protocol="uniswap_v3",
-                value_usd=estimated_value,
-                details={
-                    "asset": self.base_token,
-                    "base_token": self.base_token,
-                    "quote_token": self.quote_token,
-                    "consecutive_holds": self._consecutive_holds,
-                },
-            )
-        )
+        # Query on-chain balance instead of unconditionally reporting a position
+        try:
+            market = self.create_market_snapshot()
+            base_balance = market.balance(self.base_token)
+            if base_balance.balance > 0:
+                positions.append(
+                    PositionInfo(
+                        position_type=PositionType.TOKEN,
+                        position_id="uniswap_rsi_token_0",
+                        chain=self.chain,
+                        protocol="uniswap_v3",
+                        value_usd=base_balance.balance_usd,
+                        details={
+                            "asset": self.base_token,
+                            "balance": str(base_balance.balance),
+                            "base_token": self.base_token,
+                            "quote_token": self.quote_token,
+                        },
+                    )
+                )
+        except Exception:
+            logger.warning("Failed to query balance for teardown; reporting no positions")
 
         return TeardownPositionSummary(
             strategy_id=getattr(self, "strategy_id", "demo_uniswap_rsi"),
@@ -547,14 +528,13 @@ if __name__ == "__main__":
     print("=" * 60)
     print("UniswapRSIStrategy - Demo Strategy")
     print("=" * 60)
-    meta = UniswapRSIStrategy.STRATEGY_METADATA
     print(f"\nStrategy Name: {UniswapRSIStrategy.STRATEGY_NAME}")
-    print(f"Version: {meta.version}")
-    print(f"Supported Chains: {meta.supported_chains}")
-    print(f"Supported Protocols: {meta.supported_protocols}")
-    print(f"Intent Types: {meta.intent_types}")
-    print(f"\nDescription: {meta.description}")
+    print(f"Version: {UniswapRSIStrategy.STRATEGY_METADATA.version}")
+    print(f"Supported Chains: {UniswapRSIStrategy.STRATEGY_METADATA.supported_chains}")
+    print(f"Supported Protocols: {UniswapRSIStrategy.STRATEGY_METADATA.supported_protocols}")
+    print(f"Intent Types: {UniswapRSIStrategy.STRATEGY_METADATA.intent_types}")
+    print(f"\nDescription: {UniswapRSIStrategy.STRATEGY_METADATA.description}")
     print("\nTo run this strategy:")
-    print("  almanak strat run --once --dry-run")
+    print("  python -m src.cli.run --strategy demo_uniswap_rsi --once --dry-run")
     print("\nTo test on Anvil:")
-    print("  almanak strat run --network anvil --once")
+    print("  python strategies/demo/uniswap_rsi/run_anvil.py")

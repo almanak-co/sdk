@@ -139,7 +139,7 @@ class TestAavePnLLendingStrategyLifecycle:
         strategy_path = os.path.join(
             os.path.dirname(__file__),
             "..", "..", "..",
-            "strategies", "demo", "aave_pnl_lending", "strategy.py",
+            "almanak", "demo_strategies", "aave_pnl_lending", "strategy.py",
         )
         strategy_path = os.path.normpath(strategy_path)
 

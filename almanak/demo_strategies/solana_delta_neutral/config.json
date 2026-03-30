@@ -1,0 +1,12 @@
+{
+    "lp_pool": "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv",
+    "lp_protocol": "raydium_clmm",
+    "lp_amount_sol": "0.005",
+    "lp_amount_usdc": "0.75",
+    "lp_range_pct": "10",
+    "perp_market": "SOL-PERP",
+    "perp_leverage": "2.0",
+    "lending_token": "USDC",
+    "lending_amount": "5.0",
+    "rebalance_drift_pct": "8"
+}

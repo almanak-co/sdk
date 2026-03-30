@@ -16,7 +16,7 @@ import pytest
 
 @pytest.fixture
 def strategy():
-    from strategies.demo.aerodrome_rsi.strategy import AerodromeRSIStrategy
+    from almanak.demo_strategies.aerodrome_rsi.strategy import AerodromeRSIStrategy
 
     strat = AerodromeRSIStrategy.__new__(AerodromeRSIStrategy)
     strat.config = {}

@@ -28,7 +28,7 @@ def _make_strategy(
     chain: str = "base",
 ) -> Any:
     """Create a CompoundPaperTradeStrategy with mocked framework wiring."""
-    from strategies.demo.compound_paper_trade.strategy import CompoundPaperTradeStrategy
+    from almanak.demo_strategies.compound_paper_trade.strategy import CompoundPaperTradeStrategy
 
     with patch.object(CompoundPaperTradeStrategy, "__init__", lambda self, *a, **kw: None):
         strat = CompoundPaperTradeStrategy.__new__(CompoundPaperTradeStrategy)

@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from strategies.demo.solana_lst_depeg_arb.strategy import SolanaLstDepegArbStrategy
+from almanak.demo_strategies.solana_lst_depeg_arb.strategy import SolanaLstDepegArbStrategy
 
 
 @pytest.fixture

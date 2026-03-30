@@ -233,7 +233,7 @@ dashboard:
 anvil-dev:
 	@if [ -z "$(STRATEGY_DIR)" ]; then \
 		echo "Error: STRATEGY_DIR is required"; \
-		echo "Example: make anvil-dev STRATEGY_DIR=strategies/demo/uniswap_rsi"; \
+		echo "Example: make anvil-dev STRATEGY_DIR=almanak/demo_strategies/uniswap_rsi"; \
 		exit 1; \
 	fi
 	@echo "Starting strategy (auto-starts managed gateway + Anvil)..."

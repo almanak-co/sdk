@@ -16,7 +16,7 @@ import pytest
 
 @pytest.fixture
 def strategy():
-    from strategies.demo.pendle_yt_yield.strategy import PendleYTYieldStrategy
+    from almanak.demo_strategies.pendle_yt_yield.strategy import PendleYTYieldStrategy
 
     strat = PendleYTYieldStrategy.__new__(PendleYTYieldStrategy)
     strat.config = {}
