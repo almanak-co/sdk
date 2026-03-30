@@ -725,6 +725,11 @@ class IndicatorProvider:
         self.ichimoku = ichimoku
 
 
+# Default OHLCV timeframe used by indicator methods when neither an explicit
+# timeframe argument nor a strategy-level default_timeframe is provided.
+DEFAULT_TIMEFRAME = "4h"
+
+
 class MarketSnapshot:
     """Helper class providing market data access for strategy decisions.
 
@@ -769,6 +774,7 @@ class MarketSnapshot:
         multi_dex_service: Any | None = None,
         rate_monitor: Any | None = None,
         funding_rate_provider: Any | None = None,
+        default_timeframe: str | None = None,
     ) -> None:
         """Initialize market snapshot.
 
@@ -785,12 +791,16 @@ class MarketSnapshot:
             multi_dex_service: MultiDexService for cross-DEX price comparison
             rate_monitor: RateMonitor instance for lending rate queries
             funding_rate_provider: FundingRateProvider for perpetual funding rate queries
+            default_timeframe: Default OHLCV timeframe from strategy config (e.g., "15m", "1h").
+                Used as the default for all indicator methods (rsi, macd, sma, etc.)
+                when no explicit timeframe is passed. Falls back to DEFAULT_TIMEFRAME if not set.
         """
         self._chain = chain
         self._wallet_address = wallet_address
         self._price_oracle = price_oracle
         self._rsi_provider = rsi_provider
         self._balance_provider = balance_provider
+        self._default_timeframe = default_timeframe
         self._timestamp = timestamp or datetime.now(UTC)
         self._wallet_activity_provider = wallet_activity_provider
         self._prediction_provider = prediction_provider
@@ -838,6 +848,19 @@ class MarketSnapshot:
         # Fork RPC URL for paper trading on-chain reads (VIB-1956)
         self._fork_rpc_url: str | None = None
         self._fork_block: int | None = None
+
+    def _resolve_timeframe(self, timeframe: str | None) -> str:
+        """Resolve the effective OHLCV timeframe for indicator methods.
+
+        Priority: explicit argument > strategy-level default > module constant.
+
+        Args:
+            timeframe: Caller-supplied timeframe, or None to use defaults.
+
+        Returns:
+            A concrete timeframe string (e.g. "15m", "1h", "4h").
+        """
+        return timeframe or self._default_timeframe or DEFAULT_TIMEFRAME
 
     @property
     def chain(self) -> str:
@@ -930,13 +953,14 @@ class MarketSnapshot:
         current_price = self.price(token, quote)
         return self._price_cache.get(cache_key, PriceData(price=current_price))
 
-    def rsi(self, token: str, period: int = 14, timeframe: str = "4h") -> RSIData:
+    def rsi(self, token: str, period: int = 14, timeframe: str | None = None) -> RSIData:
         """Get RSI (Relative Strength Index) for a token.
 
         Args:
             token: Token symbol
             period: RSI calculation period (default 14)
-            timeframe: OHLCV candle timeframe (default "4h")
+            timeframe: OHLCV candle timeframe. Defaults to strategy's data_granularity
+                config, or "4h" if not configured.
 
         Returns:
             RSIData with current RSI value and signal
@@ -944,6 +968,7 @@ class MarketSnapshot:
         Raises:
             ValueError: If RSI cannot be calculated
         """
+        timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
         # Check pre-populated RSI first (validate period and timeframe match)
@@ -1084,7 +1109,7 @@ class MarketSnapshot:
         fast_period: int = 12,
         slow_period: int = 26,
         signal_period: int = 9,
-        timeframe: str = "4h",
+        timeframe: str | None = None,
     ) -> MACDData:
         """Get MACD (Moving Average Convergence Divergence) for a token.
 
@@ -1093,7 +1118,8 @@ class MarketSnapshot:
             fast_period: Fast EMA period (default 12)
             slow_period: Slow EMA period (default 26)
             signal_period: Signal EMA period (default 9)
-            timeframe: OHLCV candle timeframe (default "4h")
+            timeframe: OHLCV candle timeframe. Defaults to strategy's data_granularity
+                config, or "4h" if not configured.
 
         Returns:
             MACDData with MACD line, signal line, and histogram
@@ -1106,6 +1132,7 @@ class MarketSnapshot:
             if macd.is_bullish_crossover:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, fast_period, slow_period, signal_period)
 
         # Check pre-populated values first (validate params and timeframe)
@@ -1149,7 +1176,7 @@ class MarketSnapshot:
         raise ValueError(f"MACD data not available for {token}")
 
     def bollinger_bands(
-        self, token: str, period: int = 20, std_dev: float = 2.0, timeframe: str = "4h"
+        self, token: str, period: int = 20, std_dev: float = 2.0, timeframe: str | None = None
     ) -> BollingerBandsData:
         """Get Bollinger Bands for a token.
 
@@ -1157,7 +1184,8 @@ class MarketSnapshot:
             token: Token symbol
             period: SMA period (default 20)
             std_dev: Standard deviation multiplier (default 2.0)
-            timeframe: OHLCV candle timeframe (default "4h")
+            timeframe: OHLCV candle timeframe. Defaults to strategy's data_granularity
+                config, or "4h" if not configured.
 
         Returns:
             BollingerBandsData with upper, middle, lower bands and position metrics
@@ -1170,6 +1198,7 @@ class MarketSnapshot:
             if bb.is_oversold:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period, std_dev)
 
         # Check pre-populated values first (validate params and timeframe)
@@ -1205,14 +1234,17 @@ class MarketSnapshot:
 
         raise ValueError(f"Bollinger Bands data not available for {token}")
 
-    def stochastic(self, token: str, k_period: int = 14, d_period: int = 3, timeframe: str = "4h") -> StochasticData:
+    def stochastic(
+        self, token: str, k_period: int = 14, d_period: int = 3, timeframe: str | None = None
+    ) -> StochasticData:
         """Get Stochastic Oscillator for a token.
 
         Args:
             token: Token symbol
             k_period: %K period (default 14)
             d_period: %D period (default 3)
-            timeframe: OHLCV candle timeframe (default "4h")
+            timeframe: OHLCV candle timeframe. Defaults to strategy's data_granularity
+                config, or "4h" if not configured.
 
         Returns:
             StochasticData with %K and %D values
@@ -1225,6 +1257,7 @@ class MarketSnapshot:
             if stoch.is_oversold and stoch.k_value > stoch.d_value:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, k_period, d_period)
 
         # Check pre-populated values first (validate params and timeframe)
@@ -1260,13 +1293,14 @@ class MarketSnapshot:
 
         raise ValueError(f"Stochastic data not available for {token}")
 
-    def atr(self, token: str, period: int = 14, timeframe: str = "4h") -> ATRData:
+    def atr(self, token: str, period: int = 14, timeframe: str | None = None) -> ATRData:
         """Get ATR (Average True Range) for a token.
 
         Args:
             token: Token symbol
             period: ATR period (default 14)
-            timeframe: OHLCV candle timeframe (default "4h")
+            timeframe: OHLCV candle timeframe. Defaults to strategy's data_granularity
+                config, or "4h" if not configured.
 
         Returns:
             ATRData with ATR value and volatility assessment
@@ -1280,6 +1314,7 @@ class MarketSnapshot:
                 # Safe to trade
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
         # Check pre-populated values first (validate period and timeframe)
@@ -1315,13 +1350,14 @@ class MarketSnapshot:
 
         raise ValueError(f"ATR data not available for {token}")
 
-    def sma(self, token: str, period: int = 20, timeframe: str = "4h") -> MAData:
+    def sma(self, token: str, period: int = 20, timeframe: str | None = None) -> MAData:
         """Get Simple Moving Average for a token.
 
         Args:
             token: Token symbol
             period: SMA period (default 20)
-            timeframe: OHLCV candle timeframe (default "4h")
+            timeframe: OHLCV candle timeframe. Defaults to strategy's data_granularity
+                config, or "4h" if not configured.
 
         Returns:
             MAData with SMA value
@@ -1334,6 +1370,7 @@ class MarketSnapshot:
             if sma.is_price_above:
                 print("Bullish - price above 50 SMA")
         """
+        timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, "SMA", period)
 
         # Check pre-populated values first (validate params and timeframe)
@@ -1362,13 +1399,14 @@ class MarketSnapshot:
 
         raise ValueError(f"SMA data not available for {token} with period {period}")
 
-    def ema(self, token: str, period: int = 12, timeframe: str = "4h") -> MAData:
+    def ema(self, token: str, period: int = 12, timeframe: str | None = None) -> MAData:
         """Get Exponential Moving Average for a token.
 
         Args:
             token: Token symbol
             period: EMA period (default 12)
-            timeframe: OHLCV candle timeframe (default "4h")
+            timeframe: OHLCV candle timeframe. Defaults to strategy's data_granularity
+                config, or "4h" if not configured.
 
         Returns:
             MAData with EMA value
@@ -1382,6 +1420,7 @@ class MarketSnapshot:
             if ema_12.value > ema_26.value:
                 print("Golden cross - bullish")
         """
+        timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, "EMA", period)
 
         # Check pre-populated values first (validate params and timeframe)
@@ -1410,13 +1449,14 @@ class MarketSnapshot:
 
         raise ValueError(f"EMA data not available for {token} with period {period}")
 
-    def adx(self, token: str, period: int = 14, timeframe: str = "4h") -> ADXData:
+    def adx(self, token: str, period: int = 14, timeframe: str | None = None) -> ADXData:
         """Get ADX (Average Directional Index) for a token.
 
         Args:
             token: Token symbol
             period: ADX period (default 14)
-            timeframe: OHLCV candle timeframe (default "4h")
+            timeframe: OHLCV candle timeframe. Defaults to strategy's data_granularity
+                config, or "4h" if not configured.
 
         Returns:
             ADXData with ADX, +DI, and -DI values
@@ -1429,6 +1469,7 @@ class MarketSnapshot:
             if adx.is_uptrend:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
         if token in self._adx_values:
@@ -1453,13 +1494,14 @@ class MarketSnapshot:
 
         raise ValueError(f"ADX data not available for {token}")
 
-    def obv(self, token: str, signal_period: int = 21, timeframe: str = "4h") -> OBVData:
+    def obv(self, token: str, signal_period: int = 21, timeframe: str | None = None) -> OBVData:
         """Get OBV (On-Balance Volume) for a token.
 
         Args:
             token: Token symbol
             signal_period: OBV signal line period (default 21)
-            timeframe: OHLCV candle timeframe (default "4h")
+            timeframe: OHLCV candle timeframe. Defaults to strategy's data_granularity
+                config, or "4h" if not configured.
 
         Returns:
             OBVData with OBV and signal line values
@@ -1472,6 +1514,7 @@ class MarketSnapshot:
             if obv.is_bullish:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, signal_period)
 
         if token in self._obv_values:
@@ -1496,13 +1539,14 @@ class MarketSnapshot:
 
         raise ValueError(f"OBV data not available for {token}")
 
-    def cci(self, token: str, period: int = 20, timeframe: str = "4h") -> CCIData:
+    def cci(self, token: str, period: int = 20, timeframe: str | None = None) -> CCIData:
         """Get CCI (Commodity Channel Index) for a token.
 
         Args:
             token: Token symbol
             period: CCI period (default 20)
-            timeframe: OHLCV candle timeframe (default "4h")
+            timeframe: OHLCV candle timeframe. Defaults to strategy's data_granularity
+                config, or "4h" if not configured.
 
         Returns:
             CCIData with CCI value and overbought/oversold status
@@ -1515,6 +1559,7 @@ class MarketSnapshot:
             if cci.is_oversold:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
         if token in self._cci_values:
@@ -1545,7 +1590,7 @@ class MarketSnapshot:
         tenkan_period: int = 9,
         kijun_period: int = 26,
         senkou_b_period: int = 52,
-        timeframe: str = "4h",
+        timeframe: str | None = None,
     ) -> IchimokuData:
         """Get Ichimoku Cloud data for a token.
 
@@ -1554,7 +1599,8 @@ class MarketSnapshot:
             tenkan_period: Conversion line period (default 9)
             kijun_period: Base line period (default 26)
             senkou_b_period: Leading span B period (default 52)
-            timeframe: OHLCV candle timeframe (default "4h")
+            timeframe: OHLCV candle timeframe. Defaults to strategy's data_granularity
+                config, or "4h" if not configured.
 
         Returns:
             IchimokuData with all Ichimoku components
@@ -1567,6 +1613,7 @@ class MarketSnapshot:
             if ich.is_bullish_crossover and ich.is_above_cloud:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, tenkan_period, kijun_period, senkou_b_period)
 
         if token in self._ichimoku_values:
@@ -4222,6 +4269,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
             multi_dex_service=self._multi_dex_service,
             rate_monitor=self._rate_monitor,
             funding_rate_provider=self._funding_rate_provider,
+            default_timeframe=self.get_config("data_granularity"),
         )
 
     def run(self) -> ActionBundle | None:
