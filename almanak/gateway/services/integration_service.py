@@ -652,6 +652,97 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
                 errors=json.dumps([{"message": str(e)}]),
             )
 
+    # =========================================================================
+    # GeckoTerminal endpoints
+    # =========================================================================
+
+    async def GeckoTerminalGetOHLCV(
+        self,
+        request: gateway_pb2.GeckoTerminalOHLCVRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GeckoTerminalOHLCVResponse:
+        """Get DEX OHLCV data from GeckoTerminal.
+
+        Proxies GeckoTerminal API requests from strategy containers that
+        have no internet access. Mirrors the BinanceGetKlines pattern.
+
+        Args:
+            request: OHLCV request with token, chain, timeframe, limit
+            context: gRPC context
+
+        Returns:
+            GeckoTerminalOHLCVResponse with list of candles
+        """
+        await self._ensure_initialized()
+
+        # --- Input validation at the gRPC boundary ---
+        if not request.token or not request.token.strip():
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("token is required and cannot be empty")
+            return gateway_pb2.GeckoTerminalOHLCVResponse()
+
+        if not request.chain or not request.chain.strip():
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("chain is required and cannot be empty")
+            return gateway_pb2.GeckoTerminalOHLCVResponse()
+
+        req_timeframe = request.timeframe or "1h"
+        valid_timeframes = {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
+        if req_timeframe not in valid_timeframes:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"Invalid timeframe: {req_timeframe}. Valid: {sorted(valid_timeframes)}")
+            return gateway_pb2.GeckoTerminalOHLCVResponse()
+
+        req_limit = request.limit or 100
+        if req_limit < 1 or req_limit > 1000:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"limit must be between 1 and 1000, got {req_limit}")
+            return gateway_pb2.GeckoTerminalOHLCVResponse()
+
+        try:
+            from almanak.framework.data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
+
+            start_time_metric = time.monotonic()
+
+            async with GeckoTerminalOHLCVProvider() as provider:
+                candles = await provider.get_ohlcv(
+                    token=request.token.strip(),
+                    quote=request.quote or "USD",
+                    timeframe=req_timeframe,
+                    limit=req_limit,
+                    chain=request.chain.strip(),
+                    pool_address=request.pool_address or None,
+                )
+
+            latency = time.monotonic() - start_time_metric
+            record_integration_request("geckoterminal", "get_ohlcv")
+            record_integration_latency("geckoterminal", "get_ohlcv", latency)
+
+            candle_messages = []
+            for c in candles:
+                candle_messages.append(
+                    gateway_pb2.GeckoTerminalOHLCVCandle(
+                        timestamp=int(c.timestamp.timestamp()),
+                        open=str(c.open),
+                        high=str(c.high),
+                        low=str(c.low),
+                        close=str(c.close),
+                        volume=str(c.volume) if c.volume is not None else "",
+                    )
+                )
+
+            return gateway_pb2.GeckoTerminalOHLCVResponse(candles=candle_messages)
+
+        except ValueError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.GeckoTerminalOHLCVResponse()
+        except Exception:
+            logger.exception("GeckoTerminalGetOHLCV failed for %s on %s", request.token, request.chain)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("GeckoTerminal OHLCV request failed")
+            return gateway_pb2.GeckoTerminalOHLCVResponse()
+
     async def close(self) -> None:
         """Close all integration connections."""
         if self._binance:

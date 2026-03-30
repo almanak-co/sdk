@@ -1347,6 +1347,11 @@ class IntegrationServiceStub(object):
                 request_serializer=gateway__pb2.TheGraphQueryRequest.SerializeToString,
                 response_deserializer=gateway__pb2.TheGraphQueryResponse.FromString,
                 _registered_method=True)
+        self.GeckoTerminalGetOHLCV = channel.unary_unary(
+                '/almanak.gateway.proto.IntegrationService/GeckoTerminalGetOHLCV',
+                request_serializer=gateway__pb2.GeckoTerminalOHLCVRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GeckoTerminalOHLCVResponse.FromString,
+                _registered_method=True)
 
 
 class IntegrationServiceServicer(object):
@@ -1413,6 +1418,13 @@ class IntegrationServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GeckoTerminalGetOHLCV(self, request, context):
+        """GeckoTerminal DEX OHLCV endpoint (proxy for deployed strategies without internet)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_IntegrationServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -1460,6 +1472,11 @@ def add_IntegrationServiceServicer_to_server(servicer, server):
                     servicer.TheGraphQuery,
                     request_deserializer=gateway__pb2.TheGraphQueryRequest.FromString,
                     response_serializer=gateway__pb2.TheGraphQueryResponse.SerializeToString,
+            ),
+            'GeckoTerminalGetOHLCV': grpc.unary_unary_rpc_method_handler(
+                    servicer.GeckoTerminalGetOHLCV,
+                    request_deserializer=gateway__pb2.GeckoTerminalOHLCVRequest.FromString,
+                    response_serializer=gateway__pb2.GeckoTerminalOHLCVResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1709,6 +1726,33 @@ class IntegrationService(object):
             '/almanak.gateway.proto.IntegrationService/TheGraphQuery',
             gateway__pb2.TheGraphQueryRequest.SerializeToString,
             gateway__pb2.TheGraphQueryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GeckoTerminalGetOHLCV(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.IntegrationService/GeckoTerminalGetOHLCV',
+            gateway__pb2.GeckoTerminalOHLCVRequest.SerializeToString,
+            gateway__pb2.GeckoTerminalOHLCVResponse.FromString,
             options,
             channel_credentials,
             insecure,

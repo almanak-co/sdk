@@ -65,9 +65,8 @@ from ..data.indicators.sync_wrappers import (
 )
 from ..data.interfaces import BalanceProvider as BalanceProviderInterface
 from ..data.interfaces import PriceOracle
-from ..data.ohlcv.gateway_data_adapter import GatewayOHLCVDataProvider
-from ..data.ohlcv.gateway_provider import GatewayOHLCVProvider
-from ..data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
+from ..data.ohlcv.gateway_data_adapter import GatewayOHLCVDataProvider, GeckoTerminalGatewayDataProvider
+from ..data.ohlcv.gateway_provider import GatewayGeckoTerminalOHLCVProvider, GatewayOHLCVProvider
 from ..data.ohlcv.ohlcv_router import OHLCVRouter
 from ..data.ohlcv.routing_provider import RoutingOHLCVProvider
 from ..data.price.gateway_oracle import GatewayPriceOracle
@@ -444,23 +443,19 @@ def create_routing_ohlcv_provider(
     gateway_provider = GatewayOHLCVProvider(gateway_client=gateway_client)
     binance_adapter = GatewayOHLCVDataProvider(gateway_provider)
 
-    # GeckoTerminal provides DEX-native OHLCV data for tokens not listed
-    # on CEX (governance tokens, DEX-native tokens, small-cap tokens).
-    # In deployed mode the strategy container has no internet — GeckoTerminal
-    # calls will fail and the router will fall through to the next provider.
-    # In local mode, GeckoTerminal works directly via HTTP.
-    gecko = GeckoTerminalOHLCVProvider()
+    gecko_provider = GatewayGeckoTerminalOHLCVProvider(gateway_client=gateway_client, chain=chain)
+    gecko_adapter = GeckoTerminalGatewayDataProvider(gecko_provider)
 
     router = OHLCVRouter(default_chain=chain)
     router.register_provider(binance_adapter)
-    router.register_provider(gecko)
+    router.register_provider(gecko_adapter)
 
     pool_address = strategy_config.get("pool_address")
     return RoutingOHLCVProvider(
         router=router,
         chain=chain,
         pool_address=str(pool_address) if pool_address else None,
-        closeable_providers=[gecko],
+        closeable_providers=[],
     )
 
 

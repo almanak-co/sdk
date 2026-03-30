@@ -425,6 +425,9 @@ service IntegrationService {
 
   // TheGraph subgraph query endpoint
   rpc TheGraphQuery(TheGraphQueryRequest) returns (TheGraphQueryResponse);
+
+  // GeckoTerminal DEX OHLCV endpoint (proxy for deployed strategies without internet)
+  rpc GeckoTerminalGetOHLCV(GeckoTerminalOHLCVRequest) returns (GeckoTerminalOHLCVResponse);
 }
 
 // =============================================================================
@@ -1578,4 +1581,30 @@ message WriteAgentCommandRequest {
 message WriteAgentCommandResponse {
   bool success = 1;
   string error = 2;
+}
+
+// =============================================================================
+// GeckoTerminal Integration Messages
+// =============================================================================
+
+message GeckoTerminalOHLCVRequest {
+  string token = 1;             // Token symbol (e.g., "ALMANAK", "WETH")
+  string chain = 2;             // Chain name (e.g., "base", "ethereum")
+  string timeframe = 3;         // Candle timeframe (1m, 5m, 15m, 1h, 4h, 1d)
+  int32 limit = 4;              // Number of candles (max 1000)
+  string pool_address = 5;      // Explicit pool address (optional)
+  string quote = 6;             // Quote currency (default "USD")
+}
+
+message GeckoTerminalOHLCVCandle {
+  int64 timestamp = 1;          // Unix timestamp in seconds
+  string open = 2;
+  string high = 3;
+  string low = 4;
+  string close = 5;
+  string volume = 6;
+}
+
+message GeckoTerminalOHLCVResponse {
+  repeated GeckoTerminalOHLCVCandle candles = 1;
 }

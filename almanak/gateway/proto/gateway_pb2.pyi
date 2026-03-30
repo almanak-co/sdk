@@ -5012,3 +5012,89 @@ class WriteAgentCommandResponse(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___WriteAgentCommandResponse: _TypeAlias = WriteAgentCommandResponse  # noqa: Y015
+
+@_typing.final
+class GeckoTerminalOHLCVRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TOKEN_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    TIMEFRAME_FIELD_NUMBER: _builtins.int
+    LIMIT_FIELD_NUMBER: _builtins.int
+    POOL_ADDRESS_FIELD_NUMBER: _builtins.int
+    QUOTE_FIELD_NUMBER: _builtins.int
+    token: _builtins.str
+    """Token symbol (e.g., "ALMANAK", "WETH")"""
+    chain: _builtins.str
+    """Chain name (e.g., "base", "ethereum")"""
+    timeframe: _builtins.str
+    """Candle timeframe (1m, 5m, 15m, 1h, 4h, 1d)"""
+    limit: _builtins.int
+    """Number of candles (max 1000)"""
+    pool_address: _builtins.str
+    """Explicit pool address (optional)"""
+    quote: _builtins.str
+    """Quote currency (default "USD")"""
+    def __init__(
+        self,
+        *,
+        token: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        timeframe: _builtins.str = ...,
+        limit: _builtins.int = ...,
+        pool_address: _builtins.str = ...,
+        quote: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "limit", b"limit", "pool_address", b"pool_address", "quote", b"quote", "timeframe", b"timeframe", "token", b"token"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GeckoTerminalOHLCVRequest: _TypeAlias = GeckoTerminalOHLCVRequest  # noqa: Y015
+
+@_typing.final
+class GeckoTerminalOHLCVCandle(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    OPEN_FIELD_NUMBER: _builtins.int
+    HIGH_FIELD_NUMBER: _builtins.int
+    LOW_FIELD_NUMBER: _builtins.int
+    CLOSE_FIELD_NUMBER: _builtins.int
+    VOLUME_FIELD_NUMBER: _builtins.int
+    timestamp: _builtins.int
+    """Unix timestamp in seconds"""
+    open: _builtins.str
+    high: _builtins.str
+    low: _builtins.str
+    close: _builtins.str
+    volume: _builtins.str
+    def __init__(
+        self,
+        *,
+        timestamp: _builtins.int = ...,
+        open: _builtins.str = ...,
+        high: _builtins.str = ...,
+        low: _builtins.str = ...,
+        close: _builtins.str = ...,
+        volume: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["close", b"close", "high", b"high", "low", b"low", "open", b"open", "timestamp", b"timestamp", "volume", b"volume"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GeckoTerminalOHLCVCandle: _TypeAlias = GeckoTerminalOHLCVCandle  # noqa: Y015
+
+@_typing.final
+class GeckoTerminalOHLCVResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    CANDLES_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def candles(self) -> _containers.RepeatedCompositeFieldContainer[Global___GeckoTerminalOHLCVCandle]: ...
+    def __init__(
+        self,
+        *,
+        candles: _abc.Iterable[Global___GeckoTerminalOHLCVCandle] | None = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["candles", b"candles"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GeckoTerminalOHLCVResponse: _TypeAlias = GeckoTerminalOHLCVResponse  # noqa: Y015
