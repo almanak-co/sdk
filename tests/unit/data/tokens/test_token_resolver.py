@@ -685,6 +685,17 @@ class TestResolveForSwap:
         assert token.chain == Chain.BSC
         assert token.address.lower() == "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"
 
+    def test_s_resolves_to_ws_for_swap(self, temp_cache_file):
+        """Test S resolves to WS (wrapped Sonic) on Sonic for swap."""
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        token = resolver.resolve_for_swap("S", "sonic")
+
+        assert token.symbol == "WS"
+        assert token.decimals == 18
+        assert token.is_wrapped_native is True
+        assert token.chain == Chain.SONIC
+        assert token.address.lower() == "0x039e2fb66102314ce7b64ce5ce3e5183bc94ad38"
+
     def test_non_native_token_unchanged(self, temp_cache_file):
         """Test non-native tokens are returned unchanged for swap."""
         resolver = TokenResolver(cache_file=temp_cache_file)
@@ -1127,6 +1138,30 @@ class TestResolveForSwapBalanceQueries:
         # resolve_for_swap
         swap_token = resolver.resolve_for_swap("BNB", "bsc")
         assert swap_token.symbol == "WBNB"
+
+
+    def test_s_stays_native_for_balance(self, temp_cache_file):
+        """Test S stays S for balance queries."""
+        resolver = TokenResolver(cache_file=temp_cache_file)
+
+        # Regular resolve
+        token = resolver.resolve("S", "sonic")
+        assert token.symbol == "S"
+        assert token.is_native is True
+
+        # resolve_for_swap
+        swap_token = resolver.resolve_for_swap("S", "sonic")
+        assert swap_token.symbol == "WS"
+
+    def test_ws_resolves_directly(self, temp_cache_file):
+        """Test wS resolves directly by symbol on Sonic (case-insensitive)."""
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        token = resolver.resolve("wS", "sonic")
+
+        assert token.symbol == "WS"
+        assert token.decimals == 18
+        assert token.address.lower() == "0x039e2fb66102314ce7b64ce5ce3e5183bc94ad38"
+        assert token.chain == Chain.SONIC
 
 
 class TestGatewayConnection:

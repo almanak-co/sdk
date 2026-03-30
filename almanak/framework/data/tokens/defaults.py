@@ -1087,6 +1087,34 @@ USDT0_MONAD = Token(
 )
 
 # =============================================================================
+# SONIC CHAIN TOKENS
+# =============================================================================
+
+# S (native gas token on Sonic)
+S_TOKEN = Token(
+    symbol="S",
+    name="Sonic",
+    decimals=18,
+    addresses={
+        "sonic": NATIVE_SENTINEL,
+    },
+    coingecko_id="sonic-3",
+    is_stablecoin=False,
+)
+
+# Wrapped Sonic (wS)
+WS = Token(
+    symbol="wS",
+    name="Wrapped Sonic",
+    decimals=18,
+    addresses={
+        "sonic": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",
+    },
+    coingecko_id="wrapped-sonic",
+    is_stablecoin=False,
+)
+
+# =============================================================================
 # BERACHAIN TOKENS
 # =============================================================================
 
@@ -1347,6 +1375,9 @@ DEFAULT_TOKENS: list[Token] = [
     # The main USDC and USDT Token definitions already include "solana" addresses,
     # so registering USDC_SOL/USDT_SOL would create duplicates. The variables are
     # kept above for backward-compatibility imports.
+    # Sonic chain tokens
+    S_TOKEN,
+    WS,
     # Mantle chain tokens
     MNT,
     WMNT,
