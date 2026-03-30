@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-03-30
+
+### Added
+- All 75 demo strategies now accessible via `almanak strat demo` - migrated 59 strategies from `strategies/demo/` into the packaged `almanak/demo_strategies/` directory (#1188)
+- Stub README.md generated for all demo strategies with Quick Start instructions (#1188)
+
+### Changed
+- Demo strategies now live exclusively in `almanak/demo_strategies/` - the `strategies/demo/` directory has been removed (#1188)
+- Updated all path references across framework CLI, tests, blueprints, and agent docs (#1188)
+
+### Fixed
+- V4 LP_OPEN on-chain sqrtPrice query, approve gas estimation, and slippage fallback (#1187)
+- EIP-55 checksum for 3 addresses in demo strategies (#1188)
+- `STRATEGY_METADATA` attribute access in strategy `__main__` blocks (#1188)
+- `force_action="supply"` in aave_borrow no longer blocked by unavailable price oracle (#1188)
+- `default_chain` indentation in 30 strategy decorators (#1188)
+
 ## [2.7.0] - 2026-03-30
 
 ### Added
