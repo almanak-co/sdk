@@ -2012,13 +2012,18 @@ def run(
             # Build kwargs, then filter to only those the strategy __init__ accepts.
             # This prevents TypeError for user strategies that don't accept **kwargs
             # or newer framework params like chains/chain_wallets.
-            init_kwargs: dict[str, Any] = {
+            # Base kwargs are always safe (IntentStrategy.__init__ requires them).
+            base_kwargs: dict[str, Any] = {
                 "config": config_instance,
                 "chain": primary_chain,
                 "wallet_address": strat_wallet,
-                "chains": list(chain_wallets.keys()) if chain_wallets else None,
-                "chain_wallets": chain_wallets or None,
             }
+            # Optional kwargs only included when non-None (multi-chain mode).
+            optional_kwargs: dict[str, Any] = {}
+            if chain_wallets:
+                optional_kwargs["chains"] = list(chain_wallets.keys())
+                optional_kwargs["chain_wallets"] = chain_wallets
+            init_kwargs = {**base_kwargs, **optional_kwargs}
             try:
                 sig = inspect.signature(strategy_class.__init__)
                 params = sig.parameters
@@ -2028,7 +2033,10 @@ def run(
                     # Filter to only accepted parameter names
                     init_kwargs = {k: v for k, v in init_kwargs.items() if k in params}
             except (ValueError, TypeError) as exc:
-                logger.debug("Strategy __init__ introspection failed, passing all kwargs: %s", exc)
+                # Introspection failed — fall back to base kwargs only to avoid
+                # injecting unexpected kwargs like 'chains' (VIB-1987).
+                logger.debug("Strategy __init__ introspection failed, using base kwargs only: %s", exc)
+                init_kwargs = base_kwargs
 
             strategy_instance = strategy_class(**init_kwargs)
         else:
