@@ -409,6 +409,9 @@ class SQLiteStore:
             if self._config.wal_mode:
                 conn.execute("PRAGMA journal_mode = WAL")
                 conn.execute("PRAGMA synchronous = NORMAL")
+                # Auto-checkpoint WAL every 100 pages to prevent unbounded growth
+                # when multiple processes write concurrently
+                conn.execute("PRAGMA wal_autocheckpoint = 100")
             else:
                 conn.execute(f"PRAGMA journal_mode = {self._config.journal_mode}")
 
