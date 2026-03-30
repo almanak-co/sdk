@@ -286,6 +286,8 @@ class CoinGeckoPriceSource(BasePriceSource):
 
     # Cached token registry (lazy-loaded)
     _token_registry: Any = None
+    # Reverse mapping: lowercased contract address -> CoinGecko ID (lazy-built)
+    _address_to_coingecko_id_map: dict[str, str] | None = None
 
     def __init__(
         self,
@@ -390,13 +392,15 @@ class CoinGeckoPriceSource(BasePriceSource):
         )
 
     def _resolve_token_id(self, token: str) -> str | None:
-        """Resolve token symbol to CoinGecko ID.
+        """Resolve token symbol or contract address to CoinGecko ID.
 
-        First tries to resolve from the token registry (dynamic, scalable),
-        then falls back to hardcoded mappings (for backward compatibility).
+        Resolution order:
+        1. Token registry by symbol (dynamic, uses Token.coingecko_id)
+        2. Hardcoded symbol mappings (backward compatibility)
+        3. Token registry by contract address (for callers that pass addresses)
 
         Args:
-            token: Token symbol (already uppercased)
+            token: Token symbol (already uppercased) or contract address
 
         Returns:
             CoinGecko ID if found, None otherwise
@@ -417,7 +421,34 @@ class CoinGeckoPriceSource(BasePriceSource):
                 return token_obj.coingecko_id
 
         # Fall back to hardcoded mappings (backward compatibility)
-        return GLOBAL_TOKEN_IDS.get(token)
+        result = GLOBAL_TOKEN_IDS.get(token)
+        if result:
+            return result
+
+        # If token looks like a valid EVM address, try address-based lookup in registry
+        _HEX_CHARS = frozenset("0123456789abcdefABCDEF")
+        if (
+            len(token) == 42
+            and token[:2].lower() == "0x"
+            and all(c in _HEX_CHARS for c in token[2:])
+            and CoinGeckoPriceSource._token_registry
+        ):
+            # Build reverse mapping (address -> coingecko_id) once and cache on the class
+            if CoinGeckoPriceSource._address_to_coingecko_id_map is None:
+                address_map: dict[str, str] = {}
+                for token_obj in CoinGeckoPriceSource._token_registry.list_tokens():
+                    if token_obj.coingecko_id:
+                        for chain_addr in token_obj.addresses.values():
+                            address_map[chain_addr.lower()] = token_obj.coingecko_id
+                CoinGeckoPriceSource._address_to_coingecko_id_map = address_map
+
+            addr_lower = token.lower()
+            coingecko_id = CoinGeckoPriceSource._address_to_coingecko_id_map.get(addr_lower)
+            if coingecko_id:
+                logger.debug("Resolved address %s to CoinGecko ID '%s'", addr_lower, coingecko_id)
+                return coingecko_id
+
+        return None
 
     async def get_price(self, token: str, quote: str = "USD", *, resolved_token: object | None = None) -> PriceResult:
         """Fetch the current price for a token.
