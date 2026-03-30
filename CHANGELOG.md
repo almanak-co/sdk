@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.8.1] - 2026-03-30
+
+### Added
+- Aave V3 parameter sweep lending demo on Polygon (#1152)
+- PancakeSwap V3 swap lifecycle demo on Base (#1171)
+- Uniswap V3 swap lifecycle demos on Optimism (#1172) and Base (#1176)
+- Crisis scenario backtest for Compound V3 lending on Polygon (#1173)
+
+### Fixed
+- Prevent unexpected `chains` kwarg in strategy `__init__` (#1178)
+- Add S and WS (Wrapped Sonic) tokens to default registry (#1180)
+- Add WAL auto-checkpoint to prevent SQLite state database bloat (#1184)
+
 ## [2.8.0] - 2026-03-30
 
 ### Added
