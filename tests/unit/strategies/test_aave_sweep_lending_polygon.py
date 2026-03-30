@@ -16,7 +16,7 @@ import pytest
 
 @pytest.fixture
 def strategy():
-    from almanak.demo_strategies.aave_sweep_lending_polygon.strategy import AaveSweepLendingPolygonStrategy
+    from strategies.demo.aave_sweep_lending_polygon.strategy import AaveSweepLendingPolygonStrategy
 
     strat = AaveSweepLendingPolygonStrategy.__new__(AaveSweepLendingPolygonStrategy)
     strat.config = {}
@@ -336,27 +336,27 @@ class TestPersistence:
 
 class TestMetadata:
     def test_strategy_name(self):
-        from almanak.demo_strategies.aave_sweep_lending_polygon.strategy import AaveSweepLendingPolygonStrategy
+        from strategies.demo.aave_sweep_lending_polygon.strategy import AaveSweepLendingPolygonStrategy
 
         assert AaveSweepLendingPolygonStrategy.STRATEGY_NAME == "demo_aave_sweep_lending_polygon"
 
     def test_supported_chains(self):
-        from almanak.demo_strategies.aave_sweep_lending_polygon.strategy import AaveSweepLendingPolygonStrategy
+        from strategies.demo.aave_sweep_lending_polygon.strategy import AaveSweepLendingPolygonStrategy
 
         assert "polygon" in AaveSweepLendingPolygonStrategy.STRATEGY_METADATA.supported_chains
 
     def test_supported_protocols(self):
-        from almanak.demo_strategies.aave_sweep_lending_polygon.strategy import AaveSweepLendingPolygonStrategy
+        from strategies.demo.aave_sweep_lending_polygon.strategy import AaveSweepLendingPolygonStrategy
 
         assert "aave_v3" in AaveSweepLendingPolygonStrategy.STRATEGY_METADATA.supported_protocols
 
     def test_default_chain(self):
-        from almanak.demo_strategies.aave_sweep_lending_polygon.strategy import AaveSweepLendingPolygonStrategy
+        from strategies.demo.aave_sweep_lending_polygon.strategy import AaveSweepLendingPolygonStrategy
 
         assert AaveSweepLendingPolygonStrategy.STRATEGY_METADATA.default_chain == "polygon"
 
     def test_intent_types_include_lending(self):
-        from almanak.demo_strategies.aave_sweep_lending_polygon.strategy import AaveSweepLendingPolygonStrategy
+        from strategies.demo.aave_sweep_lending_polygon.strategy import AaveSweepLendingPolygonStrategy
 
         types = AaveSweepLendingPolygonStrategy.STRATEGY_METADATA.intent_types
         assert "SUPPLY" in types

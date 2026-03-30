@@ -16,7 +16,7 @@ import pytest
 
 @pytest.fixture
 def strategy():
-    from almanak.demo_strategies.uniswap_v3_swap_optimism.strategy import UniswapV3SwapOptimismStrategy
+    from strategies.demo.uniswap_v3_swap_optimism.strategy import UniswapV3SwapOptimismStrategy
 
     strat = UniswapV3SwapOptimismStrategy.__new__(UniswapV3SwapOptimismStrategy)
     strat.config = {}
@@ -182,27 +182,27 @@ class TestTeardown:
 
 class TestMetadata:
     def test_strategy_name(self):
-        from almanak.demo_strategies.uniswap_v3_swap_optimism.strategy import UniswapV3SwapOptimismStrategy
+        from strategies.demo.uniswap_v3_swap_optimism.strategy import UniswapV3SwapOptimismStrategy
 
         assert UniswapV3SwapOptimismStrategy.STRATEGY_NAME == "demo_uniswap_v3_swap_optimism"
 
     def test_supported_chains(self):
-        from almanak.demo_strategies.uniswap_v3_swap_optimism.strategy import UniswapV3SwapOptimismStrategy
+        from strategies.demo.uniswap_v3_swap_optimism.strategy import UniswapV3SwapOptimismStrategy
 
         assert "optimism" in UniswapV3SwapOptimismStrategy.STRATEGY_METADATA.supported_chains
 
     def test_supported_protocols(self):
-        from almanak.demo_strategies.uniswap_v3_swap_optimism.strategy import UniswapV3SwapOptimismStrategy
+        from strategies.demo.uniswap_v3_swap_optimism.strategy import UniswapV3SwapOptimismStrategy
 
         assert "uniswap_v3" in UniswapV3SwapOptimismStrategy.STRATEGY_METADATA.supported_protocols
 
     def test_default_chain(self):
-        from almanak.demo_strategies.uniswap_v3_swap_optimism.strategy import UniswapV3SwapOptimismStrategy
+        from strategies.demo.uniswap_v3_swap_optimism.strategy import UniswapV3SwapOptimismStrategy
 
         assert UniswapV3SwapOptimismStrategy.STRATEGY_METADATA.default_chain == "optimism"
 
     def test_intent_types(self):
-        from almanak.demo_strategies.uniswap_v3_swap_optimism.strategy import UniswapV3SwapOptimismStrategy
+        from strategies.demo.uniswap_v3_swap_optimism.strategy import UniswapV3SwapOptimismStrategy
 
         meta = UniswapV3SwapOptimismStrategy.STRATEGY_METADATA
         assert "SWAP" in meta.intent_types
