@@ -1,7 +1,4 @@
 {
-    "strategy_id": "demo_aave_sweep_lending_polygon",
-    "strategy_name": "demo_aave_sweep_lending_polygon",
-    "description": "Aave V3 lending strategy for parameter sweep backtesting on Polygon",
     "supply_token": "WETH",
     "borrow_token": "USDC",
     "supply_amount": "0.01",
@@ -9,8 +6,6 @@
     "borrow_rate_threshold": "6.0",
     "ltv_target": "0.4",
     "max_borrow_cycles": 5,
-    "chain": "polygon",
-    "network": "mainnet",
     "anvil_funding": {
         "MATIC": 100,
         "WETH": 2,
