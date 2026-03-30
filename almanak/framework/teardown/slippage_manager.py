@@ -227,22 +227,36 @@ class EscalatingSlippageManager:
             # Sort by slippage to maintain monotonic escalation
             effective_levels.sort(key=lambda lc: lc.slippage)
 
+        # When the strategy explicitly requests higher slippage (e.g. Pendle YT
+        # with thin AMM liquidity), raise the auto-mode cap so the escalation
+        # ladder can reach the strategy-configured level.  Still bounded by the
+        # absolute max for safety.
+        effective_auto_max = self.config.auto_max_slippage
+        if intent_slippage is not None and intent_slippage > effective_auto_max:
+            effective_auto_max = min(intent_slippage, self.config.absolute_max_slippage)
+            logger.info(
+                "Raising auto-mode slippage cap from %.1f%% to %.1f%% (intent_slippage=%.1f%%).",
+                float(self.config.auto_max_slippage * 100),
+                float(effective_auto_max * 100),
+                float(intent_slippage * 100),
+            )
+
         for level_config in effective_levels:
             slippage = level_config.slippage
 
-            # In auto mode, don't exceed configured max
-            if is_auto_mode and slippage > self.config.auto_max_slippage:
+            # In auto mode, don't exceed effective max
+            if is_auto_mode and slippage > effective_auto_max:
                 logger.info(
-                    f"Auto mode: stopping at {self.config.auto_max_slippage:.1%} "
+                    f"Auto mode: stopping at {effective_auto_max:.1%} "
                     f"(level {level_config.level.value} requires {slippage:.1%})"
                 )
                 return ExecutionResult(
                     success=False,
-                    final_slippage=self.config.auto_max_slippage,
+                    final_slippage=effective_auto_max,
                     status="paused_auto_limit_reached",
                     attempts=attempts,
                     current_level=level_config.level,
-                    message=f"Auto-exit paused. Market requires {slippage:.1%} slippage but auto limit is {self.config.auto_max_slippage:.1%}. Manual intervention needed.",
+                    message=f"Auto-exit paused. Market requires {slippage:.1%} slippage but auto limit is {effective_auto_max:.1%}. Manual intervention needed.",
                 )
 
             # Check if approval is needed
