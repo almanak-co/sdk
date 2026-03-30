@@ -97,10 +97,14 @@ def permissions(working_dir: str, chain: str | None, output: str | None, output_
         chains = ["arbitrum"]
 
     # Load config.json for token extraction
-    from ..permissions.generator import load_strategy_config
+    from ..permissions.generator import discover_teardown_protocols, load_strategy_config
 
     config_path = working_path / "config.json"
     config = load_strategy_config(config_path)
+
+    # Teardown protocol discovery is done per-chain inside the manifest loop
+    # to avoid granting chain-specific protocols (e.g. Enso on Base) to all chains.
+    declared_protocols_lower = {p.lower() for p in protocols}
 
     # Generate manifest for each chain
     from ..permissions.generator import generate_manifest
@@ -142,11 +146,25 @@ def permissions(working_dir: str, chain: str | None, output: str | None, output_
     manifests = []
     try:
         for target_chain in chains:
+            # Per-chain teardown protocol discovery
+            td_protocols, td_warnings = discover_teardown_protocols(strategy_class, target_chain)
+            for w in td_warnings:
+                click.echo(f"  Warning: {w}", err=True)
+            chain_extra = td_protocols - declared_protocols_lower
+            chain_protocols = protocols if not chain_extra else list(set(protocols) | chain_extra)
+
+            if chain_extra:
+                missing_str = ", ".join(sorted(chain_extra))
+                click.echo(
+                    f"  Teardown on {target_chain} uses protocols not in supported_protocols: [{missing_str}]",
+                    err=True,
+                )
+
             click.echo(f"Generating permissions for {strategy_name} on {target_chain}...", err=True)
             manifest = generate_manifest(
                 strategy_name=strategy_name,
                 chain=target_chain,
-                supported_protocols=protocols,
+                supported_protocols=chain_protocols,
                 intent_types=intent_types,
                 config=config,
             )

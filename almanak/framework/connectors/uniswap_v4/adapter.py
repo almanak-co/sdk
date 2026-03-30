@@ -494,12 +494,13 @@ class UniswapV4Adapter:
 
             # Compute max amounts with slippage buffer.
             # On-chain sqrtPrice is accurate so 5% covers normal price movement.
-            # Estimated sqrtPrice can diverge from actual pool state, so use 15%
-            # to avoid MaximumAmountExceeded reverts from the PoolManager.
+            # Estimated sqrtPrice (oracle-based) can diverge significantly from
+            # actual V4 pool state, so use 30% to avoid MaximumAmountExceeded
+            # reverts from the PoolManager.
             if used_onchain_price:
                 lp_default_slippage = Decimal("0.05")  # 5% for on-chain price
             else:
-                lp_default_slippage = Decimal("0.15")  # 15% for estimated price
+                lp_default_slippage = Decimal("0.30")  # 30% for estimated price
             intent_slippage = getattr(intent, "max_slippage", None)
             if intent_slippage is None:
                 intent_slippage = Decimal("0.005")
@@ -561,6 +562,7 @@ class UniswapV4Adapter:
                 "hooks": hooks,
                 "gas_estimate": sum(tx.gas_estimate for tx in transactions),
                 "protocol_version": "v4",
+                "effective_slippage_bps": slippage_bps,
             }
             if warnings:
                 metadata["warnings"] = warnings

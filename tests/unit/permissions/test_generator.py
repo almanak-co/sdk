@@ -1,19 +1,29 @@
 """Tests for the permission manifest generator."""
 
+from decimal import Decimal
+
 import pytest
 
+from almanak.framework.connectors.enso.adapter import ENSO_FUNCTION_SELECTORS
+from almanak.framework.connectors.enso.client import CHAIN_MAPPING, ROUTER_ADDRESSES
 from almanak.framework.execution.signer.safe.constants import (
     MULTISEND_ADDRESSES,
     MULTISEND_SELECTOR,
     SafeOperation,
 )
 from almanak.framework.intents.compiler import ERC20_APPROVE_SELECTOR
-from almanak.framework.permissions.generator import generate_manifest
+from almanak.framework.intents.vocabulary import SwapIntent
+from almanak.framework.permissions.generator import (
+    _overrides_teardown,
+    discover_teardown_protocols,
+    generate_manifest,
+)
 from almanak.framework.permissions.models import (
     ContractPermission,
     FunctionPermission,
     PermissionManifest,
 )
+from almanak.framework.teardown.models import TeardownMode
 
 
 class TestGenerateManifest:
@@ -49,7 +59,7 @@ class TestGenerateManifest:
         assert MULTISEND_SELECTOR in selectors
 
     def test_manifest_excludes_enso_when_not_used(self):
-        """Enso delegates should not appear when enso is not in protocols."""
+        """Enso Router should not appear when enso is not in protocols."""
         manifest = generate_manifest(
             strategy_name="test",
             chain="arbitrum",
@@ -59,18 +69,24 @@ class TestGenerateManifest:
         enso_perms = [p for p in manifest.permissions if "enso" in p.label.lower()]
         assert len(enso_perms) == 0
 
-    def test_manifest_includes_enso_delegates(self):
-        """Enso delegates should appear when enso is in protocols."""
+    def test_manifest_includes_enso_router(self):
+        """Enso Router should appear with scoped CALL when enso is in protocols."""
         manifest = generate_manifest(
             strategy_name="test",
             chain="arbitrum",
             supported_protocols=["enso"],
             intent_types=["SWAP"],
         )
-        enso_perms = [p for p in manifest.permissions if "enso" in p.label.lower()]
-        assert len(enso_perms) >= 1
-        for perm in enso_perms:
-            assert perm.operation == SafeOperation.DELEGATE_CALL
+        chain_id = CHAIN_MAPPING["arbitrum"]
+        router_addr = ROUTER_ADDRESSES[chain_id].lower()
+        enso_perms = [p for p in manifest.permissions if p.target == router_addr]
+        assert len(enso_perms) == 1
+        perm = enso_perms[0]
+        assert perm.operation == SafeOperation.CALL
+        assert perm.label == "Enso Router"
+        # Should have exactly the 4 Enso function selectors
+        selectors = {s.selector for s in perm.function_selectors}
+        assert selectors == set(ENSO_FUNCTION_SELECTORS.values())
 
     def test_deterministic_output(self):
         """Two runs should produce the same permissions (order, content)."""
@@ -252,8 +268,8 @@ class TestZodiacTargetConversion:
         """DELEGATECALL + no selectors -> clearance=1 (Target), executionOptions=2."""
         manifest = self._make_manifest([
             ContractPermission(
-                target="0x7663fd40081dccd47805c00e613b6beac3b87f08",
-                label="Enso Delegate",
+                target="0x38869bf66a61cf6bdb996a6ae40d5853fd43b526",
+                label="MultiSend (example)",
                 operation=1,
                 send_allowed=False,
                 function_selectors=[],
@@ -357,8 +373,8 @@ class TestZodiacTargetConversion:
                     assert "selector" in fn
                     assert fn["wildcarded"] is True
 
-    def test_enso_delegates_get_target_clearance(self):
-        """Enso delegates (no selectors) should get clearance=1."""
+    def test_enso_router_gets_function_clearance(self):
+        """Enso Router should get clearance=2 (Function) with CALL+Send and 4 selectors."""
         manifest = generate_manifest(
             strategy_name="test",
             chain="arbitrum",
@@ -366,18 +382,18 @@ class TestZodiacTargetConversion:
             intent_types=["SWAP"],
         )
         targets = manifest.to_zodiac_targets()
-        enso_targets = [
-            t for t in targets
-            if t["address"].lower() in {
-                "0x7663fd40081dccd47805c00e613b6beac3b87f08",
-                "0xa2f4f9c6ec598ca8c633024f8851c79ca5f43e48",
-            }
-        ]
-        assert len(enso_targets) > 0, "Expected at least one Enso delegate target"
-        for t in enso_targets:
-            assert t["clearance"] == 1  # Target-level
-            assert t["executionOptions"] == 2  # DelegateCall
-            assert "functions" not in t
+        chain_id = CHAIN_MAPPING["arbitrum"]
+        router_addr = ROUTER_ADDRESSES[chain_id]
+        from web3 import Web3
+        checksummed = Web3.to_checksum_address(router_addr)
+        enso_targets = [t for t in targets if t["address"] == checksummed]
+        assert len(enso_targets) == 1, "Expected exactly one Enso Router target"
+        t = enso_targets[0]
+        assert t["clearance"] == 2  # Function-level
+        assert t["executionOptions"] == 1  # CALL + Send (native-token swaps carry value)
+        assert len(t["functions"]) == len(ENSO_FUNCTION_SELECTORS)
+        target_selectors = {f["selector"] for f in t["functions"]}
+        assert target_selectors == set(ENSO_FUNCTION_SELECTORS.values())
 
     def test_non_evm_chain_returns_empty(self):
         """Non-EVM chains (Solana) should return empty zodiac targets."""
@@ -396,3 +412,185 @@ class TestZodiacTargetConversion:
             chain="solana",
         )
         assert manifest.to_zodiac_targets() == []
+
+
+# ---------------------------------------------------------------------------
+# Teardown protocol discovery
+# ---------------------------------------------------------------------------
+
+
+class _FakeBaseStrategy:
+    """Simulates IntentStrategy base class with default generate_teardown_intents."""
+
+    def generate_teardown_intents(self, mode, market=None):
+        return []
+
+
+class _StrategyWithEnsoTeardown(_FakeBaseStrategy):
+    """Strategy that uses enso only in teardown."""
+
+    def generate_teardown_intents(self, mode, market=None):
+        return [
+            SwapIntent(
+                from_token="ALMANAK",
+                to_token="USDC",
+                amount=Decimal("100"),
+                max_slippage=Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005"),
+                protocol="enso",
+            ),
+        ]
+
+
+class _StrategyWithMultiProtocolTeardown(_FakeBaseStrategy):
+    """Strategy using different protocols for different teardown modes."""
+
+    def generate_teardown_intents(self, mode, market=None):
+        if mode == TeardownMode.SOFT:
+            return [
+                SwapIntent(
+                    from_token="WETH",
+                    to_token="USDC",
+                    amount=Decimal("1"),
+                    max_slippage=Decimal("0.005"),
+                    protocol="uniswap_v3",
+                ),
+            ]
+        return [
+            SwapIntent(
+                from_token="WETH",
+                to_token="USDC",
+                amount=Decimal("1"),
+                max_slippage=Decimal("0.03"),
+                protocol="enso",
+            ),
+        ]
+
+
+class _StrategyNoTeardownOverride(_FakeBaseStrategy):
+    """Strategy that does not override generate_teardown_intents."""
+
+    pass
+
+
+class _TeardownMixin:
+    """Shared mixin that provides teardown logic (simulates inherited teardown)."""
+
+    def generate_teardown_intents(self, mode, market=None):
+        return [
+            SwapIntent(
+                from_token="WETH",
+                to_token="USDC",
+                amount=Decimal("1"),
+                max_slippage=Decimal("0.01"),
+                protocol="enso",
+            ),
+        ]
+
+
+class _StrategyWithInheritedTeardown(_TeardownMixin, _FakeBaseStrategy):
+    """Strategy that inherits teardown from a mixin (not defined directly on class)."""
+
+    pass
+
+
+class _StrategyOldSignature(_FakeBaseStrategy):
+    """Strategy using old-style teardown signature (no market param)."""
+
+    def generate_teardown_intents(self, mode):
+        return [
+            SwapIntent(
+                from_token="ALMANAK",
+                to_token="USDC",
+                amount=Decimal("100"),
+                max_slippage=Decimal("0.03"),
+                protocol="enso",
+            ),
+        ]
+
+
+class _StrategyBrokenTeardown(_FakeBaseStrategy):
+    """Strategy whose teardown raises."""
+
+    def generate_teardown_intents(self, mode, market=None):
+        raise RuntimeError("needs live market data")
+
+
+class TestDiscoverTeardownProtocols:
+    """Test discover_teardown_protocols helper."""
+
+    def test_discovers_enso_from_teardown(self):
+        """Enso protocol should be discovered when only used in teardown."""
+        protocols, warnings = discover_teardown_protocols(_StrategyWithEnsoTeardown, "base")
+        assert "enso" in protocols
+        assert not warnings
+
+    def test_discovers_multiple_protocols(self):
+        """Both SOFT and HARD mode protocols should be discovered."""
+        protocols, warnings = discover_teardown_protocols(_StrategyWithMultiProtocolTeardown, "arbitrum")
+        assert "uniswap_v3" in protocols
+        assert "enso" in protocols
+
+    def test_no_override_returns_empty(self):
+        """Strategy inheriting a no-op teardown should return empty set with advisory warning."""
+        protocols, warnings = discover_teardown_protocols(_StrategyNoTeardownOverride, "arbitrum")
+        assert protocols == set()
+        # Advisory warning emitted because introspection succeeded but found no protocols
+        assert any("no protocols" in w for w in warnings)
+
+    def test_broken_teardown_returns_warnings(self):
+        """Teardown that raises should return warnings, not crash."""
+        protocols, warnings = discover_teardown_protocols(_StrategyBrokenTeardown, "base")
+        assert len(warnings) > 0
+        assert "needs live market data" in warnings[0]
+
+    def test_class_without_teardown_method(self):
+        """Class with no generate_teardown_intents at all should return empty."""
+
+        class PlainClass:
+            pass
+
+        protocols, warnings = discover_teardown_protocols(PlainClass, "arbitrum")
+        assert protocols == set()
+        assert not warnings
+
+    def test_discovers_inherited_teardown(self):
+        """Teardown inherited from a mixin should be discovered."""
+        protocols, warnings = discover_teardown_protocols(_StrategyWithInheritedTeardown, "base")
+        assert "enso" in protocols
+
+    def test_discovers_old_signature_teardown(self):
+        """Old-style teardown (no market param) should be discovered via fallback."""
+        protocols, warnings = discover_teardown_protocols(_StrategyOldSignature, "base")
+        assert "enso" in protocols
+        assert not warnings
+
+
+class TestOverridesTeardown:
+    """Test _overrides_teardown helper."""
+
+    def test_detects_override(self):
+        assert _overrides_teardown(_StrategyWithEnsoTeardown) is True
+
+    def test_inherits_from_non_framework_base(self):
+        """Teardown inherited from a non-framework base is still detected."""
+        # _FakeBaseStrategy is a test class (not almanak.framework.*),
+        # so _StrategyNoTeardownOverride inherits a "real" teardown via MRO.
+        assert _overrides_teardown(_StrategyNoTeardownOverride) is True
+
+    def test_detects_inherited_from_mixin(self):
+        """Teardown from a mixin should be detected as an override."""
+        assert _overrides_teardown(_StrategyWithInheritedTeardown) is True
+
+    def test_framework_base_not_detected(self):
+        """A class whose teardown comes only from a framework base returns False."""
+        # Simulate by checking a class whose module is in almanak.framework
+        from almanak.framework.strategies.stateless_strategy import StatelessStrategy
+
+        assert _overrides_teardown(StatelessStrategy) is False
+
+    def test_plain_class(self):
+
+        class NoMethod:
+            pass
+
+        assert _overrides_teardown(NoMethod) is False

@@ -51,8 +51,8 @@ _SWAP_PROTOCOLS = {
     "traderjoe_v2",
     "pendle",
     "curve",
-    # Note: Enso is excluded - it uses DELEGATECALL via the Enso delegate
-    # contract, which is added statically by the generator (not via compilation).
+    # Note: Enso is excluded - its Router address is per-chain and added
+    # statically by the generator (not via synthetic intent compilation).
 }
 _LP_PROTOCOLS = {
     "uniswap_v3",

@@ -634,6 +634,63 @@ class TestAdapterLPCompilation:
             adapter._parse_pool("WETH-USDC")
 
 
+    def test_compile_lp_open_estimated_price_uses_30pct_slippage(self, adapter):
+        """When on-chain sqrtPrice is unavailable, the adapter uses a 30% slippage buffer."""
+        from almanak.framework.intents.vocabulary import LPOpenIntent
+
+        intent = LPOpenIntent(
+            pool="WETH/USDC/3000",
+            amount0=Decimal("0.1"),
+            amount1=Decimal("200"),
+            range_lower=Decimal("1500"),
+            range_upper=Decimal("2500"),
+            protocol="uniswap_v4",
+        )
+
+        price_oracle = {"WETH": Decimal("2000"), "USDC": Decimal("1")}
+        # adapter has no rpc_url -> used_onchain_price=False -> 30% buffer
+        bundle = adapter.compile_lp_open_intent(intent, price_oracle)
+
+        assert bundle.intent_type == "LP_OPEN"
+        assert len(bundle.transactions) > 0
+        # Verify 30% slippage is recorded in metadata
+        assert bundle.metadata.get("effective_slippage_bps") == 3000
+
+    def test_compile_lp_open_onchain_price_uses_5pct_slippage(self, mock_resolver):
+        """When on-chain sqrtPrice is available, the adapter uses a 5% slippage buffer."""
+        from unittest.mock import patch
+
+        from almanak.framework.connectors.uniswap_v4.adapter import UniswapV4Adapter, UniswapV4Config
+        from almanak.framework.intents.vocabulary import LPOpenIntent
+
+        config = UniswapV4Config(
+            chain="arbitrum",
+            wallet_address="0x1234567890abcdef1234567890abcdef12345678",
+            rpc_url="http://localhost:8545",
+        )
+        adapter = UniswapV4Adapter(config=config, token_resolver=mock_resolver)
+
+        intent = LPOpenIntent(
+            pool="WETH/USDC/3000",
+            amount0=Decimal("0.1"),
+            amount1=Decimal("200"),
+            range_lower=Decimal("1500"),
+            range_upper=Decimal("2500"),
+            protocol="uniswap_v4",
+        )
+
+        price_oracle = {"WETH": Decimal("2000"), "USDC": Decimal("1")}
+
+        # Mock the SDK's get_pool_sqrt_price to return a valid value
+        with patch.object(adapter._sdk, "get_pool_sqrt_price", return_value=2**96):
+            bundle = adapter.compile_lp_open_intent(intent, price_oracle)
+
+        assert bundle.intent_type == "LP_OPEN"
+        assert len(bundle.transactions) > 0
+        # Verify 5% slippage is recorded in metadata
+        assert bundle.metadata.get("effective_slippage_bps") == 500
+
+
 # =============================================================================
 # Receipt parser LP extraction tests
 # =============================================================================

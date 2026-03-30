@@ -7,6 +7,7 @@ gateway; strategy containers only see the results.
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Any
 
@@ -55,6 +56,8 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         self.settings = settings
         self._price_aggregator: Any = None
         self._balance_providers: dict[str, object] = {}
+        self._ohlcv_provider: Any = None
+        self._ohlcv_lock = threading.Lock()
         self._initialized = False
         self.wallet_registry: object | None = None
 
@@ -62,10 +65,50 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         """Close resources held by MarketService (HTTP sessions, etc.)."""
         if self._price_aggregator is not None and hasattr(self._price_aggregator, "close"):
             await self._price_aggregator.close()
+        if self._ohlcv_provider is not None and hasattr(self._ohlcv_provider, "close"):
+            await self._ohlcv_provider.close()
+            self._ohlcv_provider = None
         for provider in self._balance_providers.values():
             if hasattr(provider, "close"):
                 await provider.close()
         self._balance_providers.clear()
+
+    def _get_ohlcv_provider(self) -> Any:
+        """Get or create the multi-provider OHLCV routing provider.
+
+        Uses OHLCVRouter with GeckoTerminal (DEX) and Binance (CEX) so
+        indicators work for both exchange-listed and DEX-only tokens.
+        """
+        if self._ohlcv_provider is not None:
+            return self._ohlcv_provider
+
+        with self._ohlcv_lock:
+            # Double-check after acquiring lock
+            if self._ohlcv_provider is not None:
+                return self._ohlcv_provider
+
+            from almanak.framework.data.ohlcv.binance_provider import BinanceOHLCVProvider
+            from almanak.framework.data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
+            from almanak.framework.data.ohlcv.ohlcv_router import OHLCVRouter
+            from almanak.framework.data.ohlcv.routing_provider import RoutingOHLCVProvider
+
+            chain = self.settings.chains[0] if self.settings.chains else "ethereum"
+
+            gecko = GeckoTerminalOHLCVProvider()
+            binance = BinanceOHLCVProvider()
+            binance_adapter = _BinanceDataAdapter(binance)
+
+            router = OHLCVRouter(default_chain=chain)
+            router.register_provider(binance_adapter)  # name="binance"
+            router.register_provider(gecko)  # name="geckoterminal"
+
+            self._ohlcv_provider = RoutingOHLCVProvider(
+                router=router,
+                chain=chain,
+                closeable_providers=[gecko, binance],
+            )
+            logger.info("OHLCV routing provider initialised (Binance + GeckoTerminal) chain=%s", chain)
+            return self._ohlcv_provider
 
     async def _ensure_initialized(self) -> None:
         """Lazy initialization of data providers."""
@@ -397,15 +440,17 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
 
         try:
             if indicator_type == "RSI":
-                # RSI indicator
-                from almanak.framework.data.indicators.rsi import CoinGeckoOHLCVProvider, RSICalculator
+                # RSI indicator — uses multi-provider OHLCV routing so both
+                # CEX-listed tokens (via Binance) and DEX-only tokens (via
+                # GeckoTerminal) are supported.
+                from almanak.framework.data.indicators.rsi import RSICalculator
 
                 period = int(params.get("period", "14"))
                 timeframe = params.get("timeframe", "1h")
 
-                async with CoinGeckoOHLCVProvider() as ohlcv_provider:
-                    indicator = RSICalculator(ohlcv_provider=ohlcv_provider, default_period=period)
-                    value = await indicator.calculate_rsi(token, period=period, timeframe=timeframe)
+                ohlcv_provider = self._get_ohlcv_provider()
+                indicator = RSICalculator(ohlcv_provider=ohlcv_provider, default_period=period)
+                value = await indicator.calculate_rsi(token, period=period, timeframe=timeframe)
 
                 return gateway_pb2.IndicatorResponse(
                     value=str(value),
@@ -422,3 +467,65 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return gateway_pb2.IndicatorResponse()
+
+
+class _BinanceDataAdapter:
+    """Adapt BinanceOHLCVProvider to the DataProvider protocol for OHLCVRouter.
+
+    BinanceOHLCVProvider only implements OHLCVProvider (async get_ohlcv).
+    The router requires sync DataProvider.fetch().  This thin wrapper bridges
+    the two using the same async-to-sync pattern as GatewayOHLCVDataProvider.
+    """
+
+    def __init__(self, provider: Any) -> None:
+        self._provider = provider
+
+    @property
+    def name(self) -> str:
+        return "binance"
+
+    @property
+    def data_class(self) -> Any:
+        from almanak.framework.data.models import DataClassification
+
+        return DataClassification.INFORMATIONAL
+
+    def fetch(self, **kwargs: object) -> Any:
+        import concurrent.futures
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.models import DataEnvelope, DataMeta
+
+        token = str(kwargs.get("token", ""))
+        quote = str(kwargs.get("quote", "USD"))
+        timeframe = str(kwargs.get("timeframe", "1h"))
+        limit = int(kwargs.get("limit", 100))  # type: ignore[call-overload]
+
+        start = time.monotonic()
+        coro = self._provider.get_ohlcv(token=token, quote=quote, timeframe=timeframe, limit=limit)
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    candles = pool.submit(asyncio.run, coro).result()
+            else:
+                candles = loop.run_until_complete(coro)
+        except RuntimeError:
+            candles = asyncio.run(coro)
+
+        latency_ms = int((time.monotonic() - start) * 1000)
+        meta = DataMeta(
+            source=self.name,
+            observed_at=datetime.now(UTC),
+            finality="off_chain",
+            staleness_ms=0,
+            latency_ms=latency_ms,
+            confidence=1.0,
+            cache_hit=False,
+        )
+        return DataEnvelope(value=candles, meta=meta)
+
+    def health(self) -> dict[str, object]:
+        if hasattr(self._provider, "get_health_metrics"):
+            return self._provider.get_health_metrics()
+        return {}
