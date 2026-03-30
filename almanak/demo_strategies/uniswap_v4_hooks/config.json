@@ -2,7 +2,7 @@
     "pool": "WETH/USDC/3000",
     "_hook_address_note": "Zero address = standard pool (no hooks). Replace with a real hook address to test hook-aware LP.",
     "hook_address": "0x0000000000000000000000000000000000000000",
-    "range_width_pct": 0.3,
+    "range_width_pct": 0.30,
     "amount0": "0.01",
     "amount1": "30",
     "fee_hint": null,

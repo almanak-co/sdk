@@ -159,8 +159,10 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
         try:
             token0_price_usd = market.price(self.token0_symbol)
             token1_price_usd = market.price(self.token1_symbol)
+            if not token1_price_usd:
+                return Intent.hold(reason=f"Invalid price for {self.token1_symbol}")
             current_price = token0_price_usd / token1_price_usd
-        except (ValueError, KeyError) as e:
+        except (ValueError, KeyError, ZeroDivisionError) as e:
             return Intent.hold(reason=f"Price data unavailable: {e}")
 
         if self.force_action == "open":
@@ -247,10 +249,11 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
 
     def _create_collect_fees_intent(self) -> Intent:
         """Create LP_COLLECT_FEES intent for V4 PositionManager."""
-        logger.info(f"LP_COLLECT_FEES (V4): pool={self.pool}")
+        logger.info(f"LP_COLLECT_FEES (V4): pool={self.pool} position={self._current_position_id}")
         return Intent.collect_fees(
             pool=self.pool,
             protocol="uniswap_v4",
+            protocol_params={"position_id": self._current_position_id},
         )
 
     # =========================================================================
@@ -307,6 +310,10 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
             state["current_position_id"] = self._current_position_id
             if "position_opened_at" not in state:
                 state["position_opened_at"] = datetime.now(UTC).isoformat()
+        else:
+            # Clear stale position after LP_CLOSE so restarts don't see a phantom position
+            state.pop("current_position_id", None)
+            state.pop("position_opened_at", None)
         return state
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:

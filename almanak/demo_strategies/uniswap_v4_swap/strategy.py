@@ -58,7 +58,7 @@ class UniswapV4SwapStrategy(IntentStrategy):
     """Uniswap V4 swap demo: alternates BUY and SELL each iteration.
 
     Configuration Parameters (from config.json):
-        trade_size_usd: Amount to trade per signal (default: 3)
+        trade_size_usd: Amount to trade per signal (default: 1)
         max_slippage_bps: Maximum slippage in basis points (default: 200 = 2%)
         base_token: Token to buy/sell (default: WETH)
         quote_token: Stable token (default: USDC)
@@ -70,7 +70,7 @@ class UniswapV4SwapStrategy(IntentStrategy):
         if not hasattr(self, "state") or self.state is None:
             self.state: dict[str, Any] = {}
 
-        self.trade_size_usd = Decimal(str(self.get_config("trade_size_usd", "3")))
+        self.trade_size_usd = Decimal(str(self.get_config("trade_size_usd", "1")))
         self.max_slippage_bps = int(self.get_config("max_slippage_bps", 200))
         self.base_token: str = self.get_config("base_token", "WETH")
         self.quote_token: str = self.get_config("quote_token", "USDC")
@@ -158,6 +158,22 @@ class UniswapV4SwapStrategy(IntentStrategy):
         elif from_token == self.base_token:
             self.state["last_action"] = "SELL"
             logger.info("SELL executed successfully")
+
+    # =========================================================================
+    # STATE PERSISTENCE
+    # =========================================================================
+
+    def get_persistent_state(self) -> dict[str, Any]:
+        state = super().get_persistent_state() if hasattr(super(), "get_persistent_state") else {}
+        if self.state.get("last_action"):
+            state["last_action"] = self.state["last_action"]
+        return state
+
+    def load_persistent_state(self, state: dict[str, Any]) -> None:
+        if hasattr(super(), "load_persistent_state"):
+            super().load_persistent_state(state)
+        if "last_action" in state:
+            self.state["last_action"] = state["last_action"]
 
     # =========================================================================
     # TEARDOWN SUPPORT

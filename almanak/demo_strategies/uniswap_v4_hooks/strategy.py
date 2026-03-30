@@ -175,8 +175,10 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
         try:
             token0_price_usd = market.price(self.token0_symbol)
             token1_price_usd = market.price(self.token1_symbol)
+            if not token1_price_usd:
+                return Intent.hold(reason=f"Invalid price for {self.token1_symbol}")
             current_price = token0_price_usd / token1_price_usd
-        except (ValueError, KeyError) as e:
+        except (ValueError, KeyError, ZeroDivisionError) as e:
             return Intent.hold(reason=f"Price data unavailable: {e}")
 
         # If we have a position, monitor it
@@ -272,6 +274,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
             pool=self.pool,
             collect_fees=True,
             protocol="uniswap_v4",
+            protocol_params={"hook_data": hook_data},
         )
 
     # =========================================================================
@@ -332,6 +335,9 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
             state["current_position_id"] = self._current_position_id
             if "position_opened_at" not in state:
                 state["position_opened_at"] = datetime.now(UTC).isoformat()
+        else:
+            state.pop("current_position_id", None)
+            state.pop("position_opened_at", None)
         return state
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
@@ -391,12 +397,14 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
         logger.info(
             f"V4 hooked teardown: closing position {self._current_position_id} (mode={mode.value})"
         )
+        hook_data = self._encoder.encode(fee_hint=self.fee_hint)
         return [
             Intent.lp_close(
                 position_id=self._current_position_id,
                 pool=self.pool,
                 collect_fees=True,
                 protocol="uniswap_v4",
+                protocol_params={"hook_data": hook_data},
             )
         ]
 
