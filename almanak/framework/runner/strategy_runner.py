@@ -1921,6 +1921,22 @@ class StrategyRunner:
         logger.info("Shutdown requested for strategy runner")
         self._shutdown_requested = True
 
+    def _request_teardown_failure_shutdown(self, error_message: str) -> None:
+        """Record error terminal state and request shutdown after teardown failure.
+
+        In managed deployments (K8s pods), this writes ERROR state so the platform
+        picks up the failure, then shuts down to free cluster resources.
+
+        In local development, the runner stays alive so the developer can inspect
+        state or retry — matching the circuit breaker pattern (see _check_circuit_breaker).
+        """
+        if not self._is_managed_deployment():
+            logger.warning("Teardown failed in local mode — runner stays alive for debugging: %s", error_message)
+            return
+        self._terminal_lifecycle_state = "ERROR"
+        self._terminal_lifecycle_error_message = error_message
+        self.request_shutdown()
+
     def _is_managed_deployment(self) -> bool:
         """Return True if running as a deployed agent (not local development).
 
@@ -3531,7 +3547,11 @@ class StrategyRunner:
         except Exception as e:
             logger.error(f"Failed to generate teardown intents for {strategy_id}: {e}")
             if request:
-                manager.mark_failed(strategy_id, error=str(e))
+                try:
+                    manager.mark_failed(strategy_id, error=str(e))
+                except Exception:
+                    logger.warning("Failed to update teardown state for %s", strategy_id, exc_info=True)
+            self._request_teardown_failure_shutdown(str(e))
             return self._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
 
         if not teardown_intents:
@@ -3594,7 +3614,11 @@ class StrategyRunner:
                     manager.mark_completed(strategy_id, result={"intents": len(teardown_intents)})
             else:
                 if request:
-                    manager.mark_failed(strategy_id, error=result.error or "execution failed")
+                    try:
+                        manager.mark_failed(strategy_id, error=result.error or "execution failed")
+                    except Exception:
+                        logger.warning("Failed to update teardown state for %s", strategy_id, exc_info=True)
+                self._request_teardown_failure_shutdown(result.error or "multi-chain teardown execution failed")
             return result
         else:
             # Single-chain: route through TeardownManager for safety guarantees
@@ -3692,9 +3716,15 @@ class StrategyRunner:
             if not validation.all_passed:
                 logger.error(f"🛑 Teardown safety validation failed: {validation.blocked_reason}")
                 if request:
-                    state_manager.mark_failed(
-                        strategy_id, error=f"Safety validation failed: {validation.blocked_reason}"
-                    )
+                    try:
+                        state_manager.mark_failed(
+                            strategy_id, error=f"Safety validation failed: {validation.blocked_reason}"
+                        )
+                    except Exception:
+                        logger.warning("Failed to update teardown state for %s", strategy_id, exc_info=True)
+                self._request_teardown_failure_shutdown(
+                    f"Teardown safety validation failed: {validation.blocked_reason}"
+                )
                 return self._create_error_result(
                     strategy_id,
                     IterationStatus.STRATEGY_ERROR,
@@ -3772,7 +3802,11 @@ class StrategyRunner:
             except Exception as verify_err:
                 logger.error(f"Post-teardown verification failed: {verify_err}")
                 if request:
-                    state_manager.mark_failed(strategy_id, error=f"Post-teardown verification failed: {verify_err}")
+                    try:
+                        state_manager.mark_failed(strategy_id, error=f"Post-teardown verification failed: {verify_err}")
+                    except Exception:
+                        logger.warning("Failed to update teardown state for %s", strategy_id, exc_info=True)
+                self._request_teardown_failure_shutdown(f"Post-teardown verification failed: {verify_err}")
                 return self._create_error_result(
                     strategy_id,
                     IterationStatus.STRATEGY_ERROR,
@@ -3797,7 +3831,11 @@ class StrategyRunner:
         except Exception as e:
             logger.error(f"🛑 TeardownManager execution failed for {strategy_id}: {e}")
             if request:
-                state_manager.mark_failed(strategy_id, error=str(e))
+                try:
+                    state_manager.mark_failed(strategy_id, error=str(e))
+                except Exception:
+                    logger.warning("Failed to update teardown state for %s", strategy_id, exc_info=True)
+            self._request_teardown_failure_shutdown(str(e))
             return self._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
 
         # Map TeardownResult -> IterationResult
@@ -3828,7 +3866,11 @@ class StrategyRunner:
         else:
             logger.warning(f"🛑 {strategy_id} teardown incomplete via TeardownManager: {teardown_result.error}")
             if request:
-                state_manager.mark_failed(strategy_id, error=teardown_result.error or "teardown failed")
+                try:
+                    state_manager.mark_failed(strategy_id, error=teardown_result.error or "teardown failed")
+                except Exception:
+                    logger.warning("Failed to update teardown state for %s", strategy_id, exc_info=True)
+            self._request_teardown_failure_shutdown(teardown_result.error or "teardown failed")
             return IterationResult(
                 status=IterationStatus.STRATEGY_ERROR,
                 error=teardown_result.error,
@@ -3938,7 +3980,11 @@ class StrategyRunner:
             else:
                 logger.warning(f"🛑 {strategy_id} teardown incomplete - manual intervention may be required")
                 if request:
-                    state_manager.mark_failed(strategy_id, error=last_result.error or "execution failed")
+                    try:
+                        state_manager.mark_failed(strategy_id, error=last_result.error or "execution failed")
+                    except Exception:
+                        logger.warning("Failed to update teardown state for %s", strategy_id, exc_info=True)
+                self._request_teardown_failure_shutdown(last_result.error or "inline teardown execution failed")
             return last_result
 
         # Edge case: no intents executed (all positions already closed)
