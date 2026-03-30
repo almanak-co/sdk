@@ -3053,6 +3053,58 @@ class Intent:
         )
 
     @staticmethod
+    def wrap(
+        token: str,
+        amount: ChainedAmount,
+        chain: str | None = None,
+    ) -> WrapNativeIntent:
+        """Create a wrap native token intent (e.g. ETH -> WETH).
+
+        Calls the wrapped token's ``deposit()`` function with ``msg.value``
+        to convert native currency to its wrapped ERC-20 equivalent.
+
+        Args:
+            token: Wrapped token symbol (e.g., "WETH", "WMATIC", "WAVAX")
+            amount: Amount of native token to wrap, or "all"
+            chain: Target chain for execution
+
+        Returns:
+            WrapNativeIntent: The created wrap intent
+
+        Example:
+            intent = Intent.wrap(token="WETH", amount=Decimal("0.01"), chain="arbitrum")
+        """
+        return WrapNativeIntent(token=token, amount=amount, chain=chain)
+
+    @staticmethod
+    def unwrap(
+        token: str,
+        amount: ChainedAmount,
+        chain: str | None = None,
+    ) -> UnwrapNativeIntent:
+        """Create an unwrap native token intent (e.g. WETH -> ETH).
+
+        Calls the wrapped token's ``withdraw(uint256)`` function to convert
+        wrapped native tokens back to the chain's native currency.
+
+        Args:
+            token: Wrapped token symbol to unwrap (e.g., "WETH", "WMATIC", "WAVAX")
+            amount: Amount of wrapped token to unwrap, or "all"
+            chain: Target chain for execution
+
+        Returns:
+            UnwrapNativeIntent: The created unwrap intent
+
+        Example:
+            # Unwrap 0.01 WETH to ETH on Arbitrum
+            intent = Intent.unwrap(token="WETH", amount=Decimal("0.01"), chain="arbitrum")
+
+            # Unwrap all WETH from previous step in a sequence
+            intent = Intent.unwrap(token="WETH", amount="all", chain="arbitrum")
+        """
+        return UnwrapNativeIntent(token=token, amount=amount, chain=chain)
+
+    @staticmethod
     def ensure_balance(
         token: str,
         min_amount: Decimal,
