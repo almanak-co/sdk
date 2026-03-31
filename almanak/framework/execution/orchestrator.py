@@ -1067,7 +1067,7 @@ class ExecutionOrchestrator:
             # Step 0: Refresh deferred transactions (LiFi, Enso) with fresh route data
             from .deferred_refresh import refresh_deferred_bundle
 
-            action_bundle = refresh_deferred_bundle(action_bundle, context.wallet_address)
+            action_bundle = refresh_deferred_bundle(action_bundle, context.wallet_address, rpc_url=self.rpc_url)
 
             # Step 1: Build unsigned transactions from ActionBundle
             # Gas prices are set as placeholders; _update_gas_prices() sets final values.
