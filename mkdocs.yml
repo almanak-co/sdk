@@ -147,10 +147,7 @@ nav:
     - Getting Started: getting-started.md
     - Environment Variables: environment-variables.md
     - Agent Skills: agent-skills.md
-    - Agentic Trading:
-      - agentic/index.md
-      - agentic/agent-tools.md
-      - agentic/adapters.md
+    - Agentic Trading: agentic/index.md
   - CLI Reference:
     - cli/almanak.md
     - cli/almanak-ax.md
