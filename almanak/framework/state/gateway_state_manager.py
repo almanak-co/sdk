@@ -4,14 +4,15 @@ This module provides a StateManager that persists state through the gateway
 sidecar instead of directly accessing the database. Used in strategy containers
 that have no access to database credentials.
 
-Portfolio snapshots use a local SQLite fallback since the gateway gRPC service
-does not yet support snapshot persistence.
+Portfolio snapshots are persisted via gateway gRPC (SavePortfolioSnapshot,
+GetLatestSnapshot, GetSnapshotsSince) which routes to PostgreSQL in deployed
+mode.  Local mode uses the regular StateManager with SQLiteStore.
 """
 
 import json
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from almanak.framework.gateway_client import GatewayClient
 from almanak.framework.state.state_manager import StateData
@@ -51,7 +52,6 @@ class GatewayStateManager:
         """
         self._client = client
         self._timeout = timeout
-        self._sqlite_fallback: Any | None = None  # Lazy-init SQLiteStore for snapshots
 
     async def initialize(self) -> None:
         """Initialize the state manager.
@@ -62,17 +62,7 @@ class GatewayStateManager:
         logger.debug("Gateway state manager initialized (no-op)")
 
     async def close(self) -> None:
-        """Close the state manager.
-
-        Cleans up the local SQLite fallback store if it was initialized.
-        """
-        if self._sqlite_fallback is not None:
-            try:
-                await self._sqlite_fallback.close()
-                logger.debug("SQLite fallback store closed")
-            except Exception as e:
-                logger.debug("Failed to close SQLite fallback store: %s", e)
-            self._sqlite_fallback = None
+        """Close the state manager."""
         logger.debug("Gateway state manager closed")
 
     async def load_state(self, strategy_id: str) -> StateData | None:
@@ -207,65 +197,94 @@ class GatewayStateManager:
         """
         logger.debug(f"Cache invalidation requested for {strategy_id or 'all'} (no-op)")
 
-    async def _get_sqlite_fallback(self) -> Any:
-        """Lazily initialize a local SQLiteStore for portfolio snapshot persistence.
-
-        The gateway gRPC service does not yet support snapshot save/query,
-        so we fall back to a local SQLite DB in the CWD. This keeps the
-        snapshot time-series gap-free until gRPC support is added.
-        """
-        if self._sqlite_fallback is None:
-            from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
-
-            store = SQLiteStore(SQLiteConfig(db_path="./almanak_state.db"))
-            await store.initialize()
-            self._sqlite_fallback = store
-            logger.info("Initialized local SQLite fallback for portfolio snapshots")
-        return self._sqlite_fallback
-
     async def save_portfolio_snapshot(self, snapshot: "PortfolioSnapshot") -> int:
-        """Save portfolio snapshot via local SQLite fallback.
-
-        The gateway gRPC service does not yet support snapshot persistence,
-        so snapshots are written to a local SQLite DB to preserve the
-        valuation time-series for PnL tracking.
+        """Save portfolio snapshot via gateway gRPC → PostgreSQL.
 
         Args:
             snapshot: Portfolio snapshot to save
 
         Returns:
-            Snapshot ID from SQLite
+            Snapshot ID from the database
         """
         try:
-            store = await self._get_sqlite_fallback()
-            snapshot_id = await store.save_portfolio_snapshot(snapshot)
+            positions_bytes = json.dumps(snapshot.to_dict()["positions"]).encode("utf-8")
+
+            request = gateway_pb2.SaveSnapshotRequest(
+                strategy_id=snapshot.strategy_id,
+                timestamp=int(snapshot.timestamp.timestamp()),
+                iteration_number=snapshot.iteration_number,
+                total_value_usd=str(snapshot.total_value_usd),
+                available_cash_usd=str(snapshot.available_cash_usd),
+                value_confidence=snapshot.value_confidence.value,
+                positions_json=positions_bytes,
+                chain=snapshot.chain or "",
+            )
+            response = self._client.state.SavePortfolioSnapshot(request, timeout=self._timeout)
+
+            if not response.success:
+                logger.error("SavePortfolioSnapshot failed: %s", response.error)
+                return 0
+
             logger.debug(
-                "Portfolio snapshot saved via SQLite fallback: strategy=%s, value=$%.2f, confidence=%s",
+                "Portfolio snapshot saved via gateway: strategy=%s, value=$%.2f, confidence=%s",
                 snapshot.strategy_id,
                 snapshot.total_value_usd,
                 snapshot.value_confidence.value,
             )
-            return snapshot_id
+            return response.snapshot_id
         except Exception:
-            logger.exception("Failed to save portfolio snapshot via SQLite fallback")
+            logger.exception("Failed to save portfolio snapshot via gateway")
             return 0
 
     async def get_latest_snapshot(self, strategy_id: str) -> "PortfolioSnapshot | None":
-        """Get most recent portfolio snapshot via local SQLite fallback."""
+        """Get most recent portfolio snapshot via gateway gRPC."""
         try:
-            store = await self._get_sqlite_fallback()
-            return await store.get_latest_snapshot(strategy_id)
+            request = gateway_pb2.GetLatestSnapshotRequest(strategy_id=strategy_id)
+            response = self._client.state.GetLatestSnapshot(request, timeout=self._timeout)
+
+            if not response.found:
+                return None
+
+            return self._proto_to_snapshot(response)
         except Exception as e:
-            logger.debug("Failed to get latest snapshot via SQLite fallback: %s", e)
+            logger.debug("Failed to get latest snapshot via gateway: %s", e)
             return None
 
     async def get_snapshots_since(
-        self, strategy_id: str, since: datetime, limit: int = 100
+        self, strategy_id: str, since: datetime, limit: int = 168
     ) -> list["PortfolioSnapshot"]:
-        """Get portfolio snapshots since a given time via local SQLite fallback."""
+        """Get portfolio snapshots since a given time via gateway gRPC."""
         try:
-            store = await self._get_sqlite_fallback()
-            return await store.get_snapshots_since(strategy_id, since, limit)
+            request = gateway_pb2.GetSnapshotsSinceRequest(
+                strategy_id=strategy_id,
+                since=int(since.timestamp()),
+                limit=limit,
+            )
+            response = self._client.state.GetSnapshotsSince(request, timeout=self._timeout)
+
+            return [self._proto_to_snapshot(s) for s in response.snapshots if s.found]
         except Exception as e:
-            logger.debug("Failed to get snapshots via SQLite fallback: %s", e)
+            logger.debug("Failed to get snapshots via gateway: %s", e)
             return []
+
+    @staticmethod
+    def _proto_to_snapshot(data: gateway_pb2.SnapshotData) -> "PortfolioSnapshot":
+        """Convert a SnapshotData protobuf message to a PortfolioSnapshot."""
+        from almanak.framework.portfolio.models import PortfolioSnapshot
+
+        positions_list = json.loads(data.positions_json.decode("utf-8")) if data.positions_json else []
+
+        snapshot_dict = {
+            "timestamp": datetime.fromtimestamp(data.timestamp, tz=UTC).isoformat(),
+            "strategy_id": data.strategy_id,
+            "total_value_usd": data.total_value_usd or "0",
+            "available_cash_usd": data.available_cash_usd or "0",
+            "value_confidence": data.value_confidence or "HIGH",
+            "error": None,
+            "positions": positions_list,
+            "wallet_balances": [],
+            "chain": data.chain or "",
+            "iteration_number": data.iteration_number,
+        }
+
+        return PortfolioSnapshot.from_dict(snapshot_dict)

@@ -98,10 +98,28 @@ Global___RegisterChainsRequest: _TypeAlias = RegisterChainsRequest  # noqa: Y015
 class RegisterChainsResponse(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
+    @_typing.final
+    class ChainWalletsEntry(_message.Message):
+        DESCRIPTOR: _descriptor.Descriptor
+
+        KEY_FIELD_NUMBER: _builtins.int
+        VALUE_FIELD_NUMBER: _builtins.int
+        key: _builtins.str
+        value: _builtins.str
+        def __init__(
+            self,
+            *,
+            key: _builtins.str = ...,
+            value: _builtins.str = ...,
+        ) -> None: ...
+        _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
+        def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
     SUCCESS_FIELD_NUMBER: _builtins.int
     INITIALIZED_CHAINS_FIELD_NUMBER: _builtins.int
     WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
     ERROR_FIELD_NUMBER: _builtins.int
+    CHAIN_WALLETS_FIELD_NUMBER: _builtins.int
     success: _builtins.bool
     wallet_address: _builtins.str
     """Wallet address derived from gateway private key"""
@@ -110,7 +128,6 @@ class RegisterChainsResponse(_message.Message):
     def initialized_chains(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
         """Chains that were successfully initialized"""
 
-    CHAIN_WALLETS_FIELD_NUMBER: _builtins.int
     @_builtins.property
     def chain_wallets(self) -> _containers.ScalarMap[_builtins.str, _builtins.str]:
         """Per-chain wallet addresses resolved from wallet registry"""
@@ -550,6 +567,168 @@ class DeleteStateResponse(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___DeleteStateResponse: _TypeAlias = DeleteStateResponse  # noqa: Y015
+
+@_typing.final
+class SaveSnapshotRequest(_message.Message):
+    """Portfolio snapshot messages"""
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    ITERATION_NUMBER_FIELD_NUMBER: _builtins.int
+    TOTAL_VALUE_USD_FIELD_NUMBER: _builtins.int
+    AVAILABLE_CASH_USD_FIELD_NUMBER: _builtins.int
+    VALUE_CONFIDENCE_FIELD_NUMBER: _builtins.int
+    POSITIONS_JSON_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    timestamp: _builtins.int
+    """Unix epoch seconds"""
+    iteration_number: _builtins.int
+    total_value_usd: _builtins.str
+    available_cash_usd: _builtins.str
+    value_confidence: _builtins.str
+    """"HIGH", "ESTIMATED", "STALE", "UNAVAILABLE" """
+    positions_json: _builtins.bytes
+    """JSON-serialized positions array"""
+    chain: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        timestamp: _builtins.int = ...,
+        iteration_number: _builtins.int = ...,
+        total_value_usd: _builtins.str = ...,
+        available_cash_usd: _builtins.str = ...,
+        value_confidence: _builtins.str = ...,
+        positions_json: _builtins.bytes = ...,
+        chain: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["available_cash_usd", b"available_cash_usd", "chain", b"chain", "iteration_number", b"iteration_number", "positions_json", b"positions_json", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "total_value_usd", b"total_value_usd", "value_confidence", b"value_confidence"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SaveSnapshotRequest: _TypeAlias = SaveSnapshotRequest  # noqa: Y015
+
+@_typing.final
+class SaveSnapshotResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    SNAPSHOT_ID_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    snapshot_id: _builtins.int
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        snapshot_id: _builtins.int = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "snapshot_id", b"snapshot_id", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SaveSnapshotResponse: _TypeAlias = SaveSnapshotResponse  # noqa: Y015
+
+@_typing.final
+class GetLatestSnapshotRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetLatestSnapshotRequest: _TypeAlias = GetLatestSnapshotRequest  # noqa: Y015
+
+@_typing.final
+class GetSnapshotsSinceRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    SINCE_FIELD_NUMBER: _builtins.int
+    LIMIT_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    since: _builtins.int
+    """Unix epoch seconds"""
+    limit: _builtins.int
+    """Max snapshots to return (default 168)"""
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        since: _builtins.int = ...,
+        limit: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["limit", b"limit", "since", b"since", "strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetSnapshotsSinceRequest: _TypeAlias = GetSnapshotsSinceRequest  # noqa: Y015
+
+@_typing.final
+class SnapshotData(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    ITERATION_NUMBER_FIELD_NUMBER: _builtins.int
+    TOTAL_VALUE_USD_FIELD_NUMBER: _builtins.int
+    AVAILABLE_CASH_USD_FIELD_NUMBER: _builtins.int
+    VALUE_CONFIDENCE_FIELD_NUMBER: _builtins.int
+    POSITIONS_JSON_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    FOUND_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    timestamp: _builtins.int
+    iteration_number: _builtins.int
+    total_value_usd: _builtins.str
+    available_cash_usd: _builtins.str
+    value_confidence: _builtins.str
+    positions_json: _builtins.bytes
+    chain: _builtins.str
+    found: _builtins.bool
+    """False if no snapshot exists"""
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        timestamp: _builtins.int = ...,
+        iteration_number: _builtins.int = ...,
+        total_value_usd: _builtins.str = ...,
+        available_cash_usd: _builtins.str = ...,
+        value_confidence: _builtins.str = ...,
+        positions_json: _builtins.bytes = ...,
+        chain: _builtins.str = ...,
+        found: _builtins.bool = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["available_cash_usd", b"available_cash_usd", "chain", b"chain", "found", b"found", "iteration_number", b"iteration_number", "positions_json", b"positions_json", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "total_value_usd", b"total_value_usd", "value_confidence", b"value_confidence"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SnapshotData: _TypeAlias = SnapshotData  # noqa: Y015
+
+@_typing.final
+class SnapshotList(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SNAPSHOTS_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def snapshots(self) -> _containers.RepeatedCompositeFieldContainer[Global___SnapshotData]: ...
+    def __init__(
+        self,
+        *,
+        snapshots: _abc.Iterable[Global___SnapshotData] | None = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["snapshots", b"snapshots"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SnapshotList: _TypeAlias = SnapshotList  # noqa: Y015
 
 @_typing.final
 class CompileIntentRequest(_message.Message):
@@ -2283,6 +2462,23 @@ Global___ListStrategiesResponse: _TypeAlias = ListStrategiesResponse  # noqa: Y0
 class StrategySummary(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
+    @_typing.final
+    class ChainWalletsEntry(_message.Message):
+        DESCRIPTOR: _descriptor.Descriptor
+
+        KEY_FIELD_NUMBER: _builtins.int
+        VALUE_FIELD_NUMBER: _builtins.int
+        key: _builtins.str
+        value: _builtins.str
+        def __init__(
+            self,
+            *,
+            key: _builtins.str = ...,
+            value: _builtins.str = ...,
+        ) -> None: ...
+        _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
+        def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
     STRATEGY_ID_FIELD_NUMBER: _builtins.int
     NAME_FIELD_NUMBER: _builtins.int
     STATUS_FIELD_NUMBER: _builtins.int
@@ -2313,8 +2509,11 @@ class StrategySummary(_message.Message):
     attention_reason: _builtins.str
     is_multi_chain: _builtins.bool
     consecutive_errors: _builtins.int
+    """count of consecutive failed iterations"""
     last_iteration_at: _builtins.int
+    """unix timestamp of last iteration completion"""
     pnl_since_deploy_usd: _builtins.str
+    """lifetime PnL after gas; empty if unavailable"""
     wallet_address: _builtins.str
     @_builtins.property
     def chains(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
@@ -2341,7 +2540,7 @@ class StrategySummary(_message.Message):
         wallet_address: _builtins.str = ...,
         chain_wallets: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["attention_reason", b"attention_reason", "attention_required", b"attention_required", "chain", b"chain", "chains", b"chains", "consecutive_errors", b"consecutive_errors", "is_multi_chain", b"is_multi_chain", "last_action_at", b"last_action_at", "last_iteration_at", b"last_iteration_at", "name", b"name", "pnl_24h_usd", b"pnl_24h_usd", "pnl_since_deploy_usd", b"pnl_since_deploy_usd", "protocol", b"protocol", "status", b"status", "strategy_id", b"strategy_id", "total_value_usd", b"total_value_usd"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["attention_reason", b"attention_reason", "attention_required", b"attention_required", "chain", b"chain", "chain_wallets", b"chain_wallets", "chains", b"chains", "consecutive_errors", b"consecutive_errors", "is_multi_chain", b"is_multi_chain", "last_action_at", b"last_action_at", "last_iteration_at", b"last_iteration_at", "name", b"name", "pnl_24h_usd", b"pnl_24h_usd", "pnl_since_deploy_usd", b"pnl_since_deploy_usd", "protocol", b"protocol", "status", b"status", "strategy_id", b"strategy_id", "total_value_usd", b"total_value_usd", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___StrategySummary: _TypeAlias = StrategySummary  # noqa: Y015
@@ -2451,7 +2650,9 @@ class PositionInfo(_message.Message):
     @_builtins.property
     def lp_positions(self) -> _containers.RepeatedCompositeFieldContainer[Global___LPPositionInfo]: ...
     @_builtins.property
-    def strategy_positions(self) -> _containers.RepeatedCompositeFieldContainer[Global___StrategyPosition]: ...
+    def strategy_positions(self) -> _containers.RepeatedCompositeFieldContainer[Global___StrategyPosition]:
+        """Strategy-reported positions from get_open_positions()"""
+
     def __init__(
         self,
         *,
@@ -2469,10 +2670,13 @@ Global___PositionInfo: _TypeAlias = PositionInfo  # noqa: Y015
 
 @_typing.final
 class StrategyPosition(_message.Message):
-    """A single position reported by a strategy via get_open_positions()."""
+    """A single position reported by a strategy via get_open_positions().
+    Carries both teardown-critical fields and optional monitoring fields.
+    """
 
     DESCRIPTOR: _descriptor.Descriptor
 
+    @_typing.final
     class DetailsEntry(_message.Message):
         DESCRIPTOR: _descriptor.Descriptor
 
@@ -2480,7 +2684,12 @@ class StrategyPosition(_message.Message):
         VALUE_FIELD_NUMBER: _builtins.int
         key: _builtins.str
         value: _builtins.str
-        def __init__(self, *, key: _builtins.str = ..., value: _builtins.str = ...) -> None: ...
+        def __init__(
+            self,
+            *,
+            key: _builtins.str = ...,
+            value: _builtins.str = ...,
+        ) -> None: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
@@ -2501,6 +2710,7 @@ class StrategyPosition(_message.Message):
     COLLATERAL_USD_FIELD_NUMBER: _builtins.int
     LEVERAGE_FIELD_NUMBER: _builtins.int
     position_type: _builtins.str
+    """PERP, SUPPLY, BORROW, LP, STAKE, TOKEN, etc."""
     position_id: _builtins.str
     chain: _builtins.str
     protocol: _builtins.str
@@ -2508,10 +2718,12 @@ class StrategyPosition(_message.Message):
     liquidation_risk: _builtins.bool
     health_factor: _builtins.str
     entry_price: _builtins.str
+    """Optional monitoring fields"""
     current_price: _builtins.str
     unrealized_pnl_usd: _builtins.str
     unrealized_pnl_pct: _builtins.str
     direction: _builtins.str
+    """"LONG" / "SHORT" """
     size_usd: _builtins.str
     collateral_usd: _builtins.str
     leverage: _builtins.str
@@ -2945,6 +3157,23 @@ class RegisterInstanceRequest(_message.Message):
 
     DESCRIPTOR: _descriptor.Descriptor
 
+    @_typing.final
+    class ChainWalletsEntry(_message.Message):
+        DESCRIPTOR: _descriptor.Descriptor
+
+        KEY_FIELD_NUMBER: _builtins.int
+        VALUE_FIELD_NUMBER: _builtins.int
+        key: _builtins.str
+        value: _builtins.str
+        def __init__(
+            self,
+            *,
+            key: _builtins.str = ...,
+            value: _builtins.str = ...,
+        ) -> None: ...
+        _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
+        def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
     STRATEGY_ID_FIELD_NUMBER: _builtins.int
     STRATEGY_NAME_FIELD_NUMBER: _builtins.int
     TEMPLATE_NAME_FIELD_NUMBER: _builtins.int
@@ -2966,7 +3195,8 @@ class RegisterInstanceRequest(_message.Message):
     wallet_address: _builtins.str
     config_json: _builtins.str
     version: _builtins.str
-    chains: _builtins.str
+    @_builtins.property
+    def chains(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
     @_builtins.property
     def chain_wallets(self) -> _containers.ScalarMap[_builtins.str, _builtins.str]: ...
     def __init__(
@@ -2980,10 +3210,10 @@ class RegisterInstanceRequest(_message.Message):
         wallet_address: _builtins.str = ...,
         config_json: _builtins.str = ...,
         version: _builtins.str = ...,
-        chains: _builtins.str = ...,
+        chains: _abc.Iterable[_builtins.str] | None = ...,
         chain_wallets: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "config_json", b"config_json", "protocol", b"protocol", "strategy_id", b"strategy_id", "strategy_name", b"strategy_name", "template_name", b"template_name", "version", b"version", "wallet_address", b"wallet_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "chain_wallets", b"chain_wallets", "chains", b"chains", "config_json", b"config_json", "protocol", b"protocol", "strategy_id", b"strategy_id", "strategy_name", b"strategy_name", "template_name", b"template_name", "version", b"version", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___RegisterInstanceRequest: _TypeAlias = RegisterInstanceRequest  # noqa: Y015
@@ -5015,6 +5245,11 @@ Global___WriteAgentCommandResponse: _TypeAlias = WriteAgentCommandResponse  # no
 
 @_typing.final
 class GeckoTerminalOHLCVRequest(_message.Message):
+    """=============================================================================
+    GeckoTerminal Integration Messages
+    =============================================================================
+    """
+
     DESCRIPTOR: _descriptor.Descriptor
 
     TOKEN_FIELD_NUMBER: _builtins.int

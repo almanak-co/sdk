@@ -3,20 +3,28 @@
 This service provides state persistence for strategy containers via gRPC.
 All state storage backends (PostgreSQL, SQLite) are accessed here in
 the gateway; strategy containers only see the state data.
+
+Portfolio snapshots are persisted to the ``v2_portfolio_snapshots`` table
+(PostgreSQL in deployed mode, SQLite in local dev) and exposed via three
+RPCs: SavePortfolioSnapshot, GetLatestSnapshot, GetSnapshotsSince.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import grpc
 
 from almanak.framework.state.state_manager import StateNotFoundError
 
 if TYPE_CHECKING:
+    import asyncpg
+
     from almanak.framework.state.state_manager import StateManager
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
@@ -28,6 +36,9 @@ from almanak.gateway.validation import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Upper bound on snapshot queries to prevent unbounded materialisation
+MAX_SNAPSHOTS = 1000
 
 
 class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
@@ -48,6 +59,10 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         self.settings = settings
         self._state_manager: StateManager | None = None
         self._initialized = False
+        self._snapshot_pool: asyncpg.Pool | None = None
+        self._snapshot_pool_initialized = False
+        self._snapshot_pool_lock = asyncio.Lock()
+        self._snapshot_schema: str | None = None
 
     async def _ensure_initialized(self) -> None:
         """Lazy initialization of state manager."""
@@ -265,3 +280,314 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(error_msg)
             return gateway_pb2.DeleteStateResponse(success=False, error=error_msg)
+
+    # =========================================================================
+    # Portfolio Snapshot RPCs
+    # =========================================================================
+
+    async def _ensure_snapshot_pool(self) -> None:
+        """Lazy-init asyncpg pool for portfolio snapshot persistence."""
+        if self._snapshot_pool_initialized:
+            return
+
+        async with self._snapshot_pool_lock:
+            # Re-check after acquiring lock to avoid double-init
+            if self._snapshot_pool_initialized:
+                return
+
+            if not self.settings.database_url:
+                self._snapshot_pool_initialized = True
+                return
+
+            import asyncpg
+
+            # Strip ?schema= parameter (asyncpg doesn't support it)
+            parsed = urlparse(self.settings.database_url)
+            params = parse_qsl(parsed.query, keep_blank_values=True)
+            self._snapshot_schema = next((v for k, v in params if k == "schema"), None) or None
+            clean_params = [(k, v) for k, v in params if k != "schema"]
+            clean_url = urlunparse(parsed._replace(query=urlencode(clean_params)))
+
+            self._snapshot_pool = await asyncpg.create_pool(clean_url, min_size=1, max_size=2, statement_cache_size=0)
+            self._snapshot_pool_initialized = True
+            logger.debug("Snapshot asyncpg pool initialized")
+
+    async def _snapshot_execute(self, query: str, *args: Any) -> str:
+        """Execute a query on the snapshot pool with optional schema."""
+        assert self._snapshot_pool is not None
+        async with self._snapshot_pool.acquire() as conn:
+            if self._snapshot_schema:
+                await conn.fetchval(
+                    "SELECT pg_catalog.set_config('search_path', $1, true)",
+                    self._snapshot_schema,
+                )
+            return await conn.execute(query, *args)
+
+    async def _snapshot_fetchrow(self, query: str, *args: Any) -> Any:
+        """Fetch a single row from the snapshot pool with optional schema."""
+        assert self._snapshot_pool is not None
+        async with self._snapshot_pool.acquire() as conn:
+            if self._snapshot_schema:
+                await conn.fetchval(
+                    "SELECT pg_catalog.set_config('search_path', $1, true)",
+                    self._snapshot_schema,
+                )
+            return await conn.fetchrow(query, *args)
+
+    async def _snapshot_fetch(self, query: str, *args: Any) -> list[Any]:
+        """Fetch multiple rows from the snapshot pool with optional schema."""
+        assert self._snapshot_pool is not None
+        async with self._snapshot_pool.acquire() as conn:
+            if self._snapshot_schema:
+                await conn.fetchval(
+                    "SELECT pg_catalog.set_config('search_path', $1, true)",
+                    self._snapshot_schema,
+                )
+            return await conn.fetch(query, *args)
+
+    async def SavePortfolioSnapshot(
+        self,
+        request: gateway_pb2.SaveSnapshotRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.SaveSnapshotResponse:
+        """Save a portfolio snapshot to the v2_portfolio_snapshots table."""
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.SaveSnapshotResponse(success=False, error=str(e))
+
+        # Validate payload before backend split
+        if request.timestamp <= 0:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("timestamp must be positive")
+            return gateway_pb2.SaveSnapshotResponse(success=False, error="timestamp must be positive")
+        if request.positions_json:
+            try:
+                json.loads(request.positions_json)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("positions_json must be valid JSON")
+                return gateway_pb2.SaveSnapshotResponse(success=False, error="positions_json must be valid JSON")
+
+        strategy_id = resolve_agent_id(strategy_id)
+        await self._ensure_snapshot_pool()
+
+        ts = datetime.fromtimestamp(request.timestamp, tz=UTC)
+        now = datetime.now(UTC)
+
+        if self._snapshot_pool is not None:
+            # PostgreSQL mode (deployed)
+            try:
+                row = await self._snapshot_fetchrow(
+                    """
+                    INSERT INTO v2_portfolio_snapshots (
+                        agent_id, timestamp, iteration_number, total_value_usd,
+                        available_cash_usd, value_confidence, positions_json, chain, created_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
+                    ON CONFLICT (agent_id, timestamp) DO UPDATE SET
+                        iteration_number = EXCLUDED.iteration_number,
+                        total_value_usd = EXCLUDED.total_value_usd,
+                        available_cash_usd = EXCLUDED.available_cash_usd,
+                        value_confidence = EXCLUDED.value_confidence,
+                        positions_json = EXCLUDED.positions_json,
+                        chain = EXCLUDED.chain
+                    RETURNING id
+                    """,
+                    strategy_id,
+                    ts,
+                    request.iteration_number,
+                    request.total_value_usd,
+                    request.available_cash_usd,
+                    request.value_confidence or "HIGH",
+                    request.positions_json.decode("utf-8") if request.positions_json else "[]",
+                    request.chain,
+                    now,
+                )
+                snapshot_id = row["id"] if row else 0
+                return gateway_pb2.SaveSnapshotResponse(success=True, snapshot_id=snapshot_id)
+            except Exception as e:
+                logger.error(f"SavePortfolioSnapshot failed for {strategy_id}: {e}")
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
+                return gateway_pb2.SaveSnapshotResponse(success=False, error="internal server error")
+        else:
+            # SQLite mode (local dev) — delegate to StateManager's SQLiteStore
+            try:
+                await self._ensure_initialized()
+                assert self._state_manager is not None
+                warm = self._state_manager.warm_backend
+                assert warm is not None
+                from decimal import Decimal
+
+                from almanak.framework.portfolio.models import PortfolioSnapshot, ValueConfidence
+
+                snapshot = PortfolioSnapshot(
+                    timestamp=ts,
+                    strategy_id=strategy_id,
+                    total_value_usd=Decimal(request.total_value_usd or "0"),
+                    available_cash_usd=Decimal(request.available_cash_usd or "0"),
+                    value_confidence=ValueConfidence(request.value_confidence or "HIGH"),
+                    chain=request.chain,
+                    iteration_number=request.iteration_number,
+                )
+                # Deserialize positions from JSON bytes
+                if request.positions_json:
+                    snapshot_dict = snapshot.to_dict()
+                    snapshot_dict["positions"] = json.loads(request.positions_json.decode("utf-8"))
+                    snapshot = PortfolioSnapshot.from_dict(snapshot_dict)
+
+                snapshot_id = await warm.save_portfolio_snapshot(snapshot)  # type: ignore[attr-defined]
+                return gateway_pb2.SaveSnapshotResponse(success=True, snapshot_id=snapshot_id)
+            except Exception as e:
+                logger.error(f"SavePortfolioSnapshot (SQLite) failed for {strategy_id}: {e}")
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
+                return gateway_pb2.SaveSnapshotResponse(success=False, error="internal server error")
+
+    async def GetLatestSnapshot(
+        self,
+        request: gateway_pb2.GetLatestSnapshotRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.SnapshotData:
+        """Get the most recent portfolio snapshot."""
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.SnapshotData(found=False)
+
+        strategy_id = resolve_agent_id(strategy_id)
+        await self._ensure_snapshot_pool()
+
+        if self._snapshot_pool is not None:
+            try:
+                row = await self._snapshot_fetchrow(
+                    """
+                    SELECT agent_id, timestamp, iteration_number, total_value_usd,
+                           available_cash_usd, value_confidence, positions_json, chain
+                    FROM v2_portfolio_snapshots
+                    WHERE agent_id = $1
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                    """,
+                    strategy_id,
+                )
+                if row is None:
+                    return gateway_pb2.SnapshotData(found=False)
+                return self._row_to_snapshot_data(row)
+            except Exception as e:
+                logger.error(f"GetLatestSnapshot failed for {strategy_id}: {e}")
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
+                return gateway_pb2.SnapshotData(found=False)
+        else:
+            try:
+                await self._ensure_initialized()
+                assert self._state_manager is not None
+                warm = self._state_manager.warm_backend
+                assert warm is not None
+                snapshot = await warm.get_latest_snapshot(strategy_id)  # type: ignore[attr-defined]
+                if snapshot is None:
+                    return gateway_pb2.SnapshotData(found=False)
+                return self._snapshot_to_proto(snapshot)
+            except Exception as e:
+                logger.error(f"GetLatestSnapshot (SQLite) failed for {strategy_id}: {e}")
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
+                return gateway_pb2.SnapshotData(found=False)
+
+    async def GetSnapshotsSince(
+        self,
+        request: gateway_pb2.GetSnapshotsSinceRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.SnapshotList:
+        """Get portfolio snapshots since a given timestamp."""
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.SnapshotList()
+
+        strategy_id = resolve_agent_id(strategy_id)
+        since = datetime.fromtimestamp(request.since, tz=UTC)
+        limit = min(request.limit if request.limit > 0 else 168, MAX_SNAPSHOTS)
+        await self._ensure_snapshot_pool()
+
+        if self._snapshot_pool is not None:
+            try:
+                rows = await self._snapshot_fetch(
+                    """
+                    SELECT agent_id, timestamp, iteration_number, total_value_usd,
+                           available_cash_usd, value_confidence, positions_json, chain
+                    FROM v2_portfolio_snapshots
+                    WHERE agent_id = $1 AND timestamp >= $2
+                    ORDER BY timestamp ASC
+                    LIMIT $3
+                    """,
+                    strategy_id,
+                    since,
+                    limit,
+                )
+                return gateway_pb2.SnapshotList(snapshots=[self._row_to_snapshot_data(row) for row in rows])
+            except Exception as e:
+                logger.error(f"GetSnapshotsSince failed for {strategy_id}: {e}")
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
+                return gateway_pb2.SnapshotList()
+        else:
+            try:
+                await self._ensure_initialized()
+                assert self._state_manager is not None
+                warm = self._state_manager.warm_backend
+                assert warm is not None
+                snapshots = await warm.get_snapshots_since(strategy_id, since, limit)  # type: ignore[attr-defined]
+                return gateway_pb2.SnapshotList(snapshots=[self._snapshot_to_proto(s) for s in snapshots])
+            except Exception as e:
+                logger.error(f"GetSnapshotsSince (SQLite) failed for {strategy_id}: {e}")
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
+                return gateway_pb2.SnapshotList()
+
+    @staticmethod
+    def _row_to_snapshot_data(row: Any) -> gateway_pb2.SnapshotData:
+        """Convert an asyncpg row to a SnapshotData protobuf message."""
+        ts = row["timestamp"]
+        positions_json = row["positions_json"]
+        if isinstance(positions_json, str):
+            positions_bytes = positions_json.encode("utf-8")
+        elif isinstance(positions_json, dict | list):
+            positions_bytes = json.dumps(positions_json).encode("utf-8")
+        else:
+            positions_bytes = b"[]"
+
+        return gateway_pb2.SnapshotData(
+            strategy_id=row["agent_id"],
+            timestamp=int(ts.timestamp()) if hasattr(ts, "timestamp") else 0,
+            iteration_number=row["iteration_number"] or 0,
+            total_value_usd=row["total_value_usd"] or "0",
+            available_cash_usd=row["available_cash_usd"] or "0",
+            value_confidence=row["value_confidence"] or "HIGH",
+            positions_json=positions_bytes,
+            chain=row["chain"] or "",
+            found=True,
+        )
+
+    @staticmethod
+    def _snapshot_to_proto(snapshot: Any) -> gateway_pb2.SnapshotData:
+        """Convert a PortfolioSnapshot to a SnapshotData protobuf message."""
+        positions_bytes = json.dumps(snapshot.to_dict()["positions"]).encode("utf-8")
+        return gateway_pb2.SnapshotData(
+            strategy_id=snapshot.strategy_id,
+            timestamp=int(snapshot.timestamp.timestamp()),
+            iteration_number=snapshot.iteration_number,
+            total_value_usd=str(snapshot.total_value_usd),
+            available_cash_usd=str(snapshot.available_cash_usd),
+            value_confidence=snapshot.value_confidence.value,
+            positions_json=positions_bytes,
+            chain=snapshot.chain or "",
+            found=True,
+        )

@@ -449,6 +449,21 @@ class StateServiceStub(object):
                 request_serializer=gateway__pb2.DeleteStateRequest.SerializeToString,
                 response_deserializer=gateway__pb2.DeleteStateResponse.FromString,
                 _registered_method=True)
+        self.SavePortfolioSnapshot = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/SavePortfolioSnapshot',
+                request_serializer=gateway__pb2.SaveSnapshotRequest.SerializeToString,
+                response_deserializer=gateway__pb2.SaveSnapshotResponse.FromString,
+                _registered_method=True)
+        self.GetLatestSnapshot = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/GetLatestSnapshot',
+                request_serializer=gateway__pb2.GetLatestSnapshotRequest.SerializeToString,
+                response_deserializer=gateway__pb2.SnapshotData.FromString,
+                _registered_method=True)
+        self.GetSnapshotsSince = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/GetSnapshotsSince',
+                request_serializer=gateway__pb2.GetSnapshotsSinceRequest.SerializeToString,
+                response_deserializer=gateway__pb2.SnapshotList.FromString,
+                _registered_method=True)
 
 
 class StateServiceServicer(object):
@@ -479,6 +494,27 @@ class StateServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SavePortfolioSnapshot(self, request, context):
+        """Save a portfolio snapshot for value tracking.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetLatestSnapshot(self, request, context):
+        """Get the most recent portfolio snapshot.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetSnapshotsSince(self, request, context):
+        """Get portfolio snapshots since a given timestamp.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_StateServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -496,6 +532,21 @@ def add_StateServiceServicer_to_server(servicer, server):
                     servicer.DeleteState,
                     request_deserializer=gateway__pb2.DeleteStateRequest.FromString,
                     response_serializer=gateway__pb2.DeleteStateResponse.SerializeToString,
+            ),
+            'SavePortfolioSnapshot': grpc.unary_unary_rpc_method_handler(
+                    servicer.SavePortfolioSnapshot,
+                    request_deserializer=gateway__pb2.SaveSnapshotRequest.FromString,
+                    response_serializer=gateway__pb2.SaveSnapshotResponse.SerializeToString,
+            ),
+            'GetLatestSnapshot': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetLatestSnapshot,
+                    request_deserializer=gateway__pb2.GetLatestSnapshotRequest.FromString,
+                    response_serializer=gateway__pb2.SnapshotData.SerializeToString,
+            ),
+            'GetSnapshotsSince': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetSnapshotsSince,
+                    request_deserializer=gateway__pb2.GetSnapshotsSinceRequest.FromString,
+                    response_serializer=gateway__pb2.SnapshotList.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -583,6 +634,87 @@ class StateService(object):
             '/almanak.gateway.proto.StateService/DeleteState',
             gateway__pb2.DeleteStateRequest.SerializeToString,
             gateway__pb2.DeleteStateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SavePortfolioSnapshot(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/SavePortfolioSnapshot',
+            gateway__pb2.SaveSnapshotRequest.SerializeToString,
+            gateway__pb2.SaveSnapshotResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetLatestSnapshot(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/GetLatestSnapshot',
+            gateway__pb2.GetLatestSnapshotRequest.SerializeToString,
+            gateway__pb2.SnapshotData.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetSnapshotsSince(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/GetSnapshotsSince',
+            gateway__pb2.GetSnapshotsSinceRequest.SerializeToString,
+            gateway__pb2.SnapshotList.FromString,
             options,
             channel_credentials,
             insecure,
