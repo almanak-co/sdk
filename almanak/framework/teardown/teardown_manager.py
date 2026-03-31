@@ -587,18 +587,45 @@ class TeardownManager:
                     )
 
                 try:
-                    # Clone intent with updated slippage if it has a max_slippage attribute
+                    # Clone intent with updated slippage if it has a max_slippage attribute.
+                    # Intents are Pydantic frozen models — model_copy is the primary path.
                     intent_with_slippage = intent_to_exec
                     if hasattr(intent_to_exec, "max_slippage"):
-                        # Use dataclass replace for proper cloning
-                        try:
-                            intent_with_slippage = replace(intent_to_exec, max_slippage=slippage)
-                        except TypeError:
-                            # Not a dataclass, try dict-based cloning
-                            if hasattr(intent_to_exec, "to_dict") and hasattr(intent_to_exec, "from_dict"):
-                                intent_dict = intent_to_exec.to_dict()
-                                intent_dict["max_slippage"] = str(slippage)
-                                intent_with_slippage = type(intent_to_exec).from_dict(intent_dict)
+                        cloned = False
+                        if hasattr(intent_to_exec, "model_copy"):
+                            try:
+                                intent_with_slippage = intent_to_exec.model_copy(update={"max_slippage": slippage})
+                                cloned = True
+                            except (TypeError, ValueError):
+                                logger.warning(
+                                    "model_copy failed for %s, falling back to replace",
+                                    type(intent_to_exec).__name__,
+                                )
+                        if not cloned:
+                            try:
+                                intent_with_slippage = replace(intent_to_exec, max_slippage=slippage)
+                                cloned = True
+                            except TypeError:
+                                if hasattr(intent_to_exec, "to_dict") and hasattr(intent_to_exec, "from_dict"):
+                                    try:
+                                        intent_dict = intent_to_exec.to_dict()
+                                        intent_dict["max_slippage"] = str(slippage)
+                                        intent_with_slippage = type(intent_to_exec).from_dict(intent_dict)
+                                        cloned = True
+                                    except (TypeError, ValueError, KeyError) as e:
+                                        logger.warning(
+                                            "dict-based cloning failed for %s: %s",
+                                            type(intent_to_exec).__name__,
+                                            e,
+                                        )
+                        if not cloned:
+                            logger.error(
+                                "Could not clone %s with updated slippage %.1f%% — "
+                                "teardown will use original slippage %.1f%%",
+                                type(intent_to_exec).__name__,
+                                float(slippage * 100),
+                                float(getattr(intent_to_exec, "max_slippage", Decimal("0")) * 100),
+                            )
 
                     # Resolve amount="all" to actual wallet balance before compilation
                     # Support both object intents and dict intents (resume path)
