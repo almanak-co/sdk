@@ -1,8 +1,8 @@
 {
     "min_stake_amount": "5",
     "min_usdc_amount": "5",
-    "swap_usdc_to_usde": true,
-    "force_action": "swap",
+    "swap_usdc_to_usde": false,
+    "force_action": "",
     "anvil_funding": {
         "ETH": 100,
         "USDC": 10000,

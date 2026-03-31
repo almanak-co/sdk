@@ -1,4 +1,9 @@
 {
     "trade_size_usd": 3,
-    "max_slippage_bps": 100
+    "max_slippage_bps": 100,
+    "anvil_funding": {
+        "ETH": 100,
+        "USDC": 10000,
+        "USDT": 100
+    }
 }

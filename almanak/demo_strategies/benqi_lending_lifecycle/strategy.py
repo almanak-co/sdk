@@ -146,6 +146,14 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
         collateral_value = self.collateral_amount * collateral_price
         borrow_amount = (collateral_value * self.ltv_target / borrow_price).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
 
+        if borrow_amount <= 0:
+            self._loop_state = "idle"
+            return Intent.hold(
+                reason=f"Computed borrow_amount={borrow_amount} (collateral {self.collateral_amount} "
+                f"{self.collateral_token} worth {format_usd(collateral_value)} at {self.ltv_target * 100:.0f}% LTV). "
+                f"Increase collateral_amount in config."
+            )
+
         logger.info(
             f"BORROW intent: collateral={format_token_amount_human(self.collateral_amount, self.collateral_token)} "
             f"(value={format_usd(collateral_value)}), "
