@@ -3852,6 +3852,7 @@ class IntentCompiler:
             amount_in=amount_in,
             from_address=self.wallet_address,
             slippage_bps=slippage_bps,
+            routing_strategy="router",
             destination_chain_id=destination_chain_id or 0,
             receiver=receiver or "",
             refund_receiver=refund_receiver or "",
