@@ -6046,8 +6046,8 @@ class IntentCompiler:
             )
             adapter = AerodromeAdapter(config)
 
-            # Get LP token address for the pool
-            pool_address = adapter.sdk.get_pool_address(
+            # Get LP token address for the pool (gateway-aware for deployed mode)
+            pool_address = self._get_aerodrome_pool_address(
                 token0_info.address,
                 token1_info.address,
                 stable,
@@ -6102,12 +6102,15 @@ class IntentCompiler:
             logger.info(f"Found {lp_balance} LP tokens ({lp_balance_wei} wei) for Aerodrome pool")
 
             # Build removeLiquidity transaction using the adapter
+            # Pass pre-resolved pool_address so the adapter doesn't make
+            # its own direct RPC call (which fails in deployed mode).
             liquidity_result = adapter.remove_liquidity(
                 token_a=token0_symbol,
                 token_b=token1_symbol,
                 liquidity=lp_balance,
                 stable=stable,
                 recipient=self.wallet_address,
+                pool_address=pool_address,
             )
 
             if not liquidity_result.success:
@@ -13459,6 +13462,78 @@ class IntentCompiler:
         except Exception as e:
             logger.error(f"Failed to query position tokens owed: {e}")
             return None, None
+
+    def _get_aerodrome_pool_address(self, token_a: str, token_b: str, stable: bool) -> str | None:
+        """Query Aerodrome pool address, preferring gateway RPC over direct calls.
+
+        In deployed mode the strategy container has no outbound network access,
+        so direct Web3 HTTP calls fail with DNS resolution errors.  This method
+        routes the factory ``getPool()`` call through the gateway's RPC proxy
+        when available, falling back to a direct ``eth_call`` for local dev.
+
+        Args:
+            token_a: Token A address
+            token_b: Token B address
+            stable: Pool type (True=stable, False=volatile)
+
+        Returns:
+            Pool contract address, or None if pool not found / query failed.
+        """
+        from almanak.core.contracts import AERODROME
+        from almanak.framework.intents.pool_validation import (
+            ZERO_ADDRESS,
+            _decode_address,
+            _encode_get_pool_aerodrome,
+        )
+
+        chain_contracts = AERODROME.get(self.chain.lower())
+        if chain_contracts is None or "factory" not in chain_contracts:
+            logger.warning(f"No Aerodrome factory address for chain '{self.chain}'")
+            return None
+
+        factory = chain_contracts["factory"]
+        calldata = _encode_get_pool_aerodrome(token_a, token_b, stable)
+
+        def _process_raw_result(raw: bytes | None) -> str | None:
+            """Decode raw eth_call bytes into a pool address, returning None if invalid."""
+            if raw is None:
+                return None
+            pool_address = _decode_address(raw)
+            if pool_address == ZERO_ADDRESS:
+                return None
+            return pool_address
+
+        # --- Gateway path (deployed mode) ---
+        if self._gateway_client is not None:
+            try:
+                hex_result = self._gateway_client.eth_call(
+                    chain=self.chain,
+                    to=factory,
+                    data=calldata,
+                )
+                if hex_result and hex_result != "0x":
+                    raw = bytes.fromhex(hex_result[2:] if hex_result.startswith("0x") else hex_result)
+                    pool_address = _process_raw_result(raw)
+                    if pool_address:
+                        logger.debug(f"Resolved Aerodrome pool via gateway: {pool_address}")
+                        return pool_address
+                return None
+            except Exception as e:
+                logger.warning("Gateway Aerodrome pool query failed, falling back to direct RPC: %s", e)
+
+        # --- Direct RPC fallback (local dev) ---
+        rpc_url = self._get_chain_rpc_url()
+        if rpc_url is None:
+            logger.warning("No RPC URL or gateway client — cannot query Aerodrome pool address")
+            return None
+
+        from almanak.framework.intents.pool_validation import _eth_call
+
+        rpc_raw = _eth_call(rpc_url, factory, calldata)
+        pool_address = _process_raw_result(rpc_raw)
+        if pool_address:
+            logger.debug(f"Resolved Aerodrome pool via direct RPC: {pool_address}")
+        return pool_address
 
     def _query_erc20_balance(self, token_address: str, wallet_address: str) -> int | None:
         """Query ERC-20 token balance from on-chain.

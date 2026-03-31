@@ -622,6 +622,50 @@ class GatewayClient:
             logger.warning(f"Native balance query RPC error: {e}")
             return None
 
+    def eth_call(
+        self,
+        chain: str,
+        to: str,
+        data: str,
+    ) -> str | None:
+        """Perform a raw eth_call via the gateway's RPC proxy.
+
+        Args:
+            chain: Chain identifier (e.g., "base", "arbitrum")
+            to: Contract address to call
+            data: Hex-encoded calldata (with 0x prefix)
+
+        Returns:
+            Hex-encoded result string, or None on failure
+        """
+        import json
+
+        from almanak.gateway.proto import gateway_pb2
+
+        if self._rpc_stub is None:
+            logger.warning("Gateway client not connected")
+            return None
+
+        try:
+            params = json.dumps([{"to": to, "data": data}, "latest"])
+            response = self._rpc_stub.Call(
+                gateway_pb2.RpcRequest(
+                    chain=chain,
+                    method="eth_call",
+                    params=params,
+                ),
+                timeout=self.config.timeout,
+            )
+            if not response.success:
+                logger.warning(f"eth_call failed: {response.error}")
+                return None
+            if response.result:
+                return json.loads(response.result)
+            return None
+        except grpc.RpcError as e:
+            logger.warning(f"eth_call RPC error: {e}")
+            return None
+
     def query_position_liquidity(
         self,
         chain: str,

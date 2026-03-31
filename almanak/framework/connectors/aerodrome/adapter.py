@@ -650,6 +650,7 @@ class AerodromeAdapter:
         stable: bool = False,
         slippage_bps: int | None = None,
         recipient: str | None = None,
+        pool_address: str | None = None,
     ) -> LiquidityResult:
         """Build a remove liquidity transaction.
 
@@ -660,6 +661,9 @@ class AerodromeAdapter:
             stable: Pool type
             slippage_bps: Slippage tolerance in basis points
             recipient: Address to receive tokens
+            pool_address: Pre-resolved pool address. If provided, skips the
+                direct RPC lookup (required for deployed mode where the strategy
+                container has no outbound network access).
 
         Returns:
             LiquidityResult with transaction data
@@ -689,7 +693,8 @@ class AerodromeAdapter:
 
             # Get pool address for LP token approval
             # The pool contract IS the LP token (ERC-20)
-            pool_address = self.sdk.get_pool_address(token_a_address, token_b_address, stable)
+            if pool_address is None:
+                pool_address = self.sdk.get_pool_address(token_a_address, token_b_address, stable)
             if pool_address:
                 # Approve router to spend LP tokens
                 approve_tx = self._build_approve_tx(

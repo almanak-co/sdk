@@ -48,12 +48,10 @@ def test_aerodrome_lp_close_zero_lp_balance_is_noop_success() -> None:
     with (
         patch.object(compiler, "_resolve_token", side_effect=[token0, token1]),
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
+        patch.object(compiler, "_get_aerodrome_pool_address", return_value="0x" + "cc" * 20),
         patch.object(compiler, "_query_erc20_balance", return_value=0),
         patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
-        mock_adapter = mock_adapter_cls.return_value
-        mock_adapter.sdk.get_pool_address.return_value = "0x" + "cc" * 20
-
         result = compiler._compile_lp_close_aerodrome(intent)
 
     assert result.status == CompilationStatus.SUCCESS
@@ -83,11 +81,11 @@ def test_aerodrome_lp_close_nonzero_lp_balance_builds_transactions() -> None:
     with (
         patch.object(compiler, "_resolve_token", side_effect=[token0, token1]),
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
+        patch.object(compiler, "_get_aerodrome_pool_address", return_value="0x" + "cc" * 20),
         patch.object(compiler, "_query_erc20_balance", return_value=123456789),
         patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
         mock_adapter = mock_adapter_cls.return_value
-        mock_adapter.sdk.get_pool_address.return_value = "0x" + "cc" * 20
         mock_adapter.remove_liquidity.return_value = liquidity_result
 
         result = compiler._compile_lp_close_aerodrome(intent)
@@ -109,11 +107,11 @@ def test_aerodrome_lp_close_propagates_remove_liquidity_build_error() -> None:
     with (
         patch.object(compiler, "_resolve_token", side_effect=[token0, token1]),
         patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
+        patch.object(compiler, "_get_aerodrome_pool_address", return_value="0x" + "cc" * 20),
         patch.object(compiler, "_query_erc20_balance", return_value=1000000000000000000),
         patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
         mock_adapter = mock_adapter_cls.return_value
-        mock_adapter.sdk.get_pool_address.return_value = "0x" + "cc" * 20
         mock_adapter.remove_liquidity.return_value = MagicMock(
             success=False,
             transactions=[],
