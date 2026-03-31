@@ -112,7 +112,7 @@ class ResultEnricher:
             "collateral_returned",
         ],
         # === Staking ===
-        "STAKE": ["stake_amount", "shares_received", "stake_token"],
+        "STAKE": ["stake_amount", "shares_received", "wsteth_received", "stake_token"],
         "UNSTAKE": ["unstake_amount", "underlying_received", "cooldown_end"],
         # === Flash Loans ===
         "FLASH_LOAN": ["loan_amount", "fee_paid", "loan_token"],
