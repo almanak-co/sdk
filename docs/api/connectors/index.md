@@ -7,6 +7,7 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | Protocol | Type | Chains | Module |
 |----------|------|--------|--------|
 | [Uniswap V3](uniswap_v3.md) | DEX | Ethereum, Arbitrum, Optimism, Base, Polygon | `uniswap_v3` |
+| [Uniswap V4](uniswap_v4.md) | DEX | Ethereum, Arbitrum, Base | `uniswap_v4` |
 | [Aave V3](aave_v3.md) | Lending | Ethereum, Arbitrum, Optimism, Base, Avalanche | `aave_v3` |
 | [Morpho Blue](morpho_blue.md) | Lending | Ethereum, Base | `morpho_blue` |
 | [GMX V2](gmx_v2.md) | Perpetuals | Arbitrum, Avalanche | `gmx_v2` |
@@ -29,15 +30,14 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [Flash Loan](flash_loan.md) | Utility | Multi-chain | `flash_loan` |
 | Agni Finance | DEX | Mantle | `agni_finance` |
 | BenQi | Lending | Avalanche | `benqi` |
-| Drift | Perpetuals | Solana | `drift` |
-| Fluid DEX | DEX | Arbitrum | `fluid` |
+| [Drift](drift.md) | Perpetuals | Solana | `drift` |
+| [Fluid DEX](fluid.md) | DEX | Ethereum, Arbitrum | `fluid` |
 | Jupiter | DEX Aggregator | Solana | `jupiter` |
 | Jupiter Lend | Lending | Solana | `jupiter_lend` |
 | Kamino | Lending | Solana | `kamino` |
-| Lagoon | Vault | Multi-chain | `lagoon` |
-| Meteora | DEX / LP | Solana | `meteora` |
-| Morpho Vault | Vault | Ethereum, Base | `morpho_vault` |
-| Orca | DEX / LP | Solana | `orca` |
-| Raydium | DEX / LP | Solana | `raydium` |
-| Uniswap V4 | DEX | Ethereum | `uniswap_v4` |
+| [Lagoon](lagoon.md) | Vault | Multi-chain | `lagoon` |
+| [Meteora](meteora.md) | DEX / LP | Solana | `meteora` |
+| [Morpho Vault](morpho_vault.md) | Vault | Ethereum, Base | `morpho_vault` |
+| [Orca](orca.md) | DEX / LP | Solana | `orca` |
+| [Raydium](raydium.md) | DEX / LP | Solana | `raydium` |
 | [Base Infrastructure](base.md) | Shared | N/A | `base` |

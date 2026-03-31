@@ -142,17 +142,15 @@ markdown_extensions:
   - tables
 
 nav:
-  - Home: index.md
-  - Getting Started:
-    - getting-started.md
-  - Environment Variables:
-    - environment-variables.md
-  - Agent Skills:
-    - agent-skills.md
-  - Agentic Trading:
-    - agentic/index.md
-    - agentic/agent-tools.md
-    - agentic/adapters.md
+  - Home:
+    - index.md
+    - Getting Started: getting-started.md
+    - Environment Variables: environment-variables.md
+    - Agent Skills: agent-skills.md
+    - Agentic Trading:
+      - agentic/index.md
+      - agentic/agent-tools.md
+      - agentic/adapters.md
   - CLI Reference:
     - cli/almanak.md
     - cli/almanak-ax.md
@@ -181,6 +179,7 @@ nav:
     - Connectors:
       - api/connectors/index.md
       - api/connectors/uniswap_v3.md
+      - api/connectors/uniswap_v4.md
       - api/connectors/aave_v3.md
       - api/connectors/morpho_blue.md
       - api/connectors/gmx_v2.md
@@ -199,6 +198,13 @@ nav:
       - api/connectors/spark.md
       - api/connectors/pendle.md
       - api/connectors/kraken.md
+      - api/connectors/drift.md
+      - api/connectors/fluid.md
+      - api/connectors/lagoon.md
+      - api/connectors/meteora.md
+      - api/connectors/morpho_vault.md
+      - api/connectors/orca.md
+      - api/connectors/raydium.md
       - api/connectors/bridges.md
       - api/connectors/flash_loan.md
       - api/connectors/base.md
