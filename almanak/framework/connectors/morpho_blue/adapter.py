@@ -12,6 +12,7 @@ Morpho Blue is a permissionless lending protocol that allows:
 Supported chains:
 - Ethereum
 - Base
+- Arbitrum
 
 Example:
     from almanak.framework.connectors.morpho_blue import MorphoBlueAdapter, MorphoBlueConfig

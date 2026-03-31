@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 # Supported chains
-SUPPORTED_CHAINS = {"ethereum", "base"}
+SUPPORTED_CHAINS = {"ethereum", "base", "arbitrum"}
 
 # Morpho Blue function selectors for view functions
 # position(bytes32 id, address user) -> (uint256 supplyShares, uint128 borrowShares, uint128 collateral)
@@ -63,6 +63,7 @@ CREATE_MARKET_EVENT_TOPIC = HexStr("0xac4b2400f169220b0c0afdde7a0b32e775ba727ea1
 MORPHO_DEPLOYMENT_BLOCKS: dict[str, int] = {
     "ethereum": 18883124,  # Dec 2023
     "base": 18883124,  # Approximate
+    "arbitrum": 292000000,  # Jan 2025 (Morpho Blue Arbitrum launch)
 }
 
 # Max uint values

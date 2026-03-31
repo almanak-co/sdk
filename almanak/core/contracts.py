@@ -723,6 +723,10 @@ MORPHO_BLUE: dict[str, dict[str, str]] = {
         "morpho": MORPHO_BLUE_ADDRESS,
         "bundler": "0x23055618898e202386e6c13955a58D3C68200BFB",
     },
+    "arbitrum": {
+        "morpho": MORPHO_BLUE_ADDRESS,
+        "bundler": "0x1FA4431bC113D308beE1d46B0e98Cb805FB48C13",
+    },
 }
 
 MORPHO_BLUE_TOKENS: dict[str, dict[str, str]] = {
@@ -747,6 +751,14 @@ MORPHO_BLUE_TOKENS: dict[str, dict[str, str]] = {
         "USDbC": "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
         "cbETH": "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
         "wstETH": "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452",
+    },
+    "arbitrum": {
+        "WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+        "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        "USDC.e": "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",
+        "WBTC": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
+        "wstETH": "0x5979D7b546E38E414F7E9822514be443A4800529",
+        "weETH": "0x35751007a407ca6FEFfE80b3cB397736D2cf4dbe",
     },
 }
 
