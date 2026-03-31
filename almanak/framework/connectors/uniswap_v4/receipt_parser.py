@@ -274,6 +274,10 @@ class UniswapV4ReceiptParser:
         Looks for a Transfer event emitted by the PositionManager contract
         where from_address is the zero address (indicating a mint).
 
+        Falls back to ERC-721 mint Transfers from other known V4 PositionManager
+        addresses if no exact chain match is found (handles address mismatches
+        or proxy patterns). Rejects mints from unknown contracts to fail closed.
+
         Called by ResultEnricher for LP_OPEN intents.
 
         Args:
@@ -283,6 +287,18 @@ class UniswapV4ReceiptParser:
             Position ID (tokenId) or None if not found.
         """
         logs = receipt.get("logs", [])
+        tx_hash = receipt.get("transactionHash", "unknown")
+
+        # Build set of known V4 PositionManager addresses for fallback constraint
+        from almanak.core.contracts import UNISWAP_V4
+
+        known_pm_addresses = {
+            addrs["position_manager"].lower() for addrs in UNISWAP_V4.values() if addrs.get("position_manager")
+        }
+
+        # Collect ERC-721 mint Transfer candidates as fallback
+        fallback_candidates: list[tuple[int, str]] = []  # (token_id, emitting_address)
+
         for log in logs:
             topics = log.get("topics", [])
             if len(topics) < 4:
@@ -292,18 +308,74 @@ class UniswapV4ReceiptParser:
             if topic0 != TRANSFER_EVENT_TOPIC.lower():
                 continue
 
-            # Check if emitted by PositionManager
-            log_address = log.get("address", "").lower()
-            if log_address != self.position_manager:
-                continue
-
             # ERC-721 Transfer: topic[1]=from, topic[2]=to, topic[3]=tokenId
             from_addr = topics[1] if isinstance(topics[1], str) else hex(topics[1])
-            # Mint: from = zero address
-            if int(from_addr, 16) == 0:
-                token_id_hex = topics[3] if isinstance(topics[3], str) else hex(topics[3])
-                return int(token_id_hex, 16)
 
+            # Only consider mint events (from = zero address)
+            try:
+                if int(from_addr, 16) != 0:
+                    continue
+            except (ValueError, TypeError):
+                continue
+
+            token_id_hex = topics[3] if isinstance(topics[3], str) else hex(topics[3])
+            try:
+                token_id = int(token_id_hex, 16)
+            except (ValueError, TypeError):
+                continue
+
+            # Check if emitted by PositionManager (preferred match)
+            log_address = log.get("address", "")
+            log_address_lower = log_address.lower() if isinstance(log_address, str) else ""
+            if self.position_manager and log_address_lower == self.position_manager:
+                return token_id
+
+            # Only consider known V4 PositionManager addresses as fallback candidates
+            if log_address_lower in known_pm_addresses:
+                fallback_candidates.append((token_id, log_address_lower))
+
+        if len(fallback_candidates) == 1:
+            token_id, emitter = fallback_candidates[0]
+            logger.warning(
+                "V4 extract_position_id: no exact PositionManager match (%s), using fallback tokenId=%d "
+                "from known V4 PM %s. tx=%s, chain=%s",
+                self.position_manager,
+                token_id,
+                emitter,
+                tx_hash,
+                self.chain,
+            )
+            return token_id
+
+        if len(fallback_candidates) > 1:
+            logger.error(
+                "V4 extract_position_id: %d ambiguous ERC-721 mint candidates from known V4 PMs "
+                "(expected 1). Failing closed to avoid storing wrong position_id. "
+                "candidates=%s, position_manager=%s, chain=%s, tx=%s",
+                len(fallback_candidates),
+                [(tid, addr) for tid, addr in fallback_candidates],
+                self.position_manager,
+                self.chain,
+                tx_hash,
+            )
+            return None
+
+        # Log diagnostic info when extraction fails completely
+        transfer_count = sum(
+            1
+            for log in logs
+            if len(log.get("topics", [])) >= 4
+            and (log["topics"][0].lower() if isinstance(log["topics"][0], str) else "") == TRANSFER_EVENT_TOPIC.lower()
+        )
+        logger.warning(
+            "V4 extract_position_id: no position ID found. "
+            "total_logs=%d, erc721_transfer_events=%d, position_manager=%s, chain=%s, tx=%s",
+            len(logs),
+            transfer_count,
+            self.position_manager,
+            self.chain,
+            tx_hash,
+        )
         return None
 
     def extract_liquidity(self, receipt: dict[str, Any]) -> int | None:

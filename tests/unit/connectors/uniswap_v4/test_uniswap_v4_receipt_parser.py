@@ -444,3 +444,270 @@ class TestExtractSwapAmounts:
         assert amounts is not None
         assert amounts.token_in == "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
         assert amounts.token_out is None  # Only one Transfer, cannot identify output
+
+
+# =============================================================================
+# extract_position_id tests
+# =============================================================================
+
+
+def _build_erc721_transfer_log(
+    contract_address: str,
+    from_addr: str,
+    to_addr: str,
+    token_id: int,
+) -> dict:
+    """Build a mock ERC-721 Transfer event log (4 topics, no data)."""
+    return {
+        "address": contract_address,
+        "topics": [
+            EVENT_TOPICS["Transfer"],
+            "0x" + from_addr.replace("0x", "").zfill(64),
+            "0x" + to_addr.replace("0x", "").zfill(64),
+            "0x" + hex(token_id)[2:].zfill(64),
+        ],
+        "data": "0x",
+    }
+
+
+class TestExtractPositionId:
+    """Tests for extract_position_id — ERC-721 NFT tokenId extraction from LP mint receipts."""
+
+    def test_extract_from_position_manager_mint(self):
+        """Standard case: ERC-721 Transfer from PositionManager with from=zero (mint)."""
+        from almanak.core.contracts import UNISWAP_V4
+
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        pm_addr = UNISWAP_V4["arbitrum"]["position_manager"]
+
+        mint_log = _build_erc721_transfer_log(
+            contract_address=pm_addr,
+            from_addr="0x0000000000000000000000000000000000000000",
+            to_addr="0x1111111111111111111111111111111111111111",
+            token_id=42,
+        )
+
+        receipt = {"logs": [mint_log]}
+        position_id = parser.extract_position_id(receipt)
+
+        assert position_id == 42
+
+    def test_extract_ignores_non_mint_transfers(self):
+        """Regular transfers (from != zero) should NOT be extracted."""
+        from almanak.core.contracts import UNISWAP_V4
+
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        pm_addr = UNISWAP_V4["arbitrum"]["position_manager"]
+
+        # Transfer between two non-zero addresses (not a mint)
+        transfer_log = _build_erc721_transfer_log(
+            contract_address=pm_addr,
+            from_addr="0x1111111111111111111111111111111111111111",
+            to_addr="0x2222222222222222222222222222222222222222",
+            token_id=99,
+        )
+
+        receipt = {"logs": [transfer_log]}
+        assert parser.extract_position_id(receipt) is None
+
+    def test_extract_returns_none_for_empty_receipt(self):
+        """No logs -> no position ID."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        assert parser.extract_position_id({"logs": []}) is None
+
+    def test_extract_with_mixed_logs(self):
+        """Position ID extracted from ERC-721 mint among ERC-20 transfers and swaps."""
+        from almanak.core.contracts import UNISWAP_V4
+
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        pm_addr = UNISWAP_V4["arbitrum"]["position_manager"]
+
+        # ERC-20 Transfer (3 topics — should be skipped)
+        erc20_transfer = _build_transfer_log(
+            token="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            from_addr="0x1111111111111111111111111111111111111111",
+            to_addr="0x2222222222222222222222222222222222222222",
+            amount=1000 * 10**6,
+        )
+
+        # Swap event (should be skipped)
+        swap_log = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+
+        # ERC-721 mint from PositionManager (should be extracted)
+        mint_log = _build_erc721_transfer_log(
+            contract_address=pm_addr,
+            from_addr="0x0000000000000000000000000000000000000000",
+            to_addr="0x1111111111111111111111111111111111111111",
+            token_id=12345,
+        )
+
+        receipt = {"logs": [erc20_transfer, swap_log, mint_log]}
+        position_id = parser.extract_position_id(receipt)
+
+        assert position_id == 12345
+
+    def test_extract_fallback_known_v4_pm_different_chain(self):
+        """When ERC-721 mint comes from a known V4 PositionManager address
+        (but not the one configured for this chain), the fallback should
+        still extract the position ID."""
+        from almanak.core.contracts import UNISWAP_V4
+
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        # Use ethereum's PM address (known V4 PM, but not arbitrum's)
+        eth_pm = UNISWAP_V4["ethereum"]["position_manager"]
+
+        mint_log = _build_erc721_transfer_log(
+            contract_address=eth_pm,
+            from_addr="0x0000000000000000000000000000000000000000",
+            to_addr="0x1111111111111111111111111111111111111111",
+            token_id=777,
+        )
+
+        receipt = {"logs": [mint_log]}
+        position_id = parser.extract_position_id(receipt)
+
+        assert position_id == 777
+
+    def test_extract_rejects_unknown_contract_mint(self):
+        """ERC-721 mint from an unknown contract (not any known V4 PM)
+        should be rejected — fail closed for money-critical field."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+
+        mint_log = _build_erc721_transfer_log(
+            contract_address="0xDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF",
+            from_addr="0x0000000000000000000000000000000000000000",
+            to_addr="0x1111111111111111111111111111111111111111",
+            token_id=777,
+        )
+
+        receipt = {"logs": [mint_log]}
+        assert parser.extract_position_id(receipt) is None
+
+    def test_extract_prefers_position_manager_over_fallback(self):
+        """When both the chain's PositionManager and another known V4 PM emit
+        ERC-721 mints, prefer the chain's own PositionManager."""
+        from almanak.core.contracts import UNISWAP_V4
+
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        pm_addr = UNISWAP_V4["arbitrum"]["position_manager"]
+        # Use ethereum's PM as fallback candidate (known V4 PM, different chain)
+        eth_pm = UNISWAP_V4["ethereum"]["position_manager"]
+
+        fallback_mint = _build_erc721_transfer_log(
+            contract_address=eth_pm,
+            from_addr="0x0000000000000000000000000000000000000000",
+            to_addr="0x1111111111111111111111111111111111111111",
+            token_id=999,
+        )
+
+        # PositionManager mint (preferred)
+        pm_mint = _build_erc721_transfer_log(
+            contract_address=pm_addr,
+            from_addr="0x0000000000000000000000000000000000000000",
+            to_addr="0x1111111111111111111111111111111111111111",
+            token_id=42,
+        )
+
+        receipt = {"logs": [fallback_mint, pm_mint]}
+        position_id = parser.extract_position_id(receipt)
+
+        assert position_id == 42
+
+    def test_extract_large_token_id(self):
+        """Large tokenId values should be handled correctly."""
+        from almanak.core.contracts import UNISWAP_V4
+
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        pm_addr = UNISWAP_V4["arbitrum"]["position_manager"]
+
+        large_id = 2**128 - 1  # Very large tokenId
+        mint_log = _build_erc721_transfer_log(
+            contract_address=pm_addr,
+            from_addr="0x0000000000000000000000000000000000000000",
+            to_addr="0x1111111111111111111111111111111111111111",
+            token_id=large_id,
+        )
+
+        receipt = {"logs": [mint_log]}
+        position_id = parser.extract_position_id(receipt)
+
+        assert position_id == large_id
+
+    def test_extract_all_supported_chains(self):
+        """Position ID extraction works for all chains with V4 deployments."""
+        from almanak.core.contracts import UNISWAP_V4
+
+        for chain_name, addrs in UNISWAP_V4.items():
+            parser = UniswapV4ReceiptParser(chain=chain_name)
+            pm_addr = addrs["position_manager"]
+
+            mint_log = _build_erc721_transfer_log(
+                contract_address=pm_addr,
+                from_addr="0x0000000000000000000000000000000000000000",
+                to_addr="0x1111111111111111111111111111111111111111",
+                token_id=100,
+            )
+
+            receipt = {"logs": [mint_log]}
+            position_id = parser.extract_position_id(receipt)
+
+            assert position_id == 100, f"Failed for chain={chain_name}"
+
+    def test_extract_case_insensitive_address(self):
+        """Address comparison should be case-insensitive (checksum vs lowercase)."""
+        from almanak.core.contracts import UNISWAP_V4
+
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        pm_addr = UNISWAP_V4["arbitrum"]["position_manager"]
+
+        # Use all-uppercase address (simulating non-checksummed format)
+        mint_log = _build_erc721_transfer_log(
+            contract_address=pm_addr.upper(),
+            from_addr="0x0000000000000000000000000000000000000000",
+            to_addr="0x1111111111111111111111111111111111111111",
+            token_id=55,
+        )
+
+        receipt = {"logs": [mint_log]}
+        position_id = parser.extract_position_id(receipt)
+
+        assert position_id == 55
+
+    def test_extract_fails_closed_on_multiple_known_pm_mints(self):
+        """When multiple ERC-721 mints from known V4 PMs exist (no exact chain match),
+        return None to fail closed rather than guessing."""
+        from almanak.core.contracts import UNISWAP_V4
+
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        eth_pm = UNISWAP_V4["ethereum"]["position_manager"]
+        base_pm = UNISWAP_V4["base"]["position_manager"]
+
+        mint_a = _build_erc721_transfer_log(
+            contract_address=eth_pm,
+            from_addr="0x0000000000000000000000000000000000000000",
+            to_addr="0x1111111111111111111111111111111111111111",
+            token_id=111,
+        )
+        mint_b = _build_erc721_transfer_log(
+            contract_address=base_pm,
+            from_addr="0x0000000000000000000000000000000000000000",
+            to_addr="0x1111111111111111111111111111111111111111",
+            token_id=222,
+        )
+
+        receipt = {"logs": [mint_a, mint_b]}
+        assert parser.extract_position_id(receipt) is None
+
+    def test_extract_ignores_unknown_contract_mints_entirely(self):
+        """ERC-721 mints from unknown contracts should never be fallback candidates."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+
+        unknown_mint = _build_erc721_transfer_log(
+            contract_address="0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            from_addr="0x0000000000000000000000000000000000000000",
+            to_addr="0x1111111111111111111111111111111111111111",
+            token_id=111,
+        )
+
+        receipt = {"logs": [unknown_mint]}
+        assert parser.extract_position_id(receipt) is None

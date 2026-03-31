@@ -769,10 +769,20 @@ class TestReceiptParserLP:
         receipt = {"logs": []}
         assert parser.extract_position_id(receipt) is None
 
-    def test_extract_position_id_ignores_non_pm_transfers(self, parser):
-        """Transfer events from other contracts should not be matched."""
+    def test_extract_position_id_fallback_known_v4_pm(self, parser):
+        """Single ERC-721 mint from a known V4 PM (different chain) used as fallback."""
+        from almanak.core.contracts import UNISWAP_V4
+
         log = self._mint_transfer_log(token_id=999)
-        log["address"] = "0x0000000000000000000000000000000000001234"  # not PM
+        # Use ethereum's PM (known V4 PM, but not arbitrum's configured PM)
+        log["address"] = UNISWAP_V4["ethereum"]["position_manager"]
+        receipt = {"logs": [log]}
+        assert parser.extract_position_id(receipt) == 999
+
+    def test_extract_position_id_rejects_unknown_contract(self, parser):
+        """ERC-721 mint from unknown contract should be rejected (fail closed)."""
+        log = self._mint_transfer_log(token_id=999)
+        log["address"] = "0x0000000000000000000000000000000000001234"  # not any known V4 PM
         receipt = {"logs": [log]}
         assert parser.extract_position_id(receipt) is None
 
