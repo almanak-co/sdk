@@ -594,3 +594,104 @@ class TestOverridesTeardown:
             pass
 
         assert _overrides_teardown(NoMethod) is False
+
+
+# ---------------------------------------------------------------------------
+# Config propagation in teardown introspection
+# ---------------------------------------------------------------------------
+
+
+class _StrategyWithConfigDerivedTeardown(_FakeBaseStrategy):
+    """Strategy whose teardown reads config-derived attrs set in __init__."""
+
+    def __init__(self, config=None, chain=None, wallet_address=None, **kwargs):
+        self._config = config or {}
+        self._chain = chain
+        self.base_token = self._config.get("base_token", "WETH")
+
+    def generate_teardown_intents(self, mode, market=None):
+        # Uses self.base_token which is set from config in __init__
+        return [
+            SwapIntent(
+                from_token=self.base_token,
+                to_token="USDC",
+                amount=Decimal("1"),
+                max_slippage=Decimal("0.01"),
+                protocol="uniswap_v3",
+            ),
+        ]
+
+
+class _StrategyWithFailingInit(_FakeBaseStrategy):
+    """Strategy whose __init__ fails but teardown works with stub attrs."""
+
+    def __init__(self, config=None, chain=None, wallet_address=None, **kwargs):
+        raise RuntimeError("need gateway connection")
+
+    def generate_teardown_intents(self, mode, market=None):
+        return [
+            SwapIntent(
+                from_token="WETH",
+                to_token="USDC",
+                amount=Decimal("1"),
+                max_slippage=Decimal("0.01"),
+                protocol="enso",
+            ),
+        ]
+
+
+class TestConfigPropagation:
+    """Test config propagation through teardown introspection (CLI path)."""
+
+    def test_full_init_with_config_derived_attrs(self):
+        """Config values should be available to teardown via __init__."""
+        config = {"base_token": "DAI"}
+        protocols, warnings = discover_teardown_protocols(
+            _StrategyWithConfigDerivedTeardown, "base", config=config,
+        )
+        assert "uniswap_v3" in protocols
+        assert not warnings
+
+    def test_failing_init_falls_back_to_stub(self):
+        """When __init__ fails, stub should still allow teardown discovery."""
+        protocols, warnings = discover_teardown_protocols(
+            _StrategyWithFailingInit, "base", config={"base_token": "WETH"},
+        )
+        assert "enso" in protocols
+        # No warnings from teardown itself (only __init__ failed, teardown succeeded)
+        assert not any("Could not introspect" in w for w in warnings)
+
+    def test_failing_init_does_not_mutate_config(self):
+        """A failing __init__ must not corrupt the config used by the stub."""
+
+        class _MutatingInit(_FakeBaseStrategy):
+            def __init__(self, config=None, **kwargs):
+                config["mutated"] = True
+                raise RuntimeError("fail after mutation")
+
+            def generate_teardown_intents(self, mode, market=None):
+                return [
+                    SwapIntent(
+                        from_token="WETH",
+                        to_token="USDC",
+                        amount=Decimal("1"),
+                        max_slippage=Decimal("0.01"),
+                        protocol="enso",
+                    ),
+                ]
+
+        config = {"base_token": "WETH"}
+        discover_teardown_protocols(_MutatingInit, "base", config=config)
+        # Original config must not have the mutation
+        assert "mutated" not in config
+
+    def test_multi_chain_reuses_same_config(self):
+        """Multiple chains should work with the same config dict."""
+        config = {"base_token": "WETH"}
+        for chain in ("base", "arbitrum", "ethereum"):
+            protocols, warnings = discover_teardown_protocols(
+                _StrategyWithConfigDerivedTeardown, chain, config=config,
+            )
+            assert "uniswap_v3" in protocols
+        # Config should be unchanged after all invocations
+        assert config == {"base_token": "WETH"}

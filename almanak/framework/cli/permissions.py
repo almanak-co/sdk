@@ -147,7 +147,7 @@ def permissions(working_dir: str, chain: str | None, output: str | None, output_
     try:
         for target_chain in chains:
             # Per-chain teardown protocol discovery
-            td_protocols, td_warnings = discover_teardown_protocols(strategy_class, target_chain)
+            td_protocols, td_warnings = discover_teardown_protocols(strategy_class, target_chain, config=config)
             for w in td_warnings:
                 click.echo(f"  Warning: {w}", err=True)
             chain_extra = td_protocols - declared_protocols_lower

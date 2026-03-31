@@ -7,6 +7,7 @@ Zodiac Roles permission manifest for a strategy.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from datetime import UTC, datetime
@@ -288,6 +289,7 @@ def load_strategy_config(config_path: Path) -> dict[str, Any]:
 def discover_teardown_protocols(
     strategy_class: type,
     chain: str,
+    config: dict[str, Any] | None = None,
 ) -> tuple[set[str], list[str]]:
     """Discover protocols used by a strategy's teardown intents.
 
@@ -298,21 +300,25 @@ def discover_teardown_protocols(
 
     The function tries two approaches in order:
 
-    1. **Runtime introspection** — create a minimal strategy instance and
-       call ``generate_teardown_intents`` for both SOFT and HARD modes,
-       extracting the ``protocol`` field from each returned intent.
-    2. **Graceful fallback** — if instantiation or invocation fails (e.g.
-       the method needs live market data), return an empty set with a
-       warning so the caller can alert the user.
+    1. **Full init** — create a stub with config populated and attempt to
+       run ``__init__`` so derived attributes (e.g. ``self.max_slippage_pct``)
+       are available to ``generate_teardown_intents``.
+    2. **Bare stub fallback** — if ``__init__`` fails (e.g. needs a live
+       gateway), fall back to a minimal stub with only framework attributes.
+    3. **Graceful fallback** — if invocation still fails, return an empty
+       set with a warning so the caller can alert the user.
 
     Args:
         strategy_class: The loaded strategy class (not an instance).
         chain: Target chain name (set on the stub instance).
+        config: Strategy config.json values (passed to stub so
+            ``get_config()`` returns real values during introspection).
 
     Returns:
         A tuple of (discovered_protocol_names, warnings).
     """
     warnings: list[str] = []
+    config = config or {}
 
     # Only introspect if the class actually overrides generate_teardown_intents
     method = getattr(strategy_class, "generate_teardown_intents", None)
@@ -330,26 +336,32 @@ def discover_teardown_protocols(
         warnings.append("Could not import TeardownMode — skipping teardown introspection")
         return set(), warnings
 
-    # Build a lightweight stub instance (bypass __init__)
+    # Build a stub instance, trying full __init__ first for strategies whose
+    # teardown methods rely on attributes derived from config (e.g.
+    # self.max_slippage_pct, self.base_token).
+    instance: Any = None
+    used_full_init = False
     try:
-        instance: Any = object.__new__(strategy_class)
-        # Set minimal attributes that teardown methods commonly access.
-        # The base strategy class uses @property backed by _chain/_strategy_id,
-        # so set private attributes to avoid "has no setter" errors.
-        for attr, val in [
-            ("chain", chain),
-            ("_chain", chain),
-            ("state", {}),
-            ("_state", {}),
-            ("config", {}),
-            ("_config", {}),
-            ("strategy_id", "__permissions_introspection__"),
-            ("_strategy_id", "__permissions_introspection__"),
-        ]:
-            try:
-                setattr(instance, attr, val)
-            except AttributeError:
-                pass  # read-only property — private attr fallback handles it
+        instance = object.__new__(strategy_class)
+        # Set minimal framework attributes so __init__ can call get_config().
+        _set_stub_attrs(instance, chain, config)
+        # Attempt full __init__ — this populates derived attributes that
+        # teardown methods commonly access.  Use a deep copy so a partially-
+        # failing __init__ cannot mutate the caller's config.
+        try:
+            instance.__init__(
+                config=copy.deepcopy(config),
+                chain=chain,
+                wallet_address="0x0000000000000000000000000000000000000000",
+            )
+            used_full_init = True
+        except Exception:
+            # __init__ may need a gateway, market data, or other runtime deps.
+            # Discard the partially-initialized instance and create a fresh
+            # stub so teardown discovery operates on clean state.
+            logger.debug("Strategy __init__ failed during teardown introspection", exc_info=True)
+            instance = object.__new__(strategy_class)
+            _set_stub_attrs(instance, chain, config)
     except Exception as exc:
         warnings.append(f"Could not create strategy stub for teardown introspection: {exc}")
         return set(), warnings
@@ -375,9 +387,16 @@ def discover_teardown_protocols(
                 if protocol and isinstance(protocol, str):
                     protocols.add(protocol.lower())
         except Exception as exc:
+            init_hint = ""
+            if not used_full_init:
+                init_hint = (
+                    " Strategy __init__ could not run during introspection, so config-derived "
+                    "attributes are unavailable."
+                )
             warnings.append(
-                f"Could not introspect teardown intents (mode={mode.value}): {exc}. "
-                "Ensure supported_protocols includes all protocols used in generate_teardown_intents()."
+                f"Could not introspect teardown intents (mode={mode.value}): {exc}.{init_hint} "
+                "Teardown protocols may still be covered if they appear in supported_protocols "
+                "or permission hints. Verify the generated permissions include all teardown contracts."
             )
 
     if saw_success and not protocols:
@@ -386,6 +405,35 @@ def discover_teardown_protocols(
             "depends on live positions/state, verify supported_protocols manually."
         )
     return protocols, warnings
+
+
+def _set_stub_attrs(instance: Any, chain: str, config: dict[str, Any]) -> None:
+    """Set minimal framework attributes on a stub strategy instance.
+
+    The base strategy class uses ``@property`` backed by private attrs
+    (``_chain``, ``_config``, etc.), so we set both public and private
+    names to cover both property-backed and direct-attribute patterns.
+    """
+    state: dict[str, Any] = {}
+    persistent_state: dict[str, Any] = {}
+    for attr, val in [
+        ("chain", chain),
+        ("_chain", chain),
+        ("state", state),
+        ("_state", state),
+        ("config", config),
+        ("_config", config),
+        ("persistent_state", persistent_state),
+        ("_persistent_state", persistent_state),
+        ("strategy_id", "__permissions_introspection__"),
+        ("_strategy_id", "__permissions_introspection__"),
+        ("wallet_address", "0x0000000000000000000000000000000000000000"),
+        ("_wallet_address", "0x0000000000000000000000000000000000000000"),
+    ]:
+        try:
+            setattr(instance, attr, val)
+        except AttributeError:
+            pass  # read-only property — private attr fallback handles it
 
 
 def _overrides_teardown(strategy_class: type) -> bool:
