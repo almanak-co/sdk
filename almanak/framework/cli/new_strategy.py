@@ -151,7 +151,7 @@ TEMPLATE_CONFIGS: dict[StrategyTemplate, TemplateConfig] = {
         description="Atomic multi-step operations using IntentSequence for LP rebalancing",
         default_protocol="uniswap_v3",
         config_params={
-            "pool_address": "0x_SET_POOL_ADDRESS",
+            "pool": "WETH/USDC/3000",
             "base_token": "WETH",
             "quote_token": "USDC",
         },
@@ -239,6 +239,8 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     logger.warning(f"BB unavailable: {e}")
                     if indicator == "bollinger":
                         return Intent.hold(reason="BB data unavailable")
+                    # rsi_bb mode: falling back to RSI-only signals
+                    logger.warning("Bollinger Bands unavailable in rsi_bb mode -- falling back to RSI-only signals")
 
             if buy_signal and quote_balance.balance_usd >= self.trade_size_usd:
                 logger.info(f"BUY: {reason}")
@@ -282,7 +284,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                         logger.info(f"Rebalance needed: price {base_price} at {position_in_range:.1%} of range")
                         return Intent.lp_close(
                             position_id=self._position_id,
-                            pool=self.pool_address,
+                            pool=self.pool,
                             collect_fees=True,
                             protocol=self.protocol,
                         )
@@ -290,18 +292,23 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
 
             # No position -- open one
             try:
+                base_balance = market.balance(self.base_token)
                 quote_balance = market.balance(self.quote_token)
             except ValueError:
-                return Intent.hold(reason="Cannot check balance")
+                return Intent.hold(reason="Cannot check balances")
 
-            if quote_balance.balance_usd < self.min_position_usd:
-                return Intent.hold(reason=f"Insufficient {self.quote_token} for LP")
+            min_each_usd = self.min_position_usd / Decimal("2")
+            if base_balance.balance_usd < min_each_usd or quote_balance.balance_usd < min_each_usd:
+                return Intent.hold(reason="Insufficient balance for LP -- need both tokens funded")
 
+            # Use symbolic pool format (e.g. "WETH/USDC/3000") and pass amounts in that
+            # same order (amount0=base, amount1=quote). The compiler reorders to match
+            # on-chain token0/token1 sorting if needed. Provide BOTH amounts.
             logger.info(f"Opening LP: {lower_price:.2f} - {upper_price:.2f}")
             return Intent.lp_open(
-                pool=self.pool_address,
-                amount0=quote_balance.balance * Decimal("0.45"),
-                amount1=Decimal("0"),
+                pool=self.pool,
+                amount0=base_balance.balance * Decimal("0.45"),
+                amount1=quote_balance.balance * Decimal("0.45"),
                 range_lower=lower_price,
                 range_upper=upper_price,
                 protocol=self.protocol,
@@ -613,7 +620,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 if self._range_lower and self._range_upper:
                     mid = (self._range_lower + self._range_upper) / Decimal("2")
                     drift = abs(base_price - mid) / mid
-                    if drift < self.rebalance_threshold_pct:
+                    if drift < self.rebalance_drift_pct:
                         return Intent.hold(reason=f"Position in range, drift={drift:.2%}")
 
                 # Rebalance: use IntentSequence to atomically close LP + consolidate
@@ -625,7 +632,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     [
                         Intent.lp_close(
                             position_id=self._position_id,
-                            pool=self.pool_address,
+                            pool=self.pool,
                             collect_fees=True,
                             protocol=self.protocol,
                         ),
@@ -652,6 +659,8 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
             # LPOpenIntent requires concrete Decimal amounts (not "all"), so we
             # estimate the base amount after the swap using current price with a 5%
             # buffer for slippage. IntentSequence ensures swap executes first.
+            # IMPORTANT: half_base_est is an ESTIMATE. Actual swap output may differ.
+            # The compiler handles partial fills gracefully.
             half_quote = quote_balance.balance * Decimal("0.5")
             # Estimate how much base token we'll receive after swapping half_quote.
             # Fetch quote price so this works for non-stablecoin pairs (e.g. WETH/WBTC).
@@ -673,7 +682,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                         max_slippage=Decimal("0.005"),
                     ),
                     Intent.lp_open(
-                        pool=self.pool_address,
+                        pool=self.pool,
                         amount0=half_base_est,
                         amount1=half_quote * Decimal("0.95"),
                         range_lower=lower_price,
@@ -891,7 +900,7 @@ def _get_template_teardown(
                     protocol=self.protocol,
                     value_usd=Decimal("0"),  # Will be enriched by framework
                     details={{
-                        "pool": self.pool_address,
+                        "pool": self.pool,
                         "range_lower": str(self._range_lower) if self._range_lower else None,
                         "range_upper": str(self._range_upper) if self._range_upper else None,
                     }},
@@ -918,7 +927,7 @@ def _get_template_teardown(
             intents.append(
                 Intent.lp_close(
                     position_id=self._position_id,
-                    pool=self.pool_address,
+                    pool=self.pool,
                     collect_fees=True,
                     protocol=self.protocol,
                 )
@@ -1428,7 +1437,7 @@ def _get_template_teardown(
                     protocol=self.protocol,
                     value_usd=Decimal("0"),  # Will be enriched by framework
                     details={{
-                        "pool": self.pool_address,
+                        "pool": self.pool,
                         "range_lower": str(self._range_lower) if self._range_lower else None,
                         "range_upper": str(self._range_upper) if self._range_upper else None,
                     }},
@@ -1455,7 +1464,7 @@ def _get_template_teardown(
             intents.append(
                 Intent.lp_close(
                     position_id=self._position_id,
-                    pool=self.pool_address,
+                    pool=self.pool,
                     collect_fees=True,
                     protocol=self.protocol,
                 )
@@ -1602,7 +1611,7 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
     elif template == StrategyTemplate.DYNAMIC_LP:
         return """
         # LP parameters
-        self.pool_address = get_config("pool_address", "0x_SET_POOL_ADDRESS")
+        self.pool = get_config("pool", "WETH/USDC/3000")
         self.protocol = get_config("protocol", "uniswap_v3")
         self.range_width_pct = float(get_config("range_width_pct", 5))
         self.rebalance_threshold_pct = float(get_config("rebalance_threshold_pct", 80))
@@ -1624,6 +1633,11 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self.borrow_amount = Decimal(str(get_config("borrow_amount", "500")))
         self.target_leverage = Decimal(str(get_config("target_leverage", "2.0")))
         self.borrow_ratio = Decimal(str(get_config("borrow_ratio", "0.7")))
+        if self.borrow_ratio >= Decimal("1"):
+            raise ValueError(
+                f"borrow_ratio={self.borrow_ratio} >= 1.0 causes exponential borrow growth. "
+                "Set borrow_ratio to a value between 0 and 1 (e.g. 0.7) in config.json."
+            )
         self.min_health_factor = Decimal(str(get_config("min_health_factor", "1.5")))
         self.min_collateral_usd = Decimal(str(get_config("min_collateral_usd", "100")))
 
@@ -1680,6 +1694,8 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         return '''
         # Vault parameters
         self.vault_address = get_config("vault_address", "0x0000000000000000000000000000000000000000")
+        if self.vault_address == "0x0000000000000000000000000000000000000000":
+            logger.warning("vault_address is zero address -- strategy will HOLD every iteration. Update config.json.")
         self.deposit_token = get_config("deposit_token", "USDC")
         self.deposit_amount = Decimal(str(get_config("deposit_amount", "1000")))
         self.min_deposit_usd = Decimal(str(get_config("min_deposit_usd", "100")))
@@ -1709,12 +1725,12 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
     elif template == StrategyTemplate.MULTI_STEP:
         return """
         # Multi-step LP parameters
-        self.pool_address = get_config("pool_address", "0x_SET_POOL_ADDRESS")
+        self.pool = get_config("pool", "WETH/USDC/3000")
         self.protocol = get_config("protocol", "uniswap_v3")
         self.range_width_pct = float(get_config("range_width_pct", 5))
-        # rebalance_threshold_pct is configured as a percentage (e.g. 3 = 3%)
+        # rebalance_drift_pct is configured as a percentage (e.g. 3 = 3% price drift)
         # and divided by 100 here to convert to a decimal fraction for comparison
-        self.rebalance_threshold_pct = Decimal(str(get_config("rebalance_threshold_pct", "3"))) / Decimal("100")
+        self.rebalance_drift_pct = Decimal(str(get_config("rebalance_drift_pct", "3"))) / Decimal("100")
         self.min_position_usd = Decimal(str(get_config("min_position_usd", "500")))
 
         # Token configuration
@@ -2293,7 +2309,7 @@ def generate_config_json(
     elif template == StrategyTemplate.DYNAMIC_LP:
         data.update(
             {
-                "pool_address": "0x_SET_POOL_ADDRESS",
+                "pool": "WETH/USDC/3000",
                 "protocol": "uniswap_v3",
                 "base_token": "WETH",
                 "quote_token": "USDC",
@@ -2363,12 +2379,12 @@ def generate_config_json(
     elif template == StrategyTemplate.MULTI_STEP:
         data.update(
             {
-                "pool_address": "0x_SET_POOL_ADDRESS",
+                "pool": "WETH/USDC/3000",
                 "protocol": "uniswap_v3",
                 "base_token": "WETH",
                 "quote_token": "USDC",
                 "range_width_pct": 5,
-                "rebalance_threshold_pct": 3,
+                "rebalance_drift_pct": 3,
                 "min_position_usd": 500,
             }
         )

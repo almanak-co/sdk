@@ -50,8 +50,8 @@ TEMPLATE_INTENT_MAP: dict[str, list[str]] = {
 # Maps intent type -> the Intent factory method signature (simplified)
 _INTENT_QUICK_REF: dict[str, str] = {
     "SWAP": 'Intent.swap(from_token, to_token, amount_usd=, max_slippage=Decimal("0.005"))',
-    "LP_OPEN": "Intent.lp_open(pool, amount0, amount1, range_lower, range_upper, protocol=)",
-    "LP_CLOSE": "Intent.lp_close(position_id, collect_fees=True, protocol=)",
+    "LP_OPEN": 'Intent.lp_open(pool="WETH/USDC/3000", amount0=, amount1=, range_lower=, range_upper=, protocol=)',
+    "LP_CLOSE": "Intent.lp_close(position_id=, pool=None, collect_fees=True, protocol=)",
     "LP_COLLECT_FEES": 'Intent.collect_fees(pool, protocol="traderjoe_v2")',
     "SUPPLY": "Intent.supply(protocol, token, amount, use_as_collateral=True)",
     "BORROW": "Intent.borrow(protocol, collateral_token, collateral_amount, borrow_token, borrow_amount)",
@@ -86,12 +86,20 @@ TEMPLATE_CONFIG_DOCS: dict[str, list[tuple[str, str, str]]] = {
         ("bb_std_dev", "float", "Bollinger Bands std deviation multiplier (default 2.0)"),
     ],
     "dynamic_lp": [
-        ("pool_address", "string", "Uniswap V3 / DEX pool address"),
+        (
+            "pool",
+            "string",
+            "Pool identifier in TOKEN0/TOKEN1/FEE format (e.g. 'WETH/USDC/3000'). Do NOT use raw hex addresses.",
+        ),
         ("protocol", "string", "LP protocol (uniswap_v3, aerodrome, etc.)"),
         ("base_token", "string", "Pool base token"),
         ("quote_token", "string", "Pool quote token"),
         ("range_width_pct", "int", "LP range width as % of current price"),
-        ("rebalance_threshold_pct", "int", "Rebalance when position drifts this % from center"),
+        (
+            "rebalance_threshold_pct",
+            "int",
+            "Rebalance trigger: position outside the middle N% of range (80 = rebalance at 10%/90% bounds)",
+        ),
         ("min_position_usd", "int", "Minimum USD value to open a position"),
     ],
     "lending_loop": [
@@ -100,7 +108,11 @@ TEMPLATE_CONFIG_DOCS: dict[str, list[tuple[str, str, str]]] = {
         ("supply_amount", "string (Decimal)", "Initial collateral amount to supply"),
         ("borrow_amount", "string (Decimal)", "First-loop borrow amount in borrow_token"),
         ("target_leverage", "string (Decimal)", "Target leverage (e.g. 2.0 = 2x)"),
-        ("borrow_ratio", "string (Decimal)", "LTV usage per loop (0.7 = 70%), controls borrow decay"),
+        (
+            "borrow_ratio",
+            "string (Decimal)",
+            "LTV usage per loop (0.7 = 70%), controls borrow decay. Must be < 1.0; values >= 1.0 cause exponential borrow growth.",
+        ),
         ("min_health_factor", "string (Decimal)", "Minimum health factor before repay (e.g. 1.5)"),
         ("min_collateral_usd", "string (Decimal)", "Minimum collateral USD to start"),
     ],
@@ -110,8 +122,16 @@ TEMPLATE_CONFIG_DOCS: dict[str, list[tuple[str, str, str]]] = {
         ("perp_market", "string", "Perpetual market identifier (e.g. ETH/USD)"),
         ("spot_size_usd", "string (Decimal)", "USD size of the spot leg"),
         ("hedge_ratio", "string (Decimal)", "Perp size / spot size (1.0 = delta neutral)"),
-        ("funding_entry_threshold", "string (Decimal)", "Min hourly funding rate to enter (e.g. 0.0001 = 0.01%/hr)"),
-        ("funding_exit_threshold", "string (Decimal)", "Exit if funding drops below this (e.g. -0.00005)"),
+        (
+            "funding_entry_threshold",
+            "string (Decimal)",
+            "Min hourly funding rate to enter (positive = longs pay shorts, e.g. 0.0001 = 0.01%/hr)",
+        ),
+        (
+            "funding_exit_threshold",
+            "string (Decimal)",
+            "Exit if funding drops below this (negative = exit when shorts pay longs, e.g. -0.00005)",
+        ),
     ],
     "vault_yield": [
         ("vault_address", "string", "ERC-4626 vault contract address"),
@@ -131,12 +151,16 @@ TEMPLATE_CONFIG_DOCS: dict[str, list[tuple[str, str, str]]] = {
         ("base_token", "string", "Token for price checks (e.g. ETH)"),
     ],
     "multi_step": [
-        ("pool_address", "string", "DEX pool address for LP"),
+        (
+            "pool",
+            "string",
+            "Pool identifier in TOKEN0/TOKEN1/FEE format (e.g. 'WETH/USDC/3000'). Do NOT use raw hex addresses.",
+        ),
         ("protocol", "string", "LP protocol (uniswap_v3, aerodrome, etc.)"),
         ("base_token", "string", "Pool base token"),
         ("quote_token", "string", "Pool quote token"),
         ("range_width_pct", "int", "LP range width as % of current price"),
-        ("rebalance_threshold_pct", "int", "Price drift % to trigger rebalance"),
+        ("rebalance_drift_pct", "int", "Price drift % from center to trigger rebalance (3 = 3% drift)"),
         ("min_position_usd", "int", "Minimum USD value to open a position"),
     ],
     "staking": [
@@ -156,6 +180,41 @@ TEMPLATE_CONFIG_DOCS: dict[str, list[tuple[str, str, str]]] = {
 }
 
 
+# Maps template -> common mistakes that AI agents should avoid
+TEMPLATE_FOOTGUNS: dict[str, list[str]] = {
+    "blank": [],
+    "ta_swap": [
+        "In rsi_bb mode, if Bollinger Bands data is unavailable, the strategy silently falls back to RSI-only signals.",
+    ],
+    "dynamic_lp": [
+        "pool MUST use symbolic format 'TOKEN0/TOKEN1/FEE' (e.g. 'WETH/USDC/3000'), NOT a raw hex address. Raw addresses trigger silent fallback to WETH/USDC.",
+        "Pass amount0/amount1 in the same order as your pool string (e.g. for 'WETH/USDC/3000', amount0=WETH amount, amount1=USDC amount). The compiler will reorder to match on-chain token0/token1 sorting if needed.",
+        "Provide BOTH amount0 and amount1. Single-sided LP (one amount = 0) wastes liquidity or reverts on most protocols.",
+        "range_lower/range_upper are PRICES (e.g. 1800.0), not ticks. The compiler converts to ticks.",
+    ],
+    "lending_loop": [
+        "borrow_ratio MUST be between 0 and 1 (e.g. 0.7 = 70% LTV per loop). Values >= 1.0 cause exponential borrow growth.",
+        "Each loop borrows borrow_amount * borrow_ratio^loop_count -- amounts decay geometrically.",
+    ],
+    "basis_trade": [
+        "funding_entry_threshold should be POSITIVE (e.g. 0.0001 = 0.01%/hr) -- enter when longs pay shorts.",
+        "funding_exit_threshold should be NEGATIVE (e.g. -0.00005) -- exit when funding turns unfavorable (shorts pay longs).",
+    ],
+    "vault_yield": [
+        "vault_address must be set to a valid ERC-4626 vault contract. The zero-address default will cause the strategy to HOLD indefinitely.",
+        "Find vault addresses on the protocol's UI (e.g. app.morpho.org for MetaMorpho vaults).",
+    ],
+    "copy_trader": [],
+    "perps": [],
+    "multi_step": [
+        "pool MUST use symbolic format 'TOKEN0/TOKEN1/FEE', NOT a raw hex address.",
+        "The swap-then-LP sequence uses estimated amounts with a 5% slippage buffer. Actual amounts may differ.",
+        "rebalance_drift_pct is a percentage (e.g. 3 = 3% drift triggers rebalance). Do not confuse with dynamic_lp's rebalance_threshold_pct which has different semantics.",
+    ],
+    "staking": [],
+}
+
+
 def generate_strategy_agents_md(config: StrategyGuideConfig) -> str:
     """Generate a per-strategy AGENTS.md file.
 
@@ -169,6 +228,14 @@ def generate_strategy_agents_md(config: StrategyGuideConfig) -> str:
         ref = _INTENT_QUICK_REF.get(it, f"Intent.{it.lower()}(...)")
         intent_lines.append(f"- `{ref}`")
     intent_ref = "\n".join(intent_lines)
+
+    # Build common mistakes section
+    footguns = TEMPLATE_FOOTGUNS.get(config.template_name, [])
+    if footguns:
+        footgun_lines = "\n".join(f"- {f}" for f in footguns)
+        footgun_section = f"## Common Mistakes\n\n{footgun_lines}\n"
+    else:
+        footgun_section = ""
 
     # Build config parameter documentation
     config_docs = TEMPLATE_CONFIG_DOCS.get(config.template_name, [])
@@ -256,7 +323,7 @@ All intents are created via `from almanak.framework.intents import Intent`.
 - Config values are read via `self.config.get("key", default)` in `__init__`
 - State persists between iterations via `self.state` dict
 
-## Teardown (Required)
+{footgun_section}## Teardown (Required)
 
 Every `IntentStrategy` **must** implement two abstract teardown methods.
 Strategies that hold no positions can extend `StatelessStrategy` instead.

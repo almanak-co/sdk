@@ -627,3 +627,74 @@ def test_basis_trade_persistence_all_states() -> None:
         strat2 = _make_basis_strategy()
         strat2.load_persistent_state(saved)
         assert strat2._trade_state == state, f"round-trip failed for state={state}"
+
+
+# ---------------------------------------------------------------------------
+# LP template guardrails: pool format, amounts, config keys
+# ---------------------------------------------------------------------------
+
+
+def test_dynamic_lp_config_uses_symbolic_pool() -> None:
+    """dynamic_lp config.json must use symbolic pool format, not raw hex."""
+    import json
+
+    config_str = generate_config_json("Test LP", StrategyTemplate.DYNAMIC_LP, SupportedChain.ARBITRUM)
+    config = json.loads(config_str)
+    assert "pool" in config, "dynamic_lp config must have 'pool' key"
+    assert "pool_address" not in config, "dynamic_lp config must NOT have 'pool_address'"
+    assert config["pool"] == "WETH/USDC/3000", f"Expected 'WETH/USDC/3000', got '{config['pool']}'"
+
+
+def test_multi_step_config_uses_symbolic_pool() -> None:
+    """multi_step config.json must use symbolic pool format, not raw hex."""
+    import json
+
+    config_str = generate_config_json("Test MS", StrategyTemplate.MULTI_STEP, SupportedChain.ARBITRUM)
+    config = json.loads(config_str)
+    assert "pool" in config, "multi_step config must have 'pool' key"
+    assert "pool_address" not in config, "multi_step config must NOT have 'pool_address'"
+    assert config["pool"] == "WETH/USDC/3000", f"Expected 'WETH/USDC/3000', got '{config['pool']}'"
+
+
+def test_multi_step_config_uses_rebalance_drift_pct() -> None:
+    """multi_step config must use rebalance_drift_pct, not rebalance_threshold_pct."""
+    import json
+
+    config_str = generate_config_json("Test MS", StrategyTemplate.MULTI_STEP, SupportedChain.ARBITRUM)
+    config = json.loads(config_str)
+    assert "rebalance_drift_pct" in config, "multi_step config must have 'rebalance_drift_pct'"
+    assert "rebalance_threshold_pct" not in config, "multi_step config must NOT have 'rebalance_threshold_pct'"
+    assert config["rebalance_drift_pct"] == 3, "default drift should be 3 (%)"
+
+
+def test_dynamic_lp_strategy_provides_both_lp_amounts() -> None:
+    """dynamic_lp decide() must fetch both balances and pass both to lp_open."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        code = generate_strategy_file(
+            "Test LP", StrategyTemplate.DYNAMIC_LP, SupportedChain.ARBITRUM, output_dir=Path(tmpdir),
+        )
+    # Must NOT hardcode amount1=0 (single-sided)
+    assert 'amount1=Decimal("0")' not in code, "LP_OPEN must not hardcode amount1=0"
+    # Must fetch both base and quote balances before LP_OPEN
+    assert "market.balance(self.base_token)" in code, "Must fetch base_token balance for LP"
+    assert "market.balance(self.quote_token)" in code, "Must fetch quote_token balance for LP"
+    # Must reference self.pool not self.pool_address
+    assert "self.pool_address" not in code, "Must use self.pool, not self.pool_address"
+
+
+def test_lp_templates_agents_md_has_footguns() -> None:
+    """LP template AGENTS.md must include Common Mistakes section."""
+    from almanak.framework.cli.strategy_agent_guide import StrategyGuideConfig, generate_strategy_agents_md
+
+    for template in (StrategyTemplate.DYNAMIC_LP, StrategyTemplate.MULTI_STEP):
+        guide_config = StrategyGuideConfig(
+            strategy_name="test",
+            template_name=template.value,
+            chain="arbitrum",
+            class_name="TestStrategy",
+        )
+        content = generate_strategy_agents_md(guide_config)
+        assert "Common Mistakes" in content, f"{template.value} AGENTS.md must have Common Mistakes section"
+        assert "symbolic format" in content.lower() or "raw hex" in content.lower(), (
+            f"{template.value} AGENTS.md must warn about pool format"
+        )
