@@ -1,0 +1,14 @@
+{
+    "market_id": "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
+    "supply_token": "wstETH",
+    "supply_amount": "2",
+    "withdraw_drawdown_threshold": "0.15",
+    "resupply_recovery_threshold": "0.08",
+    "max_hold_ticks": 50,
+    "force_entry_if_no_rate": true,
+    "anvil_funding": {
+        "ETH": 10,
+        "wstETH": 5,
+        "USDC": 1000
+    }
+}
