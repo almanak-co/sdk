@@ -1,3 +1,68 @@
+/* Almanak fonts */
+@font-face {
+  font-family: 'Bw Gradual';
+  src: url('../assets/fonts/BwGradual-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Bw Gradual';
+  src: url('../assets/fonts/BwGradual-ExtraBold.woff2') format('woff2');
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Suisse BP';
+  src: url('../assets/fonts/Suisse BP Regular.otf') format('opentype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Suisse BP';
+  src: url('../assets/fonts/Suisse BP Medium.otf') format('opentype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Suisse BP';
+  src: url('../assets/fonts/Suisse BP Intl Bold.otf') format('opentype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Typography overrides */
+:root {
+  --md-text-font: 'Suisse BP', sans-serif;
+  --md-code-font: 'JetBrains Mono', monospace;
+}
+
+.md-typeset {
+  font-family: 'Suisse BP', sans-serif;
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4,
+.md-typeset h5,
+.md-typeset h6 {
+  font-family: 'Bw Gradual', sans-serif;
+}
+
+.md-header,
+.md-tabs {
+  font-family: 'Suisse BP', sans-serif;
+}
+
 /* Almanak brand colors */
 [data-md-color-scheme="slate"] {
   --md-primary-fg-color: #1F3033;
