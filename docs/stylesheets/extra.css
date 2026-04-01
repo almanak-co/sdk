@@ -93,6 +93,7 @@
   padding: 1.25rem 2rem;
   font-size: 0.7rem;
   color: hsla(0, 0%, 100%, 0.45);
+  background-color: rgba(22, 24, 29, 0.87);
 }
 
 .site-footer__inner {
