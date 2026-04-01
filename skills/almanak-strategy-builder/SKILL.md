@@ -12,7 +12,7 @@ description: >-
   debugging strategy execution on Anvil forks. Do NOT use for general
   smart contract development, Solidity code, or non-strategy SDK internals.
 metadata:
-  version: "2.8.1"
+  version: "2.9.0"
   author: Almanak
   license: Apache-2.0
   type: documentation
@@ -463,26 +463,20 @@ return resolved
 
 ### Token Utilities
 
-**WrapNativeIntent** - Wrap native tokens to ERC-20 (ETH -> WETH, MATIC -> WMATIC, etc.)
+**Intent.wrap** (WrapNative) - Wrap native tokens to ERC-20 (ETH -> WETH, MATIC -> WMATIC, etc.)
 
 ```python
-from almanak.framework.intents import WrapNativeIntent
-from decimal import Decimal
-
-WrapNativeIntent(
+Intent.wrap(
     token="WETH",              # Wrapped token symbol to receive
     amount=Decimal("0.5"),     # Amount of native token to wrap (or "all")
     chain="arbitrum",          # Target chain
 )
 ```
 
-**UnwrapNativeIntent** - Unwrap wrapped native tokens (WETH -> ETH, WMATIC -> MATIC, etc.)
+**Intent.unwrap** (UnwrapNative) - Unwrap wrapped native tokens (WETH -> ETH, WMATIC -> MATIC, etc.)
 
 ```python
-from almanak.framework.intents import UnwrapNativeIntent
-from decimal import Decimal
-
-UnwrapNativeIntent(
+Intent.unwrap(
     token="WETH",              # Wrapped token symbol
     amount=Decimal("0.5"),     # Amount to unwrap (or "all")
     chain="arbitrum",          # Target chain

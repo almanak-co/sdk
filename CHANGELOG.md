@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-04-01
+
+### Added
+- `Intent.wrap()` and `Intent.unwrap()` factory methods for native token wrapping (#1196)
+- Polish circuit breaker for strategy execution quality gates (#1229)
+- Lido enricher exposes wstETH amount for `receive_wrapped=True` (#1230)
+- GeckoTerminal DEX OHLCV fallback with gRPC proxy for deployed mode (#1112, #1200)
+- Teardown intent introspection for automatic protocol discovery (#1193)
+- Morpho Blue Arbitrum support with Uniswap V3 yield stack strategy (#1234)
+- Curve StableSwap 3pool LP lifecycle strategy on Ethereum (#1220)
+- Compound V3 + Enso leveraged swap strategy on Base (#1207)
+- Compound V3 + Aerodrome yield farm strategy on Base (#1194)
+- Morpho Blue + Uniswap V3 leveraged LP strategy on Ethereum (#1197)
+- BENQI + Uniswap V3 leveraged swap teardown lifecycle on Avalanche (#1210)
+- Aave V3 + PancakeSwap V3 teardown lifecycle on BSC (#1211)
+- Compound V3 + Uniswap V3 teardown lifecycle on Arbitrum (#1212)
+- Compound V3 + Aerodrome teardown lifecycle on Base (#1202)
+- Enso swap lifecycle tests on Base (#1233)
+- Velodrome V2 PnL backtest on Optimism (#1177)
+- Almanak brand fonts and consistent footer for SDK docs site
+
+### Changed
+- SDK documentation URL updated from docs.almanak.co to sdk.docs.almanak.co
+- Bump Almanak Code version to v0.2.9
+
+### Fixed
+- Halt strategy runner after teardown failure instead of continuing (#1111)
+- Route Aerodrome pool address query through gateway RPC (#1227)
+- Fix Pydantic intent cloning in teardown slippage escalation using `model_copy` (#1226)
+- Pass `routing_strategy=router` in gRPC EnsoRouteRequest (#1225)
+- Bump Stargate LayerZero fee estimates with route-aware values (#1223)
+- Repair 5 broken demo strategies found by Anvil audit (#1216)
+- Widen Enso slippage on Anvil forks to prevent safeRouteSingle reverts (#1206)
+- V4 receipt parser `extract_position_id` fallback and logging (#1204)
+- Pass config.json to teardown introspection in permissions CLI (#1203)
+- Route portfolio snapshots through gateway gRPC instead of SQLite fallback (#1205)
+- Resolve CoinGecko prices by contract address via registry lookup (#1199)
+- Thread `data_granularity` config into all indicator methods (#1198)
+- Pendle YT teardown auto-mode slippage escalation (#1195)
+- Raise V4 LP estimated-price slippage buffer to 30% (#1192)
+
 ## [2.8.1] - 2026-03-30
 
 ### Added

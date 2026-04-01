@@ -209,8 +209,8 @@ class MyStrategy(IntentStrategy):
 | `PredictionRedeemIntent` | Redeem prediction market winnings |
 | `VaultDepositIntent` | Deposit into a vault |
 | `VaultRedeemIntent` | Redeem from a vault |
-| `WrapNativeIntent` | Wrap native tokens (e.g., ETH to WETH) |
-| `UnwrapNativeIntent` | Unwrap native tokens (e.g., WETH to ETH) |
+| `WrapNativeIntent` | Wrap native tokens (e.g., ETH to WETH). Factory: `Intent.wrap()` |
+| `UnwrapNativeIntent` | Unwrap native tokens (e.g., WETH to ETH). Factory: `Intent.unwrap()` |
 | `Intent.bridge()` | Bridge tokens cross-chain (factory method returning a composite intent) |
 | `Intent.ensure_balance()` | Ensure minimum token balance on a target chain (factory method resolving to a bridge or hold) |
 

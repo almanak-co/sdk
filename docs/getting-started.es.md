@@ -209,8 +209,8 @@ class MyStrategy(IntentStrategy):
 | `PredictionRedeemIntent` | Canjear ganancias de mercado de predicción |
 | `VaultDepositIntent` | Depositar en una bóveda |
 | `VaultRedeemIntent` | Canjear desde una bóveda |
-| `WrapNativeIntent` | Envolver tokens nativos (ej: ETH a WETH) |
-| `UnwrapNativeIntent` | Desenvolver tokens nativos (ej: WETH a ETH) |
+| `WrapNativeIntent` | Envolver tokens nativos (ej: ETH a WETH). Factory: `Intent.wrap()` |
+| `UnwrapNativeIntent` | Desenvolver tokens nativos (ej: WETH a ETH). Factory: `Intent.unwrap()` |
 | `Intent.bridge()` | Transferir tokens entre cadenas (metodo factory que retorna un intent compuesto) |
 | `Intent.ensure_balance()` | Asegurar un saldo minimo de tokens en una cadena destino (metodo factory que se resuelve a bridge o hold) |
 

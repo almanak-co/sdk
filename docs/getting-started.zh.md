@@ -206,8 +206,8 @@ class MyStrategy(IntentStrategy):
 | `PredictionRedeemIntent` | 赎回预测市场收益 |
 | `VaultDepositIntent` | 存入金库 |
 | `VaultRedeemIntent` | 从金库赎回 |
-| `WrapNativeIntent` | 包装原生代币（例如 ETH 转 WETH） |
-| `UnwrapNativeIntent` | 解包原生代币（例如 WETH 转 ETH） |
+| `WrapNativeIntent` | 包装原生代币（例如 ETH 转 WETH）。工厂方法: `Intent.wrap()` |
+| `UnwrapNativeIntent` | 解包原生代币（例如 WETH 转 ETH）。工厂方法: `Intent.unwrap()` |
 | `Intent.bridge()` | 跨链桥接代币（工厂方法，返回复合意图） |
 | `Intent.ensure_balance()` | 确保目标链上的最低代币余额（工厂方法，解析为桥接或持有） |
 
