@@ -295,6 +295,9 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
     "mantle": {
         "agni_finance": "0x319B69888b0d11cEC22caA5034e25FfFBDc88421",  # Agni Finance SwapRouter
     },
+    "monad": {
+        "uniswap_v3": "0xfE31F71C1b106EAc32F1A19239c9a9A72ddfb900",  # SwapRouter02 — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
+    },
 }
 
 # Uniswap V3 NonfungiblePositionManager addresses per chain
@@ -356,6 +359,9 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     "mantle": {
         "agni_finance": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni Finance NFT Position Manager
     },
+    "monad": {
+        "uniswap_v3": "0x7197E214c0b767cFB76Fb734ab638E2c192F4E53",  # NonfungiblePositionManager — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
+    },
 }
 
 # Chain-specific token addresses for fee tier selection in swaps
@@ -415,6 +421,12 @@ CHAIN_TOKENS: dict[str, dict[str, str]] = {
         "usdt": "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE",
         "weth": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",
         "wmnt": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
+    },
+    "monad": {
+        "usdc": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "weth": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",
+        "wmon": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
+        "wbtc": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
     },
 }
 
@@ -491,6 +503,9 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
     },
     "mantle": {
         "agni_finance": "0xc4aaDc921E1cdb66c5300Bc158a313292923C0cb",  # Agni Finance QuoterV2
+    },
+    "monad": {
+        "uniswap_v3": "0x661E93cca42AfacB172121EF892830cA3b70F08d",  # QuoterV2 — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
     },
 }
 
@@ -1064,6 +1079,7 @@ class DefaultSwapAdapter:
             "bsc": "WBNB",
             "mantle": "WMNT",
             "sonic": "WS",
+            "monad": "WMON",
         }
         _wn_symbol = _wrapped_symbols.get(self.chain)
         wrapped_native_addr = resolve_address(_wn_symbol) if _wn_symbol else None
@@ -4506,7 +4522,14 @@ class IntentCompiler:
             # - In swaps, slippage = receiving fewer tokens (real loss)
             # - In LP, slippage = different deposit ratio (no loss, just different position)
             # Default 20% slippage (80% minimum), configurable to 100% (0 minimum) for volatile pairs
-            lp_slippage = getattr(intent, "max_slippage", None) or self.default_lp_slippage
+            # protocol_params.lp_slippage overrides default (e.g. 1.0 = zero minimums, safe for testing)
+            _protocol_params = intent.protocol_params
+            protocol_lp_slippage = _protocol_params.get("lp_slippage") if isinstance(_protocol_params, dict) else None
+            if protocol_lp_slippage is not None:
+                lp_slippage = min(max(Decimal(str(protocol_lp_slippage)), Decimal("0")), Decimal("1"))
+            else:
+                _max_slippage = getattr(intent, "max_slippage", None)
+                lp_slippage = _max_slippage if _max_slippage is not None else self.default_lp_slippage
             min_multiplier = Decimal("1") - lp_slippage  # 0.80 for 20% slippage
             amount0_min = int(amount0_desired * min_multiplier)
             amount1_min = int(amount1_desired * min_multiplier)
@@ -7577,8 +7600,20 @@ class IntentCompiler:
             # YT represents only the remaining yield and can approach zero near expiry,
             # so we use a 1% floor to avoid reverts on near-maturity YT sells.
             if swap_type == "yt_to_token":
-                min_amount_out = amount_in // 100
-                estimation_method = "1% floor (YT near-expiry safe)"
+                # YT value decays toward zero near expiry. A fixed 1% floor caused
+                # INSUFFICIENT_TOKEN_OUT reverts that TeardownManager slippage
+                # escalation could not overcome (VIB-2174).
+                #
+                # Scale the floor by slippage: at default 200bps use 1% floor,
+                # at >=500bps use a minimal floor (1 wei) so the SDK's own
+                # slippage_bps reduction is the only protection. This lets
+                # TeardownManager escalation actually widen the tolerance.
+                if slippage_bps >= 500:
+                    min_amount_out = 1  # Accept any output; SDK applies slippage_bps on top
+                    estimation_method = f"minimal floor (high slippage {slippage_bps}bps, YT near-expiry)"
+                else:
+                    min_amount_out = amount_in // 100
+                    estimation_method = f"1% floor (YT near-expiry safe, slippage {slippage_bps}bps)"
             elif swap_type == "pt_to_token":
                 min_amount_out = amount_in // 2
                 estimation_method = "50% floor (PT discount safe)"
@@ -7742,8 +7777,14 @@ class IntentCompiler:
                 # Don't apply slippage here -- the SDK applies it internally (VIB-576).
                 # For sell directions, use discounted estimate (VIB-1366).
                 if swap_type == "yt_to_token":
-                    min_amount_out = amount_in // 100
-                    estimation_method = "1% floor (YT near-expiry safe, post-pre-swap)"
+                    if slippage_bps >= 500:
+                        min_amount_out = 1
+                        estimation_method = (
+                            f"minimal floor (high slippage {slippage_bps}bps, YT near-expiry, post-pre-swap)"
+                        )
+                    else:
+                        min_amount_out = amount_in // 100
+                        estimation_method = f"1% floor (YT near-expiry safe, slippage {slippage_bps}bps, post-pre-swap)"
                 elif swap_type == "pt_to_token":
                     min_amount_out = amount_in // 2
                     estimation_method = "50% floor (PT discount safe, post-pre-swap)"
@@ -12737,7 +12778,7 @@ class IntentCompiler:
 
     def _is_native_token(self, symbol: str) -> bool:
         """Check if token is the native token."""
-        native_tokens = {"ETH", "MATIC", "AVAX", "XPL"}
+        native_tokens = {"ETH", "MATIC", "AVAX", "XPL", "OKB", "MON"}
         return symbol.upper() in native_tokens
 
     def _get_wrapped_native_address(self) -> str | None:
@@ -12758,6 +12799,7 @@ class IntentCompiler:
             "bsc": "WBNB",
             "mantle": "WMNT",
             "sonic": "WS",
+            "monad": "WMON",
         }
         symbol = wrapped_symbols.get(self.chain)
         if not symbol:
@@ -12996,6 +13038,7 @@ class IntentCompiler:
         "WS": "S",
         "WXPL": "XPL",
         "WPOL": "POL",
+        "WMON": "MON",
     }
 
     def _require_token_price(self, symbol: str) -> Decimal:

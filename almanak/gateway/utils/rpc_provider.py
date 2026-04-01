@@ -184,7 +184,7 @@ _BUILTIN_CHAINS: dict[str, dict] = {
         "poa": False,
     },
     "monad": {
-        "chain_id": 10143,
+        "chain_id": 143,
         "public_rpc": "https://rpc.monad.xyz",
         "alchemy_prefix": "monad",
         "anvil_port": 8555,

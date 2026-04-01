@@ -1,0 +1,13 @@
+{
+    "pool": "WETH/USDC/500",
+    "range_width_pct": 0.20,
+    "amount0": "0.001",
+    "amount1": "3",
+    "force_action": "open",
+    "anvil_funding": {
+        "MON": 1000,
+        "WMON": 10,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

@@ -232,6 +232,13 @@ TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
         "USDC": "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",
         "USDT": "0x6047828dc181963ba44974801FF68e538dA5eaF9",
     },
+    "monad": {
+        "WMON": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
+        "WETH": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",
+        "USDC": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "USDT0": "0xe7cd86e13AC4309349F30B3435a9d337750fC82D",
+        "WBTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
+    },
 }
 
 
@@ -261,6 +268,7 @@ TOKEN_DECIMALS: dict[str, int] = {
     "WBERA": 18,
     "HONEY": 18,
     "wS": 18,
+    "WMON": 18,
 }
 
 

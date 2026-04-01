@@ -83,7 +83,7 @@ UNISWAP_V3: dict[str, dict[str, str]] = {
         "quoter_v2": "0x6Cdcd65e03c1CEc3730AeeCd45bc140D57A25C77",
     },
     "monad": {
-        # Provisional — Monad testnet (chain 143) addresses; verify before mainnet launch
+        # Verified mainnet (chain 143) — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
         "swap_router": "0xfE31F71C1b106EAc32F1A19239c9a9A72ddfb900",  # SwapRouter02
         "swap_router_02": "0xfE31F71C1b106EAc32F1A19239c9a9A72ddfb900",
         "factory": "0x204FAca1764B154221e35c0d20aBb3c525710498",
@@ -174,7 +174,7 @@ UNISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
         "USDT": "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE",
     },
     "monad": {
-        # Provisional — Monad testnet (chain 143) token addresses; verify before mainnet launch
+        # Verified mainnet (chain 143) — https://docs.monad.xyz/developer-essentials/network-information/tokens-and-bridges
         "MON": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
         "WMON": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
         "WETH": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",  # WETH on Monad
