@@ -13,7 +13,8 @@ Tokens included:
     - Stablecoins: USDC, USDT, DAI, USDC.e, USDbC, USDT.e, USDe, sUSDe
     - DeFi blue chips: WBTC, LINK, UNI, AAVE, CRV, GMX, PENDLE
     - Chain tokens: ARB, OP
-    - LST/LRT tokens: wstETH, WEETH
+    - LST/LRT tokens: wstETH, WEETH, swETH, ankrETH, pufETH
+    - DeFi governance: CVX
 
 Authoritative Sources:
     - Official protocol documentation
@@ -825,6 +826,54 @@ WEETH = Token(
     is_stablecoin=False,
 )
 
+# Swell Staked ETH (liquid staking token)
+swETH = Token(
+    symbol="swETH",
+    name="Swell Staked ETH",
+    decimals=18,
+    addresses={
+        "ethereum": "0xf951E335afb289353dc249e82926178EaC7DEd78",
+    },
+    coingecko_id="sweth",
+    is_stablecoin=False,
+)
+
+# Ankr Staked ETH (liquid staking token)
+ankrETH = Token(
+    symbol="ankrETH",
+    name="Ankr Staked ETH",
+    decimals=18,
+    addresses={
+        "ethereum": "0xE95A203B1a91a908F9B9CE46459d101078c2c3cb",
+    },
+    coingecko_id="ankreth",
+    is_stablecoin=False,
+)
+
+# Puffer Staked ETH (liquid restaking token)
+pufETH = Token(
+    symbol="pufETH",
+    name="Puffer Staked ETH",
+    decimals=18,
+    addresses={
+        "ethereum": "0xD9A442856C234a39a81a089C06451EBAa4306a72",
+    },
+    coingecko_id="pufeth",
+    is_stablecoin=False,
+)
+
+# Convex Finance Token
+CVX = Token(
+    symbol="CVX",
+    name="Convex Token",
+    decimals=18,
+    addresses={
+        "ethereum": "0x4e3FBD56CD56c3e72c1403e103b45Db9da5B9D2B",
+    },
+    coingecko_id="convex-finance",
+    is_stablecoin=False,
+)
+
 # BENQI Staked AVAX (liquid staking token on Avalanche)
 SAVAX = Token(
     symbol="SAVAX",
@@ -1355,7 +1404,12 @@ DEFAULT_TOKENS: list[Token] = [
     # LST/LRT tokens
     wstETH,
     WEETH,
+    swETH,
+    ankrETH,
+    pufETH,
     SAVAX,
+    # DeFi governance tokens
+    CVX,
     # Base chain tokens
     CBETH,
     ALMANAK,
@@ -1517,7 +1571,12 @@ __all__ = [
     # LST/LRT tokens
     "wstETH",
     "WEETH",
+    "swETH",
+    "ankrETH",
+    "pufETH",
     "SAVAX",
+    # DeFi governance tokens
+    "CVX",
     # Base chain tokens
     "CBETH",
     # Plasma chain tokens
