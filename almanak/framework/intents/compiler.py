@@ -7577,20 +7577,8 @@ class IntentCompiler:
             # YT represents only the remaining yield and can approach zero near expiry,
             # so we use a 1% floor to avoid reverts on near-maturity YT sells.
             if swap_type == "yt_to_token":
-                # YT value decays toward zero near expiry. A fixed 1% floor caused
-                # INSUFFICIENT_TOKEN_OUT reverts that TeardownManager slippage
-                # escalation could not overcome (VIB-2174).
-                #
-                # Scale the floor by slippage: at default 200bps use 1% floor,
-                # at >=500bps use a minimal floor (1 wei) so the SDK's own
-                # slippage_bps reduction is the only protection. This lets
-                # TeardownManager escalation actually widen the tolerance.
-                if slippage_bps >= 500:
-                    min_amount_out = 1  # Accept any output; SDK applies slippage_bps on top
-                    estimation_method = f"minimal floor (high slippage {slippage_bps}bps, YT near-expiry)"
-                else:
-                    min_amount_out = amount_in // 100
-                    estimation_method = f"1% floor (YT near-expiry safe, slippage {slippage_bps}bps)"
+                min_amount_out = amount_in // 100
+                estimation_method = "1% floor (YT near-expiry safe)"
             elif swap_type == "pt_to_token":
                 min_amount_out = amount_in // 2
                 estimation_method = "50% floor (PT discount safe)"
@@ -7754,14 +7742,8 @@ class IntentCompiler:
                 # Don't apply slippage here -- the SDK applies it internally (VIB-576).
                 # For sell directions, use discounted estimate (VIB-1366).
                 if swap_type == "yt_to_token":
-                    if slippage_bps >= 500:
-                        min_amount_out = 1
-                        estimation_method = (
-                            f"minimal floor (high slippage {slippage_bps}bps, YT near-expiry, post-pre-swap)"
-                        )
-                    else:
-                        min_amount_out = amount_in // 100
-                        estimation_method = f"1% floor (YT near-expiry safe, slippage {slippage_bps}bps, post-pre-swap)"
+                    min_amount_out = amount_in // 100
+                    estimation_method = "1% floor (YT near-expiry safe, post-pre-swap)"
                 elif swap_type == "pt_to_token":
                     min_amount_out = amount_in // 2
                     estimation_method = "50% floor (PT discount safe, post-pre-swap)"
