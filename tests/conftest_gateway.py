@@ -328,12 +328,21 @@ class AnvilFixture:
             # Map bsc -> bnb for RollingForkManager (which uses bnb internally)
             chain_for_manager = "bnb" if self.chain == "bsc" else self.chain
 
+            # Allow pinning the fork block via env var to maximise --cache-path hit rate.
+            # Use chain-specific var first (e.g. ANVIL_FORK_BLOCK_ARBITRUM), then generic.
+            fork_block_env = (
+                os.environ.get(f"ANVIL_FORK_BLOCK_{chain_for_manager.upper()}")
+                or os.environ.get("ANVIL_FORK_BLOCK")
+            )
+            fork_block_number = int(fork_block_env) if fork_block_env else None
+
             self._manager = RollingForkManager(
                 rpc_url=self.fork_rpc_url,
                 chain=chain_for_manager,
                 anvil_port=self.port,
                 auto_impersonate=True,
                 startup_timeout_seconds=60.0,  # Match AnvilFixture.start() timeout
+                fork_block_number=fork_block_number,
             )
 
             # Start Anvil
