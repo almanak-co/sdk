@@ -109,6 +109,12 @@ class IntentCompilerConfig:
             If the on-chain quoter returns an amount deviating more than this from the oracle
             estimate, compilation fails with a clear error. Default: 0.30 (30%).
             Can be overridden per-intent via SwapIntent.max_price_impact.
+        permission_discovery: If True, the compiler is being used for offline permission
+            discovery. Enables fallbacks for RPC-dependent operations:
+            - Uses synthetic LP balances when on-chain balance is 0 or unavailable
+            This ensures LP_CLOSE compilation produces full transaction sets
+            (approve + removeLiquidity) so the permission generator can extract
+            the required target addresses and function selectors.
     """
 
     allow_placeholder_prices: bool = False
@@ -116,6 +122,7 @@ class IntentCompilerConfig:
     swap_pool_selection_mode: Literal["auto", "fixed"] = "auto"
     fixed_swap_fee_tier: int | None = None
     max_price_impact_pct: Decimal = Decimal("0.30")
+    permission_discovery: bool = False
 
     def __post_init__(self) -> None:
         """Validate swap pool selection settings."""
@@ -6063,6 +6070,21 @@ class IntentCompiler:
             # Query actual LP token balance from on-chain
             # LP token is the pool contract itself (ERC-20)
             lp_balance_wei = self._query_erc20_balance(pool_address, self.wallet_address)
+
+            # In permission discovery mode, use a synthetic balance so the
+            # compiler produces the full approve + removeLiquidity transaction
+            # set.  Without this, the zero/None balance causes an early return
+            # with empty transactions, and the LP token approve permission is
+            # never discovered.
+            _cfg = getattr(self, "_config", None)
+            if (
+                _cfg
+                and getattr(_cfg, "permission_discovery", False)
+                and (lp_balance_wei is None or lp_balance_wei == 0)
+            ):
+                lp_balance_wei = 10**18  # 1 LP token (synthetic)
+                logger.debug("Permission discovery mode: using synthetic LP balance for %s", pool_address)
+
             if lp_balance_wei is None:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,

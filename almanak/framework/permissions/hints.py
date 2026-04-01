@@ -56,6 +56,12 @@ class PermissionHints:
             compilation requires external state (GatewayClient, RPC).
             Dict mapping chain -> list of StaticPermissionEntry.
             These bypass compilation entirely and are injected directly.
+        needs_rpc_discovery: Whether this protocol requires RPC access during
+            compilation-based permission discovery.  When True and an rpc_url
+            is provided to discover_permissions(), the compiler receives the
+            RPC URL.  Protocols that only use static contract addresses (e.g.
+            Uniswap V3, Aave V3) should leave this False to avoid unnecessary
+            RPC calls during offline discovery.
     """
 
     synthetic_position_id: str = "1"
@@ -65,6 +71,7 @@ class PermissionHints:
     synthetic_swap_pair: dict[str, tuple[str, str]] = field(default_factory=dict)
     synthetic_fee_tier: dict[str, int] = field(default_factory=dict)
     static_permissions: dict[str, list[StaticPermissionEntry]] = field(default_factory=dict)
+    needs_rpc_discovery: bool = False
 
 
 _DEFAULT = PermissionHints()

@@ -55,6 +55,7 @@ def generate_manifest(
     supported_protocols: list[str],
     intent_types: list[str],
     config: dict[str, Any] | None = None,
+    rpc_url: str | None = None,
 ) -> PermissionManifest:
     """Generate a Zodiac Roles permission manifest for a strategy.
 
@@ -69,6 +70,9 @@ def generate_manifest(
         supported_protocols: Protocols the strategy uses
         intent_types: Intent types the strategy uses
         config: Optional strategy config dict (from config.json)
+        rpc_url: Optional RPC URL for on-chain queries during discovery.
+            Enables protocols like Aerodrome to resolve dynamic contract
+            addresses (e.g. LP pool addresses from factory).
 
     Returns:
         Complete permission manifest
@@ -80,6 +84,7 @@ def generate_manifest(
         chain=chain,
         protocols=supported_protocols,
         intent_types=intent_types,
+        rpc_url=rpc_url,
     )
     all_warnings.extend(discovery_warnings)
 

@@ -4,6 +4,7 @@ from almanak.framework.permissions.hints import PermissionHints
 
 PERMISSION_HINTS = PermissionHints(
     synthetic_position_id="{token0}/{token1}/volatile",
+    needs_rpc_discovery=True,
     selector_labels={
         "0xa026383e": "exactInputSingle(ExactInputSingleParams)",
         "0x5a47ddc3": "addLiquidity(address,address,bool,uint256,uint256,uint256,uint256,address,uint256)",
