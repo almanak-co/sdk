@@ -187,6 +187,7 @@ class TestCompileLPOpenInversion:
         intent.amount1 = Decimal(str(amount1))
         intent.intent_id = "test-intent-001"
         intent.max_slippage = None
+        intent.protocol_params = None
         return intent
 
     @patch("almanak.framework.intents.pool_validation.validate_v3_pool")

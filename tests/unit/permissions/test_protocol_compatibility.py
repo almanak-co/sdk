@@ -64,9 +64,10 @@ _KNOWN_GAPS: set[tuple[str, str, str]] = {
     ("aave_v3", "SUPPLY", "mantle"),
     # Aave V3 on plasma: lending pool address added but permission hints not yet implemented
     ("aave_v3", "SUPPLY", "plasma"),
-    # X-Layer: Uniswap V3 uses a non-canonical deployment; permission hints not yet wired up
+    # X-Layer chain: addresses added in VIB-2252 but permission hints not yet implemented
     ("uniswap_v3", "SWAP", "xlayer"),
     ("uniswap_v3", "LP_OPEN", "xlayer"),
+    ("aave_v3", "SUPPLY", "xlayer"),
 }
 
 

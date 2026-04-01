@@ -72,8 +72,6 @@ class MonadLPStrategy(IntentStrategy):
         )
 
     def decide(self, market: MarketSnapshot) -> Intent | None:
-        from almanak.framework.data.market_snapshot import PriceUnavailableError
-
         # Check forced close BEFORE price lookup — LP_CLOSE doesn't need price data
         if self.force_action == "close":
             if not self.position_id:
@@ -84,7 +82,7 @@ class MonadLPStrategy(IntentStrategy):
             token0_price_usd = market.price(self.token0_symbol)
             token1_price_usd = market.price(self.token1_symbol)
             current_price = token0_price_usd / token1_price_usd
-        except (PriceUnavailableError, ValueError, KeyError) as e:
+        except (ValueError, KeyError) as e:
             return Intent.hold(reason=f"Price data unavailable: {e}")
 
         # Handle forced open
@@ -106,8 +104,8 @@ class MonadLPStrategy(IntentStrategy):
                 return Intent.hold(reason=f"Insufficient {self.token0_symbol}: {bal0} < {self.amount0}")
             if bal1 < self.amount1:
                 return Intent.hold(reason=f"Insufficient {self.token1_symbol}: {bal1} < {self.amount1}")
-        except (ValueError, KeyError) as e:
-            return Intent.hold(reason=f"Could not verify balances: {e}")
+        except (ValueError, KeyError):
+            logger.warning("Could not verify balances, proceeding anyway")
 
         logger.info("No position found - opening new LP position")
         return self._create_open_intent(current_price)

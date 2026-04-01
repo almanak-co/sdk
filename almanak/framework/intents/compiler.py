@@ -4546,20 +4546,12 @@ class IntentCompiler:
             # - In LP, slippage = different deposit ratio (no loss, just different position)
             # Default 20% slippage (80% minimum), configurable to 100% (0 minimum) for volatile pairs
             # protocol_params.lp_slippage overrides default (e.g. 1.0 = zero minimums, safe for testing)
-            _pp = intent.protocol_params
-            protocol_lp_slippage = _pp.get("lp_slippage") if isinstance(_pp, dict) else None
+            protocol_lp_slippage = (intent.protocol_params or {}).get("lp_slippage")
             lp_slippage = (
                 min(max(Decimal(str(protocol_lp_slippage)), Decimal("0")), Decimal("1"))
                 if protocol_lp_slippage is not None
-                else (_ms if (_ms := getattr(intent, "max_slippage", None)) is not None else self.default_lp_slippage)
+                else (getattr(intent, "max_slippage", None) or self.default_lp_slippage)
             )
-            _protocol_params = intent.protocol_params
-            protocol_lp_slippage = _protocol_params.get("lp_slippage") if isinstance(_protocol_params, dict) else None
-            if protocol_lp_slippage is not None:
-                lp_slippage = min(max(Decimal(str(protocol_lp_slippage)), Decimal("0")), Decimal("1"))
-            else:
-                _max_slippage = getattr(intent, "max_slippage", None)
-                lp_slippage = _max_slippage if _max_slippage is not None else self.default_lp_slippage
             min_multiplier = Decimal("1") - lp_slippage  # 0.80 for 20% slippage
             amount0_min = int(amount0_desired * min_multiplier)
             amount1_min = int(amount1_desired * min_multiplier)
@@ -12810,7 +12802,7 @@ class IntentCompiler:
 
     def _is_native_token(self, symbol: str) -> bool:
         """Check if token is the native token."""
-        native_tokens = {"ETH", "MATIC", "AVAX", "XPL", "OKB", "MON"}
+        native_tokens = {"ETH", "MATIC", "AVAX", "XPL", "OKB"}
         return symbol.upper() in native_tokens
 
     def _get_wrapped_native_address(self) -> str | None:

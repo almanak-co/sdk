@@ -38,45 +38,15 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-_cached_anvil_version: tuple[int, int, int] | None = None
-_anvil_version_detected: bool = False
 _cached_anvil_flags: set[str] | None = None
 _anvil_flags_detected: bool = False
-
-
-def _get_anvil_version() -> tuple[int, int, int] | None:
-    """Detect the installed Anvil version.
-
-    Returns:
-        (major, minor, patch) tuple, or None if detection fails.
-        On failure, returns None so callers can fail-safe (skip unsupported flags).
-        Only caches successful detections — transient failures are retried on next call.
-    """
-    global _cached_anvil_version, _anvil_version_detected
-    if _anvil_version_detected:
-        return _cached_anvil_version
-    try:
-        output = subprocess.run(
-            ["anvil", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.strip()
-        match = re.search(r"(\d+)\.(\d+)\.(\d+)", output)
-        if match:
-            _cached_anvil_version = int(match.group(1)), int(match.group(2)), int(match.group(3))
-            _anvil_version_detected = True
-            return _cached_anvil_version
-    except Exception:
-        pass
-    return None
 
 
 def _get_anvil_supported_flags() -> set[str]:
     """Probe anvil --help to discover which flags are actually supported.
 
     Returns:
-        Set of long flag names (e.g. {"--no-gas-cap", "--silent", ...}).
+        Set of long flag names (e.g. {"--cache-path", "--silent", ...}).
         On failure, returns an empty set so callers can fail-safe.
         Only caches successful detections — transient failures are retried.
     """
@@ -105,25 +75,6 @@ def _get_anvil_supported_flags() -> set[str]:
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
         logger.debug("Failed to probe anvil flags: %s", exc)
     return set()
-
-
-def _anvil_supports_no_gas_cap() -> bool:
-    """Check if the installed Anvil version supports --no-gas-cap.
-
-    Probes `anvil --help` for the flag rather than relying on version comparison,
-    because Foundry changed versioning schemes (0.x -> 1.x) and the flag was
-    removed in newer releases. If help probe fails, falls back to version check
-    (0.4.0 <= v < 1.0.0). If both fail, defaults to False (fail-safe: skip the flag).
-    """
-    flags = _get_anvil_supported_flags()
-    if flags:
-        return "--no-gas-cap" in flags
-    # Fallback: version-based check (original logic) if help probe failed.
-    # --no-gas-cap existed only in Anvil 0.4.x series; Foundry 1.x removed it.
-    version = _get_anvil_version()
-    if version is None:
-        return False
-    return (0, 4, 0) <= version < (1, 0, 0)
 
 
 # =============================================================================
@@ -960,10 +911,11 @@ class RollingForkManager:
         cmd.extend(["--timeout", "120000"])  # 120s upstream RPC timeout
         cmd.extend(["--retries", "3"])  # Retry failed upstream calls
 
-        # Disable gas price cap so high-gas chains (e.g. Polygon) don't fail.
-        # --no-gas-cap was added in Anvil 0.4.0; older versions crash on this flag.
-        if _anvil_supports_no_gas_cap():
-            cmd.append("--no-gas-cap")
+        # Set base fee to 0 so transactions are never rejected for gas price being
+        # below the forked chain's real base fee (e.g. Polygon at 150-200+ gwei).
+        # This replaces the old --no-gas-cap flag which only existed in Anvil 0.4.x
+        # and was removed in Foundry 1.x. Gas is always fake/free on Anvil forks.
+        cmd.extend(["--block-base-fee-per-gas", "0"])
 
         # Cache upstream RPC responses to reduce Alchemy/RPC calls
         if self.cache_path:
