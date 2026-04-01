@@ -462,7 +462,7 @@ DEFAULT_SWAP_FEE_TIER: dict[str, int] = {
     "uniswap_v3": 3000,
     "sushiswap_v3": 3000,
     "pancakeswap_v3": 2500,
-    "agni_finance": 3000,
+    "agni_finance": 500,  # Agni Finance on Mantle: major pairs (USDC/WETH, WMNT/WETH) are at 0.05% not 0.3%
 }
 
 # Protocols using the original SwapRouter interface (8-param exactInputSingle WITH deadline).
