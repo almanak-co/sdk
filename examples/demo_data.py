@@ -682,7 +682,7 @@ class DataModuleDemo:
         print("  - Run with --indicators-only for quick TA demo")
         print("  - Start gateway for full functionality: almanak gateway")
         print("  - Check strategies/demo/ for usage examples")
-        print("  - Read https://docs.almanak.co/ for architecture documentation")
+        print("  - Read https://sdk.docs.almanak.co/ for architecture documentation")
 
 
 # =============================================================================

@@ -84,7 +84,7 @@ See the [Contributing Guide](https://github.com/almanak-co/almanak-sdk/blob/main
 
 ## Documentation
 
-For detailed documentation, visit [docs.almanak.co](https://docs.almanak.co/)
+For detailed documentation, visit [sdk.docs.almanak.co](https://sdk.docs.almanak.co/)
 
 ## Support
 

@@ -200,7 +200,7 @@ async def validate_llm_config(config: LLMConfig) -> None:
             "Set it via environment variable:\n\n"
             "  export AGENT_LLM_API_KEY=sk-...\n\n"
             "Any OpenAI-compatible provider works (OpenAI, Anthropic, Ollama, etc.).\n"
-            "See: https://docs.almanak.co/agentic/"
+            "See: https://sdk.docs.almanak.co/agentic/"
         )
     client = LLMClient(config)
     try:

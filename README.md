@@ -12,7 +12,7 @@
   <a href="https://pypi.org/project/almanak/"><img src="https://img.shields.io/pypi/v/almanak?style=flat-square&color=blue" alt="PyPI version"></a>
   <a href="https://pypi.org/project/almanak/"><img src="https://img.shields.io/pypi/pyversions/almanak?style=flat-square" alt="Python 3.12+"></a>
   <a href="https://github.com/almanak-co/almanak-sdk/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License: Apache-2.0"></a>
-  <a href="https://docs.almanak.co/"><img src="https://img.shields.io/badge/docs-almanak.co-purple?style=flat-square" alt="Docs"></a>
+  <a href="https://sdk.docs.almanak.co/"><img src="https://img.shields.io/badge/docs-sdk.docs.almanak.co-purple?style=flat-square" alt="Docs"></a>
   <a href="https://discord.gg/c4jY28WrEB"><img src="https://img.shields.io/badge/Discord-join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://x.com/almanak"><img src="https://img.shields.io/badge/Twitter-follow-1DA1F2?style=flat-square&logo=x&logoColor=white" alt="Twitter"></a>
 </p>
@@ -22,14 +22,14 @@
   <a href="#quick-start">Quick Start</a> |
   <a href="#writing-a-strategy">Strategies</a> |
   <a href="#backtesting">Backtesting</a> |
-  <a href="https://docs.almanak.co/">Docs</a>
+  <a href="https://sdk.docs.almanak.co/">Docs</a>
 </p>
 
 <p align="center">
-  <a href="https://docs.almanak.co/">English</a> |
-  <a href="https://docs.almanak.co/zh/">中文</a> |
-  <a href="https://docs.almanak.co/fr/">Français</a> |
-  <a href="https://docs.almanak.co/es/">Español</a>
+  <a href="https://sdk.docs.almanak.co/">English</a> |
+  <a href="https://sdk.docs.almanak.co/zh/">中文</a> |
+  <a href="https://sdk.docs.almanak.co/fr/">Français</a> |
+  <a href="https://sdk.docs.almanak.co/es/">Español</a>
 </p>
 
 ---
@@ -59,7 +59,7 @@ pipx install almanak
 almanak agent install
 ```
 
-This auto-detects your platform (Claude Code, Codex, Cursor, Copilot, and [6 more](https://docs.almanak.co/agent-skills/)) and installs the strategy builder skill.
+This auto-detects your platform (Claude Code, Codex, Cursor, Copilot, and [6 more](https://sdk.docs.almanak.co/agent-skills/)) and installs the strategy builder skill.
 
 ## Quick Start
 
@@ -320,7 +320,7 @@ almanak gateway
 docker-compose -f deploy/docker/docker-compose.yml up
 ```
 
-For more details, visit [docs.almanak.co](https://docs.almanak.co/).
+For more details, visit [sdk.docs.almanak.co](https://sdk.docs.almanak.co/).
 
 ## AI Agent Skills
 
@@ -361,7 +361,7 @@ AGENT_LLM_API_KEY=sk-... almanak ax -n "swap 5 USDC to WETH on base"
 AGENT_LLM_API_KEY=sk-... almanak ax -n "what's the price of ETH?"
 ```
 
-See [Agentic Trading docs](https://docs.almanak.co/agentic/) for the full guide, or browse
+See [Agentic Trading docs](https://sdk.docs.almanak.co/agentic/) for the full guide, or browse
 the [4 working examples](examples/agentic/).
 
 ## Contributing
@@ -373,7 +373,7 @@ We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for development
 
 ## Documentation
 
-For detailed documentation, visit [docs.almanak.co](https://docs.almanak.co/)
+For detailed documentation, visit [sdk.docs.almanak.co](https://sdk.docs.almanak.co/)
 
 ## Support
 

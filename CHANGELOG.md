@@ -497,7 +497,7 @@ First public open-source release of the Almanak SDK.
 - **Gateway architecture**: Secure gRPC sidecar holding all secrets, with strategy containers running user code in isolation
 - **CLI tools**: `almanak strat new`, `almanak strat run`, `almanak strat backtest`, `almanak gateway`, with auto-managed Anvil and gateway lifecycle
 - **17+ demo strategies** covering DEX trading, LP management, lending, perpetuals, prediction markets, CEX integration, yield farming, and copy trading
-- **Multi-language documentation** site at docs.almanak.co (English, Mandarin, French, Spanish)
+- **Multi-language documentation** site at sdk.docs.almanak.co (English, Mandarin, French, Spanish)
 - **AI agent skills**: Strategy builder skill for Claude Code, Codex, Cursor, Copilot, and 6 more platforms via `almanak agent install`
 - **Non-custodial Safe design**: Fine-grained permission controls through Zodiac Roles Modifier, user maintains full control of funds
 - **Three-tier state management**: Automatic HOT/WARM/COLD persistence for strategy state
