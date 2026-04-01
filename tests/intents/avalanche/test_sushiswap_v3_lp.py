@@ -39,6 +39,9 @@ from tests.intents.conftest import (
     get_token_decimals,
 )
 
+# SushiSwap V3 removed from Avalanche routing: ~54% price impact on $100, on-chain reverts on $10 (VIB-2069)
+pytestmark = pytest.mark.xfail(reason="SushiSwap V3 removed from Avalanche routing - zero usable liquidity (VIB-2069)")
+
 # =============================================================================
 # Test Configuration
 # =============================================================================

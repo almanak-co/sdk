@@ -997,6 +997,14 @@ class IntentStateMachine:
             "no existing position",
             "no position found",
             "no size specified",
+            "unknown router",
+            "unknown protocol",
+            "no router configured",
+            "no adapter found",
+            "no connector found",
+            "protocol not available",
+            "missing configuration",
+            "not deployed",
         )
         if any(kw in error_lower for kw in permanent_keywords):
             return "COMPILATION_PERMANENT"
@@ -1157,6 +1165,24 @@ class IntentStateMachine:
         # Categorize the error for hooks
         if self._last_error and not self._error_type:
             self._error_type = self._categorize_error(self._last_error)
+
+        # Fail fast on deterministic errors that will never succeed on retry
+        _NON_RETRYABLE_TYPES = {"COMPILATION_PERMANENT", "INSUFFICIENT_FUNDS"}
+        if self._error_type in _NON_RETRYABLE_TYPES:
+            logger.info(
+                f"Non-retryable error ({self._error_type}): {self._last_error}. "
+                "Skipping retries — this error will not resolve by retrying."
+            )
+            self._completed_at = datetime.now(UTC)
+            self._in_sadflow = True
+            self._call_sadflow_exit(success=False)
+            self._transition_to(IntentState.FAILED)
+            return StepResult(
+                state=self._state,
+                is_complete=True,
+                success=False,
+                error=self._last_error or "Non-retryable error",
+            )
 
         # Build context for hooks
         context = self._build_sadflow_context()
