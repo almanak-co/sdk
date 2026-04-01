@@ -90,6 +90,15 @@ UNISWAP_V3: dict[str, dict[str, str]] = {
         "position_manager": "0x7197E214c0b767cFB76Fb734ab638E2c192F4E53",
         "quoter_v2": "0x661E93cca42AfacB172121EF892830cA3b70F08d",
     },
+    "xlayer": {
+        # Non-canonical deployment via Uniswap Governance Proposal 67
+        # Source: https://github.com/Uniswap/sdks (XLAYER_ADDRESSES)
+        "swap_router": "0x4f0C28f5926AFDA16bf2506D5D9e57Ea190f9bcA",  # SwapRouter02
+        "swap_router_02": "0x4f0C28f5926AFDA16bf2506D5D9e57Ea190f9bcA",
+        "factory": "0x4B2ab38DBF28D31D467aA8993f6c2585981D6804",
+        "position_manager": "0x315e413A11AB0df498eF83873012430ca36638Ae",
+        "quoter_v2": "0x976183AC3d09840D243A88c0268BADb3B3e3259f",
+    },
 }
 
 UNISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
@@ -181,6 +190,15 @@ UNISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
         "USDC": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
         "USDT0": "0xe7cd86e13AC4309349F30B3435a9d337750fC82D",
         "WBTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
+    },
+    "xlayer": {
+        # Source: https://web3.okx.com/xlayer/docs/developer/build-on-xlayer/contracts
+        "OKB": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+        "WOKB": "0xe538905cf8410324e03A5A23C1c177a474D59b2b",
+        "WETH": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",
+        "USDC": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
+        "USDT": "0x1E4a5963aBFD975d8c9021ce480b42188849D41d",  # USDT0 variant
+        "WBTC": "0xEA034fb02eB1808C2cc3adbC15f447B93CbE08e1",
     },
 }
 
@@ -382,6 +400,13 @@ AAVE_V3: dict[str, dict[str, str]] = {
         "pool_data_provider": "0x487c5c669D9eee6057C44973207101276cf73b68",
         "oracle": "0x47a063CfDa980532267970d478EC340C0F80E8df",
     },
+    "xlayer": {
+        # Aave V3.6 — Governance Proposal #460
+        # Source: https://github.com/aave-dao/aave-address-book/blob/main/src/AaveV3XLayer.sol
+        "pool": "0xE3F3Caefdd7180F884c01E57f65Df979Af84f116",
+        "pool_data_provider": "0x6C505C31714f14e8af2A03633EB2Cdfb4959138F",
+        "oracle": "0x91FC11136d5615575a0fC5981Ab5C0C54418E2C6",
+    },
 }
 
 AAVE_V3_TOKENS: dict[str, dict[str, str]] = {
@@ -476,6 +501,15 @@ AAVE_V3_TOKENS: dict[str, dict[str, str]] = {
         "USDC": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",
         "USDe": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
         "GHO": "0xfc421aD3C883Bf9E7C4f42dE845C4e4405799e73",
+    },
+    "xlayer": {
+        # Aave V3.6 reserves on X-Layer (verified on-chain via getReservesList)
+        "WOKB": "0xe538905cf8410324e03A5A23C1c177a474D59b2b",
+        "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USD₮0 (LayerZero bridged USDT)
+        "xETH": "0xE7B000003A45145decf8a28FC755aD5eC5EA025A",
+        "xBTC": "0xb7C00000bcDEeF966b20B3D884B98E64d2b06b4f",
+        "GHO": "0xDe6539018B095353A40753Dc54C91C68c9487D4E",
+        "USDG": "0x4ae46a509F6b1D9056937BA4500cb143933D2dc8",  # Gravity USD (Aave borrow reserve)
     },
 }
 

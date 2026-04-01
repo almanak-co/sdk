@@ -148,11 +148,12 @@ CHAIN_IDS: dict[str, int] = {
     "solana": 0,  # Non-EVM chain, no EVM chain ID
     "sonic": 146,
     "monad": 143,
+    "xlayer": 196,
 }
 
 # Supported protocols and which chains they are available on
 SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
-    "aave_v3": {"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "linea", "plasma"},
+    "aave_v3": {"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "linea", "plasma", "xlayer"},
     "uniswap_v3": {
         "ethereum",
         "arbitrum",
@@ -164,6 +165,7 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
         "linea",
         "blast",
         "monad",
+        "xlayer",
     },
     "agni_finance": {"mantle"},  # Agni Finance (Uniswap V3 fork, primary DEX on Mantle)
     "gmx_v2": {"arbitrum", "avalanche"},

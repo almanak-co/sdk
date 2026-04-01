@@ -53,6 +53,7 @@ POSITION_MANAGER_ADDRESSES: dict[str, str] = {
     "bsc": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
     "mantle": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni Finance fork
     "monad": "0x7197E214c0b767cFB76Fb734ab638E2c192F4E53",
+    "xlayer": "0x315e413A11AB0df498eF83873012430ca36638Ae",  # Non-canonical (Governance Proposal 67)
 }
 
 # Zero address for detecting mints

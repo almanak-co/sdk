@@ -295,6 +295,9 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
     "mantle": {
         "agni_finance": "0x319B69888b0d11cEC22caA5034e25FfFBDc88421",  # Agni Finance SwapRouter
     },
+    "xlayer": {
+        "uniswap_v3": "0x4f0C28f5926AFDA16bf2506D5D9e57Ea190f9bcA",  # SwapRouter02 (Governance Proposal 67)
+    },
     "monad": {
         "uniswap_v3": "0xfE31F71C1b106EAc32F1A19239c9a9A72ddfb900",  # SwapRouter02 — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
     },
@@ -359,6 +362,9 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     "mantle": {
         "agni_finance": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni Finance NFT Position Manager
     },
+    "xlayer": {
+        "uniswap_v3": "0x315e413A11AB0df498eF83873012430ca36638Ae",  # Non-canonical deployment (Governance Proposal 67)
+    },
     "monad": {
         "uniswap_v3": "0x7197E214c0b767cFB76Fb734ab638E2c192F4E53",  # NonfungiblePositionManager — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
     },
@@ -421,6 +427,16 @@ CHAIN_TOKENS: dict[str, dict[str, str]] = {
         "usdt": "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE",
         "weth": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",
         "wmnt": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
+    },
+    "xlayer": {
+        "usdc": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
+        "usdt": "0x1E4a5963aBFD975d8c9021ce480b42188849D41d",
+        "weth": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",
+        "wokb": "0xe538905cf8410324e03A5A23C1c177a474D59b2b",
+        "xeth": "0xE7B000003A45145decf8a28FC755aD5eC5EA025A",
+        "xbtc": "0xb7C00000bcDEeF966b20B3D884B98E64d2b06b4f",
+        "usdg": "0x4ae46a509F6b1D9056937BA4500cb143933D2dc8",
+        "usdt0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
     },
     "monad": {
         "usdc": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
@@ -504,6 +520,9 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
     "mantle": {
         "agni_finance": "0xc4aaDc921E1cdb66c5300Bc158a313292923C0cb",  # Agni Finance QuoterV2
     },
+    "xlayer": {
+        "uniswap_v3": "0x976183AC3d09840D243A88c0268BADb3B3e3259f",  # QuoterV2 (Governance Proposal 67)
+    },
     "monad": {
         "uniswap_v3": "0x661E93cca42AfacB172121EF892830cA3b70F08d",  # QuoterV2 — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
     },
@@ -543,6 +562,9 @@ LENDING_POOL_ADDRESSES: dict[str, dict[str, str]] = {
     },
     "mantle": {
         "aave_v3": "0x458F293454fE0d67EC0655f3672301301DD51422",
+    },
+    "xlayer": {
+        "aave_v3": "0xE3F3Caefdd7180F884c01E57f65Df979Af84f116",
     },
 }
 
@@ -1079,6 +1101,7 @@ class DefaultSwapAdapter:
             "bsc": "WBNB",
             "mantle": "WMNT",
             "sonic": "WS",
+            "xlayer": "WOKB",
             "monad": "WMON",
         }
         _wn_symbol = _wrapped_symbols.get(self.chain)
@@ -4523,6 +4546,13 @@ class IntentCompiler:
             # - In LP, slippage = different deposit ratio (no loss, just different position)
             # Default 20% slippage (80% minimum), configurable to 100% (0 minimum) for volatile pairs
             # protocol_params.lp_slippage overrides default (e.g. 1.0 = zero minimums, safe for testing)
+            _pp = intent.protocol_params
+            protocol_lp_slippage = _pp.get("lp_slippage") if isinstance(_pp, dict) else None
+            lp_slippage = (
+                min(max(Decimal(str(protocol_lp_slippage)), Decimal("0")), Decimal("1"))
+                if protocol_lp_slippage is not None
+                else (_ms if (_ms := getattr(intent, "max_slippage", None)) is not None else self.default_lp_slippage)
+            )
             _protocol_params = intent.protocol_params
             protocol_lp_slippage = _protocol_params.get("lp_slippage") if isinstance(_protocol_params, dict) else None
             if protocol_lp_slippage is not None:
@@ -12799,6 +12829,7 @@ class IntentCompiler:
             "bsc": "WBNB",
             "mantle": "WMNT",
             "sonic": "WS",
+            "xlayer": "WOKB",
             "monad": "WMON",
         }
         symbol = wrapped_symbols.get(self.chain)
@@ -13038,7 +13069,9 @@ class IntentCompiler:
         "WS": "S",
         "WXPL": "XPL",
         "WPOL": "POL",
+        "WOKB": "OKB",
         "WMON": "MON",
+        "WBERA": "BERA",
     }
 
     def _require_token_price(self, symbol: str) -> Decimal:

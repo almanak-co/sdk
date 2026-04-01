@@ -90,6 +90,13 @@
       "anvil_port": 8555,
       "poa": false
     },
+    "xlayer": {
+      "chain_id": 196,
+      "public_rpc": "https://rpc.xlayer.tech",
+      "alchemy_prefix": "xlayer",
+      "anvil_port": 8557,
+      "poa": false
+    },
     "solana": {
       "chain_id": 0,
       "public_rpc": "https://api.mainnet-beta.solana.com",

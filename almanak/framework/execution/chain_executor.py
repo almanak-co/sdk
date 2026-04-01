@@ -130,6 +130,7 @@ _CHAIN_NATIVE_SYMBOL: dict[str, str] = {
     "mantle": "MNT",
     "monad": "MON",
     "berachain": "BERA",
+    "xlayer": "OKB",
 }
 
 

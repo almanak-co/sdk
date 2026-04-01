@@ -70,6 +70,7 @@ class Chain(Enum):
     BERACHAIN = "BERACHAIN"
     SOLANA = "SOLANA"
     MONAD = "MONAD"
+    XLAYER = "XLAYER"
 
 
 class ChainFamily(Enum):
@@ -94,6 +95,7 @@ CHAIN_FAMILY_MAP: dict[Chain, "ChainFamily"] = {
     Chain.MANTLE: ChainFamily.EVM,
     Chain.BERACHAIN: ChainFamily.EVM,
     Chain.MONAD: ChainFamily.EVM,
+    Chain.XLAYER: ChainFamily.EVM,
     Chain.SOLANA: ChainFamily.SOLANA,
 }
 

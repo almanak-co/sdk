@@ -74,6 +74,7 @@ class Chain(StrEnum):
     MANTLE = "mantle"
     BERACHAIN = "berachain"
     MONAD = "monad"
+    XLAYER = "xlayer"
 
 
 # =============================================================================

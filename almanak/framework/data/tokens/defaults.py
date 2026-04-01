@@ -52,6 +52,7 @@ WRAPPED_NATIVE: dict[str, str] = {
     "mantle": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",  # WMNT
     "berachain": "0x6969696969696969696969696969696969696969",  # WBERA
     "monad": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",  # WMON
+    "xlayer": "0xe538905cf8410324e03A5A23C1c177a474D59b2b",  # WOKB
 }
 
 # Re-exported from almanak.core.constants for backwards compatibility.
@@ -164,6 +165,7 @@ WETH = Token(
         "berachain": "0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590",  # Bridged WETH on Berachain
         "monad": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",  # WETH on Monad
         "sonic": "0x50c42dEAcD8Fc9773493ED674b675bE577f2634b",  # Bridged WETH on Sonic
+        "xlayer": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",  # WETH on X-Layer
     },
     coingecko_id="weth",
     is_stablecoin=False,
@@ -226,6 +228,7 @@ USDC = Token(
         "mantle": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",  # Bridged USDC on Mantle
         "monad": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",  # Native USDC on Monad
         "sonic": "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",  # Bridged USDC on Sonic
+        "xlayer": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",  # Native USDC on X-Layer
     },
     coingecko_id="usd-coin",
     is_stablecoin=True,
@@ -253,6 +256,7 @@ USDT = Token(
         "bsc": "0x55d398326f99059fF775485246999027B3197955",  # Binance-Peg USDT (18 decimals on BSC)
         "solana": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT on Solana
         "mantle": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USDT0 on Mantle (LayerZero bridged)
+        "xlayer": "0x1E4a5963aBFD975d8c9021ce480b42188849D41d",  # USDT0 on X-Layer
     },
     coingecko_id="tether",
     is_stablecoin=True,
@@ -469,6 +473,7 @@ WBTC = Token(
         "bsc": "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c",  # Binance-Peg BTCB
         "berachain": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",  # WBTC on Berachain
         "monad": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",  # WBTC on Monad
+        "xlayer": "0xEA034fb02eB1808C2cc3adbC15f447B93CbE08e1",  # WBTC on X-Layer
     },
     coingecko_id="wrapped-bitcoin",
     is_stablecoin=False,
@@ -1236,6 +1241,82 @@ USDT0_BERACHAIN = Token(
 )
 
 # =============================================================================
+# XLAYER CHAIN TOKENS
+# =============================================================================
+
+# OKB (native gas token on X-Layer)
+OKB = Token(
+    symbol="OKB",
+    name="OKB",
+    decimals=18,
+    addresses={
+        "xlayer": NATIVE_SENTINEL,
+    },
+    coingecko_id="okb",
+    is_stablecoin=False,
+)
+
+# Wrapped OKB (WOKB)
+WOKB = Token(
+    symbol="WOKB",
+    name="Wrapped OKB",
+    decimals=18,
+    addresses={
+        "xlayer": "0xe538905cf8410324e03A5A23C1c177a474D59b2b",
+    },
+    coingecko_id="okb",
+    is_stablecoin=False,
+)
+
+# xETH on X-Layer (Aave V3.6 reserve, different from bridged WETH)
+XETH = Token(
+    symbol="xETH",
+    name="xETH (X-Layer)",
+    decimals=18,
+    addresses={
+        "xlayer": "0xE7B000003A45145decf8a28FC755aD5eC5EA025A",
+    },
+    coingecko_id="ethereum",
+    is_stablecoin=False,
+)
+
+# xBTC on X-Layer (Aave V3.6 reserve)
+XBTC = Token(
+    symbol="xBTC",
+    name="xBTC (X-Layer)",
+    decimals=8,
+    addresses={
+        "xlayer": "0xb7C00000bcDEeF966b20B3D884B98E64d2b06b4f",
+    },
+    coingecko_id="bitcoin",
+    is_stablecoin=False,
+)
+
+# USDT0 on X-Layer (USD₮0 variant)
+USDT0_XLAYER = Token(
+    symbol="USDT0",
+    name="USDT Zero (X-Layer)",
+    decimals=6,
+    addresses={
+        "xlayer": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+    },
+    coingecko_id=None,
+    is_stablecoin=True,
+)
+
+# USDG on X-Layer (Gravity USD stablecoin, Aave V3.6 reserve)
+USDG_XLAYER = Token(
+    symbol="USDG",
+    name="Gravity USD (X-Layer)",
+    decimals=6,
+    addresses={
+        "xlayer": "0x4ae46a509F6b1D9056937BA4500cb143933D2dc8",
+    },
+    coingecko_id=None,
+    is_stablecoin=True,
+)
+
+# =============================================================================
 # PENDLE PT TOKENS (used as collateral on Morpho Blue)
 # WARNING: PT tokens are maturity-bound. These addresses expire and new ones
 # are deployed. Check Pendle app for current PT addresses before using.
@@ -1445,6 +1526,13 @@ DEFAULT_TOKENS: list[Token] = [
     MON,
     WMON,
     USDT0_MONAD,
+    # X-Layer chain tokens
+    OKB,
+    WOKB,
+    XETH,
+    XBTC,
+    USDT0_XLAYER,
+    USDG_XLAYER,
     # Portfolio Manager custom tokens (LP strategies)
     ATH,
     TORIVA,

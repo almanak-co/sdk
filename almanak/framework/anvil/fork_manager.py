@@ -147,6 +147,7 @@ CHAIN_IDS: dict[str, int] = {
     "berachain": 80094,
     "sonic": 146,
     "monad": 143,
+    "xlayer": 196,
 }
 
 
@@ -239,6 +240,15 @@ TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
         "USDT0": "0xe7cd86e13AC4309349F30B3435a9d337750fC82D",
         "WBTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
     },
+    "xlayer": {
+        "WOKB": "0xe538905cf8410324e03A5A23C1c177a474D59b2b",
+        "WETH": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",
+        "xETH": "0xE7B000003A45145decf8a28FC755aD5eC5EA025A",
+        "USDC": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
+        "USDT": "0x1E4a5963aBFD975d8c9021ce480b42188849D41d",
+        "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USD₮0 (Aave V3.6 reserve)
+        "WBTC": "0xEA034fb02eB1808C2cc3adbC15f447B93CbE08e1",
+    },
 }
 
 
@@ -269,6 +279,8 @@ TOKEN_DECIMALS: dict[str, int] = {
     "HONEY": 18,
     "wS": 18,
     "WMON": 18,
+    "WOKB": 18,
+    "xETH": 18,
 }
 
 
@@ -285,6 +297,7 @@ KNOWN_BALANCE_SLOTS: dict[str, dict[str, int]] = {
     "bsc": {"USDC": 1, "WBNB": 3, "USDT": 1, "BUSD": 0},
     "linea": {"USDC": 0, "WETH": 0, "USDT": 0},
     "sonic": {"USDC": 9},  # confirmed iter-100: brute-force found slot 9 for bridged USDC
+    "xlayer": {"USDT0": 51},  # confirmed: USD₮0 (0x779Ded...) uses OZ upgradeable slot 51
 }
 
 

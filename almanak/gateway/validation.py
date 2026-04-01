@@ -26,6 +26,7 @@ ALLOWED_CHAINS = frozenset(
         "berachain",
         "solana",
         "monad",
+        "xlayer",
     }
 )
 

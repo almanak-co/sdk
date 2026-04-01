@@ -26,6 +26,7 @@ from almanak.framework.data.interfaces import (
     PriceResult,
 )
 from almanak.framework.data.tokens import get_token_resolver
+from almanak.gateway.utils.ssl_context import build_ssl_context
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.models import ResolvedToken
@@ -51,6 +52,7 @@ CHAIN_TO_DEXSCREENER_PLATFORM: dict[str, str] = {
     "mantle": "mantle",
     "monad": "monad",
     "plasma": "plasma",
+    "xlayer": "xlayer",
     # Non-EVM
     "solana": "solana",
 }
@@ -142,8 +144,10 @@ class DexScreenerPriceSource(BasePriceSource):
                 self._session = None
                 self._session_loop = None
         if self._session is None or self._session.closed:
+            connector = aiohttp.TCPConnector(ssl=build_ssl_context())
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=self._request_timeout),
+                connector=connector,
             )
             self._session_loop = current_loop
         return self._session

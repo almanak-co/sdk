@@ -197,6 +197,13 @@ _BUILTIN_CHAINS: dict[str, dict] = {
         "anvil_port": 8899,
         "poa": False,
     },
+    "xlayer": {
+        "chain_id": 196,
+        "public_rpc": "https://rpc.xlayer.tech",
+        "alchemy_prefix": "xlayer",
+        "anvil_port": 8557,
+        "poa": False,
+    },
 }
 
 _BUILTIN_SOLANA_CLUSTERS: dict[str, str] = {

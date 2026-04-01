@@ -20,6 +20,7 @@ from almanak.framework.data.interfaces import (
     DataSourceUnavailable,
     PriceResult,
 )
+from almanak.gateway.utils.ssl_context import build_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +53,16 @@ _TOKEN_TO_BINANCE_SYMBOL: dict[str, str] = {
     "FTM": "FTMUSDT",
     "CAKE": "CAKEUSDT",
     "JOE": "JOEUSDT",
+    "OKB": "OKBUSDT",
+    "WOKB": "OKBUSDT",
+    "xETH": "ETHUSDT",
+    "XETH": "ETHUSDT",
+    "xBTC": "BTCUSDT",
+    "XBTC": "BTCUSDT",
 }
 
 # Stablecoins that are always $1
-_STABLECOINS = {"USDC", "USDT", "DAI", "USDC.E", "USDT.E", "USDBC", "BUSD", "USDE"}
+_STABLECOINS = {"USDC", "USDT", "DAI", "USDC.E", "USDT.E", "USDBC", "BUSD", "USDE", "USDT0", "USDG", "GHO"}
 
 
 class BinancePriceSource(BasePriceSource):
@@ -87,7 +94,8 @@ class BinancePriceSource(BasePriceSource):
                 self._session_loop = None
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=self._request_timeout)
-            self._session = aiohttp.ClientSession(timeout=timeout)
+            connector = aiohttp.TCPConnector(ssl=build_ssl_context())
+            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
             self._session_loop = current_loop
         return self._session
 

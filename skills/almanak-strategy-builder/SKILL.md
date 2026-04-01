@@ -1176,6 +1176,7 @@ class MyStrategy(IntentStrategy):
 | Mantle | `MANTLE` | `mantle` |
 | Berachain | `BERACHAIN` | `berachain` |
 | Monad | `MONAD` | `monad` |
+| X-Layer | `XLAYER` | `xlayer` |
 | Solana | `SOLANA` | `solana` |
 
 <!-- almanak-sdk-end: supported-chains -->

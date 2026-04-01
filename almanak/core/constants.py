@@ -26,6 +26,8 @@ STABLECOINS: frozenset[str] = frozenset(
         "GHO",
         "FUSDT0",
         "USDP",
+        "USDT0",
+        "USDG",
     }
 )
 
@@ -44,6 +46,7 @@ CHAIN_IDS: dict[Chain, int] = {
     Chain.MANTLE: 5000,
     Chain.BERACHAIN: 80094,
     Chain.MONAD: 143,
+    Chain.XLAYER: 196,
     Chain.SOLANA: 0,  # Non-EVM chain, no EIP-155 chain ID
 }
 
@@ -71,6 +74,7 @@ _CHAIN_ALIASES: dict[str, Chain] = {
     "berachain": Chain.BERACHAIN,
     "bera": Chain.BERACHAIN,
     "monad": Chain.MONAD,
+    "xlayer": Chain.XLAYER,
 }
 
 

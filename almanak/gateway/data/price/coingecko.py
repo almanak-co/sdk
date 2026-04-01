@@ -36,6 +36,7 @@ from almanak.framework.data.interfaces import (
     PriceResult,
 )
 from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
+from almanak.gateway.utils.ssl_context import build_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -348,7 +349,8 @@ class CoinGeckoPriceSource(BasePriceSource):
                 self._session_loop = None
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=self._request_timeout)
-            self._session = aiohttp.ClientSession(timeout=timeout)
+            connector = aiohttp.TCPConnector(ssl=build_ssl_context())
+            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
             self._session_loop = current_loop
         return self._session
 

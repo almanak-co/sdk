@@ -1,0 +1,13 @@
+{
+    "supply_token": "USDT0",
+    "borrow_token": "USDG",
+    "initial_supply_amount": "100.0",
+    "ltv_target": 0.5,
+    "min_health_factor": 1.5,
+    "interest_rate_mode": "variable",
+    "anvil_funding": {
+        "OKB": 100,
+        "WOKB": 10,
+        "USDT0": 10000
+    }
+}
