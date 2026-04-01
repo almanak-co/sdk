@@ -98,6 +98,7 @@ plugins:
 
 extra:
   generator: false
+  homepage: https://docs.almanak.co
   alternate:
     - name: English
       link: /
