@@ -1,0 +1,15 @@
+{
+    "chain": "base",
+    "chains": ["base", "arbitrum"],
+    "target_chain": "arbitrum",
+    "budget_usd": 10,
+    "relay_token": "USDC",
+    "swap_eth_usd": 6,
+    "perp_market": "ETH/USD",
+    "perp_collateral_token": "USDC",
+    "perp_collateral_usd": 4,
+    "perp_leverage": 2,
+    "perp_is_long": true,
+    "perp_protocol": "gmx_v2",
+    "max_slippage_pct": 1.0
+}

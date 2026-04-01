@@ -15,6 +15,7 @@ No two strategies share a gateway.
 import hashlib
 import json
 import logging
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -311,7 +312,7 @@ class SQLiteConfigLight:
         wal_mode: Enable WAL mode for better concurrent read performance.
     """
 
-    db_path: str = "./almanak_state.db"
+    db_path: str = field(default_factory=lambda: os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db")
     wal_mode: bool = True
 
 

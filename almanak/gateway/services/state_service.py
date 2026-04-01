@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -70,6 +71,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             return
 
         from almanak.framework.state.state_manager import (
+            SQLiteConfigLight,
             StateManager,
             StateManagerConfig,
             WarmBackendType,
@@ -84,7 +86,11 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             )
         else:
             backend_type = WarmBackendType.SQLITE
-            config = StateManagerConfig(warm_backend=backend_type)
+            db_path = os.environ.get("ALMANAK_STATE_DB", "./almanak_state.db")
+            config = StateManagerConfig(
+                warm_backend=backend_type,
+                sqlite_config=SQLiteConfigLight(db_path=db_path),
+            )
 
         self._state_manager = StateManager(config)
         await self._state_manager.initialize()

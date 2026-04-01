@@ -1831,7 +1831,7 @@ def run(
     # Handle --fresh flag: clear state for this strategy only
     strategy_id = strategy_config["strategy_id"]
     if fresh:
-        state_db_path = Path("./almanak_state.db")
+        state_db_path = Path(os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db")
         if state_db_path.exists():
             try:
                 import sqlite3
@@ -1873,7 +1873,7 @@ def run(
     existing_state_info = None
     try:
         # Quick check of state DB for existing strategy state
-        state_db_path = Path("./almanak_state.db")
+        state_db_path = Path(os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db")
         if state_db_path.exists():
             import sqlite3
 

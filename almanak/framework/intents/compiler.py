@@ -5089,6 +5089,7 @@ class IntentCompiler:
             bin_range = int(params.get("bin_range", 5))
             if bin_range < 1 or bin_range > 100:
                 raise ValueError(f"bin_range must be between 1 and 100, got {bin_range}")
+            id_slippage = int(params.get("id_slippage", 5))
 
             # Build add liquidity transaction
             lp_tx = tj_adapter.build_add_liquidity_transaction(
@@ -5098,6 +5099,7 @@ class IntentCompiler:
                 amount_y=intent.amount1,
                 bin_step=bin_step,
                 bin_range=bin_range,
+                id_slippage=id_slippage,
             )
 
             # Convert to TransactionData format

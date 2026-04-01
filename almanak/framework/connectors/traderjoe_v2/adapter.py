@@ -665,6 +665,7 @@ class TraderJoeV2Adapter:
         bin_step: int = 20,
         bin_range: int = 10,
         slippage_bps: int | None = None,
+        id_slippage: int = 5,
     ) -> TransactionData:
         """Build an add liquidity transaction.
 
@@ -698,24 +699,27 @@ class TraderJoeV2Adapter:
 
         # Distribute tokens across bins
         # X goes in bins above active, Y goes in bins below
+        # Skip distribution for a token if its amount is 0 (single-sided LP)
         distribution_x = [0] * num_bins
         distribution_y = [0] * num_bins
 
-        # X distribution (bins above active)
-        bins_above = bin_range
-        if bins_above > 0:
-            share = 10**18 // bins_above
-            for i in range(bin_range + 1, num_bins):
-                distribution_x[i] = share
-            # Adjust remainder
-            distribution_x[-1] += 10**18 - sum(distribution_x)
+        # X distribution (bins above active) — only if providing token X
+        if amount_x_wei > 0:
+            bins_above = bin_range
+            if bins_above > 0:
+                share = 10**18 // bins_above
+                for i in range(bin_range + 1, num_bins):
+                    distribution_x[i] = share
+                # Adjust remainder
+                distribution_x[-1] += 10**18 - sum(distribution_x)
 
-        # Y distribution (bins at and below active)
-        bins_below = bin_range + 1
-        share = 10**18 // bins_below
-        for i in range(bins_below):
-            distribution_y[i] = share
-        distribution_y[bin_range] += 10**18 - sum(distribution_y)
+        # Y distribution (bins at and below active) — only if providing token Y
+        if amount_y_wei > 0:
+            bins_below = bin_range + 1
+            share = 10**18 // bins_below
+            for i in range(bins_below):
+                distribution_y[i] = share
+            distribution_y[bin_range] += 10**18 - sum(distribution_y)
 
         # For LP operations, set minimums to 0.
         # TraderJoe V2's Liquidity Book doesn't guarantee all tokens will be added -
@@ -735,7 +739,7 @@ class TraderJoeV2Adapter:
             amount_x_min=amount_x_min,
             amount_y_min=amount_y_min,
             active_id_desired=pool_info.active_id,
-            id_slippage=5,
+            id_slippage=id_slippage,
             delta_ids=delta_ids,
             distribution_x=distribution_x,
             distribution_y=distribution_y,
