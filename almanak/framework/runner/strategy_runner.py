@@ -247,9 +247,12 @@ def _format_intent_for_log(intent: "AnyIntent", chain: str = "") -> str:
     if intent_type == "REPAY":
         token = getattr(intent, "token", "")
         amount = getattr(intent, "amount", None)
+        repay_full = getattr(intent, "repay_full", False)
         protocol = _display(getattr(intent, "protocol", ""))
 
-        if amount == "all":
+        if repay_full:
+            amount_str = f"FULL {token}"
+        elif amount == "all":
             amount_str = f"ALL {token}"
         elif amount:
             amount_str = f"{amount} {token}"

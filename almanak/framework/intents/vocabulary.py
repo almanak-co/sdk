@@ -716,8 +716,11 @@ class RepayIntent(AlmanakImmutableModel):
     Attributes:
         protocol: Lending protocol (e.g., "aave_v3", "morpho")
         token: Token to repay
-        amount: Amount to repay, or "all" to use output from previous step
-        repay_full: If True, repay the full outstanding debt
+        amount: Amount to repay, or "all" to use output from previous step.
+            Defaults to Decimal("0") when repay_full=True (ignored by the protocol in that case).
+            Required when repay_full=False.
+        repay_full: If True, repay the full outstanding debt (sends MAX_UINT256 to the protocol).
+            When True, amount is ignored and may be omitted via Intent.repay().
         interest_rate_mode: Interest rate mode for protocols that support it (Aave: 'variable')
         chain: Optional target chain for execution (defaults to strategy's primary chain)
         intent_id: Unique identifier for this intent
@@ -2522,7 +2525,7 @@ class Intent:
     def repay(
         protocol: str,
         token: str,
-        amount: ChainedAmount,
+        amount: ChainedAmount | None = None,
         repay_full: bool = False,
         interest_rate_mode: InterestRateMode | None = None,
         market_id: str | None = None,
@@ -2533,8 +2536,11 @@ class Intent:
         Args:
             protocol: Lending protocol (e.g., "aave_v3", "morpho_blue")
             token: Token to repay
-            amount: Amount to repay, or "all" to use previous step output
-            repay_full: If True, repay the full outstanding debt
+            amount: Amount to repay, or "all" to use previous step output.
+                Defaults to Decimal("0") when repay_full=True (amount is ignored in that case).
+                Required when repay_full=False.
+            repay_full: If True, repay the full outstanding debt (sends MAX_UINT256 to protocol).
+                When True, amount is ignored and may be omitted.
             interest_rate_mode: Interest rate mode for protocols that support it.
                 Aave V3: 'variable' (default). Stable rate is deprecated. Must match
                 the rate mode used when borrowing.
@@ -2554,15 +2560,26 @@ class Intent:
                 interest_rate_mode="variable",
             )
 
+            # Repay full debt on Aave (amount can be omitted when repay_full=True)
+            intent = Intent.repay(
+                protocol="aave_v3",
+                token="USDC",
+                repay_full=True,
+            )
+
             # Repay full debt on Morpho Blue
             intent = Intent.repay(
                 protocol="morpho_blue",
                 token="USDC",
-                amount=Decimal("0"),  # Ignored when repay_full=True
                 repay_full=True,
                 market_id="0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
             )
         """
+        if amount is None:
+            if repay_full:
+                amount = Decimal("0")
+            else:
+                raise ValueError("amount is required when repay_full=False")
         return RepayIntent(
             protocol=protocol,
             token=token,
