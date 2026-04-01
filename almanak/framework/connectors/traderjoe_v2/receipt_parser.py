@@ -12,6 +12,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.connectors.base import EventRegistry, HexDecoder
+from almanak.framework.data.tokens import get_token_resolver
 
 if TYPE_CHECKING:
     from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
@@ -208,13 +209,17 @@ class TraderJoeV2ReceiptParser:
     in DepositedToBins and WithdrawnFromBins events.
     """
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, chain: str | None = None, **kwargs: Any) -> None:
         """Initialize the parser.
 
         Args:
+            chain: Chain name for token decimal resolution (e.g. "avalanche", "bsc").
+                When provided, extract_swap_amounts() uses actual token decimals
+                instead of assuming 18 for all tokens.
             **kwargs: Additional arguments (ignored for compatibility)
         """
         _ = kwargs  # Explicitly unused for forward compatibility
+        self._chain = chain
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
 
     def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:
@@ -542,13 +547,42 @@ class TraderJoeV2ReceiptParser:
     # Extraction Methods (for Result Enrichment)
     # =============================================================================
 
+    def _resolve_token_decimals(self, token_address: str | None) -> int:
+        """Resolve token decimals from address using the token resolver.
+
+        Requires self._chain to be set (passed to __init__ via chain= kwarg).
+        Returns 18 as fallback when chain is unknown or resolution fails.
+
+        Args:
+            token_address: ERC-20 token contract address
+
+        Returns:
+            Token decimals (e.g. 6 for USDC, 8 for WBTC, 18 for WETH/WAVAX)
+        """
+        if not token_address or not self._chain:
+            if token_address and not self._chain:
+                logger.warning(
+                    "No chain configured for decimal resolution, defaulting to 18 for %s",
+                    token_address,
+                )
+            return 18
+        try:
+            resolver = get_token_resolver()
+            return resolver.get_decimals(self._chain, token_address)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Token decimal resolution failed for %s on %s, falling back to 18: %s",
+                token_address,
+                self._chain,
+                e,
+            )
+            return 18
+
     def extract_swap_amounts(self, receipt: dict[str, Any]) -> "SwapAmounts | None":
         """Extract swap amounts from a transaction receipt.
 
-        Note: Decimal conversions assume 18 decimals. TraderJoe pools often
-        include tokens with different decimals (e.g., USDC with 6, WBTC with 8).
-        The raw amount_in/amount_out fields are always accurate; use those with
-        your own decimal scaling for precise calculations.
+        Uses actual token decimals when chain is known (passed to __init__).
+        Falls back to 18 decimals when chain is unavailable.
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
@@ -567,10 +601,13 @@ class TraderJoeV2ReceiptParser:
             amount_in = sr.amount_in or 0
             amount_out = sr.amount_out or 0
 
-            # Calculate decimal amounts (assuming 18 decimals - see docstring for limitations)
-            amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**18)
-            amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**18)
-            effective_price = sr.price or Decimal(0)
+            # Resolve actual token decimals (avoids VIB-593 wrong amount_in_decimal for USDC)
+            token_in_decimals = self._resolve_token_decimals(sr.token_in)
+            token_out_decimals = self._resolve_token_decimals(sr.token_out)
+
+            amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
+            amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
+            effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal(0)
 
             return SwapAmounts(
                 amount_in=amount_in,
