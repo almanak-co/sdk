@@ -297,6 +297,8 @@ class ForkManagerConfig:
         auto_impersonate: Enable auto-impersonation for any address (default True)
         block_time: Optional block time in seconds (default None = instant)
         fork_block_number: Optional specific block to fork from (default None = latest)
+        cache_path: Optional path for Anvil's RPC response cache (reduces upstream RPC calls).
+            Defaults to ANVIL_FORK_CACHE_PATH env var if set.
     """
 
     rpc_url: str
@@ -306,6 +308,7 @@ class ForkManagerConfig:
     auto_impersonate: bool = True
     block_time: int | None = None
     fork_block_number: int | None = None
+    cache_path: str | None = field(default_factory=lambda: os.environ.get("ANVIL_FORK_CACHE_PATH"))
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -403,6 +406,7 @@ class RollingForkManager:
     auto_impersonate: bool = True
     block_time: int | None = None
     fork_block_number: int | None = None
+    cache_path: str | None = field(default_factory=lambda: os.environ.get("ANVIL_FORK_CACHE_PATH"))
 
     # Timeout defaults (env-overridable)
     rpc_timeout_seconds: float = field(default_factory=lambda: float(os.environ.get("ALMANAK_FORK_RPC_TIMEOUT", "8.0")))
@@ -939,6 +943,13 @@ class RollingForkManager:
         # --no-gas-cap was added in Anvil 0.4.0; older versions crash on this flag.
         if _anvil_supports_no_gas_cap():
             cmd.append("--no-gas-cap")
+
+        # Cache upstream RPC responses to reduce Alchemy/RPC calls
+        if self.cache_path:
+            if "--cache-path" in _get_anvil_supported_flags():
+                cmd.extend(["--cache-path", self.cache_path])
+            else:
+                logger.warning("Anvil does not support --cache-path; skipping RPC disk cache")
 
         # Silent mode for cleaner logs
         cmd.append("--silent")
