@@ -144,8 +144,11 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
         if self._session is None or self._session.closed:
+            from almanak.gateway.utils.ssl_context import build_ssl_context
+
             timeout = aiohttp.ClientTimeout(total=30.0)
-            self._session = aiohttp.ClientSession(timeout=timeout)
+            connector = aiohttp.TCPConnector(ssl=build_ssl_context())
+            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
         return self._session
 
     async def close(self) -> None:

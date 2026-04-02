@@ -40,8 +40,8 @@ if TYPE_CHECKING:
     author="Almanak",
     tags=["demo", "xlayer", "lending", "aave-v3", "carry"],
     supported_chains=["xlayer"],
-    supported_protocols=["aave_v3"],
-    intent_types=["SUPPLY", "BORROW", "REPAY", "WITHDRAW", "HOLD"],
+    supported_protocols=["aave_v3", "uniswap_v3"],
+    intent_types=["SUPPLY", "BORROW", "REPAY", "WITHDRAW", "SWAP", "HOLD"],
     default_chain="xlayer",
 )
 class XLayerAaveCarryStrategy(IntentStrategy):
@@ -185,7 +185,11 @@ class XLayerAaveCarryStrategy(IntentStrategy):
                 self._total_borrowed = Decimal("0")
 
             elif intent_type == "WITHDRAW":
-                self._total_supplied = Decimal("0")
+                if getattr(intent, "withdraw_all", False):
+                    self._total_supplied = Decimal("0")
+                else:
+                    withdrawn = Decimal(str(getattr(intent, "amount", Decimal("0")) or Decimal("0")))
+                    self._total_supplied = max(Decimal("0"), self._total_supplied - withdrawn)
         else:
             revert_to = self._previous_stable_state
             logger.warning(f"{intent_type} failed, reverting to '{revert_to}'")
@@ -261,25 +265,65 @@ class XLayerAaveCarryStrategy(IntentStrategy):
         from almanak.framework.teardown import TeardownMode
 
         intents: list[Intent] = []
-        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.01")  # noqa: F841
+        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.01")
 
         if self._total_borrowed > 0:
+            # Interest accrual gap: at teardown, Aave debt = principal + accrued interest,
+            # but the wallet only holds the original borrowed principal.  Repaying only the
+            # principal leaves residual dust debt that blocks a full collateral withdrawal.
+            #
+            # Fix: withdraw a small collateral buffer from Aave, swap it to the borrow token
+            # on Uniswap V3, then repay.  The compiler's repay_full path uses the wallet
+            # balance as the repay amount; Aave caps it to the actual debt if we overshoot.
+            #
+            # Buffer sizing: 0.5% of borrowed value in supply_token units.
+            # Sized in USD first (0.5% of borrow value), then converted to supply_token
+            # units via cached prices so it works for any collateral (USDT0, xETH, xBTC).
+            # For stablecoin pairs (default USDT0/USDG) this equals 0.5% of borrow amount.
+            borrow_price = self._borrow_price_usd if self._borrow_price_usd > 0 else Decimal("1")
+            supply_price = self._supply_price_usd if self._supply_price_usd > 0 else Decimal("1")
+            interest_buffer = (self._total_borrowed * Decimal("0.005") * borrow_price) / supply_price
+
+            # Step 1: Partial collateral withdraw to fund the interest buffer swap
+            intents.append(
+                Intent.withdraw(
+                    token=self.supply_token,
+                    amount=interest_buffer,
+                    protocol="aave_v3",
+                    chain=self.chain,
+                )
+            )
+
+            # Step 2: Swap withdrawn collateral → borrow token (covers the interest gap)
+            intents.append(
+                Intent.swap(
+                    from_token=self.supply_token,
+                    to_token=self.borrow_token,
+                    amount=interest_buffer,
+                    max_slippage=max_slippage,
+                    chain=self.chain,
+                )
+            )
+
+            # Step 3: Repay full debt (wallet now holds principal + buffer; Aave caps to actual debt)
             intents.append(
                 Intent.repay(
                     token=self.borrow_token,
-                    amount=self._total_borrowed,
                     protocol="aave_v3",
                     repay_full=True,
+                    chain=self.chain,
                 )
             )
 
         if self._total_supplied > 0:
+            # Step 4: Withdraw all remaining collateral (debt fully repaid above)
             intents.append(
                 Intent.withdraw(
                     token=self.supply_token,
                     amount="all",
                     protocol="aave_v3",
                     withdraw_all=True,
+                    chain=self.chain,
                 )
             )
 
