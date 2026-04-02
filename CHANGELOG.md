@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-04-02
+
+### Added
+- X-Layer chain support with Aave V3.6 carry and LP rebalance demo strategies (#1252)
+- Monad production activation with demo strategies and infra (#1248)
+- Lido stETH + Aave V3 wstETH supply composition on Ethereum (#1228)
+- Morpho Blue wstETH/USDC full lifecycle on Base (#1238, #1261)
+- SushiSwap V3 + Aave V3 T2 composition on Arbitrum (#1256)
+- Morpho Blue + Enso lifecycle on Base (#1255)
+- BENQI leveraged loop + Enso swap + teardown on Avalanche (#1237)
+- Compound V3 lending lifecycle execution on Polygon (#1232)
+- Morpho Blue crisis scenario backtest on Ethereum (#1231)
+- Paper trading tests for Compound V3 + Aerodrome composed strategy (#1235)
+- LST/LRT token addresses for swETH, ankrETH, pufETH, CVX (#1241)
+- Demo strategies included in nightly test suite with test-reporter prompt (#1244)
+
+### Changed
+- Bump almanak-code to v0.2.10 (#1249)
+
+### Fixed
+- Aave/Spark repay_full queries wallet balance instead of sending MAX_UINT256 (#1266)
+- Apply certifi SSL context to all AsyncHTTPProvider instances (#1265)
+- X-Layer RPC public fallback, SSL cert fix, correct USDT0 address (#1264)
+- Compound V3 support added to Polygon rate monitor (#1259)
+- Agni Finance fee tier 3000 to 500 for Mantle swap pools (#1258)
+- TraderJoe V2 extract_swap_amounts uses actual token decimals (#1251)
+- Intent.repay() optional amount when repay_full=True (#1250)
+- Aerodrome LP_CLOSE permission discovery with static removeLiquidity hint (#1243, #1246)
+- Strategy templates use symbolic pool format and provide both LP amounts (#1242)
+- Pendle YT sell floor responds to TeardownManager slippage escalation (#1224)
+- Anvil --no-gas-cap replaced with --block-base-fee-per-gas 0 for all versions (#1253)
+- Batch Quick Win bug fixes: chain-specific WETH in diagnostics, intent state machine fail-fast, teardown retry on SKIPPED, Enso routing (#1236)
+- Nightly test failures: anvil_funding configs, compound_v3 polygon, probe excludes (#1254, #1257)
+
 ## [2.9.0] - 2026-04-01
 
 ### Added
