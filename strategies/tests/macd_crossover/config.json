@@ -10,5 +10,10 @@
     "base_token": "ARB",
     "quote_token": "USDC",
     "chain": "arbitrum",
-    "protocol": "uniswap_v3"
+    "protocol": "uniswap_v3",
+    "anvil_funding": {
+        "ETH": 10,
+        "USDC": 10000,
+        "ARB": 500
+    }
 }

@@ -13,7 +13,7 @@
     "protocol": "uniswap_v3",
     "anvil_funding": {
         "ETH": 10,
-        "WETH": 1,
-        "USDC": 100
+        "USDC": 10000,
+        "WETH": 5
     }
 }

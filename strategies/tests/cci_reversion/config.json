@@ -13,7 +13,7 @@
     "protocol": "uniswap_v3",
     "anvil_funding": {
         "ETH": 10,
-        "ARB": 100,
-        "USDC": 100
+        "USDC": 10000,
+        "ARB": 500
     }
 }
