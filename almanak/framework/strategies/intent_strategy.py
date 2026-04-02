@@ -3656,37 +3656,6 @@ def almanak_strategy(
             raise ValueError(
                 f"default_chain '{default_chain}' must be one of supported_chains: {resolved_supported_chains}"
             )
-
-        # Warn about missing teardown complement intent types.
-        # One-way: only open→close, matching the permission generator's
-        # _TEARDOWN_COMPLEMENTS. A strategy declaring only close types
-        # should not be warned to add open types.
-        if intent_types:
-            _COMPLEMENT_PAIRS = {
-                "SUPPLY": "WITHDRAW",
-                "BORROW": "REPAY",
-                "LP_OPEN": "LP_CLOSE",
-                "VAULT_DEPOSIT": "VAULT_REDEEM",
-                "PERP_OPEN": "PERP_CLOSE",
-            }
-            declared = set(intent_types)
-            missing = sorted(
-                complement
-                for it in intent_types
-                if (complement := _COMPLEMENT_PAIRS.get(it)) and complement not in declared
-            )
-            if missing:
-                import warnings
-
-                warnings.warn(
-                    f"Strategy '{name}': intent_types is missing teardown complements: {missing}. "
-                    f"Strategies that use {[it for it in intent_types if _COMPLEMENT_PAIRS.get(it) in missing]} "
-                    "typically need these for safe teardown. The permission generator will auto-add them, "
-                    "but declaring them explicitly is recommended.",
-                    UserWarning,
-                    stacklevel=3,
-                )
-
         metadata = StrategyMetadata(
             name=name,
             description=description,

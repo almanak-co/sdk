@@ -196,24 +196,6 @@ Attaches metadata used by the framework and CLI:
 )
 ```
 
-**IMPORTANT — Intent Type Teardown Complements**: `intent_types` must include
-both the "open" and "close" side of every operation. These are used to generate
-Zodiac Roles permissions for Safe wallet deployments. If you declare the open
-side without its complement, the strategy will deploy but **teardown will fail
-on-chain** because the wallet lacks permission for the close operation.
-
-| If you declare... | You MUST also declare... |
-|--------------------|--------------------------|
-| `SUPPLY`           | `WITHDRAW`               |
-| `BORROW`           | `REPAY`                  |
-| `LP_OPEN`          | `LP_CLOSE`               |
-| `VAULT_DEPOSIT`    | `VAULT_REDEEM`           |
-| `PERP_OPEN`        | `PERP_CLOSE`             |
-
-The decorator emits a `UserWarning` at import time if complements are missing.
-The permission generator also auto-expands missing complements as a safety net,
-but always declare them explicitly.
-
 ### Config Access
 
 In `__init__`, read parameters from `self.config` (dict loaded from config.json):
@@ -1154,12 +1136,11 @@ Regenerate permissions whenever you:
 ### How It Works
 
 1. Reads `supported_protocols` and `intent_types` from the `@almanak_strategy()` decorator
-2. **Auto-expands teardown complements** (e.g. SUPPLY adds WITHDRAW) so teardown permissions are always included
-3. Creates synthetic intents for each (protocol, intent_type) pair
-4. Compiles them through the real IntentCompiler to extract target contracts and selectors
-5. Adds ERC-20 `approve` permissions for tokens found in `config.json`
-6. Adds infrastructure permissions (MultiSend for atomic execution)
-7. Merges, deduplicates, and outputs as Zodiac Roles Target[] format
+2. Creates synthetic intents for each (protocol, intent_type) pair
+3. Compiles them through the real IntentCompiler to extract target contracts and selectors
+4. Adds ERC-20 `approve` permissions for tokens found in `config.json`
+5. Adds infrastructure permissions (MultiSend for atomic execution)
+6. Merges, deduplicates, and outputs as Zodiac Roles Target[] format
 
 ### Usage
 
