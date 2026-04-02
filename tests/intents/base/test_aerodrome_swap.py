@@ -220,7 +220,7 @@ class TestAerodromeSwapIntent:
             from_token="WETH",
             to_token="USDC",
             amount=swap_amount,
-            max_slippage=Decimal("0.01"),
+            max_slippage=Decimal("0.20"),  # 20% slippage for oracle-based quoting (VIB-2297)
             protocol="aerodrome",
             chain=CHAIN_NAME,
         )
