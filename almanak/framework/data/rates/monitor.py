@@ -60,7 +60,7 @@ PROTOCOL_CHAINS: dict[str, list[str]] = {
     "ethereum": ["aave_v3", "morpho_blue", "compound_v3"],
     "arbitrum": ["aave_v3", "compound_v3"],
     "optimism": ["aave_v3", "compound_v3"],
-    "polygon": ["aave_v3"],
+    "polygon": ["aave_v3", "compound_v3"],
     "base": ["aave_v3", "morpho_blue", "compound_v3"],
     "avalanche": ["aave_v3"],
 }
@@ -1026,12 +1026,14 @@ class RateMonitor:
         """
         default_supply_apys: dict[str, Decimal] = {
             "USDC": Decimal("4.85"),
+            "USDC.e": Decimal("4.85"),
             "USDT": Decimal("4.25"),
             "WETH": Decimal("2.35"),
         }
 
         default_borrow_apys: dict[str, Decimal] = {
             "USDC": Decimal("6.15"),
+            "USDC.e": Decimal("6.15"),
             "USDT": Decimal("5.75"),
             "WETH": Decimal("4.15"),
         }
@@ -1044,7 +1046,14 @@ class RateMonitor:
         if apy_percent is None:
             raise TokenNotSupportedError(token, "compound_v3", self._chain)
 
-        market_key = _COMPOUND_V3_TOKEN_TO_MARKET.get(token, "usdc")
+        # Verify this token's Comet market exists on the current chain to avoid
+        # returning placeholder rates for markets that don't exist (e.g. USDC on Polygon).
+        from almanak.framework.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
+
+        market_key = _COMPOUND_V3_TOKEN_TO_MARKET.get(token)
+        if market_key is None or market_key not in COMPOUND_V3_COMET_ADDRESSES.get(self._chain, {}):
+            raise TokenNotSupportedError(token, "compound_v3", self._chain)
+
         return LendingRate(
             protocol="compound_v3",
             token=token,

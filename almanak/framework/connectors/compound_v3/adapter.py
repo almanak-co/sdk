@@ -95,6 +95,8 @@ COMPOUND_V3_COMET_ADDRESSES: dict[str, dict[str, str]] = {
         # Verified on-chain: baseToken() returns 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 (USDC.e bridged on Polygon)
         # Collateral: WETH (80% CF), WBTC (75%), WMATIC (65%), MaticX (55%)
         "usdc_e": "0xF25212E676D1F7F89Cd72fFEe66158f541246445",
+        # Alias used by rate monitor (USDC.e -> usdc_bridged mapping in _COMPOUND_V3_TOKEN_TO_MARKET)
+        "usdc_bridged": "0xF25212E676D1F7F89Cd72fFEe66158f541246445",
     },
 }
 
@@ -387,6 +389,39 @@ COMPOUND_V3_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
     "polygon": {
         # USDC.e Comet on Polygon -- verified on-chain: baseToken() = 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 (USDC.e)
         "usdc_e": {
+            "name": "USDC.e Market",
+            "base_token": "USDC.e",
+            "base_token_address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+            "collaterals": {
+                "WETH": {
+                    "address": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+                    "borrow_collateral_factor": Decimal("0.80"),
+                    "liquidation_collateral_factor": Decimal("0.85"),
+                    "liquidation_factor": Decimal("0.93"),
+                },
+                "WBTC": {
+                    "address": "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",
+                    "borrow_collateral_factor": Decimal("0.75"),
+                    "liquidation_collateral_factor": Decimal("0.85"),
+                    "liquidation_factor": Decimal("0.90"),
+                },
+                "WMATIC": {
+                    "address": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+                    "borrow_collateral_factor": Decimal("0.65"),
+                    "liquidation_collateral_factor": Decimal("0.80"),
+                    "liquidation_factor": Decimal("0.90"),
+                },
+                "MaticX": {
+                    "address": "0xfa68FB4628DFF1028CFEc22b4162FCcd0d45efb6",
+                    "borrow_collateral_factor": Decimal("0.55"),
+                    "liquidation_collateral_factor": Decimal("0.65"),
+                    "liquidation_factor": Decimal("0.90"),
+                },
+            },
+        },
+        # Alias used by rate monitor (USDC.e -> usdc_bridged mapping in _COMPOUND_V3_TOKEN_TO_MARKET)
+        # Points to same USDC.e Comet on Polygon as usdc_e
+        "usdc_bridged": {
             "name": "USDC.e Market",
             "base_token": "USDC.e",
             "base_token_address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
