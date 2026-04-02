@@ -13,7 +13,7 @@ Tokens included:
     - Stablecoins: USDC, USDT, DAI, USDC.e, USDbC, USDT.e, USDe, sUSDe
     - DeFi blue chips: WBTC, LINK, UNI, AAVE, CRV, GMX, PENDLE
     - Chain tokens: ARB, OP
-    - LST/LRT tokens: wstETH, WEETH, swETH, ankrETH, pufETH
+    - LST/LRT tokens: wstETH, stETH, rETH, WEETH, swETH, ankrETH, pufETH
     - DeFi governance: CVX
 
 Authoritative Sources:
@@ -855,6 +855,30 @@ ankrETH = Token(
     is_stablecoin=False,
 )
 
+# Lido Staked ETH (liquid staking token)
+stETH = Token(
+    symbol="stETH",
+    name="Lido Staked Ether",
+    decimals=18,
+    addresses={
+        "ethereum": "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84",
+    },
+    coingecko_id="staked-ether",
+    is_stablecoin=False,
+)
+
+# Rocket Pool ETH (liquid staking token)
+rETH = Token(
+    symbol="rETH",
+    name="Rocket Pool ETH",
+    decimals=18,
+    addresses={
+        "ethereum": "0xae78736Cd615f374D3085123A210448E74Fc6393",
+    },
+    coingecko_id="rocket-pool-eth",
+    is_stablecoin=False,
+)
+
 # Puffer Staked ETH (liquid restaking token)
 pufETH = Token(
     symbol="pufETH",
@@ -1484,6 +1508,8 @@ DEFAULT_TOKENS: list[Token] = [
     CRVUSD,
     # LST/LRT tokens
     wstETH,
+    stETH,
+    rETH,
     WEETH,
     swETH,
     ankrETH,
@@ -1658,6 +1684,8 @@ __all__ = [
     "CRVUSD",
     # LST/LRT tokens
     "wstETH",
+    "stETH",
+    "rETH",
     "WEETH",
     "swETH",
     "ankrETH",

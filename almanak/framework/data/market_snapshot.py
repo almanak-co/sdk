@@ -48,6 +48,9 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol, runtime_chec
 
 import pandas as pd
 
+from almanak.framework.data.tokens import get_token_resolver
+from almanak.framework.data.tokens.exceptions import TokenResolutionError
+
 from .interfaces import (
     AllDataSourcesFailed,
     BalanceProvider,
@@ -1006,12 +1009,28 @@ class MarketSnapshot:
 
         try:
             result: BalanceResult = self._run_async(self._balance_provider.get_balance(token))
-            self._balance_cache[token] = result.balance
-            return result.balance
         except DataSourceError as e:
             raise BalanceUnavailableError(token, str(e)) from e
         except Exception as e:
             raise BalanceUnavailableError(token, f"Unexpected error: {e}") from e
+
+        balance = result.balance
+
+        # Guard against silent-zero for unrecognized address-based tokens.
+        # If the gateway returns 0 for an address that isn't in the registry,
+        # raise rather than silently returning 0 (which looks like "empty wallet").
+        if balance == Decimal(0) and token.startswith("0x") and len(token) == 42:
+            try:
+                get_token_resolver().resolve(token, self._chain, skip_gateway=True, log_errors=False)
+            except TokenResolutionError as exc:
+                raise BalanceUnavailableError(
+                    token,
+                    f"Token address {token} is not in the SDK registry. "
+                    f"Add it to almanak/framework/data/tokens/defaults.py or use the token symbol.",
+                ) from exc
+
+        self._balance_cache[token] = balance
+        return balance
 
     def rsi(self, token: str, period: int = 14, timeframe: str = "4h") -> "RSIData":
         """Get the RSI (Relative Strength Index) for a token.

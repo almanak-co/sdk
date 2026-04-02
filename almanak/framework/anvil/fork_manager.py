@@ -222,6 +222,13 @@ TOKEN_DECIMALS: dict[str, int] = {
     "GMX": 18,
     "OP": 18,
     "wstETH": 18,
+    "stETH": 18,
+    "rETH": 18,
+    "swETH": 18,
+    "ankrETH": 18,
+    "pufETH": 18,
+    "cbETH": 18,
+    "WEETH": 18,
     "WXPL": 18,
     "USDT0": 6,
     "FUSDT0": 6,
@@ -739,7 +746,14 @@ class RollingForkManager:
                     decimals = TOKEN_DECIMALS.get(token_symbol.upper())
 
             if not token_address:
-                logger.warning(f"Unknown token {token_symbol} for chain {self.chain}, skipping")
+                is_addr = token_symbol.startswith("0x") and len(token_symbol) == 42
+                if is_addr:
+                    logger.error(
+                        f"Token address {token_symbol} not found in registry for chain {self.chain}. "
+                        f"Add it to almanak/framework/data/tokens/defaults.py to enable Anvil funding."
+                    )
+                else:
+                    logger.warning(f"Unknown token {token_symbol} for chain {self.chain}, skipping")
                 success = False
                 continue
             if decimals is None:
