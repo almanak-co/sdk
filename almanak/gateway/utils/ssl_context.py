@@ -6,20 +6,25 @@ across environments, particularly on macOS where system certs may differ.
 
 import ssl
 
+_ssl_context: ssl.SSLContext | None = None
+
 
 def build_ssl_context() -> ssl.SSLContext:
-    """Build an SSL context using certifi's certificate bundle.
+    """Build (or return cached) SSL context using certifi's certificate bundle.
 
-    Falls back to the default SSL context if certifi is unavailable.
+    The context is created once and reused on subsequent calls to avoid
+    repeated CA-file loading in hot paths (e.g. backtesting loops).
 
     Returns:
         ssl.SSLContext configured with certifi certificates
     """
-    context = ssl.create_default_context()
-    try:
-        import certifi
+    global _ssl_context
+    if _ssl_context is not None:
+        return _ssl_context
 
-        context.load_verify_locations(cafile=certifi.where())
-    except ImportError:
-        pass
+    import certifi
+
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    _ssl_context = context
     return context

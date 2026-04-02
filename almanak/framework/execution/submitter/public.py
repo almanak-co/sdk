@@ -367,7 +367,9 @@ class PublicMempoolSubmitter(Submitter):
             AsyncWeb3 instance connected to the RPC endpoint
         """
         if self._web3 is None:
-            self._web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url))
+            from almanak.gateway.utils.ssl_context import build_ssl_context
+
+            self._web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url, request_kwargs={"ssl": build_ssl_context()}))
         return self._web3
 
     def _classify_error(self, error_message: str) -> str:

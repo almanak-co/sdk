@@ -1027,9 +1027,10 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             from web3 import AsyncHTTPProvider, AsyncWeb3
 
             from almanak.gateway.utils import get_rpc_url
+            from almanak.gateway.utils.ssl_context import build_ssl_context
 
             rpc_url = get_rpc_url(chain, network=self.settings.network)
-            w3 = AsyncWeb3(AsyncHTTPProvider(rpc_url))
+            w3 = AsyncWeb3(AsyncHTTPProvider(rpc_url, request_kwargs={"ssl": build_ssl_context()}))
 
             # Get transaction receipt
             receipt = await w3.eth.get_transaction_receipt(tx_hash)  # type: ignore[arg-type]

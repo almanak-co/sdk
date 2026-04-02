@@ -809,7 +809,9 @@ class ExecutionOrchestrator:
         """Get or create Web3 instance."""
         if self._web3 is None:
             if self.rpc_url:
-                self._web3 = AsyncWeb3(AsyncHTTPProvider(self.rpc_url))
+                from almanak.gateway.utils.ssl_context import build_ssl_context
+
+                self._web3 = AsyncWeb3(AsyncHTTPProvider(self.rpc_url, request_kwargs={"ssl": build_ssl_context()}))
                 # Inject POA middleware for chains like Polygon, Avalanche, BSC
                 from almanak.gateway.utils.rpc_provider import is_poa_chain
 

@@ -530,7 +530,9 @@ class FundingRateProvider:
     async def _get_web3(self) -> AsyncWeb3 | None:
         """Get or create Web3 instance for GMX V2 queries."""
         if self._web3 is None and self._rpc_url:
-            self._web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url))
+            from almanak.gateway.utils.ssl_context import build_ssl_context
+
+            self._web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url, request_kwargs={"ssl": build_ssl_context()}))
         return self._web3
 
     async def _get_http_session(self) -> aiohttp.ClientSession:

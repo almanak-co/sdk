@@ -1378,7 +1378,9 @@ class SushiSwapV3SDK:
         except ImportError as e:
             raise SushiSwapV3SDKError("web3 package required for RPC operations") from e
 
-        self._web3 = AsyncWeb3(AsyncHTTPProvider(self.rpc_url))
+        from almanak.gateway.utils.ssl_context import build_ssl_context
+
+        self._web3 = AsyncWeb3(AsyncHTTPProvider(self.rpc_url, request_kwargs={"ssl": build_ssl_context()}))
         return self._web3
 
 
