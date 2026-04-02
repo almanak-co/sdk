@@ -379,7 +379,7 @@ message RpcResponse {
 
 EVM chains:
 
-- ethereum, arbitrum, base, optimism, polygon, avalanche, bsc, bnb, sonic, plasma, linea, blast, mantle, berachain, monad
+- ethereum, arbitrum, base, optimism, polygon, avalanche, bsc, bnb, sonic, plasma, blast, mantle, berachain, monad, xlayer
 
 Non-EVM chains:
 

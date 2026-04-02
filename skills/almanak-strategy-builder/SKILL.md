@@ -684,6 +684,45 @@ positions = market.prediction_positions("market_id")     # list[PredictionPositi
 orders = market.prediction_orders("market_id")           # list[PredictionOrder]
 ```
 
+### Rate History (Backtesting)
+
+```python
+hist = market.lending_rate_history("aave_v3", "USDC", days=90)  # DataEnvelope[list[LendingRateSnapshot]]
+for snap in hist.value:
+    print(f"Supply: {snap.supply_apy}%, Borrow: {snap.borrow_apy}%")
+
+fh = market.funding_rate_history("binance", "ETH-PERP", hours=168)  # DataEnvelope[list[FundingRateSnapshot]]
+```
+
+### Position Health
+
+```python
+ph = market.position_health("morpho_blue", market_id="0x...")  # PositionHealth
+ph.health_factor     # Decimal
+ph.ltv               # Decimal
+
+pt = market.pt_position_health("0x...", pendle_market_address="0x...")  # PTPositionHealth
+```
+
+### LST Exchange Rates (Solana)
+
+```python
+rate = market.lst_exchange_rate("jitoSOL")   # LSTExchangeRate
+rate.rate            # Decimal - rate vs SOL
+rate.apy             # Decimal
+
+all_rates = market.lst_all_rates()           # dict[str, LSTExchangeRate]
+```
+
+### Risk Metrics
+
+```python
+vol = market.realized_vol("WETH", window_days=30)    # RealizedVol
+cone = market.vol_cone("WETH")                       # VolCone
+risk = market.portfolio_risk()                        # PortfolioRisk
+sharpe = market.rolling_sharpe("WETH", window_days=30)  # RollingSharpe
+```
+
 ### Yield and Analytics
 
 ```python
