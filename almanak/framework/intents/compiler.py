@@ -9217,8 +9217,11 @@ class IntentCompiler:
                 # Lazy import to avoid circular import
                 from ..connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
 
-                # Get RPC URL from compiler config (set by runtime config for the correct network)
-                morpho_rpc_url = self.rpc_url
+                # Use _get_chain_rpc_url() (not self.rpc_url) so Anvil fork URL is detected via
+                # ANVIL_{CHAIN}_PORT env var when running on a fork. self.rpc_url is always None
+                # in gateway mode, which caused the SDK to use Alchemy mainnet RPC even on Anvil,
+                # returning borrow_shares=0 and breaking repay_full=True (VIB-587).
+                morpho_rpc_url = self._get_chain_rpc_url()
 
                 morpho_config = MorphoBlueConfig(
                     chain=self.chain,

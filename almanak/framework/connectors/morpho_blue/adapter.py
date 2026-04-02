@@ -238,7 +238,7 @@ MORPHO_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
             "loan_token_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
             "collateral_token": "cbETH",
             "collateral_token_address": "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
-            "oracle": "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c",
+            "oracle": "0x4756c26E01E61c7c2F86b10f4316e179db8F9425",
             "irm": "0x46415998764C29aB2a25CbeA6254146D50D22687",
             "lltv": 860000000000000000,  # 86%
         },
