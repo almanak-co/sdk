@@ -260,7 +260,10 @@ class LocalSimulator(Simulator):
             # so we must use the block's base fee to avoid rejection.
             try:
                 block = await web3.eth.get_block("latest")
-                gas_price = Wei(block.get("baseFeePerGas", 1_000_000_000))
+                base_fee = block.get("baseFeePerGas", 1_000_000_000)
+                # Use 2x base fee to handle block-to-block base fee increases
+                # (Anvil may advance to next block between query and submission)
+                gas_price = Wei(base_fee * 2)
             except Exception as e:
                 logger.warning(f"Failed to query baseFeePerGas, falling back to 1 gwei: {e}")
                 gas_price = Wei(1_000_000_000)
