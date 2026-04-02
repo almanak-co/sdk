@@ -196,7 +196,7 @@ TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
         "WETH": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",
         "xETH": "0xE7B000003A45145decf8a28FC755aD5eC5EA025A",
         "USDC": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
-        "USDT": "0x1E4a5963aBFD975d8c9021ce480b42188849D41d",
+        "USDT": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USD₮0 (Aave V3.6 reserve)
         "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USD₮0 (Aave V3.6 reserve)
         "WBTC": "0xEA034fb02eB1808C2cc3adbC15f447B93CbE08e1",
     },
@@ -445,7 +445,11 @@ class RollingForkManager:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            from almanak.gateway.utils.ssl_context import build_ssl_context
+
+            ssl_ctx = build_ssl_context()
+            connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+            async with aiohttp.ClientSession(connector=connector) as session:
                 async with session.post(
                     self.rpc_url, json=payload, timeout=aiohttp.ClientTimeout(total=self.rpc_timeout_seconds)
                 ) as response:

@@ -315,7 +315,10 @@ class Web3BalanceProvider:
         self._retry_delay = retry_delay
 
         # Initialize Web3 with async HTTP provider
-        self._w3 = AsyncWeb3(AsyncHTTPProvider(rpc_url))
+        # Use certifi SSL context to avoid macOS system-cert issues (e.g. xlayer public RPC)
+        from almanak.gateway.utils.ssl_context import build_ssl_context
+
+        self._w3 = AsyncWeb3(AsyncHTTPProvider(rpc_url, request_kwargs={"ssl": build_ssl_context()}))
 
         # Token resolver (unified token resolution)
         if token_resolver is not None:

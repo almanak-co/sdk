@@ -533,6 +533,95 @@ class TestAnvilWatchdog:
         mock_manager.reset_to_latest.assert_not_called()
 
 
+class TestAnvilPublicRpcFallback:
+    """Tests for public RPC fallback when primary Alchemy/private RPC fails."""
+
+    def _make_settings(self, port: int, network: str = "anvil") -> GatewaySettings:
+        return GatewaySettings(
+            grpc_port=port,
+            metrics_enabled=False,
+            audit_enabled=False,
+            allow_insecure=True,
+            network=network,
+        )
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_public_rpc_on_primary_failure(self):
+        """When primary RPC start fails, retries with public fallback URL."""
+        settings = self._make_settings(50090)
+        gw = ManagedGateway(settings, anvil_chains=["xlayer"])
+
+        # First call fails (primary RPC), second call succeeds (public fallback)
+        mock_manager_fail = AsyncMock()
+        mock_manager_fail.start.return_value = False
+        mock_manager_fail.anvil_port = 8557
+
+        mock_manager_ok = AsyncMock()
+        mock_manager_ok.start.return_value = True
+        mock_manager_ok.anvil_port = 8558
+
+        manager_instances = [mock_manager_fail, mock_manager_ok]
+
+        with (
+            patch(
+                "almanak.framework.anvil.fork_manager.RollingForkManager",
+                side_effect=manager_instances,
+            ),
+            patch(
+                "almanak.gateway.utils.rpc_provider.get_rpc_url",
+                return_value="https://xlayer-mainnet.g.alchemy.com/v2/FAKE_KEY",
+            ),
+            patch(
+                "almanak.gateway.utils.rpc_provider.PUBLIC_RPC_URLS",
+                {"xlayer": "https://rpc.xlayer.tech"},
+            ),
+            patch("almanak.gateway.managed.find_free_port", return_value=8558),
+            patch("shutil.which", return_value="/usr/bin/anvil"),
+        ):
+            await gw._start_anvil_forks()
+
+        # Should have ended up with the successful (public) manager
+        assert "xlayer" in gw._anvil_managers
+        assert gw._anvil_managers["xlayer"] is mock_manager_ok
+
+        # Cleanup
+        gw._keep_anvil = False
+        await gw._stop_anvil_forks()
+
+    @pytest.mark.asyncio
+    async def test_raises_when_both_rpc_fail(self):
+        """Raises RuntimeError when both primary and public RPC start fail."""
+        settings = self._make_settings(50091)
+        gw = ManagedGateway(settings, anvil_chains=["xlayer"])
+
+        mock_manager_fail = AsyncMock()
+        mock_manager_fail.start.return_value = False
+        mock_manager_fail.anvil_port = 8557
+
+        mock_manager_fail2 = AsyncMock()
+        mock_manager_fail2.start.return_value = False
+        mock_manager_fail2.anvil_port = 8558
+
+        with (
+            patch(
+                "almanak.framework.anvil.fork_manager.RollingForkManager",
+                side_effect=[mock_manager_fail, mock_manager_fail2],
+            ),
+            patch(
+                "almanak.gateway.utils.rpc_provider.get_rpc_url",
+                return_value="https://xlayer-mainnet.g.alchemy.com/v2/FAKE_KEY",
+            ),
+            patch(
+                "almanak.gateway.utils.rpc_provider.PUBLIC_RPC_URLS",
+                {"xlayer": "https://rpc.xlayer.tech"},
+            ),
+            patch("almanak.gateway.managed.find_free_port", return_value=8558),
+            patch("shutil.which", return_value="/usr/bin/anvil"),
+        ):
+            with pytest.raises(RuntimeError, match="Failed to start Anvil fork"):
+                await gw._start_anvil_forks()
+
+
 class TestAnvilFundingNativeTokenWarning:
     """VIB-1579: warn when anvil_funding uses 'ETH' on non-ETH chains."""
 

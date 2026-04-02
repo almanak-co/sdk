@@ -275,7 +275,31 @@ class ManagedGateway:
                 )
                 ok = await manager.start()
                 if not ok:
-                    raise RuntimeError(f"Failed to start Anvil fork for {chain} on port {port}")
+                    # If the primary RPC failed (e.g. Alchemy 403 — chain not enabled on this app),
+                    # attempt a fallback to the public RPC endpoint for this chain.
+                    from almanak.gateway.utils.rpc_provider import PUBLIC_RPC_URLS
+
+                    public_url = PUBLIC_RPC_URLS.get(chain)
+                    if public_url and public_url != fork_url:
+                        from almanak.framework.anvil.fork_manager import ForkManagerConfig
+
+                        logger.warning(
+                            "Primary RPC failed for %s (url=%s). Retrying with public fallback: %s",
+                            chain,
+                            ForkManagerConfig._mask_url(fork_url),
+                            public_url,
+                        )
+                        port = find_free_port()
+                        manager = RollingForkManager(
+                            rpc_url=public_url,
+                            chain=chain,
+                            anvil_port=port,
+                        )
+                        ok = await manager.start()
+                        if ok:
+                            fork_url = public_url
+                    if not ok:
+                        raise RuntimeError(f"Failed to start Anvil fork for {chain} on port {port}")
                 self._anvil_managers[chain] = manager
                 # Set env var so gateway RPC provider routes to this Anvil
                 self._original_env[env_var] = os.environ.get(env_var)

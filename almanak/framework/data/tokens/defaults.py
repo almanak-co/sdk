@@ -256,7 +256,7 @@ USDT = Token(
         "bsc": "0x55d398326f99059fF775485246999027B3197955",  # Binance-Peg USDT (18 decimals on BSC)
         "solana": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT on Solana
         "mantle": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USDT0 on Mantle (LayerZero bridged)
-        "xlayer": "0x1E4a5963aBFD975d8c9021ce480b42188849D41d",  # USDT0 on X-Layer
+        "xlayer": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USD₮0 on X-Layer (Aave V3.6 reserve)
     },
     coingecko_id="tether",
     is_stablecoin=True,

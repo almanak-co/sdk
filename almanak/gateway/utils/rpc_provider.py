@@ -200,7 +200,6 @@ _BUILTIN_CHAINS: dict[str, dict] = {
     "xlayer": {
         "chain_id": 196,
         "public_rpc": "https://rpc.xlayer.tech",
-        "alchemy_prefix": "xlayer",
         "anvil_port": 8557,
         "poa": False,
     },
