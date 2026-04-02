@@ -48,6 +48,45 @@ _TOKEN_CONFIG_FIELDS = frozenset(
 
 MANIFEST_VERSION = "1.0"
 
+# One-way open→close teardown complements.  If a strategy declares an "open"
+# intent type, the corresponding "close" type is needed for teardown.
+# Only open→close direction is expanded to respect least-privilege: a strategy
+# declaring only WITHDRAW should not auto-gain SUPPLY permissions.
+# discover_permissions() already skips unsupported (protocol, intent_type) combos
+# so adding complements for irrelevant protocols is a harmless no-op.
+_TEARDOWN_COMPLEMENTS: dict[str, str] = {
+    "SUPPLY": "WITHDRAW",
+    "BORROW": "REPAY",
+    "LP_OPEN": "LP_CLOSE",
+    "VAULT_DEPOSIT": "VAULT_REDEEM",
+    "PERP_OPEN": "PERP_CLOSE",
+}
+
+
+def _expand_intent_types_for_teardown(intent_types: list[str]) -> tuple[list[str], list[str]]:
+    """Expand intent types to include teardown complements.
+
+    Strategies commonly declare only the "open" side of an operation
+    (e.g. SUPPLY) and put the "close" side (WITHDRAW) only in
+    ``generate_teardown_intents()``.  Since teardown introspection is
+    fragile (requires runtime state), this function deterministically
+    adds the complementary intent types so permissions are always
+    generated for both sides.
+
+    Returns:
+        Tuple of (expanded_intent_types, sorted list of added types).
+    """
+    expanded = list(intent_types)
+    existing = set(expanded)
+    added: list[str] = []
+    for it in intent_types:
+        complement = _TEARDOWN_COMPLEMENTS.get(it)
+        if complement and complement not in existing:
+            added.append(complement)
+            existing.add(complement)
+            expanded.append(complement)
+    return expanded, sorted(added)
+
 
 def generate_manifest(
     strategy_name: str,
@@ -64,6 +103,10 @@ def generate_manifest(
     2. Token approvals - ERC-20 approve for tokens referenced in config
     3. Infrastructure - MultiSend (always), Enso Router (if enso protocol)
 
+    Intent types are automatically expanded to include teardown complements
+    (e.g. SUPPLY -> WITHDRAW) so that teardown permissions are always
+    generated even when the strategy only declares the "open" side.
+
     Args:
         strategy_name: Strategy identifier
         chain: Target chain name
@@ -79,11 +122,19 @@ def generate_manifest(
     """
     all_warnings: list[str] = []
 
+    # Expand intent types to include teardown complements
+    expanded_types, added_types = _expand_intent_types_for_teardown(intent_types)
+    if added_types:
+        all_warnings.append(
+            f"Auto-added teardown complement intent types: {added_types}. "
+            "Consider adding them to intent_types in @almanak_strategy() explicitly."
+        )
+
     # 1. Protocol permissions via compilation-based discovery
     protocol_permissions, discovery_warnings = discover_permissions(
         chain=chain,
         protocols=supported_protocols,
-        intent_types=intent_types,
+        intent_types=expanded_types,
         rpc_url=rpc_url,
     )
     all_warnings.extend(discovery_warnings)
