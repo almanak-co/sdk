@@ -2527,23 +2527,6 @@ class IntentCompiler:
         )
 
         try:
-            if intent.amount == "all":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        "amount='all' must be resolved before compilation. "
-                        "Use Intent.set_resolved_amount() to resolve chained amounts."
-                    ),
-                    intent_id=intent.intent_id,
-                )
-
-            amount_decimal = intent.amount
-            if not isinstance(amount_decimal, Decimal):
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Bridge amount must be Decimal after resolution, got: {type(amount_decimal).__name__}",
-                    intent_id=intent.intent_id,
-                )
             from_chain = intent.from_chain.lower()
             to_chain = intent.to_chain.lower()
             token_symbol = intent.token
@@ -2553,6 +2536,49 @@ class IntentCompiler:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
                     error=f"Unknown token for bridge on {from_chain}: {token_symbol}",
+                    intent_id=intent.intent_id,
+                )
+
+            if intent.amount == "all":
+                # Resolve 'all' to the actual on-chain token balance for from_chain.
+                # This mirrors how single-chain swaps/wraps handle amount='all'.
+                if token_info.is_native:
+                    balance_wei = self._query_native_balance_for_chain(self.wallet_address, from_chain)
+                else:
+                    balance_wei = self._query_erc20_balance_for_chain(
+                        token_info.address, self.wallet_address, from_chain
+                    )
+                if balance_wei is None:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=f"Failed to query {token_symbol} balance on {from_chain} — RPC unavailable",
+                        intent_id=intent.intent_id,
+                    )
+                if balance_wei <= 0:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=f"No {token_symbol} balance to bridge on {from_chain}",
+                        intent_id=intent.intent_id,
+                    )
+                if token_info.is_native:
+                    # Reserve gas for the bridge deposit transaction itself.
+                    # Mirrors wrap compiler: deduct 0.001 native token as gas buffer.
+                    gas_reserve_wei = int(Decimal("0.001") * Decimal(10**token_info.decimals))
+                    balance_wei = max(balance_wei - gas_reserve_wei, 0)
+                    if balance_wei <= 0:
+                        return CompilationResult(
+                            status=CompilationStatus.FAILED,
+                            error=f"Native balance too low to bridge {token_symbol} on {from_chain} after reserving gas",
+                            intent_id=intent.intent_id,
+                        )
+                amount_decimal = Decimal(balance_wei) / Decimal(10**token_info.decimals)
+            else:
+                amount_decimal = intent.amount  # type: ignore[assignment]
+
+            if not isinstance(amount_decimal, Decimal):
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Bridge amount must be Decimal after resolution, got: {type(amount_decimal).__name__}",
                     intent_id=intent.intent_id,
                 )
 
@@ -13730,6 +13756,146 @@ class IntentCompiler:
 
         except Exception as e:
             logger.error(f"Failed to query ERC-20 balance: {e}")
+            return None
+
+    def _query_erc20_balance_for_chain(self, token_address: str, wallet_address: str, chain: str) -> int | None:
+        """Query ERC-20 balance on a specific chain (which may differ from self.chain).
+
+        Used by cross-chain intents like BridgeIntent when amount='all' must be
+        resolved from the source chain's actual token balance.
+
+        Args:
+            token_address: ERC-20 token contract address
+            wallet_address: Wallet address to query balance for
+            chain: Chain to query (e.g. "arbitrum" even if self.chain is "base")
+
+        Returns:
+            Token balance in wei, or None if query fails
+        """
+        if chain == self.chain:
+            return self._query_erc20_balance(token_address, wallet_address)
+
+        # Cross-chain query: prefer gateway (it supports any chain).
+        # Fail-closed: if a gateway is configured but fails, do NOT fall through to direct RPC.
+        # This matches the behavior of _query_erc20_balance which treats gateway failures as terminal.
+        if self._gateway_client is not None:
+            try:
+                return self._gateway_client.query_erc20_balance(
+                    chain=chain,
+                    token_address=token_address,
+                    wallet_address=wallet_address,
+                )
+            except Exception as e:
+                logger.error("Gateway balance query failed for %s: %s", chain, e)
+                return None
+
+        # No gateway configured: fall back to direct Web3 RPC (local dev / Anvil only).
+        rpc_url = self._get_rpc_url_for_chain(chain)
+        if rpc_url is None:
+            logger.warning(f"No RPC URL for chain {chain} — cannot query ERC-20 balance")
+            return None
+
+        try:
+            from web3 import Web3
+        except ImportError:
+            logger.warning("web3 is not installed; cannot use direct RPC fallback for ERC-20 balance query")
+            return None
+
+        try:
+            web3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
+            selector = "0x70a08231"
+            padded_address = wallet_address[2:].lower().zfill(64)
+            data = selector + padded_address
+            result = web3.eth.call(
+                {
+                    "to": web3.to_checksum_address(token_address),
+                    "data": data,  # type: ignore[typeddict-item]
+                }
+            )
+            balance = int.from_bytes(result, byteorder="big")
+            logger.debug(f"ERC-20 balance for {wallet_address} at {token_address} on {chain}: {balance}")
+            return balance
+        except Exception as e:
+            logger.error(f"Failed to query ERC-20 balance on {chain}: {e}")
+            return None
+
+    def _query_native_balance_for_chain(self, wallet_address: str, chain: str) -> int | None:
+        """Query native token balance on a specific chain (which may differ from self.chain).
+
+        Used by BridgeIntent when amount='all' and the bridge token is a native asset
+        (e.g. ETH, AVAX). Mirrors the gateway-first / fail-closed pattern of
+        _query_erc20_balance_for_chain.
+
+        Args:
+            wallet_address: Wallet address to query balance for
+            chain: Chain to query (e.g. "arbitrum" even if self.chain is "base")
+
+        Returns:
+            Native balance in wei, or None if query fails
+        """
+        if chain == self.chain:
+            return self._query_native_balance(wallet_address)
+
+        # Fail-closed: if a gateway is configured but fails, do NOT fall through to direct RPC.
+        if self._gateway_client is not None:
+            try:
+                return self._gateway_client.query_native_balance(
+                    chain=chain,
+                    wallet_address=wallet_address,
+                )
+            except Exception as e:
+                logger.error("Gateway native balance query failed for %s: %s", chain, e)
+                return None
+
+        # No gateway configured: fall back to direct Web3 RPC (local dev / Anvil only).
+        rpc_url = self._get_rpc_url_for_chain(chain)
+        if rpc_url is None:
+            logger.warning(f"No RPC URL for chain {chain} — cannot query native balance")
+            return None
+
+        try:
+            from web3 import Web3
+        except ImportError:
+            logger.warning("web3 is not installed; cannot use direct RPC fallback for native balance query")
+            return None
+
+        try:
+            web3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
+            balance = web3.eth.get_balance(web3.to_checksum_address(wallet_address))
+            logger.debug(f"Native balance for {wallet_address} on {chain}: {balance}")
+            return balance
+        except Exception as e:
+            logger.error(f"Failed to query native balance on {chain}: {e}")
+            return None
+
+    def _get_rpc_url_for_chain(self, chain: str) -> str | None:
+        """Get RPC URL for an arbitrary chain.
+
+        Unlike _get_chain_rpc_url() which is bound to self.chain, this method
+        accepts an explicit chain parameter. Used for cross-chain queries (e.g.
+        querying from_chain balance when compiling BridgeIntent).
+
+        Args:
+            chain: Chain name (e.g. "arbitrum", "base")
+
+        Returns:
+            RPC URL string or None if not available.
+        """
+        if chain == self.chain:
+            return self._get_chain_rpc_url()
+
+        # Check for managed Anvil fork on the target chain
+        anvil_port_var = f"ANVIL_{chain.upper()}_PORT"
+        anvil_port = os.environ.get(anvil_port_var)
+        if anvil_port:
+            return f"http://127.0.0.1:{anvil_port}"
+
+        try:
+            from almanak.gateway.utils import get_rpc_url
+
+            return get_rpc_url(chain)
+        except (ImportError, ValueError) as e:
+            logger.debug(f"Failed to get RPC URL for {chain}: {e}")
             return None
 
     def _query_native_balance(self, wallet_address: str) -> int | None:
