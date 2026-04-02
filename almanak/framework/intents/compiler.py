@@ -9307,12 +9307,26 @@ class IntentCompiler:
                     )
 
                 if intent.repay_full:
-                    repay_amount = MAX_UINT256
+                    # Query wallet balance to use as repay amount — avoids InsufficientFunds()
+                    # when accrued interest causes debt to exceed the borrowed principal.
+                    # Aave accepts any amount up to the debt; we repay as much as the wallet holds.
+                    wallet_balance = self._query_erc20_balance(repay_token.address, self.wallet_address)
+                    if wallet_balance is None:
+                        repay_amount = MAX_UINT256
+                        logger.warning(
+                            f"repay_full: could not query wallet balance for {repay_token.symbol}, "
+                            f"falling back to MAX_UINT256 (may fail if interest accrued exceeds balance)"
+                        )
+                    else:
+                        repay_amount = wallet_balance
+                        logger.debug(
+                            f"repay_full: using on-chain wallet balance {repay_amount} wei for {repay_token.symbol}"
+                        )
                 else:
                     assert repay_amount_decimal is not None
                     repay_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
 
-                approve_amount = repay_amount if repay_amount != MAX_UINT256 else MAX_UINT256
+                approve_amount = repay_amount
 
                 if not repay_token.is_native:
                     approve_txs = self._build_approve_tx(
@@ -9411,12 +9425,25 @@ class IntentCompiler:
                 pool_address = spark_adapter.pool_address
 
                 if intent.repay_full:
-                    repay_amount = MAX_UINT256
+                    # Same as Aave path: query wallet balance to avoid InsufficientFunds()
+                    # if accrued interest exceeds original principal in the wallet.
+                    wallet_balance = self._query_erc20_balance(repay_token.address, self.wallet_address)
+                    if wallet_balance is None:
+                        repay_amount = MAX_UINT256
+                        logger.warning(
+                            f"repay_full: could not query wallet balance for {repay_token.symbol}, "
+                            f"falling back to MAX_UINT256 (may fail if interest accrued exceeds balance)"
+                        )
+                    else:
+                        repay_amount = wallet_balance
+                        logger.debug(
+                            f"repay_full: using on-chain wallet balance {repay_amount} wei for {repay_token.symbol}"
+                        )
                 else:
                     assert repay_amount_decimal is not None
                     repay_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
 
-                approve_amount = repay_amount if repay_amount != MAX_UINT256 else MAX_UINT256
+                approve_amount = repay_amount
 
                 actual_repay_address = repay_token.address
                 if not repay_token.is_native:
@@ -9443,13 +9470,21 @@ class IntentCompiler:
                 spark_repay_rate_mode = SPARK_VARIABLE_RATE_MODE
                 spark_repay_rate_label = "variable"
 
-                # Build repay TX via Spark adapter
+                # Build repay TX via Spark adapter.
+                # When we have a concrete wallet balance, pass repay_all=False so the
+                # adapter uses the exact amount instead of overriding with MAX_UINT256.
+                spark_use_repay_all = repay_amount == MAX_UINT256
+                spark_amount = (
+                    Decimal(repay_amount) / Decimal(10**repay_token.decimals)
+                    if not spark_use_repay_all
+                    else (repay_amount_decimal or Decimal("0"))
+                )
                 repay_result = spark_adapter.repay(
                     asset=actual_repay_address,
-                    amount=repay_amount_decimal if repay_amount_decimal else Decimal("0"),
+                    amount=spark_amount,
                     interest_rate_mode=spark_repay_rate_mode,
                     on_behalf_of=self.wallet_address,
-                    repay_all=intent.repay_full,
+                    repay_all=spark_use_repay_all,
                 )
 
                 if not repay_result.success:
