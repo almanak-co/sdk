@@ -113,7 +113,7 @@ TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
         "WBTC": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
         "ARB": "0x912CE59144191C1204E64559FE8253a0e49E6548",
         "GMX": "0xfc5A1A6EB076a2C7aD06eD22C90d7E710E35ad0a",
-        "WSTETH": "0x5979D7b546E38E414F7E9822514be443A4800529",
+        "wstETH": "0x5979D7b546E38E414F7E9822514be443A4800529",
     },
     "ethereum": {
         "WETH": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
@@ -239,7 +239,17 @@ TOKEN_DECIMALS: dict[str, int] = {
 # Sourced from verified intent tests (tests/intents/conftest.py CHAIN_CONFIGS).
 # Using known slots avoids slow brute-force probing and is 100% reliable.
 KNOWN_BALANCE_SLOTS: dict[str, dict[str, int]] = {
-    "arbitrum": {"USDC": 9, "WETH": 51, "USDC.e": 51, "USDT": 51, "DAI": 2, "WBTC": 51, "ARB": 51, "GMX": 0},
+    "arbitrum": {
+        "USDC": 9,
+        "WETH": 51,
+        "USDC.e": 51,
+        "USDT": 51,
+        "DAI": 2,
+        "WBTC": 51,
+        "ARB": 51,
+        "GMX": 0,
+        "wstETH": 1,
+    },
     "ethereum": {"USDC": 9, "WETH": 3, "USDT": 2, "DAI": 2, "WBTC": 0, "wstETH": 0},
     "base": {"USDC": 9, "WETH": 3, "USDbC": 9, "DAI": 0, "wstETH": 1},
     "avalanche": {"USDC": 9, "WAVAX": 3, "USDT": 2, "USDC.e": 0, "WETH.e": 0},

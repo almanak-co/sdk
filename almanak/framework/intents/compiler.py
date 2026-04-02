@@ -11924,6 +11924,12 @@ class IntentCompiler:
                 )
                 lido_adapter = LidoAdapter(lido_config)
                 action_bundle = lido_adapter.compile_stake_intent(intent)
+                if action_bundle.metadata.get("error"):
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=action_bundle.metadata["error"],
+                        intent_id=intent.intent_id,
+                    )
 
             elif protocol == "ethena":
                 # Validate chain - Ethena only on Ethereum mainnet
