@@ -4655,6 +4655,12 @@ def paper() -> None:
     default=False,
     help="Show configuration without starting session",
 )
+@click.option(
+    "--strict-bootstrap",
+    is_flag=True,
+    default=False,
+    help="Abort if any token has zero balance after wallet bootstrap (VIB-2377)",
+)
 def paper_start(
     strategy: str,
     chain: str,
@@ -4669,6 +4675,7 @@ def paper_start(
     output: str | None,
     foreground: bool,
     dry_run: bool,
+    strict_bootstrap: bool,
 ) -> None:
     """
     Start a paper trading session.
@@ -4771,7 +4778,7 @@ def paper_start(
                 if ":" not in pair:
                     raise ValueError(f"Invalid token entry '{pair}'")
                 token, amount = pair.split(":", 1)
-                token_key = token.strip().upper()
+                token_key = token.strip()
                 amount_str = amount.strip()
                 if not token_key or not amount_str:
                     raise ValueError(f"Invalid token entry '{pair}'")
@@ -4781,34 +4788,69 @@ def paper_start(
             click.echo("Expected format: 'TOKEN:AMOUNT,TOKEN:AMOUNT'", err=True)
             raise click.Abort() from e
 
-    # Load anvil_funding from strategy config.json if available (VIB-202)
+    # Load bootstrap / anvil_funding from strategy config.json (VIB-202, VIB-2375)
+    # Priority: paper_trading.bootstrap (new) > anvil_funding (legacy)
     # CLI flags override config values when both are provided.
     config_eth: Decimal | None = None
     config_tokens: dict[str, Decimal] = {}
+    config_bootstrap: dict[str, dict[str, Decimal]] = {}
     strategy_config: dict[str, Any] | None = None
+
+    def _parse_funding_dict(funding: dict, native_symbols: frozenset[str]) -> tuple[Decimal | None, dict[str, Decimal]]:
+        """Parse a flat token->amount dict into (native_eth, erc20_tokens)."""
+        eth_val: Decimal | None = None
+        tokens: dict[str, Decimal] = {}
+        for token_name, amount in funding.items():
+            token_str = str(token_name)
+            if token_str.upper() in native_symbols:
+                eth_val = Decimal(str(amount))
+            elif token_str.startswith(("0x", "0X")) and len(token_str) == 42:
+                from eth_utils import to_checksum_address
+
+                tokens[to_checksum_address(token_str)] = Decimal(str(amount))
+            else:
+                tokens[token_str] = Decimal(str(amount))
+        return eth_val, tokens
+
     try:
         strategy_config = load_strategy_config(strategy, chain)
-        anvil_funding = strategy_config.get("anvil_funding", {})
-        if anvil_funding:
-            if not isinstance(anvil_funding, dict):
-                raise ValueError(
-                    f"anvil_funding must be an object mapping TOKEN->AMOUNT, got {type(anvil_funding).__name__}"
-                )
-            click.echo(f"Found anvil_funding in config: {anvil_funding}", err=True)
-            # Use the same native token set as the gateway to correctly route
-            # native gas tokens (ETH, AVAX, MNT, etc.) per chain.
-            from almanak.gateway.managed import ManagedGateway
+        from almanak.gateway.managed import ManagedGateway
 
-            native_symbols = ManagedGateway.NATIVE_TOKEN_SYMBOLS
-            for token_name, amount in anvil_funding.items():
-                token_upper = str(token_name).upper()
-                if token_upper in native_symbols:
-                    config_eth = Decimal(str(amount))
-                else:
-                    config_tokens[token_upper] = Decimal(str(amount))
+        native_symbols = ManagedGateway.NATIVE_TOKEN_SYMBOLS
+
+        # Try new paper_trading.bootstrap first (VIB-2375)
+        paper_trading_block = strategy_config.get("paper_trading", {})
+        bootstrap_raw = paper_trading_block.get("bootstrap", {}) if isinstance(paper_trading_block, dict) else {}
+
+        if bootstrap_raw and isinstance(bootstrap_raw, dict):
+            click.echo(f"Found paper_trading.bootstrap in config: {bootstrap_raw}", err=True)
+            for chain_key, chain_tokens_raw in bootstrap_raw.items():
+                if isinstance(chain_tokens_raw, dict):
+                    chain_eth, chain_toks = _parse_funding_dict(chain_tokens_raw, native_symbols)
+                    bootstrap_entry: dict[str, Decimal] = {}
+                    if chain_eth is not None:
+                        bootstrap_entry["ETH"] = chain_eth
+                    bootstrap_entry.update(chain_toks)
+                    config_bootstrap[chain_key.lower()] = bootstrap_entry
+            # Also extract current chain's tokens for initial_tokens (backward compat)
+            current_chain_bootstrap = dict(config_bootstrap.get(chain.lower(), {}))
+            if current_chain_bootstrap:
+                config_eth = current_chain_bootstrap.pop("ETH", None)
+                config_tokens.update(current_chain_bootstrap)
+
+        # Fall back to legacy anvil_funding if no bootstrap found
+        if not config_bootstrap:
+            anvil_funding = strategy_config.get("anvil_funding", {})
+            if anvil_funding:
+                if not isinstance(anvil_funding, dict):
+                    raise ValueError(
+                        f"anvil_funding must be an object mapping TOKEN->AMOUNT, got {type(anvil_funding).__name__}"
+                    )
+                click.echo(f"Found anvil_funding in config: {anvil_funding}", err=True)
+                config_eth, config_tokens = _parse_funding_dict(anvil_funding, native_symbols)
     except Exception as e:
         click.echo(
-            f"Warning: ignoring invalid anvil_funding in strategy config: {e}",
+            f"Warning: ignoring invalid bootstrap/anvil_funding in strategy config: {e}",
             err=True,
         )
 
@@ -4833,6 +4875,8 @@ def paper_start(
             strategy_id=strategy,
             initial_eth=Decimal(str(initial_eth)),
             initial_tokens=parsed_tokens,
+            bootstrap=config_bootstrap,
+            strict_bootstrap=strict_bootstrap,
             tick_interval_seconds=tick_interval,
             max_ticks=max_ticks,
             anvil_port=anvil_port,

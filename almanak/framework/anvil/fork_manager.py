@@ -122,6 +122,12 @@ TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
         "DAI": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
         "WBTC": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
         "wstETH": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
+        "stETH": "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84",
+        "rETH": "0xae78736Cd615f374D3085123A210448E74Fc6393",
+        "cbETH": "0xBe9895146f7AF43049ca1c1AE358B0541Ea49704",
+        "swETH": "0xf951E335afb289353dc249e82926178EaC7DEd78",
+        "ankrETH": "0xE95A203B1a91a908F9B9CE46459d101078c2c3cb",
+        "pufETH": "0xD9A442856C234a39a81a089C06451EBAa4306a72",
     },
     "optimism": {
         "WETH": "0x4200000000000000000000000000000000000006",
@@ -705,6 +711,9 @@ class RollingForkManager:
     ) -> bool:
         """Fund a wallet with ERC-20 tokens.
 
+        Token keys can be symbols ("USDC", "wstETH") or ERC-20 addresses
+        ("0xf951E335..."). Symbols are matched case-insensitively.
+
         Funding priority:
         1. Known storage slots (fast, reliable -- verified in intent tests)
         2. anvil_deal RPC (works on newer Anvil versions)
@@ -712,7 +721,7 @@ class RollingForkManager:
 
         Args:
             address: Wallet address to fund
-            tokens: Dict mapping token symbol to amount (e.g., {"USDC": Decimal("10000")})
+            tokens: Dict mapping token symbol/address to amount
 
         Returns:
             True if all tokens funded successfully, False otherwise
@@ -727,54 +736,59 @@ class RollingForkManager:
         resolver = get_token_resolver()
         chain_tokens = TOKEN_ADDRESSES.get(self.chain, {})
         known_slots = KNOWN_BALANCE_SLOTS.get(self.chain, {})
+
+        # Build case-insensitive lookup indexes for local tables
+        chain_tokens_ci = {k.lower(): v for k, v in chain_tokens.items()}
+        known_slots_ci = {k.lower(): v for k, v in known_slots.items()}
+        token_decimals_ci = {k.lower(): v for k, v in TOKEN_DECIMALS.items()}
+
         success = True
 
-        for token_symbol, amount in tokens.items():
-            # Resolve token address and decimals via TokenResolver (fail-fast, no default 18)
+        for token_key, amount in tokens.items():
+            is_raw_address = isinstance(token_key, str) and token_key.startswith(("0x", "0X")) and len(token_key) == 42
+
             token_address: str | None = None
             decimals: int | None = None
-            is_raw_address = token_symbol.startswith("0x") and len(token_symbol) == 42
-            try:
-                resolved = resolver.resolve(token_symbol, self.chain)
-                token_address = resolved.address
-                decimals = resolved.decimals
-            except TokenNotFoundError:
-                if is_raw_address:
-                    # Key is a raw ERC-20 address; TOKEN_DECIMALS is keyed by symbol so it
-                    # won't help here.  The address itself IS the token address.
-                    # The first resolve() above already failed (no static/cache/gateway match),
-                    # so log the error and skip — retrying the same call would just fail again.
-                    token_address = token_symbol
-                    logger.error(
-                        "fund_tokens: could not resolve decimals for address %s on %s "
-                        "(not in static registry and gateway lookup failed). "
-                        "Add the token to almanak/framework/data/tokens/defaults.py to enable funding.",
-                        token_symbol,
-                        self.chain,
-                    )
-                else:
-                    # Fallback to local TOKEN_ADDRESSES for Anvil-specific tokens not in resolver
-                    token_address = chain_tokens.get(token_symbol) or chain_tokens.get(token_symbol.upper())
-                    # Use explicit None checks to avoid falsy-zero bug (0 decimals is valid)
-                    decimals = TOKEN_DECIMALS.get(token_symbol)
-                    if decimals is None:
-                        decimals = TOKEN_DECIMALS.get(token_symbol.upper())
+            display_name = token_key  # for log messages
+
+            if is_raw_address:
+                # Token key is an ERC-20 address — use it directly
+                token_address = token_key.lower()
+                try:
+                    # Resolver normalizes case internally, so checksummed/lower/upper all work
+                    resolved = resolver.resolve(token_address, self.chain)
+                    decimals = resolved.decimals
+                    display_name = resolved.symbol or token_key[:10] + "..."
+                except TokenNotFoundError:
+                    # Not in resolver — try on-chain decimals() call
+                    decimals = await self._fetch_decimals_onchain(token_address)
+                    if decimals is not None:
+                        logger.info(f"Resolved decimals={decimals} for {token_key[:10]}... via on-chain call")
+            else:
+                # Token key is a symbol — resolve via TokenResolver then local fallbacks
+                try:
+                    resolved = resolver.resolve(token_key, self.chain)
+                    token_address = resolved.address
+                    decimals = resolved.decimals
+                    display_name = resolved.symbol or token_key
+                except TokenNotFoundError:
+                    # Fallback to local TOKEN_ADDRESSES (case-insensitive)
+                    token_address = chain_tokens_ci.get(token_key.lower())
+                    decimals = token_decimals_ci.get(token_key.lower())
 
             if not token_address:
                 if is_raw_address:
                     logger.error(
-                        "fund_tokens: raw address %s could not be resolved for chain %s. "
-                        "Add it to almanak/framework/data/tokens/defaults.py to enable Anvil funding.",
-                        token_symbol,
-                        self.chain,
+                        f"Cannot resolve token address {token_key} on {self.chain}. "
+                        f"Verify the contract is deployed on this chain."
                     )
                 else:
-                    logger.warning("fund_tokens: unknown token %s for chain %s, skipping", token_symbol, self.chain)
+                    logger.warning(f"Unknown token {token_key} for chain {self.chain}, skipping")
                 success = False
                 continue
             if decimals is None:
                 logger.error(
-                    f"Unknown decimals for {token_symbol} on {self.chain}, skipping (refusing to default to 18)"
+                    f"Unknown decimals for {display_name} on {self.chain}, skipping (refusing to default to 18)"
                 )
                 success = False
                 continue
@@ -787,14 +801,11 @@ class RollingForkManager:
                 funded = False
 
                 # Priority 1: Known storage slot (fast and reliable)
-                known_slot = (
-                    known_slots.get(token_symbol)
-                    if known_slots.get(token_symbol) is not None
-                    else known_slots.get(token_symbol.upper())
-                )
+                # Look up by original symbol key (case-insensitive)
+                known_slot = known_slots_ci.get(token_key.lower())
                 if known_slot is not None:
                     funded = await self._set_balance_at_slot(
-                        address, token_address, amount_hex, known_slot, token_symbol
+                        address, token_address, amount_hex, known_slot, display_name
                     )
 
                 # Priority 2: anvil_deal RPC (returns null on success)
@@ -804,22 +815,49 @@ class RollingForkManager:
                         [token_address, address, amount_hex],
                     )
                     if deal_success:
-                        logger.info(f"Funded {address[:10]}... with {amount} {token_symbol} via anvil_deal")
+                        logger.info(f"Funded {address[:10]}... with {amount} {display_name} via anvil_deal")
                         funded = True
 
                 # Priority 3: Brute-force storage slot probing
                 if not funded:
-                    funded = await self._fund_token_via_storage(address, token_address, amount_hex, token_symbol)
+                    funded = await self._fund_token_via_storage(address, token_address, amount_hex, display_name)
 
                 if not funded:
-                    logger.error(f"Failed to fund {token_symbol} for {address[:10]}...")
+                    logger.error(f"Failed to fund {display_name} for {address[:10]}...")
                     success = False
 
             except Exception as e:
-                logger.exception(f"Error funding {token_symbol}: {e}")
+                logger.exception(f"Error funding {display_name}: {e}")
                 success = False
 
         return success
+
+    async def _fetch_decimals_onchain(self, token_address: str) -> int | None:
+        """Fetch ERC-20 decimals via on-chain eth_call.
+
+        Uses the decimals() selector (0x313ce567) as a last-resort fallback
+        when the token is not in the static registry or resolver.
+
+        Args:
+            token_address: Lowercased ERC-20 contract address
+
+        Returns:
+            Number of decimals, or None if the call fails
+        """
+        try:
+            ok, result = await self._rpc_call_raw(
+                "eth_call",
+                [{"to": token_address, "data": "0x313ce567"}, "latest"],
+            )
+            if ok and result and isinstance(result, str) and len(result) >= 2:
+                decimals = int(result, 16)
+                if 0 <= decimals <= 77:
+                    return decimals
+                logger.warning("On-chain decimals() returned implausible value %d for %s", decimals, token_address)
+                return None
+        except Exception as e:
+            logger.debug("On-chain decimals() call failed for %s: %s", token_address, e)
+        return None
 
     async def _set_balance_at_slot(
         self,

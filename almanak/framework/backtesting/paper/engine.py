@@ -1516,6 +1516,64 @@ class PaperTrader:
             if not success:
                 logger.warning(f"[{self._backtest_id}] Failed to fund some ERC-20 tokens")
 
+        # Two-tier bootstrap validation (VIB-2377)
+        if use_initial and balances:
+            await self._validate_bootstrap(wallet_address, balances)
+
+    async def _validate_bootstrap(self, wallet_address: str, requested_tokens: dict[str, Decimal]) -> None:
+        """Validate that the wallet was funded correctly after bootstrap.
+
+        Checks that each requested token has a non-zero balance after funding.
+        Missing tokens (zero balance) are logged as errors and cause a hard
+        failure when config.strict_bootstrap=True.
+
+        Args:
+            wallet_address: The funded wallet address
+            requested_tokens: Dict of token_key -> requested_amount
+        """
+        from almanak.framework.data.tokens import get_token_resolver
+        from almanak.framework.data.tokens.exceptions import TokenNotFoundError
+
+        resolver = get_token_resolver()
+        missing: list[str] = []
+
+        for token_key, _requested_amount in requested_tokens.items():
+            # Resolve token address for balance check
+            token_address: str | None = None
+            is_raw_address = isinstance(token_key, str) and token_key.startswith(("0x", "0X")) and len(token_key) == 42
+            if is_raw_address:
+                token_address = token_key.lower()
+            else:
+                try:
+                    resolved = resolver.resolve(token_key, self.config.chain)
+                    token_address = resolved.address
+                except TokenNotFoundError:
+                    # Fall back to Anvil funding tables (same lookup fund_tokens uses)
+                    from almanak.framework.anvil.fork_manager import TOKEN_ADDRESSES
+
+                    chain_tokens = TOKEN_ADDRESSES.get(self.config.chain, {})
+                    chain_tokens_ci = {k.lower(): v for k, v in chain_tokens.items()}
+                    token_address = chain_tokens_ci.get(token_key.lower())
+
+            if not token_address:
+                continue  # can't verify — already logged by fund_tokens
+
+            try:
+                actual = await self.fork_manager._get_token_balance(token_address, wallet_address)
+                if actual == 0:
+                    missing.append(token_key)
+            except Exception:
+                logger.warning(f"[{self._backtest_id}] Could not verify balance for {token_key}")
+
+        if missing:
+            msg = (
+                f"[{self._backtest_id}] Bootstrap validation: tokens with ZERO balance "
+                f"after funding: {missing}. Check anvil_funding config and token addresses."
+            )
+            logger.error(msg)
+            if self.config.strict_bootstrap:
+                raise RuntimeError(msg)
+
     async def _initialize_orchestrator(self) -> None:
         """Initialize the execution orchestrator with fork connection."""
         from almanak.framework.execution.signer.local import LocalKeySigner

@@ -104,6 +104,35 @@ class PaperTraderConfig:
     initial_eth: Decimal = Decimal("10")
     initial_tokens: dict[str, Decimal] = field(default_factory=dict)
 
+    # Per-chain bootstrap requirements (VIB-2375)
+    bootstrap: dict[str, dict[str, Decimal]] = field(default_factory=dict)
+    """Per-chain token requirements for paper trading wallet funding.
+
+    Structure: {chain: {token_symbol_or_address: amount}}
+
+    Example::
+
+        bootstrap={
+            "arbitrum": {"USDC": Decimal("100"), "WETH": Decimal("1")},
+            "ethereum": {"USDT": Decimal("50")},
+        }
+
+    When set, bootstrap[config.chain] is merged with initial_tokens to
+    produce the full set of tokens to fund. initial_tokens takes precedence
+    over bootstrap for the same token key (CLI flags override config).
+
+    Populated from strategy config.json ``paper_trading.bootstrap`` key.
+    The legacy ``anvil_funding`` flat dict is also supported as a fallback.
+    """
+
+    # Bootstrap validation (VIB-2377)
+    strict_bootstrap: bool = False
+    """Whether missing tokens should be a hard failure.
+
+    When False (default): Missing tokens (zero balance) are logged as errors.
+    When True: Missing tokens abort the session.
+    """
+
     # Tick configuration
     tick_interval_seconds: int = 60
     max_ticks: int | None = None  # None = run indefinitely
@@ -195,6 +224,14 @@ class PaperTraderConfig:
         for token, amount in self.initial_tokens.items():
             if amount < Decimal("0"):
                 raise ValueError(f"initial_tokens[{token}] cannot be negative")
+
+        # Bootstrap validation (VIB-2375)
+        for chain_key, tokens in self.bootstrap.items():
+            if not isinstance(tokens, dict):
+                raise ValueError(f"bootstrap[{chain_key}] must be a dict, got {type(tokens).__name__}")
+            for token, amount in tokens.items():
+                if amount < Decimal("0"):
+                    raise ValueError(f"bootstrap[{chain_key}][{token}] cannot be negative")
 
         # Tick interval validation
         if self.tick_interval_seconds <= 0:
@@ -289,12 +326,21 @@ class PaperTraderConfig:
     def get_initial_balances(self) -> dict[str, Decimal]:
         """Get all initial balances including ETH.
 
+        Merges bootstrap[chain] (base) with initial_tokens (override).
+        initial_tokens takes precedence for the same token key.
+        Preserves original token key casing.
+
         Returns:
-            Dictionary of token symbol to initial balance amount
+            Dictionary of token key to initial balance amount
         """
         balances: dict[str, Decimal] = {"ETH": self.initial_eth}
+        # Layer 1: bootstrap for the current chain (base defaults)
+        bootstrap_tokens = self.bootstrap.get(self.chain, {})
+        for token, amount in bootstrap_tokens.items():
+            balances[token] = amount
+        # Layer 2: initial_tokens override bootstrap (CLI flags > config)
         for token, amount in self.initial_tokens.items():
-            balances[token.upper()] = amount
+            balances[token] = amount
         return balances
 
     def to_dict(self) -> dict[str, Any]:
@@ -306,6 +352,10 @@ class PaperTraderConfig:
             "strategy_id": self.strategy_id,
             "initial_eth": str(self.initial_eth),
             "initial_tokens": {k: str(v) for k, v in self.initial_tokens.items()},
+            "bootstrap": {
+                chain: {tok: str(amt) for tok, amt in tokens.items()} for chain, tokens in self.bootstrap.items()
+            },
+            "strict_bootstrap": self.strict_bootstrap,
             "tick_interval_seconds": self.tick_interval_seconds,
             "max_ticks": self.max_ticks,
             "anvil_port": self.anvil_port,
@@ -352,6 +402,14 @@ class PaperTraderConfig:
                 else:
                     initial_tokens[token] = Decimal(str(amount))
 
+        # Parse bootstrap dict (VIB-2375)
+        bootstrap: dict[str, dict[str, Decimal]] = {}
+        raw_bootstrap = data.get("bootstrap", {})
+        if isinstance(raw_bootstrap, dict):
+            for chain_key, tokens in raw_bootstrap.items():
+                if isinstance(tokens, dict):
+                    bootstrap[chain_key] = {tok: Decimal(str(amt)) for tok, amt in tokens.items()}
+
         # Handle strict_price_mode with backward compatibility for allow_hardcoded_fallback
         # Priority: strict_price_mode > allow_hardcoded_fallback
         strict_price_mode = data.get("strict_price_mode", True)
@@ -363,6 +421,8 @@ class PaperTraderConfig:
             strategy_id=data["strategy_id"],
             initial_eth=initial_eth,
             initial_tokens=initial_tokens,
+            bootstrap=bootstrap,
+            strict_bootstrap=data.get("strict_bootstrap", False),
             tick_interval_seconds=data.get("tick_interval_seconds", 60),
             max_ticks=data.get("max_ticks"),
             anvil_port=data.get("anvil_port", 8546),
