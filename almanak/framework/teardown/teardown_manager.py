@@ -17,6 +17,7 @@ All operations flow through the safety layer:
 - Resumable state
 """
 
+import asyncio
 import json
 import logging
 import uuid
@@ -809,6 +810,30 @@ class TeardownManager:
                 actual_slippage = exec_result.final_slippage
                 intent_value = positions.total_value_usd / len(intents)  # Simplified
                 total_costs += intent_value * actual_slippage
+
+                # Notify strategy of successful teardown intent so it can
+                # update its in-memory state (e.g. zero out borrowed_amount
+                # after a successful REPAY), then persist that state.
+                # Without this, a partial teardown leaves stale strategy state
+                # that causes the next deploy to retry already-completed ops.
+                try:
+                    if hasattr(strategy, "on_intent_executed"):
+                        result = strategy.on_intent_executed(intent, True, exec_result)
+                        # Handle strategies that return a coroutine
+                        if asyncio.iscoroutine(result):
+                            await result
+                    if hasattr(strategy, "save_state"):
+                        strategy.save_state()
+                    if hasattr(strategy, "flush_pending_saves"):
+                        await strategy.flush_pending_saves()
+                except Exception as e:  # noqa: BLE001
+                    logger.error(
+                        "Failed to persist strategy state after teardown intent %d/%d: %s "
+                        "(on-chain action succeeded but persisted state may be stale)",
+                        i + 1,
+                        len(intents),
+                        e,
+                    )
             else:
                 failed += 1
                 if exec_result.status == "paused_awaiting_approval":
@@ -840,8 +865,12 @@ class TeardownManager:
                         recovery_options=["Approve higher slippage", "Wait and retry", "Cancel"],
                     )
 
-            # Update completed count
+            # Update completed count and persist teardown progress so that
+            # a crash/restart resumes from the correct index
             teardown_state.completed_intents = succeeded
+            teardown_state.updated_at = datetime.now(UTC)
+            if self.state_manager:
+                await self.state_manager.save_teardown_state(teardown_state)
 
         # All intents processed
         completed_at = datetime.now(UTC)
