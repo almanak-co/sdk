@@ -205,7 +205,9 @@ class TestMarketServiceInitialization:
         env = os.environ.copy()
         env.pop("COINGECKO_API_KEY", None)
         env.pop("ALMANAK_GATEWAY_COINGECKO_API_KEY", None)
-        with patch.dict(os.environ, env, clear=True):
+        # Must also mock load_dotenv to prevent .env file from re-populating
+        # COINGECKO_API_KEY into os.environ during GatewaySettings model validation.
+        with patch.dict(os.environ, env, clear=True), patch("dotenv.load_dotenv"):
             settings = GatewaySettings(coingecko_api_key=None, chains=["arbitrum"])
         service = MarketServiceServicer(settings)
 
