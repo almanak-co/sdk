@@ -1096,6 +1096,18 @@ USDT_SOL = Token(
     is_stablecoin=True,
 )
 
+# USDS on Solana (Sky/MakerDAO stablecoin, 6 decimals)
+USDS_SOL = Token(
+    symbol="USDS",
+    name="USDS (Solana)",
+    decimals=6,
+    addresses={
+        "solana": "USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA",
+    },
+    coingecko_id="usds",
+    is_stablecoin=True,
+)
+
 # =============================================================================
 # MANTLE CHAIN TOKENS
 # =============================================================================
@@ -1536,6 +1548,7 @@ DEFAULT_TOKENS: list[Token] = [
     # The main USDC and USDT Token definitions already include "solana" addresses,
     # so registering USDC_SOL/USDT_SOL would create duplicates. The variables are
     # kept above for backward-compatibility imports.
+    USDS_SOL,
     # Sonic chain tokens
     S_TOKEN,
     WS,
@@ -1707,6 +1720,7 @@ __all__ = [
     "MSOL",
     "JITOSOL",
     "JUP",
+    "USDS_SOL",
     # Mantle chain tokens
     "MNT",
     "WMNT",

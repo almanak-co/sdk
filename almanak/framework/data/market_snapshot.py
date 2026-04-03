@@ -1018,16 +1018,19 @@ class MarketSnapshot:
 
         # Guard against silent-zero for unrecognized address-based tokens.
         # If the gateway returns 0 for an address that isn't in the registry,
-        # raise rather than silently returning 0 (which looks like "empty wallet").
+        # log a warning but return 0 -- a strategy that holds zero of an exotic
+        # token should keep running, not crash.  The warning gives visibility.
         if balance == Decimal(0) and token.startswith("0x") and len(token) == 42:
             try:
                 get_token_resolver().resolve(token, self._chain, skip_gateway=True, log_errors=False)
-            except TokenResolutionError as exc:
-                raise BalanceUnavailableError(
+            except TokenResolutionError:
+                logger.warning(
+                    "balance_zero_unregistered_token: token %s on %s returned 0 and is not in the "
+                    "SDK registry. If you expect a non-zero balance, add the token to "
+                    "almanak/framework/data/tokens/defaults.py or use the token symbol.",
                     token,
-                    f"Token address {token} is not in the SDK registry. "
-                    f"Add it to almanak/framework/data/tokens/defaults.py or use the token symbol.",
-                ) from exc
+                    self._chain,
+                )
 
         self._balance_cache[token] = balance
         return balance

@@ -15,8 +15,10 @@ Key Features:
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
+from urllib.parse import quote as _url_quote
 
 import grpc
 
@@ -34,6 +36,31 @@ from almanak.gateway.utils import get_rpc_url
 from almanak.gateway.validation import ValidationError, validate_address, validate_batch_size, validate_chain
 
 logger = logging.getLogger(__name__)
+
+# EVM address pattern
+_EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+
+# Solana base58 mint address pattern (32-44 chars; base58 excludes 0, O, I, l)
+_SOLANA_MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+
+# CoinGecko free-tier search endpoint
+COINGECKO_SEARCH_URL = "https://api.coingecko.com/api/v3/search?query={symbol}"
+
+# CoinGecko platform IDs for each chain
+COINGECKO_PLATFORM_IDS: dict[str, str] = {
+    "ethereum": "ethereum",
+    "arbitrum": "arbitrum-one",
+    "optimism": "optimistic-ethereum",
+    "base": "base",
+    "polygon": "polygon-pos",
+    "avalanche": "avalanche",
+    "bsc": "binance-smart-chain",
+    "sonic": "sonic",
+    "mantle": "mantle",
+    "berachain": "berachain",
+    "monad": "monad",
+    "xlayer": "xlayer",
+}
 
 
 # =============================================================================
@@ -145,6 +172,10 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         # Get the shared TokenResolver instance (no gateway client for circular ref)
         self._resolver = get_token_resolver()
 
+        # Jupiter token lookup (Solana dynamic resolution) -- loaded lazily on first use
+        self._jupiter: Any = None  # JupiterTokenLookup, typed as Any to avoid import cycle
+        self._jupiter_lock = asyncio.Lock()
+
         logger.debug(
             "TokenService initialized",
             extra={
@@ -248,6 +279,202 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             source="",
         )
 
+    async def _get_jupiter(self) -> Any:
+        """Get (or lazily load) the JupiterTokenLookup singleton."""
+        if self._jupiter is not None:
+            return self._jupiter
+        async with self._jupiter_lock:
+            if self._jupiter is None:
+                from almanak.gateway.services.jupiter_token_lookup import get_jupiter_lookup
+
+                self._jupiter = await get_jupiter_lookup()
+            return self._jupiter
+
+    async def _try_solana_symbol_lookup(self, symbol: str) -> gateway_pb2.TokenMetadataResponse | None:
+        """Try to resolve a Solana token by symbol via Jupiter token list.
+
+        Returns a TokenMetadataResponse on success, None if not found.
+        """
+        try:
+            jupiter = await self._get_jupiter()
+            meta = jupiter.lookup_by_symbol(symbol)
+            if meta is None:
+                return None
+
+            resolved = self._build_resolved_from_jupiter(meta)
+            self._resolver.register(resolved)
+            logger.info(
+                "token_dynamic_resolved_solana: symbol=%s mint=%s decimals=%d",
+                symbol,
+                meta.address,
+                meta.decimals,
+            )
+            return self._resolved_to_response(resolved)
+        except Exception as exc:
+            logger.warning("Jupiter symbol lookup failed for %s: %s", symbol, exc)
+            return None
+
+    async def _try_solana_mint_lookup(self, mint: str) -> gateway_pb2.TokenMetadataResponse | None:
+        """Try to resolve a Solana mint address via Jupiter token list.
+
+        Returns a TokenMetadataResponse on success, None if not found.
+        """
+        try:
+            jupiter = await self._get_jupiter()
+            meta = jupiter.lookup_by_mint(mint)
+            if meta is None:
+                return None
+
+            resolved = self._build_resolved_from_jupiter(meta)
+            self._resolver.register(resolved)
+            logger.info(
+                "token_dynamic_resolved_solana_mint: mint=%s symbol=%s decimals=%d",
+                mint,
+                meta.symbol,
+                meta.decimals,
+            )
+            return self._resolved_to_response(resolved)
+        except Exception as exc:
+            logger.warning("Jupiter mint lookup failed for %s: %s", mint, exc)
+            return None
+
+    def _build_resolved_from_jupiter(self, meta: Any) -> ResolvedToken:
+        """Build a ResolvedToken from JupiterTokenMetadata."""
+        from datetime import datetime
+
+        from almanak.core.enums import Chain
+        from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
+
+        chain_enum = Chain.SOLANA
+        return ResolvedToken(
+            symbol=meta.symbol,
+            address=meta.address,
+            decimals=meta.decimals,
+            chain=chain_enum,
+            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            name=meta.name or None,
+            coingecko_id=None,
+            is_stablecoin=False,
+            is_native=False,
+            is_wrapped_native=False,
+            canonical_symbol=meta.symbol,
+            bridge_type=BridgeType.NATIVE,
+            source="jupiter",
+            is_verified=True,  # Jupiter is a trusted source
+            resolved_at=datetime.now(),
+        )
+
+    async def _try_evm_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
+        """Try to resolve an EVM token by symbol via CoinGecko + on-chain lookup.
+
+        Flow:
+        1. Search CoinGecko free-tier for the symbol
+        2. Find the contract address for the target chain
+        3. Do an on-chain ERC20 lookup for decimals/name confirmation
+        4. Cache the result
+
+        Returns a TokenMetadataResponse on success, None if not found.
+        """
+        platform = COINGECKO_PLATFORM_IDS.get(chain.lower())
+        if not platform:
+            return None
+
+        try:
+            address = await self._coingecko_find_address(symbol, platform)
+            if not address:
+                return None
+
+            # Use the on-chain lookup to confirm and get full metadata
+            try:
+                lookup = await self._get_onchain_lookup(chain)
+                metadata = await asyncio.wait_for(
+                    lookup.lookup(chain, address),
+                    timeout=self._onchain_timeout,
+                )
+            except Exception as exc:
+                logger.warning("On-chain confirm failed for CoinGecko address %s on %s: %s", address, chain, exc)
+                return None
+
+            if metadata is None:
+                return None
+
+            self._cache_discovered_token(metadata, chain)
+            logger.info(
+                "token_dynamic_resolved_evm: symbol=%s chain=%s address=%s decimals=%d (via CoinGecko)",
+                symbol,
+                chain,
+                address,
+                metadata.decimals,
+            )
+            return self._metadata_to_response(metadata)
+
+        except Exception as exc:
+            logger.warning("CoinGecko symbol lookup failed for %s on %s: %s", symbol, chain, exc)
+            return None
+
+    async def _coingecko_find_address(self, symbol: str, platform: str) -> str | None:
+        """Search CoinGecko for a token symbol and return its address on the given platform.
+
+        Uses the free-tier /search endpoint.  Rate limit is ~30 req/min; callers
+        rely on the static-registry cache to avoid repeated calls for the same token.
+        """
+        try:
+            import aiohttp
+
+            url = COINGECKO_SEARCH_URL.format(symbol=_url_quote(symbol, safe=""))
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        logger.debug("CoinGecko search HTTP %d for symbol=%s", resp.status, symbol)
+                        return None
+                    data = await resp.json(content_type=None)
+
+            coins = data.get("coins", [])
+            symbol_upper = symbol.upper()
+
+            # Walk candidates in market-cap-rank order (best match first)
+            for coin in coins:
+                if coin.get("symbol", "").upper() != symbol_upper:
+                    continue
+
+                # Fetch the coin details to get platform addresses
+                coin_id = coin.get("id")
+                if not coin_id:
+                    continue
+
+                address = await self._coingecko_get_platform_address(coin_id, platform)
+                if address:
+                    return address
+
+            return None
+
+        except Exception as exc:
+            logger.warning("CoinGecko search error for %s: %s", symbol, exc)
+            return None
+
+    async def _coingecko_get_platform_address(self, coin_id: str, platform: str) -> str | None:
+        """Fetch the contract address for a coin on a specific platform from CoinGecko."""
+        try:
+            import aiohttp
+
+            url = f"https://api.coingecko.com/api/v3/coins/{coin_id}?localization=false&tickers=false&market_data=false&community_data=false&developer_data=false"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.json(content_type=None)
+
+            platforms = data.get("platforms", {})
+            raw_address = platforms.get(platform, "")
+            if raw_address and _EVM_ADDRESS_RE.match(raw_address):
+                return raw_address.lower()
+
+            return None
+
+        except Exception as exc:
+            logger.debug("CoinGecko platform address lookup failed for %s/%s: %s", coin_id, platform, exc)
+            return None
+
     async def ResolveToken(
         self,
         request: gateway_pb2.ResolveTokenRequest,
@@ -255,8 +482,10 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
     ) -> gateway_pb2.TokenMetadataResponse:
         """Resolve a token by symbol or address.
 
-        Checks: memory cache -> disk cache -> static registry.
-        For addresses not in registry, use GetTokenMetadata for on-chain lookup.
+        Resolution order:
+        1. Static registry + caches (fast path via TokenResolver)
+        2. For Solana symbols/mints not in registry: Jupiter token list
+        3. For EVM symbols not in registry: CoinGecko search + on-chain confirm
 
         Args:
             request: ResolveTokenRequest with token and chain
@@ -290,10 +519,8 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             context.set_details(str(e))
             return self._error_response(str(e))
 
-        except TokenNotFoundError as e:
-            context.set_code(grpc.StatusCode.NOT_FOUND)
-            context.set_details(str(e))
-            return self._error_response(str(e))
+        except TokenNotFoundError:
+            pass  # Fall through to dynamic resolution
 
         except TokenResolutionError as e:
             context.set_code(grpc.StatusCode.INTERNAL)
@@ -301,10 +528,41 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             return self._error_response(str(e))
 
         except Exception as e:
-            logger.error(f"ResolveToken failed for {token} on {chain}: {e}")
+            logger.error("ResolveToken failed for %s on %s: %s", token, chain, e)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return self._error_response(str(e))
+
+        # Dynamic resolution fallback
+        is_solana = chain.lower() == "solana"
+        # EVM address: 0x-prefixed 42-char hex
+        is_evm_address = bool(_EVM_ADDRESS_RE.match(token))
+        # Solana mint: base58, 32-44 chars (no 0, O, I, l) -- use strict base58 pattern to
+        # avoid false-positives from long symbol names
+        is_solana_mint = is_solana and not is_evm_address and bool(_SOLANA_MINT_RE.match(token))
+
+        if is_solana:
+            if is_solana_mint:
+                # Try Jupiter by mint address
+                result = await self._try_solana_mint_lookup(token)
+            else:
+                # Try Jupiter by symbol
+                result = await self._try_solana_symbol_lookup(token)
+
+            if result is not None:
+                return result
+        else:
+            # EVM: only try CoinGecko for symbol lookups (not address lookups --
+            # those go through GetTokenMetadata / on-chain ERC20 lookup instead)
+            if not is_evm_address:
+                result = await self._try_evm_symbol_lookup(token, chain)
+                if result is not None:
+                    return result
+
+        error_msg = f"Token '{token}' not found on {chain} (checked static registry and dynamic resolution)"
+        context.set_code(grpc.StatusCode.NOT_FOUND)
+        context.set_details(error_msg)
+        return self._error_response(error_msg)
 
     async def GetTokenMetadata(
         self,
@@ -341,6 +599,21 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return self._error_response(str(e))
+
+        # Guard: on-chain ERC20 lookup is EVM-only.
+        # Solana mints are SPL tokens -- querying them via the EVM ABI would hang
+        # for ~30 seconds then fail.  Route Solana addresses through Jupiter instead.
+        if chain.lower() == "solana":
+            result = await self._try_solana_mint_lookup(address)
+            if result is not None:
+                return result
+            error_msg = (
+                f"On-chain ERC20 lookup is not supported for Solana. "
+                f"Add '{address}' to the static registry or ensure it is in the Jupiter token list."
+            )
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(error_msg)
+            return self._error_response(error_msg)
 
         # Check rate limit
         if not await self._rate_limiter.wait_and_acquire(timeout=2.0):

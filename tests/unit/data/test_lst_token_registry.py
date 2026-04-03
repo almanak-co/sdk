@@ -114,14 +114,33 @@ def _make_market_snapshot(chain: str, balance_result: Decimal) -> MarketSnapshot
 class TestBalanceSilentZeroGuard:
     """market.balance() must not silently return 0 for unregistered address-based tokens."""
 
-    def test_unregistered_address_zero_balance_raises(self):
-        """If balance is 0 and the address is not in the registry, raise BalanceUnavailableError."""
+    def test_unregistered_address_zero_balance_returns_zero_with_warning(self, caplog):
+        """If balance is 0 and the address is not in the registry, return 0 (no exception).
+
+        VIB-2364: Changed from raising BalanceUnavailableError to a logger.warning.
+        Strategies that hold zero of an exotic unregistered token should keep
+        running, not crash.  The warning provides visibility without breaking execution.
+        """
+        import logging
+
         # Use a clearly fake address that is definitely not in the registry
         fake_address = "0x000000000000000000000000000000000000dead"
         snapshot = _make_market_snapshot("ethereum", Decimal("0"))
-        with pytest.raises(BalanceUnavailableError) as exc_info:
-            snapshot.balance(fake_address)
-        assert "not in the SDK registry" in str(exc_info.value)
+
+        # Should NOT raise -- just emit a logger.warning and return 0
+        with caplog.at_level(logging.WARNING):
+            result = snapshot.balance(fake_address)
+
+        assert result == Decimal("0")
+        # Verify that a warning was emitted (VIB-2364 logging contract)
+        warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any(
+            fake_address.lower() in msg.lower() or "balance_zero_unregistered" in msg.lower()
+            for msg in warning_messages
+        ), (
+            "Expected a logger.warning about the unregistered address, but none was found. "
+            f"warnings: {warning_messages}"
+        )
 
     def test_registered_address_zero_balance_returns_zero(self):
         """If balance is 0 but the address IS in the registry, return 0 (no false positive)."""

@@ -404,22 +404,32 @@ class TokenResolver:
                 _validate_address(token, chain_lower)
 
             # Fast path: cache + static registry (under lock)
+            symbol_needs_gateway = False
             with self._lock:
                 if is_address:
                     result = self._try_fast_resolve_address(token, chain_lower, chain_enum)
                 else:
                     result = self._resolve_by_symbol(token, chain_lower, chain_enum)
-                    # Symbol resolution is fully handled (no gateway path for symbols)
-                    # _resolve_by_symbol raises TokenNotFoundError if not found
+                    # _resolve_by_symbol returns None (sentinel) when gateway is available
+                    # and the symbol wasn't found statically, signalling us to try the
+                    # gateway's dynamic resolution path outside the lock.
+                    if result is None:
+                        symbol_needs_gateway = True
 
             if result is not None:
                 self._record_resolution_success(token, chain_lower, result, start_time)
                 return result
 
-            # Slow path: gateway on-chain lookup (NO lock held)
-            # Only reached for address resolution when not in cache/static
+            # Slow path: gateway lookup (NO lock held)
             if not skip_gateway and (self._gateway_channel is not None or self._gateway_client is not None):
-                resolved = self._resolve_via_gateway(token, chain_lower, chain_enum)
+                if symbol_needs_gateway:
+                    # Symbol not in static registry -- try gateway's dynamic resolution
+                    # (Jupiter for Solana, CoinGecko for EVM)
+                    resolved = self._resolve_symbol_via_gateway(token, chain_lower, chain_enum)
+                else:
+                    # Address not in static registry -- try on-chain ERC20 lookup
+                    resolved = self._resolve_via_gateway(token, chain_lower, chain_enum)
+
                 if resolved:
                     # Write back to cache (under lock)
                     with self._lock:
@@ -429,18 +439,23 @@ class TokenResolver:
 
             # Token not found - provide helpful error
             _try_record_metric("record_token_resolution_cache_miss", chain_lower)
-            suggestions = [
-                "Verify the contract address is correct",
-                "Check if the address is deployed on this chain",
-                "Use register() to add custom tokens",
-            ]
+            if is_address or not symbol_needs_gateway:
+                suggestions = [
+                    "Verify the contract address is correct",
+                    "Check if the address is deployed on this chain",
+                    "Use register() to add custom tokens",
+                ]
+                reason = f"Address not found in registry for {chain_lower}"
+            else:
+                suggestions = self._get_symbol_suggestions(token.upper(), chain_lower)
+                reason = f"Symbol '{token}' not found in registry for {chain_lower}"
             if self._gateway_channel is None and self._gateway_client is None:
                 suggestions.append("Connect to gateway for on-chain token discovery")
 
             raise TokenNotFoundError(
                 token=token,
                 chain=chain_lower,
-                reason=f"Address not found in registry for {chain_lower}",
+                reason=reason,
                 suggestions=suggestions,
             )
 
@@ -523,8 +538,16 @@ class TokenResolver:
         )
         _try_record_metric("record_token_resolution_latency", chain_lower, result.source, elapsed_s)
 
-    def _resolve_by_symbol(self, symbol: str, chain_lower: str, chain_enum: Chain) -> ResolvedToken:
-        """Resolve a token by symbol."""
+    def _resolve_by_symbol(self, symbol: str, chain_lower: str, chain_enum: Chain) -> ResolvedToken | None:
+        """Resolve a token by symbol.
+
+        Returns:
+            ResolvedToken if found in cache/static registry/aliases.
+            None (sentinel) if a gateway is available and dynamic resolution
+            should be attempted by the caller outside the lock.
+            Raises TokenNotFoundError if no gateway is available and the symbol
+            is not in the registry.
+        """
         symbol_upper = symbol.upper()
 
         # 1. Check cache (memory + disk)
@@ -564,14 +587,21 @@ class TokenResolver:
             # Resolve by the canonical address
             return self._resolve_by_address(alias_address, chain_lower, chain_enum)
 
-        # Token not found - provide helpful error
-        _try_record_metric("record_token_resolution_cache_miss", chain_lower)
-        raise TokenNotFoundError(
-            token=symbol,
-            chain=chain_lower,
-            reason=f"Symbol '{symbol}' not found in registry for {chain_lower}",
-            suggestions=self._get_symbol_suggestions(symbol_upper, chain_lower),
-        )
+        # 4. Try gateway dynamic symbol resolution (Jupiter for Solana, CoinGecko for EVM).
+        # Must be called WITHOUT the lock held to avoid blocking while waiting for network.
+        # We raise here if no gateway -- this check is inside the lock.
+        if self._gateway_channel is None and self._gateway_client is None:
+            _try_record_metric("record_token_resolution_cache_miss", chain_lower)
+            raise TokenNotFoundError(
+                token=symbol,
+                chain=chain_lower,
+                reason=f"Symbol '{symbol}' not found in registry for {chain_lower}",
+                suggestions=self._get_symbol_suggestions(symbol_upper, chain_lower),
+            )
+
+        # Signal to the caller (resolve()) that gateway symbol resolution should be attempted
+        # by returning None instead of raising.  resolve() will handle this outside the lock.
+        return None  # sentinel: gateway path needed
 
     def _resolve_by_address(self, address: str, chain_lower: str, chain_enum: Chain) -> ResolvedToken:
         """Resolve a token by address from cache or static registry (must be called under lock).
@@ -883,6 +913,129 @@ class TokenResolver:
                 )
 
             _try_record_metric("record_token_resolution_onchain_lookup", chain_lower, status)
+            return None
+
+    def _resolve_symbol_via_gateway(self, symbol: str, chain_lower: str, chain_enum: Chain) -> "ResolvedToken | None":
+        """Attempt to resolve a symbol via the gateway's dynamic ResolveToken RPC.
+
+        The gateway's ResolveToken now includes dynamic fallbacks (Jupiter for
+        Solana, CoinGecko for EVM) that go beyond the static registry.  Calling
+        ResolveToken here (rather than GetTokenMetadata) allows us to use those
+        dynamic paths for symbol lookups.
+
+        Args:
+            symbol: Token symbol (e.g., "swETH", "USDS")
+            chain_lower: Chain name (lowercase)
+            chain_enum: Chain enum value
+
+        Returns:
+            ResolvedToken if successful, None otherwise
+        """
+        if not self._check_gateway_available():
+            logger.debug("Gateway not available for symbol lookup of %s on %s", symbol, chain_lower)
+            return None
+
+        stub = self._get_gateway_stub()
+        if stub is None:
+            return None
+
+        with self._lock:
+            self._stats["gateway_lookups"] += 1
+        gateway_start = time.perf_counter()
+
+        try:
+            from almanak.gateway.proto import gateway_pb2
+
+            request = gateway_pb2.ResolveTokenRequest(
+                token=symbol,
+                chain=chain_lower,
+            )
+            # Use a longer timeout to allow CoinGecko/Jupiter network calls
+            response = stub.ResolveToken(request, timeout=30.0)
+
+            if not response.success:
+                with self._lock:
+                    self._stats["gateway_errors"] += 1
+                logger.debug(
+                    "token_gateway_symbol_not_found: symbol=%s chain=%s error=%s",
+                    symbol,
+                    chain_lower,
+                    response.error,
+                )
+                return None
+
+            decimals = response.decimals
+            if not isinstance(decimals, int) or decimals < 0 or decimals > 77:
+                logger.warning(
+                    "token_gateway_symbol_integrity_rejected: decimals out of range (symbol=%s chain=%s decimals=%s)",
+                    symbol,
+                    chain_lower,
+                    decimals,
+                )
+                return None
+
+            # Validate the returned address format before caching.
+            # A misconfigured gateway could return an empty or malformed address —
+            # reject it so it doesn't poison the resolver cache.
+            returned_address = response.address
+            if not returned_address:
+                logger.warning(
+                    "token_gateway_symbol_integrity_rejected: empty address returned (symbol=%s chain=%s)",
+                    symbol,
+                    chain_lower,
+                )
+                return None
+            try:
+                _validate_address(returned_address, chain_lower)
+            except InvalidTokenAddressError:
+                logger.warning(
+                    "token_gateway_symbol_integrity_rejected: invalid address format (symbol=%s chain=%s address=%s)",
+                    symbol,
+                    chain_lower,
+                    returned_address,
+                )
+                return None
+
+            resolved = ResolvedToken(
+                symbol=response.symbol or symbol,
+                address=returned_address,
+                decimals=decimals,
+                chain=chain_enum,
+                chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+                name=response.name or None,
+                coingecko_id=None,
+                is_stablecoin=False,
+                is_native=False,
+                is_wrapped_native=False,
+                canonical_symbol=response.symbol or symbol,
+                bridge_type=BridgeType.NATIVE,
+                source=response.source or "gateway_dynamic",
+                is_verified=response.is_verified,
+                resolved_at=datetime.now(),
+            )
+
+            gateway_elapsed_ms = (time.perf_counter() - gateway_start) * 1000
+            logger.info(
+                "token_symbol_dynamic_discovered: symbol=%s chain=%s address=%s decimals=%d source=%s latency_ms=%.1f",
+                symbol,
+                chain_lower,
+                returned_address,
+                decimals,
+                response.source,
+                gateway_elapsed_ms,
+            )
+            _try_record_metric("record_token_resolution_onchain_lookup", chain_lower, "gateway_symbol")
+            return resolved
+
+        except Exception as e:
+            error_str = str(e)
+            with self._lock:
+                self._stats["gateway_errors"] += 1
+            is_unavailable = "UNAVAILABLE" in error_str.upper()
+            if is_unavailable:
+                self._gateway_available = False
+                self._gateway_check_time = time.time()
+            logger.debug("token_gateway_symbol_lookup_error: symbol=%s chain=%s error=%s", symbol, chain_lower, e)
             return None
 
     def is_gateway_connected(self) -> bool:

@@ -733,27 +733,43 @@ class RollingForkManager:
             # Resolve token address and decimals via TokenResolver (fail-fast, no default 18)
             token_address: str | None = None
             decimals: int | None = None
+            is_raw_address = token_symbol.startswith("0x") and len(token_symbol) == 42
             try:
                 resolved = resolver.resolve(token_symbol, self.chain)
                 token_address = resolved.address
                 decimals = resolved.decimals
             except TokenNotFoundError:
-                # Fallback to local TOKEN_ADDRESSES for Anvil-specific tokens not in resolver
-                token_address = chain_tokens.get(token_symbol) or chain_tokens.get(token_symbol.upper())
-                # Use explicit None checks to avoid falsy-zero bug (0 decimals is valid)
-                decimals = TOKEN_DECIMALS.get(token_symbol)
-                if decimals is None:
-                    decimals = TOKEN_DECIMALS.get(token_symbol.upper())
-
-            if not token_address:
-                is_addr = token_symbol.startswith("0x") and len(token_symbol) == 42
-                if is_addr:
+                if is_raw_address:
+                    # Key is a raw ERC-20 address; TOKEN_DECIMALS is keyed by symbol so it
+                    # won't help here.  The address itself IS the token address.
+                    # The first resolve() above already failed (no static/cache/gateway match),
+                    # so log the error and skip — retrying the same call would just fail again.
+                    token_address = token_symbol
                     logger.error(
-                        f"Token address {token_symbol} not found in registry for chain {self.chain}. "
-                        f"Add it to almanak/framework/data/tokens/defaults.py to enable Anvil funding."
+                        "fund_tokens: could not resolve decimals for address %s on %s "
+                        "(not in static registry and gateway lookup failed). "
+                        "Add the token to almanak/framework/data/tokens/defaults.py to enable funding.",
+                        token_symbol,
+                        self.chain,
                     )
                 else:
-                    logger.warning(f"Unknown token {token_symbol} for chain {self.chain}, skipping")
+                    # Fallback to local TOKEN_ADDRESSES for Anvil-specific tokens not in resolver
+                    token_address = chain_tokens.get(token_symbol) or chain_tokens.get(token_symbol.upper())
+                    # Use explicit None checks to avoid falsy-zero bug (0 decimals is valid)
+                    decimals = TOKEN_DECIMALS.get(token_symbol)
+                    if decimals is None:
+                        decimals = TOKEN_DECIMALS.get(token_symbol.upper())
+
+            if not token_address:
+                if is_raw_address:
+                    logger.error(
+                        "fund_tokens: raw address %s could not be resolved for chain %s. "
+                        "Add it to almanak/framework/data/tokens/defaults.py to enable Anvil funding.",
+                        token_symbol,
+                        self.chain,
+                    )
+                else:
+                    logger.warning("fund_tokens: unknown token %s for chain %s, skipping", token_symbol, self.chain)
                 success = False
                 continue
             if decimals is None:
