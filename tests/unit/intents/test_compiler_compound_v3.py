@@ -25,6 +25,9 @@ COMET_ADDRESSES = f"{ADAPTER_MODULE}.COMPOUND_V3_COMET_ADDRESSES"
 TEST_WALLET = "0x1234567890123456789012345678901234567890"
 TEST_COMET = "0xc3d688B66703497DAA19211EEdff47f25384cdc3"
 
+TEST_COMET_OPTIMISM = "0x2e44e174f7D53F0212823acC11C01A11d58c5bCB"
+TEST_COMET_POLYGON = "0xF25212E676D1F7F89Cd72fFEe66158f541246445"
+
 MOCK_CHAIN_ADDRESSES = {
     "ethereum": {
         "usdc": {
@@ -41,6 +44,24 @@ MOCK_CHAIN_ADDRESSES = {
             "name": "USDC",
             "base_token": "USDC",
             "base_token_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "collaterals": {},
+        },
+    },
+    "optimism": {
+        "usdc": {
+            "comet_address": TEST_COMET_OPTIMISM,
+            "name": "USDC",
+            "base_token": "USDC",
+            "base_token_address": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+            "collaterals": {},
+        },
+    },
+    "polygon": {
+        "usdc_e": {
+            "comet_address": TEST_COMET_POLYGON,
+            "name": "USDC.e",
+            "base_token": "USDC.e",
+            "base_token_address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
             "collaterals": {},
         },
     },
@@ -85,6 +106,20 @@ def arbitrum_compiler():
     """Create an IntentCompiler for Arbitrum with placeholder prices."""
     config = IntentCompilerConfig(allow_placeholder_prices=True)
     return IntentCompiler(chain="arbitrum", config=config)
+
+
+@pytest.fixture
+def optimism_compiler():
+    """Create an IntentCompiler for Optimism with placeholder prices."""
+    config = IntentCompilerConfig(allow_placeholder_prices=True)
+    return IntentCompiler(chain="optimism", config=config)
+
+
+@pytest.fixture
+def polygon_compiler():
+    """Create an IntentCompiler for Polygon with placeholder prices."""
+    config = IntentCompilerConfig(allow_placeholder_prices=True)
+    return IntentCompiler(chain="polygon", config=config)
 
 
 # =============================================================================
@@ -508,3 +543,260 @@ class TestUnsupportedProtocolErrors:
         result = compiler.compile(intent)
         assert result.status == CompilationStatus.FAILED
         assert "compound_v3" in result.error
+
+
+# =============================================================================
+# CROSS-CHAIN: OPTIMISM (validated by Kitchen Loop iter 149)
+# =============================================================================
+
+class TestCompoundV3Optimism:
+    """Test Compound V3 compilation on Optimism.
+
+    Optimism has a single USDC market (Comet: 0x2e44e174f7D53F0212823acC11C01A11d58c5bCB).
+    Validated on Anvil fork in Kitchen Loop iteration 149 with 5 TXs, zero bugs.
+    """
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_supply_optimism(self, mock_adapter_cls, mock_config_cls, optimism_compiler):
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET_OPTIMISM
+        mock_adapter.supply.return_value = _mock_tx_result("Supply 100 USDC to Compound V3 on Optimism")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = SupplyIntent(
+            token="USDC",
+            amount=Decimal("100"),
+            protocol="compound_v3",
+            market_id="usdc",
+        )
+
+        result = optimism_compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle is not None
+        assert result.action_bundle.metadata["protocol"] == "compound_v3"
+        assert result.action_bundle.metadata["market"] == "usdc"
+        mock_config_cls.assert_called_once_with(
+            chain="optimism",
+            wallet_address=optimism_compiler.wallet_address,
+            market="usdc",
+        )
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_borrow_optimism(self, mock_adapter_cls, mock_config_cls, optimism_compiler):
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET_OPTIMISM
+        mock_adapter.supply_collateral.return_value = _mock_tx_result("Supply WETH collateral")
+        mock_adapter.borrow.return_value = _mock_tx_result("Borrow 300 USDC on Optimism")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = BorrowIntent(
+            collateral_token="WETH",
+            collateral_amount=Decimal("0.5"),
+            borrow_token="USDC",
+            borrow_amount=Decimal("300"),
+            protocol="compound_v3",
+            market_id="usdc",
+        )
+
+        result = optimism_compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle is not None
+        assert result.action_bundle.metadata["protocol"] == "compound_v3"
+        assert result.action_bundle.metadata["market"] == "usdc"
+        mock_adapter.supply_collateral.assert_called_once()
+        mock_adapter.borrow.assert_called_once()
+        assert len(result.transactions) >= 2
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_repay_optimism(self, mock_adapter_cls, mock_config_cls, optimism_compiler):
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET_OPTIMISM
+        mock_adapter.repay.return_value = _mock_tx_result("Repay 300 USDC on Optimism")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = RepayIntent(
+            token="USDC",
+            amount=Decimal("300"),
+            protocol="compound_v3",
+            market_id="usdc",
+        )
+
+        result = optimism_compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle is not None
+        assert result.action_bundle.metadata["protocol"] == "compound_v3"
+        mock_adapter.repay.assert_called_once()
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_withdraw_optimism(self, mock_adapter_cls, mock_config_cls, optimism_compiler):
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET_OPTIMISM
+        mock_adapter.withdraw.return_value = _mock_tx_result("Withdraw USDC from Optimism")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = WithdrawIntent(
+            token="USDC",
+            amount=Decimal("100"),
+            protocol="compound_v3",
+            market_id="usdc",
+        )
+
+        result = optimism_compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle is not None
+        assert result.action_bundle.metadata["protocol"] == "compound_v3"
+        assert result.action_bundle.metadata["market"] == "usdc"
+        mock_adapter.withdraw.assert_called_once()
+
+
+# =============================================================================
+# CROSS-CHAIN: POLYGON
+# =============================================================================
+
+class TestCompoundV3Polygon:
+    """Test Compound V3 compilation on Polygon.
+
+    Polygon has a USDC.e (bridged) market (Comet: 0xF25212E676D1F7F89Cd72fFEe66158f541246445).
+    Collateral: WETH (80% CF), WBTC (75%), WMATIC (65%), MaticX (55%).
+    """
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_supply_polygon_usdc_e(self, mock_adapter_cls, mock_config_cls, polygon_compiler):
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET_POLYGON
+        mock_adapter.supply.return_value = _mock_tx_result("Supply USDC.e to Compound V3 on Polygon")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = SupplyIntent(
+            token="USDC.e",
+            amount=Decimal("500"),
+            protocol="compound_v3",
+            market_id="usdc_e",
+        )
+
+        result = polygon_compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle is not None
+        assert result.action_bundle.metadata["protocol"] == "compound_v3"
+        assert result.action_bundle.metadata["market"] == "usdc_e"
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_borrow_polygon_weth_collateral(self, mock_adapter_cls, mock_config_cls, polygon_compiler):
+        """Test borrow with WETH collateral (80% CF) on Polygon."""
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET_POLYGON
+        mock_adapter.supply_collateral.return_value = _mock_tx_result("Supply WETH collateral on Polygon")
+        mock_adapter.borrow.return_value = _mock_tx_result("Borrow USDC.e on Polygon")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = BorrowIntent(
+            collateral_token="WETH",
+            collateral_amount=Decimal("1"),
+            borrow_token="USDC.e",
+            borrow_amount=Decimal("1000"),
+            protocol="compound_v3",
+            market_id="usdc_e",
+        )
+
+        result = polygon_compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle is not None
+        assert result.action_bundle.metadata["protocol"] == "compound_v3"
+        assert result.action_bundle.metadata["market"] == "usdc_e"
+        mock_adapter.supply_collateral.assert_called_once()
+        mock_adapter.borrow.assert_called_once()
+        assert len(result.transactions) >= 2
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_repay_polygon(self, mock_adapter_cls, mock_config_cls, polygon_compiler):
+        """Test standard repay on Polygon."""
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET_POLYGON
+        mock_adapter.repay.return_value = _mock_tx_result("Repay 500 USDC.e on Polygon")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = RepayIntent(
+            token="USDC.e",
+            amount=Decimal("500"),
+            protocol="compound_v3",
+            market_id="usdc_e",
+        )
+
+        result = polygon_compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle is not None
+        assert result.action_bundle.metadata["protocol"] == "compound_v3"
+        mock_adapter.repay.assert_called_once()
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_withdraw_polygon(self, mock_adapter_cls, mock_config_cls, polygon_compiler):
+        """Test withdraw on Polygon."""
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET_POLYGON
+        mock_adapter.withdraw.return_value = _mock_tx_result("Withdraw USDC.e from Polygon")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = WithdrawIntent(
+            token="USDC.e",
+            amount=Decimal("250"),
+            protocol="compound_v3",
+            market_id="usdc_e",
+        )
+
+        result = polygon_compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle is not None
+        assert result.action_bundle.metadata["protocol"] == "compound_v3"
+        assert result.action_bundle.metadata["market"] == "usdc_e"
+        mock_adapter.withdraw.assert_called_once()
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_repay_full_polygon(self, mock_adapter_cls, mock_config_cls, polygon_compiler):
+        """Test repay_full on Polygon."""
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET_POLYGON
+        mock_adapter.repay.return_value = _mock_tx_result("Repay full debt on Polygon")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = RepayIntent(
+            token="USDC.e",
+            amount=Decimal("0"),
+            protocol="compound_v3",
+            market_id="usdc_e",
+            repay_full=True,
+        )
+
+        result = polygon_compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle is not None
+        assert result.action_bundle.metadata["repay_full"] is True
+        mock_adapter.repay.assert_called_once()
+        call_kwargs = mock_adapter.repay.call_args.kwargs
+        assert call_kwargs.get("repay_all") is True
