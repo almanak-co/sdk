@@ -947,19 +947,19 @@ class UniswapV3Adapter:
             ) from e
 
     def _get_token_symbol(self, address: str) -> str:
-        """Get token symbol from address using TokenResolver."""
+        """Get token symbol from address using TokenResolver.
+
+        Uses skip_gateway=True to avoid 30-second gateway timeouts for
+        addresses not in the static registry (cosmetic usage only).
+        """
         if not address.startswith("0x"):
             return address
         try:
-            resolved = self._token_resolver.resolve(address, self.chain)
+            resolved = self._token_resolver.resolve(address, self.chain, skip_gateway=True, log_errors=False)
             return resolved.symbol
-        except TokenResolutionError as e:
-            raise TokenResolutionError(
-                token=address,
-                chain=str(self.chain),
-                reason=f"[UniswapV3Adapter] Cannot resolve symbol: {e.reason}",
-                suggestions=e.suggestions,
-            ) from e
+        except TokenResolutionError:
+            logger.debug(f"Token symbol lookup failed for {address} on {self.chain}, using truncated address")
+            return f"{address[:6]}...{address[-4:]}"
 
     def _get_token_decimals(self, symbol: str) -> int:
         """Get token decimals from symbol using TokenResolver."""

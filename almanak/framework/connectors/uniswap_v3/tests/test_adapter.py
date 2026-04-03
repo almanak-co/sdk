@@ -784,10 +784,11 @@ class TestUniswapV3AdapterHelpers:
         assert symbol == "USDC"
 
     def test_get_token_symbol_unknown(self, adapter: UniswapV3Adapter) -> None:
-        """Test getting symbol for unknown address."""
+        """Test getting symbol for unknown address returns truncated address."""
         symbol = adapter._get_token_symbol("0x0000000000000000000000000000000000000000")
 
-        assert symbol == "UNKNOWN"
+        # Unknown addresses return truncated format (skip_gateway=True avoids 30s timeout)
+        assert symbol == "0x0000...0000"
 
     def test_get_default_price_oracle(self, adapter: UniswapV3Adapter) -> None:
         """Test default price oracle."""

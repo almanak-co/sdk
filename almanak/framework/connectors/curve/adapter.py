@@ -1528,11 +1528,14 @@ class CurveAdapter:
         Falls back to truncated address if token is not in registry
         (e.g., Curve LP tokens like 3Crv). This is used only for log
         descriptions, not for transaction logic.
+
+        Uses skip_gateway=True to avoid 30-second gateway timeouts for
+        LP pool addresses that are valid ERC-20s but not in the static registry.
         """
         if not address.startswith("0x"):
             return address
         try:
-            resolved = self._token_resolver.resolve(address, self.chain)
+            resolved = self._token_resolver.resolve(address, self.chain, skip_gateway=True, log_errors=False)
             return resolved.symbol
         except TokenResolutionError:
             logger.debug(f"Cannot resolve symbol for {address}, using truncated address")
