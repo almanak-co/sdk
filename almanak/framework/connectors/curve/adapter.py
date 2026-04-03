@@ -68,6 +68,10 @@ CURVE_ADDRESSES: dict[str, dict[str, str]] = {
         "address_provider": "0x5ffe7FB82894076ECB99A30D6A32e969e6e35E98",  # Universal
         "stableswap_factory": "0xA9B52d3CfB60073b7cC3D53dD3f25a8C619Afd78",
     },
+    "polygon": {
+        "address_provider": "0x5ffe7FB82894076ECB99A30D6A32e969e6e35E98",  # Universal across EVM chains
+        "stableswap_factory": "0x722272D36ef0Da72FF51c5A65Db7b870E2e8D4ee",  # Polygon StableSwap factory
+    },
 }
 
 # Popular Curve pools per chain
@@ -239,6 +243,31 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
             "virtual_price": Decimal("1.0"),
         },
     },
+    "polygon": {
+        # Curve am3pool on Polygon (aave lending pool variant)
+        # Pool address: 0x445FE580eF8d70FF569aB36e898ed8631406Db5f
+        # LP token (am3CRV): 0xE7a24EF0C5e95Ffb0f6684b813A78F2a3AD7D171
+        # This is an aave-type pool: internally holds aDAI/aUSDC/aUSDT (interest-bearing tokens).
+        # Users swap UNDERLYING tokens (DAI/USDC.e/USDT) via exchange_underlying().
+        # coin_addresses are the UNDERLYING token addresses (not aTokens) since users
+        # approve/receive the underlying tokens.
+        # Coin order: coins(0)=DAI, coins(1)=USDC.e, coins(2)=USDT
+        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.virtual_price() at runtime.
+        "3pool": {
+            "address": "0x445Fe580Ef8d70Ff569ab36e898ed8631406dB5f",
+            "lp_token": "0xE7a24EF0C5e95Ffb0f6684b813A78F2a3AD7D171",  # am3CRV LP token
+            "coins": ["DAI", "USDC.e", "USDT"],
+            "coin_addresses": [
+                "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",  # DAI on Polygon
+                "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",  # USDC.e (bridged USDC) on Polygon
+                "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",  # USDT on Polygon
+            ],
+            "pool_type": "stableswap",
+            "n_coins": 3,
+            "virtual_price": Decimal("1.02"),
+            "use_underlying": True,  # exchange_underlying() required for non-aToken swaps
+        },
+    },
 }
 
 
@@ -358,6 +387,7 @@ class PoolInfo:
     n_coins: int
     name: str = ""
     virtual_price: Decimal = field(default_factory=lambda: Decimal("1.0"))
+    use_underlying: bool = False  # When True, use exchange_underlying() (aave-type pools)
 
     def get_coin_index(self, coin: str) -> int:
         """Get the index of a coin in the pool.
@@ -394,6 +424,7 @@ class PoolInfo:
             "n_coins": self.n_coins,
             "name": self.name,
             "virtual_price": str(self.virtual_price),
+            "use_underlying": self.use_underlying,
         }
 
 
@@ -592,6 +623,7 @@ class CurveAdapter:
                     n_coins=pool_data["n_coins"],
                     name=name,
                     virtual_price=pool_data.get("virtual_price", Decimal("1.0")),
+                    use_underlying=pool_data.get("use_underlying", False),
                 )
         return None
 
@@ -615,6 +647,7 @@ class CurveAdapter:
                 n_coins=pool_data["n_coins"],
                 name=name,
                 virtual_price=pool_data.get("virtual_price", Decimal("1.0")),
+                use_underlying=pool_data.get("use_underlying", False),
             )
         return None
 
@@ -714,6 +747,7 @@ class CurveAdapter:
                 token_in_symbol=token_in_symbol,
                 token_out_symbol=pool_info.coins[j],
                 pool_type=pool_info.pool_type,
+                use_underlying=pool_info.use_underlying,
             )
             transactions.append(swap_tx)
 
@@ -1026,13 +1060,19 @@ class CurveAdapter:
         token_in_symbol: str = "",
         token_out_symbol: str = "",
         pool_type: PoolType = PoolType.STABLESWAP,
+        use_underlying: bool = False,
     ) -> TransactionData:
         """Build exchange transaction.
 
-        StableSwap:          exchange(int128 i, int128 j, uint256 dx, uint256 min_dy)
+        StableSwap:           exchange(int128 i, int128 j, uint256 dx, uint256 min_dy)
         CryptoSwap/Tricrypto: exchange(uint256 i, uint256 j, uint256 dx, uint256 min_dy)
+        Aave-type (underlying): exchange_underlying(int128 i, int128 j, uint256 dx, uint256 min_dy)
         """
-        if pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO):
+        if use_underlying:
+            # Aave-type pools (e.g. Polygon am3pool): swap underlying tokens via exchange_underlying()
+            selector = EXCHANGE_UNDERLYING_SELECTOR
+            pad_index = self._pad_int128
+        elif pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO):
             # CryptoSwap and Tricrypto pools use uint256 indices
             selector = EXCHANGE_UINT256_SELECTOR
             pad_index = self._pad_uint256
@@ -1049,7 +1089,7 @@ class CurveAdapter:
             to=pool_address,
             value=value,
             data=calldata,
-            gas_estimate=CURVE_GAS_ESTIMATES["exchange"],
+            gas_estimate=CURVE_GAS_ESTIMATES["exchange_underlying" if use_underlying else "exchange"],
             description=f"Curve swap {token_in_symbol} -> {token_out_symbol}",
             tx_type="swap",
         )
