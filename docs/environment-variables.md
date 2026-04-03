@@ -42,7 +42,7 @@ Set these based on which protocols and features your strategy uses.
 |----------|-------------|-----------|
 | `ENSO_API_KEY` | Swap routing via Enso Finance aggregator | [enso.finance](https://enso.finance/) |
 | `COINGECKO_API_KEY` | Improves rate limits for price data (works without key) | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
-| `ALMANAK_API_KEY` | Platform features: `strat push`, `strat pull`, deployment | [app.almanak.co](https://app.almanak.co/) |
+| `ALMANAK_API_KEY` | Almanak platform authentication | [app.almanak.co](https://app.almanak.co/) |
 | `THEGRAPH_API_KEY` | Backtesting with subgraph data (DEX volumes, lending APYs) | [thegraph.com/studio](https://thegraph.com/studio/) |
 
 ---

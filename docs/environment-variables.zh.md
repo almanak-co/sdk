@@ -42,7 +42,7 @@
 |----------|-------------|-----------|
 | `ENSO_API_KEY` | 通过 Enso Finance 聚合器进行交换路由 | [enso.finance](https://enso.finance/) |
 | `COINGECKO_API_KEY` | 改善价格数据的速率限制（无密钥也可使用） | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
-| `ALMANAK_API_KEY` | 平台功能：`strat push`、`strat pull`、部署 | [app.almanak.co](https://app.almanak.co/) |
+| `ALMANAK_API_KEY` | Almanak 平台身份验证 | [app.almanak.co](https://app.almanak.co/) |
 | `THEGRAPH_API_KEY` | 使用子图数据进行回测（DEX 交易量、借贷 APY） | [thegraph.com/studio](https://thegraph.com/studio/) |
 
 ---

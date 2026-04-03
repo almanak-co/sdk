@@ -42,7 +42,7 @@ Configura estas según los protocolos y funcionalidades que use tu estrategia.
 |----------|-------------|-----------|
 | `ENSO_API_KEY` | Enrutamiento de swaps vía el agregador Enso Finance | [enso.finance](https://enso.finance/) |
 | `COINGECKO_API_KEY` | Mejora los límites de velocidad para datos de precios (funciona sin clave) | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
-| `ALMANAK_API_KEY` | Funcionalidades de la plataforma: `strat push`, `strat pull`, despliegue | [app.almanak.co](https://app.almanak.co/) |
+| `ALMANAK_API_KEY` | Autenticación de la plataforma Almanak | [app.almanak.co](https://app.almanak.co/) |
 | `THEGRAPH_API_KEY` | Backtesting con datos de subgraphs (volúmenes DEX, APYs de préstamo) | [thegraph.com/studio](https://thegraph.com/studio/) |
 
 ---
