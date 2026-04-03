@@ -4796,7 +4796,11 @@ def paper_start(
     config_bootstrap: dict[str, dict[str, Decimal]] = {}
     strategy_config: dict[str, Any] | None = None
 
-    def _parse_funding_dict(funding: dict, native_symbols: frozenset[str]) -> tuple[Decimal | None, dict[str, Decimal]]:
+    def _parse_funding_dict(
+        funding: dict,
+        native_symbols: frozenset[str],
+        source: str,
+    ) -> tuple[Decimal | None, dict[str, Decimal]]:
         """Parse a flat token->amount dict into (native_eth, erc20_tokens)."""
         eth_val: Decimal | None = None
         tokens: dict[str, Decimal] = {}
@@ -4805,10 +4809,19 @@ def paper_start(
             if token_str.upper() in native_symbols:
                 eth_val = Decimal(str(amount))
             elif token_str.startswith(("0x", "0X")) and len(token_str) == 42:
+                # ERC-20 address — checksum per EIP-55 (resolver lowercases internally)
                 from eth_utils import to_checksum_address
 
-                tokens[to_checksum_address(token_str)] = Decimal(str(amount))
+                try:
+                    tokens[to_checksum_address(token_str)] = Decimal(str(amount))
+                except (ValueError, TypeError) as e:
+                    click.echo(
+                        f"Warning: ignoring invalid token address in {source}: {token_str} ({e})",
+                        err=True,
+                    )
+                    continue
             else:
+                # Token symbol — preserve original case (wstETH, swETH, USDbC, wS, etc.)
                 tokens[token_str] = Decimal(str(amount))
         return eth_val, tokens
 
@@ -4826,7 +4839,11 @@ def paper_start(
             click.echo(f"Found paper_trading.bootstrap in config: {bootstrap_raw}", err=True)
             for chain_key, chain_tokens_raw in bootstrap_raw.items():
                 if isinstance(chain_tokens_raw, dict):
-                    chain_eth, chain_toks = _parse_funding_dict(chain_tokens_raw, native_symbols)
+                    chain_eth, chain_toks = _parse_funding_dict(
+                        chain_tokens_raw,
+                        native_symbols,
+                        f"paper_trading.bootstrap[{chain_key}]",
+                    )
                     bootstrap_entry: dict[str, Decimal] = {}
                     if chain_eth is not None:
                         bootstrap_entry["ETH"] = chain_eth
@@ -4847,7 +4864,7 @@ def paper_start(
                         f"anvil_funding must be an object mapping TOKEN->AMOUNT, got {type(anvil_funding).__name__}"
                     )
                 click.echo(f"Found anvil_funding in config: {anvil_funding}", err=True)
-                config_eth, config_tokens = _parse_funding_dict(anvil_funding, native_symbols)
+                config_eth, config_tokens = _parse_funding_dict(anvil_funding, native_symbols, "anvil_funding")
     except Exception as e:
         click.echo(
             f"Warning: ignoring invalid bootstrap/anvil_funding in strategy config: {e}",

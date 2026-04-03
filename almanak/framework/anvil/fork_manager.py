@@ -731,7 +731,7 @@ class RollingForkManager:
             return False
 
         from almanak.framework.data.tokens import get_token_resolver
-        from almanak.framework.data.tokens.exceptions import TokenNotFoundError
+        from almanak.framework.data.tokens.exceptions import TokenNotFoundError, TokenResolutionError
 
         resolver = get_token_resolver()
         chain_tokens = TOKEN_ADDRESSES.get(self.chain, {})
@@ -759,7 +759,7 @@ class RollingForkManager:
                     resolved = resolver.resolve(token_address, self.chain)
                     decimals = resolved.decimals
                     display_name = resolved.symbol or token_key[:10] + "..."
-                except TokenNotFoundError:
+                except (TokenNotFoundError, TokenResolutionError):
                     # Not in resolver — try on-chain decimals() call
                     decimals = await self._fetch_decimals_onchain(token_address)
                     if decimals is not None:
@@ -771,7 +771,7 @@ class RollingForkManager:
                     token_address = resolved.address
                     decimals = resolved.decimals
                     display_name = resolved.symbol or token_key
-                except TokenNotFoundError:
+                except (TokenNotFoundError, TokenResolutionError):
                     # Fallback to local TOKEN_ADDRESSES (case-insensitive)
                     token_address = chain_tokens_ci.get(token_key.lower())
                     decimals = token_decimals_ci.get(token_key.lower())
@@ -850,10 +850,10 @@ class RollingForkManager:
                 [{"to": token_address, "data": "0x313ce567"}, "latest"],
             )
             if ok and result and isinstance(result, str) and len(result) >= 2:
-                decimals = int(result, 16)
-                if 0 <= decimals <= 77:
-                    return decimals
-                logger.warning("On-chain decimals() returned implausible value %d for %s", decimals, token_address)
+                decimals_val = int(result, 16)
+                if 0 <= decimals_val <= 77:
+                    return decimals_val
+                logger.warning("On-chain decimals() returned implausible value %d for %s", decimals_val, token_address)
                 return None
         except Exception as e:
             logger.debug("On-chain decimals() call failed for %s: %s", token_address, e)

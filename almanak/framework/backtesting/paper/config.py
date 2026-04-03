@@ -328,7 +328,9 @@ class PaperTraderConfig:
 
         Merges bootstrap[chain] (base) with initial_tokens (override).
         initial_tokens takes precedence for the same token key.
-        Preserves original token key casing.
+        Preserves original token key casing. Token symbols like "wstETH",
+        "swETH", "USDbC" have mixed case that must be kept intact.
+        ERC-20 addresses are passed through as-is (checksummed or lowercase).
 
         Returns:
             Dictionary of token key to initial balance amount

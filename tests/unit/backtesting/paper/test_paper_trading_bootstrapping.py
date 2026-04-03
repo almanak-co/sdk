@@ -16,7 +16,6 @@ import pytest
 from almanak.framework.anvil.fork_manager import RollingForkManager
 from almanak.framework.backtesting.paper.config import PaperTraderConfig
 
-
 # ---- PaperTraderConfig.get_initial_balances() ----
 
 
@@ -253,6 +252,7 @@ class TestAnvilFundingAddressParsing:
         # Symbols must NOT match
         assert not ("USDC".startswith(("0x", "0X")) and len("USDC") == 42)
         assert not ("wstETH".startswith(("0x", "0X")) and len("wstETH") == 42)
+
 
 
 # ---- PaperTraderConfig.bootstrap field (VIB-2375) ----
