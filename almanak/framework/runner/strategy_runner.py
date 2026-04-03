@@ -1209,6 +1209,13 @@ class StrategyRunner:
                     start_time,
                 )
 
+            # Step 1a: Inject simulated balances for dry-run mode (VIB-2329)
+            # When running --dry-run --no-gateway, balance providers return 0 or error
+            # for chains where the wallet has no positions. simulated_balances in config
+            # lets strategy authors test logic without needing real on-chain funds.
+            if self.config.dry_run:
+                self._inject_simulated_balances(market, strategy)
+
             # Step 2: Get strategy decision (with hard timeout)
             # NOTE: asyncio.to_thread runs decide() in a worker thread. If decide()
             # times out, the worker thread continues running (Python limitation).
@@ -4171,6 +4178,103 @@ class StrategyRunner:
 
         # If we only have stablecoins, still return — it's better than $1 for everything
         return fallback if fallback else None
+
+    def _inject_simulated_balances(self, market: Any, strategy: Any) -> None:
+        """Inject simulated_balances from strategy config into the market snapshot.
+
+        Called in dry-run mode (VIB-2329). When --dry-run --no-gateway is active,
+        balance providers return 0 or error for chains where the wallet has no
+        on-chain positions. simulated_balances in config.json lets strategy authors
+        test logic without needing real funds on every chain.
+
+        Injection is skipped when the market snapshot already has a real balance
+        provider (gateway is active). This prevents simulated balances from
+        silently overriding real on-chain data in normal dry-run simulations.
+
+        Config format (config.json):
+            {
+                "simulated_balances": {
+                    "USDC": "10000",
+                    "WETH": "5"
+                }
+            }
+
+        For MultiChainMarketSnapshot, balances are injected into every configured chain.
+
+        balance_usd is computed by attempting market.price() lookup.  For tokens
+        where the price is unavailable, balance_usd defaults to 0 (safe fallback —
+        the strategy still sees a non-zero balance and can pass balance gates).
+        """
+        from decimal import InvalidOperation
+
+        from almanak.framework.strategies.intent_strategy import MultiChainMarketSnapshot, TokenBalance
+
+        # Skip injection when a real balance provider is active. MarketSnapshot.balance()
+        # prefers pre-populated balances over the provider, so injecting with a live
+        # gateway would silently override real on-chain data.
+        if getattr(market, "_balance_provider", None) is not None:
+            return
+
+        simulated: dict | None = None
+        try:
+            simulated = strategy.get_config("simulated_balances")
+        except AttributeError:
+            # Strategy does not implement get_config — skip silently.
+            return
+
+        if not simulated or not isinstance(simulated, dict):
+            if simulated is not None and not isinstance(simulated, dict):
+                logger.warning(
+                    "[dry-run] simulated_balances must be a dict, got %s — skipping", type(simulated).__name__
+                )
+            return
+
+        is_multi_chain = isinstance(market, MultiChainMarketSnapshot)
+
+        injected: list[str] = []
+        for token, raw_amount in simulated.items():
+            try:
+                amount = Decimal(str(raw_amount))
+            except InvalidOperation:
+                logger.warning(f"[dry-run] simulated_balances: invalid amount for {token}: {raw_amount!r}")
+                continue
+
+            if not amount.is_finite() or amount <= 0:
+                logger.warning(
+                    f"[dry-run] simulated_balances: amount must be a positive finite number for {token}: {raw_amount!r}"
+                )
+                continue
+
+            tb = TokenBalance(symbol=token, balance=amount, balance_usd=Decimal("0"))
+            try:
+                if is_multi_chain:
+                    # MultiChainMarketSnapshot.set_balance and .price() both require an
+                    # explicit chain argument — inject and price each chain separately.
+                    for chain in market.chains:
+                        balance_usd = Decimal("0")
+                        try:
+                            price = market.price(token, chain=chain)
+                            balance_usd = amount * Decimal(str(price))
+                        except Exception:
+                            pass
+                        chain_tb = TokenBalance(symbol=token, balance=amount, balance_usd=balance_usd)
+                        market.set_balance(token, chain, chain_tb)
+                else:
+                    # Best-effort USD valuation using the live price oracle.
+                    # Silently falls back to 0 if price is unavailable (strategy still
+                    # sees a non-zero balance, which is all that matters for gate checks).
+                    try:
+                        price = market.price(token)
+                        tb = TokenBalance(symbol=token, balance=amount, balance_usd=amount * Decimal(str(price)))
+                    except Exception:
+                        pass
+                    market.set_balance(token, tb)
+                injected.append(f"{token}={amount}")
+            except Exception as e:
+                logger.warning(f"[dry-run] simulated_balances: could not set {token}: {e}")
+
+        if injected:
+            logger.info(f"[dry-run] Injected simulated balances: {', '.join(injected)}")
 
     def _create_error_result(
         self,
