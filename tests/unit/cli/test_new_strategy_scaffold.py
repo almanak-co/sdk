@@ -698,3 +698,83 @@ def test_lp_templates_agents_md_has_footguns() -> None:
         assert "symbolic format" in content.lower() or "raw hex" in content.lower(), (
             f"{template.value} AGENTS.md must warn about pool format"
         )
+
+
+# ---------------------------------------------------------------------------
+# VIB-2328: SDK root auto-detection for --output-dir default
+# ---------------------------------------------------------------------------
+
+
+def test_new_strategy_defaults_to_incubating_when_sdk_root(tmp_path: Path) -> None:
+    """When strategies/incubating/ exists in cwd, default output is strategies/incubating/<name>."""
+    import os
+
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    # Create SDK-root-like structure
+    incubating_dir = tmp_path / "strategies" / "incubating"
+    incubating_dir.mkdir(parents=True)
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        # Change into the SDK-root-like directory so Path.cwd() picks up strategies/incubating/
+        # Unset CI so auto-detection is not suppressed (CI env var disables it in CI environments)
+        os.chdir(tmp_path)
+        result = runner.invoke(new_strategy, ["--name", "my_auto_strat", "--chain", "arbitrum"], env={"CI": ""})
+
+    assert result.exit_code == 0, result.output
+    assert (incubating_dir / "my_auto_strat").exists(), (
+        "Expected strategy to be created in strategies/incubating/ when that directory exists"
+    )
+
+
+def test_new_strategy_falls_back_to_cwd_when_no_incubating(tmp_path: Path) -> None:
+    """When strategies/incubating/ does NOT exist, default output is ./<name> in cwd."""
+    import os
+
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        os.chdir(tmp_path)
+        result = runner.invoke(new_strategy, ["--name", "my_fallback_strat", "--chain", "arbitrum"])
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "my_fallback_strat").exists(), (
+        "Expected strategy to be created in cwd when strategies/incubating/ does not exist"
+    )
+    assert not (tmp_path / "strategies" / "incubating" / "my_fallback_strat").exists()
+
+
+def test_new_strategy_output_dir_flag_overrides_auto_detection(tmp_path: Path) -> None:
+    """Explicit --output-dir always wins over auto-detection."""
+    import os
+
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    # Create SDK-root-like structure
+    incubating_dir = tmp_path / "strategies" / "incubating"
+    incubating_dir.mkdir(parents=True)
+    explicit_dir = tmp_path / "explicit_output"
+    explicit_dir.mkdir()
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        os.chdir(tmp_path)
+        result = runner.invoke(
+            new_strategy,
+            ["--name", "my_explicit_strat", "--chain", "arbitrum", "--output-dir", str(explicit_dir / "my_explicit_strat")],
+            env={"CI": ""},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert (explicit_dir / "my_explicit_strat").exists(), "Expected strategy in explicit output dir"
+    assert not (incubating_dir / "my_explicit_strat").exists(), (
+        "Strategy should NOT be in strategies/incubating/ when --output-dir is specified"
+    )

@@ -2729,7 +2729,12 @@ def list_strategies() -> list[str]:
     "-o",
     type=click.Path(exists=False),
     default=None,
-    help="Output directory (default: ./<name> in current working directory)",
+    help=(
+        "Output directory for the new strategy. "
+        "Defaults to strategies/incubating/<name> when run from the SDK root "
+        "(detected by presence of strategies/incubating/), "
+        "otherwise ./<name> in the current working directory."
+    ),
 )
 def new_strategy(
     template: str,
@@ -2751,6 +2756,8 @@ def new_strategy(
         almanak new-strategy --template dynamic_lp --name my_lp_strategy --chain arbitrum
 
         almanak new-strategy -t ta_swap -n rsi_trader -c ethereum
+
+        almanak new-strategy -t ta_swap -n my_strat --output-dir /path/to/output
     """
     template_enum = StrategyTemplate(template)
     chain_enum = SupportedChain(chain)
@@ -2769,8 +2776,18 @@ def new_strategy(
     if output_dir:
         strategy_dir = Path(output_dir).resolve()
     else:
-        # Default to current working directory / strategy name
-        strategy_dir = Path.cwd() / snake_name
+        # Auto-detect SDK root: if strategies/incubating/ exists relative to cwd
+        # and we're not in a CI environment, default output there so users don't
+        # need to manually mv after scaffolding.
+        # (VIB-2328: every portfolio experiment required a manual mv after strat new)
+        import os
+
+        incubating_dir = Path.cwd() / "strategies" / "incubating"
+        if incubating_dir.is_dir() and not os.environ.get("CI"):
+            strategy_dir = incubating_dir / snake_name
+        else:
+            # Fall back to current working directory / strategy name
+            strategy_dir = Path.cwd() / snake_name
 
     # Check if directory already exists
     if strategy_dir.exists():

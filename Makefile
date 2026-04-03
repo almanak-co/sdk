@@ -165,7 +165,7 @@ run-example:
 		echo "Please set it with: export ALCHEMY_API_KEY=your_api_key"; \
 		exit 1; \
 	fi
-	uv run almanak strat new -n example_strategy -t mean_reversion -c arbitrum
+	uv run almanak strat new -n example_strategy -t mean_reversion -c arbitrum --output-dir ./example_strategy
 	@echo "Example strategy created in example_strategy/"
 	@echo "To test: cd example_strategy && uv run almanak strat run --once"
 
