@@ -136,6 +136,10 @@ class TimelineEvent:
     chain: str = ""
     details: dict[str, Any] = field(default_factory=dict)
 
+    # Forensic event correlation (Phase 2 observability)
+    cycle_id: str = ""
+    phase: str = ""
+
     # Computed field for block explorer link
     block_explorer_url: str | None = None
 
@@ -146,7 +150,7 @@ class TimelineEvent:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the timeline event to a dictionary for serialization."""
-        return {
+        d: dict[str, Any] = {
             "timestamp": self.timestamp.isoformat(),
             "event_type": self.event_type.value,
             "description": self.description,
@@ -156,6 +160,11 @@ class TimelineEvent:
             "details": self.details,
             "block_explorer_url": self.block_explorer_url,
         }
+        if self.cycle_id:
+            d["cycle_id"] = self.cycle_id
+        if self.phase:
+            d["phase"] = self.phase
+        return d
 
 
 @dataclass
@@ -258,6 +267,8 @@ def _load_events_from_file() -> None:
                     strategy_id=event_data.get("strategy_id", strategy_id),
                     chain=event_data.get("chain", ""),
                     details=event_data.get("details") or event_data.get("metadata", {}),
+                    cycle_id=event_data.get("cycle_id", ""),
+                    phase=event_data.get("phase", ""),
                 )
                 # Avoid duplicates
                 if not any(
@@ -313,6 +324,8 @@ def add_event(event: TimelineEvent) -> None:
                 chain=event.chain or "",
                 details_json=json.dumps(event.details) if event.details else "",
                 timestamp=int(event.timestamp.timestamp()),
+                cycle_id=event.cycle_id or "",
+                phase=event.phase or "",
             )
             _gateway_client.observe.RecordTimelineEvent(request, timeout=2.0)
         except Exception as e:

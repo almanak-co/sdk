@@ -123,7 +123,7 @@ class TestGatewayClient:
             assert client.is_connected
 
     def test_client_connect_without_auth_token(self):
-        """Client uses base channel directly when no auth token."""
+        """Client wraps channel with cycle_id interceptor even without auth."""
         config = GatewayClientConfig(host="localhost", port=50052, auth_token=None)
         client = GatewayClient(config)
 
@@ -133,15 +133,18 @@ class TestGatewayClient:
         ):
             mock_base_channel = MagicMock()
             mock_channel.return_value = mock_base_channel
+            mock_intercept.return_value = mock_base_channel
 
             client.connect()
 
             # Base channel should be created
             mock_channel.assert_called_once_with("localhost:50052")
-            # intercept_channel should NOT be called
-            mock_intercept.assert_not_called()
-            # The client channel should be the base channel
-            assert client._channel is mock_base_channel
+            # intercept_channel is called (cycle_id interceptor always active)
+            mock_intercept.assert_called_once()
+            # Only cycle_id interceptor, no auth interceptor
+            args = mock_intercept.call_args
+            interceptors = args[0][1:]  # Skip base_channel arg
+            assert len(interceptors) == 1
 
     def test_client_disconnect(self):
         """Client closes connection."""

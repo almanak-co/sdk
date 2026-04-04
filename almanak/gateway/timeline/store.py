@@ -55,10 +55,12 @@ class TimelineEvent:
     tx_hash: str | None = None
     chain: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
+    cycle_id: str = ""
+    phase: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        d: dict[str, Any] = {
             "event_id": self.event_id,
             "strategy_id": self.strategy_id,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
@@ -68,6 +70,11 @@ class TimelineEvent:
             "chain": self.chain,
             "details": self.details,
         }
+        if self.cycle_id:
+            d["cycle_id"] = self.cycle_id
+        if self.phase:
+            d["phase"] = self.phase
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TimelineEvent:
@@ -87,6 +94,8 @@ class TimelineEvent:
             tx_hash=data.get("tx_hash"),
             chain=data.get("chain"),
             details=data.get("details") or {},
+            cycle_id=data.get("cycle_id", ""),
+            phase=data.get("phase", ""),
         )
 
 
@@ -279,7 +288,9 @@ class TimelineStore:
             rows = await conn.fetch(
                 """
                 SELECT event_id, agent_id, timestamp, event_type,
-                       description, tx_hash, chain, details_json
+                       description, tx_hash, chain, details_json,
+                       COALESCE(cycle_id, '') as cycle_id,
+                       COALESCE(phase, '') as phase
                 FROM timeline_events
                 ORDER BY timestamp DESC
                 """
@@ -306,6 +317,8 @@ class TimelineStore:
                         tx_hash=row["tx_hash"],
                         chain=row["chain"],
                         details=details,
+                        cycle_id=row["cycle_id"],
+                        phase=row["phase"],
                     )
                 )
             return events
@@ -325,14 +338,16 @@ class TimelineStore:
                 """
                 INSERT INTO timeline_events
                     (event_id, agent_id, timestamp, event_type, description,
-                     tx_hash, chain, details_json)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     tx_hash, chain, details_json, cycle_id, phase)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT (event_id) DO UPDATE SET
                     event_type = EXCLUDED.event_type,
                     description = EXCLUDED.description,
                     tx_hash = EXCLUDED.tx_hash,
                     chain = EXCLUDED.chain,
-                    details_json = EXCLUDED.details_json
+                    details_json = EXCLUDED.details_json,
+                    cycle_id = EXCLUDED.cycle_id,
+                    phase = EXCLUDED.phase
                 """,
                 event.event_id,
                 resolved_id,
@@ -342,6 +357,8 @@ class TimelineStore:
                 event.tx_hash,
                 event.chain,
                 details_json,
+                event.cycle_id,
+                event.phase,
             )
 
     def _clear_events_postgres(self, resolved_id: str | None) -> None:
@@ -384,9 +401,21 @@ class TimelineStore:
                     tx_hash TEXT,
                     chain TEXT,
                     details_json TEXT,
+                    cycle_id TEXT DEFAULT '',
+                    phase TEXT DEFAULT '',
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # Migrate: add cycle_id and phase columns if not present (existing DBs)
+            try:
+                conn.execute("ALTER TABLE timeline_events ADD COLUMN cycle_id TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+            try:
+                conn.execute("ALTER TABLE timeline_events ADD COLUMN phase TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_timeline_strategy_id
                 ON timeline_events(strategy_id)
@@ -410,7 +439,8 @@ class TimelineStore:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("""
                 SELECT event_id, strategy_id, timestamp, event_type,
-                       description, tx_hash, chain, details_json
+                       description, tx_hash, chain, details_json,
+                       cycle_id, phase
                 FROM timeline_events
                 ORDER BY timestamp DESC
             """)
@@ -432,6 +462,8 @@ class TimelineStore:
                     tx_hash=row["tx_hash"],
                     chain=row["chain"],
                     details=details,
+                    cycle_id=row["cycle_id"] or "",
+                    phase=row["phase"] or "",
                 )
                 self._cache[event.strategy_id].append(event)
 
@@ -451,8 +483,8 @@ class TimelineStore:
                 """
                 INSERT OR REPLACE INTO timeline_events
                 (event_id, strategy_id, timestamp, event_type, description,
-                 tx_hash, chain, details_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 tx_hash, chain, details_json, cycle_id, phase)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.event_id,
@@ -463,6 +495,8 @@ class TimelineStore:
                     event.tx_hash,
                     event.chain,
                     details_json,
+                    event.cycle_id,
+                    event.phase,
                 ),
             )
             conn.commit()

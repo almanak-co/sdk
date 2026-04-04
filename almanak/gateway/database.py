@@ -157,6 +157,8 @@ CREATE TABLE IF NOT EXISTS timeline_events (
     tx_hash       TEXT,
     chain         TEXT,
     details_json  JSONB,
+    cycle_id      TEXT DEFAULT '',
+    phase         TEXT DEFAULT '',
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -165,6 +167,9 @@ CREATE INDEX IF NOT EXISTS idx_timeline_events_agent_time
 
 CREATE INDEX IF NOT EXISTS idx_timeline_events_agent_type
     ON timeline_events (agent_id, event_type);
+
+CREATE INDEX IF NOT EXISTS idx_timeline_events_cycle_id
+    ON timeline_events (cycle_id) WHERE cycle_id != '';
 """
 
 

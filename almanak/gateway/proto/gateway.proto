@@ -352,6 +352,8 @@ message RecordTimelineEventRequest {
   string chain = 5;            // Optional: chain name
   string details_json = 6;     // Optional: JSON-encoded details
   int64 timestamp = 7;         // Optional: event timestamp (uses server time if 0)
+  string cycle_id = 8;         // Optional: correlation ID linking events in one decide->execute cycle
+  string phase = 9;            // Optional: strategy lifecycle phase (DECIDE, COMPILE, VALIDATE, EXECUTE, ENRICH)
 }
 
 message RecordTimelineEventResponse {

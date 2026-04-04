@@ -1110,6 +1110,8 @@ class RecordTimelineEventRequest(_message.Message):
     CHAIN_FIELD_NUMBER: _builtins.int
     DETAILS_JSON_FIELD_NUMBER: _builtins.int
     TIMESTAMP_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    PHASE_FIELD_NUMBER: _builtins.int
     strategy_id: _builtins.str
     event_type: _builtins.str
     """"TRADE", "REBALANCE", "ERROR", "STATE_CHANGE", etc."""
@@ -1122,6 +1124,10 @@ class RecordTimelineEventRequest(_message.Message):
     """Optional: JSON-encoded details"""
     timestamp: _builtins.int
     """Optional: event timestamp (uses server time if 0)"""
+    cycle_id: _builtins.str
+    """Optional: correlation ID linking events in one decide->execute cycle"""
+    phase: _builtins.str
+    """Optional: strategy lifecycle phase (DECIDE, COMPILE, VALIDATE, EXECUTE, ENRICH)"""
     def __init__(
         self,
         *,
@@ -1132,8 +1138,10 @@ class RecordTimelineEventRequest(_message.Message):
         chain: _builtins.str = ...,
         details_json: _builtins.str = ...,
         timestamp: _builtins.int = ...,
+        cycle_id: _builtins.str = ...,
+        phase: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "description", b"description", "details_json", b"details_json", "event_type", b"event_type", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "tx_hash", b"tx_hash"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "cycle_id", b"cycle_id", "description", b"description", "details_json", b"details_json", "event_type", b"event_type", "phase", b"phase", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___RecordTimelineEventRequest: _TypeAlias = RecordTimelineEventRequest  # noqa: Y015

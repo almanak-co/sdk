@@ -101,6 +101,75 @@ class _AuthClientInterceptor(
         return continuation(new_details, request_iterator)
 
 
+class _CycleIdInterceptor(
+    grpc.UnaryUnaryClientInterceptor,
+    grpc.UnaryStreamClientInterceptor,
+    grpc.StreamUnaryClientInterceptor,
+    grpc.StreamStreamClientInterceptor,
+):
+    """Client interceptor that propagates cycle_id as gRPC metadata.
+
+    Reads the current cycle_id from the ContextVar and attaches it to
+    every outgoing RPC call, so the gateway can correlate all calls
+    within a single decide->execute cycle.
+    """
+
+    METADATA_KEY = "x-cycle-id"
+
+    def _add_cycle_metadata(self, metadata: tuple | None) -> tuple:
+        from almanak.framework.observability.context import get_cycle_id
+
+        metadata = metadata or ()
+        cycle_id = get_cycle_id()
+        if cycle_id:
+            return metadata + ((self.METADATA_KEY, cycle_id),)
+        return metadata
+
+    def intercept_unary_unary(self, continuation, client_call_details, request):
+        new_details = _ClientCallDetails(
+            client_call_details.method,
+            client_call_details.timeout,
+            self._add_cycle_metadata(client_call_details.metadata),
+            client_call_details.credentials,
+            client_call_details.wait_for_ready,
+            client_call_details.compression,
+        )
+        return continuation(new_details, request)
+
+    def intercept_unary_stream(self, continuation, client_call_details, request):
+        new_details = _ClientCallDetails(
+            client_call_details.method,
+            client_call_details.timeout,
+            self._add_cycle_metadata(client_call_details.metadata),
+            client_call_details.credentials,
+            client_call_details.wait_for_ready,
+            client_call_details.compression,
+        )
+        return continuation(new_details, request)
+
+    def intercept_stream_unary(self, continuation, client_call_details, request_iterator):
+        new_details = _ClientCallDetails(
+            client_call_details.method,
+            client_call_details.timeout,
+            self._add_cycle_metadata(client_call_details.metadata),
+            client_call_details.credentials,
+            client_call_details.wait_for_ready,
+            client_call_details.compression,
+        )
+        return continuation(new_details, request_iterator)
+
+    def intercept_stream_stream(self, continuation, client_call_details, request_iterator):
+        new_details = _ClientCallDetails(
+            client_call_details.method,
+            client_call_details.timeout,
+            self._add_cycle_metadata(client_call_details.metadata),
+            client_call_details.credentials,
+            client_call_details.wait_for_ready,
+            client_call_details.compression,
+        )
+        return continuation(new_details, request_iterator)
+
+
 class _ClientCallDetails(
     grpc.ClientCallDetails,
 ):
@@ -310,13 +379,13 @@ class GatewayClient:
 
         base_channel = grpc.insecure_channel(self.target)
 
-        # Wrap channel with auth interceptor if token is configured
+        # Wrap channel with interceptors
+        interceptors: list[grpc.UnaryUnaryClientInterceptor] = [_CycleIdInterceptor()]
         if self.config.auth_token:
-            interceptor = _AuthClientInterceptor(self.config.auth_token)
-            self._channel = grpc.intercept_channel(base_channel, interceptor)
+            interceptors.append(_AuthClientInterceptor(self.config.auth_token))
             logger.debug("Auth token configured for gateway connection")
-        else:
-            self._channel = base_channel
+
+        self._channel = grpc.intercept_channel(base_channel, *interceptors)
 
         self._health_stub = health_pb2_grpc.HealthStub(self._channel)
         self._gateway_health_stub = gateway_pb2_grpc.HealthStub(self._channel)

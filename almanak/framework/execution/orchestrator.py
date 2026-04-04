@@ -318,6 +318,7 @@ class ExecutionContext:
     chain: str = "arbitrum"
     wallet_address: str = ""
     correlation_id: str = ""
+    cycle_id: str = ""  # Forensic correlation ID for the decide->execute cycle
     session_id: str = ""
     simulation_enabled: bool = False
     intent_description: str = ""  # Human-readable description of the intent

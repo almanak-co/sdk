@@ -206,6 +206,8 @@ CREATE TABLE IF NOT EXISTS timeline_events (
     event_type TEXT NOT NULL,
     event_data TEXT NOT NULL,  -- JSON string
     correlation_id TEXT,
+    cycle_id TEXT DEFAULT '',
+    phase TEXT DEFAULT '',
     created_at TEXT NOT NULL
 );
 

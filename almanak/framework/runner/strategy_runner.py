@@ -1073,6 +1073,12 @@ class StrategyRunner:
         iteration_id = f"{strategy_id}_{self._total_iterations + 1}_{int(start_time.timestamp())}"
         add_context(correlation_id=iteration_id, strategy_id=strategy_id)
 
+        # Generate cycle_id for forensic event correlation across phases
+        from almanak.framework.observability.context import clear_cycle_id, new_cycle_id
+
+        cycle_id = new_cycle_id()
+        add_context(cycle_id=cycle_id)
+
         logger.info(f"Starting iteration for strategy: {strategy_id}")
 
         try:
@@ -1245,6 +1251,15 @@ class StrategyRunner:
                     )
             try:
                 self._decide_in_progress = True
+                from almanak.framework.observability.emitter import emit_phase_event
+                from almanak.framework.observability.events import StrategyPhase
+
+                emit_phase_event(
+                    strategy_id=strategy_id,
+                    phase=StrategyPhase.DECIDE,
+                    event_type="STATE_CHANGE",
+                    description="decide() started",
+                )
                 if decide_timeout <= 0:
                     # Timeout disabled -- run decide() without a time limit
                     decide_result = await asyncio.to_thread(strategy.decide, market)
@@ -1254,6 +1269,12 @@ class StrategyRunner:
                         timeout=decide_timeout,
                     )
                 self._decide_in_progress = False
+                emit_phase_event(
+                    strategy_id=strategy_id,
+                    phase=StrategyPhase.DECIDE,
+                    event_type="STATE_CHANGE",
+                    description=f"decide() returned {type(decide_result).__name__}",
+                )
             except TimeoutError:
                 # Worker thread may still be running; _decide_in_progress stays True
                 # to block overlapping calls. Recovery allowed after 2x timeout elapsed.
@@ -1604,6 +1625,7 @@ class StrategyRunner:
         finally:
             # Clear correlation context to prevent bleed across iterations
             clear_context()
+            clear_cycle_id()
 
     async def run_loop(
         self,
@@ -2185,6 +2207,17 @@ class StrategyRunner:
             f"(intent={intent.intent_id}, max_retries={self.config.max_retries})"
         )
 
+        from almanak.framework.observability.emitter import emit_phase_event
+        from almanak.framework.observability.events import StrategyPhase
+
+        emit_phase_event(
+            strategy_id=strategy_id,
+            phase=StrategyPhase.COMPILE,
+            event_type="STATE_CHANGE",
+            description=f"Compiling intent {intent.intent_id} ({getattr(intent, 'intent_type', 'unknown')})",
+            chain=strategy.chain,
+        )
+
         # Track the last execution result and context for final reporting
         last_execution_result: ExecutionResult | None = None
         last_execution_context: ExecutionContext | None = None
@@ -2224,11 +2257,14 @@ class StrategyRunner:
                 # Execute the action bundle through orchestrator
                 # Resolve protocol for result enrichment (intent is frozen, so we pass via context)
                 resolved_protocol = getattr(intent, "protocol", None) or compiler.default_protocol
+                from almanak.framework.observability.context import get_cycle_id
+
                 execution_context = ExecutionContext(
                     strategy_id=strategy_id,
                     chain=strategy.chain,
                     wallet_address=strategy.wallet_address,
                     correlation_id=intent.intent_id,
+                    cycle_id=get_cycle_id() or "",
                     protocol=resolved_protocol,
                 )
                 last_execution_context = execution_context
@@ -2360,6 +2396,22 @@ class StrategyRunner:
 
                     # Set receipt for state machine validation
                     state_machine.set_receipt(receipt)
+
+                    emit_phase_event(
+                        strategy_id=strategy_id,
+                        phase=StrategyPhase.EXECUTE,
+                        event_type="TRANSACTION_CONFIRMED" if execution_result.success else "TRANSACTION_FAILED",
+                        description=f"Execution {'succeeded' if execution_result.success else 'failed'} "
+                        f"(gas={execution_result.total_gas_used})",
+                        chain=strategy.chain,
+                        tx_hash=tx_hash,
+                        details={
+                            "success": execution_result.success,
+                            "gas_used": execution_result.total_gas_used,
+                            "tx_count": len(execution_result.transaction_results),
+                            "error": execution_result.error or "",
+                        },
+                    )
 
                     if execution_result.success:
                         logger.info(
