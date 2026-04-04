@@ -1484,6 +1484,16 @@ class IntegrationServiceStub(object):
                 request_serializer=gateway__pb2.GeckoTerminalOHLCVRequest.SerializeToString,
                 response_deserializer=gateway__pb2.GeckoTerminalOHLCVResponse.FromString,
                 _registered_method=True)
+        self.GetWalletPortfolio = channel.unary_unary(
+                '/almanak.gateway.proto.IntegrationService/GetWalletPortfolio',
+                request_serializer=gateway__pb2.WalletPortfolioRequest.SerializeToString,
+                response_deserializer=gateway__pb2.WalletPortfolioResponse.FromString,
+                _registered_method=True)
+        self.GetWalletPositions = channel.unary_unary(
+                '/almanak.gateway.proto.IntegrationService/GetWalletPositions',
+                request_serializer=gateway__pb2.WalletPortfolioRequest.SerializeToString,
+                response_deserializer=gateway__pb2.WalletPortfolioResponse.FromString,
+                _registered_method=True)
 
 
 class IntegrationServiceServicer(object):
@@ -1557,6 +1567,19 @@ class IntegrationServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetWalletPortfolio(self, request, context):
+        """External portfolio APIs (Zerion, future providers)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetWalletPositions(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_IntegrationServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -1609,6 +1632,16 @@ def add_IntegrationServiceServicer_to_server(servicer, server):
                     servicer.GeckoTerminalGetOHLCV,
                     request_deserializer=gateway__pb2.GeckoTerminalOHLCVRequest.FromString,
                     response_serializer=gateway__pb2.GeckoTerminalOHLCVResponse.SerializeToString,
+            ),
+            'GetWalletPortfolio': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetWalletPortfolio,
+                    request_deserializer=gateway__pb2.WalletPortfolioRequest.FromString,
+                    response_serializer=gateway__pb2.WalletPortfolioResponse.SerializeToString,
+            ),
+            'GetWalletPositions': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetWalletPositions,
+                    request_deserializer=gateway__pb2.WalletPortfolioRequest.FromString,
+                    response_serializer=gateway__pb2.WalletPortfolioResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1885,6 +1918,60 @@ class IntegrationService(object):
             '/almanak.gateway.proto.IntegrationService/GeckoTerminalGetOHLCV',
             gateway__pb2.GeckoTerminalOHLCVRequest.SerializeToString,
             gateway__pb2.GeckoTerminalOHLCVResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetWalletPortfolio(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.IntegrationService/GetWalletPortfolio',
+            gateway__pb2.WalletPortfolioRequest.SerializeToString,
+            gateway__pb2.WalletPortfolioResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetWalletPositions(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.IntegrationService/GetWalletPositions',
+            gateway__pb2.WalletPortfolioRequest.SerializeToString,
+            gateway__pb2.WalletPortfolioResponse.FromString,
             options,
             channel_credentials,
             insecure,

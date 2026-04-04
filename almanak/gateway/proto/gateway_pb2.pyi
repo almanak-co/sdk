@@ -2118,6 +2118,124 @@ class TheGraphQueryResponse(_message.Message):
 Global___TheGraphQueryResponse: _TypeAlias = TheGraphQueryResponse  # noqa: Y015
 
 @_typing.final
+class WalletPortfolioRequest(_message.Message):
+    """=============================================================================
+    Wallet Portfolio Integration Messages
+    =============================================================================
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PROVIDER_FIELD_NUMBER: _builtins.int
+    wallet_address: _builtins.str
+    """Wallet address to inspect"""
+    chain: _builtins.str
+    """Chain name (e.g., "avalanche", "arbitrum")"""
+    provider: _builtins.str
+    """Optional provider override (default: settings)"""
+    def __init__(
+        self,
+        *,
+        wallet_address: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        provider: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "provider", b"provider", "wallet_address", b"wallet_address"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___WalletPortfolioRequest: _TypeAlias = WalletPortfolioRequest  # noqa: Y015
+
+@_typing.final
+class WalletPortfolioPosition(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    POSITION_ID_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    LABEL_FIELD_NUMBER: _builtins.int
+    POSITION_TYPE_FIELD_NUMBER: _builtins.int
+    VALUE_USD_FIELD_NUMBER: _builtins.int
+    POOL_ADDRESS_FIELD_NUMBER: _builtins.int
+    TOKEN_SYMBOLS_FIELD_NUMBER: _builtins.int
+    RAW_DETAILS_JSON_FIELD_NUMBER: _builtins.int
+    position_id: _builtins.str
+    """Provider-specific position id when available"""
+    protocol: _builtins.str
+    """Protocol slug or display name"""
+    label: _builtins.str
+    """Human-readable label"""
+    position_type: _builtins.str
+    """Provider-native type classification"""
+    value_usd: _builtins.str
+    """USD value as string"""
+    pool_address: _builtins.str
+    """Pool/vault/market address when available"""
+    raw_details_json: _builtins.str
+    """Provider-normalized details payload"""
+    @_builtins.property
+    def token_symbols(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
+        """Token symbols involved in the position"""
+
+    def __init__(
+        self,
+        *,
+        position_id: _builtins.str = ...,
+        protocol: _builtins.str = ...,
+        label: _builtins.str = ...,
+        position_type: _builtins.str = ...,
+        value_usd: _builtins.str = ...,
+        pool_address: _builtins.str = ...,
+        token_symbols: _abc.Iterable[_builtins.str] | None = ...,
+        raw_details_json: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["label", b"label", "pool_address", b"pool_address", "position_id", b"position_id", "position_type", b"position_type", "protocol", b"protocol", "raw_details_json", b"raw_details_json", "token_symbols", b"token_symbols", "value_usd", b"value_usd"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___WalletPortfolioPosition: _TypeAlias = WalletPortfolioPosition  # noqa: Y015
+
+@_typing.final
+class WalletPortfolioResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    PROVIDER_FIELD_NUMBER: _builtins.int
+    WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    TOTAL_VALUE_USD_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    CACHE_HIT_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    POSITIONS_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    provider: _builtins.str
+    wallet_address: _builtins.str
+    chain: _builtins.str
+    total_value_usd: _builtins.str
+    timestamp: _builtins.int
+    cache_hit: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def positions(self) -> _containers.RepeatedCompositeFieldContainer[Global___WalletPortfolioPosition]: ...
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        provider: _builtins.str = ...,
+        wallet_address: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        total_value_usd: _builtins.str = ...,
+        timestamp: _builtins.int = ...,
+        cache_hit: _builtins.bool = ...,
+        error: _builtins.str = ...,
+        positions: _abc.Iterable[Global___WalletPortfolioPosition] | None = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cache_hit", b"cache_hit", "chain", b"chain", "error", b"error", "positions", b"positions", "provider", b"provider", "success", b"success", "timestamp", b"timestamp", "total_value_usd", b"total_value_usd", "wallet_address", b"wallet_address"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___WalletPortfolioResponse: _TypeAlias = WalletPortfolioResponse  # noqa: Y015
+
+@_typing.final
 class SimulateTransaction(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 

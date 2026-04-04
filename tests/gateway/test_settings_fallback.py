@@ -107,8 +107,22 @@ class TestSettingsFallback:
             settings = GatewaySettings()
             assert settings.enso_api_key == "prefixed-enso-key"
 
+    def test_portfolio_api_key_fallback(self):
+        """ALMANAK_PORTFOLIO_API_KEY populates portfolio_api_key when gateway var is unset."""
+        env = {"ALMANAK_PORTFOLIO_API_KEY": "portfolio-test-key", "ALMANAK_GATEWAY_PORTFOLIO_API_KEY": ""}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.portfolio_api_key == "portfolio-test-key"
+
+    def test_zerion_api_key_fallback(self):
+        """ZERION_API_KEY also populates portfolio_api_key for local experiments."""
+        env = {"ZERION_API_KEY": "zerion-test-key", "ALMANAK_GATEWAY_PORTFOLIO_API_KEY": "", "ALMANAK_PORTFOLIO_API_KEY": ""}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.portfolio_api_key == "zerion-test-key"
+
     def test_api_keys_empty_when_neither_set(self):
-        """alchemy_api_key, coingecko_api_key, and enso_api_key remain empty when no env vars are set."""
+        """Third-party API key fields remain empty when no env vars are set."""
         env = {
             "ALMANAK_GATEWAY_ALCHEMY_API_KEY": "",
             "ALCHEMY_API_KEY": "",
@@ -116,9 +130,13 @@ class TestSettingsFallback:
             "COINGECKO_API_KEY": "",
             "ALMANAK_GATEWAY_ENSO_API_KEY": "",
             "ENSO_API_KEY": "",
+            "ALMANAK_GATEWAY_PORTFOLIO_API_KEY": "",
+            "ALMANAK_PORTFOLIO_API_KEY": "",
+            "ZERION_API_KEY": "",
         }
         with patch.dict(os.environ, env, clear=False):
             settings = GatewaySettings()
             assert not settings.alchemy_api_key
             assert not settings.coingecko_api_key
             assert not settings.enso_api_key
+            assert not settings.portfolio_api_key

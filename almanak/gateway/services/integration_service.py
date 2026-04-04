@@ -1,6 +1,6 @@
 """IntegrationService implementation - third-party data sources.
 
-This service exposes platform integrations (Binance, CoinGecko, TheGraph)
+This service exposes platform integrations (Binance, CoinGecko, TheGraph, Zerion)
 to strategy containers via gRPC. All API keys and rate limiting are handled
 in the gateway.
 """
@@ -16,10 +16,13 @@ from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.integrations.binance import BinanceIntegration
 from almanak.gateway.integrations.coingecko import CoinGeckoIntegration
 from almanak.gateway.integrations.thegraph import TheGraphIntegration
+from almanak.gateway.integrations.zerion import ZerionIntegration, ZerionPortfolioSnapshot
 from almanak.gateway.metrics import record_integration_latency, record_integration_request
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.validation import (
     ValidationError,
+    validate_address_for_chain,
+    validate_chain,
     validate_graphql_query,
     validate_symbol,
     validate_token_id,
@@ -47,6 +50,7 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
         self._binance: BinanceIntegration | None = None
         self._coingecko: CoinGeckoIntegration | None = None
         self._thegraph: TheGraphIntegration | None = None
+        self._zerion: ZerionIntegration | None = None
         self._initialized = False
 
     async def _ensure_initialized(self) -> None:
@@ -65,8 +69,14 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
         # Initialize TheGraph
         self._thegraph = TheGraphIntegration()
 
+        # Initialize Zerion portfolio integration if configured
+        self._zerion = ZerionIntegration(
+            api_key=self.settings.portfolio_api_key,
+            cache_ttl=self.settings.portfolio_api_cache_ttl,
+        )
+
         self._initialized = True
-        logger.debug("IntegrationService initialized with Binance, CoinGecko, TheGraph")
+        logger.debug("IntegrationService initialized with Binance, CoinGecko, TheGraph, Zerion")
 
     # =========================================================================
     # Binance endpoints
@@ -743,6 +753,140 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             context.set_details("GeckoTerminal OHLCV request failed")
             return gateway_pb2.GeckoTerminalOHLCVResponse()
 
+    # =========================================================================
+    # Wallet portfolio endpoints
+    # =========================================================================
+
+    async def GetWalletPortfolio(
+        self,
+        request: gateway_pb2.WalletPortfolioRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.WalletPortfolioResponse:
+        """Get external wallet portfolio summary for a chain."""
+        await self._ensure_initialized()
+        provider, chain, wallet_address = self._validate_wallet_portfolio_request(request, context)
+        if provider is None or chain is None or wallet_address is None:
+            return gateway_pb2.WalletPortfolioResponse(success=False)
+
+        try:
+            integration = self._get_portfolio_provider(provider, context)
+            if integration is None:
+                return gateway_pb2.WalletPortfolioResponse(success=False, provider=provider, chain=chain)
+
+            start_time_metric = time.monotonic()
+            snapshot = await integration.get_wallet_portfolio(wallet_address=wallet_address, chain=chain)
+            latency = time.monotonic() - start_time_metric
+            record_integration_request(provider, "get_wallet_portfolio")
+            record_integration_latency(provider, "get_wallet_portfolio", latency)
+            return self._wallet_snapshot_to_proto(snapshot, success=True)
+        except Exception:
+            logger.exception("GetWalletPortfolio failed for %s on %s", wallet_address, chain)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("Wallet portfolio request failed")
+            return gateway_pb2.WalletPortfolioResponse(
+                success=False,
+                provider=provider,
+                wallet_address=wallet_address,
+                chain=chain,
+                error="Wallet portfolio request failed",
+            )
+
+    async def GetWalletPositions(
+        self,
+        request: gateway_pb2.WalletPortfolioRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.WalletPortfolioResponse:
+        """Get external wallet positions for a chain."""
+        await self._ensure_initialized()
+        provider, chain, wallet_address = self._validate_wallet_portfolio_request(request, context)
+        if provider is None or chain is None or wallet_address is None:
+            return gateway_pb2.WalletPortfolioResponse(success=False)
+
+        try:
+            integration = self._get_portfolio_provider(provider, context)
+            if integration is None:
+                return gateway_pb2.WalletPortfolioResponse(success=False, provider=provider, chain=chain)
+
+            start_time_metric = time.monotonic()
+            snapshot = await integration.get_wallet_positions(wallet_address=wallet_address, chain=chain)
+            latency = time.monotonic() - start_time_metric
+            record_integration_request(provider, "get_wallet_positions")
+            record_integration_latency(provider, "get_wallet_positions", latency)
+            return self._wallet_snapshot_to_proto(snapshot, success=True)
+        except Exception:
+            logger.exception("GetWalletPositions failed for %s on %s", wallet_address, chain)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("Wallet positions request failed")
+            return gateway_pb2.WalletPortfolioResponse(
+                success=False,
+                provider=provider,
+                wallet_address=wallet_address,
+                chain=chain,
+                error="Wallet positions request failed",
+            )
+
+    def _validate_wallet_portfolio_request(
+        self,
+        request: gateway_pb2.WalletPortfolioRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tuple[str | None, str | None, str | None]:
+        provider = (request.provider or self.settings.portfolio_api_provider or "zerion").strip().lower()
+
+        try:
+            chain = validate_chain(request.chain)
+            wallet_address = validate_address_for_chain(request.wallet_address, chain, field="wallet_address")
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return None, None, None
+
+        return provider, chain, wallet_address
+
+    def _get_portfolio_provider(
+        self,
+        provider: str,
+        context: grpc.aio.ServicerContext,
+    ) -> ZerionIntegration | None:
+        if provider != "zerion":
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"Unsupported portfolio provider: {provider}")
+            return None
+
+        if self._zerion is None or not self._zerion.is_configured:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details("Portfolio API is not configured")
+            return None
+
+        return self._zerion
+
+    @staticmethod
+    def _wallet_snapshot_to_proto(
+        snapshot: ZerionPortfolioSnapshot, success: bool
+    ) -> gateway_pb2.WalletPortfolioResponse:
+        positions = [
+            gateway_pb2.WalletPortfolioPosition(
+                position_id=position.position_id,
+                protocol=position.protocol,
+                label=position.label,
+                position_type=position.position_type,
+                value_usd=position.value_usd,
+                pool_address=position.pool_address,
+                token_symbols=position.token_symbols,
+                raw_details_json=json.dumps(position.details, sort_keys=True, default=str),
+            )
+            for position in snapshot.positions
+        ]
+        return gateway_pb2.WalletPortfolioResponse(
+            success=success,
+            provider=snapshot.provider,
+            wallet_address=snapshot.wallet_address,
+            chain=snapshot.chain,
+            total_value_usd=snapshot.total_value_usd,
+            timestamp=int(snapshot.fetched_at.timestamp()),
+            cache_hit=snapshot.cache_hit,
+            positions=positions,
+        )
+
     async def close(self) -> None:
         """Close all integration connections."""
         if self._binance:
@@ -751,3 +895,5 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             await self._coingecko.close()
         if self._thegraph:
             await self._thegraph.close()
+        if self._zerion:
+            await self._zerion.close()

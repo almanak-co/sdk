@@ -481,6 +481,10 @@ service IntegrationService {
 
   // GeckoTerminal DEX OHLCV endpoint (proxy for deployed strategies without internet)
   rpc GeckoTerminalGetOHLCV(GeckoTerminalOHLCVRequest) returns (GeckoTerminalOHLCVResponse);
+
+  // External portfolio APIs (Zerion, future providers)
+  rpc GetWalletPortfolio(WalletPortfolioRequest) returns (WalletPortfolioResponse);
+  rpc GetWalletPositions(WalletPortfolioRequest) returns (WalletPortfolioResponse);
 }
 
 // =============================================================================
@@ -647,6 +651,39 @@ message TheGraphQueryResponse {
   string data = 1;            // JSON-encoded query result
   string errors = 2;          // JSON-encoded errors array if any
   bool success = 3;
+}
+
+// =============================================================================
+// Wallet Portfolio Integration Messages
+// =============================================================================
+
+message WalletPortfolioRequest {
+  string wallet_address = 1;  // Wallet address to inspect
+  string chain = 2;           // Chain name (e.g., "avalanche", "arbitrum")
+  string provider = 3;        // Optional provider override (default: settings)
+}
+
+message WalletPortfolioPosition {
+  string position_id = 1;     // Provider-specific position id when available
+  string protocol = 2;        // Protocol slug or display name
+  string label = 3;           // Human-readable label
+  string position_type = 4;   // Provider-native type classification
+  string value_usd = 5;       // USD value as string
+  string pool_address = 6;    // Pool/vault/market address when available
+  repeated string token_symbols = 7;  // Token symbols involved in the position
+  string raw_details_json = 8; // Provider-normalized details payload
+}
+
+message WalletPortfolioResponse {
+  bool success = 1;
+  string provider = 2;
+  string wallet_address = 3;
+  string chain = 4;
+  string total_value_usd = 5;
+  int64 timestamp = 6;
+  bool cache_hit = 7;
+  string error = 8;
+  repeated WalletPortfolioPosition positions = 9;
 }
 
 // =============================================================================

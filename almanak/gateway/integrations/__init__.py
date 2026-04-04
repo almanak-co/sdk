@@ -4,6 +4,7 @@ This package provides third-party data source integrations for the gateway:
 - BinanceIntegration: Binance market data (ticker, klines, order book)
 - CoinGeckoIntegration: CoinGecko price and market data
 - TheGraphIntegration: TheGraph subgraph queries
+- ZerionIntegration: Wallet portfolio and DeFi position data
 
 All integrations inherit from BaseIntegration and provide:
 - Rate limiting (per-integration configurable)
@@ -19,6 +20,7 @@ from almanak.gateway.integrations.base import (
     IntegrationRegistry,
     RateLimiter,
 )
+from almanak.gateway.integrations.zerion import ZerionIntegration
 
 __all__ = [
     "BaseIntegration",
@@ -26,4 +28,5 @@ __all__ = [
     "IntegrationRateLimitError",
     "IntegrationRegistry",
     "RateLimiter",
+    "ZerionIntegration",
 ]

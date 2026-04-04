@@ -51,6 +51,9 @@ class GatewaySettings(BaseSettings):
     coingecko_api_key: str | None = None
     enso_api_key: str | None = None
     pendle_api_key: str | None = None
+    portfolio_api_key: str | None = None
+    portfolio_api_provider: str = "zerion"
+    portfolio_api_cache_ttl: int = 60
 
     # Pendle API settings
     pendle_api_cache_ttl: float = 15.0  # seconds
@@ -156,6 +159,10 @@ class GatewaySettings(BaseSettings):
             fallback = os.environ.get("ENSO_API_KEY")
             if fallback:
                 self.enso_api_key = fallback
+        if not self.portfolio_api_key:
+            fallback = os.environ.get("ALMANAK_PORTFOLIO_API_KEY") or os.environ.get("ZERION_API_KEY")
+            if fallback:
+                self.portfolio_api_key = fallback
 
         return self
 
