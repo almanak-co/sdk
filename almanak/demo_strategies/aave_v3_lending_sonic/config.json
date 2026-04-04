@@ -1,0 +1,13 @@
+{
+    "collateral_token": "USDC",
+    "collateral_amount": "100",
+    "borrow_token": "WETH",
+    "ltv_target": 0.3,
+    "borrow_amount_override": "0.01",
+    "force_action": "lifecycle",
+    "anvil_funding": {
+        "S": 100,
+        "WETH": 10,
+        "USDC": 10000
+    }
+}
