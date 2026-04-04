@@ -459,6 +459,88 @@ def create_routing_ohlcv_provider(
     )
 
 
+def _get_orca_pool_accounts(strategy_config: dict) -> list[str]:
+    """Fetch Orca Whirlpool accounts to pre-clone for local fork testing.
+
+    Returns the pool's vault accounts and all tick array PDAs covering the
+    expected LP range (plus one buffer array on each side).
+
+    Returns an empty list on any error so fork startup is never blocked.
+
+    Note: Direct HTTP call to Orca API is acceptable here because this runs
+    during CLI fork setup, before the gateway is started.
+    """
+    if strategy_config.get("protocol") != "orca_whirlpools":
+        return []
+    pool_address = strategy_config.get("pool_address")
+    tick_spacing = int(strategy_config.get("tick_spacing", 64))
+    range_pct = float(strategy_config.get("range_pct", 20))
+    if not pool_address:
+        return []
+
+    accounts: list[str] = []
+    try:
+        import math
+
+        import requests as _req
+        from solders.pubkey import Pubkey  # noqa: F811
+    except ImportError:
+        return []
+
+    try:
+        orca_api = os.environ.get("ORCA_API_BASE_URL") or "https://api.orca.so/v2/solana"
+        resp = _req.get(f"{orca_api}/pools/{pool_address}", timeout=10)
+        if resp.status_code != 200:
+            return []
+        raw = resp.json()
+        data = raw.get("data", raw) if isinstance(raw, dict) else raw
+        tick_current = int(data.get("tickCurrentIndex", 0))
+        # Use tickSpacing from API if present (more reliable than config)
+        tick_spacing = int(data.get("tickSpacing", tick_spacing))
+
+        # Add pool vault accounts (SPL token accounts that receive deposited tokens)
+        vault_a = data.get("tokenVaultA")
+        vault_b = data.get("tokenVaultB")
+        if vault_a:
+            accounts.append(vault_a)
+        if vault_b:
+            accounts.append(vault_b)
+    except Exception as _e:
+        click.echo(f"  Warning: could not fetch Orca pool state for pre-clone: {_e}")
+        return []
+
+    try:
+        tick_delta = int(math.log(1 + range_pct / 100) / math.log(1.0001))
+        tick_lower = tick_current - tick_delta
+        tick_upper = tick_current + tick_delta
+        array_size = 88 * tick_spacing
+
+        def _start(tick: int) -> int:
+            if tick >= 0:
+                return (tick // array_size) * array_size
+            else:
+                return -(((-tick - 1) // array_size + 1) * array_size)
+
+        # Collect start indexes: lower, current, upper + 1 buffer on each side
+        starts: set[int] = set()
+        for t in [tick_lower, tick_current, tick_upper]:
+            s = _start(t)
+            starts.update([s - array_size, s, s + array_size])
+
+        program_id = Pubkey.from_string("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc")
+        pool_pk = Pubkey.from_string(pool_address)
+        for s in sorted(starts):
+            pda, _ = Pubkey.find_program_address(
+                [b"tick_array", bytes(pool_pk), str(s).encode()],
+                program_id,
+            )
+            accounts.append(str(pda))
+    except Exception as _e:
+        click.echo(f"  Warning: could not derive Orca tick array PDAs: {_e}")
+
+    return accounts
+
+
 def _validate_safe_mode_preflight(execution_address: str) -> str | None:
     """Validate Safe mode environment consistency between framework and gateway.
 
@@ -2206,9 +2288,24 @@ def run(
                 from ..anvil.solana_fork_manager import SolanaForkManager
 
                 solana_rpc_url = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+                # Clone any pool/account addresses declared in the strategy config
+                _extra_clone = []
+                if strategy_config and isinstance(strategy_config, dict):
+                    for _key in ("pool_address", "pool_a_address", "pool_b_address"):
+                        _addr = strategy_config.get(_key)
+                        if _addr and isinstance(_addr, str):
+                            _extra_clone.append(_addr)
+                    # For Orca Whirlpool strategies, also pre-clone vault + tick array accounts
+                    _orca_accounts = _get_orca_pool_accounts(strategy_config)
+                    if _orca_accounts:
+                        click.echo(f"  Pre-cloning {len(_orca_accounts)} Orca pool accounts (vaults + tick arrays)")
+                        _extra_clone.extend(_orca_accounts)
+                if _extra_clone:
+                    click.echo(f"  Cloning {len(_extra_clone)} account(s) from mainnet")
                 solana_fork_mgr = SolanaForkManager(
                     rpc_url=solana_rpc_url,
                     validator_port=int(os.environ.get("SOLANA_VALIDATOR_PORT", "8899")),
+                    clone_accounts=_extra_clone,
                 )
                 click.echo("  Starting local solana-test-validator...")
                 import asyncio as _aio

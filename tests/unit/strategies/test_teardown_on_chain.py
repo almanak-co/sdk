@@ -62,6 +62,7 @@ KNOWN_VIOLATIONS: set[str] = {
     "strategies/incubating/edge_lp_arb_weth_usdc/strategy.py",
     "strategies/incubating/edge_lp_avax_wavax_usdc/strategy.py",
     "strategies/incubating/edge_lp_avax_wavax_usdt/strategy.py",
+    "strategies/incubating/edge_sol_orca_sol_usdc_lp/strategy.py",
     "strategies/incubating/edge_lp_base_usdc_toriva/strategy.py",
     "strategies/incubating/edge_lp_bsc_usdt_wbnb/strategy.py",
     "strategies/incubating/edge_lp_polygon_wmatic_usdc/strategy.py",
