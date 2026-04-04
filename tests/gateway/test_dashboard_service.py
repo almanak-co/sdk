@@ -13,6 +13,7 @@ Tests cover:
 import json
 import tempfile
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -20,6 +21,7 @@ from uuid import uuid4
 import grpc
 import pytest
 
+from almanak.framework.portfolio.models import PortfolioSnapshot, ValueConfidence
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.dashboard_service import DashboardServiceServicer
@@ -386,6 +388,150 @@ class TestGetStrategyDetails:
         response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
+
+
+class TestPortfolioFallback:
+    """Tests for dashboard portfolio fallback behavior."""
+
+    @pytest.mark.asyncio
+    async def test_fresh_metrics_preferred_over_external(self, dashboard_service):
+        """Fresh metrics should win and avoid external reads."""
+        dashboard_service._initialized = True
+        dashboard_service._state_manager = AsyncMock()
+        dashboard_service._state_manager.get_portfolio_metrics = AsyncMock(
+            return_value=MagicMock(total_value_usd=Decimal("123.45"))
+        )
+        dashboard_service._state_manager.get_latest_snapshot = AsyncMock(
+            return_value=PortfolioSnapshot(
+                timestamp=datetime.now(UTC),
+                strategy_id="test_strategy",
+                total_value_usd=Decimal("123.45"),
+                available_cash_usd=Decimal("100"),
+                value_confidence=ValueConfidence.HIGH,
+            )
+        )
+        dashboard_service._zerion = AsyncMock()
+
+        result = await dashboard_service._get_portfolio_value_and_pnl(
+            "test_strategy",
+            chain="arbitrum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+        )
+
+        assert result == ("123.45", "0")
+        dashboard_service._zerion.get_wallet_portfolio.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_metrics_always_win_even_with_stale_snapshot(self, dashboard_service):
+        """Metrics are authoritative and should not be skipped due to stale snapshots."""
+        dashboard_service._initialized = True
+        dashboard_service._state_manager = AsyncMock()
+        dashboard_service._state_manager.get_portfolio_metrics = AsyncMock(
+            return_value=MagicMock(total_value_usd=Decimal("100"))
+        )
+        dashboard_service._state_manager.get_latest_snapshot = AsyncMock(
+            return_value=PortfolioSnapshot(
+                timestamp=datetime.fromtimestamp(0, tz=UTC),
+                strategy_id="test_strategy",
+                total_value_usd=Decimal("100"),
+                available_cash_usd=Decimal("0"),
+                value_confidence=ValueConfidence.STALE,
+            )
+        )
+        dashboard_service._zerion = AsyncMock()
+
+        result = await dashboard_service._get_portfolio_value_and_pnl(
+            "test_strategy",
+            chain="avalanche",
+            wallet_address="0x1234567890123456789012345678901234567890",
+        )
+
+        assert result == ("100", "0")
+        # Zerion should not be called when metrics are available
+        dashboard_service._zerion.get_wallet_portfolio.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stale_snapshot_uses_external_fallback_when_no_metrics(self, dashboard_service):
+        """Stale snapshot should trigger external fallback when metrics are unavailable."""
+        dashboard_service._initialized = True
+        dashboard_service._state_manager = AsyncMock()
+        dashboard_service._state_manager.get_portfolio_metrics = AsyncMock(return_value=None)
+        dashboard_service._state_manager.get_latest_snapshot = AsyncMock(
+            return_value=PortfolioSnapshot(
+                timestamp=datetime.fromtimestamp(0, tz=UTC),
+                strategy_id="test_strategy",
+                total_value_usd=Decimal("100"),
+                available_cash_usd=Decimal("0"),
+                value_confidence=ValueConfidence.STALE,
+            )
+        )
+        dashboard_service._zerion = AsyncMock()
+        dashboard_service._zerion.get_wallet_portfolio = AsyncMock(
+            return_value=MagicMock(total_value_usd="150.25")
+        )
+
+        result = await dashboard_service._get_portfolio_value_and_pnl(
+            "test_strategy",
+            chain="avalanche",
+            wallet_address="0x1234567890123456789012345678901234567890",
+        )
+
+        assert result == ("150.25", "0")
+        dashboard_service._zerion.get_wallet_portfolio.assert_awaited_once_with(
+            "0x1234567890123456789012345678901234567890",
+            "avalanche",
+        )
+
+    @pytest.mark.asyncio
+    async def test_external_failure_falls_back_to_stale_snapshot(self, dashboard_service):
+        """If external lookup fails, return the stale snapshot instead of zeroing out."""
+        dashboard_service._initialized = True
+        stale_snapshot = PortfolioSnapshot(
+            timestamp=datetime.fromtimestamp(0, tz=UTC),
+            strategy_id="test_strategy",
+            total_value_usd=Decimal("99.50"),
+            available_cash_usd=Decimal("0"),
+            value_confidence=ValueConfidence.STALE,
+        )
+        dashboard_service._state_manager = AsyncMock()
+        dashboard_service._state_manager.get_portfolio_metrics = AsyncMock(return_value=None)
+        dashboard_service._state_manager.get_latest_snapshot = AsyncMock(return_value=stale_snapshot)
+        dashboard_service._zerion = AsyncMock()
+        dashboard_service._zerion.get_wallet_portfolio = AsyncMock(side_effect=RuntimeError("zerion down"))
+
+        result = await dashboard_service._get_portfolio_value_and_pnl(
+            "test_strategy",
+            chain="avalanche",
+            wallet_address="0x1234567890123456789012345678901234567890",
+        )
+
+        assert result == ("99.50", "0")
+
+    @pytest.mark.asyncio
+    async def test_multichain_external_fallback_sums_chain_wallets(self, dashboard_service):
+        """Multi-chain fallback should sum the external totals for each chain wallet."""
+        dashboard_service._initialized = True
+        dashboard_service._state_manager = AsyncMock()
+        dashboard_service._state_manager.get_portfolio_metrics = AsyncMock(return_value=None)
+        dashboard_service._state_manager.get_latest_snapshot = AsyncMock(return_value=None)
+        dashboard_service._zerion = AsyncMock()
+
+        async def _portfolio(wallet_address, chain):
+            totals = {
+                ("arbitrum", "0xaaa"): "10",
+                ("base", "0xbbb"): "15.50",
+            }
+            return MagicMock(total_value_usd=totals[(chain, wallet_address)])
+
+        dashboard_service._zerion.get_wallet_portfolio = AsyncMock(side_effect=_portfolio)
+
+        result = await dashboard_service._get_portfolio_value_and_pnl(
+            "test_strategy",
+            chain="arbitrum,base",
+            chain_wallets={"arbitrum": "0xaaa", "base": "0xbbb"},
+        )
+
+        assert result == ("25.50", "0")
 
 
 class TestGetTimeline:

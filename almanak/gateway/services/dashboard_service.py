@@ -7,6 +7,7 @@ receive the formatted data.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -18,9 +19,11 @@ from uuid import uuid4
 import grpc
 
 if TYPE_CHECKING:
+    from almanak.framework.portfolio.models import PortfolioSnapshot
     from almanak.framework.state.state_manager import StateManager
 
 from almanak.gateway.core.settings import GatewaySettings
+from almanak.gateway.integrations.zerion import ZerionIntegration
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.registry import get_instance_registry
 from almanak.gateway.timeline.store import get_timeline_store
@@ -31,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Strategy categories in the filesystem
 STRATEGY_CATEGORIES = ["demo", "production", "incubating", "poster_child", "tests"]
+PORTFOLIO_STALE_THRESHOLD_SECONDS = 300
 
 
 class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
@@ -57,6 +61,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         self._strategies_root: Path | None = None
         # In-memory cache of strategy positions reported via heartbeat
         self._cached_positions: dict[str, list[gateway_pb2.StrategyPosition]] = {}
+        self._zerion: ZerionIntegration | None = None
 
     async def _ensure_initialized(self) -> None:
         """Lazy initialization of dependencies."""
@@ -104,6 +109,16 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         except Exception as e:
             logger.warning(f"DashboardService: Failed to initialize StateManager: {e}")
             self._state_manager = None
+
+        if self.settings.portfolio_api_key:
+            try:
+                self._zerion = ZerionIntegration(
+                    api_key=self.settings.portfolio_api_key,
+                    cache_ttl=self.settings.portfolio_api_cache_ttl,
+                )
+            except Exception as e:
+                logger.warning(f"DashboardService: Failed to initialize ZerionIntegration: {e}")
+                self._zerion = None
 
         self._initialized = True
         logger.info(f"DashboardService initialized (strategies_root={self._strategies_root})")
@@ -240,17 +255,28 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         return None
 
-    async def _get_portfolio_value_and_pnl(self, strategy_id: str, state: dict | None = None) -> tuple[str, str]:
+    async def _get_portfolio_value_and_pnl(
+        self,
+        strategy_id: str,
+        state: dict | None = None,
+        chain: str = "",
+        wallet_address: str = "",
+        chain_wallets: dict[str, str] | None = None,
+    ) -> tuple[str, str]:
         """Get portfolio total value and PnL.
 
         Primary source: PortfolioMetrics (framework-owned, populated by PortfolioValuer).
-        Fallback: strategy state dict (for strategies that haven't run since
-        the PortfolioValuer was deployed).
+        Fallback order:
+        1. Fresh latest snapshot
+        2. External wallet portfolio API (read-only)
+        3. Stale snapshot
+        4. Strategy state dict (legacy)
 
         Returns:
             Tuple of (total_value_usd, pnl_usd) as strings. Defaults to "0".
         """
-        # Primary: PortfolioMetrics
+        # Primary: PortfolioMetrics are always authoritative when available.
+        # They are framework-owned and updated by PortfolioValuer each iteration.
         if self._state_manager is not None:
             try:
                 metrics = await self._state_manager.get_portfolio_metrics(strategy_id)
@@ -261,9 +287,23 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             except Exception:
                 logger.debug("Failed to get portfolio metrics for %s", strategy_id, exc_info=True)
 
+        latest_snapshot = await self._get_latest_snapshot(strategy_id)
+        if latest_snapshot is not None and self._snapshot_is_fresh(latest_snapshot):
+            return str(latest_snapshot.total_value_usd), "0"
+
+        external_total = await self._get_external_portfolio_total(
+            chain=chain,
+            wallet_address=wallet_address,
+            chain_wallets=chain_wallets,
+        )
+        if external_total is not None:
+            return str(external_total), "0"
+
+        if latest_snapshot is not None:
+            return str(latest_snapshot.total_value_usd), "0"
+
         # Fallback: extract from state dict (legacy strategies)
         if state:
-            total_value_usd = Decimal("0")
             for key in (
                 "total_value_usd",
                 "total_position_value_usd",
@@ -274,13 +314,87 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             ):
                 if key in state:
                     try:
-                        total_value_usd = Decimal(str(state[key]))
-                        break
+                        return str(Decimal(str(state[key]))), "0"
                     except (ValueError, TypeError):
                         continue
-            return str(total_value_usd), "0"
 
         return "0", "0"
+
+    async def _get_latest_snapshot(self, strategy_id: str) -> PortfolioSnapshot | None:
+        """Get the most recent portfolio snapshot for staleness checks."""
+        if self._state_manager is None:
+            return None
+        try:
+            return await self._state_manager.get_latest_snapshot(strategy_id)
+        except Exception:
+            logger.debug("Failed to get latest snapshot for %s", strategy_id, exc_info=True)
+            return None
+
+    @staticmethod
+    def _snapshot_is_fresh(
+        snapshot: PortfolioSnapshot | None,
+        stale_threshold_seconds: int = PORTFOLIO_STALE_THRESHOLD_SECONDS,
+    ) -> bool:
+        """Return True when a snapshot is recent enough to trust directly."""
+        if snapshot is None:
+            return False
+        timestamp = snapshot.timestamp
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=UTC)
+        age = (datetime.now(UTC) - timestamp).total_seconds()
+        return age <= stale_threshold_seconds
+
+    async def _get_external_portfolio_total(
+        self,
+        chain: str,
+        wallet_address: str,
+        chain_wallets: dict[str, str] | None = None,
+    ) -> Decimal | None:
+        """Fetch external portfolio totals for one or more chain/wallet contexts."""
+        if self._zerion is None:
+            return None
+
+        contexts = self._resolve_portfolio_contexts(
+            chain=chain, wallet_address=wallet_address, chain_wallets=chain_wallets
+        )
+        if not contexts:
+            return None
+
+        async def _fetch_one(context_chain: str, context_wallet: str) -> Decimal | None:
+            try:
+                snapshot = await self._zerion.get_wallet_portfolio(context_wallet, context_chain)  # type: ignore[union-attr]
+                return Decimal(snapshot.total_value_usd)
+            except Exception:
+                logger.debug(
+                    "External portfolio lookup failed for %s on %s",
+                    context_wallet,
+                    context_chain,
+                    exc_info=True,
+                )
+                return None
+
+        results = await asyncio.gather(*[_fetch_one(c, w) for c, w in contexts])
+        totals = [r for r in results if r is not None]
+        return sum(totals, Decimal("0")) if totals else None
+
+    @staticmethod
+    def _resolve_portfolio_contexts(
+        chain: str,
+        wallet_address: str,
+        chain_wallets: dict[str, str] | None = None,
+    ) -> list[tuple[str, str]]:
+        """Resolve the chain/wallet contexts to query for dashboard fallback."""
+        if chain_wallets:
+            return [
+                (context_chain.lower(), context_wallet)
+                for context_chain, context_wallet in chain_wallets.items()
+                if context_chain and context_wallet
+            ]
+
+        chains = [value.strip().lower() for value in chain.split(",") if value.strip()]
+        if not chains or not wallet_address:
+            return []
+        return [(context_chain, wallet_address) for context_chain in chains]
 
     async def _get_portfolio_metrics(self, strategy_id: str) -> Decimal | None:
         """Return pnl_after_gas for a strategy, or None if unavailable."""
@@ -443,7 +557,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                         state = await self._get_strategy_state_data(inst.strategy_id)
 
                         # Portfolio metrics (framework-owned, state fallback for legacy)
-                        total_value, pnl = await self._get_portfolio_value_and_pnl(inst.strategy_id, state)
+                        total_value, pnl = await self._get_portfolio_value_and_pnl(
+                            inst.strategy_id,
+                            state,
+                            chain=inst.chain,
+                            wallet_address=inst.wallet_address,
+                            chain_wallets=inst_chain_wallets,
+                        )
                         strategy_info["total_value_usd"] = total_value
                         strategy_info["pnl_24h_usd"] = pnl
 
@@ -616,7 +736,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         state = await self._get_strategy_state_data(strategy_id, fallback_strategy_id=original_strategy_id)
 
         # Portfolio metrics (framework-owned, state fallback for legacy)
-        total_value, pnl = await self._get_portfolio_value_and_pnl(strategy_id, state)
+        total_value, pnl = await self._get_portfolio_value_and_pnl(
+            strategy_id,
+            state,
+            chain=str(strategy_info.get("chain", "")),
+            wallet_address=str(strategy_info.get("wallet_address", "")),
+            chain_wallets=strategy_info.get("chain_wallets"),  # type: ignore[arg-type]
+        )
         strategy_info["total_value_usd"] = total_value
         strategy_info["pnl_24h_usd"] = pnl
 
