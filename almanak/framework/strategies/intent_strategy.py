@@ -3657,11 +3657,12 @@ def almanak_strategy(
                 f"default_chain '{default_chain}' must be one of supported_chains: {resolved_supported_chains}"
             )
 
-        # Warn about missing teardown complement intent types.
+        # Auto-expand teardown complement intent types.
         # One-way: only open→close, matching the permission generator's
         # _TEARDOWN_COMPLEMENTS. A strategy declaring only close types
-        # should not be warned to add open types.
-        if intent_types:
+        # should not auto-gain open type permissions.
+        expanded_intent_types = list(intent_types) if intent_types else []
+        if expanded_intent_types:
             _COMPLEMENT_PAIRS = {
                 "SUPPLY": "WITHDRAW",
                 "BORROW": "REPAY",
@@ -3669,22 +3670,20 @@ def almanak_strategy(
                 "VAULT_DEPOSIT": "VAULT_REDEEM",
                 "PERP_OPEN": "PERP_CLOSE",
             }
-            declared = set(intent_types)
+            declared = set(expanded_intent_types)
             missing = sorted(
-                complement
-                for it in intent_types
-                if (complement := _COMPLEMENT_PAIRS.get(it)) and complement not in declared
+                {
+                    complement
+                    for it in expanded_intent_types
+                    if (complement := _COMPLEMENT_PAIRS.get(it)) and complement not in declared
+                }
             )
             if missing:
-                import warnings
-
-                warnings.warn(
-                    f"Strategy '{name}': intent_types is missing teardown complements: {missing}. "
-                    f"Strategies that use {[it for it in intent_types if _COMPLEMENT_PAIRS.get(it) in missing]} "
-                    "typically need these for safe teardown. The permission generator will auto-add them, "
-                    "but declaring them explicitly is recommended.",
-                    UserWarning,
-                    stacklevel=3,
+                expanded_intent_types.extend(missing)
+                logger.debug(
+                    "Strategy '%s': auto-expanded intent_types with teardown complements %s",
+                    name,
+                    missing,
                 )
 
         metadata = StrategyMetadata(
@@ -3695,7 +3694,7 @@ def almanak_strategy(
             tags=tags or [],
             supported_chains=resolved_supported_chains,
             supported_protocols=supported_protocols or [],
-            intent_types=intent_types or [],
+            intent_types=expanded_intent_types,
             default_chain=resolved_default_chain,
         )
 
