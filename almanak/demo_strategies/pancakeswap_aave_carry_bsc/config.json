@@ -1,0 +1,13 @@
+{
+    "collateral_token": "WBNB",
+    "collateral_amount": "0.5",
+    "borrow_token": "USDC",
+    "swap_to_token": "USDT",
+    "ltv_target": "0.3",
+    "anvil_funding": {
+        "BNB": 10,
+        "WBNB": 5,
+        "USDC": 10000,
+        "USDT": 10000
+    }
+}
