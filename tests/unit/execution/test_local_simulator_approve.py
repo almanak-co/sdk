@@ -599,3 +599,98 @@ class TestExecuteTxGasPricing:
             )
             # Fallback is 1 gwei when baseFee query fails
             assert params["gasPrice"] == 1_000_000_000
+
+
+class TestStateSetupGasBuffer:
+    """Tests for gas buffer applied during state-setup TX execution (VIB-572).
+
+    eth_estimateGas returns the minimum gas at the current block, but
+    send_transaction mines a new block which can shift opcode costs.
+    _execute_tx applies a 20% buffer to prevent consistent reverts
+    during multi-TX state setup (e.g., V3 LP_CLOSE decreaseLiquidity).
+    """
+
+    @pytest.mark.asyncio
+    async def test_execute_tx_applies_gas_buffer(self):
+        """_execute_tx should apply 20% gas buffer to the provided gas limit."""
+        sim = LocalSimulator(rpc_url="http://localhost:8545")
+
+        mock_web3 = MagicMock()
+        mock_web3.to_checksum_address = lambda x: x
+
+        captured_params = {}
+
+        async def capture_send_tx(params):
+            captured_params.update(params)
+            return b"\x00" * 32
+
+        mock_web3.eth.send_transaction = AsyncMock(side_effect=capture_send_tx)
+        mock_web3.eth.wait_for_transaction_receipt = AsyncMock(return_value={"status": 1})
+        sim._web3 = mock_web3
+
+        tx = _make_tx(data=TRANSFER_SELECTOR + "0" * 56, gas_limit=200000)
+        success, error = await sim._execute_tx(tx, gas_limit=200000)
+
+        assert success
+        assert error is None
+        # Gas limit should be 200000 * 1.2 = 240000 (20% buffer)
+        assert captured_params["gas"] == 240000, (
+            f"Expected gas={240000} (200000 * 1.2), got {captured_params['gas']}. "
+            "State-setup TXs need a buffer because mining a new block can shift "
+            "opcode costs vs eth_estimateGas (VIB-572)."
+        )
+
+    @pytest.mark.asyncio
+    async def test_gas_buffer_in_multi_tx_bundle(self):
+        """In a 3-TX bundle, state-setup TXs get buffered gas but returned estimates are raw."""
+        sim = LocalSimulator(rpc_url="http://localhost:8545")
+
+        mock_web3 = MagicMock()
+        mock_web3.to_checksum_address = lambda x: x
+        mock_web3.provider.make_request = AsyncMock(return_value={"result": "0x1"})
+
+        sent_params_list = []
+
+        async def capture_send_tx(params):
+            sent_params_list.append(dict(params))
+            return b"\x00" * 32
+
+        mock_web3.eth.send_transaction = AsyncMock(side_effect=capture_send_tx)
+        mock_web3.eth.wait_for_transaction_receipt = AsyncMock(return_value={"status": 1})
+        mock_web3.eth.estimate_gas = AsyncMock(return_value=150000)
+        sim._web3 = mock_web3
+
+        # 3-TX bundle simulating V3 LP_CLOSE: decreaseLiquidity + collect + burn
+        tx1 = _make_tx(data=TRANSFER_SELECTOR + "0" * 56, gas_limit=250000)
+        tx2 = _make_tx(data=TRANSFER_SELECTOR + "0" * 56, gas_limit=100000)
+        tx3 = _make_tx(data=TRANSFER_SELECTOR + "0" * 56, gas_limit=100000)
+
+        result = await sim.simulate([tx1, tx2, tx3], chain="ethereum")
+
+        assert result.success
+        # TX1 is estimated via eth_estimateGas (first TX), then executed for state setup
+        # TX2 uses compiler gas_limit (multi-TX dependent), then executed for state setup
+        # TX3 is last (not executed for state setup)
+        assert len(sent_params_list) == 2
+
+        # TX1 gas: eth_estimateGas returned 150000, buffered to 180000
+        assert sent_params_list[0]["gas"] == 180000, (
+            f"TX1 state-setup gas should be 150000 * 1.2 = 180000, got {sent_params_list[0]['gas']}"
+        )
+        # TX2 gas: compiler gas_limit 100000, buffered to 120000
+        assert sent_params_list[1]["gas"] == 120000, (
+            f"TX2 state-setup gas should be 100000 * 1.2 = 120000, got {sent_params_list[1]['gas']}"
+        )
+
+        # Returned gas estimates should be RAW (unbuffered) for the orchestrator
+        # TX1: estimated at 150000, TX2: compiler gas_limit 100000, TX3: compiler gas_limit 100000
+        assert result.gas_estimates == [150000, 100000, 100000]
+
+    @pytest.mark.asyncio
+    async def test_gas_buffer_constant_value(self):
+        """Verify the gas buffer constant is 1.2 (20%)."""
+        from almanak.framework.execution.simulator.local import _STATE_SETUP_GAS_BUFFER
+
+        assert _STATE_SETUP_GAS_BUFFER == 1.2, (
+            f"Gas buffer should be 1.2 (20%), got {_STATE_SETUP_GAS_BUFFER}"
+        )
