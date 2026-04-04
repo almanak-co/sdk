@@ -518,7 +518,7 @@ class PostgresStore:
                 """
                 SELECT version, state_data, schema_version,
                        checksum, created_at
-                FROM v2_strategy_state
+                FROM strategy_state
                 WHERE agent_id = $1
                 """,
                 strategy_id,
@@ -559,12 +559,12 @@ class PostgresStore:
                 # UPSERT: insert new or overwrite existing (version increments)
                 await conn.execute(
                     """
-                    INSERT INTO v2_strategy_state
+                    INSERT INTO strategy_state
                         (agent_id, version, state_data, schema_version, checksum,
                          created_at, updated_at)
                     VALUES ($1, $2, $3::jsonb, $4, $5, now(), now())
                     ON CONFLICT (agent_id) DO UPDATE SET
-                        version = v2_strategy_state.version + 1,
+                        version = strategy_state.version + 1,
                         state_data = EXCLUDED.state_data,
                         schema_version = EXCLUDED.schema_version,
                         checksum = EXCLUDED.checksum,
@@ -581,7 +581,7 @@ class PostgresStore:
                 # CAS update -- inline version check
                 result = await conn.execute(
                     """
-                    UPDATE v2_strategy_state
+                    UPDATE strategy_state
                     SET version = version + 1,
                         state_data = $3::jsonb,
                         schema_version = $4,
@@ -600,7 +600,7 @@ class PostgresStore:
                 if result == "UPDATE 0":
                     # Version mismatch -- get actual version for the error
                     actual = await conn.fetchval(
-                        "SELECT version FROM v2_strategy_state WHERE agent_id = $1",
+                        "SELECT version FROM strategy_state WHERE agent_id = $1",
                         state.strategy_id,
                     )
                     raise StateConflictError(
@@ -621,7 +621,7 @@ class PostgresStore:
 
         async with self._pool.acquire() as conn:
             result = await conn.execute(
-                "DELETE FROM v2_strategy_state WHERE agent_id = $1",
+                "DELETE FROM strategy_state WHERE agent_id = $1",
                 strategy_id,
             )
             return result != "DELETE 0"
@@ -632,7 +632,7 @@ class PostgresStore:
             await self.initialize()
 
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("SELECT agent_id FROM v2_strategy_state")
+            rows = await conn.fetch("SELECT agent_id FROM strategy_state")
             return [row["agent_id"] for row in rows]
 
 

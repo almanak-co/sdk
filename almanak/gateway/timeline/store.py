@@ -280,7 +280,7 @@ class TimelineStore:
                 """
                 SELECT event_id, agent_id, timestamp, event_type,
                        description, tx_hash, chain, details_json
-                FROM v2_timeline_events
+                FROM timeline_events
                 ORDER BY timestamp DESC
                 """
             )
@@ -323,7 +323,7 @@ class TimelineStore:
         async with self._pg_pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO v2_timeline_events
+                INSERT INTO timeline_events
                     (event_id, agent_id, timestamp, event_type, description,
                      tx_hash, chain, details_json)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -356,11 +356,11 @@ class TimelineStore:
         async with self._pg_pool.acquire() as conn:
             if resolved_id is not None:
                 await conn.execute(
-                    "DELETE FROM v2_timeline_events WHERE agent_id = $1",
+                    "DELETE FROM timeline_events WHERE agent_id = $1",
                     resolved_id,
                 )
             else:
-                await conn.execute("DELETE FROM v2_timeline_events")
+                await conn.execute("DELETE FROM timeline_events")
 
     # =========================================================================
     # SQLite backend (local development)
@@ -375,7 +375,7 @@ class TimelineStore:
 
         with sqlite3.connect(str(self._db_path)) as conn:
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS v2_timeline_events (
+                CREATE TABLE IF NOT EXISTS timeline_events (
                     event_id TEXT PRIMARY KEY,
                     strategy_id TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
@@ -389,15 +389,15 @@ class TimelineStore:
             """)
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_timeline_strategy_id
-                ON v2_timeline_events(strategy_id)
+                ON timeline_events(strategy_id)
             """)
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_timeline_timestamp
-                ON v2_timeline_events(timestamp DESC)
+                ON timeline_events(timestamp DESC)
             """)
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_timeline_event_type
-                ON v2_timeline_events(event_type)
+                ON timeline_events(event_type)
             """)
             conn.commit()
 
@@ -411,7 +411,7 @@ class TimelineStore:
             cursor = conn.execute("""
                 SELECT event_id, strategy_id, timestamp, event_type,
                        description, tx_hash, chain, details_json
-                FROM v2_timeline_events
+                FROM timeline_events
                 ORDER BY timestamp DESC
             """)
 
@@ -449,7 +449,7 @@ class TimelineStore:
         with sqlite3.connect(str(self._db_path)) as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO v2_timeline_events
+                INSERT OR REPLACE INTO timeline_events
                 (event_id, strategy_id, timestamp, event_type, description,
                  tx_hash, chain, details_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -596,11 +596,11 @@ class TimelineStore:
                 with sqlite3.connect(str(self._db_path)) as conn:
                     if strategy_id is not None:
                         conn.execute(
-                            "DELETE FROM v2_timeline_events WHERE strategy_id = ?",
+                            "DELETE FROM timeline_events WHERE strategy_id = ?",
                             (strategy_id,),
                         )
                     else:
-                        conn.execute("DELETE FROM v2_timeline_events")
+                        conn.execute("DELETE FROM timeline_events")
                     conn.commit()
 
     def close(self) -> None:

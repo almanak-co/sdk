@@ -179,11 +179,11 @@ CREATE TABLE IF NOT EXISTS strategies (
 );
 
 -- --------------------------------------------------------------------------
--- v2_strategy_state: Single row per strategy with CAS (Compare-And-Swap) via version
+-- strategy_state: Single row per strategy with CAS (Compare-And-Swap) via version
 -- --------------------------------------------------------------------------
 -- This relational schema is distinct from the deployed gateway PostgreSQL
 -- schema in almanak.gateway.database, which uses agent_id for platform mode.
-CREATE TABLE IF NOT EXISTS v2_strategy_state (
+CREATE TABLE IF NOT EXISTS strategy_state (
     strategy_id UUID PRIMARY KEY REFERENCES strategies(id) ON DELETE CASCADE,
 
     -- Version for CAS semantics - incremented on each update
@@ -201,8 +201,8 @@ CREATE TABLE IF NOT EXISTS v2_strategy_state (
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
 
     -- Constraints
-    CONSTRAINT v2_strategy_state_version_positive CHECK (version > 0),
-    CONSTRAINT v2_strategy_state_schema_version_positive CHECK (schema_version > 0)
+    CONSTRAINT strategy_state_version_positive CHECK (version > 0),
+    CONSTRAINT strategy_state_schema_version_positive CHECK (schema_version > 0)
 );
 
 -- --------------------------------------------------------------------------
@@ -387,8 +387,8 @@ CREATE INDEX IF NOT EXISTS idx_strategies_owner ON strategies (owner_id);
 CREATE INDEX IF NOT EXISTS idx_strategies_updated_at ON strategies (updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_strategies_tags ON strategies USING GIN (tags);
 
--- v2_strategy_state indexes (strategy_id is PK, no extra index needed)
-CREATE INDEX IF NOT EXISTS idx_v2_strategy_state_created_at ON v2_strategy_state (created_at DESC);
+-- strategy_state indexes (strategy_id is PK, no extra index needed)
+CREATE INDEX IF NOT EXISTS idx_strategy_state_created_at ON strategy_state (created_at DESC);
 
 -- strategy_events indexes
 CREATE INDEX IF NOT EXISTS idx_strategy_events_strategy_id ON strategy_events (strategy_id);
@@ -471,9 +471,9 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Trigger for state checksum
-DROP TRIGGER IF EXISTS trigger_v2_strategy_state_checksum ON v2_strategy_state;
-CREATE TRIGGER trigger_v2_strategy_state_checksum
-    BEFORE INSERT OR UPDATE OF state_data ON v2_strategy_state
+DROP TRIGGER IF EXISTS trigger_strategy_state_checksum ON strategy_state;
+CREATE TRIGGER trigger_strategy_state_checksum
+    BEFORE INSERT OR UPDATE OF state_data ON strategy_state
     FOR EACH ROW
     EXECUTE FUNCTION calculate_state_checksum();
 
@@ -493,7 +493,7 @@ RETURNS BOOLEAN AS $$
 DECLARE
     v_updated INTEGER;
 BEGIN
-    UPDATE v2_strategy_state
+    UPDATE strategy_state
     SET state_data = p_new_state,
         version = version + 1,
         updated_at = NOW()
@@ -516,7 +516,7 @@ RETURNS TABLE (
 BEGIN
     RETURN QUERY
     SELECT ss.version, ss.state_data, ss.schema_version, ss.created_at
-    FROM v2_strategy_state ss
+    FROM strategy_state ss
     WHERE ss.strategy_id = p_strategy_id;
 END;
 $$ LANGUAGE plpgsql;
@@ -651,7 +651,7 @@ SELECT
     (SELECT COUNT(*) FROM alerts a WHERE a.strategy_id = s.id AND a.status = 'PENDING') as pending_alerts,
     CASE WHEN oc.id IS NOT NULL THEN TRUE ELSE FALSE END as has_active_card
 FROM strategies s
-LEFT JOIN v2_strategy_state ss ON s.id = ss.strategy_id
+LEFT JOIN strategy_state ss ON s.id = ss.strategy_id
 LEFT JOIN operator_cards oc ON s.id = oc.strategy_id AND oc.is_active = TRUE;
 
 -- View for recent events across all strategies
@@ -727,7 +727,7 @@ ORDER BY
 -- ============================================================================
 
 COMMENT ON TABLE strategies IS 'Core strategy metadata including name, chain, protocol, and operational status';
-COMMENT ON TABLE v2_strategy_state IS 'Single row per strategy state storage with CAS semantics via version field';
+COMMENT ON TABLE strategy_state IS 'Single row per strategy state storage with CAS semantics via version field';
 COMMENT ON TABLE strategy_events IS 'Chronological event timeline for audit and debugging';
 COMMENT ON TABLE strategy_versions IS 'Code and configuration version tracking for deployments and rollbacks';
 COMMENT ON TABLE alerts IS 'Alert instances with status tracking and escalation support';

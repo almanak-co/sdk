@@ -15,16 +15,15 @@ def state_db(tmp_path):
     db_path = tmp_path / "almanak_state.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute(
-        """CREATE TABLE v2_strategy_state (
+        """CREATE TABLE strategy_state (
             strategy_id TEXT PRIMARY KEY,
             version INTEGER DEFAULT 1,
-            state_data TEXT,
-            is_active INTEGER DEFAULT 1
+            state_data TEXT
         )"""
     )
     conn.execute(
-        "INSERT INTO v2_strategy_state (strategy_id, version, state_data, is_active) VALUES (?, ?, ?, ?)",
-        ("test-strategy", 1, json.dumps({"buy_executed": True}), 1),
+        "INSERT INTO strategy_state (strategy_id, version, state_data) VALUES (?, ?, ?)",
+        ("test-strategy", 1, json.dumps({"buy_executed": True})),
     )
     conn.commit()
     conn.close()

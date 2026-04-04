@@ -1920,7 +1920,7 @@ def run(
 
                 with sqlite3.connect(str(state_db_path)) as conn:
                     cursor = conn.execute(
-                        "DELETE FROM v2_strategy_state WHERE strategy_id = ?",
+                        "DELETE FROM strategy_state WHERE strategy_id = ?",
                         (strategy_id,),
                     )
                     deleted = cursor.rowcount
@@ -1962,7 +1962,7 @@ def run(
             conn = sqlite3.connect(str(state_db_path))
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
-                "SELECT strategy_id, version, state_data FROM v2_strategy_state WHERE strategy_id = ? AND is_active = 1",
+                "SELECT strategy_id, version, state_data FROM strategy_state WHERE strategy_id = ?",
                 (strategy_id,),
             )
             row = cursor.fetchone()

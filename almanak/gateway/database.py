@@ -41,7 +41,7 @@ def _strip_schema_param(database_url: str) -> tuple[str, str | None]:
 
 POSTGRES_SCHEMA = """
 -- Lifecycle tables ---------------------------------------------------------
-CREATE TABLE IF NOT EXISTS v2_agent_state (
+CREATE TABLE IF NOT EXISTS agent_state (
     agent_id          TEXT PRIMARY KEY,
     state             TEXT NOT NULL,
     state_changed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -52,9 +52,9 @@ CREATE TABLE IF NOT EXISTS v2_agent_state (
 );
 
 -- Migration: add source column to existing installations
-ALTER TABLE v2_agent_state ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'gateway';
+ALTER TABLE agent_state ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'gateway';
 
-CREATE TABLE IF NOT EXISTS v2_agent_command (
+CREATE TABLE IF NOT EXISTS agent_command (
     id            BIGSERIAL PRIMARY KEY,
     agent_id      TEXT NOT NULL,
     command       TEXT NOT NULL,
@@ -63,18 +63,18 @@ CREATE TABLE IF NOT EXISTS v2_agent_command (
     processed_at  TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_v2_agent_command_pending
-    ON v2_agent_command (agent_id, id DESC)
+CREATE INDEX IF NOT EXISTS idx_agent_command_pending
+    ON agent_command (agent_id, id DESC)
     WHERE processed_at IS NULL;
 
-CREATE INDEX IF NOT EXISTS idx_v2_agent_state_heartbeat
-    ON v2_agent_state (state, last_heartbeat_at)
+CREATE INDEX IF NOT EXISTS idx_agent_state_heartbeat
+    ON agent_state (state, last_heartbeat_at)
     WHERE state = 'RUNNING';
 
 -- Strategy state tables ----------------------------------------------------
 -- Single row per agent with CAS (Compare-And-Swap) via version field.
 -- Each gateway serves exactly one strategy; no two strategies share a gateway.
-CREATE TABLE IF NOT EXISTS v2_strategy_state (
+CREATE TABLE IF NOT EXISTS strategy_state (
     agent_id        TEXT PRIMARY KEY,
     version         BIGINT NOT NULL DEFAULT 1,
     state_data      JSONB NOT NULL,
@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS v2_strategy_state (
 );
 
 -- Portfolio snapshots table -------------------------------------------------
-CREATE TABLE IF NOT EXISTS v2_portfolio_snapshots (
+CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     id                 BIGSERIAL PRIMARY KEY,
     agent_id           TEXT NOT NULL,
     timestamp          TIMESTAMPTZ NOT NULL,
@@ -98,14 +98,14 @@ CREATE TABLE IF NOT EXISTS v2_portfolio_snapshots (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_portfolio_snapshots_agent_time
-    ON v2_portfolio_snapshots (agent_id, timestamp);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolio_snapshots_agent_time
+    ON portfolio_snapshots (agent_id, timestamp);
 
-CREATE INDEX IF NOT EXISTS idx_v2_portfolio_snapshots_cleanup
-    ON v2_portfolio_snapshots (created_at);
+CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_cleanup
+    ON portfolio_snapshots (created_at);
 
 -- Portfolio metrics table ---------------------------------------------------
-CREATE TABLE IF NOT EXISTS v2_portfolio_metrics (
+CREATE TABLE IF NOT EXISTS portfolio_metrics (
     agent_id          TEXT PRIMARY KEY,
     initial_value_usd TEXT NOT NULL,
     initial_timestamp TIMESTAMPTZ NOT NULL,
@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS v2_portfolio_metrics (
 );
 
 -- CLOB orders table ---------------------------------------------------------
-CREATE TABLE IF NOT EXISTS v2_clob_orders (
+CREATE TABLE IF NOT EXISTS clob_orders (
     id                 BIGSERIAL PRIMARY KEY,
     agent_id           TEXT NOT NULL,
     order_id           TEXT NOT NULL,
@@ -137,17 +137,17 @@ CREATE TABLE IF NOT EXISTS v2_clob_orders (
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_clob_orders_agent_order
-    ON v2_clob_orders (agent_id, order_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_clob_orders_agent_order
+    ON clob_orders (agent_id, order_id);
 
-CREATE INDEX IF NOT EXISTS idx_v2_clob_orders_status
-    ON v2_clob_orders (agent_id, status);
+CREATE INDEX IF NOT EXISTS idx_clob_orders_status
+    ON clob_orders (agent_id, status);
 
-CREATE INDEX IF NOT EXISTS idx_v2_clob_orders_market
-    ON v2_clob_orders (agent_id, market_id, status);
+CREATE INDEX IF NOT EXISTS idx_clob_orders_market
+    ON clob_orders (agent_id, market_id, status);
 
 -- Timeline events table (dashboard data) ------------------------------------
-CREATE TABLE IF NOT EXISTS v2_timeline_events (
+CREATE TABLE IF NOT EXISTS timeline_events (
     id            BIGSERIAL PRIMARY KEY,
     event_id      TEXT NOT NULL UNIQUE,
     agent_id      TEXT NOT NULL,
@@ -160,11 +160,11 @@ CREATE TABLE IF NOT EXISTS v2_timeline_events (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_v2_timeline_events_agent_time
-    ON v2_timeline_events (agent_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_timeline_events_agent_time
+    ON timeline_events (agent_id, timestamp DESC);
 
-CREATE INDEX IF NOT EXISTS idx_v2_timeline_events_agent_type
-    ON v2_timeline_events (agent_id, event_type);
+CREATE INDEX IF NOT EXISTS idx_timeline_events_agent_type
+    ON timeline_events (agent_id, event_type);
 """
 
 

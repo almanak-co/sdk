@@ -2,7 +2,7 @@
 
 Tests cover:
 - _strip_schema_param URL parsing
-- deployed v2_strategy_state DDL shape
+- deployed strategy_state DDL shape
 """
 
 import re
@@ -49,8 +49,8 @@ class TestStripSchemaParam:
 
 
 class TestPostgresSchema:
-    def test_v2_strategy_state_uses_agent_id_primary_key(self):
-        start = POSTGRES_SCHEMA.index("CREATE TABLE IF NOT EXISTS v2_strategy_state")
+    def test_strategy_state_uses_agent_id_primary_key(self):
+        start = POSTGRES_SCHEMA.index("CREATE TABLE IF NOT EXISTS strategy_state")
         end = POSTGRES_SCHEMA.index(");", start)
         ddl = POSTGRES_SCHEMA[start:end]
 

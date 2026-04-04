@@ -4,7 +4,7 @@ This service provides state persistence for strategy containers via gRPC.
 All state storage backends (PostgreSQL, SQLite) are accessed here in
 the gateway; strategy containers only see the state data.
 
-Portfolio snapshots are persisted to the ``v2_portfolio_snapshots`` table
+Portfolio snapshots are persisted to the ``portfolio_snapshots`` table
 (PostgreSQL in deployed mode, SQLite in local dev) and exposed via three
 RPCs: SavePortfolioSnapshot, GetLatestSnapshot, GetSnapshotsSince.
 """
@@ -356,7 +356,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         request: gateway_pb2.SaveSnapshotRequest,
         context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.SaveSnapshotResponse:
-        """Save a portfolio snapshot to the v2_portfolio_snapshots table."""
+        """Save a portfolio snapshot to the portfolio_snapshots table."""
         try:
             strategy_id = validate_strategy_id(request.strategy_id)
         except ValidationError as e:
@@ -401,7 +401,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             try:
                 row = await self._snapshot_fetchrow(
                     """
-                    INSERT INTO v2_portfolio_snapshots (
+                    INSERT INTO portfolio_snapshots (
                         agent_id, timestamp, iteration_number, total_value_usd,
                         available_cash_usd, value_confidence, positions_json, chain, created_at
                     ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
@@ -490,7 +490,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     """
                     SELECT agent_id, timestamp, iteration_number, total_value_usd,
                            available_cash_usd, value_confidence, positions_json, chain
-                    FROM v2_portfolio_snapshots
+                    FROM portfolio_snapshots
                     WHERE agent_id = $1
                     ORDER BY timestamp DESC
                     LIMIT 1
@@ -545,7 +545,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     """
                     SELECT agent_id, timestamp, iteration_number, total_value_usd,
                            available_cash_usd, value_confidence, positions_json, chain
-                    FROM v2_portfolio_snapshots
+                    FROM portfolio_snapshots
                     WHERE agent_id = $1 AND timestamp >= $2
                     ORDER BY timestamp ASC
                     LIMIT $3
