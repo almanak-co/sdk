@@ -257,6 +257,44 @@ class TestGatewayStateManagerSnapshots:
         assert result == 42
         mock_client.state.SavePortfolioSnapshot.assert_called_once()
 
+    def test_save_portfolio_snapshot_serializes_metadata_envelope(self, mock_client, sample_snapshot):
+        """Snapshot metadata is persisted via the backward-compatible envelope with positions."""
+        import asyncio
+        import json
+
+        from almanak.framework.portfolio.models import PositionValue
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+        from almanak.framework.teardown.models import PositionType
+
+        sample_snapshot.positions = [
+            PositionValue(
+                position_type=PositionType.LP,
+                protocol="traderjoe_v2",
+                chain="avalanche",
+                value_usd=Decimal("4.70"),
+                label="WAVAX/USDT",
+                tokens=["WAVAX", "USDT"],
+                details={"pool_address": "0xpool"},
+            )
+        ]
+        sample_snapshot.snapshot_metadata = {
+            "valuation_source": "reconciled_external",
+            "external_total_value_usd": "4.70",
+        }
+        manager = GatewayStateManager(mock_client)
+
+        mock_response = gateway_pb2.SaveSnapshotResponse(success=True, snapshot_id=42)
+        mock_client.state.SavePortfolioSnapshot.return_value = mock_response
+
+        result = asyncio.run(manager.save_portfolio_snapshot(sample_snapshot))
+
+        assert result == 42
+        request = mock_client.state.SavePortfolioSnapshot.call_args.args[0]
+        payload = json.loads(request.positions_json.decode("utf-8"))
+        assert len(payload["positions"]) == 1
+        assert payload["positions"][0]["protocol"] == "traderjoe_v2"
+        assert payload["metadata"]["valuation_source"] == "reconciled_external"
+
     def test_save_portfolio_snapshot_failure_returns_zero(self, mock_client, sample_snapshot):
         """save_portfolio_snapshot returns 0 on gRPC failure."""
         import asyncio
@@ -310,6 +348,53 @@ class TestGatewayStateManagerSnapshots:
 
         assert result is not None
         assert result.strategy_id == "test-strategy"
+
+    def test_get_latest_snapshot_supports_metadata_envelope(self, mock_client):
+        """get_latest_snapshot reads both positions and snapshot metadata from envelope rows."""
+        import asyncio
+        import json
+
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        manager = GatewayStateManager(mock_client)
+        ts = int(datetime.now(UTC).timestamp())
+        mock_response = gateway_pb2.SnapshotData(
+            strategy_id="test-strategy",
+            timestamp=ts,
+            total_value_usd="4.70",
+            available_cash_usd="0",
+            value_confidence="ESTIMATED",
+            positions_json=json.dumps(
+                {
+                    "positions": [
+                        {
+                            "position_type": "LP",
+                            "protocol": "traderjoe_v2",
+                            "chain": "avalanche",
+                            "value_usd": "4.70",
+                            "label": "WAVAX/USDT",
+                            "tokens": ["WAVAX", "USDT"],
+                            "details": {"pool_address": "0xpool"},
+                        }
+                    ],
+                    "metadata": {
+                        "valuation_source": "reconciled_external",
+                        "external_total_value_usd": "4.70",
+                    },
+                }
+            ).encode("utf-8"),
+            chain="avalanche",
+            found=True,
+        )
+        mock_client.state.GetLatestSnapshot.return_value = mock_response
+
+        result = asyncio.run(manager.get_latest_snapshot("test-strategy"))
+
+        assert result is not None
+        assert len(result.positions) == 1
+        assert result.positions[0].protocol == "traderjoe_v2"
+        assert result.snapshot_metadata["valuation_source"] == "reconciled_external"
+        assert result.snapshot_metadata["external_total_value_usd"] == "4.70"
 
     def test_get_latest_snapshot_not_found(self, mock_client):
         """get_latest_snapshot returns None when no snapshot exists."""

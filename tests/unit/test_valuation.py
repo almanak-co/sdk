@@ -8,7 +8,7 @@ Covers:
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock
 
 import pytest
 
@@ -20,6 +20,7 @@ from almanak.framework.portfolio.models import (
 from almanak.framework.teardown.models import PositionInfo, PositionType, TeardownPositionSummary
 from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 from almanak.framework.valuation.spot_valuer import total_value, value_tokens
+from almanak.gateway.proto import gateway_pb2
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +215,7 @@ class TestTokenBalancePriceUsd:
 def _make_strategy(
     strategy_id="test-strat",
     chain="arbitrum",
+    wallet_address="0x1234567890123456789012345678901234567890",
     tracked_tokens=None,
     positions=None,
 ):
@@ -221,6 +223,7 @@ def _make_strategy(
     strategy = MagicMock()
     type(strategy).strategy_id = PropertyMock(return_value=strategy_id)
     type(strategy).chain = PropertyMock(return_value=chain)
+    type(strategy).wallet_address = PropertyMock(return_value=wallet_address)
     strategy._get_tracked_tokens.return_value = tracked_tokens if tracked_tokens is not None else ["ETH", "USDC"]
 
     if positions is not None:
@@ -472,6 +475,163 @@ class TestPortfolioValuer:
             assert orig.balance == rest.balance
             assert orig.value_usd == rest.value_usd
             assert orig.price_usd == rest.price_usd
+
+    def test_snapshot_positions_payload_roundtrip_with_metadata(self):
+        """Persisted positions payload supports metadata envelope without breaking round-trip."""
+        snapshot = PortfolioSnapshot(
+            timestamp=datetime(2026, 4, 4, 12, 0, tzinfo=UTC),
+            strategy_id="test-strat",
+            total_value_usd=Decimal("4.70"),
+            available_cash_usd=Decimal("0"),
+            positions=[],
+            snapshot_metadata={
+                "valuation_source": "reconciled_external",
+                "external_total_value_usd": "4.70",
+            },
+        )
+
+        payload = snapshot.to_positions_payload()
+        positions, metadata = PortfolioSnapshot.unpack_positions_payload(payload)
+
+        assert positions == []
+        assert metadata["valuation_source"] == "reconciled_external"
+        assert metadata["external_total_value_usd"] == "4.70"
+
+    def test_external_agreement_keeps_framework_total(self):
+        """External wallet data within threshold preserves framework valuation."""
+        client = MagicMock()
+        client.integration.GetWalletPortfolio.return_value = gateway_pb2.WalletPortfolioResponse(
+            success=True,
+            provider="zerion",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            chain="arbitrum",
+            total_value_usd="4700",
+            timestamp=int(datetime.now(UTC).timestamp()),
+        )
+        valuer = PortfolioValuer(gateway_client=client)
+        strategy = _make_strategy(tracked_tokens=["ETH", "USDC"])
+        market = _make_market(
+            prices={"ETH": Decimal("3500"), "USDC": Decimal("1")},
+            balances={"ETH": Decimal("1"), "USDC": Decimal("1000")},
+        )
+
+        snapshot = valuer.value(strategy, market)
+
+        # Verify the outbound request was sent with correct wallet/chain
+        request = client.integration.GetWalletPortfolio.call_args.args[0]
+        assert request.wallet_address == "0x1234567890123456789012345678901234567890"
+        assert request.chain == "arbitrum"
+
+        assert snapshot.total_value_usd == Decimal("4500")
+        assert snapshot.value_confidence == ValueConfidence.HIGH
+        assert snapshot.snapshot_metadata["reconciliation_status"] == "framework_won_close_agreement"
+        assert snapshot.snapshot_metadata["external_total_value_usd"] == "4700"
+
+    def test_external_zero_framework_positive_wins_and_updates_positions(self):
+        """External valuation replaces zero framework value and fills position coverage."""
+        client = MagicMock()
+        client.integration.GetWalletPortfolio.return_value = gateway_pb2.WalletPortfolioResponse(
+            success=True,
+            provider="zerion",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            chain="avalanche",
+            total_value_usd="4.70",
+            timestamp=int(datetime.now(UTC).timestamp()),
+            positions=[
+                gateway_pb2.WalletPortfolioPosition(
+                    position_id="tjv2-bin-1",
+                    protocol="traderjoe_v2",
+                    label="WAVAX/USDT LB",
+                    position_type="liquidity_position",
+                    value_usd="4.70",
+                    pool_address="0xpool",
+                    token_symbols=["WAVAX", "USDT"],
+                    raw_details_json='{"vendor":"zerion"}',
+                )
+            ],
+        )
+        valuer = PortfolioValuer(gateway_client=client)
+        positions = [
+            PositionInfo(
+                position_type=PositionType.LP,
+                position_id="tj-strategy-pos",
+                chain="avalanche",
+                protocol="traderjoe_v2",
+                value_usd=Decimal("0"),
+                details={"pool_address": "0xpool", "strategy_note": "framework"},
+            )
+        ]
+        strategy = _make_strategy(chain="avalanche", tracked_tokens=["WAVAX"], positions=positions)
+        market = _make_market(prices={"WAVAX": Decimal("20")}, balances={"WAVAX": Decimal("0")})
+
+        snapshot = valuer.value(strategy, market)
+
+        assert snapshot.total_value_usd == Decimal("4.70")
+        assert snapshot.value_confidence == ValueConfidence.ESTIMATED
+        assert snapshot.snapshot_metadata["valuation_source"] == "reconciled_external"
+        assert snapshot.snapshot_metadata["reconciliation_status"] == "external_won_zero_framework"
+        assert len(snapshot.positions) == 1
+        assert snapshot.positions[0].protocol == "traderjoe_v2"
+        assert snapshot.positions[0].value_usd == Decimal("4.70")
+        assert snapshot.positions[0].details["strategy_note"] == "framework"
+        assert snapshot.positions[0].details["vendor"] == "zerion"
+
+    def test_external_large_divergence_framework_wins(self):
+        """Large divergence logs a warning but framework total is authoritative."""
+        client = MagicMock()
+        client.integration.GetWalletPortfolio.return_value = gateway_pb2.WalletPortfolioResponse(
+            success=True,
+            provider="zerion",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            chain="arbitrum",
+            total_value_usd="15",
+            timestamp=int(datetime.now(UTC).timestamp()),
+        )
+        valuer = PortfolioValuer(gateway_client=client)
+        strategy = _make_strategy(tracked_tokens=["USDC"])
+        market = _make_market(prices={"USDC": Decimal("1")}, balances={"USDC": Decimal("10")})
+
+        snapshot = valuer.value(strategy, market)
+
+        # Framework on-chain value is authoritative; external is advisory
+        assert snapshot.total_value_usd == Decimal("10")
+        assert snapshot.value_confidence == ValueConfidence.HIGH
+        assert snapshot.snapshot_metadata["reconciliation_status"] == "framework_won_large_divergence"
+        assert snapshot.snapshot_metadata["external_total_value_usd"] == "15"
+
+    def test_external_moderate_divergence_framework_wins(self):
+        """Moderate divergence (10-20%) keeps framework total."""
+        client = MagicMock()
+        client.integration.GetWalletPortfolio.return_value = gateway_pb2.WalletPortfolioResponse(
+            success=True,
+            provider="zerion",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            chain="arbitrum",
+            total_value_usd="115",
+            timestamp=int(datetime.now(UTC).timestamp()),
+        )
+        valuer = PortfolioValuer(gateway_client=client)
+        strategy = _make_strategy(tracked_tokens=["USDC"])
+        market = _make_market(prices={"USDC": Decimal("1")}, balances={"USDC": Decimal("100")})
+
+        snapshot = valuer.value(strategy, market)
+
+        assert snapshot.total_value_usd == Decimal("100")
+        assert snapshot.value_confidence == ValueConfidence.HIGH
+        assert snapshot.snapshot_metadata["reconciliation_status"] == "framework_won_moderate_divergence"
+
+    def test_external_rpc_failure_falls_back_to_framework(self):
+        """External RPC errors must not break framework valuation."""
+        client = MagicMock()
+        client.integration.GetWalletPortfolio.side_effect = RuntimeError("rpc failed")
+        valuer = PortfolioValuer(gateway_client=client)
+        strategy = _make_strategy(tracked_tokens=["USDC"])
+        market = _make_market(prices={"USDC": Decimal("1")}, balances={"USDC": Decimal("10")})
+
+        snapshot = valuer.value(strategy, market)
+
+        assert snapshot.total_value_usd == Decimal("10")
+        assert snapshot.snapshot_metadata == {}
 
 
 class TestPortfolioValuerEdgeCases:

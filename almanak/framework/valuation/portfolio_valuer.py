@@ -9,6 +9,7 @@ This is the single source of truth for portfolio valuation at runtime.
 The framework owns both discovery and math.
 """
 
+import json
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -36,6 +37,9 @@ if TYPE_CHECKING:
     from almanak.framework.teardown.models import TeardownPositionSummary
 
 logger = logging.getLogger(__name__)
+
+FRAMEWORK_EXTERNAL_AGREEMENT_THRESHOLD = Decimal("0.10")
+FRAMEWORK_EXTERNAL_DIVERGENCE_THRESHOLD = Decimal("0.20")
 
 
 @runtime_checkable
@@ -90,6 +94,7 @@ class PortfolioValuer:
                 queries. If None, LP positions use strategy-reported values.
                 Can also be set later via set_gateway_client().
         """
+        self._gateway_client = gateway_client
         self._lp_reader = LPPositionReader(gateway_client)
         self._lending_reader = LendingPositionReader(gateway_client)
         self._perps_reader = PerpsPositionReader.from_gateway_client(gateway_client)
@@ -100,6 +105,7 @@ class PortfolioValuer:
 
         Called by StrategyRunner once the gateway connection is established.
         """
+        self._gateway_client = gateway_client
         self._lp_reader = LPPositionReader(gateway_client)
         self._lending_reader = LendingPositionReader(gateway_client)
         self._perps_reader = PerpsPositionReader.from_gateway_client(gateway_client)
@@ -184,7 +190,7 @@ class PortfolioValuer:
             else:
                 confidence = ValueConfidence.HIGH
 
-            return PortfolioSnapshot(
+            framework_snapshot = PortfolioSnapshot(
                 timestamp=now,
                 strategy_id=strategy_id,
                 total_value_usd=wallet_value + position_value,
@@ -195,6 +201,12 @@ class PortfolioValuer:
                 chain=chain,
                 iteration_number=iteration_number,
             )
+            # Reconciliation is advisory — never let it downgrade the framework snapshot.
+            try:
+                return self._reconcile_with_external(strategy, framework_snapshot)
+            except Exception as recon_err:
+                logger.warning("External reconciliation failed (returning framework snapshot): %s", recon_err)
+                return framework_snapshot
 
         except Exception as e:
             # Failure contract: NEVER skip a snapshot. Persist with UNAVAILABLE.
@@ -209,6 +221,250 @@ class PortfolioValuer:
                 chain=chain,
                 iteration_number=iteration_number,
             )
+
+    def _reconcile_with_external(
+        self,
+        strategy: StrategyLike,
+        framework_snapshot: PortfolioSnapshot,
+    ) -> PortfolioSnapshot:
+        """Reconcile framework valuation with external wallet portfolio data."""
+        external = self._fetch_external_portfolio(strategy)
+        if external is None:
+            return framework_snapshot
+
+        external_total = external["total_value_usd"]
+        framework_total = framework_snapshot.total_value_usd
+
+        metadata = {
+            "valuation_source": "framework",
+            "external_provider": external["provider"],
+            "framework_total_value_usd": str(framework_total),
+            "external_total_value_usd": str(external_total),
+            "reconciliation_status": "framework_only",
+            "external_cache_hit": external["cache_hit"],
+            "external_timestamp": external["timestamp"].isoformat(),
+            "external_positions_count": len(external["positions"]),
+        }
+
+        if external_total <= 0:
+            metadata["reconciliation_status"] = "external_non_positive"
+            framework_snapshot.snapshot_metadata = metadata
+            return framework_snapshot
+
+        divergence_ratio = self._calculate_divergence_ratio(framework_total, external_total)
+        metadata["divergence_ratio"] = str(divergence_ratio)
+
+        # External only replaces framework when framework reports zero.
+        # When both are positive, framework's on-chain queries are authoritative;
+        # external data is advisory metadata for operator dashboards.
+        if framework_total <= 0 and external_total > 0:
+            metadata["valuation_source"] = "reconciled_external"
+            metadata["reconciliation_status"] = "external_won_zero_framework"
+            logger.warning(
+                "External portfolio valuation replaced zero framework value for %s on %s: framework=$%s external=$%s",
+                framework_snapshot.strategy_id,
+                framework_snapshot.chain,
+                framework_total,
+                external_total,
+            )
+            return self._build_external_reconciled_snapshot(framework_snapshot, external, metadata)
+
+        if framework_total > 0 and divergence_ratio <= FRAMEWORK_EXTERNAL_AGREEMENT_THRESHOLD:
+            metadata["reconciliation_status"] = "framework_won_close_agreement"
+        elif divergence_ratio > FRAMEWORK_EXTERNAL_DIVERGENCE_THRESHOLD:
+            metadata["reconciliation_status"] = "framework_won_large_divergence"
+            logger.warning(
+                "Large divergence between framework and external for %s on %s: framework=$%s external=$%s divergence=%s",
+                framework_snapshot.strategy_id,
+                framework_snapshot.chain,
+                framework_total,
+                external_total,
+                divergence_ratio,
+            )
+        else:
+            metadata["reconciliation_status"] = "framework_won_moderate_divergence"
+
+        framework_snapshot.snapshot_metadata = metadata
+        return framework_snapshot
+
+    def _fetch_external_portfolio(self, strategy: StrategyLike) -> dict[str, Any] | None:
+        """Fetch external wallet portfolio data through the gateway integration RPC."""
+        gateway_client = self._gateway_client
+        if gateway_client is None:
+            return None
+
+        wallet_address = getattr(strategy, "wallet_address", "")
+        chain = getattr(strategy, "chain", "")
+        if not wallet_address or not chain:
+            return None
+
+        try:
+            from almanak.gateway.proto import gateway_pb2
+
+            response = gateway_client.integration.GetWalletPortfolio(  # type: ignore[attr-defined]
+                gateway_pb2.WalletPortfolioRequest(wallet_address=wallet_address, chain=chain)
+            )
+        except Exception as e:
+            logger.debug("External portfolio RPC failed for %s on %s: %s", wallet_address, chain, e)
+            return None
+
+        if not response.success:
+            logger.debug(
+                "External portfolio unavailable for %s on %s: %s",
+                wallet_address,
+                chain,
+                response.error or "unknown error",
+            )
+            return None
+
+        try:
+            total_value_usd = Decimal(response.total_value_usd or "0")
+        except Exception:
+            logger.debug("Invalid total_value_usd from external portfolio: %r", response.total_value_usd)
+            return None
+
+        return {
+            "provider": response.provider or "unknown",
+            "total_value_usd": total_value_usd,
+            "cache_hit": bool(response.cache_hit),
+            "timestamp": datetime.fromtimestamp(response.timestamp, tz=UTC)
+            if response.timestamp
+            else datetime.now(UTC),
+            "positions": [self._external_position_to_value(position, chain) for position in response.positions],
+        }
+
+    def _build_external_reconciled_snapshot(
+        self,
+        framework_snapshot: PortfolioSnapshot,
+        external: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> PortfolioSnapshot:
+        """Build a reconciled snapshot where the external total wins."""
+        external_positions = external["positions"]
+        merged_positions = self._merge_external_positions(framework_snapshot.positions, external_positions)
+        external_total = external["total_value_usd"]
+
+        # Derive cash as remainder to ensure consistency: total = positions + cash.
+        # If positions already exceed the external total, cash is zero.
+        pos_total = sum((p.value_usd for p in merged_positions), Decimal("0"))
+        available_cash_usd = max(Decimal("0"), external_total - pos_total)
+
+        return PortfolioSnapshot(
+            timestamp=framework_snapshot.timestamp,
+            strategy_id=framework_snapshot.strategy_id,
+            total_value_usd=external_total,
+            available_cash_usd=available_cash_usd,
+            value_confidence=ValueConfidence.ESTIMATED,
+            error=framework_snapshot.error,
+            positions=merged_positions,
+            wallet_balances=framework_snapshot.wallet_balances,
+            chain=framework_snapshot.chain,
+            iteration_number=framework_snapshot.iteration_number,
+            snapshot_metadata=metadata,
+        )
+
+    def _external_position_to_value(self, position: Any, chain: str) -> PositionValue:
+        """Convert external portfolio data into a PositionValue."""
+        details = self._decode_external_details(position.raw_details_json)
+        pool_address = getattr(position, "pool_address", "") or ""
+        if pool_address:
+            details.setdefault("pool_address", pool_address)
+        details.setdefault("position_id", getattr(position, "position_id", ""))
+        details.setdefault("source", "external_portfolio_api")
+
+        return PositionValue(
+            position_type=self._map_external_position_type(getattr(position, "position_type", "")),
+            protocol=getattr(position, "protocol", "unknown") or "unknown",
+            chain=chain,
+            value_usd=Decimal(getattr(position, "value_usd", "0") or "0"),
+            label=getattr(position, "label", "") or getattr(position, "protocol", "external"),
+            tokens=list(getattr(position, "token_symbols", []) or []),
+            details=details,
+        )
+
+    def _merge_external_positions(
+        self,
+        framework_positions: list[PositionValue],
+        external_positions: list[PositionValue],
+    ) -> list[PositionValue]:
+        """Merge framework and external positions, preserving framework detail when possible."""
+        merged = list(framework_positions)
+
+        for external_position in external_positions:
+            match_index = next(
+                (index for index, existing in enumerate(merged) if self._positions_match(existing, external_position)),
+                None,
+            )
+            if match_index is None:
+                merged.append(external_position)
+                continue
+
+            existing = merged[match_index]
+            merged[match_index] = PositionValue(
+                position_type=existing.position_type or external_position.position_type,
+                protocol=existing.protocol or external_position.protocol,
+                chain=existing.chain or external_position.chain,
+                value_usd=external_position.value_usd,
+                label=existing.label or external_position.label,
+                tokens=existing.tokens or external_position.tokens,
+                details={**external_position.details, **existing.details},
+            )
+
+        return merged
+
+    @staticmethod
+    def _positions_match(existing: PositionValue, external_position: PositionValue) -> bool:
+        """Determine whether framework and external positions refer to the same exposure."""
+        if existing.protocol.lower() != external_position.protocol.lower():
+            return False
+
+        existing_pool = str(existing.details.get("pool_address") or existing.details.get("pool") or "").lower()
+        external_pool = str(external_position.details.get("pool_address") or "").lower()
+        if existing_pool and external_pool:
+            return existing_pool == external_pool
+
+        return existing.label == external_position.label and set(existing.tokens) == set(external_position.tokens)
+
+    @staticmethod
+    def _decode_external_details(raw_details_json: str) -> dict[str, Any]:
+        """Decode external raw details JSON defensively."""
+        if not raw_details_json:
+            return {}
+        try:
+            payload = json.loads(raw_details_json)
+            return payload if isinstance(payload, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @staticmethod
+    def _map_external_position_type(position_type: str) -> Any:
+        """Map external provider position types onto Almanak teardown position types."""
+        from almanak.framework.teardown.models import PositionType
+
+        normalized = position_type.strip().lower()
+        if "perp" in normalized or "future" in normalized:
+            return PositionType.PERP
+        if "borrow" in normalized or "debt" in normalized or "loan" in normalized:
+            return PositionType.BORROW
+        if "supply" in normalized or "deposit" in normalized or "lend" in normalized:
+            return PositionType.SUPPLY
+        if "stake" in normalized or "farm" in normalized:
+            return PositionType.STAKE
+        if "predict" in normalized:
+            return PositionType.PREDICTION
+        if "cex" in normalized:
+            return PositionType.CEX
+        if "lp" in normalized or "liquidity" in normalized or "pool" in normalized:
+            return PositionType.LP
+        return PositionType.TOKEN
+
+    @staticmethod
+    def _calculate_divergence_ratio(framework_total: Decimal, external_total: Decimal) -> Decimal:
+        """Return the absolute divergence ratio between framework and external totals."""
+        baseline = max(abs(framework_total), abs(external_total))
+        if baseline <= 0:
+            return Decimal("0")
+        return abs(framework_total - external_total) / baseline
 
     def _get_positions(
         self,

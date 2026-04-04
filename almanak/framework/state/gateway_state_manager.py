@@ -207,7 +207,7 @@ class GatewayStateManager:
             Snapshot ID from the database
         """
         try:
-            positions_bytes = json.dumps(snapshot.to_dict()["positions"]).encode("utf-8")
+            positions_bytes = json.dumps(snapshot.to_positions_payload()).encode("utf-8")
 
             request = gateway_pb2.SaveSnapshotRequest(
                 strategy_id=snapshot.strategy_id,
@@ -272,7 +272,8 @@ class GatewayStateManager:
         """Convert a SnapshotData protobuf message to a PortfolioSnapshot."""
         from almanak.framework.portfolio.models import PortfolioSnapshot
 
-        positions_list = json.loads(data.positions_json.decode("utf-8")) if data.positions_json else []
+        positions_payload = json.loads(data.positions_json.decode("utf-8")) if data.positions_json else []
+        positions_list, snapshot_metadata = PortfolioSnapshot.unpack_positions_payload(positions_payload)
 
         snapshot_dict = {
             "timestamp": datetime.fromtimestamp(data.timestamp, tz=UTC).isoformat(),
@@ -285,6 +286,7 @@ class GatewayStateManager:
             "wallet_balances": [],
             "chain": data.chain or "",
             "iteration_number": data.iteration_number,
+            "snapshot_metadata": snapshot_metadata,
         }
 
         return PortfolioSnapshot.from_dict(snapshot_dict)

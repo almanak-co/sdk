@@ -4787,6 +4787,18 @@ class StrategyRunner:
                 if state is not None:
                     state.state["total_value_usd"] = str(snapshot.total_value_usd)
                     state.state["value_confidence"] = snapshot.value_confidence.value
+                    _RECONCILIATION_STATE_KEYS = (
+                        "valuation_source",
+                        "external_provider",
+                        "external_total_value_usd",
+                        "framework_total_value_usd",
+                        "reconciliation_status",
+                    )
+                    for key in _RECONCILIATION_STATE_KEYS:
+                        if snapshot.snapshot_metadata and key in snapshot.snapshot_metadata:
+                            state.state[key] = str(snapshot.snapshot_metadata[key])
+                        else:
+                            state.state.pop(key, None)
                     await self.state_manager.save_state(state, expected_version=state.version)
             except Exception as ve:
                 logger.debug("Failed to write valuation into strategy state: %s", ve)

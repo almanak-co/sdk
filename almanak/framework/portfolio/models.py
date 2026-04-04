@@ -121,6 +121,7 @@ class PortfolioSnapshot:
     # Metadata
     chain: str = ""
     iteration_number: int = 0
+    snapshot_metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Normalize numeric fields to Decimal."""
@@ -141,7 +142,7 @@ class PortfolioSnapshot:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSON storage."""
-        return {
+        data: dict[str, Any] = {
             "timestamp": self.timestamp.isoformat(),
             "strategy_id": self.strategy_id,
             "total_value_usd": str(self.total_value_usd),
@@ -174,6 +175,34 @@ class PortfolioSnapshot:
             ],
             "chain": self.chain,
             "iteration_number": self.iteration_number,
+        }
+        if self.snapshot_metadata:
+            data["snapshot_metadata"] = self.snapshot_metadata
+        return data
+
+    def to_positions_payload(self) -> list[dict[str, Any]] | dict[str, Any]:
+        """Serialize positions_json payload for persistence.
+
+        Legacy rows store a bare positions list. New rows may store an envelope
+        with reconciliation metadata.
+        """
+        positions = [
+            {
+                "position_type": p.position_type.value if hasattr(p.position_type, "value") else str(p.position_type),
+                "protocol": p.protocol,
+                "chain": p.chain,
+                "value_usd": str(p.value_usd),
+                "label": p.label,
+                "tokens": p.tokens,
+                "details": p.details,
+            }
+            for p in self.positions
+        ]
+        if not self.snapshot_metadata:
+            return positions
+        return {
+            "positions": positions,
+            "metadata": self.snapshot_metadata,
         }
 
     @classmethod
@@ -219,7 +248,20 @@ class PortfolioSnapshot:
             wallet_balances=wallet_balances,
             chain=data.get("chain", ""),
             iteration_number=data.get("iteration_number", 0),
+            snapshot_metadata=data.get("snapshot_metadata", {}),
         )
+
+    @staticmethod
+    def unpack_positions_payload(payload: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Parse either the legacy list payload or the metadata envelope."""
+        if isinstance(payload, list):
+            return payload, {}
+        if isinstance(payload, dict):
+            positions = payload.get("positions", [])
+            metadata = payload.get("metadata", {})
+            if isinstance(positions, list) and isinstance(metadata, dict):
+                return positions, metadata
+        return [], {}
 
 
 @dataclass

@@ -1323,7 +1323,7 @@ class SQLiteStore:
                     str(snapshot.total_value_usd),
                     str(snapshot.available_cash_usd),
                     snapshot.value_confidence.value,
-                    json.dumps(snapshot.to_dict()["positions"]),
+                    json.dumps(snapshot.to_positions_payload()),
                     snapshot.chain,
                     now,
                 ),
@@ -1456,49 +1456,30 @@ class SQLiteStore:
         Returns:
             PortfolioSnapshot instance.
         """
-        from decimal import Decimal
-
-        from almanak.framework.portfolio.models import (
-            PortfolioSnapshot,
-            PositionValue,
-            ValueConfidence,
-        )
-        from almanak.framework.teardown.models import PositionType
-
-        # Parse positions JSON
-        positions_data = row["positions_json"]
-        if isinstance(positions_data, str):
-            positions_data = json.loads(positions_data)
-
-        positions = []
-        for p in positions_data:
-            positions.append(
-                PositionValue(
-                    position_type=PositionType(p["position_type"]),
-                    protocol=p["protocol"],
-                    chain=p["chain"],
-                    value_usd=Decimal(p["value_usd"]),
-                    label=p["label"],
-                    tokens=p.get("tokens", []),
-                    details=p.get("details", {}),
-                )
-            )
+        from almanak.framework.portfolio.models import PortfolioSnapshot
 
         # Parse timestamp
         timestamp = row["timestamp"]
         if isinstance(timestamp, str):
             timestamp = datetime.fromisoformat(timestamp)
+        positions_payload = row["positions_json"]
+        if isinstance(positions_payload, str):
+            positions_payload = json.loads(positions_payload)
+        positions, snapshot_metadata = PortfolioSnapshot.unpack_positions_payload(positions_payload)
 
-        return PortfolioSnapshot(
-            timestamp=timestamp,
-            strategy_id=row["strategy_id"],
-            total_value_usd=Decimal(row["total_value_usd"]),
-            available_cash_usd=Decimal(row["available_cash_usd"]),
-            value_confidence=ValueConfidence(row["value_confidence"]),
-            positions=positions,
-            wallet_balances=[],  # Not stored in snapshots table, rebuild from positions
-            chain=row["chain"] or "",
-            iteration_number=row["iteration_number"] or 0,
+        return PortfolioSnapshot.from_dict(
+            {
+                "timestamp": timestamp.isoformat(),
+                "strategy_id": row["strategy_id"],
+                "total_value_usd": str(row["total_value_usd"]),
+                "available_cash_usd": str(row["available_cash_usd"]),
+                "value_confidence": row["value_confidence"],
+                "positions": positions,
+                "wallet_balances": [],
+                "chain": row["chain"] or "",
+                "iteration_number": row["iteration_number"] or 0,
+                "snapshot_metadata": snapshot_metadata,
+            }
         )
 
     # =========================================================================

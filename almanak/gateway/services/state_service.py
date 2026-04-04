@@ -371,11 +371,24 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             return gateway_pb2.SaveSnapshotResponse(success=False, error="timestamp must be positive")
         if request.positions_json:
             try:
-                json.loads(request.positions_json)
+                positions_payload = json.loads(request.positions_json)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details("positions_json must be valid JSON")
                 return gateway_pb2.SaveSnapshotResponse(success=False, error="positions_json must be valid JSON")
+
+            # Validate envelope shape: must be a list (legacy) or {positions: list, metadata: dict}
+            is_legacy = isinstance(positions_payload, list)
+            is_envelope = (
+                isinstance(positions_payload, dict)
+                and isinstance(positions_payload.get("positions", []), list)
+                and isinstance(positions_payload.get("metadata", {}), dict)
+            )
+            if not (is_legacy or is_envelope):
+                error = "positions_json must be a list or {positions: list, metadata: object}"
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(error)
+                return gateway_pb2.SaveSnapshotResponse(success=False, error=error)
 
         strategy_id = resolve_agent_id(strategy_id)
         await self._ensure_snapshot_pool()
@@ -441,7 +454,10 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 # Deserialize positions from JSON bytes
                 if request.positions_json:
                     snapshot_dict = snapshot.to_dict()
-                    snapshot_dict["positions"] = json.loads(request.positions_json.decode("utf-8"))
+                    positions_payload = json.loads(request.positions_json.decode("utf-8"))
+                    positions, snapshot_metadata = PortfolioSnapshot.unpack_positions_payload(positions_payload)
+                    snapshot_dict["positions"] = positions
+                    snapshot_dict["snapshot_metadata"] = snapshot_metadata
                     snapshot = PortfolioSnapshot.from_dict(snapshot_dict)
 
                 snapshot_id = await warm.save_portfolio_snapshot(snapshot)  # type: ignore[attr-defined]
@@ -585,7 +601,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     @staticmethod
     def _snapshot_to_proto(snapshot: Any) -> gateway_pb2.SnapshotData:
         """Convert a PortfolioSnapshot to a SnapshotData protobuf message."""
-        positions_bytes = json.dumps(snapshot.to_dict()["positions"]).encode("utf-8")
+        positions_bytes = json.dumps(snapshot.to_positions_payload()).encode("utf-8")
         return gateway_pb2.SnapshotData(
             strategy_id=snapshot.strategy_id,
             timestamp=int(snapshot.timestamp.timestamp()),
