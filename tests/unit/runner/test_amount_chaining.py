@@ -3,7 +3,8 @@
 Verifies that when swap_amounts.amount_out_decimal is None, the runner resets
 previous_amount_received to None instead of silently reusing a stale value.
 Also tests that Enso-extracted SwapAmounts feeds into chaining correctly.
-Tests that non-swap intents (LP, lending) don't produce spurious warnings.
+Tests that the amount chaining warning only fires when a subsequent step
+actually uses amount='all' (VIB-156).
 """
 
 import logging
@@ -16,6 +17,7 @@ from almanak.framework.connectors.enso.receipt_parser import (
     EnsoReceiptParser,
 )
 from almanak.framework.execution.extracted_data import SwapAmounts
+from almanak.framework.intents.vocabulary import Intent, IntentType
 
 
 class _IterationStatus(StrEnum):
@@ -166,20 +168,27 @@ def test_enso_swap_amounts_frozen_dataclass():
 
 
 # ---------------------------------------------------------------------------
-# VIB-156: LP/lending intents should NOT produce amount-chaining WARNING
+# VIB-156: Amount chaining warning should only fire when a subsequent step
+# actually uses amount='all'. Non-swap intents (LP, lending) that don't
+# produce chainable output should log at DEBUG, not WARNING.
 # ---------------------------------------------------------------------------
 
 
-def _simulate_chaining_log(intent_type_value: str, caplog):
+def _simulate_chaining_log(current_intent_type: str, remaining_intents: list, caplog):
     """Simulate the chaining logic from strategy_runner.py and capture log output.
 
-    Mirrors the exact logic in strategy_runner.py lines 1100-1122.
-    """
-    from almanak.framework.intents.vocabulary import IntentType
+    Mirrors the exact logic in strategy_runner.py: after a step completes
+    without extractable output, check if any remaining step uses amount='all'.
+    Only warn if they do; otherwise debug-log.
 
+    Args:
+        current_intent_type: The type of the intent that just completed
+        remaining_intents: List of remaining intents (after the current one)
+        caplog: pytest caplog fixture
+    """
     # Build a mock intent with the given type
     mock_intent = MagicMock()
-    mock_intent.intent_type = IntentType(intent_type_value)
+    mock_intent.intent_type = IntentType(current_intent_type)
 
     # Simulate: execution succeeded but no swap_amounts
     er = MagicMock()
@@ -192,73 +201,115 @@ def _simulate_chaining_log(intent_type_value: str, caplog):
         previous_amount_received = er.swap_amounts.amount_out_decimal
     else:
         previous_amount_received = None
-        intent_type_val = getattr(mock_intent, "intent_type", None)
-        is_swap = intent_type_val == IntentType.SWAP
-        if is_swap:
+        # Only check the immediately next intent (not all remaining).
+        # An intermediate step can repopulate previous_amount_received.
+        has_chained = bool(remaining_intents) and Intent.has_chained_amount(remaining_intents[0])
+        if has_chained:
             logging.getLogger("test").warning(
                 "Amount chaining: no output amount extracted from step %d; "
                 "subsequent amount='all' steps will fail",
                 1,
             )
         else:
+            intent_type = getattr(mock_intent, "intent_type", None)
             logging.getLogger("test").debug(
-                "Amount chaining: step %d (%s) has no chainable output amount (normal for non-swap intents)",
+                "Amount chaining: step %d (%s) has no chainable output "
+                "amount (normal for non-swap intents)",
                 1,
-                intent_type_val.value if intent_type_val else "unknown",
+                intent_type.value if intent_type else "unknown",
             )
 
     return previous_amount_received
 
 
-def test_lp_open_no_warning(caplog):
-    """LP_OPEN should log at DEBUG, not WARNING, when no output amount."""
+def _make_intent_with_amount(amount):
+    """Create a mock intent with a specific amount (Decimal or 'all')."""
+    intent = MagicMock()
+    intent.is_chained_amount = amount == "all"
+    return intent
+
+
+def test_lp_open_no_warning_when_next_uses_fixed_amount(caplog):
+    """LP_OPEN followed by a fixed-amount step should log at DEBUG, not WARNING."""
+    next_intent = _make_intent_with_amount(Decimal("300"))
     with caplog.at_level(logging.DEBUG, logger="test"):
-        result = _simulate_chaining_log("LP_OPEN", caplog)
+        result = _simulate_chaining_log("LP_OPEN", [next_intent], caplog)
 
     assert result is None  # Still resets to None
 
     warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
     debug_msgs = [r for r in caplog.records if r.levelno == logging.DEBUG and "Amount chaining" in r.message]
 
-    assert len(warning_msgs) == 0, "LP_OPEN should NOT produce WARNING"
+    assert len(warning_msgs) == 0, "LP_OPEN should NOT produce WARNING when next step uses fixed amount"
     assert len(debug_msgs) == 1, "LP_OPEN should produce DEBUG message"
 
 
-def test_lp_close_no_warning(caplog):
-    """LP_CLOSE should log at DEBUG, not WARNING."""
+def test_lp_open_warns_when_next_uses_amount_all(caplog):
+    """LP_OPEN followed by amount='all' step should still warn."""
+    next_intent = _make_intent_with_amount("all")
     with caplog.at_level(logging.DEBUG, logger="test"):
-        result = _simulate_chaining_log("LP_CLOSE", caplog)
-
-    assert result is None
-    warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warning_msgs) == 0, "LP_CLOSE should NOT produce WARNING"
-
-
-def test_supply_no_warning(caplog):
-    """SUPPLY should log at DEBUG, not WARNING."""
-    with caplog.at_level(logging.DEBUG, logger="test"):
-        result = _simulate_chaining_log("SUPPLY", caplog)
-
-    assert result is None
-    warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warning_msgs) == 0, "SUPPLY should NOT produce WARNING"
-
-
-def test_borrow_no_warning(caplog):
-    """BORROW should log at DEBUG, not WARNING."""
-    with caplog.at_level(logging.DEBUG, logger="test"):
-        result = _simulate_chaining_log("BORROW", caplog)
-
-    assert result is None
-    warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warning_msgs) == 0, "BORROW should NOT produce WARNING"
-
-
-def test_swap_still_warns(caplog):
-    """SWAP should still produce WARNING when no output amount."""
-    with caplog.at_level(logging.DEBUG, logger="test"):
-        result = _simulate_chaining_log("SWAP", caplog)
+        result = _simulate_chaining_log("LP_OPEN", [next_intent], caplog)
 
     assert result is None
     warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING and "Amount chaining" in r.message]
-    assert len(warning_msgs) == 1, "SWAP should still produce WARNING"
+    assert len(warning_msgs) == 1, "LP_OPEN should WARN when next step uses amount='all'"
+
+
+def test_supply_no_warning_when_next_uses_fixed_amount(caplog):
+    """SUPPLY followed by a fixed-amount step should log at DEBUG, not WARNING."""
+    next_intent = _make_intent_with_amount(Decimal("100"))
+    with caplog.at_level(logging.DEBUG, logger="test"):
+        result = _simulate_chaining_log("SUPPLY", [next_intent], caplog)
+
+    assert result is None
+    warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_msgs) == 0, "SUPPLY should NOT produce WARNING when next step uses fixed amount"
+
+
+def test_borrow_no_warning_when_no_remaining_chained(caplog):
+    """BORROW as last step in sequence should not warn (no remaining steps)."""
+    with caplog.at_level(logging.DEBUG, logger="test"):
+        result = _simulate_chaining_log("BORROW", [], caplog)
+
+    assert result is None
+    warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_msgs) == 0, "BORROW as last step should NOT produce WARNING"
+
+
+def test_swap_warns_when_next_uses_amount_all(caplog):
+    """SWAP followed by amount='all' step should produce WARNING."""
+    next_intent = _make_intent_with_amount("all")
+    with caplog.at_level(logging.DEBUG, logger="test"):
+        result = _simulate_chaining_log("SWAP", [next_intent], caplog)
+
+    assert result is None
+    warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING and "Amount chaining" in r.message]
+    assert len(warning_msgs) == 1, "SWAP should produce WARNING when next step uses amount='all'"
+
+
+def test_swap_no_warning_when_next_uses_fixed_amount(caplog):
+    """SWAP followed by fixed-amount step should NOT warn (false positive scenario)."""
+    next_intent = _make_intent_with_amount(Decimal("300"))
+    with caplog.at_level(logging.DEBUG, logger="test"):
+        result = _simulate_chaining_log("SWAP", [next_intent], caplog)
+
+    assert result is None
+    warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_msgs) == 0, "SWAP should NOT produce WARNING when next step uses fixed amount"
+
+
+def test_no_warning_when_intermediate_step_can_repopulate(caplog):
+    """LP_OPEN -> SWAP(fixed) -> SUPPLY(all) should NOT warn on step 1.
+
+    The intermediate SWAP step can repopulate previous_amount_received,
+    so the chained SUPPLY will succeed. Only the immediately next step matters.
+    Regression test for the false-positive reported by CodeRabbit/Gemini.
+    """
+    fixed_intent = _make_intent_with_amount(Decimal("100"))
+    chained_intent = _make_intent_with_amount("all")
+    with caplog.at_level(logging.DEBUG, logger="test"):
+        result = _simulate_chaining_log("LP_OPEN", [fixed_intent, chained_intent], caplog)
+
+    assert result is None
+    warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_msgs) == 0, "Should NOT warn when next step uses fixed amount (intermediate can repopulate)"
