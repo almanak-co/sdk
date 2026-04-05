@@ -20,6 +20,7 @@ from almanak.gateway.integrations.base import (
     IntegrationRegistry,
     RateLimiter,
 )
+from almanak.gateway.integrations.models import WalletPortfolioSnapshot, WalletPosition
 from almanak.gateway.integrations.zerion import ZerionIntegration
 
 __all__ = [
@@ -28,5 +29,7 @@ __all__ = [
     "IntegrationRateLimitError",
     "IntegrationRegistry",
     "RateLimiter",
+    "WalletPortfolioSnapshot",
+    "WalletPosition",
     "ZerionIntegration",
 ]

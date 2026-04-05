@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from almanak.framework.state.state_manager import StateManager
 
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.integrations.zerion import ZerionIntegration
+from almanak.gateway.integrations.portfolio_chain import PortfolioProviderChain, build_portfolio_chain
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.registry import get_instance_registry
 from almanak.gateway.timeline.store import get_timeline_store
@@ -61,7 +61,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         self._strategies_root: Path | None = None
         # In-memory cache of strategy positions reported via heartbeat
         self._cached_positions: dict[str, list[gateway_pb2.StrategyPosition]] = {}
-        self._zerion: ZerionIntegration | None = None
+        self._portfolio_chain: PortfolioProviderChain | None = None
 
     async def _ensure_initialized(self) -> None:
         """Lazy initialization of dependencies."""
@@ -110,15 +110,16 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             logger.warning(f"DashboardService: Failed to initialize StateManager: {e}")
             self._state_manager = None
 
-        if self.settings.portfolio_api_key:
-            try:
-                self._zerion = ZerionIntegration(
-                    api_key=self.settings.portfolio_api_key,
-                    cache_ttl=self.settings.portfolio_api_cache_ttl,
-                )
-            except Exception as e:
-                logger.warning(f"DashboardService: Failed to initialize ZerionIntegration: {e}")
-                self._zerion = None
+        try:
+            self._portfolio_chain = build_portfolio_chain(
+                portfolio_providers_csv=self.settings.portfolio_providers,
+                portfolio_api_key=self.settings.portfolio_api_key,
+                portfolio_api_provider=self.settings.portfolio_api_provider,
+                portfolio_api_cache_ttl=self.settings.portfolio_api_cache_ttl,
+            )
+        except Exception as e:
+            logger.warning(f"DashboardService: Failed to initialize portfolio providers: {e}")
+            self._portfolio_chain = None
 
         self._initialized = True
         logger.info(f"DashboardService initialized (strategies_root={self._strategies_root})")
@@ -351,7 +352,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         chain_wallets: dict[str, str] | None = None,
     ) -> Decimal | None:
         """Fetch external portfolio totals for one or more chain/wallet contexts."""
-        if self._zerion is None:
+        if self._portfolio_chain is None:
             return None
 
         contexts = self._resolve_portfolio_contexts(
@@ -362,7 +363,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         async def _fetch_one(context_chain: str, context_wallet: str) -> Decimal | None:
             try:
-                snapshot = await self._zerion.get_wallet_portfolio(context_wallet, context_chain)  # type: ignore[union-attr]
+                snapshot = await self._portfolio_chain.get_wallet_portfolio(context_wallet, context_chain)  # type: ignore[union-attr]
+                if snapshot is None:
+                    logger.warning(
+                        "All portfolio providers failed for %s on %s",
+                        context_wallet,
+                        context_chain,
+                    )
+                    return None
                 return Decimal(snapshot.total_value_usd)
             except Exception:
                 logger.debug(
@@ -374,7 +382,10 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 return None
 
         results = await asyncio.gather(*[_fetch_one(c, w) for c, w in contexts])
+        # Return None unless ALL contexts succeeded — partial totals would under-report
         totals = [r for r in results if r is not None]
+        if len(totals) != len(results):
+            return None
         return sum(totals, Decimal("0")) if totals else None
 
     @staticmethod

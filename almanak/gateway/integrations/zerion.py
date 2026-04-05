@@ -11,42 +11,19 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from dataclasses import asdict
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from almanak.gateway.integrations.base import BaseIntegration
+from almanak.gateway.integrations.models import WalletPortfolioSnapshot, WalletPosition
 from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class ZerionPosition:
-    """Normalized wallet position from Zerion."""
-
-    position_id: str
-    protocol: str
-    label: str
-    position_type: str
-    value_usd: str
-    pool_address: str = ""
-    token_symbols: list[str] = field(default_factory=list)
-    details: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class ZerionPortfolioSnapshot:
-    """Normalized Zerion wallet portfolio payload."""
-
-    provider: str
-    wallet_address: str
-    chain: str
-    total_value_usd: str
-    positions: list[ZerionPosition] = field(default_factory=list)
-    cache_hit: bool = False
-    fetched_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+# Backward-compatible aliases for existing consumers
+ZerionPosition = WalletPosition
+ZerionPortfolioSnapshot = WalletPortfolioSnapshot
 
 
 class ZerionIntegration(BaseIntegration):
@@ -95,6 +72,10 @@ class ZerionIntegration(BaseIntegration):
         """Return True when an API key is set."""
         return bool(self._api_key)
 
+    def supports_portfolio(self) -> bool:
+        """Zerion supports wallet portfolio queries."""
+        return True
+
     async def health_check(self) -> bool:
         """Return True when the integration has an API key configured.
 
@@ -111,7 +92,7 @@ class ZerionIntegration(BaseIntegration):
             return wallet_address
         return wallet_address.lower()
 
-    async def get_wallet_positions(self, wallet_address: str, chain: str) -> ZerionPortfolioSnapshot:
+    async def get_wallet_positions(self, wallet_address: str, chain: str) -> WalletPortfolioSnapshot:
         """Get normalized positions for a wallet on a chain."""
         cache_addr = self._cache_address(wallet_address, chain)
         cache_key = f"positions:{cache_addr}:{chain.lower()}"
@@ -129,7 +110,7 @@ class ZerionIntegration(BaseIntegration):
         self._update_cache(cache_key, snapshot)
         return snapshot
 
-    async def get_wallet_portfolio(self, wallet_address: str, chain: str) -> ZerionPortfolioSnapshot:
+    async def get_wallet_portfolio(self, wallet_address: str, chain: str) -> WalletPortfolioSnapshot:
         """Get wallet portfolio total and, when available, embedded positions."""
         cache_addr = self._cache_address(wallet_address, chain)
         cache_key = f"portfolio:{cache_addr}:{chain.lower()}"
@@ -147,10 +128,10 @@ class ZerionIntegration(BaseIntegration):
         self._update_cache(cache_key, snapshot)
         return snapshot
 
-    def _normalize_positions(self, wallet_address: str, chain: str, payload: Any) -> ZerionPortfolioSnapshot:
+    def _normalize_positions(self, wallet_address: str, chain: str, payload: Any) -> WalletPortfolioSnapshot:
         positions = [self._normalize_position(item) for item in self._extract_items(payload)]
         total = sum((self._to_decimal(p.value_usd) for p in positions), Decimal("0"))
-        return ZerionPortfolioSnapshot(
+        return WalletPortfolioSnapshot(
             provider=self.name,
             wallet_address=wallet_address,
             chain=chain,
@@ -159,14 +140,14 @@ class ZerionIntegration(BaseIntegration):
             cache_hit=False,
         )
 
-    def _normalize_portfolio(self, wallet_address: str, chain: str, payload: Any) -> ZerionPortfolioSnapshot:
+    def _normalize_portfolio(self, wallet_address: str, chain: str, payload: Any) -> WalletPortfolioSnapshot:
         items = self._extract_items(payload)
         positions = [self._normalize_position(item) for item in items]
         total_value = self._extract_total_value(payload)
         if total_value == "0" and positions:
             total_value = str(sum((self._to_decimal(p.value_usd) for p in positions), Decimal("0")))
 
-        return ZerionPortfolioSnapshot(
+        return WalletPortfolioSnapshot(
             provider=self.name,
             wallet_address=wallet_address,
             chain=chain,
@@ -216,7 +197,7 @@ class ZerionIntegration(BaseIntegration):
                 return normalized
         return "0"
 
-    def _normalize_position(self, item: dict[str, Any]) -> ZerionPosition:
+    def _normalize_position(self, item: dict[str, Any]) -> WalletPosition:
         attributes = item.get("attributes", {}) if isinstance(item.get("attributes"), dict) else {}
         protocol = self._extract_protocol(item, attributes)
         label = self._extract_label(item, attributes, protocol)
@@ -229,7 +210,7 @@ class ZerionIntegration(BaseIntegration):
         position_id = str(item.get("id") or attributes.get("id") or f"{protocol}:{label}")
         details = self._curate_details(item, attributes)
 
-        return ZerionPosition(
+        return WalletPosition(
             position_id=position_id,
             protocol=protocol,
             label=label,
@@ -387,7 +368,7 @@ class ZerionIntegration(BaseIntegration):
         return Decimal(str(value))
 
     @staticmethod
-    def to_dict(snapshot: ZerionPortfolioSnapshot) -> dict[str, Any]:
+    def to_dict(snapshot: WalletPortfolioSnapshot) -> dict[str, Any]:
         """Convert a snapshot to a JSON-serializable dict for debugging/tests."""
         return {
             "provider": snapshot.provider,

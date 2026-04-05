@@ -55,6 +55,11 @@ class GatewaySettings(BaseSettings):
     portfolio_api_provider: str = "zerion"
     portfolio_api_cache_ttl: int = 300
 
+    # Multi-provider portfolio valuation (takes precedence over single portfolio_api_key).
+    # Comma-separated provider names in priority order, e.g. "zerion,moralis".
+    # Each provider reads its API key from {NAME}_API_KEY env var.
+    portfolio_providers: str | None = None
+
     # Pendle API settings
     pendle_api_cache_ttl: float = 15.0  # seconds
 
@@ -163,6 +168,10 @@ class GatewaySettings(BaseSettings):
             fallback = os.environ.get("ALMANAK_PORTFOLIO_API_KEY") or os.environ.get("ZERION_API_KEY")
             if fallback:
                 self.portfolio_api_key = fallback
+        if not self.portfolio_providers:
+            fallback = os.environ.get("PORTFOLIO_PROVIDERS")
+            if fallback:
+                self.portfolio_providers = fallback
 
         return self
 

@@ -410,7 +410,7 @@ class TestPortfolioFallback:
                 value_confidence=ValueConfidence.HIGH,
             )
         )
-        dashboard_service._zerion = AsyncMock()
+        dashboard_service._portfolio_chain = AsyncMock()
 
         result = await dashboard_service._get_portfolio_value_and_pnl(
             "test_strategy",
@@ -419,7 +419,7 @@ class TestPortfolioFallback:
         )
 
         assert result == ("123.45", "0")
-        dashboard_service._zerion.get_wallet_portfolio.assert_not_called()
+        dashboard_service._portfolio_chain.get_wallet_portfolio.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_metrics_always_win_even_with_stale_snapshot(self, dashboard_service):
@@ -438,7 +438,7 @@ class TestPortfolioFallback:
                 value_confidence=ValueConfidence.STALE,
             )
         )
-        dashboard_service._zerion = AsyncMock()
+        dashboard_service._portfolio_chain = AsyncMock()
 
         result = await dashboard_service._get_portfolio_value_and_pnl(
             "test_strategy",
@@ -448,7 +448,7 @@ class TestPortfolioFallback:
 
         assert result == ("100", "0")
         # Zerion should not be called when metrics are available
-        dashboard_service._zerion.get_wallet_portfolio.assert_not_called()
+        dashboard_service._portfolio_chain.get_wallet_portfolio.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_stale_snapshot_uses_external_fallback_when_no_metrics(self, dashboard_service):
@@ -465,8 +465,8 @@ class TestPortfolioFallback:
                 value_confidence=ValueConfidence.STALE,
             )
         )
-        dashboard_service._zerion = AsyncMock()
-        dashboard_service._zerion.get_wallet_portfolio = AsyncMock(
+        dashboard_service._portfolio_chain = AsyncMock()
+        dashboard_service._portfolio_chain.get_wallet_portfolio = AsyncMock(
             return_value=MagicMock(total_value_usd="150.25")
         )
 
@@ -477,7 +477,7 @@ class TestPortfolioFallback:
         )
 
         assert result == ("150.25", "0")
-        dashboard_service._zerion.get_wallet_portfolio.assert_awaited_once_with(
+        dashboard_service._portfolio_chain.get_wallet_portfolio.assert_awaited_once_with(
             "0x1234567890123456789012345678901234567890",
             "avalanche",
         )
@@ -496,8 +496,8 @@ class TestPortfolioFallback:
         dashboard_service._state_manager = AsyncMock()
         dashboard_service._state_manager.get_portfolio_metrics = AsyncMock(return_value=None)
         dashboard_service._state_manager.get_latest_snapshot = AsyncMock(return_value=stale_snapshot)
-        dashboard_service._zerion = AsyncMock()
-        dashboard_service._zerion.get_wallet_portfolio = AsyncMock(side_effect=RuntimeError("zerion down"))
+        dashboard_service._portfolio_chain = AsyncMock()
+        dashboard_service._portfolio_chain.get_wallet_portfolio = AsyncMock(side_effect=RuntimeError("zerion down"))
 
         result = await dashboard_service._get_portfolio_value_and_pnl(
             "test_strategy",
@@ -514,7 +514,7 @@ class TestPortfolioFallback:
         dashboard_service._state_manager = AsyncMock()
         dashboard_service._state_manager.get_portfolio_metrics = AsyncMock(return_value=None)
         dashboard_service._state_manager.get_latest_snapshot = AsyncMock(return_value=None)
-        dashboard_service._zerion = AsyncMock()
+        dashboard_service._portfolio_chain = AsyncMock()
 
         async def _portfolio(wallet_address, chain):
             totals = {
@@ -523,7 +523,7 @@ class TestPortfolioFallback:
             }
             return MagicMock(total_value_usd=totals[(chain, wallet_address)])
 
-        dashboard_service._zerion.get_wallet_portfolio = AsyncMock(side_effect=_portfolio)
+        dashboard_service._portfolio_chain.get_wallet_portfolio = AsyncMock(side_effect=_portfolio)
 
         result = await dashboard_service._get_portfolio_value_and_pnl(
             "test_strategy",

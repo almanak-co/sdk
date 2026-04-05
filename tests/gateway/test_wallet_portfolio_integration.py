@@ -32,6 +32,15 @@ class TestWalletPortfolioHandlers:
         svc._coingecko = None
         svc._thegraph = None
         svc._zerion = AsyncMock()
+        svc._zerion.name = "zerion"
+        svc._zerion.is_configured = True
+
+        # Set up a portfolio chain that delegates to the mock zerion
+        from almanak.gateway.integrations.portfolio_chain import PortfolioProviderChain
+
+        mock_chain = MagicMock(spec=PortfolioProviderChain)
+        mock_chain.get_provider = MagicMock(return_value=svc._zerion)
+        svc._portfolio_chain = mock_chain
         return svc
 
     @pytest.mark.asyncio
@@ -59,6 +68,7 @@ class TestWalletPortfolioHandlers:
     async def test_missing_provider_config_returns_failed_precondition(self, service):
         ctx = _make_context()
         service._zerion = None
+        service._portfolio_chain = None  # No chain configured either
         request = gateway_pb2.WalletPortfolioRequest(
             wallet_address="0x1234567890123456789012345678901234567890",
             chain="avalanche",
@@ -76,7 +86,7 @@ class TestWalletPortfolioHandlers:
             wallet_address="0x1234567890123456789012345678901234567890",
             chain="avalanche",
         )
-        service._zerion.get_wallet_portfolio.return_value = ZerionPortfolioSnapshot(
+        snapshot = ZerionPortfolioSnapshot(
             provider="zerion",
             wallet_address=request.wallet_address,
             chain="avalanche",
@@ -84,13 +94,15 @@ class TestWalletPortfolioHandlers:
             fetched_at=datetime(2026, 4, 3, tzinfo=UTC),
             cache_hit=False,
         )
+        # Route through the portfolio chain (no provider pin)
+        service._portfolio_chain.get_wallet_portfolio = AsyncMock(return_value=snapshot)
 
         response = await service.GetWalletPortfolio(request, ctx)
 
         assert response.success is True
         assert response.provider == "zerion"
         assert response.total_value_usd == "4.70"
-        service._zerion.get_wallet_portfolio.assert_awaited_once()
+        service._portfolio_chain.get_wallet_portfolio.assert_awaited_once()
         ctx.set_code.assert_not_called()
 
     @pytest.mark.asyncio
@@ -100,7 +112,7 @@ class TestWalletPortfolioHandlers:
             wallet_address="0x1234567890123456789012345678901234567890",
             chain="avalanche",
         )
-        service._zerion.get_wallet_positions.return_value = ZerionPortfolioSnapshot(
+        snapshot = ZerionPortfolioSnapshot(
             provider="zerion",
             wallet_address=request.wallet_address,
             chain="avalanche",
@@ -120,6 +132,7 @@ class TestWalletPortfolioHandlers:
                 )
             ],
         )
+        service._portfolio_chain.get_wallet_positions = AsyncMock(return_value=snapshot)
 
         response = await service.GetWalletPositions(request, ctx)
 

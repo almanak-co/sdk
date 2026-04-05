@@ -512,6 +512,13 @@ class BaseIntegration(ABC):
         """
         return self._metrics.to_dict()
 
+    def supports_portfolio(self) -> bool:
+        """Whether this integration supports wallet portfolio queries.
+
+        Override to return True in portfolio-capable integrations.
+        """
+        return False
+
     def clear_cache(self) -> None:
         """Clear the response cache."""
         self._cache.clear()
