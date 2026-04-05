@@ -501,6 +501,19 @@ class GatewayServer:
         )
         logger.debug("Heartbeat TTL enforcer task started (interval=60s, threshold=300s)")
 
+        # Pre-warm market service (price sources) to avoid 30s+ block on first
+        # market.price() call. This is separate from chain prewarming because
+        # _prewarm_chains() is execution-centric and can early-return. (VIB-2392)
+        # Only pre-warm when chains are already configured; wallet-registry deployments
+        # get chains later via register_chains() and must lazy-init with the correct
+        # chain context (otherwise _ensure_initialized locks to CoinGecko-only).
+        if self._market_servicer and self.settings.chains:
+            try:
+                await self._market_servicer._ensure_initialized()
+                logger.info("Market service pre-initialized (price sources ready)")
+            except Exception as e:
+                logger.warning(f"Market service pre-init failed (will lazy-init on first call): {e}")
+
         # Pre-warm orchestrators if chains are configured or wallet registry has chains
         if self.settings.chains or (self._wallet_registry and self._wallet_registry.all_chains()):
             await self._prewarm_chains()
