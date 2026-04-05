@@ -495,7 +495,7 @@ class TestPreSwapErrors:
         """If no Uniswap V3 router exists for the chain, compilation should fail with guidance."""
         # Patch PROTOCOL_ROUTERS to remove uniswap_v3 for arbitrum
         with patch(
-            "almanak.framework.intents.compiler.PROTOCOL_ROUTERS",
+            "almanak.framework.intents.compiler_constants.PROTOCOL_ROUTERS",
             {"arbitrum": {}},
         ):
             intent = SwapIntent(

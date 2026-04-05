@@ -134,7 +134,7 @@ class TestPnLBacktestRSIExecution:
 
         mock_result = _make_rsi_backtest_result(trades=8)
 
-        with patch("almanak.framework.cli.backtest.PnLBacktester") as mock_bt:
+        with patch("almanak.framework.cli.backtest.sweep.PnLBacktester") as mock_bt:
             mock_bt.return_value.backtest = AsyncMock(return_value=mock_result)
 
             result = await run_sweep_backtest(
@@ -175,7 +175,7 @@ class TestPnLBacktestRSIExecution:
             sharpe="1.5", total_return="7.2", drawdown="2.1", trades=15
         )
 
-        with patch("almanak.framework.cli.backtest.PnLBacktester") as mock_bt:
+        with patch("almanak.framework.cli.backtest.sweep.PnLBacktester") as mock_bt:
             mock_bt.return_value.backtest = AsyncMock(return_value=mock_result)
 
             result = await run_sweep_backtest(

@@ -249,7 +249,7 @@ class TestStrategyParameterInjection:
 
         mock_result = _make_backtest_result()
 
-        with patch("almanak.framework.cli.backtest.PnLBacktester") as mock_bt:
+        with patch("almanak.framework.cli.backtest.sweep.PnLBacktester") as mock_bt:
             mock_bt.return_value.backtest = AsyncMock(return_value=mock_result)
 
             await run_sweep_backtest(

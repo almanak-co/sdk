@@ -234,7 +234,7 @@ class TestRangeWidthSweepExecution:
 
         mock_result = _make_backtest_result()
 
-        with patch("almanak.framework.cli.backtest.PnLBacktester") as mock_bt:
+        with patch("almanak.framework.cli.backtest.sweep.PnLBacktester") as mock_bt:
             mock_bt.return_value.backtest = AsyncMock(return_value=mock_result)
 
             result = await run_sweep_backtest(
@@ -275,7 +275,7 @@ class TestRangeWidthSweepExecution:
 
         mock_result = _make_backtest_result()
 
-        with patch("almanak.framework.cli.backtest.PnLBacktester") as mock_bt:
+        with patch("almanak.framework.cli.backtest.sweep.PnLBacktester") as mock_bt:
             mock_bt.return_value.backtest = AsyncMock(return_value=mock_result)
 
             await run_sweep_backtest(
@@ -317,7 +317,7 @@ class TestRangeWidthSweepExecution:
             sharpe="2.1", total_return="8.5", drawdown="3.0", trades=15
         )
 
-        with patch("almanak.framework.cli.backtest.PnLBacktester") as mock_bt:
+        with patch("almanak.framework.cli.backtest.sweep.PnLBacktester") as mock_bt:
             mock_bt.return_value.backtest = AsyncMock(return_value=mock_result)
 
             result = await run_sweep_backtest(

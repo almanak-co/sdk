@@ -393,7 +393,7 @@ class TestPnLBacktestLendingExecution:
 
         mock_result = _make_lending_backtest_result(trades=4)
 
-        with patch("almanak.framework.cli.backtest.PnLBacktester") as mock_bt:
+        with patch("almanak.framework.cli.backtest.sweep.PnLBacktester") as mock_bt:
             mock_bt.return_value.backtest = AsyncMock(return_value=mock_result)
 
             result = await run_sweep_backtest(
@@ -436,7 +436,7 @@ class TestPnLBacktestLendingExecution:
             sharpe="0.9", total_return="3.1", drawdown="1.2", trades=5
         )
 
-        with patch("almanak.framework.cli.backtest.PnLBacktester") as mock_bt:
+        with patch("almanak.framework.cli.backtest.sweep.PnLBacktester") as mock_bt:
             mock_bt.return_value.backtest = AsyncMock(return_value=mock_result)
 
             result = await run_sweep_backtest(
@@ -476,7 +476,7 @@ class TestPnLBacktestLendingExecution:
                 trades=4,
             )
 
-            with patch("almanak.framework.cli.backtest.PnLBacktester") as mock_bt:
+            with patch("almanak.framework.cli.backtest.sweep.PnLBacktester") as mock_bt:
                 mock_bt.return_value.backtest = AsyncMock(return_value=mock_result)
 
                 result = await run_sweep_backtest(

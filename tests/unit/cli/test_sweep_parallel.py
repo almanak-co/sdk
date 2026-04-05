@@ -247,7 +247,7 @@ class TestParallelSerialEquivalence:
                 return None
 
         # Mock the PnLBacktester
-        with patch("almanak.framework.cli.backtest.PnLBacktester") as mock_backtester_class:
+        with patch("almanak.framework.cli.backtest.sweep.PnLBacktester") as mock_backtester_class:
             mock_backtester = MagicMock()
             mock_backtester.backtest = AsyncMock(return_value=mock_backtest_result)
             mock_backtester_class.return_value = mock_backtester

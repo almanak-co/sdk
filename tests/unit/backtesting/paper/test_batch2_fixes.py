@@ -114,10 +114,10 @@ class TestForceActionGuard:
         runner = CliRunner(mix_stderr=False)
 
         with (
-            patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test_strat"]),
-            patch("almanak.framework.cli.backtest.load_strategy_config", return_value={"force_action": "supply"}),
-            patch("almanak.framework.cli.backtest._create_backtest_strategy"),
-            patch("almanak.framework.cli.backtest.get_strategy"),
+            patch("almanak.framework.cli.backtest.paper.list_strategies_fn", return_value=["test_strat"]),
+            patch("almanak.framework.cli.backtest.paper.load_strategy_config", return_value={"force_action": "supply"}),
+            patch("almanak.framework.cli.backtest.paper._create_backtest_strategy"),
+            patch("almanak.framework.cli.backtest.paper.get_strategy"),
             patch.dict("os.environ", {"ALMANAK_ARBITRUM_RPC_URL": "http://test"}),
         ):
             result = runner.invoke(paper_start, ["-s", "test_strat", "--dry-run"])
@@ -134,10 +134,10 @@ class TestForceActionGuard:
         runner = CliRunner(mix_stderr=False)
 
         with (
-            patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test_strat"]),
-            patch("almanak.framework.cli.backtest.load_strategy_config", return_value={}),
-            patch("almanak.framework.cli.backtest._create_backtest_strategy"),
-            patch("almanak.framework.cli.backtest.get_strategy"),
+            patch("almanak.framework.cli.backtest.paper.list_strategies_fn", return_value=["test_strat"]),
+            patch("almanak.framework.cli.backtest.paper.load_strategy_config", return_value={}),
+            patch("almanak.framework.cli.backtest.paper._create_backtest_strategy"),
+            patch("almanak.framework.cli.backtest.paper.get_strategy"),
             patch.dict("os.environ", {"ALMANAK_ARBITRUM_RPC_URL": "http://test"}),
         ):
             result = runner.invoke(paper_start, ["-s", "test_strat", "--dry-run"])
@@ -191,12 +191,12 @@ class TestPaperResume:
         runner = CliRunner(mix_stderr=False)
 
         with (
-            patch("almanak.framework.cli.backtest.BackgroundPaperTrader") as mock_bg,
-            patch("almanak.framework.cli.backtest.PaperTraderState.load", return_value=state),
-            patch("almanak.framework.cli.backtest.get_strategy", return_value=type("S", (), {})),
-            patch("almanak.framework.cli.backtest.load_strategy_config", return_value={}),
-            patch("almanak.framework.cli.backtest.update_paper_session_status"),
-            patch("almanak.framework.cli.backtest.save_paper_session_state") as mock_save,
+            patch("almanak.framework.cli.backtest.paper.BackgroundPaperTrader") as mock_bg,
+            patch("almanak.framework.cli.backtest.paper.PaperTraderState.load", return_value=state),
+            patch("almanak.framework.cli.backtest.paper.get_strategy", return_value=type("S", (), {})),
+            patch("almanak.framework.cli.backtest.paper.load_strategy_config", return_value={}),
+            patch("almanak.framework.cli.backtest.paper.update_paper_session_status"),
+            patch("almanak.framework.cli.backtest.paper.save_paper_session_state") as mock_save,
             patch.dict("os.environ", {"ALMANAK_ARBITRUM_RPC_URL": "http://test-rpc"}),
         ):
             mock_instance = MagicMock()
@@ -227,14 +227,14 @@ class TestPaperResume:
         runner = CliRunner(mix_stderr=False)
 
         with (
-            patch("almanak.framework.cli.backtest.BackgroundPaperTrader") as mock_bg,
-            patch("almanak.framework.cli.backtest.PaperTraderState.load", return_value=state),
-            patch("almanak.framework.cli.backtest.is_process_running", return_value=False),
-            patch("almanak.framework.cli.backtest.PIDFile") as mock_pidfile,
-            patch("almanak.framework.cli.backtest.get_strategy", return_value=type("S", (), {})),
-            patch("almanak.framework.cli.backtest.load_strategy_config", return_value={}),
-            patch("almanak.framework.cli.backtest.update_paper_session_status"),
-            patch("almanak.framework.cli.backtest.save_paper_session_state"),
+            patch("almanak.framework.cli.backtest.paper.BackgroundPaperTrader") as mock_bg,
+            patch("almanak.framework.cli.backtest.paper.PaperTraderState.load", return_value=state),
+            patch("almanak.framework.cli.backtest.paper.is_process_running", return_value=False),
+            patch("almanak.framework.cli.backtest.paper.PIDFile") as mock_pidfile,
+            patch("almanak.framework.cli.backtest.paper.get_strategy", return_value=type("S", (), {})),
+            patch("almanak.framework.cli.backtest.paper.load_strategy_config", return_value={}),
+            patch("almanak.framework.cli.backtest.paper.update_paper_session_status"),
+            patch("almanak.framework.cli.backtest.paper.save_paper_session_state"),
             patch.dict("os.environ", {"ALMANAK_ARBITRUM_RPC_URL": "http://test-rpc"}),
         ):
             mock_instance = MagicMock()
@@ -262,12 +262,12 @@ class TestPaperResume:
         runner = CliRunner(mix_stderr=False)
 
         with (
-            patch("almanak.framework.cli.backtest.BackgroundPaperTrader") as mock_bg,
-            patch("almanak.framework.cli.backtest.PaperTraderState.load", return_value=state),
-            patch("almanak.framework.cli.backtest.get_strategy", return_value=type("S", (), {})),
-            patch("almanak.framework.cli.backtest.load_strategy_config", return_value={}),
-            patch("almanak.framework.cli.backtest.update_paper_session_status"),
-            patch("almanak.framework.cli.backtest.save_paper_session_state"),
+            patch("almanak.framework.cli.backtest.paper.BackgroundPaperTrader") as mock_bg,
+            patch("almanak.framework.cli.backtest.paper.PaperTraderState.load", return_value=state),
+            patch("almanak.framework.cli.backtest.paper.get_strategy", return_value=type("S", (), {})),
+            patch("almanak.framework.cli.backtest.paper.load_strategy_config", return_value={}),
+            patch("almanak.framework.cli.backtest.paper.update_paper_session_status"),
+            patch("almanak.framework.cli.backtest.paper.save_paper_session_state"),
             patch.dict("os.environ", {"ALMANAK_ARBITRUM_RPC_URL": "http://my-rpc"}, clear=False),
         ):
             mock_instance = MagicMock()
@@ -296,8 +296,8 @@ class TestPaperResume:
         runner = CliRunner(mix_stderr=False)
 
         with (
-            patch("almanak.framework.cli.backtest.BackgroundPaperTrader") as mock_bg,
-            patch("almanak.framework.cli.backtest.PaperTraderState.load", return_value=state),
+            patch("almanak.framework.cli.backtest.paper.BackgroundPaperTrader") as mock_bg,
+            patch("almanak.framework.cli.backtest.paper.PaperTraderState.load", return_value=state),
             patch.dict("os.environ", {}, clear=True),
         ):
             mock_instance = MagicMock()
@@ -321,12 +321,12 @@ class TestPaperResume:
         runner = CliRunner(mix_stderr=False)
 
         with (
-            patch("almanak.framework.cli.backtest.BackgroundPaperTrader") as mock_bg,
-            patch("almanak.framework.cli.backtest.PaperTraderState.load", return_value=state),
-            patch("almanak.framework.cli.backtest.get_strategy", return_value=type("S", (), {})),
-            patch("almanak.framework.cli.backtest.load_strategy_config", return_value={}),
-            patch("almanak.framework.cli.backtest.update_paper_session_status"),
-            patch("almanak.framework.cli.backtest.save_paper_session_state"),
+            patch("almanak.framework.cli.backtest.paper.BackgroundPaperTrader") as mock_bg,
+            patch("almanak.framework.cli.backtest.paper.PaperTraderState.load", return_value=state),
+            patch("almanak.framework.cli.backtest.paper.get_strategy", return_value=type("S", (), {})),
+            patch("almanak.framework.cli.backtest.paper.load_strategy_config", return_value={}),
+            patch("almanak.framework.cli.backtest.paper.update_paper_session_status"),
+            patch("almanak.framework.cli.backtest.paper.save_paper_session_state"),
             patch.dict("os.environ", {"ALMANAK_ARBITRUM_RPC_URL": "http://test-rpc"}),
         ):
             mock_instance = MagicMock()

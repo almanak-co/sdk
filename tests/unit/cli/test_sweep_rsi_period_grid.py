@@ -232,7 +232,7 @@ class TestVIB1701SweepExecution:
                 return None
 
         mock_result = _make_result()
-        with patch("almanak.framework.cli.backtest.PnLBacktester") as mock_bt:
+        with patch("almanak.framework.cli.backtest.sweep.PnLBacktester") as mock_bt:
             mock_bt.return_value.backtest = AsyncMock(return_value=mock_result)
             await run_sweep_backtest(
                 strategy_class=ConfigTracker,
@@ -262,7 +262,7 @@ class TestVIB1701SweepExecution:
                 return None
 
         mock_result = _make_result(sharpe="1.8", total_return="12.0")
-        with patch("almanak.framework.cli.backtest.PnLBacktester") as mock_bt:
+        with patch("almanak.framework.cli.backtest.sweep.PnLBacktester") as mock_bt:
             mock_bt.return_value.backtest = AsyncMock(return_value=mock_result)
             result = await run_sweep_backtest(
                 strategy_class=SimpleStrategy,
