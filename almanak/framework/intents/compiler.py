@@ -10216,8 +10216,38 @@ class IntentCompiler:
                 )
                 transactions.extend(approve_txs)
 
-                # Build supply TX via Compound V3 adapter
-                supply_result = compound_adapter.supply(amount=amount_decimal)
+                # Detect if the token is the base token or a collateral token.
+                # Compound V3 uses supply() for the base asset and supply_collateral()
+                # for collateral assets — they are different contract methods.
+                # Use address comparison (not symbol) for reliable matching.
+                # Fail closed if market_config is incomplete — we cannot safely route
+                # without knowing the base token address.
+                base_token_address = compound_adapter.market_config.get("base_token_address", "")
+                if not base_token_address:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=f"Compound V3 market config missing base_token_address for {market} on {self.chain} — cannot determine supply routing",
+                        intent_id=intent.intent_id,
+                    )
+                is_base_token = supply_token.address.lower() == base_token_address.lower()
+
+                if is_base_token:
+                    # Supply base asset (earn interest)
+                    supply_result = compound_adapter.supply(amount=amount_decimal)
+                else:
+                    # In Compound V3, non-base tokens can ONLY be supplied as collateral.
+                    # If the caller explicitly opted out of collateral, fail closed.
+                    if not intent.use_as_collateral:
+                        return CompilationResult(
+                            status=CompilationStatus.FAILED,
+                            error=f"Cannot supply {supply_token.symbol} to Compound V3 {market} market with use_as_collateral=False — non-base tokens can only be supplied as collateral in Compound V3",
+                            intent_id=intent.intent_id,
+                        )
+                    # Supply collateral asset (enable borrowing)
+                    supply_result = compound_adapter.supply_collateral(
+                        asset=supply_token.symbol,
+                        amount=amount_decimal,
+                    )
 
                 if not supply_result.success:
                     return CompilationResult(
@@ -10238,7 +10268,7 @@ class IntentCompiler:
                     gas_estimate=supply_result.gas_estimate,
                     description=supply_result.description
                     or f"Supply {amount_decimal} {supply_token.symbol} to Compound V3",
-                    tx_type="lending_supply",
+                    tx_type="lending_supply" if is_base_token else "lending_supply_collateral",
                 )
                 transactions.append(supply_tx)
 
@@ -10254,6 +10284,7 @@ class IntentCompiler:
                         "market": market,
                         "supply_token": supply_token.to_dict(),
                         "supply_amount": str(amount_decimal),
+                        "supply_type": "base" if is_base_token else "collateral",
                         "chain": self.chain,
                     },
                 )
@@ -10263,8 +10294,9 @@ class IntentCompiler:
                 result.total_gas_estimate = total_gas
                 result.warnings = warnings
 
+                supply_type = "base" if is_base_token else "collateral"
                 supply_fmt = format_token_amount(supply_amount_wei, supply_token.symbol, supply_token.decimals)
-                logger.info(f"Compiled SUPPLY: {supply_fmt} to Compound V3 ({market} market)")
+                logger.info(f"Compiled SUPPLY ({supply_type}): {supply_fmt} to Compound V3 ({market} market)")
                 logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
 
             # =================================================================

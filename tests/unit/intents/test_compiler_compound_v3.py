@@ -40,6 +40,7 @@ MOCK_CHAIN_ADDRESSES = {
                     "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
                     "collateral_factor": 0.825,
                 },
+                "WBTC": {"address": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"},
             },
         },
     },
@@ -152,9 +153,11 @@ class TestCompoundV3Supply:
     @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
     @patch(CONFIG_CLS)
     @patch(ADAPTER_CLS)
-    def test_supply_success(self, mock_adapter_cls, mock_config_cls, compiler):
+    def test_supply_base_token_calls_supply(self, mock_adapter_cls, mock_config_cls, compiler):
+        """Supplying the base token (USDC) calls adapter.supply()."""
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
         mock_adapter.supply.return_value = _mock_tx_result("Supply 100 USDC to Compound V3")
         mock_adapter_cls.return_value = mock_adapter
 
@@ -171,7 +174,116 @@ class TestCompoundV3Supply:
         assert result.action_bundle is not None
         assert result.action_bundle.metadata["protocol"] == "compound_v3"
         assert result.action_bundle.metadata["market"] == "usdc"
+        assert result.action_bundle.metadata["supply_type"] == "base"
         assert len(result.transactions) >= 2  # approve + supply
+        mock_adapter.supply.assert_called_once()
+        mock_adapter.supply_collateral.assert_not_called()
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_supply_collateral_token_calls_supply_collateral(self, mock_adapter_cls, mock_config_cls, compiler):
+        """Supplying a collateral token (WETH to USDC market) calls adapter.supply_collateral()."""
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
+        mock_adapter.supply_collateral.return_value = _mock_tx_result("Supply 1 WETH as collateral")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = SupplyIntent(
+            token="WETH",
+            amount=Decimal("1"),
+            protocol="compound_v3",
+            market_id="usdc",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle is not None
+        assert result.action_bundle.metadata["supply_type"] == "collateral"
+        mock_adapter.supply_collateral.assert_called_once_with(
+            asset="WETH",
+            amount=Decimal("1"),
+        )
+        mock_adapter.supply.assert_not_called()
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_supply_collateral_failure(self, mock_adapter_cls, mock_config_cls, compiler):
+        """Collateral supply failure returns FAILED status."""
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
+        mock_adapter.supply_collateral.return_value = _mock_failed_result("Unsupported collateral: DAI")
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = SupplyIntent(
+            token="DAI",
+            amount=Decimal("1000"),
+            protocol="compound_v3",
+            market_id="usdc",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "Compound V3 supply failed" in result.error
+        mock_adapter.supply_collateral.assert_called_once_with(
+            asset="DAI",
+            amount=Decimal("1000"),
+        )
+        mock_adapter.supply.assert_not_called()
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_supply_collateral_rejected_when_use_as_collateral_false(self, mock_adapter_cls, mock_config_cls, compiler):
+        """Supplying a non-base token with use_as_collateral=False fails closed."""
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = SupplyIntent(
+            token="WETH",
+            amount=Decimal("1"),
+            protocol="compound_v3",
+            market_id="usdc",
+            use_as_collateral=False,
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "use_as_collateral=False" in result.error
+        mock_adapter.supply.assert_not_called()
+        mock_adapter.supply_collateral.assert_not_called()
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_supply_fails_when_no_market_config(self, mock_adapter_cls, mock_config_cls, compiler):
+        """When market_config has no base_token_address, compilation fails closed."""
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = {}  # Empty — market exists in COMET_ADDRESSES but not MARKETS
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = SupplyIntent(
+            token="USDC",
+            amount=Decimal("100"),
+            protocol="compound_v3",
+            market_id="usdc",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "missing base_token_address" in result.error
+        mock_adapter.supply.assert_not_called()
+        mock_adapter.supply_collateral.assert_not_called()
 
     @patch(COMET_ADDRESSES, {"ethereum": {"usdc": {"comet_address": TEST_COMET}}})
     def test_supply_unsupported_chain(self):
@@ -210,6 +322,7 @@ class TestCompoundV3Supply:
     def test_supply_defaults_to_usdc_market(self, mock_adapter_cls, mock_config_cls, compiler):
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
         mock_adapter.supply.return_value = _mock_tx_result("Supply USDC")
         mock_adapter_cls.return_value = mock_adapter
 
@@ -232,9 +345,10 @@ class TestCompoundV3Supply:
     @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
     @patch(CONFIG_CLS)
     @patch(ADAPTER_CLS)
-    def test_supply_adapter_failure(self, mock_adapter_cls, mock_config_cls, compiler):
+    def test_supply_base_adapter_failure(self, mock_adapter_cls, mock_config_cls, compiler):
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
         mock_adapter.supply.return_value = _mock_failed_result("Insufficient balance")
         mock_adapter_cls.return_value = mock_adapter
 
@@ -670,6 +784,7 @@ class TestCompoundV3Optimism:
     def test_supply_optimism(self, mock_adapter_cls, mock_config_cls, optimism_compiler):
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET_OPTIMISM
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["optimism"]["usdc"]
         mock_adapter.supply.return_value = _mock_tx_result("Supply 100 USDC to Compound V3 on Optimism")
         mock_adapter_cls.return_value = mock_adapter
 
@@ -787,6 +902,7 @@ class TestCompoundV3Polygon:
     def test_supply_polygon_usdc_e(self, mock_adapter_cls, mock_config_cls, polygon_compiler):
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET_POLYGON
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["polygon"]["usdc_e"]
         mock_adapter.supply.return_value = _mock_tx_result("Supply USDC.e to Compound V3 on Polygon")
         mock_adapter_cls.return_value = mock_adapter
 
