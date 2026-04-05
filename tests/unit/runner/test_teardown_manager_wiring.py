@@ -333,7 +333,7 @@ class TestTeardownCompilerCreation:
         strategy.chain = "arbitrum"
         strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
 
-        with patch("almanak.framework.runner.strategy_runner.IntentCompiler", side_effect=RuntimeError("bad")):
+        with patch("almanak.framework.runner.runner_teardown.IntentCompiler", side_effect=RuntimeError("bad")):
             compiler = runner._build_teardown_compiler(strategy, None)
 
         assert compiler is None

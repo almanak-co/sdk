@@ -25,7 +25,7 @@ if TYPE_CHECKING:
         WithdrawIntent,
     )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("almanak.framework.intents.compiler")
 
 
 # =============================================================================

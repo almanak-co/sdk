@@ -620,7 +620,7 @@ class TestTeardownViaManager:
         strategy = _make_strategy()
         market = MagicMock(get_price_oracle_dict=MagicMock(return_value={"ETH": Decimal("3000")}))
 
-        with patch("almanak.framework.runner.strategy_runner.IntentCompiler") as mock_compiler_cls:
+        with patch("almanak.framework.runner.runner_teardown.IntentCompiler") as mock_compiler_cls:
             mock_compiler_cls.return_value = MagicMock()
             compiler = runner._build_teardown_compiler(strategy, market)
 
@@ -638,7 +638,7 @@ class TestTeardownViaManager:
         runner = _make_runner()
         strategy = _make_strategy()
 
-        with patch("almanak.framework.runner.strategy_runner.IntentCompiler", side_effect=RuntimeError("bad")):
+        with patch("almanak.framework.runner.runner_teardown.IntentCompiler", side_effect=RuntimeError("bad")):
             compiler = runner._build_teardown_compiler(strategy, None)
 
         assert compiler is None

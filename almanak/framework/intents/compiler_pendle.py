@@ -20,7 +20,7 @@ from .vocabulary import IntentType
 if TYPE_CHECKING:
     from .vocabulary import LPCloseIntent, LPOpenIntent, SwapIntent, WithdrawIntent
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("almanak.framework.intents.compiler")
 
 
 def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:

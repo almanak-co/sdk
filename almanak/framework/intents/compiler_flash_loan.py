@@ -19,7 +19,7 @@ from .vocabulary import AnyIntent, Intent, IntentType, SwapIntent
 if TYPE_CHECKING:
     from .vocabulary import FlashLoanIntent
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("almanak.framework.intents.compiler")
 
 
 def compile_flash_loan(compiler, intent: FlashLoanIntent) -> CompilationResult:

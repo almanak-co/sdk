@@ -3274,6 +3274,13 @@ class PaperTrader:
         Returns:
             BacktestMetrics with all calculated performance metrics
         """
+        from .metrics_calculator import (
+            calculate_max_drawdown,
+            calculate_returns,
+            calculate_sharpe_ratio,
+            calculate_volatility,
+        )
+
         if not self._equity_curve:
             return BacktestMetrics()
 
@@ -3300,14 +3307,14 @@ class PaperTrader:
             total_return = (final_value - initial_value) / initial_value
 
         # Calculate returns for risk metrics
-        returns = self._calculate_returns(equity_values)
+        returns = calculate_returns(equity_values)
 
         # Volatility and Sharpe ratio (simplified)
-        volatility = self._calculate_volatility(returns)
-        sharpe = self._calculate_sharpe_ratio(returns, volatility)
+        volatility = calculate_volatility(returns)
+        sharpe = calculate_sharpe_ratio(returns, volatility)
 
         # Max drawdown
-        max_drawdown = self._calculate_max_drawdown(equity_values)
+        max_drawdown = calculate_max_drawdown(equity_values)
 
         # Trade statistics using per-trade PnL from net_pnl_usd (includes gas costs)
         total_trades_count = len(self._trades)
@@ -3357,82 +3364,38 @@ class PaperTrader:
         )
 
     def _calculate_returns(self, values: list[Decimal]) -> list[Decimal]:
-        """Calculate period-over-period returns."""
-        if len(values) < 2:
-            return []
+        """Calculate period-over-period returns. Delegates to metrics_calculator module."""
+        from .metrics_calculator import calculate_returns
 
-        returns: list[Decimal] = []
-        for i in range(1, len(values)):
-            if values[i - 1] > Decimal("0"):
-                ret = (values[i] - values[i - 1]) / values[i - 1]
-                returns.append(ret)
-        return returns
+        return calculate_returns(values)
 
     def _calculate_volatility(self, returns: list[Decimal]) -> Decimal:
-        """Calculate volatility (standard deviation) of returns."""
-        if len(returns) < 2:
-            return Decimal("0")
+        """Calculate volatility. Delegates to metrics_calculator module."""
+        from .metrics_calculator import calculate_volatility
 
-        n = Decimal(str(len(returns)))
-        mean = sum(returns, Decimal("0")) / n
-        squared_diffs = sum((r - mean) ** 2 for r in returns)
-        variance = squared_diffs / (n - Decimal("1"))
-
-        return self._decimal_sqrt(variance)
+        return calculate_volatility(returns)
 
     def _calculate_sharpe_ratio(
         self,
         returns: list[Decimal],
         volatility: Decimal,
     ) -> Decimal:
-        """Calculate Sharpe ratio."""
-        if volatility == Decimal("0") or not returns:
-            return Decimal("0")
+        """Calculate Sharpe ratio. Delegates to metrics_calculator module."""
+        from .metrics_calculator import calculate_sharpe_ratio
 
-        n = Decimal(str(len(returns)))
-        mean_return = sum(returns, Decimal("0")) / n
-
-        # Annualize (assuming hourly returns for paper trading)
-        annualized_return = mean_return * Decimal("8760")  # Hours per year
-        annualized_vol = volatility * self._decimal_sqrt(Decimal("8760"))
-
-        if annualized_vol == Decimal("0"):
-            return Decimal("0")
-
-        return annualized_return / annualized_vol
+        return calculate_sharpe_ratio(returns, volatility)
 
     def _calculate_max_drawdown(self, values: list[Decimal]) -> Decimal:
-        """Calculate maximum drawdown."""
-        if len(values) < 2:
-            return Decimal("0")
+        """Calculate maximum drawdown. Delegates to metrics_calculator module."""
+        from .metrics_calculator import calculate_max_drawdown
 
-        max_drawdown = Decimal("0")
-        peak = values[0]
-
-        for value in values:
-            if value > peak:
-                peak = value
-            elif peak > Decimal("0"):
-                drawdown = (peak - value) / peak
-                if drawdown > max_drawdown:
-                    max_drawdown = drawdown
-
-        return max_drawdown
+        return calculate_max_drawdown(values)
 
     def _decimal_sqrt(self, n: Decimal) -> Decimal:
-        """Calculate square root of a Decimal using Newton's method."""
-        if n < Decimal("0"):
-            raise ValueError("Cannot compute sqrt of negative number")
-        if n == Decimal("0"):
-            return Decimal("0")
+        """Calculate square root of a Decimal. Delegates to metrics_calculator module."""
+        from .metrics_calculator import decimal_sqrt
 
-        x = n
-        for _ in range(50):
-            x_new = (x + n / x) / Decimal("2")
-            if abs(x_new - x) < Decimal("1e-28"):
-                break
-            x = x_new
-        return x
+        return decimal_sqrt(n)
 
 
 # =============================================================================

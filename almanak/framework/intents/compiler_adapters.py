@@ -37,7 +37,7 @@ from .compiler_constants import (
     get_gas_estimate,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("almanak.framework.intents.compiler")
 
 
 # =============================================================================
