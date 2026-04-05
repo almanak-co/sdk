@@ -136,6 +136,37 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
 
         self._initialized = True
 
+    async def warmup(self, wallet_address: str | None = None) -> None:
+        """Pre-warm price caches and balance providers to avoid first-call delays.
+
+        Fetches a common price (ETH/USD) to warm all HTTP connections and caches
+        in the price sources. Optionally pre-warms the balance provider for the
+        configured chain/wallet.
+
+        Args:
+            wallet_address: Optional wallet address to pre-warm balance provider.
+        """
+        await self._ensure_initialized()
+
+        # Warm price sources by fetching a common token price.
+        # This forces HTTP connection setup, API auth, and cache population
+        # so the first strategy price() call doesn't block for 30s+.
+        if self._price_aggregator is not None:
+            try:
+                await self._price_aggregator.get_aggregated_price("ETH", "USD")
+                logger.info("Price cache pre-warmed (ETH/USD fetched)")
+            except Exception as e:
+                logger.warning("Price cache warmup failed (will retry on first call): %s", e)
+
+        # Pre-warm balance provider for the configured chain if a wallet is available
+        chain = self.settings.chains[0] if self.settings.chains else None
+        if chain and wallet_address:
+            try:
+                await self._get_balance_provider(chain, wallet_address)
+                logger.info("Balance provider pre-warmed for chain=%s", chain)
+            except Exception as e:
+                logger.warning("Balance provider warmup failed for chain=%s: %s", chain, e)
+
     async def _get_balance_provider(self, chain: str, wallet_address: str):
         """Get or create balance provider for a chain.
 

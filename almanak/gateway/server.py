@@ -501,22 +501,54 @@ class GatewayServer:
         )
         logger.debug("Heartbeat TTL enforcer task started (interval=60s, threshold=300s)")
 
-        # Pre-warm market service (price sources) to avoid 30s+ block on first
-        # market.price() call. This is separate from chain prewarming because
-        # _prewarm_chains() is execution-centric and can early-return. (VIB-2392)
+        # Pre-warm market service: initialize price sources AND fetch a common
+        # price to warm HTTP connections/caches. Also pre-warms the balance
+        # provider for the configured chain/wallet. (VIB-2392)
         # Only pre-warm when chains are already configured; wallet-registry deployments
         # get chains later via register_chains() and must lazy-init with the correct
         # chain context (otherwise _ensure_initialized locks to CoinGecko-only).
         if self._market_servicer and self.settings.chains:
+            wallet_for_warmup = self._resolve_wallet_address()
             try:
-                await self._market_servicer._ensure_initialized()
-                logger.info("Market service pre-initialized (price sources ready)")
+                await self._market_servicer.warmup(wallet_address=wallet_for_warmup)
             except Exception as e:
-                logger.warning(f"Market service pre-init failed (will lazy-init on first call): {e}")
+                logger.warning(f"Market service warmup failed (will lazy-init on first call): {e}")
 
         # Pre-warm orchestrators if chains are configured or wallet registry has chains
         if self.settings.chains or (self._wallet_registry and self._wallet_registry.all_chains()):
             await self._prewarm_chains()
+
+    def _resolve_wallet_address(self) -> str | None:
+        """Resolve the wallet address from registry or legacy config.
+
+        Returns the first available wallet address (for balance provider warmup),
+        or None if no wallet is configured.
+        """
+        # Registry-aware path
+        if self._wallet_registry is not None:
+            for chain in self._wallet_registry.all_chains():
+                try:
+                    resolved = self._wallet_registry.resolve(chain)
+                    return resolved.account_address
+                except Exception:
+                    continue
+            return None
+
+        # Legacy path: Safe address first, then derive from private key
+        safe_mode_enabled = self.settings.safe_mode in ("direct", "zodiac")
+        if self.settings.safe_address and safe_mode_enabled:
+            return self.settings.safe_address
+        if not self.settings.private_key:
+            return None
+        try:
+            from eth_account import Account
+
+            key = self.settings.private_key
+            if not key.startswith("0x"):
+                key = "0x" + key
+            return Account.from_key(key).address
+        except Exception:
+            return None
 
     async def _prewarm_chains(self) -> None:
         """Pre-warm execution orchestrators for configured chains."""
