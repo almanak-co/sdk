@@ -166,6 +166,7 @@ class Protocol(Enum):
     ENSO = "ENSO"
     PENDLE = "PENDLE"
     METAMORPHO = "METAMORPHO"
+    RADIANT_V2 = "RADIANT_V2"
     LIFI = "LIFI"
 
 

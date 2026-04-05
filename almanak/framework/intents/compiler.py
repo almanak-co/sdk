@@ -532,9 +532,11 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
 LENDING_POOL_ADDRESSES: dict[str, dict[str, str]] = {
     "ethereum": {
         "aave_v3": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+        "radiant_v2": "0xA950974f64aA33f27F6C5e017eEE93BF7588ED07",
     },
     "arbitrum": {
         "aave_v3": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+        "radiant_v2": "0xF4B1486DD74D07706052A33d31d7c0AAFD0659E1",
     },
     "optimism": {
         "aave_v3": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
@@ -612,6 +614,16 @@ NFT_POSITION_DECREASE_SELECTOR = "0x0c49ccbe"
 NFT_POSITION_COLLECT_SELECTOR = "0xfc6f7865"
 # burn(tokenId): burn position NFT (requires position to be empty)
 NFT_POSITION_BURN_SELECTOR = "0x42966c68"
+
+# Aave V2 forks (use deposit() instead of supply(), otherwise same ABI).
+AAVE_V2_FORKS = {"radiant_v2"}
+
+# Protocols that share the Aave V3 lending pool interface (same ABI, different addresses).
+AAVE_COMPATIBLE_PROTOCOLS = {"aave_v3"} | AAVE_V2_FORKS
+
+# Aave V2 Pool function selectors (used by V2 forks: Radiant V2, etc.)
+# deposit(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)
+AAVE_V2_DEPOSIT_SELECTOR = "0xe8eda9df"
 
 # Aave V3 Pool function selectors
 # supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)
@@ -1553,6 +1565,8 @@ class AaveV3Adapter:
     - Variable and stable interest rates (stable being deprecated)
     """
 
+    _AAVE_V2_FORKS = AAVE_V2_FORKS
+
     def __init__(self, chain: str, protocol: str = "aave_v3") -> None:
         """Initialize the adapter.
 
@@ -1562,6 +1576,7 @@ class AaveV3Adapter:
         """
         self.chain = chain
         self.protocol = protocol
+        self._is_v2_fork = protocol in self._AAVE_V2_FORKS
 
         # Get pool address
         chain_pools = LENDING_POOL_ADDRESSES.get(chain, {})
@@ -1577,10 +1592,12 @@ class AaveV3Adapter:
         amount: int,
         on_behalf_of: str,
     ) -> bytes:
-        """Generate calldata for supplying assets to Aave V3.
+        """Generate calldata for supplying assets.
 
-        Aave V3 supply function:
-        supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)
+        Aave V3: supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)
+        Aave V2 forks (Radiant V2): deposit(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)
+
+        Both have identical parameter layouts, only the function selector differs.
 
         Args:
             asset: Token address to supply
@@ -1588,7 +1605,7 @@ class AaveV3Adapter:
             on_behalf_of: Address to credit with the supply
 
         Returns:
-            Encoded calldata for the supply transaction
+            Encoded calldata for the supply/deposit transaction
         """
         # No referral code (0)
         referral_code = 0
@@ -1600,7 +1617,8 @@ class AaveV3Adapter:
             + self._pad_uint16(referral_code)
         )
 
-        return bytes.fromhex(AAVE_SUPPLY_SELECTOR[2:] + params)
+        selector = AAVE_V2_DEPOSIT_SELECTOR if self._is_v2_fork else AAVE_SUPPLY_SELECTOR
+        return bytes.fromhex(selector[2:] + params)
 
     def get_borrow_calldata(
         self,
@@ -8548,17 +8566,17 @@ class IntentCompiler:
                 return result
 
             # =================================================================
-            # AAVE V3 PATH
+            # AAVE-COMPATIBLE PATH (Aave V3 + Radiant V2)
             # =================================================================
-            elif protocol_lower.startswith("aave"):
+            elif protocol_lower in AAVE_COMPATIBLE_PROTOCOLS:
                 # Get lending adapter
-                adapter = AaveV3Adapter(self.chain, "aave_v3")
+                adapter = AaveV3Adapter(self.chain, protocol_lower)
                 pool_address = adapter.get_pool_address()
 
                 if pool_address == "0x0000000000000000000000000000000000000000":
                     return CompilationResult(
                         status=CompilationStatus.FAILED,
-                        error=f"Aave V3 not available on chain: {self.chain}",
+                        error=f"{intent.protocol} not available on chain: {self.chain}",
                         intent_id=intent.intent_id,
                     )
 
@@ -9319,16 +9337,16 @@ class IntentCompiler:
                 return result
 
             # =================================================================
-            # AAVE V3 PATH
+            # AAVE-COMPATIBLE PATH (Aave V3 + Radiant V2)
             # =================================================================
-            elif protocol_lower.startswith("aave"):
-                adapter = AaveV3Adapter(self.chain, "aave_v3")
+            elif protocol_lower in AAVE_COMPATIBLE_PROTOCOLS:
+                adapter = AaveV3Adapter(self.chain, protocol_lower)
                 pool_address = adapter.get_pool_address()
 
                 if pool_address == "0x0000000000000000000000000000000000000000":
                     return CompilationResult(
                         status=CompilationStatus.FAILED,
-                        error=f"Aave V3 not available on chain: {self.chain}",
+                        error=f"{intent.protocol} not available on chain: {self.chain}",
                         intent_id=intent.intent_id,
                     )
 
@@ -9942,17 +9960,17 @@ class IntentCompiler:
                 return result
 
             # =================================================================
-            # AAVE V3 PATH
+            # AAVE-COMPATIBLE PATH (Aave V3 + Radiant V2)
             # =================================================================
-            elif protocol_lower.startswith("aave"):
+            elif protocol_lower in AAVE_COMPATIBLE_PROTOCOLS:
                 # Get lending adapter
-                adapter = AaveV3Adapter(self.chain, "aave_v3")
+                adapter = AaveV3Adapter(self.chain, protocol_lower)
                 pool_address = adapter.get_pool_address()
 
                 if pool_address == "0x0000000000000000000000000000000000000000":
                     return CompilationResult(
                         status=CompilationStatus.FAILED,
-                        error=f"Aave V3 not available on chain: {self.chain}",
+                        error=f"{intent.protocol} not available on chain: {self.chain}",
                         intent_id=intent.intent_id,
                     )
 
@@ -9996,7 +10014,7 @@ class IntentCompiler:
                     data="0x" + supply_calldata.hex(),
                     gas_estimate=adapter.estimate_supply_gas(),
                     description=(
-                        f"Supply {self._format_amount(supply_amount, supply_token.decimals)} {supply_token.symbol} to Aave V3"
+                        f"Supply {self._format_amount(supply_amount, supply_token.decimals)} {supply_token.symbol} to {intent.protocol}"
                     ),
                     tx_type="lending_supply",
                 )
@@ -10014,7 +10032,7 @@ class IntentCompiler:
                         value=0,
                         data="0x" + set_collateral_calldata.hex(),
                         gas_estimate=adapter.estimate_set_collateral_gas(),
-                        description=(f"Enable {supply_token.symbol} as collateral on Aave V3"),
+                        description=(f"Enable {supply_token.symbol} as collateral on {intent.protocol}"),
                         tx_type="lending_set_collateral",
                     )
                     transactions.append(set_collateral_tx)
@@ -10586,16 +10604,16 @@ class IntentCompiler:
                 return result
 
             # =================================================================
-            # AAVE V3 PATH
+            # AAVE-COMPATIBLE PATH (Aave V3 + Radiant V2)
             # =================================================================
-            elif protocol_lower.startswith("aave"):
-                adapter = AaveV3Adapter(self.chain, "aave_v3")
+            elif protocol_lower in AAVE_COMPATIBLE_PROTOCOLS:
+                adapter = AaveV3Adapter(self.chain, protocol_lower)
                 pool_address = adapter.get_pool_address()
 
                 if pool_address == "0x0000000000000000000000000000000000000000":
                     return CompilationResult(
                         status=CompilationStatus.FAILED,
-                        error=f"Aave V3 not available on chain: {self.chain}",
+                        error=f"{intent.protocol} not available on chain: {self.chain}",
                         intent_id=intent.intent_id,
                     )
 
@@ -10634,7 +10652,7 @@ class IntentCompiler:
                     value=0,
                     data="0x" + withdraw_calldata.hex(),
                     gas_estimate=adapter.estimate_withdraw_gas(),
-                    description=(f"Withdraw {amount_display} {withdraw_token.symbol} from Aave V3"),
+                    description=(f"Withdraw {amount_display} {withdraw_token.symbol} from {intent.protocol}"),
                     tx_type="lending_withdraw",
                 )
                 transactions.append(withdraw_tx)

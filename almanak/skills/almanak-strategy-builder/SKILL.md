@@ -1255,6 +1255,7 @@ class MyStrategy(IntentStrategy):
 | Enso | `ENSO` | Aggregator | `enso` |
 | Pendle | `PENDLE` | Yield | `pendle` |
 | MetaMorpho | `METAMORPHO` | Lending | `metamorpho` |
+| Radiant V2 | `RADIANT_V2` | Lending | `radiant_v2` |
 | LiFi | `LIFI` | Bridge | `lifi` |
 | Vault | `VAULT` | ERC-4626 | `vault` |
 | Curve | `CURVE` | DEX / LP | `curve` |

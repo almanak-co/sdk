@@ -1880,7 +1880,7 @@ class ExecutionOrchestrator:
 
         # Protocols that store lending amounts as wei in metadata.
         # All others (morpho, morpho_blue, compound_v3) use human-readable.
-        _WEI_LENDING_PROTOCOLS = {"aave_v3", "spark"}
+        _WEI_LENDING_PROTOCOLS = {"aave_v3", "spark", "radiant_v2"}
 
         # Extract required tokens and amounts from metadata based on intent type
         # Each requirement: (symbol, address, amount_wei, decimals or None, is_native)

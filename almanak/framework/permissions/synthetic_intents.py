@@ -61,7 +61,7 @@ _LP_PROTOCOLS = {
     "aerodrome",
     "traderjoe_v2",
 }
-_LENDING_PROTOCOLS = {"aave_v3", "morpho_blue", "spark", "compound_v3"}
+_LENDING_PROTOCOLS = {"aave_v3", "morpho_blue", "spark", "compound_v3", "radiant_v2"}
 _PERP_PROTOCOLS = {"gmx_v2"}
 _FLASH_LOAN_PROVIDERS = {"aave", "balancer"}
 

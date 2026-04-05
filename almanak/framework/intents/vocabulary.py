@@ -251,6 +251,12 @@ PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
         "type": "clmm",
         "operations": ["lp_open", "lp_close"],
     },
+    "radiant_v2": {
+        "supports_interest_rate_mode": True,
+        "interest_rate_modes": ["variable"],  # stable rate deprecated (Aave V2 fork)
+        "supports_collateral_toggle": True,
+        "operations": ["supply", "withdraw", "borrow", "repay"],
+    },
 }
 
 
