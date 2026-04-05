@@ -35,6 +35,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -44,6 +45,7 @@ from ..state_manager import StateConflictError, StateData, StateTier
 
 if TYPE_CHECKING:
     from almanak.framework.execution.clob_handler import ClobFill, ClobOrderState, ClobOrderStatus
+    from almanak.framework.observability.ledger import LedgerEntry
     from almanak.framework.portfolio import PortfolioMetrics, PortfolioSnapshot
 
 logger = logging.getLogger(__name__)
@@ -305,6 +307,40 @@ CREATE TABLE IF NOT EXISTS portfolio_metrics (
     gas_spent_usd TEXT DEFAULT '0',
     updated_at TEXT NOT NULL
 );
+
+-- Transaction ledger -- structured trade records (VIB-2402)
+CREATE TABLE IF NOT EXISTS transaction_ledger (
+    id TEXT PRIMARY KEY,
+    cycle_id TEXT NOT NULL,
+    strategy_id TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    intent_type TEXT NOT NULL,
+    token_in TEXT,
+    amount_in TEXT,
+    token_out TEXT,
+    amount_out TEXT,
+    effective_price TEXT,
+    slippage_bps REAL,
+    gas_used INTEGER,
+    gas_usd TEXT,
+    tx_hash TEXT,
+    chain TEXT,
+    protocol TEXT,
+    success BOOLEAN NOT NULL DEFAULT 1,
+    error TEXT
+);
+
+-- Index for strategy + time queries
+CREATE INDEX IF NOT EXISTS idx_transaction_ledger_strategy_time
+ON transaction_ledger (strategy_id, timestamp DESC);
+
+-- Index for cycle correlation
+CREATE INDEX IF NOT EXISTS idx_transaction_ledger_cycle_id
+ON transaction_ledger (cycle_id);
+
+-- Index for intent type filtering
+CREATE INDEX IF NOT EXISTS idx_transaction_ledger_intent_type
+ON transaction_ledger (strategy_id, intent_type);
 """
 
 
@@ -348,6 +384,7 @@ class SQLiteStore:
         self._conn: sqlite3.Connection | None = None
         self._initialized = False
         self._lock = asyncio.Lock()
+        self._db_lock = threading.Lock()
 
     @property
     def is_initialized(self) -> bool:
@@ -1606,3 +1643,132 @@ class SQLiteStore:
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_cleanup)
+
+    # =========================================================================
+    # Transaction Ledger (VIB-2402)
+    # =========================================================================
+
+    async def save_ledger_entry(self, entry: "LedgerEntry") -> None:
+        """Persist a transaction ledger entry.
+
+        Args:
+            entry: LedgerEntry to save.
+        """
+
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_save() -> None:
+            with self._db_lock:
+                self._conn.execute(  # type: ignore[union-attr]
+                    """
+                    INSERT OR REPLACE INTO transaction_ledger
+                    (id, cycle_id, strategy_id, timestamp, intent_type,
+                     token_in, amount_in, token_out, amount_out,
+                     effective_price, slippage_bps, gas_used, gas_usd,
+                     tx_hash, chain, protocol, success, error)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entry.id,
+                        entry.cycle_id,
+                        entry.strategy_id,
+                        entry.timestamp.isoformat(),
+                        entry.intent_type,
+                        entry.token_in,
+                        entry.amount_in,
+                        entry.token_out,
+                        entry.amount_out,
+                        entry.effective_price,
+                        entry.slippage_bps,
+                        entry.gas_used,
+                        entry.gas_usd,
+                        entry.tx_hash,
+                        entry.chain,
+                        entry.protocol,
+                        entry.success,
+                        entry.error,
+                    ),
+                )
+                self._conn.commit()  # type: ignore[union-attr]
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _sync_save)
+
+    async def get_ledger_entries(
+        self,
+        strategy_id: str,
+        since: datetime | None = None,
+        intent_type: str | None = None,
+        limit: int = 100,
+    ) -> list["LedgerEntry"]:
+        """Query transaction ledger entries.
+
+        Args:
+            strategy_id: Strategy to query.
+            since: Only entries after this timestamp.
+            intent_type: Filter by intent type.
+            limit: Maximum entries to return.
+
+        Returns:
+            List of LedgerEntry objects, newest first.
+        """
+        from almanak.framework.observability.ledger import LedgerEntry
+
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_get() -> list[LedgerEntry]:
+            conditions = ["strategy_id = ?"]
+            params: list[Any] = [strategy_id]
+
+            if since is not None:
+                conditions.append("timestamp > ?")
+                params.append(since.isoformat())
+            if intent_type is not None:
+                conditions.append("intent_type = ?")
+                params.append(intent_type)
+
+            where = " AND ".join(conditions)
+            params.append(limit)
+
+            with self._db_lock:
+                cursor = self._conn.execute(  # type: ignore[union-attr]
+                    f"""
+                    SELECT * FROM transaction_ledger
+                    WHERE {where}
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                    """,
+                    params,
+                )
+                rows = cursor.fetchall()
+
+            entries = []
+            for row in rows:
+                entries.append(
+                    LedgerEntry(
+                        id=row["id"],
+                        cycle_id=row["cycle_id"],
+                        strategy_id=row["strategy_id"],
+                        timestamp=datetime.fromisoformat(row["timestamp"]),
+                        intent_type=row["intent_type"],
+                        token_in=row["token_in"] or "",
+                        amount_in=row["amount_in"] or "",
+                        token_out=row["token_out"] or "",
+                        amount_out=row["amount_out"] or "",
+                        effective_price=row["effective_price"] or "",
+                        slippage_bps=row["slippage_bps"],
+                        gas_used=row["gas_used"] or 0,
+                        gas_usd=row["gas_usd"] or "",
+                        tx_hash=row["tx_hash"] or "",
+                        chain=row["chain"] or "",
+                        protocol=row["protocol"] or "",
+                        success=bool(row["success"]),
+                        error=row["error"] or "",
+                    )
+                )
+            return entries
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_get)

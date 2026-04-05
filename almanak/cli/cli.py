@@ -19,6 +19,7 @@ from almanak.framework.cli import backtest as framework_backtest_group
 from almanak.framework.cli import new_strategy as framework_new_strategy_cmd
 from almanak.framework.cli.ax import ax as framework_ax_group
 from almanak.framework.cli.demo import demo as framework_demo_cmd
+from almanak.framework.cli.export import export as framework_export_cmd
 from almanak.framework.cli.permissions import permissions as framework_permissions_cmd
 from almanak.framework.cli.run import run as framework_run_cmd
 from almanak.framework.cli.status import (
@@ -161,6 +162,7 @@ strat.add_command(framework_permissions_cmd, name="permissions")
 strat.add_command(framework_demo_cmd, name="demo")
 
 # Add monitoring commands to strat
+strat.add_command(framework_export_cmd, name="export")
 strat.add_command(framework_list_cmd, name="list")
 strat.add_command(framework_status_cmd, name="status")
 strat.add_command(framework_logs_cmd, name="logs")

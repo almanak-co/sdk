@@ -812,6 +812,9 @@ service DashboardService {
 
   // Purge a strategy instance and all its events (permanent delete).
   rpc PurgeStrategyInstance(PurgeInstanceRequest) returns (PurgeInstanceResponse);
+
+  // Get structured trade records from the transaction ledger (VIB-2402).
+  rpc GetTransactionLedger(GetTransactionLedgerRequest) returns (GetTransactionLedgerResponse);
 }
 
 // =============================================================================
@@ -1054,6 +1057,41 @@ message PurgeInstanceRequest {
 message PurgeInstanceResponse {
   bool success = 1;
   string error = 2;
+}
+
+// Transaction ledger messages (VIB-2402) -------------------------------------
+
+message GetTransactionLedgerRequest {
+  string strategy_id = 1;
+  int64 since_timestamp = 2;  // Optional: only entries after this time (unix)
+  string intent_type_filter = 3;  // Optional: filter by intent type
+  int32 limit = 4;  // Default 100
+}
+
+message GetTransactionLedgerResponse {
+  repeated LedgerEntryInfo entries = 1;
+  bool has_more = 2;
+}
+
+message LedgerEntryInfo {
+  string id = 1;
+  string cycle_id = 2;
+  string strategy_id = 3;
+  int64 timestamp = 4;
+  string intent_type = 5;
+  string token_in = 6;
+  string amount_in = 7;
+  string token_out = 8;
+  string amount_out = 9;
+  string effective_price = 10;
+  float slippage_bps = 11;
+  int64 gas_used = 12;
+  string gas_usd = 13;
+  string tx_hash = 14;
+  string chain = 15;
+  string protocol = 16;
+  bool success = 17;
+  string error = 18;
 }
 
 // =============================================================================

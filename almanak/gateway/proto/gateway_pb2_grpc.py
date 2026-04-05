@@ -2260,6 +2260,11 @@ class DashboardServiceStub(object):
                 request_serializer=gateway__pb2.PurgeInstanceRequest.SerializeToString,
                 response_deserializer=gateway__pb2.PurgeInstanceResponse.FromString,
                 _registered_method=True)
+        self.GetTransactionLedger = channel.unary_unary(
+                '/almanak.gateway.proto.DashboardService/GetTransactionLedger',
+                request_serializer=gateway__pb2.GetTransactionLedgerRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetTransactionLedgerResponse.FromString,
+                _registered_method=True)
 
 
 class DashboardServiceServicer(object):
@@ -2339,6 +2344,13 @@ class DashboardServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetTransactionLedger(self, request, context):
+        """Get structured trade records from the transaction ledger (VIB-2402).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_DashboardServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -2391,6 +2403,11 @@ def add_DashboardServiceServicer_to_server(servicer, server):
                     servicer.PurgeStrategyInstance,
                     request_deserializer=gateway__pb2.PurgeInstanceRequest.FromString,
                     response_serializer=gateway__pb2.PurgeInstanceResponse.SerializeToString,
+            ),
+            'GetTransactionLedger': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetTransactionLedger,
+                    request_deserializer=gateway__pb2.GetTransactionLedgerRequest.FromString,
+                    response_serializer=gateway__pb2.GetTransactionLedgerResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -2667,6 +2684,33 @@ class DashboardService(object):
             '/almanak.gateway.proto.DashboardService/PurgeStrategyInstance',
             gateway__pb2.PurgeInstanceRequest.SerializeToString,
             gateway__pb2.PurgeInstanceResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetTransactionLedger(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.DashboardService/GetTransactionLedger',
+            gateway__pb2.GetTransactionLedgerRequest.SerializeToString,
+            gateway__pb2.GetTransactionLedgerResponse.FromString,
             options,
             channel_credentials,
             insecure,

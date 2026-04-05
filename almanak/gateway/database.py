@@ -170,6 +170,38 @@ CREATE INDEX IF NOT EXISTS idx_timeline_events_agent_type
 
 CREATE INDEX IF NOT EXISTS idx_timeline_events_cycle_id
     ON timeline_events (cycle_id) WHERE cycle_id != '';
+
+-- Transaction ledger -- structured trade records (VIB-2402) ----------------
+CREATE TABLE IF NOT EXISTS transaction_ledger (
+    id                TEXT PRIMARY KEY,
+    cycle_id          TEXT NOT NULL,
+    agent_id          TEXT NOT NULL,
+    timestamp         TIMESTAMPTZ NOT NULL,
+    intent_type       TEXT NOT NULL,
+    token_in          TEXT,
+    amount_in         TEXT,
+    token_out         TEXT,
+    amount_out        TEXT,
+    effective_price   TEXT,
+    slippage_bps      REAL,
+    gas_used          BIGINT,
+    gas_usd           TEXT,
+    tx_hash           TEXT,
+    chain             TEXT,
+    protocol          TEXT,
+    success           BOOLEAN NOT NULL DEFAULT TRUE,
+    error             TEXT,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_transaction_ledger_agent_time
+    ON transaction_ledger (agent_id, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_transaction_ledger_cycle_id
+    ON transaction_ledger (cycle_id);
+
+CREATE INDEX IF NOT EXISTS idx_transaction_ledger_intent_type
+    ON transaction_ledger (agent_id, intent_type);
 """
 
 

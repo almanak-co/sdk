@@ -1944,6 +1944,35 @@ class StrategyRunner:
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Failed to emit execution timeline event: {e}")
 
+    async def _write_ledger_entry(
+        self,
+        strategy: StrategyProtocol,
+        intent: AnyIntent,
+        result: Any | None,
+        success: bool,
+        error: str = "",
+    ) -> None:
+        """Write a structured trade record to the transaction ledger."""
+        try:
+            from ..observability.context import get_cycle_id
+            from ..observability.ledger import build_ledger_entry
+
+            cycle_id = get_cycle_id() or ""
+            chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
+            entry = build_ledger_entry(
+                strategy_id=strategy.strategy_id,
+                cycle_id=cycle_id,
+                intent=intent,
+                result=result,
+                chain=chain,
+                success=success,
+                error=error,
+            )
+            if self.state_manager:
+                await self.state_manager.save_ledger_entry(entry)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Failed to write ledger entry: {e}")
+
     def request_shutdown(self) -> None:
         """Request graceful shutdown of the run loop.
 
@@ -2514,6 +2543,11 @@ class StrategyRunner:
                         last_execution_result,
                     )
 
+                    # Record slippage-breach trade in ledger (VIB-2402)
+                    await self._write_ledger_entry(
+                        strategy, intent, result=last_execution_result, success=False, error=slippage_error
+                    )
+
                     # Persist state even when circuit breaker fails; on-chain state already changed.
                     if hasattr(strategy, "save_state"):
                         try:
@@ -2532,6 +2566,8 @@ class StrategyRunner:
 
             # Emit timeline event for successful execution
             self._emit_execution_timeline_event(strategy, intent, success=True, result=last_execution_result)
+            # Write structured trade record to transaction ledger (VIB-2402)
+            await self._write_ledger_entry(strategy, intent, result=last_execution_result, success=True)
             if record_metrics:
                 self._record_success(execution_proved=True)
 
@@ -2578,6 +2614,10 @@ class StrategyRunner:
             # Emit timeline event for failed execution
             timeline_result = last_execution_result or SimpleNamespace(error=error_msg)
             self._emit_execution_timeline_event(strategy, intent, success=False, result=timeline_result)
+            # Write failed trade to transaction ledger (VIB-2402)
+            await self._write_ledger_entry(
+                strategy, intent, result=last_execution_result, success=False, error=error_msg
+            )
 
             # Run revert diagnostics only for on-chain execution failures.
             # Skip when no execution was attempted (compilation failure, validation

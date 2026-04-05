@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from almanak.framework.execution.clob_handler import ClobFill, ClobOrderState, ClobOrderStatus
+    from almanak.framework.observability.ledger import LedgerEntry
     from almanak.framework.portfolio import PortfolioMetrics, PortfolioSnapshot
 
 logger = logging.getLogger(__name__)
@@ -1529,3 +1530,73 @@ class StateManager:
             self._record_metrics(StateTier.WARM, "cleanup_old_snapshots", latency, False, str(e))
             logger.error(f"Failed to cleanup old snapshots: {e}")
             return 0
+
+    # =========================================================================
+    # Transaction Ledger (VIB-2402)
+    # =========================================================================
+
+    async def save_ledger_entry(self, entry: "LedgerEntry") -> None:
+        """Save a transaction ledger entry to the WARM backend.
+
+        Args:
+            entry: LedgerEntry to persist.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        if not self._warm:
+            logger.debug("Cannot save ledger entry: no WARM backend configured")
+            return
+
+        if not hasattr(self._warm, "save_ledger_entry"):
+            logger.debug("WARM backend does not support transaction ledger")
+            return
+
+        start = time.perf_counter()
+        try:
+            await self._warm.save_ledger_entry(entry)  # type: ignore[attr-defined]
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "save_ledger_entry", latency, True)
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "save_ledger_entry", latency, False, str(e))
+            logger.warning(f"Failed to save ledger entry: {e}")
+
+    async def get_ledger_entries(
+        self,
+        strategy_id: str,
+        since: "datetime | None" = None,
+        intent_type: str | None = None,
+        limit: int = 100,
+    ) -> list:
+        """Query transaction ledger entries.
+
+        Args:
+            strategy_id: Strategy to query.
+            since: Only entries after this timestamp.
+            intent_type: Filter by intent type.
+            limit: Maximum entries to return.
+
+        Returns:
+            List of LedgerEntry objects, newest first.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        if not self._warm:
+            return []
+
+        if not hasattr(self._warm, "get_ledger_entries"):
+            return []
+
+        start = time.perf_counter()
+        try:
+            result = await self._warm.get_ledger_entries(strategy_id, since, intent_type, limit)  # type: ignore[attr-defined]
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_ledger_entries", latency, True)
+            return result
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_ledger_entries", latency, False, str(e))
+            logger.error(f"Failed to get ledger entries: {e}")
+            return []

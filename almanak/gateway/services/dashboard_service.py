@@ -1389,3 +1389,70 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         except Exception as e:
             logger.error(f"Failed to purge instance {request.strategy_id}: {e}")
             return gateway_pb2.PurgeInstanceResponse(success=False, error=str(e))
+
+    async def GetTransactionLedger(
+        self,
+        request: gateway_pb2.GetTransactionLedgerRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetTransactionLedgerResponse:
+        """Get structured trade records from the transaction ledger."""
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            logger.warning(f"Invalid strategy_id in GetTransactionLedger: {e}")
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.GetTransactionLedgerResponse()
+
+        await self._ensure_initialized()
+        strategy_id = resolve_agent_id(strategy_id)
+
+        since = None
+        if request.since_timestamp > 0:
+            since = datetime.fromtimestamp(request.since_timestamp, tz=UTC)
+
+        intent_type = request.intent_type_filter or None
+        limit = request.limit if request.limit > 0 else 100
+
+        entries = []
+        if self._state_manager is not None:
+            try:
+                entries = await self._state_manager.get_ledger_entries(
+                    strategy_id, since=since, intent_type=intent_type, limit=limit + 1
+                )
+            except Exception:
+                logger.debug("Failed to query transaction ledger for %s", strategy_id, exc_info=True)
+
+        has_more = len(entries) > limit
+        if has_more:
+            entries = entries[:limit]
+
+        proto_entries = []
+        for entry in entries:
+            proto_entries.append(
+                gateway_pb2.LedgerEntryInfo(
+                    id=entry.id,
+                    cycle_id=entry.cycle_id,
+                    strategy_id=entry.strategy_id,
+                    timestamp=int(entry.timestamp.timestamp()),
+                    intent_type=entry.intent_type,
+                    token_in=entry.token_in,
+                    amount_in=entry.amount_in,
+                    token_out=entry.token_out,
+                    amount_out=entry.amount_out,
+                    effective_price=entry.effective_price,
+                    slippage_bps=entry.slippage_bps or 0.0,
+                    gas_used=entry.gas_used,
+                    gas_usd=entry.gas_usd,
+                    tx_hash=entry.tx_hash,
+                    chain=entry.chain,
+                    protocol=entry.protocol,
+                    success=entry.success,
+                    error=entry.error,
+                )
+            )
+
+        return gateway_pb2.GetTransactionLedgerResponse(
+            entries=proto_entries,
+            has_more=has_more,
+        )

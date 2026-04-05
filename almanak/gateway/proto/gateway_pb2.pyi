@@ -3497,6 +3497,112 @@ class PurgeInstanceResponse(_message.Message):
 Global___PurgeInstanceResponse: _TypeAlias = PurgeInstanceResponse  # noqa: Y015
 
 @_typing.final
+class GetTransactionLedgerRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    SINCE_TIMESTAMP_FIELD_NUMBER: _builtins.int
+    INTENT_TYPE_FILTER_FIELD_NUMBER: _builtins.int
+    LIMIT_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    since_timestamp: _builtins.int
+    intent_type_filter: _builtins.str
+    limit: _builtins.int
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        since_timestamp: _builtins.int = ...,
+        intent_type_filter: _builtins.str = ...,
+        limit: _builtins.int = ...,
+    ) -> None: ...
+
+Global___GetTransactionLedgerRequest: _TypeAlias = GetTransactionLedgerRequest  # noqa: Y015
+
+@_typing.final
+class GetTransactionLedgerResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ENTRIES_FIELD_NUMBER: _builtins.int
+    HAS_MORE_FIELD_NUMBER: _builtins.int
+    has_more: _builtins.bool
+    @_builtins.property
+    def entries(self) -> _containers.RepeatedCompositeFieldContainer[Global___LedgerEntryInfo]: ...
+    def __init__(
+        self,
+        *,
+        entries: _abc.Iterable[Global___LedgerEntryInfo] | None = ...,
+        has_more: _builtins.bool = ...,
+    ) -> None: ...
+
+Global___GetTransactionLedgerResponse: _TypeAlias = GetTransactionLedgerResponse  # noqa: Y015
+
+@_typing.final
+class LedgerEntryInfo(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    INTENT_TYPE_FIELD_NUMBER: _builtins.int
+    TOKEN_IN_FIELD_NUMBER: _builtins.int
+    AMOUNT_IN_FIELD_NUMBER: _builtins.int
+    TOKEN_OUT_FIELD_NUMBER: _builtins.int
+    AMOUNT_OUT_FIELD_NUMBER: _builtins.int
+    EFFECTIVE_PRICE_FIELD_NUMBER: _builtins.int
+    SLIPPAGE_BPS_FIELD_NUMBER: _builtins.int
+    GAS_USED_FIELD_NUMBER: _builtins.int
+    GAS_USD_FIELD_NUMBER: _builtins.int
+    TX_HASH_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    id: _builtins.str
+    cycle_id: _builtins.str
+    strategy_id: _builtins.str
+    timestamp: _builtins.int
+    intent_type: _builtins.str
+    token_in: _builtins.str
+    amount_in: _builtins.str
+    token_out: _builtins.str
+    amount_out: _builtins.str
+    effective_price: _builtins.str
+    slippage_bps: _builtins.float
+    gas_used: _builtins.int
+    gas_usd: _builtins.str
+    tx_hash: _builtins.str
+    chain: _builtins.str
+    protocol: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        strategy_id: _builtins.str = ...,
+        timestamp: _builtins.int = ...,
+        intent_type: _builtins.str = ...,
+        token_in: _builtins.str = ...,
+        amount_in: _builtins.str = ...,
+        token_out: _builtins.str = ...,
+        amount_out: _builtins.str = ...,
+        effective_price: _builtins.str = ...,
+        slippage_bps: _builtins.float = ...,
+        gas_used: _builtins.int = ...,
+        gas_usd: _builtins.str = ...,
+        tx_hash: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        protocol: _builtins.str = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+
+Global___LedgerEntryInfo: _TypeAlias = LedgerEntryInfo  # noqa: Y015
+
+@_typing.final
 class PolymarketGetMarketRequest(_message.Message):
     """=============================================================================
     Polymarket Market Data Messages

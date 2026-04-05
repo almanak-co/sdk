@@ -93,6 +93,30 @@ class StrategyDetails:
     pnl_history: list[dict] = field(default_factory=list)
 
 
+@dataclass
+class LedgerTradeRecord:
+    """A trade record from the transaction ledger (protobuf-free)."""
+
+    id: str
+    cycle_id: str
+    strategy_id: str
+    timestamp: datetime | None
+    intent_type: str
+    token_in: str
+    amount_in: str
+    token_out: str
+    amount_out: str
+    effective_price: str
+    slippage_bps: float
+    gas_used: int
+    gas_usd: str
+    tx_hash: str
+    chain: str
+    protocol: str
+    success: bool
+    error: str
+
+
 class GatewayConnectionError(Exception):
     """Raised when gateway connection fails."""
 
@@ -458,6 +482,61 @@ class GatewayDashboardClient:
     # =========================================================================
     # Conversion helpers
     # =========================================================================
+
+    def get_transaction_ledger(
+        self,
+        strategy_id: str,
+        since: datetime | None = None,
+        intent_type: str | None = None,
+        limit: int = 100,
+    ) -> list[LedgerTradeRecord]:
+        """Get trade records from the transaction ledger.
+
+        Args:
+            strategy_id: Strategy to query.
+            since: Only entries after this timestamp.
+            intent_type: Filter by intent type (e.g. "SWAP", "BORROW").
+            limit: Maximum entries to return.
+
+        Returns:
+            List of LedgerTradeRecord dataclasses.
+        """
+        client = self._ensure_connected()
+
+        since_ts = int(since.timestamp()) if since else 0
+        request = gateway_pb2.GetTransactionLedgerRequest(
+            strategy_id=strategy_id,
+            since_timestamp=since_ts,
+            intent_type_filter=intent_type or "",
+            limit=limit,
+        )
+        response = client.dashboard.GetTransactionLedger(request)
+
+        records = []
+        for entry in response.entries:
+            records.append(
+                LedgerTradeRecord(
+                    id=entry.id,
+                    cycle_id=entry.cycle_id,
+                    strategy_id=entry.strategy_id,
+                    timestamp=datetime.fromtimestamp(entry.timestamp, tz=UTC) if entry.timestamp else None,
+                    intent_type=entry.intent_type,
+                    token_in=entry.token_in,
+                    amount_in=entry.amount_in,
+                    token_out=entry.token_out,
+                    amount_out=entry.amount_out,
+                    effective_price=entry.effective_price,
+                    slippage_bps=entry.slippage_bps,
+                    gas_used=entry.gas_used,
+                    gas_usd=entry.gas_usd,
+                    tx_hash=entry.tx_hash,
+                    chain=entry.chain,
+                    protocol=entry.protocol,
+                    success=entry.success,
+                    error=entry.error,
+                )
+            )
+        return records
 
     def _convert_summary(self, proto: gateway_pb2.StrategySummary) -> StrategySummary:
         """Convert protobuf StrategySummary to dataclass."""
