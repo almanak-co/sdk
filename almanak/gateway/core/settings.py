@@ -53,7 +53,7 @@ class GatewaySettings(BaseSettings):
     pendle_api_key: str | None = None
     portfolio_api_key: str | None = None
     portfolio_api_provider: str = "zerion"
-    portfolio_api_cache_ttl: int = 60
+    portfolio_api_cache_ttl: int = 300
 
     # Pendle API settings
     pendle_api_cache_ttl: float = 15.0  # seconds

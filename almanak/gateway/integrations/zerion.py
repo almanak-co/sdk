@@ -54,7 +54,7 @@ class ZerionIntegration(BaseIntegration):
 
     name = "zerion"
     rate_limit_requests = 120
-    default_cache_ttl = 60
+    default_cache_ttl = 300
     _API_BASE = "https://api.zerion.io"
 
     _CHAIN_IDS = {
