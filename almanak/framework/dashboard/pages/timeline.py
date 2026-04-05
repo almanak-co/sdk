@@ -3,6 +3,9 @@
 Displays full timeline view with pagination and filtering.
 """
 
+from copy import copy
+from datetime import timedelta
+
 import streamlit as st
 
 from almanak.framework.dashboard.models import Strategy, TimelineEventType
@@ -179,6 +182,11 @@ def page(strategies: list[Strategy]) -> None:
     if has_tx_only:
         filtered_events = [e for e in filtered_events if bool(e.tx_hash)]
 
+    # Coalesce consecutive runs of the same event type into summary entries.
+    # This deduplicates historical STRATEGY_STUCK spam that was stored before
+    # the throttle was added (VIB-2427).
+    filtered_events = _coalesce_consecutive_events(filtered_events)
+
     # Paginate filtered events
     total_events = len(filtered_events)
     total_pages = (total_events + page_size - 1) // page_size
@@ -349,3 +357,73 @@ def page(strategies: list[Strategy]) -> None:
         if st.button("Last", disabled=current_page >= total_pages - 1, use_container_width=True):
             st.session_state.timeline_page = max(0, total_pages - 1)
             st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+# Event types that should be coalesced when they appear consecutively.
+_COALESCE_EVENT_TYPES: frozenset[str] = frozenset({"STRATEGY_STUCK"})
+
+
+def _coalesce_consecutive_events(
+    events: list,
+    max_gap: timedelta = timedelta(minutes=10),
+) -> list:
+    """Collapse consecutive runs of the same noisy event type into one summary row.
+
+    Only event types in ``_COALESCE_EVENT_TYPES`` are collapsed. Non-matching
+    events pass through unchanged.
+
+    Args:
+        events: Pre-sorted list of TimelineEvent (newest first).
+        max_gap: Maximum time gap between consecutive events to still be
+            considered part of the same run.
+
+    Returns:
+        A new list with runs replaced by a single representative event whose
+        description notes how many were collapsed.
+    """
+    if not events:
+        return events
+
+    result: list = []
+    i = 0
+    while i < len(events):
+        event = events[i]
+        etype = event.event_type.value if hasattr(event.event_type, "value") else str(event.event_type)
+
+        if etype not in _COALESCE_EVENT_TYPES:
+            result.append(event)
+            i += 1
+            continue
+
+        # Start a run of the same event type for the same strategy
+        run_count = 1
+        run_end = i
+        while run_end + 1 < len(events):
+            nxt = events[run_end + 1]
+            nxt_type = nxt.event_type.value if hasattr(nxt.event_type, "value") else str(nxt.event_type)
+            if nxt_type != etype or nxt.strategy_id != event.strategy_id:
+                break
+            # Compare adjacent events — break the run if the gap between
+            # consecutive events exceeds max_gap (not first-to-Nth).
+            if abs((events[run_end].timestamp - nxt.timestamp).total_seconds()) > max_gap.total_seconds():
+                break
+            run_count += 1
+            run_end += 1
+
+        if run_count <= 1:
+            result.append(event)
+        else:
+            # Create a summary event (shallow copy of the newest in the run)
+            summary = copy(event)
+            oldest = events[run_end]
+            span_minutes = int((event.timestamp - oldest.timestamp).total_seconds() / 60)
+            summary.description = f"{event.description} (repeated {run_count}x over {span_minutes}min)"
+            result.append(summary)
+
+        i = run_end + 1
+
+    return result
