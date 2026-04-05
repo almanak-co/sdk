@@ -1,0 +1,13 @@
+{
+    "collateral_token": "wstETH",
+    "collateral_amount": "1",
+    "borrow_token": "DAI",
+    "ltv_target": 0.3,
+    "borrow_amount_override": "500",
+    "force_action": "lifecycle",
+    "anvil_funding": {
+        "ETH": 10,
+        "wstETH": 5,
+        "DAI": 10000
+    }
+}
