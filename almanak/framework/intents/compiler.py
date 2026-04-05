@@ -10774,11 +10774,36 @@ class IntentCompiler:
                 )
                 compound_adapter = CompoundV3Adapter(compound_config)
 
-                # Build withdraw TX via Compound V3 adapter
-                withdraw_result = compound_adapter.withdraw(
-                    amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
-                    withdraw_all=intent.withdraw_all,
+                # Detect if the token is the base token or a collateral token.
+                # Compound V3 uses withdraw() for the base asset and withdraw_collateral()
+                # for collateral assets — they are different contract methods.
+                # Compare by address (more robust than symbol, avoids alias ambiguity).
+                base_token_address = compound_adapter.market_config.get("base_token_address")
+                if not base_token_address:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=f"Compound V3 market config missing base_token_address for market '{market}' on {self.chain}",
+                        intent_id=intent.intent_id,
+                    )
+                is_base_token = withdraw_token.address.lower() == base_token_address.lower()
+
+                compound_withdraw_amount: Decimal = (
+                    withdraw_amount_decimal if withdraw_amount_decimal is not None else Decimal("0")
                 )
+
+                if is_base_token:
+                    # Withdraw base asset (reduce lending position)
+                    withdraw_result = compound_adapter.withdraw(
+                        amount=compound_withdraw_amount,
+                        withdraw_all=intent.withdraw_all,
+                    )
+                else:
+                    # Withdraw collateral asset
+                    withdraw_result = compound_adapter.withdraw_collateral(
+                        asset=withdraw_token.symbol,
+                        amount=compound_withdraw_amount,
+                        withdraw_all=intent.withdraw_all,
+                    )
 
                 if not withdraw_result.success:
                     return CompilationResult(
@@ -10801,7 +10826,7 @@ class IntentCompiler:
                     gas_estimate=withdraw_result.gas_estimate,
                     description=withdraw_result.description
                     or f"Withdraw {amount_display} {withdraw_token.symbol} from Compound V3",
-                    tx_type="lending_withdraw",
+                    tx_type="lending_withdraw" if is_base_token else "lending_withdraw_collateral",
                 )
                 transactions.append(withdraw_tx)
 
@@ -10817,6 +10842,7 @@ class IntentCompiler:
                         "withdraw_token": withdraw_token.to_dict(),
                         "withdraw_amount": amount_display,
                         "withdraw_all": intent.withdraw_all,
+                        "withdraw_type": "base" if is_base_token else "collateral",
                         "chain": self.chain,
                     },
                 )
@@ -10826,8 +10852,9 @@ class IntentCompiler:
                 result.total_gas_estimate = total_gas
                 result.warnings = warnings
 
+                withdraw_type = "base" if is_base_token else "collateral"
                 logger.info(
-                    f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Compound V3)"
+                    f"Compiled WITHDRAW ({withdraw_type}): {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Compound V3)"
                 )
 
             # =================================================================
