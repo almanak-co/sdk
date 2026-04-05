@@ -1737,8 +1737,12 @@ class StrategyRunner:
                     except Exception as e:
                         logger.warning(f"Failed to persist copy trading state: {e}")
 
-                # Capture portfolio snapshot for dashboard/PnL tracking
-                if self.config.enable_state_persistence and result.success:
+                # Capture portfolio snapshot for dashboard/PnL tracking.
+                # Always capture regardless of iteration success — failed iterations
+                # don't change the portfolio, but we need continuity in the equity curve.
+                # _capture_portfolio_snapshot handles errors gracefully and persists
+                # UNAVAILABLE snapshots when valuation fails.
+                if self.config.enable_state_persistence:
                     await self._capture_portfolio_snapshot(
                         strategy=strategy,
                         iteration_number=self._total_iterations,
