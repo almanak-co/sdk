@@ -742,6 +742,12 @@ class RollingForkManager:
         known_slots_ci = {k.lower(): v for k, v in known_slots.items()}
         token_decimals_ci = {k.lower(): v for k, v in TOKEN_DECIMALS.items()}
 
+        # Load paper-local token overrides (VIB-2378)
+        from almanak.framework.backtesting.paper.token_overrides import load_token_overrides
+
+        paper_overrides_raw = load_token_overrides(self.chain)
+        paper_overrides_ci = {k.lower(): v for k, v in paper_overrides_raw.items()}
+
         success = True
 
         for token_key, amount in tokens.items():
@@ -772,9 +778,22 @@ class RollingForkManager:
                     decimals = resolved.decimals
                     display_name = resolved.symbol or token_key
                 except (TokenNotFoundError, TokenResolutionError):
-                    # Fallback to local TOKEN_ADDRESSES (case-insensitive)
-                    token_address = chain_tokens_ci.get(token_key.lower())
-                    decimals = token_decimals_ci.get(token_key.lower())
+                    # Check paper-local overrides before local TOKEN_ADDRESSES (VIB-2378)
+                    override = paper_overrides_ci.get(token_key.lower())
+                    if override is not None:
+                        token_address = override.address
+                        decimals = override.decimals
+                        display_name = token_key
+                        logger.info(f"Resolved {token_key} via paper-local token override: {token_address}")
+                        # Address-only overrides (decimals=None): try on-chain lookup
+                        if decimals is None:
+                            decimals = await self._fetch_decimals_onchain(token_address)
+                            if decimals is not None:
+                                logger.info(f"Resolved decimals={decimals} for {display_name} via on-chain call")
+                    else:
+                        # Fallback to local TOKEN_ADDRESSES (case-insensitive)
+                        token_address = chain_tokens_ci.get(token_key.lower())
+                        decimals = token_decimals_ci.get(token_key.lower())
 
             if not token_address:
                 if is_raw_address:
