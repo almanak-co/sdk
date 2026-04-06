@@ -18,6 +18,7 @@ from almanak.framework.intents.pool_validation import (
     _decode_address,
     _encode_get_pool_aerodrome,
     _encode_get_pool_v3,
+    fetch_v3_pool_sqrt_price_x96,
     validate_aerodrome_pool,
     validate_traderjoe_pool,
     validate_v3_pool,
@@ -253,3 +254,62 @@ class TestEncodingHelpers:
         data = bytes(16)
         addr = _decode_address(data)
         assert addr == ZERO_ADDRESS
+
+
+class TestFetchV3PoolSqrtPriceX96:
+    """Unit tests for fetch_v3_pool_sqrt_price_x96."""
+
+    POOL_ADDR = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
+    RPC_URL = "http://localhost:8545"
+
+    def test_rpc_failure_returns_none(self):
+        with patch("almanak.framework.intents.pool_validation._eth_call", return_value=None):
+            result = fetch_v3_pool_sqrt_price_x96(self.POOL_ADDR, self.RPC_URL)
+        assert result is None
+
+    def test_response_too_short_returns_none(self):
+        with patch("almanak.framework.intents.pool_validation._eth_call", return_value=bytes(32)):
+            result = fetch_v3_pool_sqrt_price_x96(self.POOL_ADDR, self.RPC_URL)
+        assert result is None
+
+    def test_valid_response_decodes_sqrt_price(self):
+        # Use a realistic sqrtPriceX96 (tick=0 -> Q96) and tick=42
+        sqrt_price = 79228162514264337593543950336  # Q96 (tick=0)
+        tick = 42
+        raw = sqrt_price.to_bytes(32, "big") + tick.to_bytes(32, "big")
+        with patch("almanak.framework.intents.pool_validation._eth_call", return_value=raw):
+            result = fetch_v3_pool_sqrt_price_x96(self.POOL_ADDR, self.RPC_URL)
+        assert result is not None
+        assert result[0] == sqrt_price
+        assert result[1] == tick
+
+    def test_negative_tick_sign_extended(self):
+        # Negative ticks are sign-extended to int256 in ABI encoding
+        sqrt_price = 79228162514264337593543950336  # Q96 (tick=0)
+        tick = -60
+        # ABI int256 two's complement for -60: 2**256 - 60
+        tick_encoded = (2**256 + tick).to_bytes(32, "big")
+        raw = sqrt_price.to_bytes(32, "big") + tick_encoded
+        with patch("almanak.framework.intents.pool_validation._eth_call", return_value=raw):
+            result = fetch_v3_pool_sqrt_price_x96(self.POOL_ADDR, self.RPC_URL)
+        assert result is not None
+        assert result[0] == sqrt_price
+        assert result[1] == tick
+
+    def test_out_of_range_sqrt_price_returns_none(self):
+        # sqrtPriceX96 below MIN_SQRT_RATIO should be rejected
+        sqrt_price = 100  # way below MIN_SQRT_RATIO
+        tick = 0
+        raw = sqrt_price.to_bytes(32, "big") + tick.to_bytes(32, "big")
+        with patch("almanak.framework.intents.pool_validation._eth_call", return_value=raw):
+            result = fetch_v3_pool_sqrt_price_x96(self.POOL_ADDR, self.RPC_URL)
+        assert result is None
+
+    def test_out_of_range_tick_returns_none(self):
+        # Tick beyond MAX_TICK should be rejected
+        sqrt_price = 79228162514264337593543950336  # Q96
+        tick = 900000  # beyond MAX_TICK
+        raw = sqrt_price.to_bytes(32, "big") + tick.to_bytes(32, "big")
+        with patch("almanak.framework.intents.pool_validation._eth_call", return_value=raw):
+            result = fetch_v3_pool_sqrt_price_x96(self.POOL_ADDR, self.RPC_URL)
+        assert result is None

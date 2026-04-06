@@ -302,6 +302,43 @@ def validate_aerodrome_cl_pool(
     return PoolValidationResult(exists=True, pool_address=pool_address)
 
 
+_SLOT0_SELECTOR = "0x3850c7bd"
+
+
+def fetch_v3_pool_sqrt_price_x96(pool_address: str, rpc_url: str) -> tuple[int, int] | None:
+    """Fetch sqrtPriceX96 and current tick from a Uniswap V3-compatible pool's slot0().
+
+    Calls slot0() on the pool contract and returns the first two return values:
+    sqrtPriceX96 (uint160) and tick (int24). Both are used by the compiler to
+    recompute LP deposit amounts and avoid "Price slippage check" reverts.
+
+    The tick is used for exact integer branch selection (below/in/above range),
+    avoiding float precision issues at tick boundaries.
+
+    Args:
+        pool_address: Pool contract address.
+        rpc_url: RPC URL for on-chain query.
+
+    Returns:
+        (sqrtPriceX96, current_tick) as (int, int), or None on any failure.
+    """
+    raw = _eth_call(rpc_url, pool_address, _SLOT0_SELECTOR)
+    if raw is None or len(raw) < 64:
+        return None
+    sqrt_price_x96 = int.from_bytes(raw[:32], "big")
+    # Sanity check: sqrtPriceX96 must be within Uniswap V3 valid range
+    if sqrt_price_x96 < 4295128739 or sqrt_price_x96 > 1461446703485210103287273052203988822378723970342:
+        return None
+    # ABI-decode int24 tick (sign-extended to int256 in ABI encoding)
+    tick_raw = int.from_bytes(raw[32:64], "big")
+    if tick_raw >= 2**255:
+        tick_raw -= 2**256
+    # Validate tick is within Uniswap V3 bounds
+    if tick_raw < -887272 or tick_raw > 887272:
+        return None
+    return sqrt_price_x96, tick_raw
+
+
 def validate_traderjoe_pool(
     chain: str,
     token_x: str,

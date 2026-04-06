@@ -198,7 +198,7 @@ class TestCompileLPOpenInversion:
         mock_adapter.get_position_manager_address.return_value = "0x" + "AA" * 20
         mock_adapter.get_mint_calldata.return_value = b"\x00" * 32
         mock_adapter.estimate_mint_gas.return_value = 500000
-        mock_validate.return_value = MagicMock(is_valid=True)
+        mock_validate.return_value = MagicMock(is_valid=True, pool_address=None)
 
         intent = self._make_lp_intent(
             range_lower=550,
@@ -237,7 +237,7 @@ class TestCompileLPOpenInversion:
         mock_adapter.get_position_manager_address.return_value = "0x" + "AA" * 20
         mock_adapter.get_mint_calldata.return_value = b"\x00" * 32
         mock_adapter.estimate_mint_gas.return_value = 500000
-        mock_validate.return_value = MagicMock(is_valid=True)
+        mock_validate.return_value = MagicMock(is_valid=True, pool_address=None)
 
         intent = self._make_lp_intent(
             range_lower=550,
@@ -252,11 +252,14 @@ class TestCompileLPOpenInversion:
             approve_amounts[token_addr] = amount
             return []
 
+        # Return distinct ticks so the tick_lower < tick_upper guard passes
+        tick_values = iter([-100, 100])
+
         with (
             patch.object(compiler, "_parse_pool_info", return_value=(USDT, WBNB, 500, True)),
             patch.object(compiler, "_validate_pool", return_value=None),
             patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
-            patch.object(IntentCompiler, "_price_to_tick", return_value=0),
+            patch.object(IntentCompiler, "_price_to_tick", side_effect=lambda *a, **kw: next(tick_values)),
             patch.object(compiler, "_build_approve_tx", side_effect=mock_build_approve),
         ):
             compiler._compile_lp_open(intent)
@@ -273,7 +276,7 @@ class TestCompileLPOpenInversion:
         mock_adapter.get_position_manager_address.return_value = "0x" + "AA" * 20
         mock_adapter.get_mint_calldata.return_value = b"\x00" * 32
         mock_adapter.estimate_mint_gas.return_value = 500000
-        mock_validate.return_value = MagicMock(is_valid=True)
+        mock_validate.return_value = MagicMock(is_valid=True, pool_address=None)
 
         intent = self._make_lp_intent(
             pool="USDC/WETH/3000",

@@ -2338,12 +2338,73 @@ class IntentCompiler:
             tick_lower = (tick_lower // tick_spacing) * tick_spacing
             tick_upper = (tick_upper // tick_spacing) * tick_spacing
 
+            if tick_lower >= tick_upper:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        "LP_OPEN tick range collapsed after applying pool tick spacing. "
+                        "Widen the price range so lower and upper ticks differ."
+                    ),
+                    intent_id=intent.intent_id,
+                )
+
             logger.debug(
                 f"LP tick calculation: price_range=[{range_lower:.8f}, {range_upper:.8f}]"
                 f"{' (inverted)' if tokens_swapped else ''}, "
                 f"decimals=({token0_info.decimals}, {token1_info.decimals}), "
                 f"ticks=[{tick_lower}, {tick_upper}], spacing={tick_spacing}"
             )
+
+            # Step 4b: Recompute amounts from on-chain sqrtPriceX96 to prevent "Price slippage check" reverts.
+            # When oracle price diverges from pool price, the pool takes a different token ratio than
+            # expected; if desired amounts don't match the pool ratio, the NonfungiblePositionManager
+            # reverts with "Price slippage check". Fetching slot0() and running getLiquidityForAmounts
+            # + getAmountsForLiquidity aligns amounts to the pool's actual price.
+            if pool_check.pool_address:
+                rpc_url_for_slot0 = self._get_chain_rpc_url()
+                if rpc_url_for_slot0:
+                    from .lp_math import recompute_lp_amounts
+                    from .pool_validation import fetch_v3_pool_sqrt_price_x96
+
+                    try:
+                        slot0_result = fetch_v3_pool_sqrt_price_x96(pool_check.pool_address, rpc_url_for_slot0)
+                    except Exception as exc:
+                        logger.warning(
+                            "LP slot0 lookup failed for pool %s; proceeding with oracle-derived amounts "
+                            "which may cause 'Price slippage check' revert if oracle/pool prices diverge: %s",
+                            pool_check.pool_address,
+                            exc,
+                        )
+                        slot0_result = None
+                    if slot0_result is not None:
+                        sqrt_price_x96, current_tick = slot0_result
+                    else:
+                        sqrt_price_x96, current_tick = None, None
+                    if sqrt_price_x96 is not None and sqrt_price_x96 > 0:
+                        a0_corrected, a1_corrected = recompute_lp_amounts(
+                            sqrt_price_x96,
+                            tick_lower,
+                            tick_upper,
+                            amount0_desired,
+                            amount1_desired,
+                            current_tick=current_tick,
+                        )
+                        if a0_corrected == 0 and a1_corrected == 0 and (amount0_desired > 0 or amount1_desired > 0):
+                            return CompilationResult(
+                                status=CompilationStatus.FAILED,
+                                error=(
+                                    "LP_OPEN cannot mint liquidity at the pool's current price for the "
+                                    "supplied range/amounts. Adjust the tick range or token amounts."
+                                ),
+                                intent_id=intent.intent_id,
+                            )
+                        if a0_corrected > 0 or a1_corrected > 0:
+                            logger.debug(
+                                f"LP amounts recomputed from on-chain price: "
+                                f"({amount0_desired}, {amount1_desired}) -> ({a0_corrected}, {a1_corrected})"
+                            )
+                            amount0_desired = a0_corrected
+                            amount1_desired = a1_corrected
 
             # Step 5: Calculate minimum amounts using LP slippage
             # LP slippage is different from swap slippage:
