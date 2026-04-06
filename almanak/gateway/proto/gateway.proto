@@ -147,6 +147,12 @@ service StateService {
 
   // Get portfolio snapshots since a given timestamp.
   rpc GetSnapshotsSince(GetSnapshotsSinceRequest) returns (SnapshotList);
+
+  // Save or update portfolio metrics (PnL baseline).
+  rpc SavePortfolioMetrics(SaveMetricsRequest) returns (SaveMetricsResponse);
+
+  // Get portfolio metrics for a strategy.
+  rpc GetPortfolioMetrics(GetMetricsRequest) returns (PortfolioMetricsData);
 }
 
 message LoadStateRequest {
@@ -229,6 +235,36 @@ message SnapshotData {
 
 message SnapshotList {
   repeated SnapshotData snapshots = 1;
+}
+
+// Portfolio metrics messages (PnL baseline tracking)
+message SaveMetricsRequest {
+  string strategy_id = 1;
+  string initial_value_usd = 2;
+  int64 initial_timestamp = 3;  // Unix epoch seconds
+  string deposits_usd = 4;
+  string withdrawals_usd = 5;
+  string gas_spent_usd = 6;
+}
+
+message SaveMetricsResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message GetMetricsRequest {
+  string strategy_id = 1;
+}
+
+message PortfolioMetricsData {
+  string strategy_id = 1;
+  string initial_value_usd = 2;
+  int64 initial_timestamp = 3;
+  string deposits_usd = 4;
+  string withdrawals_usd = 5;
+  string gas_spent_usd = 6;
+  int64 updated_at = 7;
+  bool found = 8;
 }
 
 // =============================================================================

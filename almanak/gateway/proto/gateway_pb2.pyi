@@ -731,6 +731,109 @@ class SnapshotList(_message.Message):
 Global___SnapshotList: _TypeAlias = SnapshotList  # noqa: Y015
 
 @_typing.final
+class SaveMetricsRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    INITIAL_VALUE_USD_FIELD_NUMBER: _builtins.int
+    INITIAL_TIMESTAMP_FIELD_NUMBER: _builtins.int
+    DEPOSITS_USD_FIELD_NUMBER: _builtins.int
+    WITHDRAWALS_USD_FIELD_NUMBER: _builtins.int
+    GAS_SPENT_USD_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    initial_value_usd: _builtins.str
+    initial_timestamp: _builtins.int
+    deposits_usd: _builtins.str
+    withdrawals_usd: _builtins.str
+    gas_spent_usd: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        initial_value_usd: _builtins.str = ...,
+        initial_timestamp: _builtins.int = ...,
+        deposits_usd: _builtins.str = ...,
+        withdrawals_usd: _builtins.str = ...,
+        gas_spent_usd: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id", "initial_value_usd", b"initial_value_usd", "initial_timestamp", b"initial_timestamp", "deposits_usd", b"deposits_usd", "withdrawals_usd", b"withdrawals_usd", "gas_spent_usd", b"gas_spent_usd"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SaveMetricsRequest: _TypeAlias = SaveMetricsRequest  # noqa: Y015
+
+@_typing.final
+class SaveMetricsResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["success", b"success", "error", b"error"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SaveMetricsResponse: _TypeAlias = SaveMetricsResponse  # noqa: Y015
+
+@_typing.final
+class GetMetricsRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetMetricsRequest: _TypeAlias = GetMetricsRequest  # noqa: Y015
+
+@_typing.final
+class PortfolioMetricsData(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    INITIAL_VALUE_USD_FIELD_NUMBER: _builtins.int
+    INITIAL_TIMESTAMP_FIELD_NUMBER: _builtins.int
+    DEPOSITS_USD_FIELD_NUMBER: _builtins.int
+    WITHDRAWALS_USD_FIELD_NUMBER: _builtins.int
+    GAS_SPENT_USD_FIELD_NUMBER: _builtins.int
+    UPDATED_AT_FIELD_NUMBER: _builtins.int
+    FOUND_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    initial_value_usd: _builtins.str
+    initial_timestamp: _builtins.int
+    deposits_usd: _builtins.str
+    withdrawals_usd: _builtins.str
+    gas_spent_usd: _builtins.str
+    updated_at: _builtins.int
+    found: _builtins.bool
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        initial_value_usd: _builtins.str = ...,
+        initial_timestamp: _builtins.int = ...,
+        deposits_usd: _builtins.str = ...,
+        withdrawals_usd: _builtins.str = ...,
+        gas_spent_usd: _builtins.str = ...,
+        updated_at: _builtins.int = ...,
+        found: _builtins.bool = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id", "initial_value_usd", b"initial_value_usd", "initial_timestamp", b"initial_timestamp", "deposits_usd", b"deposits_usd", "withdrawals_usd", b"withdrawals_usd", "gas_spent_usd", b"gas_spent_usd", "updated_at", b"updated_at", "found", b"found"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PortfolioMetricsData: _TypeAlias = PortfolioMetricsData  # noqa: Y015
+
+@_typing.final
 class CompileIntentRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 

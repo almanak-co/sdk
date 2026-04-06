@@ -6,7 +6,9 @@ that have no access to database credentials.
 
 Portfolio snapshots are persisted via gateway gRPC (SavePortfolioSnapshot,
 GetLatestSnapshot, GetSnapshotsSince) which routes to PostgreSQL in deployed
-mode.  Local mode uses the regular StateManager with SQLiteStore.
+mode.  Portfolio metrics (PnL baseline) are persisted via SavePortfolioMetrics
+and GetPortfolioMetrics.  Local mode uses the regular StateManager with
+SQLiteStore.
 """
 
 import json
@@ -19,6 +21,7 @@ from almanak.framework.state.state_manager import StateData
 from almanak.gateway.proto import gateway_pb2
 
 if TYPE_CHECKING:
+    from almanak.framework.portfolio.models import PortfolioMetrics
     from almanak.framework.state.portfolio import PortfolioSnapshot
 
 logger = logging.getLogger(__name__)
@@ -266,6 +269,71 @@ class GatewayStateManager:
         except Exception as e:
             logger.debug("Failed to get snapshots via gateway: %s", e)
             return []
+
+    async def save_portfolio_metrics(self, metrics: "PortfolioMetrics") -> bool:
+        """Save portfolio metrics via gateway gRPC.
+
+        Args:
+            metrics: PortfolioMetrics to persist.
+
+        Returns:
+            True if save succeeded.
+        """
+        try:
+            request = gateway_pb2.SaveMetricsRequest(
+                strategy_id=metrics.strategy_id,
+                initial_value_usd=str(metrics.initial_value_usd),
+                initial_timestamp=int(metrics.timestamp.timestamp()),
+                deposits_usd=str(metrics.deposits_usd),
+                withdrawals_usd=str(metrics.withdrawals_usd),
+                gas_spent_usd=str(metrics.gas_spent_usd),
+            )
+            response = self._client.state.SavePortfolioMetrics(request, timeout=self._timeout)
+
+            if not response.success:
+                logger.error("SavePortfolioMetrics failed: %s", response.error)
+                return False
+
+            logger.debug("Portfolio metrics saved via gateway for strategy=%s", metrics.strategy_id)
+            return True
+        except Exception:
+            logger.exception("Failed to save portfolio metrics via gateway")
+            return False
+
+    async def get_portfolio_metrics(self, strategy_id: str) -> "PortfolioMetrics | None":
+        """Get portfolio metrics via gateway gRPC.
+
+        Args:
+            strategy_id: Strategy identifier.
+
+        Returns:
+            PortfolioMetrics or None if not found.
+        """
+        from decimal import Decimal
+
+        from almanak.framework.portfolio.models import PortfolioMetrics
+
+        try:
+            request = gateway_pb2.GetMetricsRequest(strategy_id=strategy_id)
+            response = self._client.state.GetPortfolioMetrics(request, timeout=self._timeout)
+
+            if not response.found:
+                return None
+
+            return PortfolioMetrics(
+                strategy_id=response.strategy_id,
+                timestamp=datetime.fromtimestamp(response.updated_at, tz=UTC)
+                if response.updated_at
+                else datetime.now(UTC),
+                total_value_usd=Decimal("0"),  # Not stored in metrics, get from latest snapshot
+                initial_value_usd=Decimal(response.initial_value_usd or "0"),
+                deposits_usd=Decimal(response.deposits_usd or "0"),
+                withdrawals_usd=Decimal(response.withdrawals_usd or "0"),
+                gas_spent_usd=Decimal(response.gas_spent_usd or "0"),
+            )
+        except Exception as e:
+            logger.debug("Failed to get portfolio metrics via gateway: %s", e)
+            return None
 
     @staticmethod
     def _proto_to_snapshot(data: gateway_pb2.SnapshotData) -> "PortfolioSnapshot":

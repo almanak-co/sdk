@@ -613,3 +613,202 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             chain=snapshot.chain or "",
             found=True,
         )
+
+    # =========================================================================
+    # Portfolio Metrics RPCs
+    # =========================================================================
+
+    async def SavePortfolioMetrics(
+        self,
+        request: gateway_pb2.SaveMetricsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.SaveMetricsResponse:
+        """Save or update portfolio metrics (PnL baseline)."""
+        from decimal import Decimal, InvalidOperation
+
+        from almanak.framework.portfolio.models import PortfolioMetrics
+
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.SaveMetricsResponse(success=False, error=str(e))
+
+        strategy_id = resolve_agent_id(strategy_id)
+
+        try:
+            initial_value_usd = Decimal(request.initial_value_usd or "0")
+            deposits_usd = Decimal(request.deposits_usd or "0")
+            withdrawals_usd = Decimal(request.withdrawals_usd or "0")
+            gas_spent_usd = Decimal(request.gas_spent_usd or "0")
+        except InvalidOperation:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("metrics fields must be valid decimal strings")
+            return gateway_pb2.SaveMetricsResponse(success=False, error="metrics fields must be valid decimal strings")
+
+        if request.initial_timestamp < 0:
+            error = "initial_timestamp must be non-negative"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(error)
+            return gateway_pb2.SaveMetricsResponse(success=False, error=error)
+
+        try:
+            ts = (
+                datetime.fromtimestamp(request.initial_timestamp, tz=UTC)
+                if request.initial_timestamp
+                else datetime.now(UTC)
+            )
+        except (OverflowError, OSError, ValueError):
+            error = "initial_timestamp is out of range"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(error)
+            return gateway_pb2.SaveMetricsResponse(success=False, error=error)
+
+        now = datetime.now(UTC)
+
+        await self._ensure_snapshot_pool()
+
+        if self._snapshot_pool is not None:
+            # PostgreSQL mode (deployed)
+            try:
+                await self._snapshot_fetchrow(
+                    """
+                    INSERT INTO portfolio_metrics (
+                        agent_id, initial_value_usd, initial_timestamp,
+                        deposits_usd, withdrawals_usd, gas_spent_usd, updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (agent_id) DO UPDATE SET
+                        initial_value_usd = EXCLUDED.initial_value_usd,
+                        initial_timestamp = EXCLUDED.initial_timestamp,
+                        deposits_usd = EXCLUDED.deposits_usd,
+                        withdrawals_usd = EXCLUDED.withdrawals_usd,
+                        gas_spent_usd = EXCLUDED.gas_spent_usd,
+                        updated_at = EXCLUDED.updated_at
+                    RETURNING agent_id
+                    """,
+                    strategy_id,
+                    str(initial_value_usd),
+                    ts,
+                    str(deposits_usd),
+                    str(withdrawals_usd),
+                    str(gas_spent_usd),
+                    now,
+                )
+                logger.debug("Portfolio metrics saved for strategy=%s", strategy_id)
+                return gateway_pb2.SaveMetricsResponse(success=True)
+            except Exception as e:
+                logger.error("SavePortfolioMetrics failed for %s: %s", strategy_id, e)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
+                return gateway_pb2.SaveMetricsResponse(success=False, error="internal server error")
+        else:
+            # SQLite mode (local dev) — delegate to StateManager's SQLiteStore
+            try:
+                await self._ensure_initialized()
+                assert self._state_manager is not None
+
+                metrics = PortfolioMetrics(
+                    strategy_id=strategy_id,
+                    timestamp=ts,
+                    total_value_usd=Decimal("0"),
+                    initial_value_usd=initial_value_usd,
+                    deposits_usd=deposits_usd,
+                    withdrawals_usd=withdrawals_usd,
+                    gas_spent_usd=gas_spent_usd,
+                )
+
+                warm = self._state_manager.warm_backend
+                if warm and hasattr(warm, "save_portfolio_metrics"):
+                    result = await warm.save_portfolio_metrics(metrics)
+                    if result:
+                        logger.debug("Portfolio metrics saved (SQLite) for strategy=%s", strategy_id)
+                        return gateway_pb2.SaveMetricsResponse(success=True)
+                    return gateway_pb2.SaveMetricsResponse(
+                        success=False, error="Backend save_portfolio_metrics returned False"
+                    )
+
+                return gateway_pb2.SaveMetricsResponse(
+                    success=False, error="No warm backend with portfolio metrics support"
+                )
+            except Exception as e:
+                logger.error("SavePortfolioMetrics (SQLite) failed for %s: %s", strategy_id, e)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
+                return gateway_pb2.SaveMetricsResponse(success=False, error="internal server error")
+
+    async def GetPortfolioMetrics(
+        self,
+        request: gateway_pb2.GetMetricsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.PortfolioMetricsData:
+        """Get portfolio metrics for a strategy."""
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.PortfolioMetricsData(found=False)
+
+        strategy_id = resolve_agent_id(strategy_id)
+        await self._ensure_snapshot_pool()
+
+        if self._snapshot_pool is not None:
+            # PostgreSQL mode (deployed)
+            try:
+                row = await self._snapshot_fetchrow(
+                    """
+                    SELECT agent_id, initial_value_usd, initial_timestamp,
+                           deposits_usd, withdrawals_usd, gas_spent_usd, updated_at
+                    FROM portfolio_metrics
+                    WHERE agent_id = $1
+                    """,
+                    strategy_id,
+                )
+                if row is None:
+                    return gateway_pb2.PortfolioMetricsData(found=False)
+
+                return gateway_pb2.PortfolioMetricsData(
+                    strategy_id=row["agent_id"],
+                    initial_value_usd=row["initial_value_usd"],
+                    initial_timestamp=int(row["initial_timestamp"].timestamp()),
+                    deposits_usd=row["deposits_usd"] or "0",
+                    withdrawals_usd=row["withdrawals_usd"] or "0",
+                    gas_spent_usd=row["gas_spent_usd"] or "0",
+                    updated_at=int(row["updated_at"].timestamp()),
+                    found=True,
+                )
+            except Exception as e:
+                logger.error("GetPortfolioMetrics failed for %s: %s", strategy_id, e)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
+                return gateway_pb2.PortfolioMetricsData(found=False)
+        else:
+            # SQLite mode (local dev) — delegate to StateManager's SQLiteStore
+            try:
+                await self._ensure_initialized()
+                assert self._state_manager is not None
+
+                warm = self._state_manager.warm_backend
+                if warm and hasattr(warm, "get_portfolio_metrics"):
+                    metrics = await warm.get_portfolio_metrics(strategy_id)
+                    if metrics is None:
+                        return gateway_pb2.PortfolioMetricsData(found=False)
+
+                    return gateway_pb2.PortfolioMetricsData(
+                        strategy_id=metrics.strategy_id,
+                        initial_value_usd=str(metrics.initial_value_usd),
+                        initial_timestamp=int(metrics.timestamp.timestamp()),
+                        deposits_usd=str(metrics.deposits_usd),
+                        withdrawals_usd=str(metrics.withdrawals_usd),
+                        gas_spent_usd=str(metrics.gas_spent_usd),
+                        updated_at=int(metrics.timestamp.timestamp()),
+                        found=True,
+                    )
+
+                return gateway_pb2.PortfolioMetricsData(found=False)
+            except Exception as e:
+                logger.error("GetPortfolioMetrics (SQLite) failed for %s: %s", strategy_id, e)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
+                return gateway_pb2.PortfolioMetricsData(found=False)
