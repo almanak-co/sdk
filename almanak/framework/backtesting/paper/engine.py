@@ -1490,6 +1490,10 @@ class PaperTrader:
         Falls back to config initial balances on first init (before the
         tracker has been started) or when use_initial=True.
 
+        When use_initial=True and no explicit bootstrap/anvil_funding config
+        is present, attempts to infer token requirements by calling
+        strategy.decide() with a synthetic MarketSnapshot (VIB-2376).
+
         Args:
             use_initial: Force using config initial balances (for first startup).
         """
@@ -1501,7 +1505,36 @@ class PaperTrader:
         if not use_initial and self.portfolio_tracker.current_balances:
             balances = dict(self.portfolio_tracker.current_balances)
         else:
-            balances = self.config.get_initial_balances()
+            explicit_balances = self.config.get_initial_balances()
+            balances = dict(explicit_balances)
+
+            # VIB-2376: Dry-run inference when no explicit bootstrap tokens configured
+            if use_initial and self._current_strategy is not None:
+                has_explicit_tokens = bool(self.config.bootstrap.get(self.config.chain, {})) or bool(
+                    self.config.initial_tokens
+                )
+                if not has_explicit_tokens:
+                    from almanak.framework.backtesting.paper.bootstrap_inference import infer_token_requirements
+
+                    inferred = infer_token_requirements(self._current_strategy, self.config.chain)
+                    if inferred:
+                        for token, amount in inferred.items():
+                            balances.setdefault(token, amount)
+                            # Keep portfolio tracker in sync so fork resets re-fund correctly
+                            if hasattr(self, "portfolio_tracker") and self.portfolio_tracker is not None:
+                                if token not in self.portfolio_tracker.current_balances:
+                                    self.portfolio_tracker.current_balances[token] = amount
+                                    self.portfolio_tracker.initial_balances[token] = amount
+                else:
+                    # Divergence check when both explicit and inference exist
+                    from almanak.framework.backtesting.paper.bootstrap_inference import (
+                        check_divergence,
+                        infer_token_requirements,
+                    )
+
+                    inferred = infer_token_requirements(self._current_strategy, self.config.chain)
+                    if inferred:
+                        check_divergence(explicit_balances, inferred)
 
         # Fund ETH
         eth_amount = balances.pop("ETH", None)
