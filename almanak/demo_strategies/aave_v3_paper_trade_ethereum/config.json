@@ -1,0 +1,17 @@
+{
+    "strategy_id": "aave_v3_paper_trade_ethereum",
+    "strategy_name": "aave_v3_paper_trade_ethereum",
+    "collateral_token": "USDC",
+    "collateral_amount": "500",
+    "borrow_token": "WETH",
+    "ltv_target": 0.25,
+    "supply_threshold_pct": 3.0,
+    "max_ticks_in_position": 4,
+    "chain": "ethereum",
+    "network": "mainnet",
+    "anvil_funding": {
+        "ETH": 10,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}
