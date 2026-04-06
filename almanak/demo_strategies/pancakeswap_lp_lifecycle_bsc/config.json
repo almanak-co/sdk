@@ -1,0 +1,11 @@
+{
+    "pool": "WBNB/USDT/2500",
+    "range_width_pct": 0.20,
+    "amount0": "0.01",
+    "amount1": "5",
+    "anvil_funding": {
+        "BNB": 100,
+        "WBNB": 1,
+        "USDT": 10000
+    }
+}
