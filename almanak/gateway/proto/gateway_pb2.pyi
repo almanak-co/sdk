@@ -2725,6 +2725,8 @@ class StrategySummary(_message.Message):
     PNL_SINCE_DEPLOY_USD_FIELD_NUMBER: _builtins.int
     WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
     CHAIN_WALLETS_FIELD_NUMBER: _builtins.int
+    EXECUTION_MODE_FIELD_NUMBER: _builtins.int
+    PAPER_METRICS_JSON_FIELD_NUMBER: _builtins.int
     strategy_id: _builtins.str
     name: _builtins.str
     status: _builtins.str
@@ -2744,6 +2746,10 @@ class StrategySummary(_message.Message):
     pnl_since_deploy_usd: _builtins.str
     """lifetime PnL after gas; empty if unavailable"""
     wallet_address: _builtins.str
+    execution_mode: _builtins.str
+    """\"live\" (default) or \"paper\""""
+    paper_metrics_json: _builtins.str
+    """JSON-encoded paper trading metrics (when execution_mode=\"paper\")"""
     @_builtins.property
     def chains(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
     @_builtins.property
@@ -2768,8 +2774,10 @@ class StrategySummary(_message.Message):
         pnl_since_deploy_usd: _builtins.str = ...,
         wallet_address: _builtins.str = ...,
         chain_wallets: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
+        execution_mode: _builtins.str = ...,
+        paper_metrics_json: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["attention_reason", b"attention_reason", "attention_required", b"attention_required", "chain", b"chain", "chain_wallets", b"chain_wallets", "chains", b"chains", "consecutive_errors", b"consecutive_errors", "is_multi_chain", b"is_multi_chain", "last_action_at", b"last_action_at", "last_iteration_at", b"last_iteration_at", "name", b"name", "pnl_24h_usd", b"pnl_24h_usd", "pnl_since_deploy_usd", b"pnl_since_deploy_usd", "protocol", b"protocol", "status", b"status", "strategy_id", b"strategy_id", "total_value_usd", b"total_value_usd", "wallet_address", b"wallet_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["attention_reason", b"attention_reason", "attention_required", b"attention_required", "chain", b"chain", "chain_wallets", b"chain_wallets", "chains", b"chains", "consecutive_errors", b"consecutive_errors", "execution_mode", b"execution_mode", "is_multi_chain", b"is_multi_chain", "last_action_at", b"last_action_at", "last_iteration_at", b"last_iteration_at", "name", b"name", "paper_metrics_json", b"paper_metrics_json", "pnl_24h_usd", b"pnl_24h_usd", "pnl_since_deploy_usd", b"pnl_since_deploy_usd", "protocol", b"protocol", "status", b"status", "strategy_id", b"strategy_id", "total_value_usd", b"total_value_usd", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___StrategySummary: _TypeAlias = StrategySummary  # noqa: Y015

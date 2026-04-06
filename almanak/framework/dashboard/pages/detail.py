@@ -4,6 +4,7 @@ Displays detailed information about a single strategy.
 Wires action buttons to real API endpoints.
 """
 
+import html
 import logging
 from decimal import Decimal
 from typing import Any
@@ -136,6 +137,127 @@ def call_strategy_action(strategy_id: str, action: str, payload: dict[str, Any] 
     except Exception as e:
         logger.exception(f"Action API call failed: {e}")
         return {"success": False, "error": str(e)}
+
+
+def render_paper_session_detail(strategy: Strategy) -> None:
+    """Render paper trading session detail view."""
+    pm = strategy.paper_metrics
+    if pm is None:
+        st.info("No paper trading metrics available.")
+        return
+
+    # Session summary
+    st.markdown("### Session Summary")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Ticks", pm.tick_count)
+    with col2:
+        rate = f"{pm.success_rate * 100:.1f}%" if pm.total_decisions > 0 else "N/A"
+        st.metric("Success Rate", rate)
+    with col3:
+        st.metric("Simulated PnL", format_usd(pm.simulated_pnl_usd))
+    with col4:
+        st.metric("Gas Cost", format_usd(pm.total_gas_cost_usd))
+
+    col5, col6, col7, col8 = st.columns(4)
+    with col5:
+        st.metric("Successes", pm.success_count)
+    with col6:
+        st.metric("Holds", pm.hold_count)
+    with col7:
+        st.metric("Errors", pm.error_count)
+    with col8:
+        st.metric("Trades/Hour", f"{pm.trades_per_hour:.1f}")
+
+    st.divider()
+
+    # Equity curve
+    if pm.equity_curve:
+        st.markdown("### Equity Curve")
+        import pandas as pd
+
+        eq_df = pd.DataFrame(
+            {
+                "timestamp": [pt.timestamp for pt in pm.equity_curve],
+                "value_usd": [float(pt.value_usd) for pt in pm.equity_curve],
+            }
+        )
+        eq_df = eq_df.set_index("timestamp")
+        st.line_chart(eq_df, y="value_usd", use_container_width=True)
+        st.divider()
+
+    # Error breakdown
+    if pm.error_breakdown:
+        st.markdown("### Error Breakdown")
+        import pandas as pd
+
+        error_data = [
+            {"Error Type": etype.replace("_", " ").title(), "Count": count}
+            for etype, count in sorted(pm.error_breakdown.items(), key=lambda x: -x[1])
+        ]
+        st.dataframe(error_data, use_container_width=True, hide_index=True)
+        st.divider()
+
+    # Health telemetry
+    if pm.tick_count > 0:
+        st.markdown("### Health Telemetry")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            fork_pct = pm.ticks_with_fork / pm.tick_count * 100
+            st.metric("Fork Usage", f"{fork_pct:.0f}%", help="Ticks with active Anvil fork")
+        with col2:
+            ind_pct = pm.ticks_with_indicators / pm.tick_count * 100
+            st.metric("Indicator Availability", f"{ind_pct:.0f}%", help="Ticks with market indicators")
+        with col3:
+            act_pct = pm.ticks_with_action / pm.tick_count * 100
+            st.metric("Action Rate", f"{act_pct:.0f}%", help="Ticks that produced a trade")
+
+    # Pre-flight status
+    if pm.anvil_result:
+        st.markdown("### Pre-flight Status")
+        result_icons = {"SUCCESS": "Pass", "FAIL": "Fail", "HOLD": "Hold"}
+        result_colors = {"SUCCESS": "#00c853", "FAIL": "#f44336", "HOLD": "#ffc107"}
+        result_label = result_icons.get(pm.anvil_result.upper(), html.escape(pm.anvil_result))
+        result_color = result_colors.get(pm.anvil_result.upper(), "#9e9e9e")
+        st.markdown(
+            f'<span style="color: {result_color}; font-weight: bold;">Anvil Test: {result_label}</span>',
+            unsafe_allow_html=True,
+        )
+
+    # Promotion readiness
+    st.divider()
+    st.markdown("### Deployment Readiness")
+    criteria = [
+        ("Tick count >= 50", pm.tick_count >= 50, f"{pm.tick_count}/50"),
+        ("At least 1 trade", pm.success_count >= 1, f"{pm.success_count} trades"),
+        (
+            "Success rate >= 80%",
+            pm.success_rate >= Decimal("0.80") if pm.total_decisions > 0 else False,
+            f"{pm.success_rate * 100:.0f}%" if pm.total_decisions > 0 else "N/A (no trades)",
+        ),
+        (
+            "Error rate < 5%",
+            pm.error_rate < Decimal("0.05") if pm.total_decisions > 0 else False,
+            f"{pm.error_rate * 100:.1f}%" if pm.total_decisions > 0 else "N/A (no trades)",
+        ),
+        ("Session age > 1 hour", pm.session_age_hours > Decimal("1"), f"{pm.session_age_hours:.1f}h"),
+    ]
+
+    for label, passed, value in criteria:
+        icon = "+" if passed else "-"
+        color = "#00c853" if passed else "#f44336"
+        st.markdown(
+            f'<div style="color: {color}; margin-bottom: 0.25rem;">[{icon}] {label} ({value})</div>',
+            unsafe_allow_html=True,
+        )
+
+    if pm.is_promotion_ready:
+        st.success(
+            "This paper session meets all readiness criteria. "
+            "To deploy to mainnet, run: `almanak strat run -d <strategy_dir>`"
+        )
+    else:
+        st.info("Paper session does not yet meet all deployment criteria.")
 
 
 def render_pnl_chart(strategy: Strategy) -> None:
@@ -790,6 +912,11 @@ def page(strategies: list[Strategy]) -> None:
                 st.markdown(f"**Last Action:** {strategy.last_action_at.strftime('%Y-%m-%d %H:%M')}")
 
     st.divider()
+
+    # Paper trading sessions get a dedicated detail view
+    if strategy.execution_mode == "paper":
+        render_paper_session_detail(strategy)
+        return
 
     # Key metrics - include bridge fees for multi-chain
     col1, col2, col3, col4 = st.columns(4)

@@ -107,6 +107,12 @@ class TestListStrategies:
     - Invalid filters: return INVALID_ARGUMENT
     """
 
+    @pytest.fixture(autouse=True)
+    def _no_paper_sessions(self, dashboard_service):
+        """Prevent real ~/.almanak/paper/ from leaking into tests."""
+        with patch.object(dashboard_service, "_discover_paper_sessions", return_value=[]):
+            yield
+
     @pytest.mark.asyncio
     async def test_default_filter_is_registry(self, dashboard_service, mock_context):
         """Default (no filter) should use REGISTRY mode, returning empty when no instances."""

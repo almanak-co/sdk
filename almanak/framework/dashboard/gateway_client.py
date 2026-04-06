@@ -35,6 +35,8 @@ class StrategySummary:
     attention_reason: str
     is_multi_chain: bool
     chains: list[str] = field(default_factory=list)
+    execution_mode: str = "live"
+    paper_metrics_json: str = ""
 
 
 @dataclass
@@ -553,6 +555,8 @@ class GatewayDashboardClient:
             attention_reason=proto.attention_reason,
             is_multi_chain=proto.is_multi_chain,
             chains=list(proto.chains),
+            execution_mode=proto.execution_mode or "live",
+            paper_metrics_json=proto.paper_metrics_json or "",
         )
 
     def _convert_details(self, proto: gateway_pb2.StrategyDetails) -> StrategyDetails:

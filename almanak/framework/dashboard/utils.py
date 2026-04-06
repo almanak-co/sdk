@@ -47,6 +47,7 @@ def get_status_icon(status: StrategyStatus) -> str:
         StrategyStatus.STUCK: "\U0001f7e1",  # Yellow circle
         StrategyStatus.PAUSED: "\u23f8\ufe0f",  # Pause button
         StrategyStatus.ERROR: "\U0001f534",  # Red circle
+        StrategyStatus.PAPER_TRADING: "\U0001f535",  # Blue circle
     }
     return icons.get(status, "\u26aa")  # White circle default
 

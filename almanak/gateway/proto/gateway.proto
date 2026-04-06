@@ -889,6 +889,8 @@ message StrategySummary {
   string pnl_since_deploy_usd = 15; // lifetime PnL after gas; empty if unavailable
   string wallet_address = 16;
   map<string, string> chain_wallets = 17;
+  string execution_mode = 18;       // "live" (default) or "paper"
+  string paper_metrics_json = 19;   // JSON-encoded paper trading metrics (when execution_mode="paper")
 }
 
 message GetStrategyDetailsRequest {

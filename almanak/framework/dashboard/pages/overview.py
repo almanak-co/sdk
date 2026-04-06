@@ -218,7 +218,11 @@ def render_strategy_card(strategy: Strategy, col_idx: int, manage_mode: bool = F
     """Render a single strategy card."""
     status_icon = get_status_icon(strategy.status)
     status_color = get_status_color(strategy.status)
-    pnl_color = "#00c853" if strategy.pnl_24h_usd >= 0 else "#f44336"
+    is_paper = strategy.execution_mode == "paper"
+    pnl_value = strategy.pnl_24h_usd
+    if is_paper and strategy.paper_metrics:
+        pnl_value = strategy.paper_metrics.simulated_pnl_usd
+    pnl_color = "#00c853" if pnl_value >= 0 else "#f44336"
 
     # Build chain display - for multi-chain strategies, show badges
     if strategy.is_multi_chain and strategy.chains:
@@ -235,10 +239,10 @@ def render_strategy_card(strategy: Strategy, col_idx: int, manage_mode: bool = F
         chain_color = get_chain_color(strategy.chain)
         chain_display = format_chain_badge(strategy.chain, chain_color)
 
-    # Multi-chain indicator
-    multi_chain_badge = ""
+    # Mode badges (multi-chain, paper)
+    extra_badges = ""
     if strategy.is_multi_chain:
-        multi_chain_badge = """
+        extra_badges += """
         <span style="
             background-color: #9c27b022;
             color: #9c27b0;
@@ -249,27 +253,52 @@ def render_strategy_card(strategy: Strategy, col_idx: int, manage_mode: bool = F
             margin-left: 0.5rem;
         ">MULTI-CHAIN</span>
         """
+    if is_paper:
+        extra_badges += """
+        <span style="
+            background-color: #2196f322;
+            color: #2196f3;
+            padding: 0.1rem 0.4rem;
+            border-radius: 8px;
+            font-size: 0.65rem;
+            font-weight: bold;
+            margin-left: 0.5rem;
+        ">PAPER</span>
+        """
 
     # Escape user-controllable values to prevent XSS
     safe_name = html.escape(strategy.name)
     safe_protocol = html.escape(strategy.protocol)
 
+    value_label = "Simulated Value" if is_paper else "Total Value"
+    pnl_label = "Simulated PnL" if is_paper else "24h PnL"
+
+    paper_info_html = ""
+    if is_paper and strategy.paper_metrics:
+        pm = strategy.paper_metrics
+        rate_pct = f"{pm.success_rate * 100:.0f}%"
+        paper_info_html = (
+            f'<div style="color: #2196f3; font-size: 0.75rem; margin-bottom: 0.5rem;">'
+            f"Ticks: {pm.tick_count} | Success: {rate_pct}"
+            f"</div>"
+        )
+
     # Pure HTML card - no inline JS (Streamlit strips onclick/onmouseover, corrupting the DOM)
     card_html = f"""<div style="background-color: #1e1e1e; border: 1px solid #333; border-left: 4px solid {status_color}; border-radius: 8px; padding: 1rem; margin-bottom: 0.5rem;">
 <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.5rem;">
-<span style="font-weight: bold; font-size: 1.1rem;">{safe_name}{multi_chain_badge}</span>
+<span style="font-weight: bold; font-size: 1.1rem;">{safe_name}{extra_badges}</span>
 <span>{status_icon}</span>
 </div>
 <div style="margin-bottom: 0.5rem;">{chain_display}</div>
 <div style="color: #888; font-size: 0.8rem; margin-bottom: 0.5rem;">{safe_protocol}</div>
-<div style="display: flex; justify-content: space-between; align-items: flex-end;">
+{paper_info_html}<div style="display: flex; justify-content: space-between; align-items: flex-end;">
 <div>
-<div style="color: #888; font-size: 0.75rem;">Total Value</div>
+<div style="color: #888; font-size: 0.75rem;">{value_label}</div>
 <div style="font-size: 1.1rem;">{format_usd(strategy.total_value_usd)}</div>
 </div>
 <div style="text-align: right;">
-<div style="color: #888; font-size: 0.75rem;">24h PnL</div>
-<div style="font-size: 1.1rem; color: {pnl_color};">{format_pnl(strategy.pnl_24h_usd)}</div>
+<div style="color: #888; font-size: 0.75rem;">{pnl_label}</div>
+<div style="font-size: 1.1rem; color: {pnl_color};">{format_pnl(pnl_value)}</div>
 </div>
 </div>
 </div>"""

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -188,6 +189,190 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     continue
 
         return strategies
+
+    def _discover_paper_sessions(self) -> list[dict]:
+        """Discover paper trading sessions from ~/.almanak/paper/.
+
+        Reads state files produced by the BackgroundPaperTrader to surface
+        paper sessions alongside live strategies in the dashboard.
+
+        Returns:
+            List of strategy info dicts for paper sessions.
+        """
+        paper_dir = Path.home() / ".almanak" / "paper"
+        if not paper_dir.exists():
+            return []
+
+        sessions: list[dict] = []
+
+        for state_file in paper_dir.glob("*.state.json"):
+            try:
+                data = json.loads(state_file.read_text())
+            except (json.JSONDecodeError, OSError) as e:
+                logger.debug(f"Failed to read paper state file {state_file}: {e}")
+                continue
+
+            if not isinstance(data, dict):
+                logger.debug(f"Paper state file {state_file} is not a JSON object, skipping")
+                continue
+
+            strategy_id = data.get("strategy_id", state_file.stem.replace(".state", ""))
+            config = data.get("config", {})
+            if not isinstance(config, dict):
+                config = {}
+
+            # Determine status: check PID liveness and file freshness
+            status = "PAPER_TRADING"
+            pid = data.get("pid")
+            file_status = data.get("status", "unknown")
+            if file_status in ("stopped", "error"):
+                status = "INACTIVE"
+            elif isinstance(pid, int) and pid > 0:
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    last_save = data.get("last_save")
+                    if last_save:
+                        try:
+                            last_dt = datetime.fromisoformat(last_save)
+                            if last_dt.tzinfo is None:
+                                last_dt = last_dt.replace(tzinfo=UTC)
+                            age = (datetime.now(UTC) - last_dt).total_seconds()
+                            if age > 300:
+                                status = "INACTIVE"
+                        except (ValueError, TypeError):
+                            status = "INACTIVE"
+
+            chain = config.get("chain", "arbitrum")
+            protocol = config.get("protocol", "")
+            if not protocol:
+                protocol = self._derive_protocol_from_config(config, strategy_id)
+
+            trades = data.get("trades", [])
+            if not isinstance(trades, list):
+                trades = []
+            errors = data.get("errors", [])
+            if not isinstance(errors, list):
+                errors = []
+            equity_curve = data.get("equity_curve", [])
+            if not isinstance(equity_curve, list):
+                equity_curve = []
+            tick_count = data.get("tick_count", 0)
+            success_count = len(trades)
+            error_count = len(errors)
+            hold_count = max(0, tick_count - success_count - error_count)
+
+            total_gas_cost = Decimal("0")
+            for trade in trades:
+                try:
+                    total_gas_cost += Decimal(str(trade.get("gas_cost_usd", "0")))
+                except (ValueError, TypeError, ArithmeticError) as e:
+                    logger.debug("Skipping malformed gas_cost_usd in trade %s: %s", trade, e)
+
+            # PnL from portfolio state, not summed trade deltas (Fix #4).
+            # The equity curve tracks mark-to-market portfolio value including
+            # open positions. PnL = latest equity value - initial value.
+            simulated_pnl = Decimal("0")
+            initial_value = Decimal("0")
+            current_value = Decimal("0")
+            if equity_curve:
+                try:
+                    initial_value = Decimal(str(equity_curve[0].get("value", "0")))
+                    current_value = Decimal(str(equity_curve[-1].get("value", "0")))
+                    simulated_pnl = current_value - initial_value
+                except (IndexError, AttributeError, ValueError):
+                    pass
+            # Fallback: use initial/current balances if no equity curve
+            if not equity_curve:
+                initial_balances = data.get("initial_balances", {})
+                current_balances = data.get("current_balances", {})
+                if initial_balances and current_balances:
+                    # Can't compute PnL without prices — leave at 0
+                    pass
+
+            last_trade_at = ""
+            if trades:
+                last_trade_at = trades[-1].get("timestamp", "")
+
+            trades_per_hour = Decimal("0")
+            session_start = data.get("session_start", "")
+            if session_start and success_count > 0:
+                try:
+                    start_dt = datetime.fromisoformat(session_start)
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=UTC)
+                    hours = Decimal(str((datetime.now(UTC) - start_dt).total_seconds())) / Decimal("3600")
+                    if hours > 0:
+                        trades_per_hour = Decimal(success_count) / hours
+                except (ValueError, TypeError):
+                    pass
+
+            # Prefer persisted error_breakdown; fall back to reconstructing from errors list
+            error_breakdown = data.get("error_breakdown")
+            if not isinstance(error_breakdown, dict):
+                error_breakdown = {}
+                for error in errors:
+                    if isinstance(error, dict):
+                        etype = error.get("error_type", "unknown")
+                        error_breakdown[etype] = error_breakdown.get(etype, 0) + 1
+
+            # Downsample equity curve to max 200 points (always include last point)
+            eq_points = equity_curve
+            if len(eq_points) > 200:
+                step = len(eq_points) / 199
+                eq_points = [eq_points[int(i * step)] for i in range(199)] + [eq_points[-1]]
+
+            paper_metrics = {
+                "tick_count": tick_count,
+                "success_count": success_count,
+                "hold_count": hold_count,
+                "error_count": error_count,
+                "simulated_pnl_usd": str(simulated_pnl),
+                "total_gas_cost_usd": str(total_gas_cost),
+                "last_trade_at": last_trade_at,
+                "session_start": session_start,
+                "trades_per_hour": str(trades_per_hour),
+                "equity_curve": eq_points,
+                "error_breakdown": error_breakdown,
+                "ticks_with_fork": data.get("ticks_with_fork", 0),
+                "ticks_with_indicators": data.get("ticks_with_indicators", 0),
+                "ticks_with_action": data.get("ticks_with_action", 0),
+                "anvil_result": data.get("anvil_result"),
+            }
+
+            total_value = str(current_value) if current_value else "0"
+
+            last_action_ts = 0
+            last_save = data.get("last_save")
+            if last_save:
+                try:
+                    last_dt = datetime.fromisoformat(last_save)
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=UTC)
+                    last_action_ts = int(last_dt.timestamp())
+                except (ValueError, TypeError):
+                    pass
+
+            sessions.append(
+                {
+                    "strategy_id": f"paper:{strategy_id}",
+                    "name": strategy_id.replace("_", " ").title() + " (Paper)",
+                    "status": status,
+                    "chain": chain,
+                    "protocol": protocol,
+                    "total_value_usd": total_value,
+                    "pnl_24h_usd": "0",  # Keep 0 to avoid contaminating portfolio 24h total; simulated PnL is in paper_metrics_json
+                    "last_action_at": last_action_ts,
+                    "attention_required": status == "INACTIVE",
+                    "attention_reason": "Paper session inactive" if status == "INACTIVE" else "",
+                    "is_multi_chain": "," in str(chain),
+                    "chains": [c.strip() for c in str(chain).split(",")],
+                    "execution_mode": "paper",
+                    "paper_metrics_json": json.dumps(paper_metrics),
+                }
+            )
+
+        return sessions
 
     def _derive_protocol_from_config(self, config: dict, strategy_id: str) -> str:
         """Derive protocol string from config or strategy ID."""
@@ -443,7 +628,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
     # Supported status_filter values for ListStrategies.
     _SOURCE_FILTERS = frozenset({"REGISTRY", "AVAILABLE", "ALL"})
-    _STATUS_FILTERS = frozenset({"RUNNING", "PAUSED", "ERROR", "STUCK", "STALE", "INACTIVE", "ARCHIVED"})
+    _STATUS_FILTERS = frozenset(
+        {"RUNNING", "PAUSED", "ERROR", "STUCK", "STALE", "INACTIVE", "ARCHIVED", "PAPER_TRADING"}
+    )
     _VALID_FILTERS = _SOURCE_FILTERS | _STATUS_FILTERS
 
     @staticmethod
@@ -604,10 +791,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             except Exception as e:
                 logger.debug(f"Failed to get instances from registry: {e}")
 
-        # Apply status filter (RUNNING, PAUSED, ERROR, etc.)
-        if status_filter in self._STATUS_FILTERS:
-            strategies = [s for s in strategies if s["status"] == status_filter]
-
         # --- Collect filesystem templates (for AVAILABLE and ALL) ---
         if status_filter in ("AVAILABLE", "ALL"):
             for fs_strategy in self._discover_strategies_from_filesystem():
@@ -615,6 +798,19 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 if template_id in registry_template_ids:
                     continue
                 strategies.append(fs_strategy)
+
+        # --- Collect paper trading sessions ---
+        # Include paper sessions for REGISTRY (default), ALL, or any status
+        # filter that could match paper session statuses (PAPER_TRADING, INACTIVE).
+        if status_filter not in ("AVAILABLE",):
+            for paper_session in self._discover_paper_sessions():
+                strategies.append(paper_session)
+
+        # Apply status filter AFTER all sources are collected (Fix: consistent
+        # filtering for paper sessions — INACTIVE filter catches inactive paper
+        # sessions, PAPER_TRADING filter catches active ones).
+        if status_filter in self._STATUS_FILTERS:
+            strategies = [s for s in strategies if s["status"] == status_filter]
 
         # Apply chain filter
         filtered = []
@@ -642,6 +838,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 "consecutive_errors": s.get("consecutive_errors", 0),
                 "last_iteration_at": s.get("last_iteration_at", 0),
                 "pnl_since_deploy_usd": s.get("pnl_since_deploy_usd", ""),
+                "execution_mode": s.get("execution_mode", ""),
+                "paper_metrics_json": s.get("paper_metrics_json", ""),
             }
             if "wallet_address" in s:
                 summary_kwargs["wallet_address"] = s["wallet_address"]
@@ -738,6 +936,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                     strategy_info = s
                     break
 
+        # Fallback to paper session discovery (match against original ID
+        # because resolve_agent_id may have rewritten paper:xxx IDs)
+        if strategy_info is None:
+            for s in self._discover_paper_sessions():
+                if s["strategy_id"] == original_strategy_id or s["strategy_id"] == strategy_id:
+                    strategy_info = s
+                    break
+
         if strategy_info is None:
             context.set_code(grpc.StatusCode.NOT_FOUND)
             context.set_details(f"Strategy not found: {strategy_id}")
@@ -819,6 +1025,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             "consecutive_errors": int(str(strategy_info.get("consecutive_errors", 0))),
             "last_iteration_at": int(str(strategy_info.get("last_iteration_at", 0))),
             "pnl_since_deploy_usd": str(strategy_info.get("pnl_since_deploy_usd", "")),
+            "execution_mode": str(strategy_info.get("execution_mode", "")),
+            "paper_metrics_json": str(strategy_info.get("paper_metrics_json", "")),
         }
         if "wallet_address" in strategy_info:
             summary_kwargs["wallet_address"] = str(strategy_info["wallet_address"])
