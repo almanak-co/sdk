@@ -268,10 +268,17 @@ class ManagedGateway:
                 # Managed Anvil: start a new fork
                 port = find_free_port()
                 fork_url = get_rpc_url(chain, network="mainnet")
+                # Use pinned fork block if available (set by CI or nightly entrypoint)
+                # to maximise Foundry RPC cache hits across strategy runs.
+                fork_block_env = os.environ.get(f"ANVIL_FORK_BLOCK_{chain.upper()}")
+                fork_block = int(fork_block_env) if fork_block_env else None
+                if fork_block:
+                    logger.info("Anvil fork for %s pinned to block %d", chain, fork_block)
                 manager = RollingForkManager(
                     rpc_url=fork_url,
                     chain=chain,
                     anvil_port=port,
+                    fork_block_number=fork_block,
                 )
                 ok = await manager.start()
                 if not ok:
@@ -294,6 +301,7 @@ class ManagedGateway:
                             rpc_url=public_url,
                             chain=chain,
                             anvil_port=port,
+                            fork_block_number=fork_block,
                         )
                         ok = await manager.start()
                         if ok:

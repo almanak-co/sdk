@@ -622,6 +622,93 @@ class TestAnvilPublicRpcFallback:
                 await gw._start_anvil_forks()
 
 
+class TestAnvilForkBlockPinning:
+    """Tests for ANVIL_FORK_BLOCK_{CHAIN} env var passthrough to RollingForkManager."""
+
+    def _make_settings(self, port: int) -> GatewaySettings:
+        return GatewaySettings(
+            grpc_port=port,
+            metrics_enabled=False,
+            audit_enabled=False,
+            allow_insecure=True,
+            network="anvil",
+        )
+
+    @pytest.mark.asyncio
+    async def test_fork_block_env_var_passed_to_manager(self):
+        """When ANVIL_FORK_BLOCK_{CHAIN} is set, fork_block_number is passed to RollingForkManager."""
+        settings = self._make_settings(50095)
+        gw = ManagedGateway(settings, anvil_chains=["arbitrum"])
+
+        mock_manager = AsyncMock()
+        mock_manager.start.return_value = True
+        mock_manager.anvil_port = 8560
+
+        env_patch = patch.dict(os.environ, {"ANVIL_FORK_BLOCK_ARBITRUM": "449499053"})
+
+        with (
+            env_patch,
+            patch(
+                "almanak.framework.anvil.fork_manager.RollingForkManager",
+                return_value=mock_manager,
+            ) as mock_cls,
+            patch(
+                "almanak.gateway.utils.rpc_provider.get_rpc_url",
+                return_value="https://arb-mainnet.g.alchemy.com/v2/FAKE",
+            ),
+            patch("almanak.gateway.managed.find_free_port", return_value=8560),
+            patch("shutil.which", return_value="/usr/bin/anvil"),
+        ):
+            await gw._start_anvil_forks()
+
+        # Verify fork_block_number was passed
+        mock_cls.assert_called_once()
+        call_kwargs = mock_cls.call_args[1]
+        assert call_kwargs["fork_block_number"] == 449499053
+
+        # Cleanup
+        gw._keep_anvil = False
+        await gw._stop_anvil_forks()
+
+    @pytest.mark.asyncio
+    async def test_no_fork_block_env_var_defaults_to_none(self):
+        """When ANVIL_FORK_BLOCK_{CHAIN} is not set, fork_block_number is None."""
+        settings = self._make_settings(50096)
+        gw = ManagedGateway(settings, anvil_chains=["base"])
+
+        mock_manager = AsyncMock()
+        mock_manager.start.return_value = True
+        mock_manager.anvil_port = 8561
+
+        # Ensure the env var is NOT set
+        env_patch = patch.dict(os.environ, {}, clear=False)
+
+        with (
+            env_patch,
+            patch(
+                "almanak.framework.anvil.fork_manager.RollingForkManager",
+                return_value=mock_manager,
+            ) as mock_cls,
+            patch(
+                "almanak.gateway.utils.rpc_provider.get_rpc_url",
+                return_value="https://base-mainnet.g.alchemy.com/v2/FAKE",
+            ),
+            patch("almanak.gateway.managed.find_free_port", return_value=8561),
+            patch("shutil.which", return_value="/usr/bin/anvil"),
+        ):
+            # Remove env var if it happens to exist
+            os.environ.pop("ANVIL_FORK_BLOCK_BASE", None)
+            await gw._start_anvil_forks()
+
+        mock_cls.assert_called_once()
+        call_kwargs = mock_cls.call_args[1]
+        assert call_kwargs["fork_block_number"] is None
+
+        # Cleanup
+        gw._keep_anvil = False
+        await gw._stop_anvil_forks()
+
+
 class TestAnvilFundingNativeTokenWarning:
     """VIB-1579: warn when anvil_funding uses 'ETH' on non-ETH chains."""
 
