@@ -65,11 +65,23 @@ _TOKEN_TO_BINANCE_SYMBOL: dict[str, str] = {
 _STABLECOINS = {"USDC", "USDT", "DAI", "USDC.E", "USDT.E", "USDBC", "BUSD", "USDE", "USDT0", "USDG", "GHO"}
 
 
+# Quote currencies to try when dynamically resolving unknown tokens (VIB-645).
+# Order matters: USDT is the most common, USDC and FDUSD are fallbacks.
+_DYNAMIC_QUOTE_CANDIDATES = ("USDT", "USDC", "FDUSD")
+
+# TTL for negative cache entries (tokens confirmed not on Binance).
+_NEGATIVE_CACHE_TTL = 4 * 3600  # 4 hours
+
+
 class BinancePriceSource(BasePriceSource):
     """Binance public API price source.
 
     Uses the /api/v3/ticker/price endpoint (no API key needed).
     Rate limit: 1200 req/min (very generous).
+
+    For tokens not in the static symbol map, attempts dynamic resolution
+    by probing {SYMBOL}USDT, {SYMBOL}USDC, {SYMBOL}FDUSD against the API.
+    Successful lookups are cached; failures are negative-cached for 4h.
     """
 
     _API_BASE = "https://api.binance.com"
@@ -80,6 +92,9 @@ class BinancePriceSource(BasePriceSource):
         self._cache: dict[str, tuple[PriceResult, float]] = {}
         self._session: aiohttp.ClientSession | None = None
         self._session_loop: asyncio.AbstractEventLoop | None = None
+        # Dynamic resolution caches (VIB-645)
+        self._dynamic_symbol_cache: dict[str, str] = {}  # TOKEN -> resolved Binance symbol
+        self._negative_cache: dict[str, float] = {}  # TOKEN -> timestamp of failed lookup
         logger.info("Initialized BinancePriceSource (cache_ttl=%ds)", cache_ttl)
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -134,37 +149,43 @@ class BinancePriceSource(BasePriceSource):
             if time.time() - cached_at < self._cache_ttl:
                 return result
 
-        # Look up Binance symbol
+        # Look up Binance symbol: static map -> dynamic cache -> dynamic resolve
         binance_symbol = _TOKEN_TO_BINANCE_SYMBOL.get(token_upper)
+        confidence = 1.0
+
         if not binance_symbol:
-            raise DataSourceUnavailable(
-                source=self.source_name,
-                reason=f"Token '{token_upper}' not mapped to a Binance pair",
-            )
+            binance_symbol = self._dynamic_symbol_cache.get(token_upper)
+            if binance_symbol:
+                confidence = 0.9  # dynamically resolved, slightly lower confidence
+
+        if not binance_symbol:
+            # Check negative cache before probing
+            neg_ts = self._negative_cache.get(token_upper)
+            if neg_ts and (time.time() - neg_ts) < _NEGATIVE_CACHE_TTL:
+                raise DataSourceUnavailable(
+                    source=self.source_name,
+                    reason=f"Token '{token_upper}' not available on Binance (negative-cached)",
+                )
+            # Dynamic resolution: probe candidate pairs (VIB-645)
+            binance_symbol = await self._resolve_binance_symbol(token_upper)
+            if binance_symbol:
+                confidence = 0.9
+            else:
+                raise DataSourceUnavailable(
+                    source=self.source_name,
+                    reason=f"Token '{token_upper}' not found on Binance (tried {', '.join(_DYNAMIC_QUOTE_CANDIDATES)})",
+                )
 
         try:
-            session = await self._get_session()
-            url = f"{self._API_BASE}/api/v3/ticker/price?symbol={binance_symbol}"
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    raise ValueError(f"Binance API returned {resp.status}: {text}")
-                data = await resp.json()
-                price_str = data.get("price")
-                if price_str is None:
-                    raise ValueError("Binance response missing 'price' field")
-                price = Decimal(str(price_str))
-
-                result = PriceResult(
-                    price=price,
-                    source=self.source_name,
-                    timestamp=datetime.now(UTC),
-                    confidence=1.0,
-                )
-                self._cache[cache_key] = (result, time.time())
-                return result
-
+            result = await self._fetch_price(binance_symbol, cache_key, confidence)
+            return result
+        except DataSourceUnavailable:
+            raise
         except (aiohttp.ClientError, TimeoutError, InvalidOperation, ValueError, TypeError, KeyError) as e:
+            # Evict dynamic cache on API error (the pair may have been delisted)
+            if token_upper in self._dynamic_symbol_cache:
+                del self._dynamic_symbol_cache[token_upper]
+                logger.warning("Evicted dynamic Binance mapping for %s after API error: %s", token_upper, e)
             # Check for stale cache
             if cache_key in self._cache:
                 stale_result, _ = self._cache[cache_key]
@@ -179,6 +200,76 @@ class BinancePriceSource(BasePriceSource):
                 source=self.source_name,
                 reason=f"Binance request failed: {e}",
             ) from e
+
+    async def _fetch_price(self, binance_symbol: str, cache_key: str, confidence: float) -> PriceResult:
+        """Fetch a price from Binance for a given trading pair symbol."""
+        session = await self._get_session()
+        url = f"{self._API_BASE}/api/v3/ticker/price?symbol={binance_symbol}"
+        async with session.get(url) as resp:
+            if resp.status in (429, 418) or resp.status >= 500:
+                text = await resp.text()
+                raise DataSourceUnavailable(
+                    source=self.source_name,
+                    reason=f"Binance API transient error {resp.status}: {text}",
+                )
+            if resp.status != 200:
+                text = await resp.text()
+                raise ValueError(f"Binance API returned {resp.status}: {text}")
+            data = await resp.json()
+            price_str = data.get("price")
+            if price_str is None:
+                raise ValueError("Binance response missing 'price' field")
+            price = Decimal(str(price_str))
+
+            result = PriceResult(
+                price=price,
+                source=self.source_name,
+                timestamp=datetime.now(UTC),
+                confidence=confidence,
+            )
+            self._cache[cache_key] = (result, time.time())
+            return result
+
+    async def _resolve_binance_symbol(self, token: str) -> str | None:
+        """Try to find a valid Binance trading pair for an unknown token.
+
+        Probes {TOKEN}USDT, {TOKEN}USDC, {TOKEN}FDUSD against the ticker API.
+        Returns the first valid pair, or None if no pair exists.
+        Successful lookups are cached in _dynamic_symbol_cache.
+        """
+        # Guard against non-alphanumeric tokens being injected into URLs
+        if not token.isalnum():
+            return None
+
+        session = await self._get_session()
+        saw_transient_error = False
+        for quote in _DYNAMIC_QUOTE_CANDIDATES:
+            candidate = f"{token}{quote}"
+            url = f"{self._API_BASE}/api/v3/ticker/price?symbol={candidate}"
+            try:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("price"):
+                            self._dynamic_symbol_cache[token] = candidate
+                            logger.warning(
+                                "Dynamically resolved Binance pair for %s -> %s (not in static map)",
+                                token,
+                                candidate,
+                            )
+                            return candidate
+                    elif resp.status in (429, 418) or resp.status >= 500:
+                        saw_transient_error = True
+                        continue
+            except (aiohttp.ClientError, TimeoutError):
+                saw_transient_error = True
+                continue
+        # Only negative-cache if all probes got definitive 4xx (not-found) responses
+        if not saw_transient_error:
+            self._negative_cache[token] = time.time()
+        else:
+            logger.debug("Skipping negative cache for %s due to transient errors during probe", token)
+        return None
 
     @property
     def source_name(self) -> str:
