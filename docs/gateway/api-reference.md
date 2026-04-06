@@ -8,12 +8,12 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 |---------|---------|-------------|
 | Health | 3 | Standard gRPC health checks and chain registration |
 | MarketService | 4 | Price data, balances, batch balances, and technical indicators |
-| StateService | 3 | Strategy state persistence with optimistic locking |
+| StateService | 8 | Strategy state persistence and portfolio snapshots/metrics |
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
 | RpcService | 6 | JSON-RPC proxy to blockchains with typed queries |
-| IntegrationService | 9 | Third-party data (Binance, CoinGecko, TheGraph) |
-| DashboardService | 10 | Operator dashboard data and actions |
+| IntegrationService | 12 | Third-party data (Binance, CoinGecko, TheGraph, GeckoTerminal, Zerion) |
+| DashboardService | 11 | Operator dashboard data, actions, and transaction ledger |
 | FundingRateService | 2 | Perpetual funding rates and spreads |
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
 | PolymarketService | 18 | Polymarket CLOB API proxy (market data, orders, positions) |
@@ -230,6 +230,46 @@ Delete strategy state.
 
 ```protobuf
 rpc DeleteState(DeleteStateRequest) returns (DeleteStateResponse)
+```
+
+### SavePortfolioSnapshot
+
+Save a portfolio snapshot for tracking valuation over time.
+
+```protobuf
+rpc SavePortfolioSnapshot(SaveSnapshotRequest) returns (SaveSnapshotResponse)
+```
+
+### GetLatestSnapshot
+
+Get the most recent portfolio snapshot.
+
+```protobuf
+rpc GetLatestSnapshot(GetLatestSnapshotRequest) returns (SnapshotData)
+```
+
+### GetSnapshotsSince
+
+Get all portfolio snapshots since a given timestamp.
+
+```protobuf
+rpc GetSnapshotsSince(GetSnapshotsSinceRequest) returns (SnapshotList)
+```
+
+### SavePortfolioMetrics
+
+Save computed portfolio metrics (PnL, Sharpe, drawdown, etc.).
+
+```protobuf
+rpc SavePortfolioMetrics(SaveMetricsRequest) returns (SaveMetricsResponse)
+```
+
+### GetPortfolioMetrics
+
+Retrieve stored portfolio metrics.
+
+```protobuf
+rpc GetPortfolioMetrics(GetMetricsRequest) returns (PortfolioMetricsData)
 ```
 
 ## ExecutionService
@@ -609,6 +649,30 @@ Get price chart data for a date range.
 rpc CoinGeckoGetMarketChartRange(CoinGeckoMarketChartRangeRequest) returns (CoinGeckoMarketChartRangeResponse)
 ```
 
+### GeckoTerminalGetOHLCV
+
+Get DEX OHLCV data from GeckoTerminal for on-chain pool pricing.
+
+```protobuf
+rpc GeckoTerminalGetOHLCV(GeckoTerminalOHLCVRequest) returns (GeckoTerminalOHLCVResponse)
+```
+
+### GetWalletPortfolio
+
+Get aggregated wallet portfolio valuation via Zerion.
+
+```protobuf
+rpc GetWalletPortfolio(WalletPortfolioRequest) returns (WalletPortfolioResponse)
+```
+
+### GetWalletPositions
+
+Get detailed wallet positions (DeFi protocol positions) via Zerion.
+
+```protobuf
+rpc GetWalletPositions(WalletPortfolioRequest) returns (WalletPortfolioResponse)
+```
+
 ## DashboardService
 
 Provides data and actions for the operator dashboard.
@@ -720,6 +784,14 @@ Permanently remove a strategy instance from the registry.
 
 ```protobuf
 rpc PurgeStrategyInstance(PurgeInstanceRequest) returns (PurgeInstanceResponse)
+```
+
+### GetTransactionLedger
+
+Retrieve the transaction ledger for a strategy instance.
+
+```protobuf
+rpc GetTransactionLedger(GetTransactionLedgerRequest) returns (GetTransactionLedgerResponse)
 ```
 
 ## FundingRateService

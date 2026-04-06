@@ -40,4 +40,6 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [Morpho Vault](morpho_vault.md) | Vault | Ethereum, Base | `morpho_vault` |
 | [Orca](orca.md) | DEX / LP | Solana | `orca` |
 | [Raydium](raydium.md) | DEX / LP | Solana | `raydium` |
+| LiFi | Bridge Aggregator | Multi-chain | `lifi` |
+| Radiant V2 | Lending | Arbitrum | (via Aave V3 fork) |
 | [Base Infrastructure](base.md) | Shared | N/A | `base` |

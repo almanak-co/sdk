@@ -6,6 +6,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-04-06
+
+### Added
+- Radiant V2 lending connector (#1334)
+- Paper trading bootstrap with decide() dry-run inference (#1355, #1297)
+- Paper-local token override registry for paper trading (#1356)
+- Paper Trading Dashboard integration (#1342)
+- Dashboard Phase 3 - ledger, data client, export, PM integration (#1327)
+- Structured forensic events with cycle_id correlation (#1319)
+- SavePortfolioMetrics/GetPortfolioMetrics gRPC endpoints (#1354)
+- Multi-provider portfolio valuation with circuit-breaker failover (#1339)
+- Gateway Zerion portfolio integration foundation (#1305)
+- Portfolio valuation reconciliation and snapshot metadata (#1306)
+- Dynamic Binance token resolution for price oracles (#1346)
+- Dynamic token resolution - Jupiter/CoinGecko fallback + Solana guard (#1293)
+- Pre-warm gateway price cache on startup (#1349)
+- Orca SOL/USDC LP Anvil fork support + sdk.py IDL fixes (#1296)
+- Aave V3 lending demo + compiler tests on Sonic (#1315)
+- Spark Protocol wstETH/DAI full lending lifecycle (#1329)
+- Auto-expand teardown complements in @almanak_strategy decorator (#1309)
+- PnL backtest regression tests for uniswap_rsi on Arbitrum (#1323)
+- Compound V3 compiler tests for Optimism and Polygon (#1308)
+- Unit tests for ADX, OBV, CCI, Ichimoku calculators (#1299)
+- 12 new demo strategies across 7 chains covering carry trades, lending, LP lifecycle, and yield stacks
+
+### Changed
+- Codebase hygiene Phase 1+2 - split 9 oversized files into sub-modules (#1341, #1352)
+- Auto-expand teardown complement intent types in permission generation (#1270)
+- Bump Almanak Code to v0.2.12
+
+### Fixed
+- Recompute LP amounts from on-chain sqrtPriceX96 to prevent price slippage reverts (#1288)
+- Route Compound V3 SUPPLY to supply_collateral() for collateral tokens (#1310)
+- Route Compound V3 WITHDRAW to withdraw_collateral() for collateral tokens (#1311)
+- Resolve amount='all' in BridgeIntent compilation by querying from_chain balance (#1275)
+- Morpho Blue repay_full=True uses correct RPC on Anvil fork (#1278)
+- Persist strategy state after each successful teardown intent (#1279)
+- Capture portfolio snapshot on all iteration outcomes (#1324)
+- Add certifi SSL context to RpcService aiohttp session (#1269)
+- Anvil port race condition with retry logic (#1321)
+- Add stETH/rETH to token registry + guard balance() silent-zero (#1287)
+- Paper trading bootstrapping - checksum addresses, preserve symbol case (#1295)
+- Inject simulated_balances from config in dry-run mode (#1291)
+- Auto-default strat new to strategies/incubating/ from SDK root (#1290)
+- Skip gateway timeout in cosmetic token symbol lookups (#1298)
+- Suppress false-positive amount chaining warnings (#1307)
+- Add gas buffer to simulator state-setup execution (#1333)
+- Compound V3 collateral routing, gateway price pre-warm fixes (#1335)
+- Throttle dashboard event spam, harden crash resilience (#1338)
+- Bump Zerion cache TTL from 60s to 300s (#1336)
+- Restore PancakeSwap Aave carry BSC strategy deleted by #1332 (#1361)
+- Authoritative registry files use BASE-WINS conflict resolution (#1268)
+
+### Security
+- Bump cryptography from 46.0.5 to 46.0.6 (#1161)
+
 ## [2.10.0] - 2026-04-02
 
 ### Added
