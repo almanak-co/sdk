@@ -73,6 +73,37 @@
   --md-typeset-a-color: #4bc951;
 }
 
+/* Background: subtle glow + grid */
+body {
+  position: relative;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 60% 50% at 50% 45%, rgba(210, 245, 98, 0.04) 0%, transparent 70%),
+    radial-gradient(ellipse 40% 40% at 25% 30%, rgba(210, 245, 98, 0.02) 0%, transparent 60%),
+    radial-gradient(ellipse 40% 40% at 75% 30%, rgba(210, 245, 98, 0.02) 0%, transparent 60%);
+  pointer-events: none;
+  z-index: -1;
+}
+
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(hsla(0, 0%, 100%, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, hsla(0, 0%, 100%, 0.03) 1px, transparent 1px);
+  background-size: 60px 60px;
+  pointer-events: none;
+  z-index: -1;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 50%, black 20%, transparent 70%);
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 50%, black 20%, transparent 70%);
+}
+
 /* Header logo */
 .md-header__button.md-logo img {
   height: 0.8rem;
