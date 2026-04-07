@@ -4,21 +4,20 @@ Starts with USDC on Base, bridges to Avalanche, swaps some USDC for WAVAX,
 opens a dual-sided TraderJoe V2 LP position (WAVAX + USDC), closes it,
 swaps WAVAX back to USDC, then bridges back to Base.
 
-Budget allocation ($5):
-  $2 -> swap to WAVAX (LP token0)
-  $2 -> LP as USDC (LP token1)
-  $1 -> reserve for gas/bridge fees
+Budget allocation ($2):
+  $1 -> swap to WAVAX (LP token0)
+  $1 -> LP as USDC (LP token1)
 
 Design: fire-once phase machine. Each phase executes exactly once.
 
 Phase flow:
-  BRIDGE_IN  -> Bridge $5 USDC Base->Avalanche
+  BRIDGE_IN  -> Bridge $2 USDC Base->Avalanche
   WAIT_BRIDGE -> Wait for bridged USDC to land
-  SWAP_IN    -> Swap $2 USDC->WAVAX via Enso
+  SWAP_IN    -> Swap $1 USDC->WAVAX via Enso
   OPEN       -> LP_OPEN WAVAX/USDC on TraderJoe V2
   CLOSE      -> LP_CLOSE position
-  SWAP_OUT   -> Swap $2 WAVAX->USDC via Enso
-  BRIDGE_OUT -> Bridge $5 USDC Avalanche->Base
+  SWAP_OUT   -> Swap $1 WAVAX->USDC via Enso
+  BRIDGE_OUT -> Bridge $2 USDC Avalanche->Base
   DONE       -> Evaluate PASS/FAIL, log budget delta
 """
 
@@ -56,13 +55,13 @@ class AvalancheLPLifecycleProbeStrategy(IntentStrategy):
         super().__init__(*args, **kwargs)
 
         self.target_chain = self.get_config("target_chain", "avalanche")
-        self.budget_usd = Decimal(str(self.get_config("budget_usd", "5")))
+        self.budget_usd = Decimal(str(self.get_config("budget_usd", "2")))
         self.relay_token = self.get_config("relay_token", "USDC")
         self.lp_token0 = self.get_config("lp_token0", "WAVAX")
         self.lp_token1 = self.get_config("lp_token1", "USDC")
         self.pool = self.get_config("pool", "WAVAX/USDC/20")
-        self.swap_wavax_usd = Decimal(str(self.get_config("swap_wavax_usd", "2")))
-        self.lp_usdc = Decimal(str(self.get_config("lp_usdc", "2")))
+        self.swap_wavax_usd = Decimal(str(self.get_config("swap_wavax_usd", "1")))
+        self.lp_usdc = Decimal(str(self.get_config("lp_usdc", "1")))
         self.protocol = self.get_config("protocol", "traderjoe_v2")
         self.max_slippage = Decimal(str(self.get_config("max_slippage_pct", "1.0"))) / Decimal("100")
 

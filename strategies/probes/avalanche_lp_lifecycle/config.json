@@ -2,13 +2,13 @@
     "chain": "base",
     "chains": ["base", "avalanche"],
     "target_chain": "avalanche",
-    "budget_usd": 5,
+    "budget_usd": 2,
     "relay_token": "USDC",
     "lp_token0": "WAVAX",
     "lp_token1": "USDC",
     "pool": "WAVAX/USDC/20",
-    "swap_wavax_usd": 2,
-    "lp_usdc": 2,
+    "swap_wavax_usd": 1,
+    "lp_usdc": 1,
     "protocol": "traderjoe_v2",
     "max_slippage_pct": 1.0
 }
