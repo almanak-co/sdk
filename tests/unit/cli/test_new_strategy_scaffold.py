@@ -778,3 +778,113 @@ def test_new_strategy_output_dir_flag_overrides_auto_detection(tmp_path: Path) -
     assert not (incubating_dir / "my_explicit_strat").exists(), (
         "Strategy should NOT be in strategies/incubating/ when --output-dir is specified"
     )
+
+
+# ---------------------------------------------------------------------------
+# Directory validation: dotfile-only dirs, file paths, cleanup safety
+# ---------------------------------------------------------------------------
+
+
+def test_new_strategy_allows_dotfile_only_dir(tmp_path: Path) -> None:
+    """Scaffolding into a directory with only dotfiles should succeed."""
+    import os
+
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    target = tmp_path / "workspace"
+    target.mkdir()
+    (target / ".almanak").mkdir()
+    (target / ".almanakdb").mkdir()
+    (target / ".almanak" / "sdk.json").write_text("{}")
+
+    runner = CliRunner()
+    os.chdir(tmp_path)
+    result = runner.invoke(
+        new_strategy,
+        ["--name", "my_strat", "--chain", "arbitrum", "--output-dir", str(target)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (target / "strategy.py").exists()
+    assert (target / ".almanak" / "sdk.json").exists(), "Dotfiles should be preserved"
+
+
+def test_new_strategy_rejects_dir_with_real_files(tmp_path: Path) -> None:
+    """Scaffolding into a directory with non-dotfiles should fail."""
+    import os
+
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    target = tmp_path / "workspace"
+    target.mkdir()
+    (target / "strategy.py").write_text("# existing")
+
+    runner = CliRunner()
+    os.chdir(tmp_path)
+    result = runner.invoke(
+        new_strategy,
+        ["--name", "my_strat", "--chain", "arbitrum", "--output-dir", str(target)],
+    )
+
+    assert result.exit_code != 0
+    assert "already contains files" in result.output
+
+
+def test_new_strategy_rejects_file_path(tmp_path: Path) -> None:
+    """Scaffolding with -o pointing to a file should fail gracefully."""
+    import os
+
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    target = tmp_path / "not_a_dir"
+    target.write_text("I am a file")
+
+    runner = CliRunner()
+    os.chdir(tmp_path)
+    result = runner.invoke(
+        new_strategy,
+        ["--name", "my_strat", "--chain", "arbitrum", "--output-dir", str(target)],
+    )
+
+    assert result.exit_code != 0
+    assert "not a directory" in result.output
+
+
+def test_new_strategy_no_rmtree_on_existing_dir_failure(tmp_path: Path) -> None:
+    """If scaffold fails in a pre-existing dir, the directory should NOT be deleted."""
+    import os
+
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    target = tmp_path / "workspace"
+    target.mkdir()
+    (target / ".almanak").mkdir()
+    (target / ".almanak" / "important.json").write_text("{}")
+
+    # Make tests/ dir read-only to force a failure during scaffold
+    tests_dir = target / "tests"
+    tests_dir.mkdir()
+    tests_dir.chmod(0o444)
+
+    runner = CliRunner()
+    os.chdir(tmp_path)
+    result = runner.invoke(
+        new_strategy,
+        ["--name", "my_strat", "--chain", "arbitrum", "--output-dir", str(target)],
+    )
+
+    # Restore permissions for cleanup
+    tests_dir.chmod(0o755)
+
+    assert result.exit_code != 0, "Expected scaffold to fail due to read-only tests/ directory"
+    # Directory should still exist (not rmtree'd)
+    assert target.exists(), "Pre-existing directory should not be deleted on scaffold failure"
+    assert (target / ".almanak" / "important.json").exists(), "Dotfiles should be preserved"

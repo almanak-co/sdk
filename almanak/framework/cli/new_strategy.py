@@ -2789,10 +2789,14 @@ def new_strategy(
             # Fall back to current working directory / strategy name
             strategy_dir = Path.cwd() / snake_name
 
-    # Check if directory already exists
+    # Check if directory already has strategy files (allow scaffolding into empty or dotfile-only dirs)
     if strategy_dir.exists():
-        click.echo(f"Error: Directory already exists: {strategy_dir}", err=True)
-        raise click.Abort()
+        if not strategy_dir.is_dir():
+            click.echo(f"Error: Path exists and is not a directory: {strategy_dir}", err=True)
+            raise click.Abort()
+        if any(f for f in strategy_dir.iterdir() if not f.name.startswith(".")):
+            click.echo(f"Error: Directory already contains files: {strategy_dir}", err=True)
+            raise click.Abort()
 
     # Create directory structure
     click.echo(f"Creating strategy: {snake_name}")
@@ -2801,6 +2805,7 @@ def new_strategy(
     click.echo(f"Output: {strategy_dir}")
     click.echo()
 
+    created_dir = not strategy_dir.exists()
     try:
         # Create directories
         strategy_dir.mkdir(parents=True, exist_ok=True)
@@ -2907,8 +2912,10 @@ def new_strategy(
 
     except Exception as e:
         click.echo(f"Error creating strategy: {e}", err=True)
-        # Clean up on failure
-        if strategy_dir.exists():
+        # Clean up on failure — only rmtree if we created the directory.
+        # If the directory existed before scaffolding (e.g. -o . or dotfile-only dir),
+        # don't delete it — just leave the partially-written files for the user to clean up.
+        if strategy_dir.exists() and created_dir:
             import shutil
 
             shutil.rmtree(strategy_dir)
