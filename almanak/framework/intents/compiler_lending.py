@@ -889,13 +889,17 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
             repay_amount_decimal = None  # Will use shares-based repay for Morpho
             amount_description = "full debt"
             warnings.append("Repaying full debt - ensure sufficient balance to cover interest")
+        elif intent.amount == "all":
+            # amount="all" was not resolved by the amount resolver — fall back to repay_full
+            logger.info(
+                "amount='all' reached compiler unresolved for %s repay — using repay_full path",
+                intent.protocol,
+            )
+            repay_amount_decimal = None
+            intent = intent.model_copy(update={"repay_full": True})
+            amount_description = "full debt"
+            warnings.append("Repaying full debt (amount='all' fallback)")
         else:
-            if intent.amount == "all":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="amount='all' must be resolved before compilation. Use Intent.set_resolved_amount() to resolve chained amounts.",
-                    intent_id=intent.intent_id,
-                )
             repay_amount_decimal = intent.amount  # type: ignore[assignment]
             amount_description = str(repay_amount_decimal)
 
@@ -1529,7 +1533,10 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:
         if intent.amount == "all":
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error="amount='all' must be resolved before compilation. Use Intent.set_resolved_amount() to resolve chained amounts.",
+                error=(
+                    "amount='all' for supply must be resolved to a wallet balance before compilation. "
+                    "This should be done by the strategy runner or teardown manager."
+                ),
                 intent_id=intent.intent_id,
             )
         amount_decimal: Decimal = intent.amount  # type: ignore[assignment]
@@ -2175,13 +2182,17 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
         if intent.withdraw_all:
             withdraw_amount_decimal = None  # Will use withdraw_all flag
             warnings.append("Withdrawing all available balance")
+        elif intent.amount == "all":
+            # amount="all" was not resolved by the amount resolver (no RPC, no reader, etc.)
+            # Fall back to withdraw_all=True — let the adapter handle it.
+            logger.info(
+                "amount='all' reached compiler unresolved for %s — using withdraw_all path",
+                intent.protocol,
+            )
+            withdraw_amount_decimal = None
+            intent = intent.model_copy(update={"withdraw_all": True})
+            warnings.append("Withdrawing all available balance (amount='all' fallback)")
         else:
-            if intent.amount == "all":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="amount='all' must be resolved before compilation. Use Intent.set_resolved_amount() to resolve chained amounts.",
-                    intent_id=intent.intent_id,
-                )
             withdraw_amount_decimal = intent.amount  # type: ignore[assignment]
 
         # =================================================================

@@ -661,7 +661,12 @@ class TeardownManager:
                         if _intent_type_val
                         else False
                     )
-                    if amount_value == "all" and not _withdraw_all and not _is_withdraw:
+                    _is_repay = (
+                        str(_intent_type_val).upper() in ("REPAY", "INTENTTYPE.REPAY") if _intent_type_val else False
+                    )
+                    # Skip wallet-balance resolution for withdraw/repay intents —
+                    # the compiler's amount resolver handles these via protocol balance queries.
+                    if amount_value == "all" and not _withdraw_all and not _is_withdraw and not _is_repay:
                         if not from_token or market is None:
                             return ExecutionAttempt(
                                 success=False,

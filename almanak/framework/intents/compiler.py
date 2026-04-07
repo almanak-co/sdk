@@ -509,6 +509,19 @@ class IntentCompiler:
             CompilationResult with ActionBundle and metadata
         """
         try:
+            # Step 0: Resolve amount="all" before dispatching.
+            # This is the single mandatory resolution point for all intent types.
+            # Protocol-position intents (withdraw, repay) query on-chain balances;
+            # wallet-funded intents (swap, supply, bridge) are left for per-intent handlers.
+            from .amount_resolver import resolve_amount_all
+
+            intent = resolve_amount_all(
+                intent,
+                chain=self.chain,
+                wallet_address=self.wallet_address,
+                gateway_client=self._gateway_client,
+            )
+
             intent_type = intent.intent_type
 
             # Suppress placeholder price warning for intent types that don't use prices.
