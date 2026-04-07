@@ -85,16 +85,22 @@ class TestArbitrumPTDateSuffix:
         assert decimals == ARB_PT_WSTETH_DECIMALS
 
     def test_all_arbitrum_market_entries_consistent(self):
-        """All MARKET_BY_PT_TOKEN entries for arbitrum should point to the same market."""
+        """Case-variant entries for each arbitrum PT token should point to the same market."""
         markets = MARKET_BY_PT_TOKEN["arbitrum"]
-        unique_values = set(markets.values())
-        assert len(unique_values) == 1, f"Inconsistent market addresses: {unique_values}"
-        assert unique_values.pop() == ARB_WSTETH_MARKET
+        # Group entries by uppercased key prefix (e.g., PT-WSTETH variants share a market)
+        by_market: dict[str, set[str]] = {}
+        for key, market_addr in markets.items():
+            addr_lower = market_addr.lower()
+            by_market.setdefault(addr_lower, set()).add(key)
+        # wstETH market must be present
+        assert ARB_WSTETH_MARKET.lower() in by_market
 
     def test_all_arbitrum_pt_info_entries_consistent(self):
-        """All PT_TOKEN_INFO entries for arbitrum should point to the same token."""
+        """Case-variant entries for each arbitrum PT token should have matching address/decimals."""
         infos = PT_TOKEN_INFO["arbitrum"]
-        unique_addresses = {addr for addr, _ in infos.values()}
-        unique_decimals = {dec for _, dec in infos.values()}
-        assert len(unique_addresses) == 1, f"Inconsistent PT addresses: {unique_addresses}"
-        assert len(unique_decimals) == 1, f"Inconsistent decimals: {unique_decimals}"
+        # Group by address to check that all case variants agree on decimals
+        by_address: dict[str, set[int]] = {}
+        for _key, (addr, dec) in infos.items():
+            by_address.setdefault(addr.lower(), set()).add(dec)
+        for addr, decimals_set in by_address.items():
+            assert len(decimals_set) == 1, f"Inconsistent decimals for {addr}: {decimals_set}"

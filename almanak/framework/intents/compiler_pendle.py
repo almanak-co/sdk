@@ -256,6 +256,10 @@ def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:
         chain_mint_sy_map = MARKET_TOKEN_MINT_SY.get(compiler.chain, {})
         token_mint_sy = chain_mint_sy_map.get(market.lower())
 
+        # Track original input for pre-flight balance checks (VIB-2533)
+        original_from_token = None
+        original_amount_in = None
+
         # ================================================================
         # Pre-swap routing: when tokenIn != tokenMintSy
         # ================================================================
@@ -396,6 +400,12 @@ def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:
                 f"(capped to min of 2% buffer and {intent.max_slippage:.1%} slippage floor)"
             )
 
+            # Save original input token/amount for pre-flight balance checks (VIB-2533).
+            # The orchestrator must verify the wallet holds the *original* input token
+            # (e.g., USDC), not the intermediate token produced by the pre-swap (e.g., sUSDe).
+            original_from_token = from_token
+            original_amount_in = amount_in
+
             # Override from_token and amount for the Pendle step
             from_token = mint_sy_token
             amount_in = buffered_mint_sy_amount
@@ -506,19 +516,29 @@ def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:
 
         total_gas = sum(tx.gas_estimate for tx in transactions)
 
+        metadata = {
+            "from_token": from_token.to_dict(),
+            "to_token": intent.to_token,
+            "amount_in": str(amount_in),
+            "min_amount_out": str(min_amount_out),
+            "slippage": str(intent.max_slippage),
+            "protocol": "pendle",
+            "market": market,
+            "swap_type": swap_type,
+        }
+
+        # When a pre-swap was inserted, expose the original input token/amount
+        # so the orchestrator's pre-flight balance check validates the token the
+        # wallet actually holds (e.g., USDC), not the intermediate token produced
+        # by the pre-swap (e.g., sUSDe). See VIB-2533.
+        if original_from_token is not None:
+            metadata["original_from_token"] = original_from_token.to_dict()
+            metadata["original_amount_in"] = str(original_amount_in)
+
         action_bundle = ActionBundle(
             intent_type=IntentType.SWAP.value,
             transactions=[tx.to_dict() for tx in transactions],
-            metadata={
-                "from_token": from_token.to_dict(),
-                "to_token": intent.to_token,
-                "amount_in": str(amount_in),
-                "min_amount_out": str(min_amount_out),
-                "slippage": str(intent.max_slippage),
-                "protocol": "pendle",
-                "market": market,
-                "swap_type": swap_type,
-            },
+            metadata=metadata,
         )
 
         result.action_bundle = action_bundle

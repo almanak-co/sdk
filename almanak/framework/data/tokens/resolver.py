@@ -278,6 +278,7 @@ class TokenResolver:
         self._static_address_index: dict[str, dict[str, Token]] = {}
 
         self._build_static_indices()
+        self._register_pendle_tokens()
 
         # Performance tracking
         self._stats = {
@@ -303,6 +304,42 @@ class TokenResolver:
                 address = token.get_address(chain_name)
                 if address:
                     addr_key = _normalize_address_for_chain(address, chain_lower)
+                    if chain_lower not in self._static_address_index:
+                        self._static_address_index[chain_lower] = {}
+                    self._static_address_index[chain_lower][addr_key] = token
+
+    def _register_pendle_tokens(self) -> None:
+        """Auto-register Pendle PT/YT tokens from the connector's static mappings.
+
+        This avoids requiring every Pendle strategy to manually call
+        register_token() for PT/YT tokens (VIB-2536).  Tokens are indexed
+        by symbol (uppercased) and address so both resolve paths work.
+        """
+        try:
+            from almanak.framework.connectors.pendle.sdk import PT_TOKEN_INFO, YT_TOKEN_INFO
+        except ImportError:
+            return  # Pendle connector not installed — nothing to register
+
+        for token_map in (PT_TOKEN_INFO, YT_TOKEN_INFO):
+            for chain, tokens in token_map.items():
+                chain_lower = chain.lower()
+                seen_addresses: set[str] = set()
+                for name, (address, decimals) in tokens.items():
+                    addr_key = _normalize_address_for_chain(address, chain_lower)
+                    if addr_key in seen_addresses:
+                        continue  # Skip case-variant duplicates
+                    seen_addresses.add(addr_key)
+
+                    token = Token(
+                        symbol=name,
+                        name=name,
+                        decimals=decimals,
+                        addresses={chain: address},
+                    )
+                    if chain_lower not in self._static_registry:
+                        self._static_registry[chain_lower] = {}
+                    self._static_registry[chain_lower][name.upper()] = token
+
                     if chain_lower not in self._static_address_index:
                         self._static_address_index[chain_lower] = {}
                     self._static_address_index[chain_lower][addr_key] = token

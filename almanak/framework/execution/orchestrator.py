@@ -1931,7 +1931,13 @@ class ExecutionOrchestrator:
 
         try:
             if intent_type == "SWAP":
-                _add_requirement(metadata.get("from_token", {}), metadata.get("amount_in"))
+                # For multi-step bundles (e.g., Pendle pre-swap routing), the metadata
+                # from_token/amount_in reflect the intermediate token (e.g., sUSDe) which
+                # won't exist in the wallet until the pre-swap TX runs.  Check the
+                # original input token instead when present (VIB-2533).
+                swap_token = metadata.get("original_from_token") or metadata.get("from_token", {})
+                swap_amount = metadata.get("original_amount_in") or metadata.get("amount_in")
+                _add_requirement(swap_token, swap_amount)
 
             elif intent_type == "LP_OPEN":
                 token0 = metadata.get("token0") or metadata.get("token_x") or {}

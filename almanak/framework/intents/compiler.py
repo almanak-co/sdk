@@ -1181,6 +1181,18 @@ class IntentCompiler:
 
         # Check for aggregator protocols
         protocol = self._resolve_protocol(intent.protocol)
+
+        # Handle Pendle first: explicit protocol OR auto-detect PT-/YT- prefixed tokens.
+        # Must run before other protocol dispatches so that PT-/YT- tokens are routed to
+        # Pendle regardless of default_protocol (e.g., enso, aerodrome). VIB-2535.
+        if protocol == "pendle":
+            return self._compile_pendle_swap(intent)
+        if intent.protocol is None:
+            to_upper = (intent.to_token or "").upper()
+            from_upper = (intent.from_token or "").upper()
+            if to_upper.startswith(("PT-", "YT-")) or from_upper.startswith(("PT-", "YT-")):
+                return self._compile_pendle_swap(intent)
+
         if protocol == "enso":
             return self._compile_enso_swap(intent)
         if protocol == "lifi":
@@ -1190,10 +1202,6 @@ class IntentCompiler:
         # protocol is already resolved via _resolve_protocol() above (velodrome -> aerodrome on Optimism)
         if protocol == "aerodrome":
             return self._compile_swap_aerodrome(intent)
-
-        # Handle Pendle separately (yield tokenization protocol with PT/YT tokens)
-        if protocol == "pendle":
-            return self._compile_pendle_swap(intent)
 
         # Handle Curve separately (pool-based AMM with direct pool addressing)
         if protocol == "curve":
