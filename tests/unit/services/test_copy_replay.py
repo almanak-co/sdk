@@ -24,7 +24,7 @@ def _make_config() -> CopyTradingConfigV2:
 
 
 def test_replay_runner_loads_and_replays_fixture() -> None:
-    fixture = Path(__file__).resolve().parent.parent.parent / "fixtures" / "copy_trading" / "sample_replay.jsonl"
+    fixture = Path("tests/fixtures/copy_trading/sample_replay.jsonl")
     runner = CopyReplayRunner(config=_make_config())
 
     result = runner.run(fixture, shadow=True)

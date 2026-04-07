@@ -40,8 +40,8 @@ class LPLifecycleProbeStrategy(IntentStrategy):
 
         # Config
         self.pool = self.get_config("pool", "WETH/USDC/500")
-        self.amount0 = Decimal(str(self.get_config("amount0", "0.0004")))
-        self.amount1 = Decimal(str(self.get_config("amount1", "0.75")))
+        self.amount0 = Decimal(str(self.get_config("amount0", "0.001")))
+        self.amount1 = Decimal(str(self.get_config("amount1", "1.5")))
         self.range_width_pct = Decimal(str(self.get_config("range_width_pct", "0.50")))
         self.protocol = self.get_config("protocol", "uniswap_v3")
         self.max_slippage = Decimal(str(self.get_config("max_slippage_pct", "1.0"))) / Decimal("100")
@@ -52,7 +52,7 @@ class LPLifecycleProbeStrategy(IntentStrategy):
         self.token1_symbol = pool_parts[1] if len(pool_parts) > 1 else "USDC"
 
         # State machine
-        self._position_id: str | None = None
+        self._position_id: int | None = None
         self._phase: str = "OPEN"
         self._open_success = False
         self._close_success = False
@@ -72,8 +72,7 @@ class LPLifecycleProbeStrategy(IntentStrategy):
         state = self.get_persistent_state()
         if state:
             self._phase = state.get("phase", "OPEN")
-            raw_pid = state.get("position_id")
-            self._position_id = str(raw_pid) if raw_pid is not None else None
+            self._position_id = state.get("position_id")
             self._open_success = state.get("open_success", False)
             self._close_success = state.get("close_success", False)
 
@@ -89,8 +88,7 @@ class LPLifecycleProbeStrategy(IntentStrategy):
         if hasattr(super(), "load_persistent_state"):
             super().load_persistent_state(state)
         self._phase = state.get("phase", "OPEN")
-        raw_pid = state.get("position_id")
-        self._position_id = str(raw_pid) if raw_pid is not None else None
+        self._position_id = state.get("position_id")
         self._open_success = state.get("open_success", False)
         self._close_success = state.get("close_success", False)
 
@@ -166,7 +164,7 @@ class LPLifecycleProbeStrategy(IntentStrategy):
             if success:
                 position_id = result.position_id if result else None
                 if position_id:
-                    self._position_id = str(position_id)
+                    self._position_id = int(position_id)
                     self._open_success = True
                     self._phase = "CLOSE"
                     logger.info(
@@ -236,7 +234,7 @@ class LPLifecycleProbeStrategy(IntentStrategy):
                     position_id=str(self._position_id),
                     chain=self.chain,
                     protocol=self.protocol,
-                    value_usd=self.amount1,
+                    value_usd=Decimal("5"),
                     details={"pool": self.pool},
                 )
             )

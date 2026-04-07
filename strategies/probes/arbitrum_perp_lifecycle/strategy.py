@@ -58,13 +58,13 @@ class ArbitrumPerpLifecycleProbeStrategy(IntentStrategy):
         super().__init__(*args, **kwargs)
 
         self.target_chain = self.get_config("target_chain", "arbitrum")
-        self.budget_usd = Decimal(str(self.get_config("budget_usd", "3")))
+        self.budget_usd = Decimal(str(self.get_config("budget_usd", "10")))
         self.relay_token = self.get_config("relay_token", "USDC")
         self.max_slippage = Decimal(str(self.get_config("max_slippage_pct", "1.0"))) / Decimal("100")
-        self.swap_eth_usd = Decimal(str(self.get_config("swap_eth_usd", "1.50")))
+        self.swap_eth_usd = Decimal(str(self.get_config("swap_eth_usd", "6")))
         self.perp_market = self.get_config("perp_market", "ETH/USD")
         self.perp_collateral_token = self.get_config("perp_collateral_token", "USDC")
-        self.perp_collateral_usd = Decimal(str(self.get_config("perp_collateral_usd", "1.50")))
+        self.perp_collateral_usd = Decimal(str(self.get_config("perp_collateral_usd", "4")))
         self.perp_leverage = Decimal(str(self.get_config("perp_leverage", "2")))
         self.perp_is_long = self.get_config("perp_is_long", True)
         self.perp_protocol = self.get_config("perp_protocol", "gmx_v2")
@@ -164,19 +164,6 @@ class ArbitrumPerpLifecycleProbeStrategy(IntentStrategy):
     # -- Phase handlers (each fires its intent, then sets phase for next tick) -
 
     def _do_bridge_in(self, market: MarketSnapshot) -> Intent:
-        # Pre-flight balance check
-        base_usdc = self._bal_usd(market, self.relay_token, "base")
-        if base_usdc < self.budget_usd:
-            logger.error(f"BRIDGE_IN: insufficient Base USDC (${base_usdc} < ${self.budget_usd})")
-            self._advance("DONE")
-            return Intent.hold(reason=f"PROBE_FAIL: Base USDC ${base_usdc} < ${self.budget_usd} minimum")
-
-        base_eth = self._bal_raw(market, "ETH", "base")
-        if base_eth < Decimal("0.003"):
-            logger.error(f"BRIDGE_IN: insufficient Base ETH for gas ({base_eth} < 0.003)")
-            self._advance("DONE")
-            return Intent.hold(reason=f"PROBE_FAIL: Base ETH {base_eth} < 0.003 for bridge gas")
-
         logger.info(f"BRIDGE_IN: bridge ${self.budget_usd} USDC Base->{self.target_chain}")
         self._advance("SWAP_IN")
         return Intent.bridge(
