@@ -39,7 +39,7 @@ class OrcaLPStrategy(IntentStrategy):
 
     def decide(self, market: MarketSnapshot) -> Intent:
         try:
-            pool = self.config.get("pool", "HJPjoWUrhoZzkNfRpHuieeFk9AnbKnovy8po1NtRSqX2")
+            pool = self.config.get("pool", "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE")
             amount_sol = Decimal(str(self.config.get("amount_sol", "0.001")))
             amount_usdc = Decimal(str(self.config.get("amount_usdc", "0.15")))
             range_lower = Decimal(str(self.config.get("range_lower", "80")))

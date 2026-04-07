@@ -574,10 +574,15 @@ class RollingForkManager:
                 self._process.terminate()
                 # Wait for process to terminate with timeout
                 try:
+                    loop = asyncio.get_running_loop()
                     await asyncio.wait_for(
-                        asyncio.get_event_loop().run_in_executor(None, self._process.wait),
+                        loop.run_in_executor(None, self._process.wait),
                         timeout=5.0,
                     )
+                except RuntimeError:
+                    # Event loop closing/closed — fall back to synchronous wait
+                    logger.debug("Event loop closing, using synchronous process wait")
+                    self._process.wait(timeout=5)
                 except TimeoutError:
                     logger.warning("Anvil process did not terminate, killing")
                     self._process.kill()
@@ -591,8 +596,12 @@ class RollingForkManager:
         self._current_block = None
         self._start_time = None
 
-        # Wait for port to be freed
-        await self._wait_for_port_free(timeout=5.0)
+        # Wait for port to be freed (skip if event loop is shutting down)
+        try:
+            await self._wait_for_port_free(timeout=5.0)
+        except RuntimeError:
+            # Event loop closing — port will be freed when process exits
+            logger.debug("Skipping port-free wait: event loop closing")
         logger.info("Anvil fork stopped")
 
     async def _wait_for_port_free(self, timeout: float = 5.0) -> None:
