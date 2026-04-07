@@ -169,6 +169,10 @@ class ReceiptParserRegistry:
             "almanak.framework.connectors.aave_v3.receipt_parser",
             "AaveV3ReceiptParser",
         ),
+        "radiant_v2": (
+            "almanak.framework.connectors.radiant_v2.receipt_parser",
+            "RadiantV2ReceiptParser",
+        ),
         "spark": (
             "almanak.framework.connectors.spark.receipt_parser",
             "SparkReceiptParser",

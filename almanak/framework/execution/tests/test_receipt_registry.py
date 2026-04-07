@@ -64,6 +64,7 @@ class TestReceiptParserRegistry:
         assert registry.is_registered("lido")
         assert registry.is_registered("ethena")
         assert registry.is_registered("benqi")
+        assert registry.is_registered("radiant_v2")
 
     def test_is_registered_case_insensitive(self, registry: ReceiptParserRegistry) -> None:
         """Test is_registered handles case insensitivity."""
@@ -342,6 +343,189 @@ class TestParserIntegration:
 
         assert result.success is True
         assert result.events == []
+
+    def test_radiant_v2_parser_is_standalone(self) -> None:
+        """Test radiant_v2 uses its own RadiantV2ReceiptParser, not AaveV3ReceiptParser."""
+        from almanak.framework.connectors.radiant_v2.receipt_parser import RadiantV2ReceiptParser
+
+        parser = get_parser("radiant_v2")
+        assert parser is not None
+        assert isinstance(parser, RadiantV2ReceiptParser)
+
+        # Empty receipt should parse cleanly
+        result = parser.parse_receipt(
+            {
+                "transactionHash": "0x123",
+                "blockNumber": 12345,
+                "logs": [],
+            }
+        )
+        assert result.success is True
+        assert result.supplies == []
+        assert result.withdraws == []
+
+    def test_radiant_v2_parser_parses_deposit_event(self) -> None:
+        """Test radiant_v2 parser handles Aave V2 Deposit events (not V3 Supply)."""
+        parser = get_parser("radiant_v2")
+        assert parser is not None
+
+        # Aave V2 Deposit event: Deposit(address indexed reserve, address user,
+        #   address indexed onBehalfOf, uint256 amount, uint16 referralCode)
+        # Topic0 = keccak256("Deposit(address,address,address,uint256,uint16)")
+        deposit_topic = "0xde6857219544bb5b7746f48ed30be6386fefc61b2f864cacf559893bf50fd951"
+        # Topic1 = reserve address (indexed) — USDC on Ethereum
+        reserve_topic = "0x000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        # Topic2 = onBehalfOf address (indexed)
+        on_behalf_topic = "0x0000000000000000000000001234567890abcdef1234567890abcdef12345678"
+
+        # Data: user (address) + amount (uint256) + referralCode (uint16)
+        user_hex = "0000000000000000000000001234567890abcdef1234567890abcdef12345678"
+        amount_hex = "00000000000000000000000000000000000000000000000000000000000f4240"  # 1_000_000
+        referral_hex = "0000000000000000000000000000000000000000000000000000000000000000"
+
+        result = parser.parse_receipt(
+            {
+                "transactionHash": "0xabc",
+                "blockNumber": 99999,
+                "logs": [
+                    {
+                        "topics": [deposit_topic, reserve_topic, on_behalf_topic],
+                        "data": "0x" + user_hex + amount_hex + referral_hex,
+                        "address": "0xA950974f64aA33f27F6C5e017eEE93BF7588ED07",
+                        "logIndex": "0x0",
+                    }
+                ],
+            }
+        )
+
+        assert result.success is True
+        assert len(result.supplies) == 1
+        assert result.supplies[0].amount == 1_000_000
+        assert result.supplies[0].reserve.lower() == "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+
+    def test_radiant_v2_parser_does_not_match_v3_supply(self) -> None:
+        """Test radiant_v2 parser ignores Aave V3 Supply events (wrong topic)."""
+        parser = get_parser("radiant_v2")
+        assert parser is not None
+
+        # Aave V3 Supply topic — should NOT be recognized by Radiant V2 parser
+        supply_topic = "0x2b627736bca15cd5381dcf80b0bf11fd197d01a037c52b927a881a10fb73ba61"
+        reserve_topic = "0x000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        on_behalf_topic = "0x0000000000000000000000001234567890abcdef1234567890abcdef12345678"
+
+        user_hex = "0000000000000000000000001234567890abcdef1234567890abcdef12345678"
+        amount_hex = "00000000000000000000000000000000000000000000000000000000000f4240"
+        referral_hex = "0000000000000000000000000000000000000000000000000000000000000000"
+
+        result = parser.parse_receipt(
+            {
+                "transactionHash": "0xdef",
+                "blockNumber": 99999,
+                "logs": [
+                    {
+                        "topics": [supply_topic, reserve_topic, on_behalf_topic],
+                        "data": "0x" + user_hex + amount_hex + referral_hex,
+                        "address": "0xA950974f64aA33f27F6C5e017eEE93BF7588ED07",
+                        "logIndex": "0x0",
+                    }
+                ],
+            }
+        )
+
+        assert result.success is True
+        assert len(result.supplies) == 0  # V3 Supply events must be ignored
+
+    def test_radiant_v2_extraction_methods(self) -> None:
+        """Test RadiantV2ReceiptParser extraction methods for ResultEnricher."""
+        parser = get_parser("radiant_v2")
+        assert parser is not None
+
+        deposit_topic = "0xde6857219544bb5b7746f48ed30be6386fefc61b2f864cacf559893bf50fd951"
+        reserve_topic = "0x000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        on_behalf_topic = "0x0000000000000000000000001234567890abcdef1234567890abcdef12345678"
+
+        user_hex = "0000000000000000000000001234567890abcdef1234567890abcdef12345678"
+        amount_hex = "00000000000000000000000000000000000000000000000000000000000f4240"  # 1_000_000
+        referral_hex = "0000000000000000000000000000000000000000000000000000000000000000"
+
+        receipt = {
+            "transactionHash": "0xabc",
+            "blockNumber": 99999,
+            "logs": [
+                {
+                    "topics": [deposit_topic, reserve_topic, on_behalf_topic],
+                    "data": "0x" + user_hex + amount_hex + referral_hex,
+                    "address": "0xA950974f64aA33f27F6C5e017eEE93BF7588ED07",
+                    "logIndex": "0x0",
+                }
+            ],
+        }
+
+        # extract_supply_amount should return the deposit amount
+        assert parser.extract_supply_amount(receipt) == 1_000_000
+
+    def test_radiant_v2_rejects_non_radiant_pool_address(self) -> None:
+        """Test pool address filtering prevents false positives from Aave V3."""
+        parser = get_parser("radiant_v2")
+        assert parser is not None
+
+        # Use Deposit topic but from Aave V3 pool address (not Radiant)
+        deposit_topic = "0xde6857219544bb5b7746f48ed30be6386fefc61b2f864cacf559893bf50fd951"
+        reserve_topic = "0x000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        on_behalf_topic = "0x0000000000000000000000001234567890abcdef1234567890abcdef12345678"
+
+        user_hex = "0000000000000000000000001234567890abcdef1234567890abcdef12345678"
+        amount_hex = "00000000000000000000000000000000000000000000000000000000000f4240"
+        referral_hex = "0000000000000000000000000000000000000000000000000000000000000000"
+
+        result = parser.parse_receipt(
+            {
+                "transactionHash": "0xfff",
+                "blockNumber": 99999,
+                "logs": [
+                    {
+                        "topics": [deposit_topic, reserve_topic, on_behalf_topic],
+                        "data": "0x" + user_hex + amount_hex + referral_hex,
+                        # Aave V3 Ethereum pool — NOT a Radiant pool
+                        "address": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+                        "logIndex": "0x0",
+                    }
+                ],
+            }
+        )
+
+        assert result.success is True
+        assert len(result.supplies) == 0  # Filtered out by pool address
+
+    def test_radiant_v2_rejects_truncated_data(self) -> None:
+        """Test parser rejects events with truncated data payloads."""
+        parser = get_parser("radiant_v2")
+        assert parser is not None
+
+        deposit_topic = "0xde6857219544bb5b7746f48ed30be6386fefc61b2f864cacf559893bf50fd951"
+        reserve_topic = "0x000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        on_behalf_topic = "0x0000000000000000000000001234567890abcdef1234567890abcdef12345678"
+
+        # Only 1 word of data (64 hex chars) — Deposit needs 3 words
+        truncated_data = "0x" + "00" * 32
+
+        result = parser.parse_receipt(
+            {
+                "transactionHash": "0xbad",
+                "blockNumber": 99999,
+                "logs": [
+                    {
+                        "topics": [deposit_topic, reserve_topic, on_behalf_topic],
+                        "data": truncated_data,
+                        "address": "0xA950974f64aA33f27F6C5e017eEE93BF7588ED07",
+                        "logIndex": "0x0",
+                    }
+                ],
+            }
+        )
+
+        assert result.success is True
+        assert len(result.supplies) == 0  # Truncated data should be rejected
 
     def test_ethena_parser_parses_empty_receipt(self) -> None:
         """Test EthenaReceiptParser handles empty receipt."""

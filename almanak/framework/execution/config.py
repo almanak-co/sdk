@@ -189,6 +189,7 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
     "pancakeswap_v3": {"bsc", "ethereum", "arbitrum"},  # PancakeSwap V3 DEX
     "lido": {"ethereum", "arbitrum", "optimism", "polygon"},  # Lido liquid staking
     "ethena": {"ethereum"},  # Ethena synthetic dollar (USDe/sUSDe)
+    "radiant_v2": {"ethereum"},  # Radiant V2 (Aave V2 fork) — Arbitrum pool frozen post-hack
 }
 
 
