@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.11.1] - 2026-04-07
+
+### Changed
+- Allow `almanak strat new -o .` in directories containing only dotfiles (#1374)
+- Bump almanak-code to v0.2.13 (#1362)
+
+### Fixed
+- Fix nightly probe bugs: stranded LP position, phase corruption, missing pre-flight balance checks (#1373)
+- Default balancer_flash_arb demo strategy to HOLD instead of swap to eliminate spurious nightly failures (#1370)
+- Resolve copy replay fixture path relative to test file for pytest-xdist compatibility (#1375)
+- Update allowed chains in gateway troubleshooting docs (add xlayer, sync translations)
+- Update T&Cs link and add Spanish version in docs footer
+
 ## [2.11.0] - 2026-04-06
 
 ### Added
