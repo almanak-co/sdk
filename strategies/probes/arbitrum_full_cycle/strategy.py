@@ -43,17 +43,17 @@ class ArbitrumFullCycleProbeStrategy(IntentStrategy):
         super().__init__(*args, **kwargs)
 
         self.target_chain = self.get_config("target_chain", "arbitrum")
-        self.budget_usd = Decimal(str(self.get_config("budget_usd", "5")))
+        self.budget_usd = Decimal(str(self.get_config("budget_usd", "2")))
         self.relay_token = self.get_config("relay_token", "USDC")
         self.intermediate_token = self.get_config("intermediate_token", "WETH")
         self.max_slippage = Decimal(str(self.get_config("max_slippage_pct", "1.0"))) / Decimal("100")
         self.swap_protocols: list[str] = self.get_config(
             "swap_protocols", ["uniswap_v3", "sushiswap_v3", "pancakeswap_v3"]
         )
-        self.swap_amount_per_protocol = Decimal(str(self.get_config("swap_amount_per_protocol_usd", "0.50")))
+        self.swap_amount_per_protocol = Decimal(str(self.get_config("swap_amount_per_protocol_usd", "0.25")))
         self.lending_protocol = self.get_config("lending_protocol", "aave_v3")
-        self.lending_supply_amount = Decimal(str(self.get_config("lending_supply_amount", "0.0003")))
-        self.lending_borrow_usd = Decimal(str(self.get_config("lending_borrow_usd", "0.30")))
+        self.lending_supply_amount = Decimal(str(self.get_config("lending_supply_amount", "0.0002")))
+        self.lending_borrow_usd = Decimal(str(self.get_config("lending_borrow_usd", "0.15")))
 
         # State machine
         self._phase = "BRIDGE_IN"
@@ -127,12 +127,12 @@ class ArbitrumFullCycleProbeStrategy(IntentStrategy):
                         f"{self.target_chain}, skipping to EXECUTE"
                     )
                     self._phase = "EXECUTE"
-                    return self._do_execute(market)
+                    return self._do_execute_safely(market)
             except Exception as e:
                 logger.warning(f"BRIDGE_IN auto-advance check failed: {e}")
-            return self._do_bridge_in()
+            return self._do_bridge_in(market)
         elif self._phase == "EXECUTE":
-            return self._do_execute(market)
+            return self._do_execute_safely(market)
         elif self._phase == "BRIDGE_OUT":
             return self._do_bridge_out()
         elif self._phase == "DONE":
@@ -141,8 +141,26 @@ class ArbitrumFullCycleProbeStrategy(IntentStrategy):
             logger.error(f"Unknown phase: {self._phase}")
             return Intent.hold(reason=f"Unknown phase: {self._phase}")
 
-    def _do_bridge_in(self) -> Intent:
+    def _do_bridge_in(self, market: MarketSnapshot) -> Intent:
         """Bridge USDC from Base to Arbitrum."""
+        # Pre-flight balance check
+        base_usdc = market.balance(self.relay_token, "base")
+        base_usdc_usd = Decimal(str(base_usdc.balance_usd)) if base_usdc and base_usdc.balance_usd else Decimal("0")
+        if base_usdc_usd < self.budget_usd:
+            logger.error(f"BRIDGE_IN: insufficient Base USDC (${base_usdc_usd} < ${self.budget_usd})")
+            self._phase = "DONE"
+            self._had_failures = True
+            return Intent.hold(reason=f"PROBE_FAIL: Base USDC ${base_usdc_usd} < ${self.budget_usd} minimum")
+
+        # Check Base ETH for gas
+        base_eth = market.balance("ETH", "base")
+        base_eth_raw = Decimal(str(base_eth.balance)) if base_eth and base_eth.balance else Decimal("0")
+        if base_eth_raw < Decimal("0.003"):
+            logger.error(f"BRIDGE_IN: insufficient Base ETH for gas ({base_eth_raw} < 0.003)")
+            self._phase = "DONE"
+            self._had_failures = True
+            return Intent.hold(reason=f"PROBE_FAIL: Base ETH {base_eth_raw} < 0.003 for bridge gas")
+
         logger.info(f"Phase BRIDGE_IN: bridging ${self.budget_usd} USDC Base -> {self.target_chain}")
         return Intent.bridge(
             token=self.relay_token,
@@ -151,6 +169,16 @@ class ArbitrumFullCycleProbeStrategy(IntentStrategy):
             to_chain=self.target_chain,
             max_slippage=self.max_slippage,
         )
+
+    def _do_execute_safely(self, market: MarketSnapshot) -> Intent:
+        """Wrap _do_execute with failure handling so both EXECUTE entry points behave consistently."""
+        try:
+            return self._do_execute(market)
+        except Exception as e:
+            logger.error(f"EXECUTE failed: {e}, recovering via BRIDGE_OUT")
+            self._had_failures = True
+            self._phase = "BRIDGE_OUT"
+            return Intent.hold(reason=f"PROBE_FAIL: execute setup failed ({e})")
 
     def _do_execute(self, market: MarketSnapshot) -> Intent:
         """Swap relay through 3 DEXs + Aave V3 lending lifecycle."""

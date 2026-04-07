@@ -41,7 +41,7 @@ class BaseFullCycleProbeStrategy(IntentStrategy):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.budget_usd = Decimal(str(self.get_config("budget_usd", "5")))
+        self.budget_usd = Decimal(str(self.get_config("budget_usd", "2")))
         self.relay_token = self.get_config("relay_token", "USDC")
         self.intermediate_token = self.get_config("intermediate_token", "WETH")
         self.max_slippage = Decimal(str(self.get_config("max_slippage_pct", "1.0"))) / Decimal("100")
@@ -50,7 +50,7 @@ class BaseFullCycleProbeStrategy(IntentStrategy):
         )
         self.lending_protocol = self.get_config("lending_protocol", "compound_v3")
         self.lending_market_id = self.get_config("lending_market_id", "usdc")
-        self.lending_supply_amount = Decimal(str(self.get_config("lending_supply_usd", "1")))
+        self.lending_supply_amount = Decimal(str(self.get_config("lending_supply_usd", "0.50")))
 
         # Per-leg tracking
         self._leg_results: list[dict] = []

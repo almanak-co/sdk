@@ -5,7 +5,7 @@ between USDC and WETH, and returns to USDC. Asserts that the ending
 balance is within acceptable loss bounds.
 
 Relay pattern (default config):
-  $3 USDC --[uniswap_v3]--> WETH --[sushiswap_v3]--> USDC
+  $1.50 USDC --[uniswap_v3]--> WETH --[sushiswap_v3]--> USDC
           --[pancakeswap_v3]--> WETH --[aerodrome]--> USDC
 
 Each protocol is tested exactly once. The probe always executes
@@ -40,7 +40,7 @@ class SwapRelayProbeStrategy(IntentStrategy):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.relay_amount_usd = Decimal(str(self.get_config("relay_amount_usd", "3")))
+        self.relay_amount_usd = Decimal(str(self.get_config("relay_amount_usd", "1.50")))
         self.relay_token = self.get_config("relay_token", "USDC")
         self.intermediate_token = self.get_config("intermediate_token", "WETH")
         self.max_slippage = Decimal(str(self.get_config("max_slippage_pct", "1.0"))) / Decimal("100")

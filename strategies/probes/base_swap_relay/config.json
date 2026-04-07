@@ -1,6 +1,6 @@
 {
     "chain": "base",
-    "relay_amount_usd": 3,
+    "relay_amount_usd": 1.50,
     "relay_token": "USDC",
     "intermediate_token": "WETH",
     "max_slippage_pct": 1.0,
