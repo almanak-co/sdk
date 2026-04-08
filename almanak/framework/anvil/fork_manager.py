@@ -270,8 +270,37 @@ KNOWN_BALANCE_SLOTS: dict[str, dict[str, int]] = {
     "polygon": {"USDC": 9, "WETH": 3, "USDT": 2, "WMATIC": 3, "USDC.e": 0},
     "bsc": {"USDC": 1, "WBNB": 3, "USDT": 1, "BUSD": 0},
     "linea": {"USDC": 0, "WETH": 0, "USDT": 0},
-    "sonic": {"USDC": 9},  # confirmed iter-100: brute-force found slot 9 for bridged USDC
+    "sonic": {"USDC": 9, "WETH": 0},  # USDC: confirmed iter-100. WETH: bridged, try slot 0
     "xlayer": {"USDT0": 51},  # confirmed: USD₮0 (0x779Ded...) uses OZ upgradeable slot 51
+}
+
+# Tokens where storage slot manipulation produces a valid balanceOf() but
+# transferFrom() reverts (proxy implementation mismatch).  For these tokens,
+# whale impersonation is used instead of slot patching.
+# Format: { chain: { token_symbol_upper: whale_address } }
+WHALE_FUNDED_TOKENS: dict[str, dict[str, str]] = {
+    "ethereum": {
+        # USDC FiatTokenProxy: slot 9 sets balanceOf but transferFrom reverts
+        # because implementation contract's internal state is inconsistent.
+        # Circle: Treasury is a reliable large holder.
+        "USDC": "0x37305B1cD40574E4C5Ce33f8e8306Be057fD7341",
+    },
+}
+
+# Wrapped native tokens that can be funded via deposit() instead of storage
+# slot manipulation.  deposit() is more reliable for these contracts because
+# it uses the contract's own logic (no proxy/slot mismatch risk).
+WRAPPED_NATIVE_TOKENS: dict[str, str] = {
+    "ethereum": "WETH",
+    "arbitrum": "WETH",
+    "base": "WETH",
+    "optimism": "WETH",
+    "polygon": "WMATIC",
+    "linea": "WETH",
+    "avalanche": "WAVAX",
+    "bsc": "WBNB",
+    "sonic": "WS",
+    "mantle": "WMNT",
 }
 
 
@@ -871,14 +900,46 @@ class RollingForkManager:
 
             try:
                 funded = False
+                skip_storage_fallback = False
+
+                # Use display_name (resolved symbol) for priority-0 lookups so
+                # raw-address inputs also match (e.g., "0xC02...Cc2" resolves to "WETH").
+                lookup_symbol = display_name.upper()
+
+                # Priority 0a: Wrapped native deposit() (VIB-2571)
+                # For WETH/WAVAX/WBNB etc., calling deposit() with ETH value is
+                # more reliable than storage slot manipulation (proxy/slot issues).
+                wrapped_native = WRAPPED_NATIVE_TOKENS.get(self.chain)
+                if wrapped_native and lookup_symbol == wrapped_native.upper():
+                    funded = await self._fund_wrapped_native_via_deposit(
+                        address, token_address, amount_hex, amount, display_name
+                    )
+                    # deposit() is the correct method for wrapped natives;
+                    # storage slot manipulation can produce broken state.
+                    skip_storage_fallback = True
+
+                # Priority 0b: Whale impersonation (VIB-2571)
+                # For tokens where storage slot patches pass balanceOf but break
+                # transferFrom (e.g., Ethereum USDC FiatTokenProxy).
+                if not funded:
+                    whale_tokens = WHALE_FUNDED_TOKENS.get(self.chain, {})
+                    whale_address = whale_tokens.get(lookup_symbol)
+                    if whale_address:
+                        funded = await self._fund_token_via_whale(
+                            address, token_address, amount_hex, whale_address, display_name
+                        )
+                        # Whale-funded tokens are listed precisely because slot
+                        # patching produces broken internal state; skip storage.
+                        skip_storage_fallback = True
 
                 # Priority 1: Known storage slot (fast and reliable)
                 # Look up by original symbol key (case-insensitive)
-                known_slot = known_slots_ci.get(token_key.lower())
-                if known_slot is not None:
-                    funded = await self._set_balance_at_slot(
-                        address, token_address, amount_hex, known_slot, display_name
-                    )
+                if not funded and not skip_storage_fallback:
+                    known_slot = known_slots_ci.get(token_key.lower())
+                    if known_slot is not None:
+                        funded = await self._set_balance_at_slot(
+                            address, token_address, amount_hex, known_slot, display_name
+                        )
 
                 # Priority 2: anvil_deal RPC (returns null on success)
                 if not funded:
@@ -891,7 +952,7 @@ class RollingForkManager:
                         funded = True
 
                 # Priority 3: Brute-force storage slot probing
-                if not funded:
+                if not funded and not skip_storage_fallback:
                     funded = await self._fund_token_via_storage(address, token_address, amount_hex, display_name)
 
                 if not funded:
@@ -974,6 +1035,128 @@ class RollingForkManager:
 
         logger.debug(f"Known slot {slot} for {token_symbol}: balance {balance} != expected {expected}")
         return False
+
+    async def _fund_wrapped_native_via_deposit(
+        self,
+        wallet_address: str,
+        token_address: str,
+        amount_hex: str,
+        amount: Decimal,
+        token_symbol: str,
+    ) -> bool:
+        """Fund wrapped native token (WETH, WAVAX, etc.) via deposit().
+
+        Calls the token contract's deposit() function with ETH value.
+        More reliable than storage slot manipulation for wrapped native
+        tokens, especially on Ethereum where WETH9 slot 3 can produce
+        incorrect balances on Anvil forks.
+
+        The wallet must already have sufficient native balance (set via
+        fund_wallet before fund_tokens).
+        """
+        # deposit() function selector
+        deposit_selector = "0xd0e30db0"
+
+        try:
+            # Send native currency to the wrapped token contract via deposit()
+            # On Anvil, all accounts are unlocked — no signing needed
+            success, tx_hash = await self._rpc_call_raw(
+                "eth_sendTransaction",
+                [
+                    {
+                        "from": wallet_address,
+                        "to": token_address,
+                        "value": amount_hex,
+                        "data": deposit_selector,
+                    }
+                ],
+            )
+
+            if not success:
+                logger.debug(f"deposit() call failed for {token_symbol}")
+                return False
+
+            # Mine a block to confirm the transaction
+            await self._rpc_call_raw("evm_mine", [])
+
+            # Verify the balance
+            balance = await self._get_token_balance(token_address, wallet_address)
+            expected = int(amount_hex, 16)
+
+            if balance >= expected:
+                logger.info(f"Funded {wallet_address[:10]}... with {amount} {token_symbol} via deposit()")
+                return True
+
+            logger.debug(f"deposit() for {token_symbol}: balance {balance} < expected {expected}")
+            return False
+
+        except Exception as e:
+            logger.debug(f"deposit() funding failed for {token_symbol}: {e}")
+            return False
+
+    async def _fund_token_via_whale(
+        self,
+        wallet_address: str,
+        token_address: str,
+        amount_hex: str,
+        whale_address: str,
+        token_symbol: str,
+    ) -> bool:
+        """Fund token by impersonating a whale and transferring.
+
+        For proxy tokens (e.g., Ethereum USDC) where storage slot patching
+        makes balanceOf() return the right value but transferFrom() reverts.
+        Impersonation produces a real transfer with consistent internal state.
+        """
+        try:
+            # Impersonate the whale account
+            success, _ = await self._rpc_call_raw("anvil_impersonateAccount", [whale_address])
+            if not success:
+                logger.debug(f"Failed to impersonate whale {whale_address[:10]}... for {token_symbol}")
+                return False
+
+            try:
+                # ERC-20 transfer(address,uint256) selector = 0xa9059cbb
+                # Encode: selector + address padded to 32 bytes + amount padded to 32 bytes
+                addr_padded = wallet_address.lower().replace("0x", "").zfill(64)
+                amt_padded = amount_hex.replace("0x", "").zfill(64)
+                calldata = "0xa9059cbb" + addr_padded + amt_padded
+
+                success, tx_hash = await self._rpc_call_raw(
+                    "eth_sendTransaction",
+                    [
+                        {
+                            "from": whale_address,
+                            "to": token_address,
+                            "data": calldata,
+                        }
+                    ],
+                )
+
+                if not success:
+                    logger.debug(f"Whale transfer failed for {token_symbol}")
+                    return False
+
+                # Mine a block to confirm
+                await self._rpc_call_raw("evm_mine", [])
+
+                # Verify
+                balance = await self._get_token_balance(token_address, wallet_address)
+                expected = int(amount_hex, 16)
+
+                if balance >= expected:
+                    logger.info(f"Funded {wallet_address[:10]}... with {token_symbol} via whale impersonation")
+                    return True
+
+                logger.debug(f"Whale transfer for {token_symbol}: balance {balance} < expected {expected}")
+                return False
+            finally:
+                # Stop impersonation regardless of transfer result
+                await self._rpc_call_raw("anvil_stopImpersonatingAccount", [whale_address])
+
+        except Exception as e:
+            logger.debug(f"Whale funding failed for {token_symbol}: {e}")
+            return False
 
     async def _fund_token_via_storage(
         self,
