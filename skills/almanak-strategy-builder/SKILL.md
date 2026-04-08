@@ -45,9 +45,10 @@ See the [Gateway](#gateway) section for details.
 strategy or modify `strategy.py` in a way that changes protocols, intent types,
 tokens, or chains, you MUST regenerate the Zodiac Roles permission manifest
 by running `almanak strat permissions -o permissions.json`
-from the strategy directory. This ensures the Safe wallet permissions stay in
-sync with the strategy's actual contract interactions. Always do this as a
-final step after writing or editing strategy code.
+from the strategy directory. The file MUST be named exactly `permissions.json`
+— the platform deploy pipeline hardcodes this filename. This ensures the Safe
+wallet permissions stay in sync with the strategy's actual contract interactions.
+Always do this as a final step after writing or editing strategy code.
 
 <!-- almanak-sdk-start: quick-start -->
 
