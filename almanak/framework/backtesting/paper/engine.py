@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     from almanak.framework.data.indicators.rsi import RSICalculator
     from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
-from almanak.framework.anvil.fork_manager import RollingForkManager
+from almanak.framework.anvil.fork_manager import TOKEN_ADDRESSES, RollingForkManager
 from almanak.framework.backtesting.models import (
     BacktestEngine,
     BacktestMetrics,
@@ -863,6 +863,9 @@ class PaperTrader:
 
         Returns (total_value_usd, spot_value_usd, position_value_usd) or None
         if the valuer is unavailable or the strategy doesn't satisfy StrategyLike.
+
+        VIB-2550: Also accounts for native ETH balance which PortfolioValuer
+        may miss since it only tracks tokens from _get_tracked_tokens().
         """
         if not self._valuer_available or self._portfolio_valuer is None:
             return None
@@ -882,11 +885,29 @@ class PaperTrader:
             snapshot = self._portfolio_valuer.value(strategy, market, iteration_number=self._tick_count)
             if snapshot.value_confidence.value == "UNAVAILABLE":
                 return None
-            return (
-                snapshot.total_value_usd,
-                snapshot.available_cash_usd,
-                snapshot.position_value_usd,
-            )
+
+            total = snapshot.total_value_usd
+            spot = snapshot.available_cash_usd
+            positions = snapshot.position_value_usd
+
+            # VIB-2550: Add native ETH value if the valuer didn't include it.
+            # PortfolioValuer tracks strategy tokens but may skip native ETH
+            # used for gas. Check if ETH is in portfolio but not in the snapshot.
+            try:
+                eth_balance = self.portfolio_tracker.current_balances.get("ETH", Decimal("0"))
+                if eth_balance > 0:
+                    eth_price = self._get_token_price_sync("ETH")
+                    eth_value = eth_balance * eth_price
+                    # Only add if the valuer's total is missing ETH value.
+                    # Heuristic: if valuer total + ETH value ~ simple total, ETH was missing.
+                    simple_total = self._calculate_portfolio_value()
+                    if simple_total > 0 and abs(total + eth_value - simple_total) < abs(total - simple_total):
+                        total += eth_value
+                        spot += eth_value
+            except Exception:
+                logger.debug("[%s] ETH adjustment in rich valuation skipped", self._backtest_id, exc_info=True)
+
+            return (total, spot, positions)
         except Exception:
             logger.debug("[%s] Portfolio valuer failed, falling back to simple", self._backtest_id, exc_info=True)
             return None
@@ -1023,6 +1044,16 @@ class PaperTrader:
                 logger.exception(f"[{self._backtest_id}] Paper trading session failed: {e}")
             error = str(e)
         finally:
+            # VIB-2550: Refresh price cache for all portfolio tokens before PnL calc.
+            try:
+                await self._get_portfolio_prices()
+            except Exception:
+                logger.debug(
+                    "[%s] Failed to refresh portfolio prices before PnL calc",
+                    self._backtest_id,
+                    exc_info=True,
+                )
+
             # Cache final value BEFORE cleanup clears valuer state.
             # Fallback chain: rich valuation > last equity point > simple.
             _cached_rich = self._value_portfolio_rich()
@@ -1365,6 +1396,18 @@ class PaperTrader:
             )
             self._errors.append(error)
         finally:
+            # VIB-2550: Refresh price cache for all portfolio tokens before PnL calc.
+            # Without this, _get_token_price_sync may miss tokens whose prices
+            # were never fetched (e.g., ETH used only for gas, not for trades).
+            try:
+                await self._get_portfolio_prices()
+            except Exception:
+                logger.debug(
+                    "[%s] Failed to refresh portfolio prices before PnL calc",
+                    self._backtest_id,
+                    exc_info=True,
+                )
+
             # Cache final value BEFORE cleanup clears valuer state.
             # Fallback chain: rich valuation > last equity point > simple.
             _cached_rich = self._value_portfolio_rich()
@@ -1640,7 +1683,38 @@ class PaperTrader:
         logger.debug(f"[{self._backtest_id}] Orchestrator initialized with fork RPC: {fork_rpc}")
 
     async def _cleanup(self) -> None:
-        """Cleanup resources after paper trading session."""
+        """Cleanup resources after paper trading session.
+
+        VIB-2553: Close all long-lived providers and their HTTP sessions
+        to prevent 'Event loop is closed' and 'Unclosed client session' warnings.
+        """
+        # Close providers' HTTP sessions to prevent resource leaks.
+        # Note: providers are NOT nulled out so the PaperTrader instance
+        # remains reusable for another run() call if needed.
+        if self._rsi_calculator is not None:
+            try:
+                await self._rsi_calculator.close()
+            except Exception as e:
+                logger.debug(f"[{self._backtest_id}] Error closing RSI calculator: {e}")
+
+        if self._price_aggregator is not None:
+            try:
+                await self._price_aggregator.close()
+            except Exception as e:
+                logger.debug(f"[{self._backtest_id}] Error closing price aggregator: {e}")
+
+        if self._chainlink_provider is not None:
+            try:
+                await self._chainlink_provider.close()
+            except Exception as e:
+                logger.debug(f"[{self._backtest_id}] Error closing Chainlink provider: {e}")
+
+        if self._twap_provider is not None:
+            try:
+                await self._twap_provider.close()
+            except Exception as e:
+                logger.debug(f"[{self._backtest_id}] Error closing TWAP provider: {e}")
+
         # Stop the fork
         try:
             await self.fork_manager.stop()
@@ -1892,6 +1966,10 @@ class PaperTrader:
                 self._errors.append(error)
                 return None
 
+            # VIB-2550: Snapshot balances BEFORE execution for delta accounting
+            wallet_address = self._orchestrator.signer.address if self._orchestrator else ""
+            balances_before = await self._snapshot_balances(wallet_address, intent=intent)
+
             # Create execution context
             context = ExecutionContext(
                 strategy_id=strategy.strategy_id,
@@ -1927,13 +2005,21 @@ class PaperTrader:
                         block_number = receipt.block_number or block_number  # type: ignore[union-attr]
                         gas_used = receipt.gas_used or 0  # type: ignore[union-attr]
 
-                # Get wallet address for receipt parsing
-                wallet_address = self._orchestrator.signer.address if self._orchestrator else ""
+                # VIB-2550: Use balance deltas as primary accounting (ground truth)
+                # Snapshot balances AFTER execution and diff against pre-execution
+                balances_after = await self._snapshot_balances(wallet_address, intent=intent)
+                tokens_in, tokens_out = await self._compute_balance_deltas(balances_before, balances_after, intent)
 
-                # Get token flows from receipt (if available) or intent (fallback)
-                tokens_in, tokens_out = await self._extract_token_flows(
-                    intent, receipt=receipt, wallet_address=wallet_address
-                )
+                # If balance deltas returned nothing (e.g., all tokens unresolvable),
+                # fall back to receipt/intent-based extraction as last resort
+                if not tokens_in and not tokens_out:
+                    logger.warning(
+                        f"[{self._backtest_id}] Balance deltas returned empty flows, "
+                        "falling back to receipt/intent-based extraction."
+                    )
+                    tokens_in, tokens_out = await self._extract_token_flows(
+                        intent, receipt=receipt, wallet_address=wallet_address
+                    )
 
                 # Calculate slippage tracking values
                 expected_amount_out = self._get_expected_amount_out(intent)
@@ -2408,6 +2494,170 @@ class PaperTrader:
 
         # Fallback to string representation
         return {"repr": str(intent)}
+
+    # =========================================================================
+    # Balance-delta accounting (VIB-2550)
+    # =========================================================================
+
+    def _resolve_token_address(self, symbol: str) -> str | None:
+        """Resolve a token symbol to its on-chain address for the current chain.
+
+        Uses TokenResolver first, falls back to TOKEN_ADDRESSES registry.
+
+        Args:
+            symbol: Token symbol (e.g., "USDC", "WETH")
+
+        Returns:
+            Checksummed address string, or None if unresolvable
+        """
+        # Skip ETH — tracked via eth_getBalance, not ERC-20
+        if symbol.upper() == "ETH":
+            return None
+
+        resolver = _get_resolver()
+        if resolver:
+            try:
+                resolved = resolver.resolve(symbol, self.config.chain)
+                return resolved.address
+            except Exception as e:
+                logger.debug(f"[{self._backtest_id}] TokenResolver failed for {symbol} on {self.config.chain}: {e}")
+
+        # Fallback to static TOKEN_ADDRESSES table
+        chain_tokens = TOKEN_ADDRESSES.get(self.config.chain, {})
+        # Case-insensitive lookup
+        for key, addr in chain_tokens.items():
+            if key.upper() == symbol.upper():
+                return addr
+        return None
+
+    async def _snapshot_balances(self, wallet_address: str, intent: Any = None) -> dict[str, int]:
+        """Snapshot all tracked token balances on the fork (in smallest units).
+
+        Queries native ETH via eth_getBalance and all ERC-20 tokens the
+        portfolio tracker currently holds via balanceOf.
+
+        Args:
+            wallet_address: The wallet to query
+            intent: Optional intent to include its tokens in the snapshot
+                (ensures tokens being bought for the first time are captured)
+
+        Returns:
+            Dict mapping token symbol -> balance in smallest units.
+            ETH is keyed as "ETH".
+        """
+        balances: dict[str, int] = {}
+
+        # 1. Native ETH balance
+        eth_hex = await self.fork_manager._rpc_call("eth_getBalance", [wallet_address, "latest"])
+        if eth_hex:
+            balances["ETH"] = int(eth_hex, 16)
+
+        # 2. ERC-20 balances for all tokens the portfolio currently tracks
+        tracked_tokens = set(self.portfolio_tracker.current_balances.keys())
+        # Also include tokens from initial_balances in case current is empty
+        tracked_tokens |= set(self.portfolio_tracker.initial_balances.keys())
+
+        # Also include tokens from the intent (e.g., to_token for a first-time buy)
+        if intent is not None:
+            for attr in ("from_token", "to_token", "token", "asset", "token0", "token1", "token_a", "token_b"):
+                token_val = getattr(intent, attr, None)
+                if token_val:
+                    tracked_tokens.add(str(token_val).upper())
+
+        for symbol in tracked_tokens:
+            if symbol.upper() == "ETH":
+                continue  # Already queried above
+            token_address = self._resolve_token_address(symbol)
+            if not token_address:
+                continue
+            try:
+                raw_balance = await self.fork_manager._get_token_balance(token_address, wallet_address)
+                # Preserve original case from tracker to avoid key mismatch (e.g., USDC.e vs USDC.E)
+                balances[symbol] = raw_balance
+            except Exception as e:
+                logger.debug(f"[{self._backtest_id}] Could not query balance for {symbol}: {e}")
+
+        return balances
+
+    async def _compute_balance_deltas(
+        self,
+        before: dict[str, int],
+        after: dict[str, int],
+        intent: Any,
+    ) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+        """Compute token inflows and outflows from before/after balance snapshots.
+
+        Converts raw balance diffs (in smallest units) to Decimal amounts using
+        the correct token decimals.
+
+        Args:
+            before: Balances before execution (symbol -> smallest units)
+            after: Balances after execution (symbol -> smallest units)
+            intent: The executed intent (used to discover tokens not yet tracked)
+
+        Returns:
+            Tuple of (tokens_in, tokens_out) with human-readable Decimal amounts
+        """
+        tokens_in: dict[str, Decimal] = {}
+        tokens_out: dict[str, Decimal] = {}
+
+        # Collect all tokens that appear in either snapshot
+        all_symbols = set(before.keys()) | set(after.keys())
+
+        # Also check intent tokens in case they weren't tracked before
+        for attr in ("from_token", "to_token", "token", "asset", "token0", "token1", "token_a", "token_b"):
+            token_val = getattr(intent, attr, None)
+            if token_val:
+                sym = str(token_val).upper()
+                if sym not in all_symbols and sym != "ETH":
+                    # Try to query this token's balance in after snapshot
+                    token_address = self._resolve_token_address(sym)
+                    if token_address:
+                        try:
+                            after[sym] = await self.fork_manager._get_token_balance(
+                                token_address,
+                                self._orchestrator.signer.address if self._orchestrator else "",
+                            )
+                            before.setdefault(sym, 0)
+                            all_symbols.add(sym)
+                        except Exception:
+                            pass
+
+        chain_id = self.fork_manager.chain_id
+        rpc_url = self.fork_manager.get_rpc_url() if self.fork_manager.is_running else None
+
+        for symbol in all_symbols:
+            before_raw = before.get(symbol, 0)
+            after_raw = after.get(symbol, 0)
+            delta = after_raw - before_raw
+
+            if delta == 0:
+                continue
+
+            # Get decimals for this token
+            if symbol.upper() == "ETH":
+                decimals = 18
+            else:
+                token_address = self._resolve_token_address(symbol)
+                if token_address:
+                    decimals = await get_token_decimals_with_fallback(chain_id, token_address, rpc_url)
+                else:
+                    # Cannot resolve address — skip this token to avoid silent miscount.
+                    # NEVER default to 18 decimals (USDC=6, USDT=6, WBTC=8).
+                    logger.warning(
+                        f"[{self._backtest_id}] Skipping balance delta for {symbol}: "
+                        f"could not resolve token address on chain={self.config.chain}"
+                    )
+                    continue
+
+            amount = Decimal(str(abs(delta))) / Decimal(10**decimals)
+
+            if delta > 0:
+                tokens_in[symbol] = amount
+            else:
+                tokens_out[symbol] = amount
+
+        return tokens_in, tokens_out
 
     async def _extract_token_flows(
         self,

@@ -649,6 +649,10 @@ class RollingForkManager:
                     block_hex = await self._rpc_call("eth_blockNumber", [])
                     if block_hex:
                         self._current_block = int(block_hex, 16)
+
+                    # VIB-2552: Assert chain ID integrity after reset
+                    await self._assert_chain_id_after_reset()
+
                     logger.info(f"Fork reset in-place to block {self._current_block}")
                     return True
                 else:
@@ -666,6 +670,8 @@ class RollingForkManager:
             success = await self.start()
 
             if success:
+                # VIB-2552: Also assert chain ID after stop/start fallback
+                await self._assert_chain_id_after_reset()
                 logger.info(f"Fork reset to latest block: {self._current_block}")
             else:
                 logger.error("Failed to reset fork to latest block")
@@ -677,6 +683,44 @@ class RollingForkManager:
             logger.exception(f"Error resetting fork: {e}")
             self.fork_block_number = original_fork_block
             return False
+
+    async def _assert_chain_id_after_reset(self) -> None:
+        """Assert that the fork reports the expected chain ID after a reset.
+
+        VIB-2552: After anvil_reset, verify that eth_chainId matches the
+        expected chain ID. If mismatched, attempt to fix with anvil_setChainId.
+        This prevents "invalid chain id for signer" errors on non-default chains.
+        """
+        expected_chain_id = CHAIN_IDS.get(self.chain)
+        if expected_chain_id is None:
+            return  # Unknown chain, skip assertion
+
+        chain_id_hex = await self._rpc_call("eth_chainId", [])
+        if not chain_id_hex:
+            logger.warning(f"Could not query eth_chainId after reset for chain={self.chain}")
+            return
+
+        actual_chain_id = int(chain_id_hex, 16)
+        if actual_chain_id == expected_chain_id:
+            return  # All good
+
+        logger.warning(
+            f"Chain ID mismatch after anvil_reset: expected {expected_chain_id} "
+            f"({self.chain}), got {actual_chain_id}. Attempting anvil_setChainId fix."
+        )
+
+        # Attempt to fix with anvil_setChainId
+        try:
+            success, _ = await self._rpc_call_raw("anvil_setChainId", [expected_chain_id])
+            if success:
+                logger.info(f"Fixed chain ID via anvil_setChainId: {expected_chain_id} ({self.chain})")
+            else:
+                logger.error(
+                    f"anvil_setChainId failed for chain={self.chain}. "
+                    f"Transactions may fail with 'invalid chain id for signer'."
+                )
+        except Exception as e:
+            logger.error(f"anvil_setChainId error: {e}")
 
     async def fund_wallet(self, address: str, eth_amount: Decimal) -> bool:
         """Fund a wallet with ETH.

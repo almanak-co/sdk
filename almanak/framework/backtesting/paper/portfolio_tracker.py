@@ -8,6 +8,7 @@ Classes:
     - PaperPortfolioTracker: Tracks paper trading portfolio state
 """
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -18,6 +19,8 @@ from almanak.framework.backtesting.paper.models import (
     PaperTradeError,
     PaperTradingSummary,
 )
+
+logger = logging.getLogger(__name__)
 
 # Common stablecoins for USD value estimation
 STABLECOINS = frozenset({"USDC", "USDT", "DAI", "FRAX", "LUSD", "BUSD"})
@@ -124,6 +127,22 @@ class PaperPortfolioTracker:
             )
             tracker.record_trade(trade)
         """
+        # VIB-2551: Sanity guard — reject trades with zero-amount inflows for swaps
+        # This prevents the -$42k PnL corruption from Decimal("0") fallbacks
+        # Use trade.intent_type (always set by engine) with intent dict fallback
+        intent_type = getattr(trade, "intent_type", "") or ""
+        if not intent_type:
+            intent_type = trade.intent.get("type", "") if isinstance(trade.intent, dict) else ""
+        if intent_type.upper() == "SWAP" and trade.tokens_out:
+            has_nonzero_inflow = any(amount > 0 for amount in trade.tokens_in.values())
+            if not has_nonzero_inflow:
+                logger.error(
+                    f"[paper-trading] SANITY GUARD: Swap trade has zero/empty inflows "
+                    f"(tokens_in={trade.tokens_in}, tokens_out={trade.tokens_out}). "
+                    f"Rejecting trade to prevent balance corruption."
+                )
+                return
+
         # Add trade to list
         self.trades.append(trade)
 
