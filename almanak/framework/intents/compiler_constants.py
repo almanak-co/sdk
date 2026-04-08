@@ -132,7 +132,7 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
     },
     "polygon": {
         "uniswap_v3": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",  # SwapRouter02
-        # sushiswap_v3 removed: zero usable liquidity (>99% price impact on $100 swaps, VIB-2069)
+        "sushiswap_v3": "0x0aF89E1620b96170e2a9D0b68fEebb767eD044c3",  # SushiSwap V3 SwapRouter
         "quickswap": "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff",
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
     },
@@ -198,7 +198,7 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     "polygon": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
         "uniswap_v4": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",  # V4 PositionManager
-        # sushiswap_v3 removed: zero usable liquidity (VIB-2069)
+        "sushiswap_v3": "0xb7402ee99F0A008e461098AC3A27F4957Df89a40",
     },
     "base": {
         "uniswap_v3": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
@@ -359,7 +359,7 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
     },
     "polygon": {
         "uniswap_v3": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
-        # sushiswap_v3 removed: zero usable liquidity (VIB-2069)
+        "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
     },
     "base": {
         "uniswap_v3": "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",

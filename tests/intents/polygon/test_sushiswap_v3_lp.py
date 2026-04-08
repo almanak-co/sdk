@@ -40,9 +40,6 @@ from tests.intents.conftest import (
 )
 from tests.intents.pool_helpers import fail_if_v3_pool_missing
 
-# SushiSwap V3 removed from Polygon routing: >99% price impact on $100 swaps (VIB-2069)
-pytestmark = pytest.mark.xfail(reason="SushiSwap V3 removed from Polygon routing - zero usable liquidity (VIB-2069)")
-
 # =============================================================================
 # Test Configuration
 # =============================================================================
