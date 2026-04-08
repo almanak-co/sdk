@@ -129,7 +129,7 @@ class GatewayStateManager:
         """
         try:
             # Serialize state to JSON bytes
-            state_bytes = json.dumps(state.state).encode("utf-8")
+            state_bytes = json.dumps(state.state, default=str, sort_keys=True).encode("utf-8")
 
             request = gateway_pb2.SaveStateRequest(
                 strategy_id=state.strategy_id,
@@ -210,7 +210,7 @@ class GatewayStateManager:
             Snapshot ID from the database
         """
         try:
-            positions_bytes = json.dumps(snapshot.to_positions_payload()).encode("utf-8")
+            positions_bytes = json.dumps(snapshot.to_positions_payload(), default=str, sort_keys=True).encode("utf-8")
 
             request = gateway_pb2.SaveSnapshotRequest(
                 strategy_id=snapshot.strategy_id,
