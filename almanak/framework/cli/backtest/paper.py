@@ -339,6 +339,10 @@ def paper_start(
 
     # Create config
     try:
+        # Check env var for relaxed price mode (useful for tokens without price feeds,
+        # e.g. Pendle PT tokens) (VIB-2562)
+        relaxed_prices = os.environ.get("ALMANAK_ALLOW_HARDCODED_PRICES", "").strip() == "1"
+
         paper_config = PaperTraderConfig(
             chain=chain,
             rpc_url=rpc_url,
@@ -351,6 +355,7 @@ def paper_start(
             max_ticks=max_ticks,
             anvil_port=anvil_port,
             reset_fork_every_tick=not no_reset_fork,
+            strict_price_mode=not relaxed_prices,
         )
     except ValueError as e:
         click.echo(f"Configuration error: {e}", err=True)

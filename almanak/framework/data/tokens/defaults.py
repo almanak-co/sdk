@@ -1353,6 +1353,48 @@ USDG_XLAYER = Token(
 )
 
 # =============================================================================
+# PENDLE SY MINT TOKENS (tokens that mint SY for Pendle markets)
+# These are the underlying tokens that Pendle's SY contract accepts.
+# Required for pre-swap routing in the Pendle compiler (VIB-2560).
+# =============================================================================
+
+# USDG (Global Dollar) on Ethereum - SY mint token for PT-USDG-28MAY2026
+USDG_ETH = Token(
+    symbol="USDG",
+    name="Global Dollar",
+    decimals=6,
+    addresses={
+        "ethereum": "0xe343167631d89B6Ffc58B88d6b7fB0228795491D",
+    },
+    coingecko_id=None,
+    is_stablecoin=True,
+)
+
+# aEthPYUSD (Aave Ethereum PYUSD) - SY mint token for PT-aPYUSD-28MAY2026
+aEthPYUSD = Token(
+    symbol="aEthPYUSD",
+    name="Aave Ethereum PYUSD",
+    decimals=6,
+    addresses={
+        "ethereum": "0x0C0d01AbF3e6aDfcA0989eBbA9d6e85dD58EaB1E",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
+# sUSDai (Staked USDai) on Arbitrum - SY mint token for PT-sUSDai-15OCT2026
+sUSDai = Token(
+    symbol="sUSDai",
+    name="Staked USDai",
+    decimals=18,
+    addresses={
+        "arbitrum": "0x0B2b2B2076d95dda7817e785989fE353fe955ef9",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
+# =============================================================================
 # PENDLE PT TOKENS (used as collateral on Morpho Blue)
 # WARNING: PT tokens are maturity-bound. These addresses expire and new ones
 # are deployed. Check Pendle app for current PT addresses before using.
@@ -1575,6 +1617,10 @@ DEFAULT_TOKENS: list[Token] = [
     # Portfolio Manager custom tokens (LP strategies)
     ATH,
     TORIVA,
+    # Pendle SY mint tokens (VIB-2560)
+    USDG_ETH,
+    aEthPYUSD,
+    sUSDai,
     # Pendle PT tokens (used as collateral)
     PT_sUSDe,
     PT_eUSDe,
@@ -1734,6 +1780,10 @@ __all__ = [
     "MON",
     "WMON",
     "USDT0_MONAD",
+    # Pendle SY mint tokens
+    "USDG_ETH",
+    "aEthPYUSD",
+    "sUSDai",
     # Pendle PT tokens
     "PT_sUSDe",
     "PT_eUSDe",

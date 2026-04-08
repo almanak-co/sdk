@@ -308,11 +308,19 @@ def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:
             try:
                 estimated_mint_sy_output = compiler._calculate_expected_output(amount_in, from_token, mint_sy_token)
             except (ValueError, KeyError, ZeroDivisionError):
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Cannot estimate pre-swap output for {from_token.symbol} -> {mint_sy_token.symbol}. "
-                    f"Price data unavailable. Use {mint_sy_token.symbol} directly as from_token.",
-                    intent_id=intent.intent_id,
+                # Fallback: decimal-adjusted 1:1 estimate when price data unavailable.
+                # Many Pendle SY mint tokens (aEthPYUSD, sUSDai, USDG) are yield-bearing
+                # stablecoin wrappers where 1:1 is a safe conservative estimate.
+                # The 2% buffer applied below and Pendle's own slippage protection
+                # guard against estimation inaccuracy (VIB-2561).
+                from_decimals = from_token.decimals or 6
+                to_decimals = mint_sy_token.decimals or 18
+                estimated_mint_sy_output = int(
+                    Decimal(str(amount_in)) * Decimal(10**to_decimals) / Decimal(10**from_decimals)
+                )
+                logger.info(
+                    f"Pre-swap price fallback: {from_token.symbol} -> {mint_sy_token.symbol}, "
+                    f"using 1:1 decimal-adjusted estimate ({amount_in} -> {estimated_mint_sy_output})"
                 )
 
             # Apply 2% safety buffer on the estimated output for the Pendle step.

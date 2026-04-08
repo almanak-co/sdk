@@ -2384,8 +2384,11 @@ class ExecutionOrchestrator:
             return
 
         metadata = action_bundle.metadata or {}
-        from_token = metadata.get("from_token", {})
-        amount_in_str = metadata.get("amount_in")
+        # For multi-step bundles (e.g., Pendle pre-swap routing), use the
+        # original input token/amount instead of the intermediate token
+        # that won't exist until the pre-swap TX runs (VIB-2559).
+        from_token = metadata.get("original_from_token") or metadata.get("from_token", {})
+        amount_in_str = metadata.get("original_amount_in") or metadata.get("amount_in")
 
         if not from_token or not amount_in_str:
             return  # Can't check without metadata
