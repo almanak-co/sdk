@@ -1078,8 +1078,15 @@ class ExecutionOrchestrator:
 
             if not unsigned_txs:
                 intent_type = (action_bundle.intent_type or "").upper()
-                # HOLD intents legitimately produce 0 transactions
-                if intent_type == "HOLD":
+                # HOLD intents legitimately produce 0 transactions.
+                # No-op bundles (e.g., withdraw_all on zero collateral) are also legitimate.
+                is_no_op = bool(action_bundle.metadata and action_bundle.metadata.get("no_op"))
+                if intent_type == "HOLD" or is_no_op:
+                    no_op_reason = (
+                        action_bundle.metadata.get("reason", "No-op bundle")
+                        if is_no_op
+                        else "No transactions to execute (HOLD intent)"
+                    )
                     result.success = True
                     result.phase = ExecutionPhase.COMPLETE
                     result.completed_at = datetime.now(UTC)
@@ -1087,7 +1094,7 @@ class ExecutionOrchestrator:
                     self._emit_event(
                         ExecutionEventType.EXECUTION_SUCCESS,
                         context,
-                        {"message": "No transactions to execute (HOLD intent)", "intent_type": intent_type},
+                        {"message": no_op_reason, "intent_type": intent_type},
                     )
                     return result
 

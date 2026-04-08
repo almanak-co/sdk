@@ -2487,10 +2487,14 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
                     intent_id=intent.intent_id,
                 )
 
+            # Resolve RPC URL for on-chain queries (needed for collateral withdraw_all)
+            compound_rpc_url = compiler._get_chain_rpc_url() if intent.withdraw_all else None
+
             compound_config = CompoundV3Config(
                 chain=compiler.chain,
                 wallet_address=compiler.wallet_address,
                 market=market,
+                rpc_url=compound_rpc_url,
             )
             compound_adapter = CompoundV3Adapter(compound_config)
 
@@ -2513,15 +2517,27 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
 
             if is_base_token:
                 # Withdraw base asset (reduce lending position)
+                # Base token withdraw supports MAX_UINT256 for withdraw_all natively.
                 withdraw_result = compound_adapter.withdraw(
                     amount=compound_withdraw_amount,
                     withdraw_all=intent.withdraw_all,
                 )
             else:
-                # Withdraw collateral asset
+                # Withdraw collateral asset.
+                # For withdraw_all: use the intent's original amount if available, since
+                # Compound V3 stores collateral as uint128 and MAX_UINT256 causes safe128() revert.
+                # The on-chain query in the adapter is the primary path; the intent amount is
+                # the fallback for when no RPC is available.
+                collateral_amount = compound_withdraw_amount
+                if intent.withdraw_all and collateral_amount == 0 and intent.amount not in (None, "all"):
+                    try:
+                        collateral_amount = Decimal(str(intent.amount))
+                    except (TypeError, ValueError, ArithmeticError):
+                        pass
+
                 withdraw_result = compound_adapter.withdraw_collateral(
                     asset=withdraw_token.symbol,
-                    amount=compound_withdraw_amount,
+                    amount=collateral_amount,
                     withdraw_all=intent.withdraw_all,
                 )
 
@@ -2532,9 +2548,31 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
                     intent_id=intent.intent_id,
                 )
 
-            amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
+            # No-op: withdraw_all on zero collateral returns success with no tx_data.
+            # Return a SUCCESS result with an empty ActionBundle so callers don't crash.
+            if withdraw_result.tx_data is None:
+                return CompilationResult(
+                    status=CompilationStatus.SUCCESS,
+                    action_bundle=ActionBundle(
+                        intent_type=IntentType.WITHDRAW.value,
+                        transactions=[],
+                        metadata={
+                            "protocol": intent.protocol,
+                            "comet_address": compound_adapter.comet_address,
+                            "market": market,
+                            "withdraw_token": withdraw_token.to_dict(),
+                            "withdraw_amount": "0",
+                            "withdraw_all": intent.withdraw_all,
+                            "withdraw_type": "collateral" if not is_base_token else "base",
+                            "chain": compiler.chain,
+                            "no_op": True,
+                            "reason": withdraw_result.description or "Nothing to withdraw (balance is 0)",
+                        },
+                    ),
+                    intent_id=intent.intent_id,
+                )
 
-            assert withdraw_result.tx_data is not None
+            amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
             withdraw_data = withdraw_result.tx_data["data"]
             if not withdraw_data.startswith("0x"):
                 withdraw_data = "0x" + withdraw_data

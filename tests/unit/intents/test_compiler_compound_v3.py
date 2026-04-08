@@ -884,6 +884,70 @@ class TestCompoundV3Optimism:
         assert result.action_bundle.metadata["market"] == "usdc"
         mock_adapter.withdraw.assert_called_once()
 
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_withdraw_collateral_optimism(self, mock_adapter_cls, mock_config_cls, optimism_compiler):
+        """Test that WITHDRAW of collateral (WETH) routes to withdraw_collateral, not withdraw.
+
+        Compound V3 stores collateral as uint128, so MAX_UINT256 cannot be used for
+        withdraw_all. The compiler must pass the intent's amount as fallback.
+        """
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET_OPTIMISM
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["optimism"]["usdc"]
+        mock_adapter.withdraw_collateral.return_value = _mock_tx_result(
+            "Withdraw WETH collateral from Optimism"
+        )
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = WithdrawIntent(
+            token="WETH",
+            amount=Decimal("0.5"),
+            protocol="compound_v3",
+            market_id="usdc",
+            withdraw_all=True,
+        )
+
+        result = optimism_compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle is not None
+        assert result.action_bundle.metadata["withdraw_type"] == "collateral"
+        assert result.action_bundle.metadata["withdraw_all"] is True
+        mock_adapter.withdraw_collateral.assert_called_once()
+        # Verify the amount passed includes the fallback from intent.amount
+        call_kwargs = mock_adapter.withdraw_collateral.call_args
+        assert call_kwargs[1]["withdraw_all"] is True
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_withdraw_collateral_uses_intent_amount_as_fallback(self, mock_adapter_cls, mock_config_cls, optimism_compiler):
+        """When withdraw_all=True, compiler should pass intent.amount as fallback for collateral."""
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET_OPTIMISM
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["optimism"]["usdc"]
+        mock_adapter.withdraw_collateral.return_value = _mock_tx_result(
+            "Withdraw WETH collateral"
+        )
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = WithdrawIntent(
+            token="WETH",
+            amount=Decimal("0.5"),
+            protocol="compound_v3",
+            market_id="usdc",
+            withdraw_all=True,
+        )
+
+        result = optimism_compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        call_kwargs = mock_adapter.withdraw_collateral.call_args
+        # The amount should be 0.5 (from intent.amount), not 0
+        assert call_kwargs[1]["amount"] == Decimal("0.5")
+
 
 # =============================================================================
 # CROSS-CHAIN: POLYGON

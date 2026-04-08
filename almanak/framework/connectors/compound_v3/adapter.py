@@ -470,12 +470,14 @@ class CompoundV3Config:
         wallet_address: User wallet address
         market: Market identifier (usdc, weth, usdt, etc.)
         default_slippage_bps: Default slippage tolerance in basis points
+        rpc_url: Optional RPC URL for on-chain queries (e.g., collateral balance for withdraw_all)
     """
 
     chain: str
     wallet_address: str
     market: str = "usdc"
     default_slippage_bps: int = 50  # 0.5%
+    rpc_url: str | None = None
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -735,10 +737,71 @@ class CompoundV3Adapter:
 
             self._token_resolver = get_token_resolver()
 
+        # RPC URL for on-chain queries
+        self.rpc_url = config.rpc_url
+
         logger.info(
             f"CompoundV3Adapter initialized for chain={config.chain}, "
             f"market={config.market}, wallet={config.wallet_address[:10]}..."
         )
+
+    # =========================================================================
+    # On-chain query helpers
+    # =========================================================================
+
+    def _query_collateral_balance(self, asset_address: str) -> int | None:
+        """Query on-chain collateral balance via Comet.userCollateral(address,address).
+
+        Returns the collateral balance in wei, or None if the query fails.
+        Requires rpc_url to be set on the config.
+
+        Compound V3 stores collateral amounts as uint128, so MAX_UINT256 cannot be
+        used for withdraw_all. Unlike the base asset (which has a MAX_UINT256 shortcut),
+        collateral withdrawal reverts on underflow — so we must query the exact balance.
+
+        Note: There is an inherent race window between this query and the subsequent
+        withdrawal transaction. If another transaction (e.g., liquidation) reduces the
+        collateral between query and execution, the withdrawal may revert. This is the
+        standard integration pattern for Compound V3 collateral withdrawals.
+        """
+        if not self.rpc_url:
+            logger.warning("No rpc_url configured; cannot query on-chain collateral balance")
+            return None
+
+        try:
+            from web3 import Web3
+            from web3.types import HexStr
+
+            w3 = Web3(Web3.HTTPProvider(self.rpc_url, request_kwargs={"timeout": 10}))
+
+            # userCollateral(address,address) returns (uint128 balance, uint128 _reserved)
+            # selector = keccak256("userCollateral(address,address)")[0:4] = 0x2b92a07d
+            account_padded = self.wallet_address[2:].lower().zfill(64)
+            asset_padded = asset_address[2:].lower().zfill(64)
+            calldata = HexStr(f"0x2b92a07d{account_padded}{asset_padded}")
+
+            result = w3.eth.call(
+                {
+                    "to": Web3.to_checksum_address(self.comet_address),
+                    "data": calldata,
+                }
+            )
+
+            if not result or len(result) < 64:
+                logger.warning(f"Unexpected RPC result length: {len(result) if result else 0} bytes")
+                return None
+
+            # Decode: first 32 bytes = balance (uint128 ABI-padded to 32 bytes)
+            balance = int(result[:32].hex(), 16)
+            logger.debug(
+                f"On-chain collateral balance for {asset_address[:10]}...: {balance} wei "
+                f"(wallet={self.wallet_address[:10]}...)"
+            )
+            return balance
+
+        except Exception as e:
+            logger.warning(f"Failed to query on-chain collateral balance: {e}")
+            return None
 
     # =========================================================================
     # Supply Operations (Base Asset Lending)
@@ -964,7 +1027,38 @@ class CompoundV3Adapter:
             recipient = receiver or self.wallet_address
 
             if withdraw_all:
-                amount_wei = MAX_UINT256
+                # Compound V3 stores collateral as uint128 — MAX_UINT256 causes safe128() revert.
+                # Must query actual on-chain balance instead.
+                on_chain_balance = self._query_collateral_balance(asset_address)
+                if on_chain_balance is not None:
+                    if on_chain_balance == 0:
+                        logger.info("withdraw_all collateral: on-chain balance is 0, nothing to withdraw")
+                        return TransactionResult(
+                            success=True,
+                            tx_data=None,
+                            description="No collateral to withdraw (balance is 0)",
+                        )
+                    amount_wei = on_chain_balance
+                    logger.info(
+                        f"withdraw_all collateral: using on-chain balance {amount_wei} wei (queried via userCollateral)"
+                    )
+                else:
+                    # Fallback: use the amount parameter if on-chain query fails
+                    if amount > 0:
+                        amount_wei = int(amount * Decimal(10**decimals))
+                        logger.warning(
+                            f"withdraw_all collateral: on-chain query unavailable, "
+                            f"falling back to provided amount={amount} ({amount_wei} wei)"
+                        )
+                    else:
+                        return TransactionResult(
+                            success=False,
+                            error=(
+                                "Cannot withdraw_all collateral: on-chain balance query failed "
+                                "and no fallback amount provided. Set rpc_url on CompoundV3Config "
+                                "for on-chain queries."
+                            ),
+                        )
             else:
                 amount_wei = int(amount * Decimal(10**decimals))
 
