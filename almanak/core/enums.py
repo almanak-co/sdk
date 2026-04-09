@@ -171,6 +171,7 @@ class Protocol(Enum):
     LIFI = "LIFI"
     BENQI = "BENQI"
     JOE_LEND = "JOE_LEND"
+    EULER_V2 = "EULER_V2"
 
 
 class Network(Enum):

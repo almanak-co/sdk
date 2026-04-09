@@ -966,6 +966,144 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
             logger.info(f"   Protocol: Joe Lend | Txs: {len(transactions)} | Gas: {total_gas:,}")
 
         # =================================================================
+        # EULER V2 PATH (ERC-4626 vaults + EVC on Avalanche)
+        # =================================================================
+        elif protocol_lower == "euler_v2":
+            from ..connectors.euler_v2.adapter import (
+                EulerV2Adapter,
+                EulerV2Config,
+            )
+
+            if compiler.chain != "avalanche":
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Euler V2 is only available on Avalanche, got: {compiler.chain}",
+                    intent_id=intent.intent_id,
+                )
+
+            euler_config = EulerV2Config(
+                chain=compiler.chain,
+                wallet_address=compiler.wallet_address,
+            )
+            euler_adapter = EulerV2Adapter(euler_config)
+
+            # Find collateral vault
+            collateral_vault = euler_adapter.find_vault_for_asset(collateral_token.symbol.upper())
+            if not collateral_vault:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Euler V2 does not have a vault for collateral asset: {collateral_token.symbol}. Supported: {euler_adapter.get_supported_assets()}",
+                    intent_id=intent.intent_id,
+                )
+
+            # If collateral > 0, first supply collateral
+            if collateral_amount_decimal > 0:
+                collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+
+                # Build approve TX for vault
+                approve_txs = compiler._build_approve_tx(
+                    collateral_token.address,
+                    collateral_vault.vault_address,
+                    collateral_amount_wei,
+                )
+                transactions.extend(approve_txs)
+
+                # Build supply (deposit) TX
+                supply_result = euler_adapter.supply(
+                    asset=collateral_token.symbol.upper(),
+                    amount=collateral_amount_decimal,
+                    vault_symbol=collateral_vault.vault_symbol,
+                )
+
+                if not supply_result.success:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=f"Euler V2 supply collateral failed: {supply_result.error}",
+                        intent_id=intent.intent_id,
+                    )
+
+                assert supply_result.tx_data is not None
+                supply_data = supply_result.tx_data["data"]
+                if not supply_data.startswith("0x"):
+                    supply_data = "0x" + supply_data
+
+                supply_tx = TransactionData(
+                    to=supply_result.tx_data["to"],
+                    value=int(supply_result.tx_data.get("value", 0)),
+                    data=supply_data,
+                    gas_estimate=supply_result.gas_estimate,
+                    description=supply_result.description,
+                    tx_type="lending_supply_collateral",
+                )
+                transactions.append(supply_tx)
+            else:
+                warnings.append("No collateral supplied - borrowing against existing collateral")
+
+            # Build borrow TX (includes EVC enableCollateral + enableController + borrow)
+            borrow_result = euler_adapter.borrow(
+                borrow_asset=borrow_token.symbol.upper(),
+                borrow_amount=intent.borrow_amount,
+                collateral_vault_address=collateral_vault.vault_address,
+            )
+
+            if not borrow_result.success:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Euler V2 borrow failed: {borrow_result.error}",
+                    intent_id=intent.intent_id,
+                )
+
+            assert borrow_result.tx_data is not None
+            borrow_data = borrow_result.tx_data["data"]
+            if not borrow_data.startswith("0x"):
+                borrow_data = "0x" + borrow_data
+
+            borrow_tx = TransactionData(
+                to=borrow_result.tx_data["to"],
+                value=int(borrow_result.tx_data.get("value", 0)),
+                data=borrow_data,
+                gas_estimate=borrow_result.gas_estimate,
+                description=borrow_result.description,
+                tx_type="lending_borrow",
+            )
+            transactions.append(borrow_tx)
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+            action_bundle = ActionBundle(
+                intent_type=IntentType.BORROW.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "protocol": intent.protocol,
+                    "evc_address": euler_adapter.evc_address,
+                    "collateral_vault": collateral_vault.vault_address,
+                    "collateral_token": collateral_token.to_dict(),
+                    "borrow_token": borrow_token.to_dict(),
+                    "collateral_amount": str(collateral_amount_decimal),
+                    "borrow_amount": str(intent.borrow_amount),
+                    "chain": compiler.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+            result.warnings = warnings
+
+            collateral_fmt = format_token_amount(
+                int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+                collateral_token.symbol,
+                collateral_token.decimals,
+            )
+            borrow_fmt = format_token_amount(
+                int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
+                borrow_token.symbol,
+                borrow_token.decimals,
+            )
+
+            logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
+            logger.info(f"   Protocol: Euler V2 | Txs: {len(transactions)} | Gas: {total_gas:,}")
+
+        # =================================================================
         # SILO V2 PATH (Isolated lending on Avalanche)
         # =================================================================
         elif protocol_lower == "silo_v2":
@@ -1120,7 +1258,7 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
         else:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi, joelend, silo_v2",
+                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
                 intent_id=intent.intent_id,
             )
 
@@ -1884,6 +2022,121 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
             )
 
         # =================================================================
+        # EULER V2 PATH (ERC-4626 vaults + EVC on Avalanche)
+        # =================================================================
+        elif protocol_lower == "euler_v2":
+            from ..connectors.euler_v2.adapter import (
+                MAX_UINT256 as EULER_MAX_UINT256,
+            )
+            from ..connectors.euler_v2.adapter import (
+                EulerV2Adapter,
+                EulerV2Config,
+            )
+
+            if compiler.chain != "avalanche":
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Euler V2 is only available on Avalanche, got: {compiler.chain}",
+                    intent_id=intent.intent_id,
+                )
+
+            euler_config = EulerV2Config(
+                chain=compiler.chain,
+                wallet_address=compiler.wallet_address,
+            )
+            euler_adapter = EulerV2Adapter(euler_config)
+
+            repay_symbol = repay_token.symbol.upper()
+            repay_vault = euler_adapter.find_vault_for_asset(repay_symbol)
+
+            if not repay_vault:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Euler V2 does not have a vault for asset: {repay_symbol}. Supported: {euler_adapter.get_supported_assets()}",
+                    intent_id=intent.intent_id,
+                )
+
+            # Build approve TX for vault
+            if not intent.repay_full:
+                if repay_amount_decimal is None:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error="Euler V2 repay requires an explicit amount (or use repay_full=True)",
+                        intent_id=intent.intent_id,
+                    )
+                repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+                approve_txs = compiler._build_approve_tx(
+                    repay_token.address,
+                    repay_vault.vault_address,
+                    repay_amount_wei,
+                )
+                transactions.extend(approve_txs)
+            else:
+                # For repay_full, approve MAX_UINT256
+                approve_txs = compiler._build_approve_tx(
+                    repay_token.address,
+                    repay_vault.vault_address,
+                    EULER_MAX_UINT256,
+                )
+                transactions.extend(approve_txs)
+
+            # Build repay TX
+            repay_result = euler_adapter.repay(
+                asset=repay_symbol,
+                amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
+                repay_all=intent.repay_full,
+                vault_symbol=repay_vault.vault_symbol,
+            )
+
+            if not repay_result.success:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Euler V2 repay failed: {repay_result.error}",
+                    intent_id=intent.intent_id,
+                )
+
+            assert repay_result.tx_data is not None
+            repay_data = repay_result.tx_data["data"]
+            if not repay_data.startswith("0x"):
+                repay_data = "0x" + repay_data
+
+            amount_description = "all" if intent.repay_full else str(repay_amount_decimal)
+
+            repay_tx = TransactionData(
+                to=repay_result.tx_data["to"],
+                value=int(repay_result.tx_data.get("value", 0)),
+                data=repay_data,
+                gas_estimate=repay_result.gas_estimate,
+                description=repay_result.description,
+                tx_type="lending_repay",
+            )
+            transactions.append(repay_tx)
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+            action_bundle = ActionBundle(
+                intent_type=IntentType.REPAY.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "protocol": intent.protocol,
+                    "vault_address": repay_vault.vault_address,
+                    "repay_token": repay_token.to_dict(),
+                    "repay_amount": amount_description,
+                    "repay_full": intent.repay_full,
+                    "chain": compiler.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+            result.warnings = warnings
+
+            logger.info(
+                f"Compiled REPAY: {amount_description} {repay_token.symbol} to Euler V2, "
+                f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
+            )
+
+        # =================================================================
         elif protocol_lower == "silo_v2":
             from ..connectors.silo_v2.adapter import (
                 MAX_UINT256 as SILO_MAX_UINT256,
@@ -2006,7 +2259,7 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
         else:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi, joelend, silo_v2",
+                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
                 intent_id=intent.intent_id,
             )
 
@@ -2788,6 +3041,102 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:
             logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
 
         # =================================================================
+        # EULER V2 PATH (ERC-4626 vaults on Avalanche)
+        # =================================================================
+        elif protocol_lower == "euler_v2":
+            from ..connectors.euler_v2.adapter import (
+                EulerV2Adapter,
+                EulerV2Config,
+            )
+
+            if compiler.chain != "avalanche":
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Euler V2 is only available on Avalanche, got: {compiler.chain}",
+                    intent_id=intent.intent_id,
+                )
+
+            euler_config = EulerV2Config(
+                chain=compiler.chain,
+                wallet_address=compiler.wallet_address,
+            )
+            euler_adapter = EulerV2Adapter(euler_config)
+
+            supply_symbol = supply_token.symbol.upper()
+            supply_vault = euler_adapter.find_vault_for_asset(supply_symbol)
+
+            if not supply_vault:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Euler V2 does not have a vault for asset: {supply_symbol}. Supported: {euler_adapter.get_supported_assets()}",
+                    intent_id=intent.intent_id,
+                )
+
+            supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
+
+            # Build approve TX for vault
+            approve_txs = compiler._build_approve_tx(
+                supply_token.address,
+                supply_vault.vault_address,
+                supply_amount_wei,
+            )
+            transactions.extend(approve_txs)
+
+            # Build supply (deposit) TX
+            supply_result = euler_adapter.supply(
+                asset=supply_symbol,
+                amount=amount_decimal,
+                vault_symbol=supply_vault.vault_symbol,
+            )
+
+            if not supply_result.success:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Euler V2 supply failed: {supply_result.error}",
+                    intent_id=intent.intent_id,
+                )
+
+            assert supply_result.tx_data is not None
+            supply_data = supply_result.tx_data["data"]
+            if not supply_data.startswith("0x"):
+                supply_data = "0x" + supply_data
+
+            supply_tx = TransactionData(
+                to=supply_result.tx_data["to"],
+                value=int(supply_result.tx_data.get("value", 0)),
+                data=supply_data,
+                gas_estimate=supply_result.gas_estimate,
+                description=supply_result.description or f"Supply {amount_decimal} {supply_token.symbol} to Euler V2",
+                tx_type="lending_supply",
+            )
+            transactions.append(supply_tx)
+
+            # Build ActionBundle
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+
+            action_bundle = ActionBundle(
+                intent_type=IntentType.SUPPLY.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "protocol": intent.protocol,
+                    "vault_address": supply_vault.vault_address,
+                    "vault_symbol": supply_vault.vault_symbol,
+                    "supply_token": supply_token.to_dict(),
+                    "supply_amount": str(amount_decimal),
+                    "chain": compiler.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+            result.warnings = warnings
+
+            supply_fmt = format_token_amount(supply_amount_wei, supply_token.symbol, supply_token.decimals)
+            logger.info(f"Compiled SUPPLY: {supply_fmt} to Euler V2 vault {supply_vault.vault_symbol}")
+            logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
+
+        # =================================================================
         elif protocol_lower == "silo_v2":
             from ..connectors.silo_v2.adapter import (
                 SILO_V2_MARKETS,
@@ -2890,7 +3239,7 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:
         else:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi, joelend, silo_v2",
+                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
                 intent_id=intent.intent_id,
             )
 
@@ -3596,6 +3945,96 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
             )
 
         # =================================================================
+        # EULER V2 PATH (ERC-4626 vaults on Avalanche)
+        # =================================================================
+        elif protocol_lower == "euler_v2":
+            from ..connectors.euler_v2.adapter import (
+                EulerV2Adapter,
+                EulerV2Config,
+            )
+
+            if compiler.chain != "avalanche":
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Euler V2 is only available on Avalanche, got: {compiler.chain}",
+                    intent_id=intent.intent_id,
+                )
+
+            euler_config = EulerV2Config(
+                chain=compiler.chain,
+                wallet_address=compiler.wallet_address,
+            )
+            euler_adapter = EulerV2Adapter(euler_config)
+
+            withdraw_symbol = withdraw_token.symbol.upper()
+            withdraw_vault = euler_adapter.find_vault_for_asset(withdraw_symbol)
+
+            if not withdraw_vault:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Euler V2 does not have a vault for asset: {withdraw_symbol}. Supported: {euler_adapter.get_supported_assets()}",
+                    intent_id=intent.intent_id,
+                )
+
+            # Build withdraw TX
+            withdraw_result = euler_adapter.withdraw(
+                asset=withdraw_symbol,
+                amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
+                withdraw_all=intent.withdraw_all,
+                vault_symbol=withdraw_vault.vault_symbol,
+            )
+
+            if not withdraw_result.success:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Euler V2 withdraw failed: {withdraw_result.error}",
+                    intent_id=intent.intent_id,
+                )
+
+            amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
+
+            assert withdraw_result.tx_data is not None
+            withdraw_data = withdraw_result.tx_data["data"]
+            if not withdraw_data.startswith("0x"):
+                withdraw_data = "0x" + withdraw_data
+
+            withdraw_tx = TransactionData(
+                to=withdraw_result.tx_data["to"],
+                value=int(withdraw_result.tx_data.get("value", 0)),
+                data=withdraw_data,
+                gas_estimate=withdraw_result.gas_estimate,
+                description=withdraw_result.description
+                or f"Withdraw {amount_display} {withdraw_token.symbol} from Euler V2",
+                tx_type="lending_withdraw",
+            )
+            transactions.append(withdraw_tx)
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+
+            action_bundle = ActionBundle(
+                intent_type=IntentType.WITHDRAW.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "protocol": intent.protocol,
+                    "vault_address": withdraw_vault.vault_address,
+                    "vault_symbol": withdraw_vault.vault_symbol,
+                    "withdraw_token": withdraw_token.to_dict(),
+                    "withdraw_amount": amount_display,
+                    "withdraw_all": intent.withdraw_all,
+                    "chain": compiler.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+            result.warnings = warnings
+
+            logger.info(
+                f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Euler V2)"
+            )
+
+        # =================================================================
         elif protocol_lower == "silo_v2":
             from ..connectors.silo_v2.adapter import (
                 SILO_V2_MARKETS,
@@ -3693,7 +4132,7 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
         else:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, pendle, compound_v3, benqi, joelend, silo_v2",
+                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, pendle, compound_v3, benqi, joelend, euler_v2, silo_v2",
                 intent_id=intent.intent_id,
             )
 

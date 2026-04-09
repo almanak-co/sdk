@@ -192,6 +192,7 @@ nav:
       - api/connectors/silo_v2.md
       - api/connectors/enso.md
       - api/connectors/joelend.md
+      - api/connectors/euler_v2.md
       - api/connectors/polymarket.md
       - api/connectors/hyperliquid.md
       - api/connectors/lido.md

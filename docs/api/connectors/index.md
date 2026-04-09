@@ -33,6 +33,7 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [Silo V2](silo_v2.md) | Lending | Avalanche | `silo_v2` |
 | [Drift](drift.md) | Perpetuals | Solana | `drift` |
 | [Joe Lend](joelend.md) | Lending | Avalanche | `joelend` |
+| [Euler V2](euler_v2.md) | Lending | Avalanche | `euler_v2` |
 | [Fluid DEX](fluid.md) | DEX | Ethereum, Arbitrum | `fluid` |
 | Jupiter | DEX Aggregator | Solana | `jupiter` |
 | Jupiter Lend | Lending | Solana | `jupiter_lend` |
