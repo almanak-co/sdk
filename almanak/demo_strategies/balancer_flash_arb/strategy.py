@@ -67,7 +67,16 @@ class BalancerFlashArbStrategy(IntentStrategy):
         self.max_slippage_pct = float(self.get_config("max_slippage_pct", 1.0))
         self.base_token = self.get_config("base_token", "WETH")
         self.quote_token = self.get_config("quote_token", "USDC")
-        self.force_action = self.get_config("force_action", None)
+        # Normalize force_action once: boolean/truthy -> "swap", strings lowercased
+        raw_action = self.get_config("force_action", None)
+        if raw_action is None:
+            self.force_action = None
+        else:
+            action = str(raw_action).lower().strip()
+            if action in ("true", "1"):
+                self.force_action = "swap"
+            else:
+                self.force_action = action or None
         self._trades_executed = 0
         self._fell_back_to_swap = False
 

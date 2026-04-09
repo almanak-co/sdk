@@ -8,7 +8,7 @@
     "lp_pool": "WETH/USDC/500",
     "lp_range_width_pct": "0.20",
     "swap_slippage": "0.005",
-    "force_action": "",
+    "force_action": "supply",
     "anvil_funding": {
         "ETH": 100,
         "WETH": 0.01,

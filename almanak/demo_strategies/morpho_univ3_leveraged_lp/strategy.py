@@ -100,14 +100,18 @@ class MorphoUniV3LeveragedLPStrategy(IntentStrategy):
             return Intent.hold(reason=f"Price data unavailable: {e}")
 
     def _handle_forced_action(self, market: MarketSnapshot) -> Intent | None:
-        action = self._force_action
+        action = str(self._force_action).lower().strip()
         self._force_action = ""  # Clear after use
+
+        # Normalize boolean true to default action (supply starts the cycle)
+        if action in ("true", "1"):
+            action = "supply"
 
         if action == "supply":
             return self._start_supply()
         elif action == "borrow":
             return self._start_borrow(market)
-        elif action == "lp_open":
+        elif action in ("lp_open", "open"):
             return self._open_lp(market)
         else:
             logger.warning(f"Unknown force_action: {action}")

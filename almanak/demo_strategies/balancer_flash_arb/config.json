@@ -3,7 +3,7 @@
     "max_slippage_pct": 1.0,
     "base_token": "WETH",
     "quote_token": "USDC",
-    "force_action": null,
+    "force_action": "swap",
     "anvil_funding": {
         "ETH": 100,
         "WETH": 1,
