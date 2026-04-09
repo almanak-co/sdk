@@ -556,9 +556,21 @@ class GatewayServer:
             logger.warning("Cannot pre-warm: execution servicer not available")
             return
 
+        # VIB-2580: In single-chain Anvil mode, only pre-warm the configured chain.
+        # Warming all registry chains triggers RPC calls to non-running Anvil ports
+        # (e.g., port 8548 for Base when only Arbitrum/8545 is running), producing
+        # ERROR-level "Cannot connect to host" log entries that obscure real issues.
+        configured_chains = set(self.settings.chains) if self.settings.chains else set()
+        is_anvil_mode = self.settings.network == "anvil"
+
         # Registry-aware branch: iterate wallet_registry chains
         if self._wallet_registry is not None:
             for chain in self._wallet_registry.all_chains():
+                # Skip non-configured chains in Anvil mode to avoid connecting to
+                # Anvil ports that aren't running
+                if is_anvil_mode and configured_chains and chain not in configured_chains:
+                    logger.debug(f"Skipping non-configured chain {chain} in Anvil mode")
+                    continue
                 try:
                     resolved = self._wallet_registry.resolve(chain)
                     # Skip Solana chains

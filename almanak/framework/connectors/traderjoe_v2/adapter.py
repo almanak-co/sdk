@@ -665,7 +665,7 @@ class TraderJoeV2Adapter:
         bin_step: int = 20,
         bin_range: int = 10,
         slippage_bps: int | None = None,
-        id_slippage: int = 5,
+        id_slippage: int = 50,
     ) -> TransactionData:
         """Build an add liquidity transaction.
 
@@ -679,6 +679,10 @@ class TraderJoeV2Adapter:
             bin_step: Bin step of the pool
             bin_range: Number of bins on each side of active bin
             slippage_bps: Slippage tolerance in basis points
+            id_slippage: Allowed deviation in active bin ID between pool query
+                and TX execution. Default 50 (was 5, increased to handle
+                Avalanche's high throughput where bins shift between
+                simulation and execution). VIB-2579.
 
         Returns:
             TransactionData ready for signing and execution

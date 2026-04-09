@@ -61,6 +61,7 @@ class SolanaSwapStrategy(IntentStrategy):
                 to_token=to_token,
                 amount=amount,
                 max_slippage=max_slippage,
+                protocol="jupiter",
             )
         except Exception as e:
             logger.exception(f"Error in decide(): {e}")
@@ -125,5 +126,6 @@ class SolanaSwapStrategy(IntentStrategy):
                 to_token=to_token,
                 amount="all",
                 max_slippage=max_slippage,
+                protocol="jupiter",
             )
         ]

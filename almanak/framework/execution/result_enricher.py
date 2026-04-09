@@ -200,6 +200,13 @@ class ResultEnricher:
             f"chain={context.chain}, fields={spec}"
         )
 
+        # VIB-2581: Skip enrichment for Solana chains when no Solana-specific parser
+        # exists. Without this guard, Solana TXs (with string instruction logs) get routed
+        # to EVM parsers (expecting dict logs with 'topics'), producing 40+ warnings like
+        # "Failed to parse log: 'str' object has no attribute 'get'".
+        chain_str = str(getattr(context, "chain", "")).lower()
+        is_solana = "solana" in chain_str
+
         # Get parser for protocol
         try:
             parser = self.parser_registry.get(protocol, chain=context.chain)
@@ -207,6 +214,23 @@ class ResultEnricher:
             warning = f"Parser not found for {protocol}: {e}"
             logger.info(warning)
             result.extraction_warnings.append(warning)
+            return result
+
+        # Guard: don't run EVM parsers on Solana receipts
+        parser_name = type(parser).__name__.lower()
+        solana_parsers = {
+            "jupiterreceiptparser",
+            "kaminoreceiptparser",
+            "raydiumreceiptparser",
+            "meteorareceiptparser",
+            "orcareceiptparser",
+            "jupiterlendreceiptparser",
+        }
+        if is_solana and parser_name not in solana_parsers:
+            logger.debug(
+                f"Enrichment skipped: EVM parser {type(parser).__name__} is not compatible "
+                f"with Solana chain receipts (protocol={protocol})"
+            )
             return result
         logger.debug(f"Enrichment: using parser {type(parser).__name__} for protocol={protocol}")
 

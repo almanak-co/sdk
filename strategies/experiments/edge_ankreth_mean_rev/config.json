@@ -1,0 +1,21 @@
+{
+    "signal_id": "92e14fed-96ac-4b3c-9ae3-d4b4bde1203c",
+    "signal_type": "HIGH_CONVICTION_SYNTHESIS",
+
+    "sell_token": "0xE95A203B1a91a908F9B9CE46459d101078c2c3cb",
+    "sell_token_address": "0xE95A203B1a91a908F9B9CE46459d101078c2c3cb",
+    "buy_token": "WETH",
+    "sell_amount": "0.001",
+
+    "peg_ratio": "1.05",
+    "min_premium_pct": "10.0",
+    "stop_loss_pct": "-0.075",
+    "time_horizon_hours": 72,
+    "max_slippage_bps": 50,
+
+    "anvil_funding": {
+        "ETH": 1,
+        "WETH": 1,
+        "0xE95A203B1a91a908F9B9CE46459d101078c2c3cb": 0.01
+    }
+}

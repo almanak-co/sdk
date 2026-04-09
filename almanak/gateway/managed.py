@@ -421,11 +421,16 @@ class ManagedGateway:
                 native_amount = native_amounts.get(chain_native, Decimal("0")) if chain_native else Decimal("0")
                 if native_amount > 0:
                     await manager.fund_wallet(wallet, native_amount)
+                    logger.info(f"Funded native {chain_native}: {native_amount}")
                 if erc20_tokens:
+                    # VIB-2570: Log each ERC20 token being funded so failures are traceable
+                    logger.info(f"Funding ERC20 tokens on {chain}: {list(erc20_tokens.keys())}")
                     await manager.fund_tokens(wallet, erc20_tokens)
                 logger.info(f"Anvil funding complete for {chain}")
             except Exception as e:
-                logger.warning(f"Anvil funding failed for {chain}: {e}")
+                # VIB-2570: Log at ERROR (not WARNING) when funding fails after restart —
+                # the strategy WILL fail with INSUFFICIENT_FUNDS if this is not resolved.
+                logger.error(f"Anvil funding failed for {chain}: {e}")
 
     async def _stop_anvil_forks(self, *, force: bool = False) -> None:
         """Stop all managed Anvil fork instances and restore env vars.
@@ -494,8 +499,15 @@ class ManagedGateway:
                     try:
                         ok = await manager.reset_to_latest()
                         if ok:
+                            # VIB-2570: Re-fund ALL tokens (native + ERC20) after restart.
+                            # anvil_reset / stop-start resets the fork to mainnet state,
+                            # losing all storage-slot-manipulated ERC20 balances.
+                            logger.info(
+                                "Anvil fork for %s reset. Re-funding wallet (native + ERC20)...",
+                                chain,
+                            )
                             await self._fund_anvil_wallets(chains=[chain])
-                            logger.info("Anvil fork for %s restarted successfully", chain)
+                            logger.info("Anvil fork for %s restarted and re-funded successfully", chain)
                         else:
                             logger.error("Failed to restart Anvil fork for %s", chain)
                     except Exception:

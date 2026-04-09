@@ -1910,7 +1910,10 @@ def run(
         else:
             strategy_config["wallet_address"] = runtime_config.execution_address
 
-    # Handle --fresh flag: clear state for this strategy only
+    # Handle --fresh flag: clear state to prevent cross-strategy contamination
+    # VIB-2573: On Anvil, clear ALL strategy state (not just current strategy)
+    # to prevent TokenNotFoundError from stale state referencing wrong-chain tokens.
+    # On mainnet, only clear the current strategy's state (preserve other strategies).
     strategy_id = strategy_config["strategy_id"]
     if fresh:
         state_db_path = Path(os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db")
@@ -1918,18 +1921,27 @@ def run(
             try:
                 import sqlite3
 
+                is_anvil = gateway_network == "anvil"
                 with sqlite3.connect(str(state_db_path)) as conn:
-                    cursor = conn.execute(
-                        "DELETE FROM strategy_state WHERE strategy_id = ?",
-                        (strategy_id,),
-                    )
-                    deleted = cursor.rowcount
-                    # Also clear teardown requests for this strategy
-                    try:
-                        teardown_cursor = conn.execute(
-                            "DELETE FROM teardown_requests WHERE strategy_id = ?",
+                    if is_anvil:
+                        # Clear ALL state on Anvil — previous strategy runs on
+                        # different chains leave state that can contaminate the gateway
+                        cursor = conn.execute("DELETE FROM strategy_state")
+                    else:
+                        cursor = conn.execute(
+                            "DELETE FROM strategy_state WHERE strategy_id = ?",
                             (strategy_id,),
                         )
+                    deleted = cursor.rowcount
+                    # Also clear teardown requests
+                    try:
+                        if is_anvil:
+                            teardown_cursor = conn.execute("DELETE FROM teardown_requests")
+                        else:
+                            teardown_cursor = conn.execute(
+                                "DELETE FROM teardown_requests WHERE strategy_id = ?",
+                                (strategy_id,),
+                            )
                         teardown_deleted = teardown_cursor.rowcount
                     except sqlite3.OperationalError:
                         teardown_deleted = 0  # Table may not exist
@@ -1939,8 +1951,9 @@ def run(
                         parts.append("state")
                     if teardown_deleted > 0:
                         parts.append("teardown requests")
+                    scope = "all strategies" if is_anvil else f"strategy '{strategy_id}'"
                     click.secho(
-                        f"Cleared {' and '.join(parts)} for strategy '{strategy_id}' (--fresh flag)",
+                        f"Cleared {' and '.join(parts)} for {scope} (--fresh flag)",
                         fg="yellow",
                     )
                 else:

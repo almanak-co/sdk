@@ -336,7 +336,11 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 stale=result.stale,
             )
         except Exception as e:
-            logger.error(f"GetBalance failed for {token} on {chain}: {e}")
+            # VIB-2580: In single-chain Anvil mode, balance queries for non-running
+            # chains are expected failures. Downgrade to WARNING to avoid noise.
+            is_connection_error = "Cannot connect to host" in str(e)
+            log_fn = logger.warning if is_connection_error else logger.error
+            log_fn(f"GetBalance failed for {token} on {chain}: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return gateway_pb2.BalanceResponse()

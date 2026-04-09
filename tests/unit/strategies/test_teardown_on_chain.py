@@ -91,6 +91,16 @@ KNOWN_VIOLATIONS: set[str] = {
     "strategies/incubating/uniswap_v3_lp_bsc/strategy.py",
     "strategies/incubating/uniswap_v3_mantle/strategy.py",
     "strategies/incubating/velodrome_lp_optimism/strategy.py",
+    # Grandfathered from merged PRs (incubating strategies from Edge generator)
+    "strategies/incubating/avax_ausd_usdt_joe_lp/strategy.py",
+    "strategies/incubating/avax_usdt_aave_yield/strategy.py",
+    "strategies/incubating/edge_gov_aave_supply/strategy.py",
+    "strategies/incubating/edge_hcs_avax_usdc_aave_euler/strategy.py",
+    "strategies/incubating/edge_lending_arb_sonic_usdc/strategy.py",
+    "strategies/incubating/edge_lp_avax_wavax_usdc_v2/strategy.py",
+    "strategies/incubating/edge_sol_kamino_xbtc_supply/strategy.py",
+    "strategies/incubating/edge_sol_raydium_usds_lp/strategy.py",
+    "strategies/incubating/edge_sol_raydium_usds_lp_root_copy/strategy.py",
 }
 
 
