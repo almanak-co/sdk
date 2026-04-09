@@ -84,13 +84,13 @@ PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
     },
     "morpho": {
         "supports_interest_rate_mode": False,
-        "supports_collateral_toggle": False,
+        "supports_collateral_toggle": True,  # Morpho Blue supports both collateral and loan-token supply
         "requires_market_id": True,
         "operations": ["supply", "withdraw", "borrow", "repay"],
     },
     "morpho_blue": {
         "supports_interest_rate_mode": False,
-        "supports_collateral_toggle": False,
+        "supports_collateral_toggle": True,  # Morpho Blue supports both collateral and loan-token supply
         "requires_market_id": True,
         "operations": ["supply", "withdraw", "borrow", "repay"],
     },
@@ -1117,6 +1117,8 @@ class Intent:
         withdraw_all: bool = False,
         market_id: str | None = None,
         chain: str | None = None,
+        *,
+        is_collateral: bool = True,
     ) -> WithdrawIntent:
         """Create a withdraw intent.
 
@@ -1125,6 +1127,9 @@ class Intent:
             token: Token to withdraw
             amount: Amount to withdraw, or "all" to use previous step output
             withdraw_all: If True, withdraw all available balance
+            is_collateral: For Morpho Blue: True withdraws collateral, False withdraws
+                loan token (e.g., USDC lent to earn interest). Default True.
+                Other protocols ignore this field.
             market_id: Market identifier for isolated lending protocols (e.g., Morpho Blue).
                 Required for morpho/morpho_blue, ignored for aave_v3.
             chain: Target chain for execution (defaults to strategy's primary chain)
@@ -1154,6 +1159,7 @@ class Intent:
             token=token,
             amount=amount,
             withdraw_all=withdraw_all,
+            is_collateral=is_collateral,
             market_id=market_id,
             chain=chain,
         )

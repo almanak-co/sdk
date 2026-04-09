@@ -1571,12 +1571,26 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:
             )
             transactions.extend(approve_txs)
 
-            # Build supply collateral TX via Morpho adapter
-            tx_result = morpho_adapter.supply_collateral(
-                market_id=intent.market_id,
-                amount=amount_decimal,
-                on_behalf_of=compiler.wallet_address,
-            )
+            # Morpho Blue has two supply paths:
+            # - supply() for loan-token deposits (lending to earn interest)
+            # - supply_collateral() for collateral deposits (to enable borrowing)
+            # Route based on use_as_collateral flag: True -> collateral, False -> loan-token
+            if intent.use_as_collateral:
+                tx_result = morpho_adapter.supply_collateral(
+                    market_id=intent.market_id,
+                    amount=amount_decimal,
+                    on_behalf_of=compiler.wallet_address,
+                )
+                tx_type_label = "lending_supply_collateral"
+                description_suffix = "as collateral"
+            else:
+                tx_result = morpho_adapter.supply(
+                    market_id=intent.market_id,
+                    amount=amount_decimal,
+                    on_behalf_of=compiler.wallet_address,
+                )
+                tx_type_label = "lending_supply"
+                description_suffix = "as loan token"
 
             if not tx_result.success:
                 return CompilationResult(
@@ -1591,8 +1605,9 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:
                 value=tx_result.tx_data["value"],
                 data=tx_result.tx_data["data"],
                 gas_estimate=tx_result.gas_estimate,
-                description=tx_result.description or f"Supply {amount_decimal} {supply_token.symbol} to Morpho Blue",
-                tx_type="lending_supply_collateral",
+                description=tx_result.description
+                or f"Supply {amount_decimal} {supply_token.symbol} to Morpho Blue {description_suffix}",
+                tx_type=tx_type_label,
             )
             transactions.append(supply_tx)
 
@@ -2220,14 +2235,31 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
             )
             morpho_adapter = MorphoBlueAdapter(morpho_config)
 
-            # Build withdraw collateral TX
-            withdraw_result: Any = morpho_adapter.withdraw_collateral(
-                market_id=intent.market_id,
-                amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
-                receiver=compiler.wallet_address,
-                on_behalf_of=compiler.wallet_address,
-                withdraw_all=intent.withdraw_all,
-            )
+            # Morpho Blue has two withdraw paths (mirrors supply):
+            # - withdraw_collateral() for collateral withdrawals
+            # - withdraw() for loan-token withdrawals (lender reclaiming supplied funds)
+            # Route based on is_collateral flag (default True for backward compat)
+            amount_for_adapter = withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0")
+            if intent.is_collateral:
+                withdraw_result: Any = morpho_adapter.withdraw_collateral(
+                    market_id=intent.market_id,
+                    amount=amount_for_adapter,
+                    receiver=compiler.wallet_address,
+                    on_behalf_of=compiler.wallet_address,
+                    withdraw_all=intent.withdraw_all,
+                )
+                tx_type_label = "lending_withdraw_collateral"
+                description_suffix = "collateral"
+            else:
+                withdraw_result = morpho_adapter.withdraw(
+                    market_id=intent.market_id,
+                    amount=amount_for_adapter,
+                    receiver=compiler.wallet_address,
+                    on_behalf_of=compiler.wallet_address,
+                    withdraw_all=intent.withdraw_all,
+                )
+                tx_type_label = "lending_withdraw"
+                description_suffix = "loan token"
 
             if not withdraw_result.success:
                 return CompilationResult(
@@ -2245,8 +2277,8 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
                 data=withdraw_result.tx_data["data"],
                 gas_estimate=withdraw_result.gas_estimate,
                 description=withdraw_result.description
-                or f"Withdraw {amount_display} {withdraw_token.symbol} from Morpho Blue",
-                tx_type="lending_withdraw_collateral",
+                or f"Withdraw {amount_display} {withdraw_token.symbol} {description_suffix} from Morpho Blue",
+                tx_type=tx_type_label,
             )
             transactions.append(withdraw_tx)
 

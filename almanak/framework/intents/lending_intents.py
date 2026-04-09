@@ -383,6 +383,9 @@ class WithdrawIntent(AlmanakImmutableModel):
     token: str
     amount: PydanticChainedAmount
     withdraw_all: bool = False
+    is_collateral: bool = True
+    """For Morpho Blue: True withdraws collateral, False withdraws loan token.
+    Other protocols ignore this field. Defaults to True for backward compat."""
     market_id: str | None = None
     chain: str | None = None
     intent_id: str = Field(default_factory=default_intent_id)
