@@ -920,6 +920,27 @@ ALCHEMY_API_KEY=<your-alchemy-key>
 # ALMANAK_API_KEY=<key>
 ```
 
+### token_funding (recommended, will be required)
+
+Structured list declaring exactly which tokens the strategy needs to be funded before the first tick.
+Each entry specifies the token symbol, on-chain address, amount, and how to interpret the amount.
+`strat new` generates this automatically when the template includes token fields.
+
+```json
+"token_funding": [
+    {"symbol": "WETH", "address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", "chain": "arbitrum", "amount": "1", "amount_type": "token"},
+    {"symbol": "USDC", "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "amount": "5000", "amount_type": "usd"}
+]
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `symbol` | yes | Token symbol (e.g. "WETH") |
+| `address` | yes | ERC-20 contract address |
+| `chain` | no | Defaults to strategy chain |
+| `amount` | yes | Quantity (string to preserve precision) |
+| `amount_type` | yes | `"token"` (native units), `"usd"` (dollar value), or `"percentage"` (of held balance) |
+
 ### anvil_funding
 
 When running on Anvil (`--network anvil`), the framework auto-funds the wallet

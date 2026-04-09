@@ -230,6 +230,21 @@ def find_strategy_dir(strategy_name: str) -> Path | None:
     return None
 
 
+def _warn_missing_token_funding(config: dict[str, Any], config_path: Path) -> None:
+    """Emit a warning if the config lacks a ``token_funding`` field."""
+    if "token_funding" in config:
+        return
+    # Skip for intentionally dynamic strategies (e.g. copy_trader)
+    if "copy_trading" in config:
+        return
+    click.echo(
+        f'  Warning: {config_path.name} is missing a "token_funding" field. '
+        "This will be required in a future release. "
+        "Run `almanak strat new` to see the expected format.",
+        err=True,
+    )
+
+
 def load_strategy_config(
     strategy_name: str,
     config_file: str | None = None,
@@ -257,6 +272,7 @@ def load_strategy_config(
             with open(config_path) as f:
                 config = json.load(f)
         click.echo(f"Loaded config from: {config_path}")
+        _warn_missing_token_funding(config, config_path)
         return config
 
     # Search for config in standard locations
@@ -268,6 +284,7 @@ def load_strategy_config(
             with open(config_path) as f:
                 config = json.load(f)
             click.echo(f"Loaded config from: {config_path}")
+            _warn_missing_token_funding(config, config_path)
             return config
 
         # Try YAML
@@ -279,6 +296,7 @@ def load_strategy_config(
                 with open(config_path) as f:
                     config = yaml.safe_load(f)
                 click.echo(f"Loaded config from: {config_path}")
+                _warn_missing_token_funding(config, config_path)
                 return config
 
     # Return minimal default config with generated UUID

@@ -73,6 +73,13 @@ _CHAIN_NATIVE_FUNDING: dict[str, dict[str, object]] = {
 
 _DEFAULT_ANVIL_FUNDING: dict[str, object] = {"ETH": 10, "WETH": 5, "USDC": 10000}
 
+# Default token_funding example — strategy authors should replace the placeholder
+# addresses with the correct on-chain addresses for their target chain.
+_DEFAULT_TOKEN_FUNDING: list[dict[str, str]] = [
+    {"symbol": "WETH", "address": "0x0000000000000000000000000000000000000000", "amount": "1", "amount_type": "token"},
+    {"symbol": "USDC", "address": "0x0000000000000000000000000000000000000000", "amount": "5000", "amount_type": "usd"},
+]
+
 # Template configurations with sensible defaults
 TEMPLATE_CONFIGS: dict[StrategyTemplate, TemplateConfig] = {
     StrategyTemplate.BLANK: TemplateConfig(
@@ -2406,6 +2413,11 @@ def generate_config_json(
                 "trade_size_usd": "100",
             }
         )
+
+    # Add token_funding example for all templates (except COPY_TRADER which discovers tokens dynamically).
+    # Strategy authors should replace placeholder addresses with correct on-chain addresses.
+    if template != StrategyTemplate.COPY_TRADER and "token_funding" not in data:
+        data["token_funding"] = _DEFAULT_TOKEN_FUNDING
 
     # Add anvil_funding for all templates (unless already set).
     # This ensures `almanak strat run --network anvil` funds the wallet automatically.
