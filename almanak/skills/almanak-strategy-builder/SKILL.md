@@ -1258,6 +1258,7 @@ class MyStrategy(IntentStrategy):
 | MetaMorpho | `METAMORPHO` | Lending | `metamorpho` |
 | Radiant V2 | `RADIANT_V2` | Lending | `radiant_v2` |
 | LiFi | `LIFI` | Bridge | `lifi` |
+| BenQi | `BENQI` | Lending | `benqi` |
 | Vault | `VAULT` | ERC-4626 | `vault` |
 | Curve | `CURVE` | DEX / LP | `curve` |
 | Balancer | `BALANCER` | DEX / LP | `balancer` |

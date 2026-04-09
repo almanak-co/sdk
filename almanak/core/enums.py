@@ -168,6 +168,7 @@ class Protocol(Enum):
     METAMORPHO = "METAMORPHO"
     RADIANT_V2 = "RADIANT_V2"
     LIFI = "LIFI"
+    BENQI = "BENQI"
 
 
 class Network(Enum):
