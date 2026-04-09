@@ -176,7 +176,9 @@ class CompoundV3PnLBacktestStrategy(IntentStrategy):
         try:
             rate = market.lending_rate("compound_v3", self.supply_token, "supply")
             if rate is not None:
-                return Decimal(str(rate)), True
+                # rate is a LendingRate dataclass; apy_percent is e.g. 3.25 for 3.25%
+                apy_fraction = Decimal(str(rate.apy_percent)) / Decimal("100")
+                return apy_fraction, True
         except (AttributeError, NotImplementedError):
             # Expected in PnL backtester context where lending_rate() is not wired up.
             logger.debug("lending_rate() not available in this context (backtester)")

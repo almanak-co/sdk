@@ -47,6 +47,8 @@ class TestGetFallbackTeardownPrices:
         assert result["WETH"] == Decimal("3500")
         # WBTC is NOT in the unconditional fetch list — only native/wrapped tokens
         assert "WBTC" not in result
+        called_symbols = [call.args[0] for call in market.price.call_args_list]
+        assert "WBTC" not in called_symbols
         # Stablecoins still present
         assert result["USDC"] == Decimal("1")
 

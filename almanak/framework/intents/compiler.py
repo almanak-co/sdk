@@ -527,11 +527,14 @@ class IntentCompiler:
             # Suppress placeholder price warning for intent types that don't use prices.
             # STAKE/UNSTAKE amounts are in native units, not USD, so no price conversion needed.
             # HOLD is a no-op with no transactions.
+            # VAULT_DEPOSIT/VAULT_REDEEM use ERC-4626 on-chain reads, no price oracle needed.
             _price_irrelevant = intent_type in (
                 IntentType.STAKE,
                 IntentType.UNSTAKE,
                 IntentType.HOLD,
                 IntentType.UNWRAP_NATIVE,
+                IntentType.VAULT_DEPOSIT,
+                IntentType.VAULT_REDEEM,
             )
             if self._using_placeholders and not self._placeholder_warning_logged and not _price_irrelevant:
                 logger.warning(
