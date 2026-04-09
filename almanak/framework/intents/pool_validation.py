@@ -304,6 +304,9 @@ def validate_aerodrome_cl_pool(
 
 _SLOT0_SELECTOR = "0x3850c7bd"
 
+# TraderJoe V2 LBPair getReserves() selector
+_TRADERJOE_GET_RESERVES_SELECTOR = "0x0902f1ac"
+
 
 def fetch_v3_pool_sqrt_price_x96(pool_address: str, rpc_url: str) -> tuple[int, int] | None:
     """Fetch sqrtPriceX96 and current tick from a Uniswap V3-compatible pool's slot0().
@@ -345,6 +348,8 @@ def validate_traderjoe_pool(
     token_y: str,
     bin_step: int,
     rpc_url: str | None,
+    *,
+    allow_empty_reserves: bool = False,
 ) -> PoolValidationResult:
     """Validate that a TraderJoe V2 LBPair pool exists on-chain.
 
@@ -356,6 +361,8 @@ def validate_traderjoe_pool(
         token_y: Token Y address.
         bin_step: Bin step of the pair (e.g. 20).
         rpc_url: RPC URL for on-chain query. If None, returns unknown.
+        allow_empty_reserves: If True, skip the zero-liquidity check. Set True
+            for LP_OPEN flows where seeding an empty pool is valid.
 
     Returns:
         PoolValidationResult with exists=True/False/None.
@@ -414,5 +421,23 @@ def validate_traderjoe_pool(
                 f"The pool may not exist or may use a different bin step."
             ),
         )
+
+    # Pool address exists in factory — verify it has actual liquidity.
+    # Skip for LP_OPEN where seeding an empty pool is valid.
+    # getReserves() selector: 0x0902f1ac
+    if not allow_empty_reserves:
+        reserves_raw = _eth_call(rpc_url, pool_address, _TRADERJOE_GET_RESERVES_SELECTOR)
+        if reserves_raw is not None and len(reserves_raw) >= 64:
+            reserve_x = int.from_bytes(reserves_raw[0:32], "big")
+            reserve_y = int.from_bytes(reserves_raw[32:64], "big")
+            if reserve_x == 0 and reserve_y == 0:
+                return PoolValidationResult(
+                    exists=False,
+                    error=(
+                        f"TraderJoe V2 pool exists for "
+                        f"{token_x[:10]}.../{token_y[:10]}... with bin step {bin_step} on {chain}, "
+                        f"but has zero liquidity. The swap would revert on-chain."
+                    ),
+                )
 
     return PoolValidationResult(exists=True, pool_address=pool_address)

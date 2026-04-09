@@ -798,6 +798,18 @@ CRVUSD = Token(
     is_stablecoin=True,
 )
 
+# Agora USD (AUSD) — stablecoin on Avalanche used in Euler V2 and Joe V2 LP signals
+AUSD = Token(
+    symbol="AUSD",
+    name="Agora USD",
+    decimals=6,
+    addresses={
+        "avalanche": "0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a",
+    },
+    coingecko_id="agora-dollar",
+    is_stablecoin=True,
+)
+
 # =============================================================================
 # LIQUID STAKING TOKENS (LST/LRT)
 # =============================================================================
@@ -1560,6 +1572,7 @@ DEFAULT_TOKENS: list[Token] = [
     sUSDe,
     GHO,
     CRVUSD,
+    AUSD,
     # LST/LRT tokens
     wstETH,
     stETH,
@@ -1741,6 +1754,7 @@ __all__ = [
     "sUSDe",
     "GHO",
     "CRVUSD",
+    "AUSD",
     # LST/LRT tokens
     "wstETH",
     "stETH",

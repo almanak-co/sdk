@@ -196,7 +196,10 @@ class TestTraderJoePoolValidation:
         pool_addr_word = bytes(12) + bytes.fromhex("abcdef1234567890abcdef1234567890abcdef12")
         third_word = bytes(32)  # createdByOwner
         fourth_word = bytes(32)  # ignoredForRouting
-        mock_eth_call.return_value = first_word + pool_addr_word + third_word + fourth_word
+        factory_response = first_word + pool_addr_word + third_word + fourth_word
+        # Second call is getReserves() — return non-zero reserves
+        reserves_response = (1000).to_bytes(32, byteorder="big") + (2000).to_bytes(32, byteorder="big")
+        mock_eth_call.side_effect = [factory_response, reserves_response]
         result = validate_traderjoe_pool(
             "avalanche",
             "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
@@ -207,9 +210,54 @@ class TestTraderJoePoolValidation:
         assert result.exists is True
         assert result.pool_address is not None
 
-        # Ensure selector matches getLBPairInformation(address,address,uint256)
-        _, _, calldata = mock_eth_call.call_args.args
+        # Ensure first call selector matches getLBPairInformation(address,address,uint256)
+        _, _, calldata = mock_eth_call.call_args_list[0].args
         assert calldata.startswith("0x704037bd")
+        # Ensure second call is getReserves() on the discovered pool address
+        _, reserves_to, reserves_calldata = mock_eth_call.call_args_list[1].args
+        assert reserves_calldata == "0x0902f1ac"
+        assert reserves_to.lower() == "0xabcdef1234567890abcdef1234567890abcdef12"
+
+    @patch("almanak.framework.intents.pool_validation._eth_call")
+    def test_zero_liquidity_pool_returns_false(self, mock_eth_call):
+        """Pool exists in factory but has zero reserves — should fail validation."""
+        first_word = (1).to_bytes(32, byteorder="big")  # binStep=1
+        pool_addr_word = bytes(12) + bytes.fromhex("abcdef1234567890abcdef1234567890abcdef12")
+        third_word = bytes(32)
+        fourth_word = bytes(32)
+        factory_response = first_word + pool_addr_word + third_word + fourth_word
+        # getReserves() returns zero reserves
+        reserves_response = (0).to_bytes(32, byteorder="big") + (0).to_bytes(32, byteorder="big")
+        mock_eth_call.side_effect = [factory_response, reserves_response]
+        result = validate_traderjoe_pool(
+            "avalanche",
+            "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+            "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
+            1,
+            "http://localhost:8545",
+        )
+        assert result.exists is False
+        assert "zero liquidity" in result.error
+
+    @patch("almanak.framework.intents.pool_validation._eth_call")
+    def test_reserves_rpc_failure_still_passes(self, mock_eth_call):
+        """If getReserves() RPC fails, pool should still pass (factory confirmed it exists)."""
+        first_word = (20).to_bytes(32, byteorder="big")
+        pool_addr_word = bytes(12) + bytes.fromhex("abcdef1234567890abcdef1234567890abcdef12")
+        third_word = bytes(32)
+        fourth_word = bytes(32)
+        factory_response = first_word + pool_addr_word + third_word + fourth_word
+        # getReserves() call fails (returns None)
+        mock_eth_call.side_effect = [factory_response, None]
+        result = validate_traderjoe_pool(
+            "avalanche",
+            "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+            "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
+            20,
+            "http://localhost:8545",
+        )
+        assert result.exists is True
+        assert result.pool_address is not None
 
 
 class TestEncodingHelpers:

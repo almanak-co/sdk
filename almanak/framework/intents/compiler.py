@@ -2910,7 +2910,12 @@ class IntentCompiler:
             from .pool_validation import validate_traderjoe_pool
 
             pool_check = validate_traderjoe_pool(
-                self.chain, token_x_addr, token_y_addr, bin_step, self._get_chain_rpc_url()
+                self.chain,
+                token_x_addr,
+                token_y_addr,
+                bin_step,
+                self._get_chain_rpc_url(),
+                allow_empty_reserves=True,  # LP_OPEN can seed empty pools
             )
             failed = self._validate_pool(pool_check, intent.intent_id)
             if failed is not None:

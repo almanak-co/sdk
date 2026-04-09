@@ -184,6 +184,11 @@ PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
         "supports_collateral_toggle": False,
         "operations": ["supply", "withdraw", "borrow", "repay"],
     },
+    "joelend": {
+        "supports_interest_rate_mode": False,
+        "supports_collateral_toggle": True,
+        "operations": ["supply", "withdraw", "borrow", "repay"],
+    },
 }
 
 
