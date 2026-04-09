@@ -589,9 +589,9 @@ def build_teardown_compiler(
     fetched: dict[str, Decimal] | None = None
     if market is not None and hasattr(market, "get_price_oracle_dict"):
         fetched = market.get_price_oracle_dict()
-    # Merge fallback prices (stablecoins + major tokens) into the fetched
-    # oracle.  This ensures partially-populated caches (e.g. only USDC)
-    # still get WETH/WBTC fallback prices instead of $1 placeholders.
+    # Merge fallback prices (stablecoins + native/wrapped tokens) into the
+    # fetched oracle.  This ensures partially-populated caches (e.g. only USDC)
+    # still get WETH fallback prices instead of $1 placeholders.
     fallback = get_fallback_teardown_prices(market)
     merged = {**(fallback or {}), **(fetched if fetched is not None else {})}
     price_oracle = merged if merged else None
@@ -714,7 +714,7 @@ def get_fallback_teardown_prices(market: Any) -> dict[str, Decimal] | None:
     chain = getattr(market, "_chain", None) or getattr(market, "chain", None)
     native = NATIVE_TOKEN_SYMBOLS.get(str(chain).lower(), "ETH") if chain else "ETH"
     wrapped = _NATIVE_TO_WRAPPED.get(native, f"W{native}")
-    tokens_to_fetch = (native, wrapped, "WBTC")
+    tokens_to_fetch = (native, wrapped)
 
     # Try to get real prices from the market one more time — the gateway
     # may have recovered since the prefetch attempt.
