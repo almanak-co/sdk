@@ -1259,6 +1259,7 @@ class MyStrategy(IntentStrategy):
 | Radiant V2 | `RADIANT_V2` | Lending | `radiant_v2` |
 | LiFi | `LIFI` | Bridge | `lifi` |
 | BenQi | `BENQI` | Lending | `benqi` |
+| Joe Lend | `JOE_LEND` | Lending | `joelend` |
 | Vault | `VAULT` | ERC-4626 | `vault` |
 | Curve | `CURVE` | DEX / LP | `curve` |
 | Balancer | `BALANCER` | DEX / LP | `balancer` |

@@ -190,6 +190,7 @@ nav:
       - api/connectors/benqi.md
       - api/connectors/compound_v3.md
       - api/connectors/enso.md
+      - api/connectors/joelend.md
       - api/connectors/polymarket.md
       - api/connectors/hyperliquid.md
       - api/connectors/lido.md
