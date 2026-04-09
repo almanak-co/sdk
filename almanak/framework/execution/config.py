@@ -200,6 +200,7 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
     },  # SushiSwap V3 DEX — avalanche excluded: zero usable liquidity (VIB-2069)
     "benqi": {"avalanche"},  # BENQI (Compound V2 fork) on Avalanche
     "joelend": {"avalanche"},  # Joe Lend / Banker Joe (Compound V2 fork) on Avalanche
+    "silo_v2": {"avalanche"},  # Silo V2 isolated lending on Avalanche
 }
 
 

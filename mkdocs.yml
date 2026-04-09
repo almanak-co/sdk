@@ -189,6 +189,7 @@ nav:
       - api/connectors/balancer.md
       - api/connectors/benqi.md
       - api/connectors/compound_v3.md
+      - api/connectors/silo_v2.md
       - api/connectors/enso.md
       - api/connectors/joelend.md
       - api/connectors/polymarket.md

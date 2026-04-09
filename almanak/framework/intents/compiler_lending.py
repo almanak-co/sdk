@@ -966,12 +966,161 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
             logger.info(f"   Protocol: Joe Lend | Txs: {len(transactions)} | Gas: {total_gas:,}")
 
         # =================================================================
+        # SILO V2 PATH (Isolated lending on Avalanche)
+        # =================================================================
+        elif protocol_lower == "silo_v2":
+            from ..connectors.silo_v2.adapter import (
+                SILO_V2_MARKETS,
+                SiloV2Adapter,
+                SiloV2Config,
+            )
+
+            if compiler.chain != "avalanche":
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Silo V2 is only available on Avalanche, got: {compiler.chain}",
+                    intent_id=intent.intent_id,
+                )
+
+            silo_config = SiloV2Config(
+                chain=compiler.chain,
+                wallet_address=compiler.wallet_address,
+            )
+            silo_adapter = SiloV2Adapter(silo_config)
+
+            collateral_symbol = collateral_token.symbol.upper()
+            borrow_symbol = borrow_token.symbol.upper()
+
+            sv2_market = silo_adapter.find_market(collateral_symbol, borrow_symbol)
+            if not sv2_market:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"No Silo V2 market found for {collateral_symbol}/{borrow_symbol}. Available: {list(SILO_V2_MARKETS.keys())}",
+                    intent_id=intent.intent_id,
+                )
+
+            # If collateral > 0, deposit into the collateral silo
+            if collateral_amount_decimal > 0:
+                collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+
+                sv2_silo_result = silo_adapter.find_silo_for_asset(collateral_symbol, sv2_market.market_name)
+                if not sv2_silo_result:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=f"Cannot find silo for collateral {collateral_symbol} in market {sv2_market.market_name}",
+                        intent_id=intent.intent_id,
+                    )
+                _, collateral_silo_address, _ = sv2_silo_result
+
+                approve_txs = compiler._build_approve_tx(
+                    collateral_token.address,
+                    collateral_silo_address,
+                    collateral_amount_wei,
+                )
+                transactions.extend(approve_txs)
+
+                sv2_supply_result = silo_adapter.supply(
+                    asset=collateral_symbol,
+                    amount=collateral_amount_decimal,
+                    market_name=sv2_market.market_name,
+                )
+
+                if not sv2_supply_result.success:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=f"Silo V2 deposit failed: {sv2_supply_result.error}",
+                        intent_id=intent.intent_id,
+                    )
+
+                assert sv2_supply_result.tx_data is not None
+                supply_data = sv2_supply_result.tx_data["data"]
+                if not supply_data.startswith("0x"):
+                    supply_data = "0x" + supply_data
+
+                supply_tx = TransactionData(
+                    to=sv2_supply_result.tx_data["to"],
+                    value=int(sv2_supply_result.tx_data.get("value", 0)),
+                    data=supply_data,
+                    gas_estimate=sv2_supply_result.gas_estimate,
+                    description=sv2_supply_result.description,
+                    tx_type="lending_supply_collateral",
+                )
+                transactions.append(supply_tx)
+            else:
+                warnings.append("No collateral supplied - borrowing against existing collateral")
+
+            borrow_result = silo_adapter.borrow(
+                collateral_asset=collateral_symbol,
+                borrow_asset=borrow_symbol,
+                borrow_amount=intent.borrow_amount,
+            )
+
+            if not borrow_result.success:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Silo V2 borrow failed: {borrow_result.error}",
+                    intent_id=intent.intent_id,
+                )
+
+            assert borrow_result.tx_data is not None
+            borrow_data = borrow_result.tx_data["data"]
+            if not borrow_data.startswith("0x"):
+                borrow_data = "0x" + borrow_data
+
+            borrow_tx = TransactionData(
+                to=borrow_result.tx_data["to"],
+                value=int(borrow_result.tx_data.get("value", 0)),
+                data=borrow_data,
+                gas_estimate=borrow_result.gas_estimate,
+                description=borrow_result.description,
+                tx_type="lending_borrow",
+            )
+            transactions.append(borrow_tx)
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+            action_bundle = ActionBundle(
+                intent_type=IntentType.BORROW.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "protocol": intent.protocol,
+                    "silo_config": sv2_market.silo_config,
+                    "market_name": sv2_market.market_name,
+                    "collateral_token": collateral_token.to_dict(),
+                    "borrow_token": borrow_token.to_dict(),
+                    "collateral_amount": str(collateral_amount_decimal),
+                    "borrow_amount": str(intent.borrow_amount),
+                    "chain": compiler.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+            result.warnings = warnings
+
+            collateral_fmt = format_token_amount(
+                int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+                collateral_token.symbol,
+                collateral_token.decimals,
+            )
+            borrow_fmt = format_token_amount(
+                int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
+                borrow_token.symbol,
+                borrow_token.decimals,
+            )
+
+            logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
+            logger.info(
+                f"   Protocol: Silo V2 ({sv2_market.market_name}) | Txs: {len(transactions)} | Gas: {total_gas:,}"
+            )
+
+        # =================================================================
         # UNSUPPORTED PROTOCOL
         # =================================================================
         else:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi, joelend",
+                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi, joelend, silo_v2",
                 intent_id=intent.intent_id,
             )
 
@@ -1735,12 +1884,129 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
             )
 
         # =================================================================
+        elif protocol_lower == "silo_v2":
+            from ..connectors.silo_v2.adapter import (
+                MAX_UINT256 as SILO_MAX_UINT256,
+            )
+            from ..connectors.silo_v2.adapter import (
+                SILO_V2_MARKETS,
+                SiloV2Adapter,
+                SiloV2Config,
+            )
+
+            if compiler.chain != "avalanche":
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Silo V2 is only available on Avalanche, got: {compiler.chain}",
+                    intent_id=intent.intent_id,
+                )
+
+            silo_config = SiloV2Config(
+                chain=compiler.chain,
+                wallet_address=compiler.wallet_address,
+            )
+            silo_adapter = SiloV2Adapter(silo_config)
+
+            repay_symbol = repay_token.symbol.upper()
+            sv2_silo_result = silo_adapter.find_silo_for_asset(repay_symbol)
+
+            if not sv2_silo_result:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"No Silo V2 market found for asset: {repay_symbol}. Available: {list(SILO_V2_MARKETS.keys())}",
+                    intent_id=intent.intent_id,
+                )
+
+            sv2_market, silo_address, _ = sv2_silo_result
+
+            # Build approve TX for the silo
+            if not intent.repay_full:
+                if repay_amount_decimal is None:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error="Silo V2 repay requires an explicit amount (or use repay_full=True)",
+                        intent_id=intent.intent_id,
+                    )
+                repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+                approve_txs = compiler._build_approve_tx(
+                    repay_token.address,
+                    silo_address,
+                    repay_amount_wei,
+                )
+                transactions.extend(approve_txs)
+            else:
+                # For repay_full, approve MAX_UINT256
+                approve_txs = compiler._build_approve_tx(
+                    repay_token.address,
+                    silo_address,
+                    SILO_MAX_UINT256,
+                )
+                transactions.extend(approve_txs)
+
+            # Build repay TX
+            repay_result = silo_adapter.repay(
+                asset=repay_symbol,
+                amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
+                market_name=sv2_market.market_name,
+                repay_all=intent.repay_full,
+            )
+
+            if not repay_result.success:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Silo V2 repay failed: {repay_result.error}",
+                    intent_id=intent.intent_id,
+                )
+
+            assert repay_result.tx_data is not None
+            repay_data = repay_result.tx_data["data"]
+            if not repay_data.startswith("0x"):
+                repay_data = "0x" + repay_data
+
+            amount_description = "all" if intent.repay_full else str(repay_amount_decimal)
+
+            repay_tx = TransactionData(
+                to=repay_result.tx_data["to"],
+                value=int(repay_result.tx_data.get("value", 0)),
+                data=repay_data,
+                gas_estimate=repay_result.gas_estimate,
+                description=repay_result.description,
+                tx_type="lending_repay",
+            )
+            transactions.append(repay_tx)
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+            action_bundle = ActionBundle(
+                intent_type=IntentType.REPAY.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "protocol": intent.protocol,
+                    "silo_config": sv2_market.silo_config,
+                    "market_name": sv2_market.market_name,
+                    "repay_token": repay_token.to_dict(),
+                    "repay_amount": amount_description,
+                    "repay_full": intent.repay_full,
+                    "chain": compiler.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+            result.warnings = warnings
+
+            logger.info(
+                f"Compiled REPAY: {amount_description} {repay_token.symbol} to Silo V2 ({sv2_market.market_name}), "
+                f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
+            )
+
+        # =================================================================
         # UNSUPPORTED PROTOCOL
         # =================================================================
         else:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi, joelend",
+                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi, joelend, silo_v2",
                 intent_id=intent.intent_id,
             )
 
@@ -2522,12 +2788,109 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:
             logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
 
         # =================================================================
+        elif protocol_lower == "silo_v2":
+            from ..connectors.silo_v2.adapter import (
+                SILO_V2_MARKETS,
+                SiloV2Adapter,
+                SiloV2Config,
+            )
+
+            if compiler.chain != "avalanche":
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Silo V2 is only available on Avalanche, got: {compiler.chain}",
+                    intent_id=intent.intent_id,
+                )
+
+            silo_config = SiloV2Config(
+                chain=compiler.chain,
+                wallet_address=compiler.wallet_address,
+            )
+            silo_adapter = SiloV2Adapter(silo_config)
+
+            supply_symbol = supply_token.symbol.upper()
+            sv2_silo_result = silo_adapter.find_silo_for_asset(supply_symbol)
+
+            if not sv2_silo_result:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"No Silo V2 market found for asset: {supply_symbol}. Available: {list(SILO_V2_MARKETS.keys())}",
+                    intent_id=intent.intent_id,
+                )
+
+            sv2_market, silo_address, _ = sv2_silo_result
+            supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
+
+            # Build approve TX for the silo
+            approve_txs = compiler._build_approve_tx(
+                supply_token.address,
+                silo_address,
+                supply_amount_wei,
+            )
+            transactions.extend(approve_txs)
+
+            # Build deposit TX
+            sv2_supply_result = silo_adapter.supply(
+                asset=supply_symbol,
+                amount=amount_decimal,
+                market_name=sv2_market.market_name,
+            )
+
+            if not sv2_supply_result.success:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Silo V2 supply failed: {sv2_supply_result.error}",
+                    intent_id=intent.intent_id,
+                )
+
+            assert sv2_supply_result.tx_data is not None
+            supply_data = sv2_supply_result.tx_data["data"]
+            if not supply_data.startswith("0x"):
+                supply_data = "0x" + supply_data
+
+            supply_tx = TransactionData(
+                to=sv2_supply_result.tx_data["to"],
+                value=int(sv2_supply_result.tx_data.get("value", 0)),
+                data=supply_data,
+                gas_estimate=sv2_supply_result.gas_estimate,
+                description=sv2_supply_result.description
+                or f"Deposit {amount_decimal} {supply_token.symbol} to Silo V2",
+                tx_type="lending_supply",
+            )
+            transactions.append(supply_tx)
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+
+            action_bundle = ActionBundle(
+                intent_type=IntentType.SUPPLY.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "protocol": intent.protocol,
+                    "silo_config": sv2_market.silo_config,
+                    "market_name": sv2_market.market_name,
+                    "silo_address": silo_address,
+                    "supply_token": supply_token.to_dict(),
+                    "supply_amount": str(amount_decimal),
+                    "chain": compiler.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+            result.warnings = warnings
+
+            supply_fmt = format_token_amount(supply_amount_wei, supply_token.symbol, supply_token.decimals)
+            logger.info(f"Compiled SUPPLY: {supply_fmt} to Silo V2 ({sv2_market.market_name})")
+            logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
+
+        # =================================================================
         # UNSUPPORTED PROTOCOL
         # =================================================================
         else:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi, joelend",
+                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi, joelend, silo_v2",
                 intent_id=intent.intent_id,
             )
 
@@ -3233,12 +3596,104 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
             )
 
         # =================================================================
+        elif protocol_lower == "silo_v2":
+            from ..connectors.silo_v2.adapter import (
+                SILO_V2_MARKETS,
+                SiloV2Adapter,
+                SiloV2Config,
+            )
+
+            if compiler.chain != "avalanche":
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Silo V2 is only available on Avalanche, got: {compiler.chain}",
+                    intent_id=intent.intent_id,
+                )
+
+            silo_config = SiloV2Config(
+                chain=compiler.chain,
+                wallet_address=compiler.wallet_address,
+            )
+            silo_adapter = SiloV2Adapter(silo_config)
+
+            withdraw_symbol = withdraw_token.symbol.upper()
+            sv2_silo_result = silo_adapter.find_silo_for_asset(withdraw_symbol)
+
+            if not sv2_silo_result:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"No Silo V2 market found for asset: {withdraw_symbol}. Available: {list(SILO_V2_MARKETS.keys())}",
+                    intent_id=intent.intent_id,
+                )
+
+            sv2_market, silo_address, _ = sv2_silo_result
+
+            # Build withdraw TX
+            withdraw_result = silo_adapter.withdraw(
+                asset=withdraw_symbol,
+                amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
+                market_name=sv2_market.market_name,
+                withdraw_all=intent.withdraw_all,
+            )
+
+            if not withdraw_result.success:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Silo V2 withdraw failed: {withdraw_result.error}",
+                    intent_id=intent.intent_id,
+                )
+
+            amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
+
+            assert withdraw_result.tx_data is not None
+            withdraw_data = withdraw_result.tx_data["data"]
+            if not withdraw_data.startswith("0x"):
+                withdraw_data = "0x" + withdraw_data
+
+            withdraw_tx = TransactionData(
+                to=withdraw_result.tx_data["to"],
+                value=int(withdraw_result.tx_data.get("value", 0)),
+                data=withdraw_data,
+                gas_estimate=withdraw_result.gas_estimate,
+                description=withdraw_result.description
+                or f"Withdraw {amount_display} {withdraw_token.symbol} from Silo V2",
+                tx_type="lending_withdraw",
+            )
+            transactions.append(withdraw_tx)
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+
+            action_bundle = ActionBundle(
+                intent_type=IntentType.WITHDRAW.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "protocol": intent.protocol,
+                    "silo_config": sv2_market.silo_config,
+                    "market_name": sv2_market.market_name,
+                    "silo_address": silo_address,
+                    "withdraw_token": withdraw_token.to_dict(),
+                    "withdraw_amount": amount_display,
+                    "withdraw_all": intent.withdraw_all,
+                    "chain": compiler.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+            result.warnings = warnings
+
+            logger.info(
+                f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Silo V2 {sv2_market.market_name})"
+            )
+
+        # =================================================================
         # UNSUPPORTED PROTOCOL
         # =================================================================
         else:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, pendle, compound_v3, benqi, joelend",
+                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, pendle, compound_v3, benqi, joelend, silo_v2",
                 intent_id=intent.intent_id,
             )
 

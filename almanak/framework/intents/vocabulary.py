@@ -110,6 +110,11 @@ PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
         "supports_collateral_toggle": True,
         "operations": ["supply", "withdraw", "borrow", "repay"],
     },
+    "silo_v2": {
+        "supports_interest_rate_mode": False,
+        "supports_collateral_toggle": False,  # All deposits are collateral in isolated pairs
+        "operations": ["supply", "withdraw", "borrow", "repay"],
+    },
     "gmx_v2": {
         "supports_leverage": True,
         "max_leverage": Decimal("100"),
