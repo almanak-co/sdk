@@ -38,6 +38,16 @@ logger = logging.getLogger(__name__)
 class SolanaLendStrategy(IntentStrategy):
     """Supply tokens to Kamino Finance lending market."""
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.state: dict = {}
+
+    def get_persistent_state(self) -> dict:
+        return dict(self.state)
+
+    def load_persistent_state(self, state: dict) -> None:
+        self.state = dict(state or {})
+
     def decide(self, market: MarketSnapshot) -> Intent:
         try:
             token = self.config.get("token", "USDC")

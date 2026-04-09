@@ -57,6 +57,16 @@ logger = logging.getLogger(__name__)
 class SolanaLstDepegArbStrategy(IntentStrategy):
     """Buy discounted LSTs during depeg events, sell on recovery."""
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.state: dict = {}
+
+    def get_persistent_state(self) -> dict:
+        return dict(self.state)
+
+    def load_persistent_state(self, state: dict) -> None:
+        self.state = dict(state or {})
+
     def decide(self, market: MarketSnapshot) -> Intent:
         try:
             return self._decide_inner(market)

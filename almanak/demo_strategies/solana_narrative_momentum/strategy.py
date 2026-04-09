@@ -110,6 +110,7 @@ class SolanaNarrativeMomentumStrategy(IntentStrategy):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.state: dict = {}
         self._position: dict | None = None
         self._entry_volume_h24: float = 0.0
 

@@ -52,6 +52,16 @@ class SolanaPerpFundingStrategy(IntentStrategy):
     4. If funding near zero: hold or close existing position
     """
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.state: dict = {}
+
+    def get_persistent_state(self) -> dict:
+        return dict(self.state)
+
+    def load_persistent_state(self, state: dict) -> None:
+        self.state = dict(state or {})
+
     def decide(self, market: MarketSnapshot) -> Intent:
         try:
             # Read config
