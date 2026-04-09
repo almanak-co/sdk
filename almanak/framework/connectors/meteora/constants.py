@@ -76,7 +76,7 @@ STRATEGY_TYPE_BID_ASK_BALANCED = 8
 # API
 # =========================================================================
 
-METEORA_API_BASE_URL = os.environ.get("METEORA_API_BASE_URL") or "https://dlmm-api.meteora.ag"
+METEORA_API_BASE_URL = os.environ.get("METEORA_API_BASE_URL") or "https://dlmm.datapi.meteora.ag"
 
 # =========================================================================
 # Common bin_step values and their approximate fee tiers (bps)
