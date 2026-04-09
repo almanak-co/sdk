@@ -190,6 +190,7 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
     "lido": {"ethereum", "arbitrum", "optimism", "polygon"},  # Lido liquid staking
     "ethena": {"ethereum"},  # Ethena synthetic dollar (USDe/sUSDe)
     "radiant_v2": {"ethereum"},  # Radiant V2 (Aave V2 fork) — Arbitrum pool frozen post-hack
+    "benqi": {"avalanche"},  # BENQI (Compound V2 fork) on Avalanche
 }
 
 
