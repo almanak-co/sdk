@@ -496,6 +496,13 @@ class StrategyRunner:
             if self.config.dry_run:
                 self._inject_simulated_balances(market, strategy)
 
+            # Step 1b: Pre-warm price cache (VIB-2568)
+            # On cold Anvil forks, gateway price fetches can take 15-30s each.
+            # If decide() makes multiple market.price() calls, the total easily
+            # exceeds the 30s decide_timeout. Pre-warming populates the snapshot's
+            # _price_cache OUTSIDE the timeout budget so decide() hits cache.
+            await self._pre_warm_prices(market, strategy)
+
             # Step 2: Get strategy decision (with hard timeout)
             # NOTE: asyncio.to_thread runs decide() in a worker thread. If decide()
             # times out, the worker thread continues running (Python limitation).
@@ -2823,6 +2830,47 @@ class StrategyRunner:
         from .runner_teardown import inject_simulated_balances
 
         inject_simulated_balances(self, market, strategy)
+
+    async def _pre_warm_prices(self, market, strategy) -> None:
+        """Pre-warm the market snapshot's price cache before decide().
+
+        On cold Anvil forks, gateway price fetches can take 15-30s each.
+        By fetching prices BEFORE the decide() timeout starts, the
+        strategy's market.price() calls hit cache instead of the gateway.
+
+        Uses the strategy's _get_tracked_tokens() to discover which tokens
+        the strategy needs. Failures are silently ignored — decide() will
+        still try to fetch prices if pre-warming misses or fails.
+
+        The entire pre-warm phase is capped at 60s to prevent stalled
+        gateway calls from blocking the iteration indefinitely.
+        """
+        try:
+            await asyncio.wait_for(self._do_pre_warm_prices(market, strategy), timeout=60.0)
+        except TimeoutError:
+            logger.warning("Price pre-warming timed out after 60s — proceeding to decide()")
+        except Exception as e:
+            logger.debug(f"Price pre-warming failed: {e}")
+
+    async def _do_pre_warm_prices(self, market, strategy) -> None:
+        """Inner implementation of price pre-warming (called with a timeout wrapper)."""
+        tokens: list[str] = []
+        if hasattr(strategy, "_get_tracked_tokens"):
+            try:
+                tokens = strategy._get_tracked_tokens()
+            except Exception as e:
+                logger.debug(f"Failed to get tracked tokens for pre-warming: {e}")
+
+        if not tokens:
+            return
+
+        logger.debug(f"Pre-warming price cache for {len(tokens)} tokens: {tokens}")
+        # Sequential iteration is intentional — _price_cache is not thread-safe
+        for token in tokens:
+            try:
+                await asyncio.to_thread(market.price, token)
+            except Exception as e:
+                logger.debug(f"Price pre-warm failed for {token}: {e}")
 
     @staticmethod
     def _bridge_token_resolution_candidates(token_symbol, bridge_status):
