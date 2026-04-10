@@ -501,6 +501,7 @@ anvil_bsc = _create_anvil_fixture("bsc")
 anvil_optimism = _create_anvil_fixture("optimism")
 anvil_polygon = _create_anvil_fixture("polygon")
 anvil_mantle = _create_anvil_fixture("mantle")
+anvil_xlayer = _create_anvil_fixture("xlayer")
 
 
 # =============================================================================

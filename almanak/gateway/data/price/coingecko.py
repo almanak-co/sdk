@@ -146,12 +146,22 @@ MANTLE_TOKEN_IDS: dict[str, str] = {
     "USDT": "tether",
 }
 
+XLAYER_TOKEN_IDS: dict[str, str] = {
+    "OKB": "okb",
+    "WOKB": "okb",  # Wrapped OKB uses same price as OKB
+    "WETH": "weth",
+    "USDC": "usd-coin",
+    "USDT0": "tether",  # USD₮0 is Stargate-bridged USDT
+    "USDG": "usd-coin",  # Gravity USD stablecoin, pegged ~$1
+}
+
 GLOBAL_TOKEN_IDS: dict[str, str] = {
     **ARBITRUM_TOKEN_IDS,
     **AVALANCHE_TOKEN_IDS,
     **BASE_TOKEN_IDS,
     **BSC_TOKEN_IDS,
     **MANTLE_TOKEN_IDS,
+    **XLAYER_TOKEN_IDS,
     **SOLANA_TOKEN_IDS,
     # Ethena tokens (available on multiple chains)
     "USDE": "ethena-usde",

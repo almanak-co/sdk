@@ -247,6 +247,21 @@ CHAIN_CONFIGS = {
             "USDT": 0,  # Bridged USDT uses slot 0
         },
     },
+    "xlayer": {
+        "rpc_url": "https://rpc.xlayer.tech",
+        "chain_id": 196,
+        "alchemy_key": None,  # No Alchemy support, uses public RPC
+        "tokens": {
+            "USDC": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
+            "WETH": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",
+            "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+        },
+        "balance_slots": {
+            "USDC": 9,  # Native Circle USDC uses slot 9
+            "WETH": 0,  # Bridged WETH
+            "USDT0": 51,  # OpenZeppelin upgradeable pattern
+        },
+    },
 }
 # Import Anvil fixtures and constants from shared gateway conftest.
 # Note: We do NOT import CHAIN_CONFIGS from conftest_gateway to avoid conflict with local definition
@@ -263,6 +278,7 @@ from tests.conftest_gateway import (
     anvil_mantle,
     anvil_optimism,
     anvil_polygon,
+    anvil_xlayer,
     get_anvil_rpc_url,
 )
 
@@ -277,6 +293,7 @@ __all__ = [
     "anvil_mantle",
     "anvil_optimism",
     "anvil_polygon",
+    "anvil_xlayer",
     # Price oracle fixtures (session-scoped per chain)
     "price_oracle_arbitrum",
     "price_oracle_avalanche",
@@ -287,6 +304,7 @@ __all__ = [
     "price_oracle_mantle",
     "price_oracle_optimism",
     "price_oracle_polygon",
+    "price_oracle_xlayer",
     # Utilities
     "fund_native_token",
     "fund_erc20_token",
@@ -916,6 +934,7 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "linea: Tests that run on Linea chain")
     config.addinivalue_line("markers", "blast: Tests that run on Blast chain")
     config.addinivalue_line("markers", "mantle: Tests that run on Mantle chain")
+    config.addinivalue_line("markers", "xlayer: Tests that run on X-Layer chain")
     config.addinivalue_line("markers", "swap: Tests for SwapIntent")
     config.addinivalue_line("markers", "lp: Tests for LP intents (Open/Close)")
     config.addinivalue_line("markers", "lending: Tests for lending intents")
@@ -1355,6 +1374,7 @@ price_oracle_mantle = _create_price_oracle_fixture("mantle")
 price_oracle_optimism = _create_price_oracle_fixture("optimism")
 price_oracle_polygon = _create_price_oracle_fixture("polygon")
 price_oracle_mantle = _create_price_oracle_fixture("mantle")
+price_oracle_xlayer = _create_price_oracle_fixture("xlayer")
 
 
 # =============================================================================
@@ -1391,6 +1411,7 @@ def price_oracle(chain_name: str, request) -> dict[str, Decimal]:
         "optimism": "price_oracle_optimism",
         "polygon": "price_oracle_polygon",
         "mantle": "price_oracle_mantle",
+        "xlayer": "price_oracle_xlayer",
     }
 
     fixture_name = fixture_map.get(chain_name)
