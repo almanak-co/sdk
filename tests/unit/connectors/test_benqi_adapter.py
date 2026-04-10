@@ -8,6 +8,7 @@ from almanak.framework.connectors.benqi.adapter import (
     BENQI_BORROW_SELECTOR,
     BENQI_COMPTROLLER_ADDRESS,
     BENQI_ENTER_MARKETS_SELECTOR,
+    BENQI_EXIT_MARKET_SELECTOR,
     BENQI_MINT_NATIVE_SELECTOR,
     BENQI_MINT_SELECTOR,
     BENQI_QI_TOKENS,
@@ -131,11 +132,23 @@ class TestBenqiWithdraw:
         # redeemUnderlying(uint256) selector
         assert result.tx_data["data"].startswith(BENQI_REDEEM_UNDERLYING_SELECTOR)
 
-    def test_withdraw_all_unsupported(self, adapter):
-        """withdraw_all is unsupported because Compound V2 redeem() needs exact qiToken balance."""
+    def test_withdraw_all_no_amount_or_redeem(self, adapter):
+        """withdraw_all with no amount and no redeem_amount should fail."""
         result = adapter.withdraw(asset="USDC", amount=Decimal("0"), withdraw_all=True)
         assert result.success is False
-        assert "withdraw_all is not supported" in result.error
+        assert "withdraw_all requires" in result.error
+
+    def test_withdraw_all_with_amount(self, adapter):
+        """withdraw_all with a positive amount uses redeemUnderlying."""
+        result = adapter.withdraw(asset="USDC", amount=Decimal("1000"), withdraw_all=True)
+        assert result.success is True
+        assert result.tx_data["data"].startswith(BENQI_REDEEM_UNDERLYING_SELECTOR)
+
+    def test_withdraw_all_with_redeem_amount(self, adapter):
+        """withdraw_all with redeem_amount uses redeem() with exact qiToken count."""
+        result = adapter.withdraw(asset="USDC", amount=Decimal("0"), withdraw_all=True, redeem_amount=500_000_000)
+        assert result.success is True
+        assert result.tx_data["data"].startswith(BENQI_REDEEM_SELECTOR)
 
     def test_withdraw_unsupported_asset(self, adapter):
         result = adapter.withdraw(asset="UNKNOWN", amount=Decimal("100"))
@@ -193,6 +206,21 @@ class TestBenqiRepay:
         assert result.tx_data["data"] == BENQI_REPAY_BORROW_NATIVE_SELECTOR
         assert result.tx_data["value"] == 5 * 10**18
 
+    def test_repay_all_native_avax_adds_buffer(self, adapter):
+        """repay_all on native AVAX applies 0.1% buffer for interest accrual."""
+        result = adapter.repay(asset="AVAX", amount=Decimal("5"), repay_all=True)
+        assert result.success is True
+        assert result.tx_data is not None
+        assert result.tx_data["data"] == BENQI_REPAY_BORROW_NATIVE_SELECTOR
+        expected_wei = int(Decimal("5") * Decimal(10**18) * Decimal("1.001"))
+        assert result.tx_data["value"] == expected_wei
+
+    def test_repay_all_native_avax_zero_amount_fails(self, adapter):
+        """repay_all on native AVAX with zero amount returns error."""
+        result = adapter.repay(asset="AVAX", amount=Decimal("0"), repay_all=True)
+        assert result.success is False
+        assert "positive amount" in result.error
+
     def test_repay_unsupported(self, adapter):
         result = adapter.repay(asset="UNKNOWN", amount=Decimal("100"))
         assert result.success is False
@@ -219,6 +247,22 @@ class TestBenqiEnterMarkets:
 
     def test_enter_unsupported_market(self, adapter):
         result = adapter.enter_markets(["UNKNOWN"])
+        assert result.success is False
+
+
+class TestBenqiExitMarket:
+    """Test Comptroller exitMarket."""
+
+    def test_exit_market(self, adapter):
+        result = adapter.exit_market("USDC")
+        assert result.success is True
+        assert result.tx_data is not None
+        assert result.tx_data["to"] == BENQI_COMPTROLLER_ADDRESS
+        assert result.tx_data["data"].startswith(BENQI_EXIT_MARKET_SELECTOR)
+        assert result.tx_data["value"] == 0
+
+    def test_exit_unsupported_market(self, adapter):
+        result = adapter.exit_market("UNKNOWN")
         assert result.success is False
 
 

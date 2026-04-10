@@ -144,7 +144,7 @@ class SiloV2ReceiptParser:
                 result.success = True
 
         except Exception as e:
-            logger.exception(f"Error parsing Silo V2 receipt: {e}")
+            logger.exception("Error parsing Silo V2 receipt: %s", e)
             result.error = str(e)
 
         return result
@@ -172,9 +172,9 @@ class SiloV2ReceiptParser:
                 }
             )
 
-            logger.info(f"Silo V2 Deposit: assets={assets}, shares={shares}")
+            logger.info("Silo V2 Deposit: assets=%s, shares=%s", assets, shares)
         except Exception as e:
-            logger.warning(f"Failed to parse Deposit event: {e}")
+            logger.warning("Failed to parse Deposit event: %s", e)
 
     def _parse_withdraw_event(self, result: SiloV2ParseResult, data: str, topics: list) -> None:
         """Parse Withdraw(sender, receiver, owner, assets, shares) event.
@@ -199,9 +199,9 @@ class SiloV2ReceiptParser:
                 }
             )
 
-            logger.info(f"Silo V2 Withdraw: assets={assets}, shares={shares}")
+            logger.info("Silo V2 Withdraw: assets=%s, shares=%s", assets, shares)
         except Exception as e:
-            logger.warning(f"Failed to parse Withdraw event: {e}")
+            logger.warning("Failed to parse Withdraw event: %s", e)
 
     def _parse_borrow_event(self, result: SiloV2ParseResult, data: str, topics: list) -> None:
         """Parse Borrow(sender, receiver, owner, assets, shares) event.
@@ -226,9 +226,9 @@ class SiloV2ReceiptParser:
                 }
             )
 
-            logger.info(f"Silo V2 Borrow: assets={assets}, shares={shares}")
+            logger.info("Silo V2 Borrow: assets=%s, shares=%s", assets, shares)
         except Exception as e:
-            logger.warning(f"Failed to parse Borrow event: {e}")
+            logger.warning("Failed to parse Borrow event: %s", e)
 
     def _parse_repay_event(self, result: SiloV2ParseResult, data: str, topics: list) -> None:
         """Parse Repay(sender, owner, assets, shares) event.
@@ -253,9 +253,9 @@ class SiloV2ReceiptParser:
                 }
             )
 
-            logger.info(f"Silo V2 Repay: assets={assets}, shares={shares}")
+            logger.info("Silo V2 Repay: assets=%s, shares=%s", assets, shares)
         except Exception as e:
-            logger.warning(f"Failed to parse Repay event: {e}")
+            logger.warning("Failed to parse Repay event: %s", e)
 
     # =========================================================================
     # Extraction methods for ResultEnricher

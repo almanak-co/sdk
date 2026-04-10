@@ -974,13 +974,7 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
                 EulerV2Config,
             )
 
-            if compiler.chain != "avalanche":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Euler V2 is only available on Avalanche, got: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
+            # Chain validation is handled by EulerV2Config.__post_init__
             euler_config = EulerV2Config(
                 chain=compiler.chain,
                 wallet_address=compiler.wallet_address,
@@ -2033,13 +2027,7 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
                 EulerV2Config,
             )
 
-            if compiler.chain != "avalanche":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Euler V2 is only available on Avalanche, got: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
+            # Chain validation is handled by EulerV2Config.__post_init__
             euler_config = EulerV2Config(
                 chain=compiler.chain,
                 wallet_address=compiler.wallet_address,
@@ -3049,13 +3037,7 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:
                 EulerV2Config,
             )
 
-            if compiler.chain != "avalanche":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Euler V2 is only available on Avalanche, got: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
+            # Chain validation is handled by EulerV2Config.__post_init__
             euler_config = EulerV2Config(
                 chain=compiler.chain,
                 wallet_address=compiler.wallet_address,
@@ -3953,13 +3935,7 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
                 EulerV2Config,
             )
 
-            if compiler.chain != "avalanche":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Euler V2 is only available on Avalanche, got: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
+            # Chain validation is handled by EulerV2Config.__post_init__
             euler_config = EulerV2Config(
                 chain=compiler.chain,
                 wallet_address=compiler.wallet_address,

@@ -98,6 +98,7 @@ JOELEND_REPAY_BORROW_NATIVE_SELECTOR = "0x4e4d9fea"  # repayBorrow() payable - j
 
 # Joetroller function selectors
 JOELEND_ENTER_MARKETS_SELECTOR = "0xc2998238"  # enterMarkets(address[])
+JOELEND_EXIT_MARKET_SELECTOR = "0xede4edd0"  # exitMarket(address)
 
 # ERC20 approve
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"  # approve(address,uint256)
@@ -283,16 +284,22 @@ class JoeLendAdapter:
     # Withdraw (Redeem)
     # -------------------------------------------------------------------------
 
-    def withdraw(self, asset: str, amount: Decimal, *, withdraw_all: bool = False) -> TransactionResult:
+    def withdraw(
+        self, asset: str, amount: Decimal, *, withdraw_all: bool = False, redeem_amount: int | None = None
+    ) -> TransactionResult:
         """Build a withdraw transaction.
 
         Calls redeemUnderlying(uint256) on the jToken to withdraw exact underlying amount.
-        Note: withdraw_all is not supported (requires on-chain jToken balance query).
+        For withdraw_all with redeem_amount, uses redeem(uint256) with exact jToken count.
+        For withdraw_all with amount > 0, uses redeemUnderlying(amount_wei) with the tracked amount.
 
         Args:
             asset: Asset symbol
             amount: Amount of underlying to withdraw
             withdraw_all: If True, withdraw entire balance
+            redeem_amount: Exact jToken amount for redeem() when withdraw_all=True.
+                Not yet wired from the compiler — reserved for future use when
+                the compiler can query on-chain jToken balances.
 
         Returns:
             TransactionResult with TX data
@@ -305,15 +312,23 @@ class JoeLendAdapter:
             )
 
         if withdraw_all:
-            # Compound V2 redeem() requires exact jToken amount, not MAX_UINT256.
-            # Without RPC access to query jToken balance, withdraw_all is unsupported.
-            return TransactionResult(
-                success=False,
-                error=(
-                    "withdraw_all is not supported for Joe Lend without on-chain jToken balance. "
-                    "Use a specific amount with redeemUnderlying instead."
-                ),
-            )
+            if redeem_amount is not None:
+                # Use redeem(uint256) with exact jToken amount
+                calldata = JOELEND_REDEEM_SELECTOR + self._encode_uint256(redeem_amount)
+                description = f"Withdraw all {asset} from Joe Lend (redeem {redeem_amount} j{asset})"
+            elif amount > 0:
+                # Use redeemUnderlying(uint256) with the strategy's tracked supply amount
+                amount_wei = int(amount * Decimal(10**market.decimals))
+                calldata = JOELEND_REDEEM_UNDERLYING_SELECTOR + self._encode_uint256(amount_wei)
+                description = f"Withdraw all ~{amount} {asset} from Joe Lend (redeem j{asset})"
+            else:
+                return TransactionResult(
+                    success=False,
+                    error=(
+                        "withdraw_all requires redeem_amount parameter (jToken balance) "
+                        "or a positive amount for redeemUnderlying."
+                    ),
+                )
         else:
             amount_wei = int(amount * Decimal(10**market.decimals))
             # redeemUnderlying(uint256) for exact underlying amount
@@ -400,6 +415,16 @@ class JoeLendAdapter:
         if market.is_native:
             # jAVAX: repayBorrow() payable
             amount_wei = int(amount * Decimal(10**market.decimals))
+            if repay_all:
+                if amount_wei == 0:
+                    return TransactionResult(
+                        success=False,
+                        error="repay_all on native AVAX requires a positive amount (query debt balance first).",
+                    )
+                # Add 0.1% buffer to account for interest accrual between query and execution.
+                # Assumes sub-minute execution latency (sufficient for ~876% APY).
+                # Excess native AVAX is returned by the protocol automatically.
+                amount_wei = int(amount_wei * Decimal("1.001"))
             calldata = JOELEND_REPAY_BORROW_NATIVE_SELECTOR
             return TransactionResult(
                 success=True,
@@ -462,6 +487,38 @@ class JoeLendAdapter:
             },
             gas_estimate=DEFAULT_GAS_ESTIMATES["enter_markets"] * len(assets),
             description=f"Enable {', '.join(assets)} as collateral on Joe Lend",
+        )
+
+    def exit_market(self, asset: str) -> TransactionResult:
+        """Build an exitMarket transaction to remove an asset from collateral.
+
+        Note: exitMarket is per-asset (not array), unlike enterMarkets.
+        Will revert if the user has outstanding borrows against this collateral.
+
+        Args:
+            asset: Asset symbol to remove from collateral
+
+        Returns:
+            TransactionResult with TX data
+        """
+        market = self.get_market_info(asset)
+        if not market:
+            return TransactionResult(
+                success=False,
+                error=f"Unsupported asset: {asset}",
+            )
+
+        calldata = JOELEND_EXIT_MARKET_SELECTOR + self._encode_address(market.j_token_address)
+
+        return TransactionResult(
+            success=True,
+            tx_data={
+                "to": self.joetroller_address,
+                "data": calldata,
+                "value": 0,
+            },
+            gas_estimate=DEFAULT_GAS_ESTIMATES["enter_markets"],
+            description=f"Remove {asset} from Joe Lend collateral",
         )
 
     # -------------------------------------------------------------------------

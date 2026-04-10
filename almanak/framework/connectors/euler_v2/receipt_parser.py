@@ -142,7 +142,7 @@ class EulerV2ReceiptParser:
                 result.success = True
 
         except Exception as e:
-            logger.exception(f"Error parsing Euler V2 receipt: {e}")
+            logger.exception("Error parsing Euler V2 receipt: %s", e)
             result.error = str(e)
 
         return result
@@ -170,9 +170,9 @@ class EulerV2ReceiptParser:
                 }
             )
 
-            logger.info(f"Euler V2 Deposit: assets={assets}, shares={shares}")
+            logger.info("Euler V2 Deposit: assets=%s, shares=%s", assets, shares)
         except Exception as e:
-            logger.warning(f"Failed to parse Deposit event: {e}")
+            logger.warning("Failed to parse Deposit event: %s", e)
 
     def _parse_withdraw_event(self, result: EulerV2ParseResult, data: str, topics: list) -> None:
         """Parse Withdraw(sender, receiver, owner, assets, shares) event.
@@ -197,9 +197,9 @@ class EulerV2ReceiptParser:
                 }
             )
 
-            logger.info(f"Euler V2 Withdraw: assets={assets}, shares={shares}")
+            logger.info("Euler V2 Withdraw: assets=%s, shares=%s", assets, shares)
         except Exception as e:
-            logger.warning(f"Failed to parse Withdraw event: {e}")
+            logger.warning("Failed to parse Withdraw event: %s", e)
 
     def _parse_borrow_event(self, result: EulerV2ParseResult, data: str, topics: list) -> None:
         """Parse Borrow(account, assets) event.
@@ -222,9 +222,9 @@ class EulerV2ReceiptParser:
                 }
             )
 
-            logger.info(f"Euler V2 Borrow: assets={assets}")
+            logger.info("Euler V2 Borrow: assets=%s", assets)
         except Exception as e:
-            logger.warning(f"Failed to parse Borrow event: {e}")
+            logger.warning("Failed to parse Borrow event: %s", e)
 
     def _parse_repay_event(self, result: EulerV2ParseResult, data: str, topics: list) -> None:
         """Parse Repay(account, assets) event.
@@ -247,9 +247,9 @@ class EulerV2ReceiptParser:
                 }
             )
 
-            logger.info(f"Euler V2 Repay: assets={assets}")
+            logger.info("Euler V2 Repay: assets=%s", assets)
         except Exception as e:
-            logger.warning(f"Failed to parse Repay event: {e}")
+            logger.warning("Failed to parse Repay event: %s", e)
 
     # =========================================================================
     # Extraction methods for ResultEnricher

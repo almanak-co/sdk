@@ -82,48 +82,56 @@ EULER_V2_VAULTS: dict[str, dict] = {
         "underlying_symbol": "USDC",
         "underlying_address": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
         "decimals": 6,
+        "preferred": True,  # Re7Labs vault, generally highest TVL
     },
     "eUSDC-2": {
         "vault_address": "0x39dE0f00189306062D79eDEC6DcA5bb6bFd108f9",
         "underlying_symbol": "USDC",
         "underlying_address": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
         "decimals": 6,
+        "preferred": False,
     },
     "eUSDC-15": {
         "vault_address": "0x8f23Da78e3F31Ab5DEb75dC3282198bed630ffde",
         "underlying_symbol": "USDC",
         "underlying_address": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
         "decimals": 6,
+        "preferred": False,
     },
     "eWAVAX-2": {
         "vault_address": "0x6c718a70239fA548c0bD268fE88F37EBE8b6E2ea",
         "underlying_symbol": "WAVAX",
         "underlying_address": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
         "decimals": 18,
+        "preferred": True,
     },
     "eUSDt-3": {
         "vault_address": "0xa446938b0204Aa4055cdFEd68Ddf0E0d1BAB3E9E",
         "underlying_symbol": "USDT",
         "underlying_address": "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7",
         "decimals": 6,
+        "preferred": True,
     },
     "eAUSD-2": {
         "vault_address": "0x2137568666f12fc5A026f5430Ae7194F1C1362aB",
         "underlying_symbol": "AUSD",
         "underlying_address": "0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a",
         "decimals": 6,
+        "preferred": True,
     },
     "eBTC.b-33": {
         "vault_address": "0xF983f92bd962A94EAc85a8c58237C1CC1cDfBBBa",
         "underlying_symbol": "BTC.b",
         "underlying_address": "0x152b9d0FdC40C096757F570A51E494bd4b943E50",
         "decimals": 8,
+        "preferred": True,
     },
     "esAVAX-2": {
         "vault_address": "0x38a559c2b6eF3fF7Cdc40a800D6351a2B70b2243",
         "underlying_symbol": "sAVAX",
         "underlying_address": "0x2b2C81e08f1Af8835a78Bb2A90AE924ACE0eA4bE",
         "decimals": 18,
+        "preferred": True,
     },
 }
 
@@ -229,8 +237,11 @@ class EulerV2Adapter:
         if not vault_symbols:
             return None
 
-        # Return first vault (preferred by ordering in EULER_V2_VAULTS)
-        sym = vault_symbols[0]
+        # Prefer vaults marked as preferred, fall back to first in list
+        sym = next(
+            (s for s in vault_symbols if EULER_V2_VAULTS[s].get("preferred", False)),
+            vault_symbols[0],
+        )
         info = EULER_V2_VAULTS[sym]
         return EulerV2VaultInfo(
             vault_symbol=sym,
@@ -323,8 +334,10 @@ class EulerV2Adapter:
             )
 
         if withdraw_all:
-            # redeem(uint256 shares, address receiver, address owner) with MAX_UINT256
-            # MAX_UINT256 means "redeem all my shares"
+            # redeem(uint256 shares, address receiver, address owner) with MAX_UINT256.
+            # Euler V2 EVault inherits OpenZeppelin's ERC4626 which handles
+            # type(uint256).max in redeem() by capping to balanceOf(owner).
+            # This is safe and standard behavior for OZ-based ERC4626 vaults.
             calldata = (
                 REDEEM_SELECTOR
                 + _encode_uint256(MAX_UINT256)
@@ -508,7 +521,7 @@ def _encode_address(address: str) -> str:
 
 
 def _encode_evc_batch(items: list[tuple[str, str, int, bytes]]) -> bytes:
-    """Encode an EVC batch(BatchItem[]) call.
+    """Encode an EVC batch(BatchItem[]) call using eth_abi.
 
     Each item is (targetContract, onBehalfOfAccount, value, data).
 
@@ -519,59 +532,18 @@ def _encode_evc_batch(items: list[tuple[str, str, int, bytes]]) -> bytes:
             uint256 value;
             bytes data;
         }
-
-    ABI encoding: function selector + dynamic array offset + array length + items
     """
-    # batch((address,address,uint256,bytes)[]) selector
+    from eth_abi import encode
     from web3 import Web3
 
     batch_selector = Web3.keccak(text="batch((address,address,uint256,bytes)[])")[:4]
 
-    # Encode the dynamic array
-    # Offset to array data (32 bytes)
-    encoded = b""
-    encoded += (32).to_bytes(32, "big")  # offset to array
+    # Convert addresses to checksummed format for eth_abi
+    batch_items = [
+        (Web3.to_checksum_address(target), Web3.to_checksum_address(on_behalf), value, data)
+        for target, on_behalf, value, data in items
+    ]
 
-    # Array length
-    n = len(items)
-    encoded += n.to_bytes(32, "big")
-
-    # Each element is a dynamic tuple, so we need offsets to each element
-    # Offset calculation: n * 32 bytes for the offset array, then each element's data
-    element_offsets = []
-    element_data = []
-
-    for target, on_behalf, value, data in items:
-        element = b""
-        # address targetContract (32 bytes, left-padded)
-        element += bytes.fromhex(target.replace("0x", "").lower().zfill(64))
-        # address onBehalfOfAccount (32 bytes, left-padded)
-        element += bytes.fromhex(on_behalf.replace("0x", "").lower().zfill(64))
-        # uint256 value (32 bytes)
-        element += value.to_bytes(32, "big")
-        # bytes data — dynamic, needs offset + length + data
-        # Offset to data within this tuple: 4 * 32 = 128 bytes from start of tuple
-        element += (128).to_bytes(32, "big")  # offset to bytes data
-        # Length of data
-        element += len(data).to_bytes(32, "big")
-        # Data padded to 32-byte boundary
-        padded_len = ((len(data) + 31) // 32) * 32
-        element += data + b"\x00" * (padded_len - len(data))
-
-        element_data.append(element)
-
-    # Calculate offsets for each element
-    current_offset = n * 32  # past the offsets array
-    for elem in element_data:
-        element_offsets.append(current_offset)
-        current_offset += len(elem)
-
-    # Write offsets
-    for offset in element_offsets:
-        encoded += offset.to_bytes(32, "big")
-
-    # Write element data
-    for elem in element_data:
-        encoded += elem
+    encoded = encode(["(address,address,uint256,bytes)[]"], [batch_items])
 
     return batch_selector + encoded

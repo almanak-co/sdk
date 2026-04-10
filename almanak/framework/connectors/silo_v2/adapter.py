@@ -95,8 +95,16 @@ SILO_V2_MARKETS: dict[str, SiloV2MarketInfo] = {
         asset1_symbol="WAVAX",
         asset1_address="0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
     ),
-    # BTC.b/WAVAX: silo addresses not yet verified on-chain, excluded until confirmed
-    # silo_config="0x8b84c6C770Dd9856B5830C5A2DB1893d08f9BF0f"
+    "BTC.b/WAVAX": SiloV2MarketInfo(
+        market_name="BTC.b/WAVAX",
+        silo_config="0x8b84c6C770Dd9856B5830C5A2DB1893d08f9BF0f",
+        silo0_address="0xeBc7775D7E87dedC383409a0e4c1e42e0d4A9533",  # BTC.b silo
+        silo1_address="0x668B662755517541D7f37470c99F10A7366Cf0ea",  # WAVAX silo
+        asset0_symbol="BTC.b",
+        asset0_address="0x152b9d0FdC40C096757F570A51E494bd4b943E50",
+        asset1_symbol="WAVAX",
+        asset1_address="0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+    ),
 }
 
 # Reverse lookup: token symbol -> list of (market_name, silo_address, asset_index)
@@ -352,20 +360,25 @@ class SiloV2Adapter:
         decimals = resolver.get_decimals(self.chain, asset)
 
         if withdraw_all:
-            # MAX_UINT256 causes NotEnoughLiquidity on Silo V2.
-            # Caller must provide the exact deposited amount for withdraw_all.
-            if amount <= 0:
-                return TransactionResult(
-                    success=False,
-                    error="Silo V2 withdraw_all requires an explicit amount (query deposit balance first)",
+            if amount > 0:
+                # Caller provided an explicit amount — use withdraw() with that amount
+                amount_wei = int(amount * Decimal(10**decimals))
+                calldata = self._encode_withdraw(
+                    amount_wei,
+                    self.wallet_address,
+                    self.wallet_address,
+                    collateral_type,
                 )
-            amount_wei = int(amount * Decimal(10**decimals))
-            calldata = self._encode_withdraw(
-                amount_wei,
-                self.wallet_address,
-                self.wallet_address,
-                collateral_type,
-            )
+            else:
+                # No explicit amount — use redeem(MAX_UINT256) to redeem all shares.
+                # Silo V2's redeem() caps to the caller's actual share balance,
+                # so MAX_UINT256 safely withdraws everything without NotEnoughLiquidity.
+                calldata = self._encode_redeem(
+                    MAX_UINT256,
+                    self.wallet_address,
+                    self.wallet_address,
+                    collateral_type,
+                )
             amount_display = "all"
         else:
             amount_wei = int(amount * Decimal(10**decimals))
@@ -482,19 +495,19 @@ class SiloV2Adapter:
         market, silo_address, _asset_idx = result
 
         if repay_all:
-            # Silo V2 does NOT use MAX_UINT256 for full repay (unlike Compound forks).
-            # Full repay requires maxRepayShares() which needs RPC access.
-            # Caller must provide the exact debt amount for repay_all.
-            if amount <= 0:
-                return TransactionResult(
-                    success=False,
-                    error="Silo V2 repay_all requires an explicit amount (query debt balance first)",
-                )
             from almanak.framework.data.tokens import get_token_resolver
 
             resolver = get_token_resolver()
             decimals = resolver.get_decimals(self.chain, asset)
-            amount_wei = int(amount * Decimal(10**decimals))
+
+            if amount > 0:
+                # Caller provided an explicit amount — use it directly
+                amount_wei = int(amount * Decimal(10**decimals))
+            else:
+                # No explicit amount — use MAX_UINT256. Silo V2's repay() internally
+                # caps to actual debt via _accrueInterestForAsset, so MAX_UINT256
+                # safely repays the full outstanding debt without overpaying.
+                amount_wei = MAX_UINT256
             calldata = self._encode_repay(amount_wei, self.wallet_address)
             amount_display = "all"
         else:
