@@ -79,7 +79,7 @@ class MorphoUSDCYieldPaperStrategy(IntentStrategy):
     Configuration (config.json):
         market_id: Morpho Blue market identifier
         supply_token: Token to supply (default: "USDC")
-        supply_amount: Amount to supply (default: "1000")
+        supply_amount: Amount to supply (default: "100")
         withdraw_after_ticks: Number of ticks before withdrawing (default: 8)
         resupply_after_withdraw: Re-supply after withdrawal (default: true)
     """
@@ -89,7 +89,7 @@ class MorphoUSDCYieldPaperStrategy(IntentStrategy):
 
         self.market_id = self.get_config("market_id", DEFAULT_MARKET_ID)
         self.supply_token = self.get_config("supply_token", "USDC")
-        self.supply_amount = Decimal(str(self.get_config("supply_amount", "1000")))
+        self.supply_amount = Decimal(str(self.get_config("supply_amount", "100")))
         self.withdraw_after_ticks = int(self.get_config("withdraw_after_ticks", 8))
         self.resupply_after_withdraw = bool(self.get_config("resupply_after_withdraw", True))
 

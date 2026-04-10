@@ -91,8 +91,8 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
     Configuration (config.json):
         pool: Pool descriptor "TokenX/TokenY/BinStep" (default: WAVAX/USDC/20)
         range_width_pct: Width of LP range around current price (default: 0.15)
-        amount_x: Token X amount to LP (default: 0.5 WAVAX)
-        amount_y: Token Y amount to LP (default: 10 USDC)
+        amount_x: Token X amount to LP (default: 0.1 WAVAX)
+        amount_y: Token Y amount to LP (default: 2 USDC)
         num_bins: Number of bins to distribute across (default: 11)
         rebalance_threshold_pct: Price move % triggering rebalance (default: 0.06)
     """
@@ -108,8 +108,8 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
         self.bin_step = int(parts[2]) if len(parts) > 2 else 20
 
         # LP amounts
-        self.amount_x = Decimal(str(self.get_config("amount_x", "0.5")))
-        self.amount_y = Decimal(str(self.get_config("amount_y", "10")))
+        self.amount_x = Decimal(str(self.get_config("amount_x", "0.1")))
+        self.amount_y = Decimal(str(self.get_config("amount_y", "2")))
         self.num_bins = int(self.get_config("num_bins", 11))
 
         # Range and rebalance — tuned for crisis volatility
