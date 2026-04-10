@@ -1951,14 +1951,24 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
                 )
                 transactions.extend(approve_txs)
 
-            # Fail fast: native AVAX repay_full requires an explicit amount
-            # (the adapter uses amount as msg.value, MAX_UINT256 trick doesn't apply)
+            # Native AVAX repay_full requires an explicit amount because msg.value
+            # can't be MAX_UINT256.  The generic repay_full path (line ~1328) sets
+            # repay_amount_decimal = None, but the strategy may have provided an
+            # explicit intent.amount — recover it here so the adapter can use it
+            # as msg.value (with its own 0.1 % interest buffer).
             if jl_repay_market.is_native and intent.repay_full and not repay_amount_decimal:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="Joe Lend native AVAX repay_full requires an explicit repay amount (query debt balance first)",
-                    intent_id=intent.intent_id,
-                )
+                if intent.amount is not None and intent.amount != "all":
+                    repay_amount_decimal = Decimal(str(intent.amount))
+                    logger.info(
+                        "Recovered repay amount %s from intent for native AVAX repay_full",
+                        repay_amount_decimal,
+                    )
+                else:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error="Joe Lend native AVAX repay_full requires an explicit repay amount (query debt balance first)",
+                        intent_id=intent.intent_id,
+                    )
 
             # Build repay TX
             repay_result = joelend_adapter.repay(
