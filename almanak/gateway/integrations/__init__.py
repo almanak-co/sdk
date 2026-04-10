@@ -5,6 +5,7 @@ This package provides third-party data source integrations for the gateway:
 - CoinGeckoIntegration: CoinGecko price and market data
 - TheGraphIntegration: TheGraph subgraph queries
 - ZerionIntegration: Wallet portfolio and DeFi position data
+- OkxIntegration: OKX OnchainOS wallet portfolio and token balances
 
 All integrations inherit from BaseIntegration and provide:
 - Rate limiting (per-integration configurable)
@@ -21,6 +22,7 @@ from almanak.gateway.integrations.base import (
     RateLimiter,
 )
 from almanak.gateway.integrations.models import WalletPortfolioSnapshot, WalletPosition
+from almanak.gateway.integrations.okx import OkxIntegration
 from almanak.gateway.integrations.zerion import ZerionIntegration
 
 __all__ = [
@@ -28,6 +30,7 @@ __all__ = [
     "IntegrationError",
     "IntegrationRateLimitError",
     "IntegrationRegistry",
+    "OkxIntegration",
     "RateLimiter",
     "WalletPortfolioSnapshot",
     "WalletPosition",

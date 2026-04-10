@@ -269,8 +269,10 @@ class TestBuildPortfolioChain:
         )
         assert chain is None
 
-    def test_skips_unconfigured_providers(self):
+    def test_skips_unconfigured_providers(self, monkeypatch):
         # moralis has no API key, should be skipped
+        monkeypatch.delenv("MORALIS_API_KEY", raising=False)
+        monkeypatch.delenv("ALMANAK_GATEWAY_MORALIS_API_KEY", raising=False)
         chain = build_portfolio_chain(
             portfolio_providers_csv="zerion,moralis",
             portfolio_api_key="zk_test",
@@ -298,7 +300,54 @@ class TestBuildPortfolioChain:
 
 
 class TestMoralisNormalization:
-    def test_normalize_evm_response(self):
+    def test_normalize_evm_response_new_format(self):
+        """New v2.2 /wallets/{address}/tokens format with usd_value pre-calculated."""
+        moralis = MoralisIntegration.__new__(MoralisIntegration)
+        moralis.name = "moralis"
+
+        data = {
+            "result": [
+                {
+                    "token_address": "0xusdc",
+                    "name": "USD Coin",
+                    "symbol": "USDC",
+                    "decimals": "6",
+                    "balance": "1000000",
+                    "balance_formatted": "1.0",
+                    "usd_price": 1.0,
+                    "usd_value": 1.0,
+                    "native_token": False,
+                    "possible_spam": False,
+                },
+                {
+                    "token_address": "0xweth",
+                    "name": "Wrapped Ether",
+                    "symbol": "WETH",
+                    "decimals": "18",
+                    "balance": "500000000000000000",
+                    "balance_formatted": "0.5",
+                    "usd_price": 2000.0,
+                    "usd_value": 1000.0,
+                    "native_token": False,
+                    "possible_spam": False,
+                },
+            ]
+        }
+
+        snapshot = moralis._normalize_evm_response("0xwallet", "arbitrum", data)
+
+        assert snapshot.provider == "moralis"
+        assert snapshot.chain == "arbitrum"
+        assert len(snapshot.positions) == 2
+        assert snapshot.positions[0].token_symbols == ["USDC"]
+        assert Decimal(snapshot.positions[0].value_usd) == Decimal("1")
+        assert snapshot.positions[1].token_symbols == ["WETH"]
+        assert Decimal(snapshot.positions[1].value_usd) == Decimal("1000")
+        total = Decimal(snapshot.total_value_usd)
+        assert total == Decimal("1001")
+
+    def test_normalize_evm_response_legacy_flat_list(self):
+        """Legacy flat-list format (backward compatibility)."""
         moralis = MoralisIntegration.__new__(MoralisIntegration)
         moralis.name = "moralis"
 
@@ -311,34 +360,71 @@ class TestMoralisNormalization:
                 "balance": "1000000",
                 "usd_price": 1.0,
             },
-            {
-                "token_address": "0xweth",
-                "name": "Wrapped Ether",
-                "symbol": "WETH",
-                "decimals": "18",
-                "balance": "500000000000000000",
-                "usd_price": 2000.0,
-            },
         ]
 
         snapshot = moralis._normalize_evm_response("0xwallet", "arbitrum", data)
 
-        assert snapshot.provider == "moralis"
-        assert snapshot.chain == "arbitrum"
-        assert len(snapshot.positions) == 2
+        assert len(snapshot.positions) == 1
+        assert Decimal(snapshot.positions[0].value_usd) == Decimal("1")
+
+    def test_normalize_evm_filters_spam(self):
+        """Spam tokens are filtered out."""
+        moralis = MoralisIntegration.__new__(MoralisIntegration)
+        moralis.name = "moralis"
+
+        data = {
+            "result": [
+                {
+                    "token_address": "0xusdc",
+                    "name": "USD Coin",
+                    "symbol": "USDC",
+                    "usd_value": 1.0,
+                    "possible_spam": False,
+                },
+                {
+                    "token_address": "0xspam",
+                    "name": "Free Money",
+                    "symbol": "SCAM",
+                    "usd_value": 99999.0,
+                    "possible_spam": True,
+                },
+            ]
+        }
+
+        snapshot = moralis._normalize_evm_response("0xwallet", "arbitrum", data)
+
+        assert len(snapshot.positions) == 1
         assert snapshot.positions[0].token_symbols == ["USDC"]
-        assert Decimal(snapshot.positions[0].value_usd) == Decimal("1")  # 1M / 10^6 * $1
-        assert snapshot.positions[1].token_symbols == ["WETH"]
-        assert Decimal(snapshot.positions[1].value_usd) == Decimal("1000")  # 0.5 * $2000
-        # Total should be sum
-        total = Decimal(snapshot.total_value_usd)
-        assert total == Decimal("1001")
+
+    def test_normalize_evm_native_token(self):
+        """Native tokens are handled via native_token flag."""
+        moralis = MoralisIntegration.__new__(MoralisIntegration)
+        moralis.name = "moralis"
+
+        data = {
+            "result": [
+                {
+                    "token_address": "",
+                    "name": "Ether",
+                    "symbol": "ETH",
+                    "usd_value": 2000.0,
+                    "native_token": True,
+                    "possible_spam": False,
+                },
+            ]
+        }
+
+        snapshot = moralis._normalize_evm_response("0xwallet", "ethereum", data)
+
+        assert len(snapshot.positions) == 1
+        assert snapshot.positions[0].position_id == "moralis:native"
+        assert snapshot.positions[0].details.get("native_token") is True
 
     def test_normalize_evm_empty_response(self):
         moralis = MoralisIntegration.__new__(MoralisIntegration)
         moralis.name = "moralis"
 
-        snapshot = moralis._normalize_evm_response("0xwallet", "arbitrum", [])
+        snapshot = moralis._normalize_evm_response("0xwallet", "arbitrum", {"result": []})
 
         assert snapshot.total_value_usd == "0"
         assert snapshot.positions == []
@@ -365,20 +451,24 @@ class TestMoralisNormalization:
         assert len(snapshot.positions) == 1
         assert Decimal(snapshot.positions[0].value_usd) == Decimal("5")
 
-    def test_handles_missing_usd_price(self):
+    def test_handles_missing_usd_price_with_fallback_calc(self):
+        """When usd_value is absent, falls back to manual calc from balance+price."""
         moralis = MoralisIntegration.__new__(MoralisIntegration)
         moralis.name = "moralis"
 
-        data = [
-            {
-                "token_address": "0xunknown",
-                "name": "Unknown Token",
-                "symbol": "UNK",
-                "decimals": "18",
-                "balance": "1000000000000000000",
-                "usd_price": None,
-            },
-        ]
+        data = {
+            "result": [
+                {
+                    "token_address": "0xunknown",
+                    "name": "Unknown Token",
+                    "symbol": "UNK",
+                    "decimals": "18",
+                    "balance": "1000000000000000000",
+                    "usd_price": None,
+                    # No usd_value field
+                },
+            ]
+        }
 
         snapshot = moralis._normalize_evm_response("0xwallet", "arbitrum", data)
 
@@ -388,11 +478,141 @@ class TestMoralisNormalization:
         moralis = MoralisIntegration.__new__(MoralisIntegration)
         assert moralis.supports_portfolio() is True
 
-    def test_chain_id_mapping(self):
-        assert MoralisIntegration._CHAIN_IDS["ethereum"] == "0x1"
-        assert MoralisIntegration._CHAIN_IDS["arbitrum"] == "0xa4b1"
-        assert MoralisIntegration._CHAIN_IDS["base"] == "0x2105"
+    def test_chain_slug_mapping(self):
+        """New v2.2 endpoints use slug-based chain identifiers."""
+        assert MoralisIntegration._CHAIN_SLUGS["ethereum"] == "eth"
+        assert MoralisIntegration._CHAIN_SLUGS["arbitrum"] == "arbitrum"
+        assert MoralisIntegration._CHAIN_SLUGS["base"] == "base"
+        # Solana is NOT in _CHAIN_SLUGS (uses legacy path)
+        assert "solana" not in MoralisIntegration._CHAIN_SLUGS
+        # Solana is still in _CHAIN_IDS for detection
         assert MoralisIntegration._CHAIN_IDS["solana"] == "solana"
+
+    def test_normalize_net_worth_response(self):
+        moralis = MoralisIntegration.__new__(MoralisIntegration)
+        moralis.name = "moralis"
+
+        data = {
+            "total_networth_usd": "38.50",
+            "chains": [{"chain": "arbitrum", "networth_usd": "38.50"}],
+        }
+
+        snapshot = moralis._normalize_net_worth_response("0xwallet", "arbitrum", data)
+
+        assert snapshot.total_value_usd == "38.50"
+        assert snapshot.positions == []
+
+    def test_normalize_defi_response(self):
+        moralis = MoralisIntegration.__new__(MoralisIntegration)
+        moralis.name = "moralis"
+
+        data = [
+            {
+                "protocol_name": "Aave V3",
+                "protocol_id": "aave-v3",
+                "position": {
+                    "label": "USDC Supply",
+                    "tokens": [{"symbol": "USDC"}, {"symbol": "aUSDC"}],
+                    "balance_usd": 100.0,
+                    "total_unclaimed_usd_value": 2.5,
+                },
+                "position_details": {"pool_address": "0xpool123"},
+            }
+        ]
+
+        positions = moralis._normalize_defi_response(data)
+
+        assert len(positions) == 1
+        assert positions[0].protocol == "Aave V3"
+        assert positions[0].label == "USDC Supply"
+        assert positions[0].token_symbols == ["USDC", "aUSDC"]
+        assert Decimal(positions[0].value_usd) == Decimal("102.5")
+        assert positions[0].pool_address == "0xpool123"
+        assert positions[0].position_type == "defi"
+
+    def test_normalize_defi_response_empty(self):
+        moralis = MoralisIntegration.__new__(MoralisIntegration)
+        moralis.name = "moralis"
+
+        assert moralis._normalize_defi_response([]) == []
+        assert moralis._normalize_defi_response(None) == []
+
+    @pytest.mark.asyncio
+    async def test_get_wallet_positions_merges_tokens_and_defi(self):
+        """get_wallet_positions merges token balances + DeFi positions."""
+        moralis = MoralisIntegration.__new__(MoralisIntegration)
+        moralis.name = "moralis"
+        moralis._api_key = "test"
+        moralis.default_cache_ttl = 60
+        moralis._cache = {}
+
+        token_snapshot = WalletPortfolioSnapshot(
+            provider="moralis",
+            wallet_address="0xwallet",
+            chain="arbitrum",
+            total_value_usd="10",
+            positions=[
+                WalletPosition(
+                    position_id="moralis:0xusdc",
+                    protocol="wallet",
+                    label="USDC",
+                    position_type="token",
+                    value_usd="10",
+                )
+            ],
+        )
+        defi_positions = [
+            WalletPosition(
+                position_id="moralis:defi:aave:supply",
+                protocol="Aave V3",
+                label="USDC Supply",
+                position_type="defi",
+                value_usd="50",
+            )
+        ]
+
+        with (
+            patch.object(moralis, "_fetch_evm_tokens", return_value=token_snapshot),
+            patch.object(moralis, "_fetch_defi_positions", return_value=defi_positions),
+        ):
+            result = await moralis.get_wallet_positions("0xwallet", "arbitrum")
+
+        assert len(result.positions) == 2
+        assert Decimal(result.total_value_usd) == Decimal("60")
+
+    @pytest.mark.asyncio
+    async def test_get_wallet_positions_defi_failure_is_best_effort(self):
+        """DeFi failure should not break the whole positions call."""
+        moralis = MoralisIntegration.__new__(MoralisIntegration)
+        moralis.name = "moralis"
+        moralis._api_key = "test"
+        moralis.default_cache_ttl = 60
+        moralis._cache = {}
+
+        token_snapshot = WalletPortfolioSnapshot(
+            provider="moralis",
+            wallet_address="0xwallet",
+            chain="arbitrum",
+            total_value_usd="10",
+            positions=[
+                WalletPosition(
+                    position_id="moralis:0xusdc",
+                    protocol="wallet",
+                    label="USDC",
+                    position_type="token",
+                    value_usd="10",
+                )
+            ],
+        )
+
+        with (
+            patch.object(moralis, "_fetch_evm_tokens", return_value=token_snapshot),
+            patch.object(moralis, "_fetch_defi_positions", side_effect=Exception("403 Forbidden")),
+        ):
+            result = await moralis.get_wallet_positions("0xwallet", "arbitrum")
+
+        assert len(result.positions) == 1
+        assert Decimal(result.total_value_usd) == Decimal("10")
 
 
 # =============================================================================
