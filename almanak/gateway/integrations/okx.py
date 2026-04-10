@@ -17,14 +17,20 @@ API docs:
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import hmac
+import json
 import logging
+import time
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from urllib.parse import urlencode
 
-from almanak.gateway.integrations.base import BaseIntegration
+import aiohttp
+
+from almanak.gateway.integrations.base import BaseIntegration, IntegrationError, IntegrationRateLimitError
 from almanak.gateway.integrations.models import WalletPortfolioSnapshot, WalletPosition
 from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
 
@@ -52,6 +58,7 @@ class OkxIntegration(BaseIntegration):
     _API_BASE = "https://web3.okx.com"
 
     # OKX uses standard EVM numeric chain IDs as strings.
+    # Non-EVM chains use OKX-specific synthetic IDs (e.g. Solana = "501").
     # https://web3.okx.com/onchainos/dev-docs/home/supported-chain
     _CHAIN_IDS: dict[str, str] = {
         "ethereum": "1",
@@ -148,14 +155,8 @@ class OkxIntegration(BaseIntegration):
         json_data: dict[str, Any] | None = None,
     ) -> Any:
         """Override BaseIntegration._fetch to inject per-request HMAC auth headers."""
-        import time as _time
-
-        import aiohttp
-
-        from almanak.gateway.integrations.base import IntegrationError, IntegrationRateLimitError
-
         self._metrics.total_requests += 1
-        start_time = _time.time()
+        start_time = time.time()
 
         wait_time = await self._rate_limiter.acquire()
         if wait_time > 0:
@@ -164,8 +165,6 @@ class OkxIntegration(BaseIntegration):
         # Build full URL with query string for signature
         url = f"{self._base_url}{path}"
         if params:
-            from urllib.parse import urlencode
-
             query_string = urlencode(params)
             request_path = f"{path}?{query_string}"
             url = f"{self._base_url}{request_path}"
@@ -174,25 +173,28 @@ class OkxIntegration(BaseIntegration):
 
         body = ""
         if json_data:
-            import json
-
             body = json.dumps(json_data)
 
         headers = self._get_auth_headers(method, request_path, body)
+        if body:
+            headers["Content-Type"] = "application/json"
 
         try:
             session = await self._get_session()
             async with session.request(
                 method,
                 url,
-                json=json_data if json_data else None,
+                data=body if body else None,
                 headers=headers,
             ) as response:
-                latency_ms = (_time.time() - start_time) * 1000
+                latency_ms = (time.time() - start_time) * 1000
 
                 if response.status == 429:
                     self._metrics.rate_limited_requests += 1
-                    retry_after = float(response.headers.get("Retry-After", "60"))
+                    try:
+                        retry_after = float(response.headers.get("Retry-After", "60"))
+                    except (ValueError, TypeError):
+                        retry_after = 60.0
                     raise IntegrationRateLimitError(self.name, retry_after)
 
                 if response.status >= 400:
@@ -206,7 +208,43 @@ class OkxIntegration(BaseIntegration):
                         code=f"HTTP_{response.status}",
                     )
 
-                data = await response.json()
+                try:
+                    data = await response.json()
+                except (aiohttp.ContentTypeError, json.JSONDecodeError) as e:
+                    self._metrics.failed_requests += 1
+                    self._metrics.last_error = f"Invalid JSON response: {e}"
+                    self._metrics.last_error_time = datetime.now(UTC)
+                    raise IntegrationError(
+                        self.name,
+                        f"Invalid JSON response from OKX: {e}",
+                        code="INVALID_RESPONSE",
+                    ) from e
+
+                # OKX responses must be a dict with "code" and "data" keys.
+                # Reject unexpected envelopes (e.g. {}, []) to trigger provider failover.
+                if not isinstance(data, dict) or "code" not in data:
+                    self._metrics.failed_requests += 1
+                    self._metrics.last_error = f"Invalid OKX response envelope: {type(data).__name__}"
+                    self._metrics.last_error_time = datetime.now(UTC)
+                    raise IntegrationError(
+                        self.name,
+                        f"Invalid OKX response: expected dict with 'code', got {type(data).__name__}",
+                        code="INVALID_RESPONSE",
+                    )
+
+                # OKX returns HTTP 200 with error codes in the body
+                # (e.g., {"code": "50011", "msg": "Invalid API key"})
+                okx_code = str(data["code"])
+                if okx_code != "0":
+                    okx_msg = data.get("msg", "unknown error")
+                    self._metrics.failed_requests += 1
+                    self._metrics.last_error = f"OKX {okx_code}: {okx_msg}"
+                    self._metrics.last_error_time = datetime.now(UTC)
+                    raise IntegrationError(
+                        self.name,
+                        f"OKX API error {okx_code}: {okx_msg}",
+                        code=f"OKX_{okx_code}",
+                    )
 
                 self._metrics.successful_requests += 1
                 self._metrics.total_latency_ms += latency_ms
@@ -235,13 +273,31 @@ class OkxIntegration(BaseIntegration):
     # Portfolio API
     # -------------------------------------------------------------------------
 
+    @staticmethod
+    def _validate_inputs(wallet_address: str, chain: str) -> tuple[str, str]:
+        """Validate and normalize wallet_address and chain inputs."""
+        addr = wallet_address.strip() if wallet_address else ""
+        ch = chain.strip().lower() if chain else ""
+        if not addr:
+            raise ValueError("wallet_address must not be empty")
+        if not ch:
+            raise ValueError("chain must not be empty")
+        return addr, ch
+
+    @staticmethod
+    def _cache_address(wallet_address: str, chain: str) -> str:
+        """Normalize wallet address for cache keys. Preserves case for Solana (base58)."""
+        if chain.lower() in {"solana", "501"}:
+            return wallet_address
+        return wallet_address.lower()
+
     async def get_wallet_portfolio(self, wallet_address: str, chain: str) -> WalletPortfolioSnapshot:
         """Get total USD portfolio value for a wallet on a chain."""
-        cache_key = f"okx:portfolio:{wallet_address.lower()}:{chain.lower()}"
+        wallet_address, chain = self._validate_inputs(wallet_address, chain)
+        cache_key = f"okx:portfolio:{self._cache_address(wallet_address, chain)}:{chain.lower()}"
         cached = self._get_cached(cache_key)
         if cached is not None:
-            cached.cache_hit = True
-            return cached
+            return dataclasses.replace(cached, cache_hit=True)
 
         chain_id = self._CHAIN_IDS.get(chain.lower())
         if not chain_id:
@@ -264,11 +320,11 @@ class OkxIntegration(BaseIntegration):
         1. Market Balance API — bare token holdings
         2. Wallet DeFi API — LP, lending, staking, farming positions
         """
-        cache_key = f"okx:positions:{wallet_address.lower()}:{chain.lower()}"
+        wallet_address, chain = self._validate_inputs(wallet_address, chain)
+        cache_key = f"okx:positions:{self._cache_address(wallet_address, chain)}:{chain.lower()}"
         cached = self._get_cached(cache_key)
         if cached is not None:
-            cached.cache_hit = True
-            return cached
+            return dataclasses.replace(cached, cache_hit=True)
 
         chain_id = self._CHAIN_IDS.get(chain.lower())
         if not chain_id:
@@ -282,12 +338,14 @@ class OkxIntegration(BaseIntegration):
         )
         token_snapshot = self._normalize_token_balances(wallet_address, chain, token_data)
 
-        # Fetch DeFi positions (best-effort — don't fail the whole call)
+        # Fetch DeFi positions (best-effort — don't fail the whole call on network errors)
         defi_positions: list[WalletPosition] = []
+        defi_failed = False
         try:
             defi_positions = await self._fetch_defi_positions(wallet_address, chain_id)
-        except Exception as e:
+        except (IntegrationError, aiohttp.ClientError, TimeoutError) as e:
             logger.warning("OKX DeFi positions fetch failed for %s on %s: %s", wallet_address, chain, e)
+            defi_failed = True
 
         # Merge
         all_positions = token_snapshot.positions + defi_positions
@@ -301,11 +359,14 @@ class OkxIntegration(BaseIntegration):
             positions=all_positions,
             cache_hit=False,
         )
-        self._update_cache(cache_key, snapshot)
+        # Use short TTL (10s) when DeFi data is missing to allow quick retry
+        cache_ttl = 10 if defi_failed else None
+        self._update_cache(cache_key, snapshot, ttl=cache_ttl)
         return snapshot
 
     async def get_token_balances(self, wallet_address: str, chain: str) -> WalletPortfolioSnapshot:
         """Get only bare token balances (no DeFi positions)."""
+        wallet_address, chain = self._validate_inputs(wallet_address, chain)
         chain_id = self._CHAIN_IDS.get(chain.lower(), chain)
         data = await self._fetch(
             "/api/v6/dex/balance/all-token-balances-by-address",
@@ -319,11 +380,11 @@ class OkxIntegration(BaseIntegration):
 
     async def get_defi_positions(self, wallet_address: str, chain: str) -> WalletPortfolioSnapshot:
         """Get DeFi protocol positions for a wallet on a chain."""
-        cache_key = f"okx:defi:{wallet_address.lower()}:{chain.lower()}"
+        wallet_address, chain = self._validate_inputs(wallet_address, chain)
+        cache_key = f"okx:defi:{self._cache_address(wallet_address, chain)}:{chain.lower()}"
         cached = self._get_cached(cache_key)
         if cached is not None:
-            cached.cache_hit = True
-            return cached
+            return dataclasses.replace(cached, cache_hit=True)
 
         chain_id = self._CHAIN_IDS.get(chain.lower(), chain)
         positions = await self._fetch_defi_positions(wallet_address, chain_id)
@@ -376,7 +437,7 @@ class OkxIntegration(BaseIntegration):
         total_value = "0"
         data_list = self._extract_data(payload)
         if data_list:
-            total_value = str(data_list[0].get("totalValue", "0"))
+            total_value = str(self._safe_decimal(data_list[0].get("totalValue", "0")))
 
         return WalletPortfolioSnapshot(
             provider=self.name,
@@ -553,8 +614,9 @@ class OkxIntegration(BaseIntegration):
                                         symbols.append(tok["tokenSymbol"])
 
                         # Calculate total value from positionList assets
-                        total_value = invest.get("totalValue", "")
-                        if not total_value:
+                        raw_value = invest.get("totalValue", "")
+                        total_value = str(OkxIntegration._safe_decimal(raw_value)) if raw_value else ""
+                        if not total_value or total_value == "0":
                             total_value = OkxIntegration._sum_position_values(invest.get("positionList"))
 
                         pool_addr = invest.get("poolAddress", "") or invest.get("tokenAddress", "")
@@ -693,16 +755,16 @@ class OkxIntegration(BaseIntegration):
     @staticmethod
     def _calc_usd_value(balance: str, token_price: str) -> str:
         """Calculate USD value from human-readable balance and price."""
-        try:
-            bal = Decimal(str(balance))
-            price = Decimal(str(token_price))
-            return str(bal * price)
-        except (InvalidOperation, ValueError):
-            return "0"
+        bal = OkxIntegration._safe_decimal(balance)
+        price = OkxIntegration._safe_decimal(token_price)
+        return str(bal * price)
 
     @staticmethod
-    def _safe_decimal(value: str) -> Decimal:
+    def _safe_decimal(value: Any) -> Decimal:
+        if value is None:
+            return Decimal("0")
         try:
-            return Decimal(value)
-        except (InvalidOperation, ValueError):
+            parsed = Decimal(str(value))
+            return parsed if parsed.is_finite() else Decimal("0")
+        except (InvalidOperation, ValueError, TypeError):
             return Decimal("0")

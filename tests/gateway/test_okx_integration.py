@@ -1,9 +1,11 @@
 """Tests for OKX OnchainOS portfolio integration."""
 
-from unittest.mock import patch
+from decimal import Decimal
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from almanak.gateway.integrations.base import IntegrationError
 from almanak.gateway.integrations.okx import OkxIntegration
 
 
@@ -31,12 +33,16 @@ class TestOkxIntegration:
         monkeypatch.delenv("OKX_API_KEY", raising=False)
         monkeypatch.delenv("OKX_API_SECRET", raising=False)
         monkeypatch.delenv("OKX_API_PASSPHRASE", raising=False)
+        monkeypatch.delenv("ALMANAK_GATEWAY_OKX_API_KEY", raising=False)
+        monkeypatch.delenv("ALMANAK_GATEWAY_OKX_API_SECRET", raising=False)
+        monkeypatch.delenv("ALMANAK_GATEWAY_OKX_API_PASSPHRASE", raising=False)
         okx = OkxIntegration(api_key=None, api_secret=None, api_passphrase=None)
         assert okx.is_configured is False
 
     def test_not_configured_partial_credentials(self, monkeypatch):
         """Integration reports not configured with partial credentials."""
         monkeypatch.delenv("OKX_API_SECRET", raising=False)
+        monkeypatch.delenv("ALMANAK_GATEWAY_OKX_API_SECRET", raising=False)
         okx = OkxIntegration(api_key="key", api_secret=None, api_passphrase="pass")
         assert okx.is_configured is False
 
@@ -100,6 +106,21 @@ class TestOkxIntegration:
         payload = {"code": "0", "msg": "success", "data": []}
         snapshot = okx._normalize_total_value("0xabc", "ethereum", payload)
         assert snapshot.total_value_usd == "0"
+
+    @pytest.mark.parametrize("bad_value", ["NaN", "Infinity", "-Infinity"])
+    def test_normalize_total_value_non_finite(self, okx, bad_value):
+        """Non-finite totalValue strings are sanitized to zero."""
+        payload = {"code": "0", "msg": "success", "data": [{"totalValue": bad_value}]}
+        snapshot = okx._normalize_total_value("0xabc", "ethereum", payload)
+        assert snapshot.total_value_usd == "0"
+        assert snapshot.provider == "okx"
+        assert snapshot.wallet_address == "0xabc"
+        assert snapshot.chain == "ethereum"
+
+    @pytest.mark.parametrize("bad_value", ["NaN", "Infinity", "-Infinity", None])
+    def test_safe_decimal_non_finite(self, bad_value):
+        """Non-finite and None values return Decimal(0)."""
+        assert OkxIntegration._safe_decimal(bad_value) == Decimal("0")
 
     def test_normalize_token_balances(self, okx):
         """Token balances response is normalized into positions."""
@@ -201,8 +222,8 @@ class TestOkxIntegration:
 
     def test_calc_usd_value_invalid(self):
         """USD calculation returns 0 for invalid inputs."""
-        assert OkxIntegration._calc_usd_value("invalid", "2000") == "0"
-        assert OkxIntegration._calc_usd_value("1.5", "invalid") == "0"
+        assert Decimal(OkxIntegration._calc_usd_value("invalid", "2000")) == 0
+        assert Decimal(OkxIntegration._calc_usd_value("1.5", "invalid")) == 0
 
     # -------------------------------------------------------------------------
     # Caching tests
@@ -409,6 +430,40 @@ class TestOkxIntegration:
         positions = okx._normalize_defi_details(payload, platforms)
         assert len(positions) == 0
 
+    @pytest.mark.parametrize("bad_value", ["NaN", "Infinity", "-Infinity"])
+    def test_normalize_defi_details_non_finite_total_value(self, okx, bad_value):
+        """Non-finite totalValue in DeFi positions is sanitized."""
+        platforms = [{"id": "1", "name": "Proto"}]
+        payload = {
+            "code": "0",
+            "data": [
+                {
+                    "walletIdPlatformDetailList": [
+                        {
+                            "analysisPlatformId": "1",
+                            "networkHoldVoList": [
+                                {
+                                    "chainIndex": "1",
+                                    "investTokenBalanceVoList": [
+                                        {
+                                            "investmentName": "Test",
+                                            "investmentId": "inv-1",
+                                            "investType": 1,
+                                            "totalValue": bad_value,
+                                            "tokenList": [{"tokenSymbol": "USDC"}],
+                                        },
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ],
+        }
+        positions = okx._normalize_defi_details(payload, platforms)
+        assert len(positions) == 1
+        assert Decimal(positions[0].value_usd).is_finite()
+
     @pytest.mark.asyncio
     async def test_get_wallet_positions_merges_tokens_and_defi(self, okx):
         """get_wallet_positions merges token balances with DeFi positions."""
@@ -446,3 +501,31 @@ class TestOkxIntegration:
         assert snap.positions[1].protocol == "Aave V3"
         # Total = 2000 + 500
         assert "2500" in snap.total_value_usd
+
+    # -------------------------------------------------------------------------
+    # Schema-invalid response tests
+    # -------------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_body", [{}, [], {"msg": "ok"}])
+    async def test_fetch_rejects_invalid_response_envelope(self, okx, bad_body):
+        """HTTP 200 with missing 'code' key raises IntegrationError."""
+        from contextlib import asynccontextmanager
+
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(return_value=bad_body)
+
+        @asynccontextmanager
+        async def fake_request(*args, **kwargs):
+            yield mock_response
+
+        mock_session = AsyncMock()
+        mock_session.request = fake_request
+
+        with patch.object(okx, "_get_session", AsyncMock(return_value=mock_session)), \
+             patch.object(okx._rate_limiter, "acquire", AsyncMock(return_value=0)):
+            with pytest.raises(IntegrationError, match="Invalid OKX response"):
+                await okx._fetch("/api/v6/dex/balance/total-value-by-address")
+
+        assert okx._metrics.failed_requests > 0

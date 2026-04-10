@@ -165,10 +165,14 @@ def build_portfolio_chain(
             from almanak.gateway.integrations.moralis import MoralisIntegration
 
             providers.append(MoralisIntegration(api_key=cfg.api_key, cache_ttl=cfg.cache_ttl))
-        elif cfg.name == "okx" and cfg.api_key:
+        elif cfg.name == "okx":
             from almanak.gateway.integrations.okx import OkxIntegration
 
-            providers.append(OkxIntegration(api_key=cfg.api_key, cache_ttl=cfg.cache_ttl))
+            okx = OkxIntegration(cache_ttl=cfg.cache_ttl)
+            if okx.is_configured:
+                providers.append(okx)
+            else:
+                logger.info("Skipping OKX provider: requires api_key, api_secret, and api_passphrase")
         else:
             logger.info("Skipping unconfigured portfolio provider: %s", cfg.name)
 
