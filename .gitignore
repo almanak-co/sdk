@@ -21,6 +21,8 @@ venv/
 almanak_state.db
 almanak_state.db-shm
 almanak_state.db-wal
+almanak_copy_ledger.db
+.almanak/sdk.json
 scripts/contracts.db
 almanak/.dashboard_events.json
 probe/
