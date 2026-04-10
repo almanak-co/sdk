@@ -246,9 +246,26 @@ class XLayerLPRebalanceStrategy(IntentStrategy):
                 self._state = "swapped"  # Next decide() will re-open position
                 logger.info(f"SWAP SUCCESS: rebalance #{self._rebalance_count} complete")
         else:
-            revert_to = self._previous_stable_state
-            logger.warning(f"{intent_type} failed, reverting to '{revert_to}'")
-            self._state = revert_to
+            if intent_type == "LP_CLOSE":
+                # Check if the failure is due to a non-existent position (stale state)
+                # vs a transient execution error (slippage, gas, RPC timeout, etc.)
+                error_text = str(getattr(result, "error", "")).lower()
+                stale_position = any(
+                    marker in error_text
+                    for marker in ("invalid token id", "nonexistent token", "position does not exist", "position not found")
+                )
+                if stale_position:
+                    logger.warning("LP_CLOSE failed due to stale position_id — resetting to idle")
+                    self._state = "idle"
+                    self._position_id = None
+                else:
+                    revert_to = self._previous_stable_state
+                    logger.warning(f"LP_CLOSE failed ({error_text or 'unknown error'}), reverting to '{revert_to}'")
+                    self._state = revert_to
+            else:
+                revert_to = self._previous_stable_state
+                logger.warning(f"{intent_type} failed, reverting to '{revert_to}'")
+                self._state = revert_to
 
     # -- Status & Persistence --
 
