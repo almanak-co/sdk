@@ -135,10 +135,10 @@ EULER_V2_VAULTS: dict[str, dict] = {
     },
 }
 
-# Reverse lookup: underlying_symbol -> list of vault symbols (sorted by preference)
+# Reverse lookup: underlying_symbol (UPPER) -> list of vault symbols (sorted by preference)
 _TOKEN_TO_VAULT_MAP: dict[str, list[str]] = {}
 for _vault_sym, _vault_info in EULER_V2_VAULTS.items():
-    _underlying = _vault_info["underlying_symbol"]
+    _underlying = _vault_info["underlying_symbol"].upper()
     if _underlying not in _TOKEN_TO_VAULT_MAP:
         _TOKEN_TO_VAULT_MAP[_underlying] = []
     _TOKEN_TO_VAULT_MAP[_underlying].append(_vault_sym)

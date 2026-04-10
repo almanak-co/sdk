@@ -80,7 +80,7 @@ SYMBOL_ALIASES: dict[tuple[str, str], str] = {
     ("avalanche", "USDC.E"): "0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664",  # Bridged USDC
     ("avalanche", "USDT.E"): "0xc7198437980c041c805A1EDcbA50c1Ce5db95118",  # Bridged USDT
     ("avalanche", "WETH.E"): "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",  # Bridged WETH
-    ("avalanche", "BTCB"): "0x152b9D0fDC40c096DE20232db1E35ae6A57fa6C0",  # BTC.b alias (no dot)
+    ("avalanche", "BTCB"): "0x152b9d0FdC40C096757F570A51E494bd4b943E50",  # BTC.b alias (no dot)
     # Berachain bridged tokens
     ("berachain", "USDC.E"): "0x549943e04f40284185054145c6E4e9568C1D3241",  # Bridged USDC (Stargate)
     ("berachain", "USDC"): "0x549943e04f40284185054145c6E4e9568C1D3241",  # USDC -> bridged USDC on Berachain
@@ -485,7 +485,7 @@ BTC_B = Token(
     name="Bitcoin (BTC.b)",
     decimals=8,
     addresses={
-        "avalanche": "0x152b9D0fDC40c096DE20232db1E35ae6A57fa6C0",
+        "avalanche": "0x152b9d0FdC40C096757F570A51E494bd4b943E50",
     },
     coingecko_id="bitcoin-avalanche-bridged-btc-b",
     is_stablecoin=False,

@@ -989,7 +989,7 @@ class TestBridgedTokenAliases:
         assert token.symbol == "BTC.B"
         assert token.decimals == 8
         assert token.chain == Chain.AVALANCHE
-        assert token.address.lower() == "0x152b9d0fdc40c096de20232db1e35ae6a57fa6c0"
+        assert token.address.lower() == "0x152b9d0fdc40c096757f570a51e494bd4b943e50"
 
     def test_btcb_alias_resolves_on_avalanche(self, temp_cache_file):
         """Test BTCB alias resolves to BTC.b on Avalanche (VIB-1362)."""
@@ -999,7 +999,7 @@ class TestBridgedTokenAliases:
         assert token.symbol == "BTC.B"
         assert token.decimals == 8
         assert token.chain == Chain.AVALANCHE
-        assert token.address.lower() == "0x152b9d0fdc40c096de20232db1e35ae6a57fa6c0"
+        assert token.address.lower() == "0x152b9d0fdc40c096757f570a51e494bd4b943e50"
 
     def test_savax_resolves_on_avalanche(self, temp_cache_file):
         """Test sAVAX resolves to BENQI staked AVAX on Avalanche (VIB-1362)."""
