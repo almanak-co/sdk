@@ -85,7 +85,7 @@ from almanak.framework.backtesting.models import (
     IntentType,
     TradeRecord,
 )
-from almanak.framework.backtesting.paper.config import PaperTraderConfig
+from almanak.framework.backtesting.paper.config import ForkLifecycle, PaperTraderConfig
 from almanak.framework.backtesting.paper.models import (
     PaperTrade,
     PaperTradeError,
@@ -769,6 +769,9 @@ class PaperTrader:
     _portfolio_valuer: "PortfolioValuer | None" = field(default=None, init=False, repr=False)
     _last_market_snapshot: MarketSnapshot | None = field(default=None, init=False, repr=False)
     _valuer_available: bool = field(default=False, init=False, repr=False)
+    _yield_poker: Any = field(default=None, init=False, repr=False)
+    _position_reconciler: Any = field(default=None, init=False, repr=False)
+    _reconciler_discrepancies: list[Any] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -794,6 +797,17 @@ class PaperTrader:
 
         # Initialize indicator calculators (RSI, MACD, BB, ATR all derive from OHLCV)
         self._init_indicator_calculators()
+
+        # Initialize YieldPoker for persistent fork mode (VIB-2632)
+        if self.config.yield_poker_enabled:
+            try:
+                from almanak.framework.backtesting.paper.yield_poker import YieldPoker
+
+                self._yield_poker = YieldPoker()
+                logger.info("YieldPoker initialized with default protocol poke hooks")
+            except ImportError:
+                logger.warning("YieldPoker not available (import failed)")
+                self._yield_poker = None
 
     def _track_fallback(self, fallback_type: str) -> None:
         """Track usage of a fallback value.
@@ -947,6 +961,7 @@ class PaperTrader:
         self._errors = []
         self._equity_curve = []
         self._tick_count = 0
+        self._reconciler_discrepancies = []
         self._last_execution_result: ExecutionResult | None = None  # For on_intent_executed callback (VIB-1951)
         # Reset health telemetry counters (VIB-1957)
         self._ticks_with_fork = 0
@@ -970,9 +985,11 @@ class PaperTrader:
             )
         )
 
+        lifecycle_label = self.config.fork_lifecycle.value
         logger.info(
             f"[{self._backtest_id}] Starting paper trading session for {strategy.strategy_id} "
-            f"(duration={effective_duration}s, interval={self.config.tick_interval_seconds}s)"
+            f"(duration={effective_duration}s, interval={self.config.tick_interval_seconds}s, "
+            f"fork_lifecycle={lifecycle_label})"
         )
 
         self._emit_event(
@@ -1018,9 +1035,17 @@ class PaperTrader:
                     logger.info(f"[{self._backtest_id}] Max ticks ({max_ticks}) reached, stopping")
                     break
 
+                # For persistent forks: advance time and poke before tick
+                if self.config.fork_lifecycle == ForkLifecycle.PERSISTENT and self._tick_count > 0:
+                    await self._advance_persistent_fork()
+
                 # Execute tick
                 await self._execute_tick(strategy)
                 self._tick_count += 1
+
+                # For persistent forks: run reconciler after tick to detect divergence
+                if self.config.position_reconciler_enabled and self.config.fork_lifecycle == ForkLifecycle.PERSISTENT:
+                    await self._run_position_reconciler()
 
                 # Sleep until next tick
                 await asyncio.sleep(self.config.tick_interval_seconds)
@@ -1264,8 +1289,19 @@ class PaperTrader:
         if await self._should_refresh_fork():
             await self._refresh_fork()
 
+        # For persistent forks: advance time and poke protocols before tick
+        if self.config.fork_lifecycle == ForkLifecycle.PERSISTENT and self._tick_count > 0:
+            await self._advance_persistent_fork()
+
         # Execute the tick
-        return await self._execute_tick(self._current_strategy)
+        result = await self._execute_tick(self._current_strategy)
+        self._tick_count += 1
+
+        # For persistent forks: run reconciler after tick to detect divergence
+        if self.config.position_reconciler_enabled and self.config.fork_lifecycle == ForkLifecycle.PERSISTENT:
+            await self._run_position_reconciler()
+
+        return result
 
     async def run_loop(
         self,
@@ -2153,6 +2189,10 @@ class PaperTrader:
         Tries the PortfolioValuer first (LP + lending aware). Falls back
         to simple token×price calculation if the valuer is unavailable.
 
+        For persistent forks with use_rich_valuation, always prefers the
+        PortfolioValuer which reads on-chain balances (including accrued
+        interest on aTokens) rather than the in-memory tracker.
+
         Note: This method refreshes the price cache before calculating portfolio
         value to ensure newly acquired tokens have prices and to avoid using
         stale prices across ticks.
@@ -2166,7 +2206,12 @@ class PaperTrader:
 
         now = datetime.now(UTC)
 
+        # For persistent forks: check oracle divergence before valuation
+        if self.config.fork_lifecycle == ForkLifecycle.PERSISTENT:
+            await self._check_oracle_divergence()
+
         # Try rich valuation first (includes LP + lending positions)
+        # Persistent forks with use_rich_valuation strongly prefer this path
         rich = self._value_portfolio_rich()
         if rich is not None:
             value, spot_value, position_value = rich
@@ -2176,6 +2221,11 @@ class PaperTrader:
             spot_value = None
             position_value = None
             valuation_source = "simple"
+            if self.config.use_rich_valuation and self.config.fork_lifecycle == ForkLifecycle.PERSISTENT:
+                logger.warning(
+                    f"[{self._backtest_id}] Rich valuation unavailable on persistent fork — "
+                    f"falling back to simple (in-memory) valuation. Yield accrual may not be reflected."
+                )
 
         eth_price = self._cached_prices.get("ETH") or self._cached_prices.get("WETH")
         point = EquityPoint(
@@ -2201,14 +2251,18 @@ class PaperTrader:
     async def _should_refresh_fork(self) -> bool:
         """Check if the fork should be refreshed.
 
-        Returns True if:
-        - Fork has been reset in this tick (reset_fork_every_tick is True)
-        - Fork has become stale (not running)
+        For ROLLING_RESET mode: returns True every tick (reset to latest block).
+        For PERSISTENT mode: returns False (fork stays alive, time is advanced).
+        Always returns True if the fork process has died.
 
         Returns:
             True if fork should be refreshed
         """
-        # Check if we should reset each tick
+        # Persistent mode: never reset, only recover dead forks
+        if self.config.fork_lifecycle == ForkLifecycle.PERSISTENT:
+            return not self.fork_manager.is_running
+
+        # Rolling reset mode: reset every tick if configured
         if not self.config.reset_fork_every_tick:
             return False
 
@@ -2220,13 +2274,19 @@ class PaperTrader:
     async def _refresh_fork(self) -> None:
         """Refresh the Anvil fork to a more recent block.
 
-        This resets the fork to the latest block while preserving portfolio state.
+        For ROLLING_RESET: resets fork to latest mainnet block and re-funds wallet.
+        For PERSISTENT: only used for fork recovery (dead process), does NOT
+        reset state. Normal time advancement is handled in _advance_persistent_fork().
         """
         logger.info(f"[{self._backtest_id}] Refreshing Anvil fork to latest block...")
 
         self._emit_event(
             PaperTradeEventType.FORK_REFRESHED,
-            {"reason": "reset_each_tick"},
+            {
+                "reason": "reset_each_tick"
+                if self.config.fork_lifecycle == ForkLifecycle.ROLLING_RESET
+                else "fork_recovery"
+            },
         )
 
         # Reset fork to latest block
@@ -2240,6 +2300,161 @@ class PaperTrader:
 
         if self.fork_manager.is_running:
             logger.info(f"[{self._backtest_id}] Fork refreshed to block {self.fork_manager.current_block}")
+
+    async def _advance_persistent_fork(self) -> None:
+        """Advance time on a persistent fork between ticks.
+
+        Called before each tick in PERSISTENT mode. Advances the fork's block
+        timestamp by tick_interval_seconds and mines a new block. This allows
+        on-chain yield accrual (lending interest) to progress.
+
+        After time advancement, executes YieldPoker poke hooks if enabled.
+        """
+        seconds = self.config.tick_interval_seconds
+        success = await self.fork_manager.advance_time(seconds)
+        if not success:
+            logger.warning(f"[{self._backtest_id}] Failed to advance fork time by {seconds}s")
+            return
+
+        logger.info(f"[{self._backtest_id}] Advanced fork time by {seconds}s (block={self.fork_manager.current_block})")
+
+        # Execute YieldPoker poke hooks to trigger interest accrual
+        if self.config.yield_poker_enabled and self._yield_poker is not None:
+            wallet = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+            try:
+                rpc_url = self.fork_manager.get_rpc_url() or self.config.fork_rpc_url
+                poke_results = await self._yield_poker.poke_all(self.config.chain, rpc_url, wallet)
+                poked = sum(1 for r in poke_results if r.success)
+                failed = len(poke_results) - poked
+                if poked > 0:
+                    logger.info(f"[{self._backtest_id}] YieldPoker: {poked} pokes succeeded, {failed} failed")
+                if failed > 0:
+                    for r in poke_results:
+                        if not r.success:
+                            logger.warning(f"[{self._backtest_id}] Poke failed for {r.protocol}: {r.error}")
+            except Exception as e:
+                logger.warning(f"[{self._backtest_id}] YieldPoker failed: {e}")
+
+    async def _run_position_reconciler(self) -> None:
+        """Run the PositionReconciler to detect on-chain vs tracked divergence.
+
+        V1: observe-only — logs warnings but doesn't correct or halt.
+        Called after each tick on persistent forks when position_reconciler_enabled=True.
+        """
+        try:
+            from almanak.framework.backtesting.paper.position_reconciler import PositionReconciler
+
+            # Lazy-init the reconciler
+            if self._position_reconciler is None:
+                self._position_reconciler = PositionReconciler(chain=self.config.chain)
+
+            # Reconciler needs web3 instance — create from fork RPC
+            fork_rpc = self.fork_manager.get_rpc_url()
+            if not fork_rpc:
+                return
+
+            try:
+                from web3 import Web3
+
+                w3 = Web3(Web3.HTTPProvider(fork_rpc))
+            except ImportError:
+                logger.debug("[%s] web3 not available, skipping reconciler", self._backtest_id)
+                return
+
+            wallet = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+            discrepancies = await self._position_reconciler.reconcile(w3, wallet)
+
+            if discrepancies:
+                logger.warning(
+                    f"[{self._backtest_id}] PositionReconciler found {len(discrepancies)} "
+                    f"discrepancies (observe-only, no correction applied)"
+                )
+                # Store for inclusion in summary
+                self._reconciler_discrepancies.extend(discrepancies)
+        except Exception as e:
+            logger.debug(
+                f"[{self._backtest_id}] PositionReconciler failed (non-fatal): {e}",
+                exc_info=True,
+            )
+
+    async def _check_oracle_divergence(self) -> None:
+        """Check divergence between live prices and on-fork oracle prices.
+
+        For persistent forks, the fork's on-chain oracle prices become stale
+        over time since no real oracle updates occur. This method compares
+        the live price feed (CoinGecko/DexScreener) against on-fork Chainlink
+        prices and logs/halts if divergence exceeds the threshold.
+
+        Uses a fork-bound Chainlink provider (pointing at the Anvil fork RPC)
+        rather than the upstream RPC, so it reads the actual stale on-chain
+        oracle prices rather than the live upstream values.
+        """
+        if not self._cached_prices:
+            return
+
+        # Build a fork-bound Chainlink provider to read on-fork oracle prices
+        fork_rpc = self.fork_manager.get_rpc_url() if self.fork_manager else None
+        if not fork_rpc:
+            return
+
+        chain_mapping = {
+            "ethereum": "ethereum",
+            "arbitrum": "arbitrum",
+            "base": "base",
+            "optimism": "optimism",
+            "polygon": "polygon",
+            "avalanche": "avalanche",
+        }
+        chainlink_chain = chain_mapping.get(self.config.chain)
+        if not chainlink_chain:
+            return
+
+        try:
+            fork_chainlink = ChainlinkDataProvider(
+                chain=chainlink_chain,
+                rpc_url=fork_rpc,
+                cache_ttl_seconds=0,
+            )
+        except Exception as e:
+            logger.debug(f"[{self._backtest_id}] Failed to create fork-bound Chainlink provider: {e}")
+            return
+
+        threshold = self.config.oracle_divergence_threshold
+        max_divergence = Decimal("0")
+        worst_token = ""
+
+        try:
+            for token, live_price in self._cached_prices.items():
+                if live_price <= 0:
+                    continue
+                try:
+                    fork_price = await fork_chainlink.get_price(token, timestamp=None)
+                    if fork_price and fork_price > 0:
+                        divergence = abs(live_price - fork_price) / live_price
+                        if divergence > max_divergence:
+                            max_divergence = divergence
+                            worst_token = token
+                        if divergence > Decimal("0.02"):
+                            logger.info(
+                                f"[{self._backtest_id}] Oracle divergence for {token}: "
+                                f"live=${live_price:.2f} vs fork=${fork_price:.2f} "
+                                f"({divergence * 100:.1f}%)"
+                            )
+                except Exception as e:
+                    logger.debug(f"[{self._backtest_id}] Failed to get on-fork price for {token} from Chainlink: {e}")
+        finally:
+            await fork_chainlink.close()
+
+        if max_divergence > threshold:
+            error_msg = (
+                f"Oracle divergence exceeds threshold for {worst_token}: "
+                f"{max_divergence * 100:.1f}% > {threshold * 100:.0f}%. "
+                f"The persistent fork's on-chain prices have drifted too far from reality. "
+                f"Paper trading results would be unreliable. "
+                f"Increase oracle_divergence_threshold or reduce session duration."
+            )
+            logger.error(f"[{self._backtest_id}] {error_msg}")
+            raise RuntimeError(error_msg)
 
     def _emit_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Emit a paper trading event.

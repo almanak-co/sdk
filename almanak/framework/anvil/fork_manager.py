@@ -717,6 +717,44 @@ class RollingForkManager:
             self.fork_block_number = original_fork_block
             return False
 
+    async def advance_time(self, seconds: int) -> bool:
+        """Advance the fork's block timestamp and mine a new block.
+
+        Used by persistent fork mode to simulate passage of time so that
+        on-chain yield accrual (lending interest, etc.) progresses.
+
+        Args:
+            seconds: Number of seconds to advance the block timestamp.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        if not self.is_running:
+            logger.warning("Cannot advance time: fork is not running")
+            return False
+
+        try:
+            success, _ = await self._rpc_call_raw("evm_increaseTime", [seconds])
+            if not success:
+                logger.warning(f"evm_increaseTime({seconds}) failed")
+                return False
+
+            success, _ = await self._rpc_call_raw("evm_mine", [])
+            if not success:
+                logger.warning("evm_mine failed after evm_increaseTime")
+                return False
+
+            # Update current block number
+            block_hex = await self._rpc_call("eth_blockNumber", [])
+            if block_hex:
+                self._current_block = int(block_hex, 16)
+
+            logger.debug(f"Advanced fork time by {seconds}s, block={self._current_block}")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to advance fork time: {e}")
+            return False
+
     async def _assert_chain_id_after_reset(self) -> None:
         """Assert that the fork reports the expected chain ID after a reset.
 

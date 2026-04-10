@@ -49,9 +49,30 @@ Examples:
 
 from dataclasses import dataclass, field
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any, Literal
 
 from almanak.framework.anvil.fork_manager import CHAIN_IDS
+
+
+class ForkLifecycle(StrEnum):
+    """Fork lifecycle mode for paper trading.
+
+    Controls how the Anvil fork is managed between ticks.
+
+    Values:
+        ROLLING_RESET: Default. Reset fork to latest mainnet block each tick.
+            Positions are destroyed and re-funded from the portfolio tracker.
+            Best for execution validation (smoke testing TX flow).
+
+        PERSISTENT: Keep fork alive across ticks. Positions survive.
+            Time is advanced via evm_increaseTime + evm_mine between ticks.
+            Protocol poke transactions trigger interest accrual.
+            Best for yield-validation (measuring lending strategy PnL).
+    """
+
+    ROLLING_RESET = "rolling_reset"
+    PERSISTENT = "persistent"
 
 
 @dataclass
@@ -143,6 +164,34 @@ class PaperTraderConfig:
     startup_timeout_seconds: float = 30.0
     auto_impersonate: bool = True
     block_time: int | None = None
+
+    # Fork lifecycle (VIB-2631)
+    fork_lifecycle: ForkLifecycle = ForkLifecycle.ROLLING_RESET
+    """Fork lifecycle mode controlling how the fork is managed between ticks.
+
+    ROLLING_RESET (default): Reset fork to latest mainnet block each tick.
+        Current behavior. Best for execution validation.
+    PERSISTENT: Keep fork alive across ticks with time advancement.
+        Positions survive, yield accrues. Best for yield-validation.
+
+    When set to PERSISTENT, reset_fork_every_tick is ignored.
+    """
+
+    # Yield-validation options (only apply when fork_lifecycle == PERSISTENT)
+    yield_poker_enabled: bool = False
+    """Enable YieldPoker to poke lending protocols for interest accrual."""
+
+    use_rich_valuation: bool = False
+    """Use _value_portfolio_rich() with live prices for equity calculation."""
+
+    position_reconciler_enabled: bool = False
+    """Enable PositionReconciler to detect on-chain vs tracked divergence."""
+
+    oracle_divergence_threshold: Decimal = Decimal("0.05")
+    """Maximum allowed divergence between live and on-fork prices (5% default).
+    Paper trading halts with a clear error if this threshold is exceeded.
+    Only applies when fork_lifecycle == PERSISTENT.
+    """
 
     # Wallet configuration
     wallet_address: str | None = None
@@ -244,6 +293,19 @@ class PaperTraderConfig:
         # Anvil port validation
         if self.anvil_port <= 0 or self.anvil_port > 65535:
             raise ValueError(f"Invalid anvil_port: {self.anvil_port}")
+
+        # Fork lifecycle validation (VIB-2631)
+        if isinstance(self.fork_lifecycle, str):
+            self.fork_lifecycle = ForkLifecycle(self.fork_lifecycle)
+        # Sync reset_fork_every_tick with fork_lifecycle for backward compat
+        if self.fork_lifecycle == ForkLifecycle.PERSISTENT:
+            self.reset_fork_every_tick = False
+
+        # Oracle divergence threshold validation
+        if not (Decimal("0") <= self.oracle_divergence_threshold <= Decimal("1")):
+            raise ValueError(
+                f"oracle_divergence_threshold must be between 0 and 1, got {self.oracle_divergence_threshold}"
+            )
 
         # Startup timeout validation
         if self.startup_timeout_seconds <= 0:
@@ -372,6 +434,12 @@ class PaperTraderConfig:
             "strict_price_mode": self.strict_price_mode,
             # Backward compat: serialize as inverse of strict_price_mode
             "allow_hardcoded_fallback": not self.strict_price_mode,
+            # Fork lifecycle (VIB-2631)
+            "fork_lifecycle": self.fork_lifecycle.value,
+            "yield_poker_enabled": self.yield_poker_enabled,
+            "use_rich_valuation": self.use_rich_valuation,
+            "position_reconciler_enabled": self.position_reconciler_enabled,
+            "oracle_divergence_threshold": str(self.oracle_divergence_threshold),
             # Computed properties
             "max_duration_seconds": self.max_duration_seconds,
             "fork_rpc_url": self.fork_rpc_url,
@@ -438,6 +506,16 @@ class PaperTraderConfig:
             price_source=data.get("price_source", "auto"),
             strict_price_mode=strict_price_mode,
             allow_hardcoded_fallback=allow_hardcoded_fallback,
+            # Fork lifecycle (VIB-2631)
+            fork_lifecycle=ForkLifecycle(data["fork_lifecycle"])
+            if "fork_lifecycle" in data
+            else ForkLifecycle.ROLLING_RESET,
+            yield_poker_enabled=data.get("yield_poker_enabled", False),
+            use_rich_valuation=data.get("use_rich_valuation", False),
+            position_reconciler_enabled=data.get("position_reconciler_enabled", False),
+            oracle_divergence_threshold=Decimal(data["oracle_divergence_threshold"])
+            if "oracle_divergence_threshold" in data
+            else Decimal("0.05"),
         )
 
     @staticmethod
@@ -472,4 +550,4 @@ class PaperTraderConfig:
         )
 
 
-__all__ = ["PaperTraderConfig"]
+__all__ = ["ForkLifecycle", "PaperTraderConfig"]

@@ -125,6 +125,16 @@ def paper() -> None:
     default=False,
     help="Abort if any token has zero balance after wallet bootstrap (VIB-2377)",
 )
+@click.option(
+    "--preset",
+    type=click.Choice(["execution-validation", "yield-validation"]),
+    default=None,
+    help=(
+        "Paper trading preset. "
+        "'execution-validation' (default): rolling fork reset for TX smoke testing. "
+        "'yield-validation': persistent fork with time advancement for lending yield measurement."
+    ),
+)
 def paper_start(
     strategy: str,
     chain: str,
@@ -140,6 +150,7 @@ def paper_start(
     foreground: bool,
     dry_run: bool,
     strict_bootstrap: bool,
+    preset: str | None,
 ) -> None:
     """
     Start a paper trading session.
@@ -360,6 +371,30 @@ def paper_start(
     except ValueError as e:
         click.echo(f"Configuration error: {e}", err=True)
         raise click.Abort() from e
+
+    # Apply preset overrides (VIB-2636)
+    if preset == "yield-validation":
+        from ...backtesting.paper.config import ForkLifecycle
+
+        paper_config.fork_lifecycle = ForkLifecycle.PERSISTENT
+        paper_config.reset_fork_every_tick = False
+        paper_config.yield_poker_enabled = True
+        paper_config.use_rich_valuation = True
+        paper_config.position_reconciler_enabled = True
+        click.echo(
+            click.style(
+                "Preset: yield-validation (persistent fork, interest accrual enabled)",
+                fg="cyan",
+            )
+        )
+    else:
+        preset_label = preset or "execution-validation"
+        click.echo(
+            click.style(
+                f"Preset: {preset_label} (rolling fork reset, TX smoke testing)",
+                fg="cyan",
+            )
+        )
 
     # Display configuration
     click.echo("=" * 60)
