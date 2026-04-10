@@ -16,6 +16,7 @@ API docs:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import dataclasses
 import hashlib
@@ -154,120 +155,143 @@ class OkxIntegration(BaseIntegration):
         params: dict[str, Any] | None = None,
         json_data: dict[str, Any] | None = None,
     ) -> Any:
-        """Override BaseIntegration._fetch to inject per-request HMAC auth headers."""
+        """Override BaseIntegration._fetch to inject per-request HMAC auth headers.
+
+        Includes automatic retry on HTTP 429 (inherits retry config from BaseIntegration).
+        """
         self._metrics.total_requests += 1
-        start_time = time.time()
-
-        wait_time = await self._rate_limiter.acquire()
-        if wait_time > 0:
-            logger.debug("Rate limiter wait for %s: %.2fs", self.name, wait_time)
-
-        # Build full URL with query string for signature
         url = f"{self._base_url}{path}"
-        if params:
-            query_string = urlencode(params)
-            request_path = f"{path}?{query_string}"
-            url = f"{self._base_url}{request_path}"
-        else:
-            request_path = path
 
-        body = ""
-        if json_data:
-            body = json.dumps(json_data)
+        for attempt in range(1 + self.rate_limit_max_retries):
+            start_time = time.time()
 
-        headers = self._get_auth_headers(method, request_path, body)
-        if body:
-            headers["Content-Type"] = "application/json"
+            wait_time = await self._rate_limiter.acquire()
+            if wait_time > 0:
+                logger.debug("Rate limiter wait for %s: %.2fs", self.name, wait_time)
 
-        try:
-            session = await self._get_session()
-            async with session.request(
-                method,
-                url,
-                data=body if body else None,
-                headers=headers,
-            ) as response:
-                latency_ms = (time.time() - start_time) * 1000
+            # Build full URL with query string for signature
+            if params:
+                query_string = urlencode(params)
+                request_path = f"{path}?{query_string}"
+                full_url = f"{self._base_url}{request_path}"
+            else:
+                request_path = path
+                full_url = url
 
-                if response.status == 429:
-                    self._metrics.rate_limited_requests += 1
+            body = ""
+            if json_data:
+                body = json.dumps(json_data)
+
+            headers = self._get_auth_headers(method, request_path, body)
+            if body:
+                headers["Content-Type"] = "application/json"
+
+            try:
+                session = await self._get_session()
+                async with session.request(
+                    method,
+                    full_url,
+                    data=body if body else None,
+                    headers=headers,
+                ) as response:
+                    latency_ms = (time.time() - start_time) * 1000
+
+                    if response.status == 429:
+                        try:
+                            retry_after = float(response.headers.get("Retry-After", "5"))
+                        except (ValueError, TypeError):
+                            retry_after = 5.0
+                        retry_after = min(max(retry_after, 0), self.rate_limit_max_wait)
+
+                        if attempt < self.rate_limit_max_retries:
+                            logger.info(
+                                "%s rate limited on %s, retrying in %.1fs (attempt %d/%d)",
+                                self.name,
+                                path,
+                                retry_after,
+                                attempt + 1,
+                                self.rate_limit_max_retries,
+                            )
+                            await asyncio.sleep(retry_after)
+                            continue
+
+                        self._metrics.rate_limited_requests += 1
+                        self._metrics.failed_requests += 1
+                        self._metrics.last_error = f"Rate limited after {self.rate_limit_max_retries} retries"
+                        self._metrics.last_error_time = datetime.now(UTC)
+                        raise IntegrationRateLimitError(self.name, retry_after)
+
+                    if response.status >= 400:
+                        error_text = await response.text()
+                        self._metrics.failed_requests += 1
+                        self._metrics.last_error = f"HTTP {response.status}: {error_text}"
+                        self._metrics.last_error_time = datetime.now(UTC)
+                        raise IntegrationError(
+                            self.name,
+                            f"HTTP {response.status}: {error_text}",
+                            code=f"HTTP_{response.status}",
+                        )
+
                     try:
-                        retry_after = float(response.headers.get("Retry-After", "60"))
-                    except (ValueError, TypeError):
-                        retry_after = 60.0
-                    raise IntegrationRateLimitError(self.name, retry_after)
+                        data = await response.json()
+                    except (aiohttp.ContentTypeError, json.JSONDecodeError) as e:
+                        self._metrics.failed_requests += 1
+                        self._metrics.last_error = f"Invalid JSON response: {e}"
+                        self._metrics.last_error_time = datetime.now(UTC)
+                        raise IntegrationError(
+                            self.name,
+                            f"Invalid JSON response from OKX: {e}",
+                            code="INVALID_RESPONSE",
+                        ) from e
 
-                if response.status >= 400:
-                    error_text = await response.text()
-                    self._metrics.failed_requests += 1
-                    self._metrics.last_error = f"HTTP {response.status}: {error_text}"
-                    self._metrics.last_error_time = datetime.now(UTC)
-                    raise IntegrationError(
-                        self.name,
-                        f"HTTP {response.status}: {error_text}",
-                        code=f"HTTP_{response.status}",
-                    )
+                    # OKX responses must be a dict with "code" and "data" keys.
+                    # Reject unexpected envelopes (e.g. {}, []) to trigger provider failover.
+                    if not isinstance(data, dict) or "code" not in data:
+                        self._metrics.failed_requests += 1
+                        self._metrics.last_error = f"Invalid OKX response envelope: {type(data).__name__}"
+                        self._metrics.last_error_time = datetime.now(UTC)
+                        raise IntegrationError(
+                            self.name,
+                            f"Invalid OKX response: expected dict with 'code', got {type(data).__name__}",
+                            code="INVALID_RESPONSE",
+                        )
 
-                try:
-                    data = await response.json()
-                except (aiohttp.ContentTypeError, json.JSONDecodeError) as e:
-                    self._metrics.failed_requests += 1
-                    self._metrics.last_error = f"Invalid JSON response: {e}"
-                    self._metrics.last_error_time = datetime.now(UTC)
-                    raise IntegrationError(
-                        self.name,
-                        f"Invalid JSON response from OKX: {e}",
-                        code="INVALID_RESPONSE",
-                    ) from e
+                    # OKX returns HTTP 200 with error codes in the body
+                    # (e.g., {"code": "50011", "msg": "Invalid API key"})
+                    okx_code = str(data["code"])
+                    if okx_code != "0":
+                        okx_msg = data.get("msg", "unknown error")
+                        self._metrics.failed_requests += 1
+                        self._metrics.last_error = f"OKX {okx_code}: {okx_msg}"
+                        self._metrics.last_error_time = datetime.now(UTC)
+                        raise IntegrationError(
+                            self.name,
+                            f"OKX API error {okx_code}: {okx_msg}",
+                            code=f"OKX_{okx_code}",
+                        )
 
-                # OKX responses must be a dict with "code" and "data" keys.
-                # Reject unexpected envelopes (e.g. {}, []) to trigger provider failover.
-                if not isinstance(data, dict) or "code" not in data:
-                    self._metrics.failed_requests += 1
-                    self._metrics.last_error = f"Invalid OKX response envelope: {type(data).__name__}"
-                    self._metrics.last_error_time = datetime.now(UTC)
-                    raise IntegrationError(
-                        self.name,
-                        f"Invalid OKX response: expected dict with 'code', got {type(data).__name__}",
-                        code="INVALID_RESPONSE",
-                    )
+                    self._metrics.successful_requests += 1
+                    self._metrics.total_latency_ms += latency_ms
 
-                # OKX returns HTTP 200 with error codes in the body
-                # (e.g., {"code": "50011", "msg": "Invalid API key"})
-                okx_code = str(data["code"])
-                if okx_code != "0":
-                    okx_msg = data.get("msg", "unknown error")
-                    self._metrics.failed_requests += 1
-                    self._metrics.last_error = f"OKX {okx_code}: {okx_msg}"
-                    self._metrics.last_error_time = datetime.now(UTC)
-                    raise IntegrationError(
-                        self.name,
-                        f"OKX API error {okx_code}: {okx_msg}",
-                        code=f"OKX_{okx_code}",
-                    )
+                    logger.debug("%s API call: %s (latency: %.2fms)", self.name, path, latency_ms)
 
-                self._metrics.successful_requests += 1
-                self._metrics.total_latency_ms += latency_ms
+                    return data
 
-                logger.debug("%s API call: %s (latency: %.2fms)", self.name, path, latency_ms)
+            except aiohttp.ClientError as e:
+                self._metrics.failed_requests += 1
+                self._metrics.last_error = str(e)
+                self._metrics.last_error_time = datetime.now(UTC)
+                raise IntegrationError(self.name, str(e), code="NETWORK_ERROR") from e
 
-                return data
-
-        except aiohttp.ClientError as e:
-            self._metrics.failed_requests += 1
-            self._metrics.last_error = str(e)
-            self._metrics.last_error_time = datetime.now(UTC)
-            raise IntegrationError(self.name, str(e), code="NETWORK_ERROR") from e
-
-        except TimeoutError:
-            self._metrics.failed_requests += 1
-            self._metrics.last_error = f"Timeout after {self._request_timeout}s"
-            self._metrics.last_error_time = datetime.now(UTC)
-            raise IntegrationError(
-                self.name,
-                f"Timeout after {self._request_timeout}s",
-                code="TIMEOUT",
-            ) from None
+            except TimeoutError:
+                self._metrics.failed_requests += 1
+                self._metrics.last_error = f"Timeout after {self._request_timeout}s"
+                self._metrics.last_error_time = datetime.now(UTC)
+                raise IntegrationError(
+                    self.name,
+                    f"Timeout after {self._request_timeout}s",
+                    code="TIMEOUT",
+                ) from None
 
     # -------------------------------------------------------------------------
     # Portfolio API
