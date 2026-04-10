@@ -60,6 +60,9 @@ class BalancerFlashArbStrategy(IntentStrategy):
         force_action: Force "flash_loan" or "swap" for testing
     """
 
+    def supports_teardown(self) -> bool:
+        return True
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -277,5 +280,6 @@ class BalancerFlashArbStrategy(IntentStrategy):
                 amount="all",
                 max_slippage=max_slippage,
                 protocol="enso",
+                chain=self.chain,
             )
         ]
