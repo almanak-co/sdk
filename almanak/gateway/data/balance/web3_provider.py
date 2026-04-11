@@ -130,8 +130,12 @@ NATIVE_TOKEN_SYMBOLS: dict[str, str] = {
     "avalanche": "AVAX",
     "bsc": "BNB",
     "sonic": "S",
+    "blast": "ETH",
     "plasma": "XPL",
     "mantle": "MNT",
+    "berachain": "BERA",
+    "monad": "MON",
+    "xlayer": "OKB",
 }
 
 

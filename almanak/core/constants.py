@@ -75,6 +75,8 @@ _CHAIN_ALIASES: dict[str, Chain] = {
     "bera": Chain.BERACHAIN,
     "monad": Chain.MONAD,
     "xlayer": Chain.XLAYER,
+    "solana": Chain.SOLANA,
+    "sol": Chain.SOLANA,
 }
 
 
