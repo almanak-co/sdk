@@ -433,7 +433,7 @@ class PaperTraderState:
     equity_curve: list[tuple[datetime, Decimal, Decimal | None]]  # (timestamp, value_usd, eth_price_usd)
     config: dict[str, Any]
     pid: int
-    status: str = "running"  # running, stopped, error, resumed
+    status: str = "running"  # running, stopped, stopped_clean, error, completed, resumed
     is_resumed: bool = False
     resume_count: int = 0
     last_resume_time: datetime | None = None
@@ -1391,8 +1391,12 @@ def _run_background_paper_trader(
                     last_save_time = current_time
                     bg_logger.debug(f"Saved state: tick={state.tick_count}, trades={len(state.trades)}")
 
-                # Sleep until next tick
-                await asyncio.sleep(config.tick_interval_seconds)
+                # Sleep until next tick (interruptible by shutdown signal)
+                sleep_remaining: float = config.tick_interval_seconds
+                while sleep_remaining > 0 and not shutdown_requested:
+                    chunk = min(sleep_remaining, 2.0)
+                    await asyncio.sleep(chunk)
+                    sleep_remaining -= chunk
 
         except asyncio.CancelledError:
             bg_logger.info("Trading loop cancelled")
@@ -1400,20 +1404,110 @@ def _run_background_paper_trader(
             bg_logger.exception(f"Trading loop error: {e}")
             state.status = "error"
         finally:
-            # Final cleanup
+            # ── Teardown phase: close positions before cleanup ──
+            # Only meaningful on persistent forks where positions survive ticks.
+            # On rolling_reset forks, positions are destroyed each tick anyway.
+            teardown_ok = False
+            from almanak.framework.backtesting.paper.config import ForkLifecycle
+
+            fork_is_persistent = getattr(config, "fork_lifecycle", None) == ForkLifecycle.PERSISTENT
+            fork_running = trader.fork_manager.is_running if trader.fork_manager else False
+
+            if fork_is_persistent and fork_running and trader._orchestrator is not None:
+                bg_logger.info("Teardown phase: closing positions on persistent fork...")
+                try:
+                    from almanak.framework.teardown.models import TeardownMode
+
+                    teardown_intents = strategy.generate_teardown_intents(
+                        TeardownMode.SOFT, market=trader._last_market_snapshot
+                    )
+
+                    if teardown_intents:
+                        bg_logger.info(f"Teardown: {len(teardown_intents)} intent(s) to execute")
+                        snapshot = trader._last_market_snapshot
+                        if snapshot is None:
+                            bg_logger.warning("Teardown: no market snapshot available, skipping")
+                            teardown_ok = False
+                            raise ValueError("No market snapshot for teardown")
+                        teardown_failures = 0
+                        for i, intent in enumerate(teardown_intents):
+                            intent_type = trader._get_intent_type(intent)
+                            bg_logger.info(f"Teardown [{i + 1}/{len(teardown_intents)}]: {intent_type.value}")
+                            try:
+                                # _execute_intent already appends to trader._trades
+                                trade = await trader._execute_intent(intent, strategy, snapshot)
+                                if trade is not None:
+                                    # Write teardown trade to JSONL
+                                    try:
+                                        trade_history.write_trade(trade)
+                                    except OSError as write_err:
+                                        bg_logger.warning(f"Failed to write teardown trade to history: {write_err}")
+                                    bg_logger.info(f"Teardown [{i + 1}]: {intent_type.value} executed successfully")
+                                    # Notify strategy so it can update internal state
+                                    trader._notify_strategy_callback(strategy, intent, trade)
+                                else:
+                                    teardown_failures += 1
+                                    bg_logger.warning(f"Teardown [{i + 1}]: {intent_type.value} returned no trade")
+                            except Exception as te:
+                                teardown_failures += 1
+                                bg_logger.error(f"Teardown [{i + 1}]: {intent_type.value} failed: {te}")
+
+                        # Record final equity point after teardown
+                        await trader._record_equity_point()
+                        teardown_ok = teardown_failures == 0
+                        bg_logger.info(
+                            f"Teardown complete: {len(teardown_intents)} intent(s) processed, "
+                            f"{teardown_failures} failure(s)"
+                        )
+                    else:
+                        bg_logger.info("Teardown: no open positions to close")
+                        teardown_ok = True
+                except Exception as e:
+                    bg_logger.error(f"Teardown failed: {e}")
+            elif not fork_is_persistent:
+                bg_logger.debug("Skipping teardown: rolling_reset fork (positions don't persist)")
+                teardown_ok = True
+
+            # ── Resource cleanup ──
             trader._running = False
             await trader._cleanup()
 
-            # Save final state
-            if not shutdown_requested:
-                state.status = "completed"
-            else:
-                state.status = "stopped"
+            # Update state with any teardown trades
+            state.tick_count = trader._tick_count
+            state.trades = trader._trades
+            state.errors = trader._errors
+            state.current_balances = dict(portfolio_tracker.current_balances)
+            state.equity_curve = [
+                (p.timestamp, p.value_usd, getattr(p, "eth_price_usd", None)) for p in trader._equity_curve
+            ]
+            # Health telemetry (VIB-1957)
+            state.ticks_with_fork = getattr(trader, "_ticks_with_fork", 0)
+            state.ticks_with_indicators = getattr(trader, "_ticks_with_indicators", 0)
+            state.ticks_with_action = getattr(trader, "_ticks_with_action", 0)
+            state.last_successful_decision_at = getattr(trader, "_last_successful_decision_at", None)
+            state.last_trade_at = getattr(trader, "_last_trade_at", None)
+
+            # Save final state (preserve error status from exception handler)
+            if state.status != "error":
+                if not shutdown_requested:
+                    state.status = "completed"
+                elif teardown_ok:
+                    state.status = "stopped_clean"
+                else:
+                    state.status = "stopped"
             state.save(state_file)
+
+            if not fork_is_persistent:
+                teardown_status = "skipped"
+            elif teardown_ok:
+                teardown_status = "ok"
+            else:
+                teardown_status = "failed"
 
             bg_logger.info(
                 f"Trading session ended: {state.tick_count} ticks, "
-                f"{len(state.trades)} trades, resume_count={state.resume_count}"
+                f"{len(state.trades)} trades, teardown={teardown_status}, "
+                f"resume_count={state.resume_count}"
             )
 
     # Run the async loop

@@ -225,7 +225,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             status = "PAPER_TRADING"
             pid = data.get("pid")
             file_status = data.get("status", "unknown")
-            if file_status in ("stopped", "error"):
+            if file_status in ("stopped", "stopped_clean", "error", "completed"):
                 status = "INACTIVE"
             elif isinstance(pid, int) and pid > 0:
                 try:
