@@ -2723,6 +2723,10 @@ class IntentStrategy(StrategyBase[ConfigT]):
 
             if key in _POOL_FIELDS:
                 # Parse pool-style values: "WETH/USDC/500" -> ["WETH", "USDC"]
+                # Only parse if the value contains "/" (actual pool format).
+                # Bare strings like "usdc_e" are market IDs, not token symbols.
+                if "/" not in value:
+                    continue
                 parts = value.split("/")
                 for part in parts:
                     # Skip numeric parts (fee tiers like "500", "3000")
