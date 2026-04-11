@@ -1253,6 +1253,7 @@ class MyStrategy(IntentStrategy):
 | Sonic | `SONIC` | `sonic` |
 | Plasma | `PLASMA` | `plasma` |
 | Blast | `BLAST` | `blast` |
+| Linea | `LINEA` | `linea` |
 | Mantle | `MANTLE` | `mantle` |
 | Berachain | `BERACHAIN` | `berachain` |
 | Monad | `MONAD` | `monad` |

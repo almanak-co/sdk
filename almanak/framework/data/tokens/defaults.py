@@ -48,7 +48,7 @@ WRAPPED_NATIVE: dict[str, str] = {
     "bsc": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
     "sonic": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",  # wS (Wrapped Sonic)
     "blast": "0x4300000000000000000000000000000000000004",  # WETH (Blast rebasing WETH)
-    "linea": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",  # WETH (verified on-chain)
+    "linea": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",  # WETH on Linea
     "plasma": "0x6100E367285b01F48D07953803A2d8dCA5D19873",  # WXPL
     "solana": "So11111111111111111111111111111111111111112",  # WSOL
     "mantle": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",  # WMNT
@@ -167,8 +167,8 @@ WETH = Token(
         "berachain": "0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590",  # Bridged WETH on Berachain
         "monad": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",  # WETH on Monad
         "sonic": "0x50c42dEAcD8Fc9773493ED674b675bE577f2634b",  # Bridged WETH on Sonic
+        "linea": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",  # WETH on Linea
         "xlayer": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",  # WETH on X-Layer
-        "linea": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",  # Canonical WETH on Linea (18 decimals, verified on-chain)
     },
     coingecko_id="weth",
     is_stablecoin=False,
@@ -231,8 +231,8 @@ USDC = Token(
         "mantle": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",  # Bridged USDC on Mantle
         "monad": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",  # Native USDC on Monad
         "sonic": "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",  # Bridged USDC on Sonic
+        "linea": "0x176211869cA2b568f2A7D4EE941E073a821EE1ff",  # Bridged USDC on Linea
         "xlayer": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",  # Native USDC on X-Layer
-        "linea": "0x176211869cA2b568f2A7D4EE941E073a821EE1ff",  # Bridged USDC on Linea (6 decimals, verified on-chain)
     },
     coingecko_id="usd-coin",
     is_stablecoin=True,
@@ -260,8 +260,8 @@ USDT = Token(
         "bsc": "0x55d398326f99059fF775485246999027B3197955",  # Binance-Peg USDT (18 decimals on BSC)
         "solana": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT on Solana
         "mantle": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USDT0 on Mantle (LayerZero bridged)
+        "linea": "0xA219439258ca9da29E9Cc4cE5596924745e12B93",  # USDT on Linea
         "xlayer": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USD₮0 on X-Layer (Aave V3.6 reserve)
-        "linea": "0xA219439258ca9da29E9Cc4cE5596924745e12B93",  # Bridged USDT on Linea (6 decimals, verified on-chain)
     },
     coingecko_id="tether",
     is_stablecoin=True,
@@ -288,6 +288,7 @@ DAI = Token(
         "polygon": "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",
         "avalanche": "0xd586E7F844cEa2F87f50152665BCbc2C279D8d70",  # DAI.e on Avalanche
         "bsc": "0x1AF3F329e8BE154074D8769D1FFa4eE058B1DBc3",  # Binance-Peg DAI
+        "linea": "0x4AF15ec2A0BD43Db75dd04E62FAA3B8EF36b00d5",  # DAI on Linea
     },
     coingecko_id="dai",
     is_stablecoin=True,
@@ -478,6 +479,7 @@ WBTC = Token(
         "bsc": "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c",  # Binance-Peg BTCB
         "berachain": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",  # WBTC on Berachain
         "monad": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",  # WBTC on Monad
+        "linea": "0x3aAB2285ddcDdaD8edf438C1bAB47e1a9D05a9b4",  # WBTC on Linea
         "xlayer": "0xEA034fb02eB1808C2cc3adbC15f447B93CbE08e1",  # WBTC on X-Layer
     },
     coingecko_id="wrapped-bitcoin",

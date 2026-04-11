@@ -50,6 +50,7 @@ CHAIN_TO_DEXSCREENER_PLATFORM: dict[str, str] = {
     "avalanche": "avalanche",
     "sonic": "sonic",
     "blast": "blast",
+    "linea": "linea",
     "mantle": "mantle",
     "berachain": "berachain",
     "monad": "monad",

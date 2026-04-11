@@ -66,6 +66,7 @@ class Chain(Enum):
     SONIC = "SONIC"
     PLASMA = "PLASMA"
     BLAST = "BLAST"
+    LINEA = "LINEA"
     MANTLE = "MANTLE"
     BERACHAIN = "BERACHAIN"
     SOLANA = "SOLANA"
@@ -92,6 +93,7 @@ CHAIN_FAMILY_MAP: dict[Chain, "ChainFamily"] = {
     Chain.SONIC: ChainFamily.EVM,
     Chain.PLASMA: ChainFamily.EVM,
     Chain.BLAST: ChainFamily.EVM,
+    Chain.LINEA: ChainFamily.EVM,
     Chain.MANTLE: ChainFamily.EVM,
     Chain.BERACHAIN: ChainFamily.EVM,
     Chain.MONAD: ChainFamily.EVM,

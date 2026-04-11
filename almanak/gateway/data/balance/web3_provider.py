@@ -131,6 +131,7 @@ NATIVE_TOKEN_SYMBOLS: dict[str, str] = {
     "bsc": "BNB",
     "sonic": "S",
     "blast": "ETH",
+    "linea": "ETH",
     "plasma": "XPL",
     "mantle": "MNT",
     "berachain": "BERA",
