@@ -1,7 +1,7 @@
 """Tests for gateway gRPC server."""
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import grpc
 import pytest
@@ -131,3 +131,70 @@ async def test_stop_awaits_aiohttp_grace_period():
     assert _AIOHTTP_SHUTDOWN_GRACE_SECONDS in sleep_calls, (
         f"Expected asyncio.sleep({_AIOHTTP_SHUTDOWN_GRACE_SECONDS}) during stop(), got calls: {sleep_calls}"
     )
+
+
+@pytest.mark.asyncio
+async def test_serving_deferred_until_after_warmup():
+    """SERVING health status is set only AFTER warmup completes (VIB-2413).
+
+    Previously, the gateway marked itself SERVING before warmup, causing
+    clients to call balance/price endpoints before providers were initialized.
+    """
+    settings = GatewaySettings(
+        grpc_port=50058,
+        metrics_enabled=False,
+        audit_enabled=False,
+        allow_insecure=True,
+        chains=["arbitrum"],
+    )
+    server = GatewayServer(settings)
+
+    # Track the order of operations: warmup vs SERVING
+    call_order: list[str] = []
+
+    original_set = server._health_servicer.set
+
+    async def tracking_health_set(service, status):
+        if status == health_pb2.HealthCheckResponse.NOT_SERVING:
+            call_order.append("NOT_SERVING")
+        elif status == health_pb2.HealthCheckResponse.SERVING:
+            call_order.append("SERVING")
+        await original_set(service, status)
+
+    async def tracking_warmup(*args, **kwargs):
+        call_order.append("warmup_start")
+        call_order.append("warmup_end")
+
+    async def tracking_prewarm(*args, **kwargs):
+        call_order.append("prewarm_start")
+        call_order.append("prewarm_end")
+
+    server._health_servicer.set = tracking_health_set
+
+    with (
+        patch(
+            "almanak.gateway.services.market_service.MarketServiceServicer.warmup",
+            new=AsyncMock(side_effect=tracking_warmup),
+        ),
+        patch.object(server, "_prewarm_chains", side_effect=tracking_prewarm),
+    ):
+        await server.start()
+
+    # NOT_SERVING must be set before warmup; SERVING must come after
+    assert "NOT_SERVING" in call_order, f"NOT_SERVING was never set: {call_order}"
+    assert "SERVING" in call_order, f"SERVING was never set: {call_order}"
+    serving_idx = call_order.index("SERVING")
+    not_serving_idx = call_order.index("NOT_SERVING")
+    assert not_serving_idx < serving_idx, (
+        f"NOT_SERVING must precede SERVING: {call_order}"
+    )
+    assert "warmup_end" in call_order, f"Warmup was not executed: {call_order}"
+    assert "prewarm_end" in call_order, f"Prewarm was not executed: {call_order}"
+    assert call_order.index("warmup_end") < serving_idx, (
+        f"SERVING set before warmup completed: {call_order}"
+    )
+    assert call_order.index("prewarm_end") < serving_idx, (
+        f"SERVING set before prewarm completed: {call_order}"
+    )
+
+    await server.stop()

@@ -479,8 +479,10 @@ class GatewayServer:
         )
         reflection.enable_server_reflection(service_names, self.server)
 
-        # Mark as serving
-        await self._health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+        # VIB-2413: Explicitly mark NOT_SERVING before opening the port.
+        # The gRPC HealthServicer defaults to SERVING, so without this
+        # clients could connect during warmup and hit uninitialized providers.
+        await self._health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
 
         # Use grpc_host from settings, default to localhost for security
         listen_addr = f"{self.settings.grpc_host}:{self.settings.grpc_port}"
@@ -516,7 +518,17 @@ class GatewayServer:
 
         # Pre-warm orchestrators if chains are configured or wallet registry has chains
         if self.settings.chains or (self._wallet_registry and self._wallet_registry.all_chains()):
-            await self._prewarm_chains()
+            try:
+                await self._prewarm_chains()
+            except Exception as e:
+                logger.warning(f"Chain pre-warm failed (will lazy-init on first call): {e}")
+
+        # VIB-2413: Mark as serving AFTER warmup so clients don't call balance/price
+        # endpoints before providers are initialized. Previously this was set before
+        # warmup, causing the first market.balance() call to DEADLINE_EXCEEDED on
+        # slower RPC connections (e.g., Base mainnet).
+        await self._health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+        logger.info("Gateway marked SERVING (warmup complete)")
 
     def _resolve_wallet_address(self) -> str | None:
         """Resolve the wallet address from registry or legacy config.
