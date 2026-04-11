@@ -47,6 +47,7 @@ WRAPPED_NATIVE: dict[str, str] = {
     "avalanche": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",  # WAVAX
     "bsc": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
     "sonic": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",  # wS (Wrapped Sonic)
+    "linea": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",  # WETH (verified on-chain)
     "plasma": "0x6100E367285b01F48D07953803A2d8dCA5D19873",  # WXPL
     "solana": "So11111111111111111111111111111111111111112",  # WSOL
     "mantle": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",  # WMNT
@@ -166,6 +167,7 @@ WETH = Token(
         "monad": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",  # WETH on Monad
         "sonic": "0x50c42dEAcD8Fc9773493ED674b675bE577f2634b",  # Bridged WETH on Sonic
         "xlayer": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",  # WETH on X-Layer
+        "linea": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",  # Canonical WETH on Linea (18 decimals, verified on-chain)
     },
     coingecko_id="weth",
     is_stablecoin=False,
@@ -229,6 +231,7 @@ USDC = Token(
         "monad": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",  # Native USDC on Monad
         "sonic": "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",  # Bridged USDC on Sonic
         "xlayer": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",  # Native USDC on X-Layer
+        "linea": "0x176211869cA2b568f2A7D4EE941E073a821EE1ff",  # Bridged USDC on Linea (6 decimals, verified on-chain)
     },
     coingecko_id="usd-coin",
     is_stablecoin=True,
@@ -257,6 +260,7 @@ USDT = Token(
         "solana": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT on Solana
         "mantle": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USDT0 on Mantle (LayerZero bridged)
         "xlayer": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USD₮0 on X-Layer (Aave V3.6 reserve)
+        "linea": "0xA219439258ca9da29E9Cc4cE5596924745e12B93",  # Bridged USDT on Linea (6 decimals, verified on-chain)
     },
     coingecko_id="tether",
     is_stablecoin=True,

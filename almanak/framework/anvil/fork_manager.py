@@ -273,7 +273,7 @@ KNOWN_BALANCE_SLOTS: dict[str, dict[str, int]] = {
     "optimism": {"USDC": 9, "WETH": 3, "USDT": 0, "USDC.e": 0, "OP": 0},
     "polygon": {"USDC": 9, "WETH": 3, "USDT": 2, "WMATIC": 3, "USDC.e": 0},
     "bsc": {"USDC": 1, "WBNB": 3, "USDT": 1, "BUSD": 0},
-    "linea": {"USDC": 0, "WETH": 0, "USDT": 0},
+    "linea": {"USDC": 9, "WETH": 3, "USDT": 51},  # verified on-chain 2026-04-12 (VIB-2724)
     "sonic": {"USDC": 9, "WETH": 0},  # USDC: confirmed iter-100. WETH: bridged, try slot 0
     "xlayer": {"USDT0": 51},  # confirmed: USD₮0 (0x779Ded...) uses OZ upgradeable slot 51
 }
