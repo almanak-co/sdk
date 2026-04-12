@@ -11,6 +11,7 @@ Euler V2 uses ERC-4626 standard events for deposit/withdraw, plus custom events 
 
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
 from almanak.framework.connectors.base import HexDecoder
 
@@ -72,7 +73,7 @@ class EulerV2ReceiptParser:
     Extracts deposit, withdraw, borrow, and repay data from on-chain events.
     """
 
-    def __init__(self, underlying_decimals: int = 6) -> None:
+    def __init__(self, underlying_decimals: int = 6, **kwargs: Any) -> None:
         self.underlying_decimals = underlying_decimals
 
     def parse_receipt(

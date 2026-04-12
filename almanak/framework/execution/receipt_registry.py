@@ -34,6 +34,9 @@ Registered Protocols:
     - morpho_blue / morpho: MorphoBlueReceiptParser
     - compound_v3: CompoundV3ReceiptParser
     - benqi: BenqiReceiptParser (Compound V2 fork on Avalanche)
+    - joelend: JoeLendReceiptParser (Banker Joe / Compound V2 fork on Avalanche)
+    - euler_v2: EulerV2ReceiptParser (ERC-4626 vaults + EVC on Avalanche)
+    - silo_v2: SiloV2ReceiptParser (Isolated lending on Avalanche)
 
     Perpetuals:
     - gmx_v2: GMXv2ReceiptParser (Arbitrum perps)
@@ -192,6 +195,18 @@ class ReceiptParserRegistry:
         "benqi": (
             "almanak.framework.connectors.benqi.receipt_parser",
             "BenqiReceiptParser",
+        ),
+        "joelend": (
+            "almanak.framework.connectors.joelend.receipt_parser",
+            "JoeLendReceiptParser",
+        ),
+        "euler_v2": (
+            "almanak.framework.connectors.euler_v2.receipt_parser",
+            "EulerV2ReceiptParser",
+        ),
+        "silo_v2": (
+            "almanak.framework.connectors.silo_v2.receipt_parser",
+            "SiloV2ReceiptParser",
         ),
         # Perpetuals
         "drift": (
