@@ -966,7 +966,7 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
             logger.info(f"   Protocol: Joe Lend | Txs: {len(transactions)} | Gas: {total_gas:,}")
 
         # =================================================================
-        # EULER V2 PATH (ERC-4626 vaults + EVC on Avalanche)
+        # EULER V2 PATH (ERC-4626 vaults + EVC)
         # =================================================================
         elif protocol_lower == "euler_v2":
             from ..connectors.euler_v2.adapter import (
@@ -2026,7 +2026,7 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
             )
 
         # =================================================================
-        # EULER V2 PATH (ERC-4626 vaults + EVC on Avalanche)
+        # EULER V2 PATH (ERC-4626 vaults + EVC)
         # =================================================================
         elif protocol_lower == "euler_v2":
             from ..connectors.euler_v2.adapter import (
@@ -3039,7 +3039,7 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:
             logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
 
         # =================================================================
-        # EULER V2 PATH (ERC-4626 vaults on Avalanche)
+        # EULER V2 PATH (ERC-4626 vaults)
         # =================================================================
         elif protocol_lower == "euler_v2":
             from ..connectors.euler_v2.adapter import (
@@ -3937,7 +3937,7 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
             )
 
         # =================================================================
-        # EULER V2 PATH (ERC-4626 vaults on Avalanche)
+        # EULER V2 PATH (ERC-4626 vaults)
         # =================================================================
         elif protocol_lower == "euler_v2":
             from ..connectors.euler_v2.adapter import (

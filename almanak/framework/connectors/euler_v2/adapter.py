@@ -1,4 +1,4 @@
-"""Euler V2 lending protocol adapter for Avalanche.
+"""Euler V2 lending protocol adapter (Avalanche + Ethereum).
 
 Euler V2 uses an ERC-4626 vault architecture where each vault holds a single
 underlying ERC-20 asset. Cross-vault borrowing is coordinated through the
@@ -12,6 +12,7 @@ Key architecture:
 - Sub-accounts (256 per address) for isolated position management
 - Deferred solvency checks within EVC batches
 
+Supported chains: Avalanche, Ethereum
 Supported operations: SUPPLY, WITHDRAW, BORROW, REPAY
 """
 
@@ -22,17 +23,29 @@ from decimal import Decimal
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# Contract Addresses (Avalanche C-Chain)
+# Contract Addresses (per chain)
 # =============================================================================
 
-# Ethereum Vault Connector — coordinates cross-vault collateral/borrow
-EVC_ADDRESS = "0xddcbe30A761Edd2e19bba930A977475265F36Fa1"
+# Supported chains and their core addresses
+CHAIN_ADDRESSES: dict[str, dict[str, str]] = {
+    "avalanche": {
+        "evc": "0xddcbe30A761Edd2e19bba930A977475265F36Fa1",
+        "evault_factory": "0xaf4B4c18B17F6a2B32F6c398a3910bdCD7f26181",
+        "vault_lens": "0x7a2A57a0ed6807c7dbF846cc74aa04eE9DFa7F57",
+    },
+    "ethereum": {
+        "evc": "0x0C9a3dd6b8F28529d72d7f9cE918D493519EE383",
+        "evault_factory": "0x29a56a1b8214D9Cf7c5561811750D5cBDb45CC8e",
+        "vault_lens": "0xA18D79deB85C414989D7297F23e5391703Ea66aB",
+    },
+}
 
-# eVault Factory — creates new vaults (247 deployed as of 2026-04)
-EVAULT_FACTORY_ADDRESS = "0xaf4B4c18B17F6a2B32F6c398a3910bdCD7f26181"
+SUPPORTED_CHAINS = set(CHAIN_ADDRESSES.keys())
 
-# Vault Lens — read-only batch queries
-VAULT_LENS_ADDRESS = "0x7a2A57a0ed6807c7dbF846cc74aa04eE9DFa7F57"
+# Legacy aliases for backward compatibility
+EVC_ADDRESS = CHAIN_ADDRESSES["avalanche"]["evc"]
+EVAULT_FACTORY_ADDRESS = CHAIN_ADDRESSES["avalanche"]["evault_factory"]
+VAULT_LENS_ADDRESS = CHAIN_ADDRESSES["avalanche"]["vault_lens"]
 
 # =============================================================================
 # Function Selectors (from `cast sig`)
@@ -71,12 +84,12 @@ GAS_ESTIMATE_REPAY = 250_000
 GAS_ESTIMATE_APPROVE = 50_000
 
 # =============================================================================
-# Euler V2 Vault Registry (Avalanche)
+# Euler V2 Vault Registry (per chain)
 # =============================================================================
 
 # Map of vault_symbol -> {address, underlying_symbol, underlying_address, decimals}
 # Curated list of active vaults with meaningful liquidity
-EULER_V2_VAULTS: dict[str, dict] = {
+_AVALANCHE_VAULTS: dict[str, dict] = {
     "eUSDC-19": {
         "vault_address": "0x37ca03aD51B8ff79aAD35FadaCBA4CEDF0C3e74e",
         "underlying_symbol": "USDC",
@@ -135,13 +148,38 @@ EULER_V2_VAULTS: dict[str, dict] = {
     },
 }
 
-# Reverse lookup: underlying_symbol (UPPER) -> list of vault symbols (sorted by preference)
-_TOKEN_TO_VAULT_MAP: dict[str, list[str]] = {}
-for _vault_sym, _vault_info in EULER_V2_VAULTS.items():
-    _underlying = _vault_info["underlying_symbol"].upper()
-    if _underlying not in _TOKEN_TO_VAULT_MAP:
-        _TOKEN_TO_VAULT_MAP[_underlying] = []
-    _TOKEN_TO_VAULT_MAP[_underlying].append(_vault_sym)
+_ETHEREUM_VAULTS: dict[str, dict] = {
+    "eUSDC-2": {
+        "vault_address": "0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9",
+        "underlying_symbol": "USDC",
+        "underlying_address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "decimals": 6,
+        "preferred": True,
+    },
+}
+
+# Per-chain vault registries
+EULER_V2_VAULTS_BY_CHAIN: dict[str, dict[str, dict]] = {
+    "avalanche": _AVALANCHE_VAULTS,
+    "ethereum": _ETHEREUM_VAULTS,
+}
+
+# Legacy alias: flat dict for backward compatibility (Avalanche only)
+EULER_V2_VAULTS = _AVALANCHE_VAULTS
+
+# Per-chain reverse lookup: chain -> (underlying_symbol (UPPER) -> list of vault symbols)
+_TOKEN_TO_VAULT_MAP_BY_CHAIN: dict[str, dict[str, list[str]]] = {}
+for _chain_name, _chain_vaults in EULER_V2_VAULTS_BY_CHAIN.items():
+    _chain_map: dict[str, list[str]] = {}
+    for _vault_sym, _vault_info in _chain_vaults.items():
+        _underlying = _vault_info["underlying_symbol"].upper()
+        if _underlying not in _chain_map:
+            _chain_map[_underlying] = []
+        _chain_map[_underlying].append(_vault_sym)
+    _TOKEN_TO_VAULT_MAP_BY_CHAIN[_chain_name] = _chain_map
+
+# Legacy alias for backward compatibility
+_TOKEN_TO_VAULT_MAP = _TOKEN_TO_VAULT_MAP_BY_CHAIN.get("avalanche", {})
 
 
 # =============================================================================
@@ -158,8 +196,8 @@ class EulerV2Config:
     default_slippage_bps: int = 50
 
     def __post_init__(self) -> None:
-        if self.chain != "avalanche":
-            raise ValueError(f"Euler V2 connector only supports Avalanche, got: {self.chain}")
+        if self.chain not in SUPPORTED_CHAINS:
+            raise ValueError(f"Euler V2 connector supports {', '.join(sorted(SUPPORTED_CHAINS))}, got: {self.chain}")
         if not self.wallet_address.startswith("0x"):
             raise ValueError(f"Invalid wallet address: {self.wallet_address}")
 
@@ -202,7 +240,10 @@ class EulerV2Adapter:
         self.config = config
         self.chain = config.chain
         self.wallet_address = config.wallet_address
-        self.evc_address = EVC_ADDRESS
+        chain_addrs = CHAIN_ADDRESSES[self.chain]
+        self.evc_address = chain_addrs["evc"]
+        self._vaults = EULER_V2_VAULTS_BY_CHAIN.get(self.chain, {})
+        self._token_to_vault_map = _TOKEN_TO_VAULT_MAP_BY_CHAIN.get(self.chain, {})
 
     # =========================================================================
     # Vault Resolution
@@ -222,8 +263,8 @@ class EulerV2Adapter:
         Returns:
             EulerV2VaultInfo or None if not found
         """
-        if vault_symbol and vault_symbol in EULER_V2_VAULTS:
-            info = EULER_V2_VAULTS[vault_symbol]
+        if vault_symbol and vault_symbol in self._vaults:
+            info = self._vaults[vault_symbol]
             return EulerV2VaultInfo(
                 vault_symbol=vault_symbol,
                 vault_address=info["vault_address"],
@@ -233,16 +274,16 @@ class EulerV2Adapter:
             )
 
         asset_upper = asset_symbol.upper()
-        vault_symbols = _TOKEN_TO_VAULT_MAP.get(asset_upper, [])
+        vault_symbols = self._token_to_vault_map.get(asset_upper, [])
         if not vault_symbols:
             return None
 
         # Prefer vaults marked as preferred, fall back to first in list
         sym = next(
-            (s for s in vault_symbols if EULER_V2_VAULTS[s].get("preferred", False)),
+            (s for s in vault_symbols if self._vaults[s].get("preferred", False)),
             vault_symbols[0],
         )
-        info = EULER_V2_VAULTS[sym]
+        info = self._vaults[sym]
         return EulerV2VaultInfo(
             vault_symbol=sym,
             vault_address=info["vault_address"],
@@ -253,7 +294,7 @@ class EulerV2Adapter:
 
     def get_supported_assets(self) -> list[str]:
         """Return list of supported underlying asset symbols."""
-        return list(_TOKEN_TO_VAULT_MAP.keys())
+        return list(self._token_to_vault_map.keys())
 
     # =========================================================================
     # Supply (ERC-4626 deposit)

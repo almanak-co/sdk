@@ -1,0 +1,8 @@
+{
+    "supply_token": "USDC",
+    "supply_amount": "1000",
+    "anvil_funding": {
+        "ETH": 1,
+        "USDC": 10000
+    }
+}
