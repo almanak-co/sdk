@@ -1384,6 +1384,51 @@ class AerodromeReceiptParser:
 
         return None
 
+    def extract_position_id(self, receipt: dict[str, Any]) -> str | None:
+        """Extract position ID from LP mint transaction receipt.
+
+        For Aerodrome (Solidly fork), LP tokens are fungible ERC-20s (not NFTs).
+        The position ID is the pool address that emitted the Mint event, which
+        is also the LP token contract address.
+
+        Called by ResultEnricher for LP_OPEN intents.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            Pool address (LP token address) as hex string, or None if not found
+        """
+        try:
+            logs = receipt.get("logs", [])
+            mint_topic = EVENT_TOPICS["Mint"]
+            for log in logs:
+                topics = log.get("topics", [])
+                if not topics:
+                    continue
+                topic0 = topics[0]
+                if isinstance(topic0, bytes | bytearray):
+                    topic0 = "0x" + bytes(topic0).hex()
+                else:
+                    topic0 = str(topic0)
+                if not topic0.startswith("0x"):
+                    topic0 = "0x" + topic0
+                if topic0.lower() == mint_topic.lower():
+                    # The Mint event is emitted by the pool contract
+                    pool_address = log.get("address", "")
+                    if isinstance(pool_address, bytes | bytearray):
+                        pool_address = "0x" + bytes(pool_address).hex()
+                    else:
+                        pool_address = str(pool_address)
+                    if pool_address and not pool_address.startswith("0x"):
+                        pool_address = "0x" + pool_address
+                    if pool_address:
+                        return str(pool_address).lower()
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to extract position_id: {e}")
+            return None
+
     def extract_liquidity(self, receipt: dict[str, Any]) -> int | None:
         """Extract liquidity from LP mint transaction receipt.
 

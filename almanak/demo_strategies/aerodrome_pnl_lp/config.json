@@ -23,8 +23,8 @@
     "rsi_overbought": 70,
     "rsi_oversold": 30,
     "anvil_funding": {
-        "ETH": 1,
-        "WETH": 1,
+        "ETH": 2,
+        "WETH": 0.5,
         "USDC": 5000
     }
 }

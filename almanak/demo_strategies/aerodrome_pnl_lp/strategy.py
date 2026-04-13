@@ -166,9 +166,9 @@ class AerodromePnLLPStrategy(IntentStrategy):
                     f"(entry={entry_price}, current={base_price:.2f})"
                 )
                 pool_type = "stable" if self.stable else "volatile"
-                # Use stored position_id from LP_OPEN result (PnL backtester
-                # auto-generates IDs like LP_aerodrome_WETH_USDC_<timestamp>)
-                close_id = self._lp_position_id or f"{self.token0}/{self.token1}/{pool_type}"
+                # The Aerodrome LP_CLOSE compiler expects TOKEN0/TOKEN1/pool_type
+                # format for position_id (not the enriched pool address).
+                close_id = f"{self.token0}/{self.token1}/{pool_type}"
                 return Intent.lp_close(
                     position_id=close_id,
                     pool=f"{self.token0}/{self.token1}/{pool_type}",
@@ -227,10 +227,13 @@ class AerodromePnLLPStrategy(IntentStrategy):
 
         if self._state == "opening":
             self._state = "active"
-            # Capture the position_id from the PnL backtester for LP_CLOSE
-            if result and hasattr(result, "position_id"):
-                self._lp_position_id = result.position_id
-            logger.info("LP opened successfully. State -> active")
+            # Capture the position_id from the ResultEnricher for LP_CLOSE.
+            # For Aerodrome, position_id is the pool address (fungible LP tokens).
+            if result and hasattr(result, "position_id") and result.position_id:
+                self._lp_position_id = str(result.position_id)
+                logger.info(f"LP opened successfully. Position ID: {self._lp_position_id}. State -> active")
+            else:
+                logger.info("LP opened successfully (no position_id enriched). State -> active")
         elif self._state == "closing":
             self._state = "idle"
             self._entry_price = None
@@ -312,7 +315,9 @@ class AerodromePnLLPStrategy(IntentStrategy):
             return []
 
         pool_type = "stable" if self.stable else "volatile"
-        close_id = self._lp_position_id or f"{self.token0}/{self.token1}/{pool_type}"
+        # The Aerodrome LP_CLOSE compiler expects TOKEN0/TOKEN1/pool_type
+        # format for position_id (not the enriched pool address).
+        close_id = f"{self.token0}/{self.token1}/{pool_type}"
         return [
             Intent.lp_close(
                 position_id=close_id,
