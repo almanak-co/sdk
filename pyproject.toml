@@ -36,7 +36,7 @@ dependencies = [
     "solders>=0.21.0",
     "structlog>=24.1.0",
     "nest_asyncio>=1.6.0",
-    "matplotlib>=3.7.0",
+    "matplotlib>=3.10.8",
     "python-kraken-sdk>=3.2.7",
     "asyncpg>=0.29.0", # PostgreSQL async driver for state management
     # Gateway dependencies (gRPC)
