@@ -1,4 +1,20 @@
 {
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0xdeaddeaddeaddeaddeaddeaddeaddeaddead1111",
+            "chain": "mantle",
+            "amount": "0.05",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0x09bc4e0d864854c6afb6eb9a9cdf58ac190d0df9",
+            "chain": "mantle",
+            "amount": "50",
+            "amount_type": "usd"
+        }
+    ],
     "supply_token": "WETH",
     "borrow_token": "USDC",
     "initial_supply_amount": "0.01",

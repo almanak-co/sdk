@@ -1,4 +1,27 @@
 {
+    "token_funding": [
+        {
+            "symbol": "WOKB",
+            "address": "0xe538905cf8410324e03a5a23c1c177a474d59b2b",
+            "chain": "xlayer",
+            "amount": "5",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDT",
+            "address": "0x779ded0c9e1022225f8e0630b35a9b54be713736",
+            "chain": "xlayer",
+            "amount": "250",
+            "amount_type": "usd"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0x74b7f16337b8972027f6196a17a631ac6de26d22",
+            "chain": "xlayer",
+            "amount": "50",
+            "amount_type": "usd"
+        }
+    ],
     "pool": "WOKB/USDT/3000",
     "range_width_pct": "0.10",
     "rebalance_threshold_pct": "0.05",

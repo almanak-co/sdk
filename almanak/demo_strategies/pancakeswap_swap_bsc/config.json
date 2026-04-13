@@ -1,4 +1,20 @@
 {
+    "token_funding": [
+        {
+            "symbol": "WBNB",
+            "address": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+            "chain": "bsc",
+            "amount": "0.25",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDT",
+            "address": "0x55d398326f99059ff775485246999027b3197955",
+            "chain": "bsc",
+            "amount": "100",
+            "amount_type": "usd"
+        }
+    ],
     "trade_size_usd": 10,
     "max_slippage": 0.01,
     "base_token": "WBNB",

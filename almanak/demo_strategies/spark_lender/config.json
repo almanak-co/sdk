@@ -1,4 +1,20 @@
 {
+    "token_funding": [
+        {
+            "symbol": "DAI",
+            "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+            "chain": "ethereum",
+            "amount": "10",
+            "amount_type": "usd"
+        },
+        {
+            "symbol": "WETH",
+            "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "chain": "ethereum",
+            "amount": "0.01",
+            "amount_type": "token"
+        }
+    ],
     "min_supply_amount": "5",
     "supply_token": "DAI",
     "force_action": "supply",

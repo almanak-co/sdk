@@ -1,4 +1,13 @@
 {
+    "token_funding": [
+        {
+            "symbol": "USDC",
+            "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "chain": "ethereum",
+            "amount": "250",
+            "amount_type": "usd"
+        }
+    ],
     "vault_address": "0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB",
     "deposit_token": "USDC",
     "deposit_amount": "50",

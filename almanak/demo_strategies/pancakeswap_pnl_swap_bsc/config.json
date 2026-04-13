@@ -1,4 +1,20 @@
 {
+    "token_funding": [
+        {
+            "symbol": "WBNB",
+            "address": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+            "chain": "bsc",
+            "amount": "2",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
+            "chain": "bsc",
+            "amount": "1000",
+            "amount_type": "usd"
+        }
+    ],
     "base_token": "WBNB",
     "quote_token": "USDC",
     "trade_size_usd": 100,

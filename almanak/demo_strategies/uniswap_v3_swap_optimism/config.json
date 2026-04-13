@@ -1,4 +1,20 @@
 {
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0x4200000000000000000000000000000000000006",
+            "chain": "optimism",
+            "amount": "0.05",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0x0b2c639c533813f4aa9d7837caf62653d097ff85",
+            "chain": "optimism",
+            "amount": "100",
+            "amount_type": "usd"
+        }
+    ],
     "trade_size_usd": 10,
     "max_slippage": 0.01,
     "base_token": "WETH",

@@ -1,4 +1,20 @@
 {
+    "token_funding": [
+        {
+            "symbol": "WBNB",
+            "address": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+            "chain": "bsc",
+            "amount": "0.5",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDT",
+            "address": "0x55d398326f99059ff775485246999027b3197955",
+            "chain": "bsc",
+            "amount": "250",
+            "amount_type": "usd"
+        }
+    ],
     "pool": "WBNB/USDT/3000",
     "amount0": "0.1",
     "amount1": "50",

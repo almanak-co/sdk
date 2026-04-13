@@ -1,4 +1,20 @@
 {
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "chain": "ethereum",
+            "amount": "0.05",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "chain": "ethereum",
+            "amount": "50",
+            "amount_type": "usd"
+        }
+    ],
     "trade_size_usd": 3,
     "rsi_period": 14,
     "rsi_oversold": 40,

@@ -1,4 +1,20 @@
 {
+    "token_funding": [
+        {
+            "symbol": "DAI",
+            "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+            "chain": "ethereum",
+            "amount": "100",
+            "amount_type": "usd"
+        },
+        {
+            "symbol": "wstETH",
+            "address": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+            "chain": "ethereum",
+            "amount": "2",
+            "amount_type": "token"
+        }
+    ],
     "collateral_token": "wstETH",
     "collateral_amount": "1",
     "borrow_token": "DAI",

@@ -1,6 +1,22 @@
 {
+    "token_funding": [
+        {
+            "symbol": "W0G",
+            "address": "0x1cd0690ff9a693f5ef2dd976660a8dafc81a109c",
+            "chain": "zerog",
+            "amount": "100",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "st0G",
+            "address": "0x7bbc63d01ca42491c3e084c941c3e86e55951404",
+            "chain": "zerog",
+            "amount": "100",
+            "amount_type": "token"
+        }
+    ],
     "pool": "W0G/st0G/3000",
-    "range_width_pct": 0.50,
+    "range_width_pct": 0.5,
     "amount0": "10",
     "amount1": "10",
     "force_action": "open",

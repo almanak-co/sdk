@@ -1,4 +1,20 @@
 {
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+            "chain": "arbitrum",
+            "amount": "0.01",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            "chain": "arbitrum",
+            "amount": "25",
+            "amount_type": "usd"
+        }
+    ],
     "flash_loan_amount_usd": "1000",
     "max_slippage_pct": 1.0,
     "base_token": "WETH",
