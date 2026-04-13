@@ -30,19 +30,23 @@ from almanak.framework.dashboard.utils import (
 @st.fragment
 def render_portfolio_summary(strategies: list[Strategy]) -> None:
     """Render the portfolio summary section at the top."""
-    total_value = sum((s.total_value_usd for s in strategies), Decimal("0"))
-    total_pnl_24h = sum((s.pnl_24h_usd for s in strategies), Decimal("0"))
+    # Only count RUNNING/PAUSED strategies for portfolio totals (VIB-2767).
+    # Archived/inactive strategies inflate the total with stale values.
+    _ACTIVE_STATUSES = {StrategyStatus.RUNNING, StrategyStatus.PAUSED}
+    active = [s for s in strategies if s.status in _ACTIVE_STATUSES]
+    total_value = sum((s.total_value_usd for s in active), Decimal("0"))
+    total_pnl_24h = sum((s.pnl_24h_usd for s in active), Decimal("0"))
     strategy_count = len(strategies)
-    running_count = sum(1 for s in strategies if s.status == StrategyStatus.RUNNING)
+    running_count = len(active)
 
     # Calculate multi-chain stats
-    multi_chain_count = sum(1 for s in strategies if s.is_multi_chain)
-    total_bridge_fees = sum((s.bridge_fees_usd for s in strategies), Decimal("0"))
+    multi_chain_count = sum(1 for s in active if s.is_multi_chain)
+    total_bridge_fees = sum((s.bridge_fees_usd for s in active), Decimal("0"))
 
-    # Collect all unique chains across all strategies
+    # Collect all unique chains across active strategies
     all_chains: set[str] = set()
     value_by_chain: dict[str, Decimal] = {}
-    for strategy in strategies:
+    for strategy in active:
         if strategy.is_multi_chain and strategy.chains:
             all_chains.update(strategy.chains)
             for chain, position in strategy.positions_by_chain.items():
@@ -80,7 +84,7 @@ def render_portfolio_summary(strategies: list[Strategy]) -> None:
         )
 
     with col4:
-        attention_count = sum(1 for s in strategies if s.attention_required)
+        attention_count = sum(1 for s in active if s.attention_required)
         st.metric(
             label="Needs Attention",
             value=attention_count,
@@ -90,7 +94,7 @@ def render_portfolio_summary(strategies: list[Strategy]) -> None:
 
     # Per-chain breakdown if multi-chain strategies exist
     if multi_chain_count > 0 and len(all_chains) > 1:
-        render_chain_breakdown(strategies, all_chains, value_by_chain)
+        render_chain_breakdown(active, all_chains, value_by_chain)
 
 
 @st.fragment

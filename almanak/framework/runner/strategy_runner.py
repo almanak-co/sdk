@@ -1256,6 +1256,38 @@ class StrategyRunner:
             )
             if self.state_manager:
                 await self.state_manager.save_ledger_entry(entry)
+
+            # Emit position event for LP/perp intents (Phase 2, VIB-2775)
+            if success and self.state_manager and hasattr(self.state_manager, "save_position_event"):
+                try:
+                    from ..observability.position_events import build_position_event_from_intent
+
+                    pos_event = build_position_event_from_intent(
+                        deployment_id=strategy.strategy_id,
+                        intent=intent,
+                        result=result,
+                        ledger_entry_id=entry.id,
+                        chain=chain,
+                    )
+                    if pos_event is not None:
+                        await self.state_manager.save_position_event(pos_event)
+                        logger.debug(
+                            "Position event %s emitted for %s (position=%s)",
+                            pos_event.event_type,
+                            pos_event.position_type,
+                            pos_event.position_id,
+                        )
+                        # Run PnL attribution on CLOSE events (VIB-2776)
+                        if pos_event.event_type == "CLOSE" and pos_event.position_id:
+                            try:
+                                from ..observability.pnl_attributor import run_attribution_on_close
+
+                                await run_attribution_on_close(self.state_manager, pos_event)
+                            except Exception as attr_err:  # noqa: BLE001
+                                logger.debug("Attribution failed (non-blocking): %s", attr_err)
+                except Exception as pe:  # noqa: BLE001
+                    logger.debug("Failed to emit position event: %s", pe)
+
             # Signal that this iteration executed a trade — forces snapshot
             if success:
                 self._iteration_had_trade = True

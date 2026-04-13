@@ -714,10 +714,27 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 await self._ensure_initialized()
                 assert self._state_manager is not None
 
+                # Resolve total_value_usd from the latest snapshot (VIB-2765).
+                # The proto doesn't carry total_value_usd, so we read it from
+                # the most recent snapshot which was saved moments before this call.
+                total_value_usd = Decimal("0")
+                try:
+                    warm_be = self._state_manager.warm_backend
+                    if warm_be and hasattr(warm_be, "get_latest_snapshot"):
+                        latest = await warm_be.get_latest_snapshot(strategy_id)
+                        if latest is not None:
+                            total_value_usd = latest.total_value_usd
+                except Exception as snap_err:
+                    logger.warning(
+                        "Could not resolve total_value_usd from snapshot for %s: %s",
+                        strategy_id,
+                        snap_err,
+                    )
+
                 metrics = PortfolioMetrics(
                     strategy_id=strategy_id,
                     timestamp=ts,
-                    total_value_usd=Decimal("0"),
+                    total_value_usd=total_value_usd,
                     initial_value_usd=initial_value_usd,
                     deposits_usd=deposits_usd,
                     withdrawals_usd=withdrawals_usd,

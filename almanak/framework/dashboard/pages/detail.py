@@ -608,6 +608,135 @@ def render_timeline_events(strategy: Strategy, limit: int = 10) -> None:
             )
 
 
+def render_position_lifecycle(strategy: Strategy) -> None:
+    """Render position lifecycle events with PnL attribution.
+
+    Reads position events from the local SQLite store (no gateway gRPC path yet).
+    Shows a table of all position events and per-position PnL breakdown for
+    closed positions.
+    """
+    import asyncio
+    import json
+
+    from almanak.framework.dashboard.export import export_positions
+
+    # Try to read position events from the local SQLite store
+    events: list[dict] = []
+    try:
+        from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+
+        db_path = _find_state_db(strategy.id)
+        if not db_path:
+            return  # No local DB found — position events not available
+
+        config = SQLiteConfig(db_path=db_path)
+        store = SQLiteStore(config)
+        asyncio.get_event_loop().run_until_complete(store.initialize())
+        events = asyncio.get_event_loop().run_until_complete(store.get_position_events(strategy.id, limit=200))
+        asyncio.get_event_loop().run_until_complete(store.close())
+    except Exception:
+        return  # Silently skip if SQLite not available
+
+    if not events:
+        return
+
+    st.markdown("### Position Lifecycle")
+
+    # Summary metrics
+    open_count = sum(1 for e in events if e.get("event_type") == "OPEN")
+    close_count = sum(1 for e in events if e.get("event_type") == "CLOSE")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Positions Opened", open_count)
+    with col2:
+        st.metric("Positions Closed", close_count)
+    with col3:
+        st.metric("Total Events", len(events))
+
+    # Events table
+    table_data = []
+    for evt in events:
+        row = {
+            "Time": evt.get("timestamp", "")[:19],
+            "Type": evt.get("event_type", ""),
+            "Position": evt.get("position_type", ""),
+            "ID": str(evt.get("position_id", ""))[:12],
+            "Protocol": evt.get("protocol", ""),
+            "Value (USD)": evt.get("value_usd", ""),
+            "TX": str(evt.get("tx_hash", ""))[:12] + "..." if evt.get("tx_hash") else "",
+        }
+        table_data.append(row)
+
+    st.dataframe(table_data, use_container_width=True, hide_index=True)
+
+    # PnL attribution for closed positions
+    closed_with_attr = [e for e in events if e.get("event_type") == "CLOSE" and e.get("attribution_json", "{}") != "{}"]
+    if closed_with_attr:
+        st.markdown("#### PnL Attribution (Closed Positions)")
+        attr_data = []
+        for evt in closed_with_attr:
+            try:
+                attr = json.loads(evt.get("attribution_json", "{}"))
+                attr_data.append(
+                    {
+                        "Position": str(evt.get("position_id", ""))[:12],
+                        "Type": attr.get("position_type", ""),
+                        "Net PnL": attr.get("net_pnl_usd", "0"),
+                        "Price PnL": attr.get("price_pnl_usd", "0"),
+                        "Fee PnL": attr.get("fee_pnl_usd", "0"),
+                        "Gas": attr.get("gas_usd", "0"),
+                        "Version": f"v{attr.get('version', '?')}",
+                    }
+                )
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        if attr_data:
+            st.dataframe(attr_data, use_container_width=True, hide_index=True)
+
+    # Export button
+    csv_bytes = export_positions(events, fmt="csv")
+    if csv_bytes:
+        st.download_button(
+            label="Export Position Events (CSV)",
+            data=csv_bytes,
+            file_name=f"position_events_{strategy.id}.csv",
+            mime="text/csv",
+        )
+
+
+def _find_state_db(strategy_id: str) -> str | None:
+    """Find the SQLite state DB for a strategy.
+
+    Looks in the standard location used by the framework runner.
+    """
+    import os
+
+    # Canonical env var check first (matches run.py / state_service.py / state_manager.py)
+    env_db = os.environ.get("ALMANAK_STATE_DB")
+    if env_db and os.path.exists(env_db):
+        return env_db
+
+    # Standard location: .almanak/state/<strategy_id>/state.db
+    home = os.path.expanduser("~")
+    candidates = [
+        os.path.join(".", "almanak_state.db"),  # Default CLI path
+        os.path.join(home, ".almanak", "state", strategy_id, "state.db"),
+        os.path.join(home, ".almanak", "state", "state.db"),
+        os.path.join(".", ".almanak", "state.db"),
+    ]
+
+    # Also check for strategy name without deployment suffix
+    base_name = strategy_id.split(":")[0] if ":" in strategy_id else strategy_id
+    candidates.append(os.path.join(home, ".almanak", "state", base_name, "state.db"))
+
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+
+    return None
+
+
 def render_chain_health_indicators(strategy: Strategy) -> None:
     """Render chain health indicators for multi-chain strategies."""
     if not strategy.chain_health:
@@ -1136,6 +1265,17 @@ def page(strategies: list[Strategy]) -> None:
     if strategy.is_multi_chain and strategy.bridge_transfers:
         render_bridge_transfers(strategy)
         st.divider()
+
+    # Position Lifecycle (VIB-2777)
+    try:
+        render_position_lifecycle(strategy)
+    except Exception as e:
+        st.error(f"Error rendering position lifecycle: {e}")
+        import traceback
+
+        st.code(traceback.format_exc())
+
+    st.divider()
 
     # Timeline Events
     try:

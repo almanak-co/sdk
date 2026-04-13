@@ -295,6 +295,10 @@ class PortfolioMetrics:
     withdrawals_usd: Decimal = Decimal("0")  # Cumulative withdrawals
     gas_spent_usd: Decimal = Decimal("0")  # Cumulative gas costs
 
+    # Phase 1a: rich accounting fields (persisted in SQLite, round-tripped)
+    positions_json: str = "[]"  # JSON-encoded position details
+    cycle_id: str | None = None  # Current execution cycle
+
     def __post_init__(self) -> None:
         """Normalize numeric fields to Decimal."""
         for attr in ["total_value_usd", "initial_value_usd", "deposits_usd", "withdrawals_usd", "gas_spent_usd"]:
@@ -332,6 +336,8 @@ class PortfolioMetrics:
             "deposits_usd": str(self.deposits_usd),
             "withdrawals_usd": str(self.withdrawals_usd),
             "gas_spent_usd": str(self.gas_spent_usd),
+            "positions_json": self.positions_json,
+            "cycle_id": self.cycle_id,
         }
 
     @classmethod
@@ -345,4 +351,6 @@ class PortfolioMetrics:
             deposits_usd=Decimal(data.get("deposits_usd", "0")),
             withdrawals_usd=Decimal(data.get("withdrawals_usd", "0")),
             gas_spent_usd=Decimal(data.get("gas_spent_usd", "0")),
+            positions_json=data.get("positions_json", "[]"),
+            cycle_id=data.get("cycle_id"),
         )

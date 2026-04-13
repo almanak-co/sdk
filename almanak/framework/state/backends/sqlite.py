@@ -46,6 +46,7 @@ from ..state_manager import StateConflictError, StateData, StateTier
 if TYPE_CHECKING:
     from almanak.framework.execution.clob_handler import ClobFill, ClobOrderState, ClobOrderStatus
     from almanak.framework.observability.ledger import LedgerEntry
+    from almanak.framework.observability.position_events import PositionEvent
     from almanak.framework.portfolio import PortfolioMetrics, PortfolioSnapshot
 
 logger = logging.getLogger(__name__)
@@ -307,6 +308,9 @@ CREATE TABLE IF NOT EXISTS portfolio_metrics (
     deposits_usd TEXT DEFAULT '0',
     withdrawals_usd TEXT DEFAULT '0',
     gas_spent_usd TEXT DEFAULT '0',
+    total_value_usd TEXT DEFAULT '0',  -- Current portfolio value (VIB-2765)
+    positions_json TEXT DEFAULT '[]',  -- Snapshot of position state (VIB-2765)
+    cycle_id TEXT,  -- Correlation to portfolio_snapshots (VIB-2765)
     updated_at TEXT NOT NULL
 );
 
@@ -344,6 +348,52 @@ ON transaction_ledger (cycle_id);
 -- Index for intent type filtering
 CREATE INDEX IF NOT EXISTS idx_transaction_ledger_intent_type
 ON transaction_ledger (strategy_id, intent_type);
+
+-- Position lifecycle events (Phase 2, VIB-2774)
+-- Tracks OPEN -> SNAPSHOT* -> CLOSE for immutable-ID positions (LP, perps).
+CREATE TABLE IF NOT EXISTS position_events (
+    id TEXT PRIMARY KEY,
+    deployment_id TEXT NOT NULL,
+    position_id TEXT NOT NULL,
+    position_type TEXT NOT NULL,  -- LP, PERP
+    event_type TEXT NOT NULL,  -- OPEN, CLOSE, COLLECT_FEES, SNAPSHOT
+    timestamp TEXT NOT NULL,
+    protocol TEXT,
+    chain TEXT,
+    token0 TEXT,
+    token1 TEXT,
+    amount0 TEXT,
+    amount1 TEXT,
+    value_usd TEXT,
+    tick_lower INTEGER,
+    tick_upper INTEGER,
+    liquidity TEXT,
+    in_range BOOLEAN,
+    fees_token0 TEXT,
+    fees_token1 TEXT,
+    leverage TEXT,
+    entry_price TEXT,
+    mark_price TEXT,
+    unrealized_pnl TEXT,
+    is_long BOOLEAN,
+    tx_hash TEXT,
+    gas_usd TEXT,
+    ledger_entry_id TEXT,
+    attribution_json TEXT DEFAULT '{}',
+    attribution_version INTEGER DEFAULT 0
+);
+
+-- Index for position lifecycle queries
+CREATE INDEX IF NOT EXISTS idx_position_events_lifecycle
+ON position_events (deployment_id, position_id, timestamp);
+
+-- Index for event type filtering
+CREATE INDEX IF NOT EXISTS idx_position_events_type
+ON position_events (deployment_id, event_type);
+
+-- Index for position_id lookups
+CREATE INDEX IF NOT EXISTS idx_position_events_position
+ON position_events (position_id, timestamp);
 """
 
 
@@ -496,12 +546,104 @@ class SQLiteStore:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
                 logger.info(f"Migration: added {table}.{column}")
 
+        # Phase 1a: total_value_usd, positions_json, cycle_id on portfolio_metrics (VIB-2765)
+        _add_column_if_missing("portfolio_metrics", "total_value_usd", "TEXT DEFAULT '0'")
+        _add_column_if_missing("portfolio_metrics", "positions_json", "TEXT DEFAULT '[]'")
+        _add_column_if_missing("portfolio_metrics", "cycle_id", "TEXT")
+
         # Phase 1b: extracted_data_json on transaction_ledger
         _add_column_if_missing("transaction_ledger", "extracted_data_json", "TEXT DEFAULT ''")
 
         # Phase 1c: token_prices_json and wallet_balances_json on portfolio_snapshots
         _add_column_if_missing("portfolio_snapshots", "token_prices_json", "TEXT DEFAULT '{}'")
         _add_column_if_missing("portfolio_snapshots", "wallet_balances_json", "TEXT DEFAULT '[]'")
+
+    async def backfill_deployment_id(self, old_strategy_id: str, new_deployment_id: str) -> int:
+        """Migrate data from a bare strategy name to the canonical deployment_id.
+
+        Rewrites ``strategy_id`` in all accounting tables so that data written
+        under the old bare name is accessible under the new deployment_id.
+
+        Idempotent: rows already using ``new_deployment_id`` are unaffected.
+        Skipped if ``old_strategy_id == new_deployment_id`` or if the old ID
+        doesn't match any existing rows.
+
+        Args:
+            old_strategy_id: The bare strategy name (e.g. "AaveYieldStrategy").
+            new_deployment_id: The new deployment_id (e.g. "AaveYieldStrategy:a1b2c3d4e5f6").
+
+        Returns:
+            Total number of rows migrated across all tables.
+        """
+        if old_strategy_id == new_deployment_id:
+            return 0
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_backfill() -> int:
+            conn = self._conn
+            assert conn is not None
+            total = 0
+
+            tables = [
+                "strategy_state",
+                "portfolio_snapshots",
+                "portfolio_metrics",
+                "transaction_ledger",
+                "timeline_events",
+            ]
+
+            with self._db_lock:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    for table in tables:
+                        # Check table exists (some may not be present in older DBs)
+                        exists = conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                            (table,),
+                        ).fetchone()
+                        if not exists:
+                            continue
+
+                        # Only migrate if the old ID has data and the new one doesn't
+                        old_count = conn.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE strategy_id = ?",
+                            (old_strategy_id,),
+                        ).fetchone()[0]
+
+                        if old_count == 0:
+                            continue
+
+                        # Skip if target already has rows (avoids PK/unique-index collisions)
+                        new_count = conn.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE strategy_id = ?",
+                            (new_deployment_id,),
+                        ).fetchone()[0]
+                        if new_count > 0:
+                            continue
+
+                        cursor = conn.execute(
+                            f"UPDATE {table} SET strategy_id = ? WHERE strategy_id = ?",
+                            (new_deployment_id, old_strategy_id),
+                        )
+                        total += cursor.rowcount
+
+                    conn.execute("COMMIT")
+                    if total > 0:
+                        logger.info(
+                            "Backfilled %d rows from '%s' to '%s'",
+                            total,
+                            old_strategy_id,
+                            new_deployment_id,
+                        )
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+
+            return total
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_backfill)
 
     async def close(self) -> None:
         """Close database connection."""
@@ -1419,6 +1561,108 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_save)
 
+    async def save_snapshot_and_metrics(
+        self,
+        snapshot: "PortfolioSnapshot",
+        metrics: "PortfolioMetrics",
+    ) -> int:
+        """Atomically save a portfolio snapshot and its associated metrics.
+
+        Wraps both writes in a single SQLite transaction so that a snapshot
+        exists if-and-only-if its metrics row also exists.  This prevents
+        the dashboard from ever showing ``$0`` when data actually exists.
+
+        Args:
+            snapshot: PortfolioSnapshot to persist.
+            metrics: PortfolioMetrics to persist (same cycle).
+
+        Returns:
+            Row ID of the inserted snapshot.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_save_atomic() -> int:
+            now = datetime.now(UTC).isoformat()
+            conn = self._conn
+            assert conn is not None
+
+            # Acquire _db_lock to serialize concurrent callers, then BEGIN
+            # IMMEDIATE for the SQLite write lock.
+            with self._db_lock:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    # 1. Save snapshot
+                    cursor = conn.execute(
+                        """
+                        INSERT OR REPLACE INTO portfolio_snapshots (
+                            strategy_id, timestamp, iteration_number, total_value_usd,
+                            available_cash_usd, value_confidence, positions_json,
+                            token_prices_json, wallet_balances_json,
+                            chain, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            snapshot.strategy_id,
+                            snapshot.timestamp.isoformat(),
+                            snapshot.iteration_number,
+                            str(snapshot.total_value_usd),
+                            str(snapshot.available_cash_usd),
+                            snapshot.value_confidence.value,
+                            json.dumps(snapshot.to_positions_payload()),
+                            json.dumps(snapshot.token_prices) if snapshot.token_prices else "{}",
+                            json.dumps(
+                                [
+                                    {
+                                        "symbol": b.symbol,
+                                        "balance": str(b.balance),
+                                        "value_usd": str(b.value_usd),
+                                        "address": b.address,
+                                        "price_usd": str(b.price_usd) if b.price_usd is not None else None,
+                                    }
+                                    for b in snapshot.wallet_balances
+                                ]
+                            )
+                            if snapshot.wallet_balances
+                            else "[]",
+                            snapshot.chain,
+                            now,
+                        ),
+                    )
+                    snapshot_id = cursor.lastrowid or 0
+
+                    # 2. Save metrics in the same transaction
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO portfolio_metrics (
+                            strategy_id, initial_value_usd, initial_timestamp,
+                            deposits_usd, withdrawals_usd, gas_spent_usd,
+                            total_value_usd, positions_json, cycle_id, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            metrics.strategy_id,
+                            str(metrics.initial_value_usd),
+                            metrics.timestamp.isoformat(),
+                            str(metrics.deposits_usd),
+                            str(metrics.withdrawals_usd),
+                            str(metrics.gas_spent_usd),
+                            str(metrics.total_value_usd),
+                            getattr(metrics, "positions_json", "[]"),
+                            getattr(metrics, "cycle_id", None),
+                            now,
+                        ),
+                    )
+
+                    conn.execute("COMMIT")
+                    return snapshot_id
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_save_atomic)
+
     async def get_latest_snapshot(self, strategy_id: str) -> "PortfolioSnapshot | None":
         """Get the most recent portfolio snapshot for a strategy.
 
@@ -1613,8 +1857,9 @@ class SQLiteStore:
                 """
                 INSERT OR REPLACE INTO portfolio_metrics (
                     strategy_id, initial_value_usd, initial_timestamp,
-                    deposits_usd, withdrawals_usd, gas_spent_usd, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    deposits_usd, withdrawals_usd, gas_spent_usd,
+                    total_value_usd, positions_json, cycle_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     metrics.strategy_id,
@@ -1623,6 +1868,9 @@ class SQLiteStore:
                     str(metrics.deposits_usd),
                     str(metrics.withdrawals_usd),
                     str(metrics.gas_spent_usd),
+                    str(metrics.total_value_usd),
+                    getattr(metrics, "positions_json", "[]"),
+                    getattr(metrics, "cycle_id", None),
                     now,
                 ),
             )
@@ -1652,7 +1900,8 @@ class SQLiteStore:
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
                 SELECT strategy_id, initial_value_usd, initial_timestamp,
-                       deposits_usd, withdrawals_usd, gas_spent_usd, updated_at
+                       deposits_usd, withdrawals_usd, gas_spent_usd,
+                       total_value_usd, positions_json, cycle_id, updated_at
                 FROM portfolio_metrics
                 WHERE strategy_id = ?
                 """,
@@ -1674,12 +1923,184 @@ class SQLiteStore:
             return PortfolioMetrics(
                 strategy_id=row["strategy_id"],
                 timestamp=updated_at,
-                total_value_usd=Decimal("0"),  # Not stored, get from latest snapshot
+                total_value_usd=Decimal(row["total_value_usd"] or "0"),
                 initial_value_usd=Decimal(row["initial_value_usd"]),
                 deposits_usd=Decimal(row["deposits_usd"]),
                 withdrawals_usd=Decimal(row["withdrawals_usd"]),
                 gas_spent_usd=Decimal(row["gas_spent_usd"]),
+                positions_json=row["positions_json"] or "[]",
+                cycle_id=row["cycle_id"],
             )
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_get)
+
+    # =========================================================================
+    # Position Events Methods (Phase 2, VIB-2774)
+    # =========================================================================
+
+    async def save_position_event(self, event: "PositionEvent") -> bool:
+        """Save a position lifecycle event.
+
+        Args:
+            event: PositionEvent to persist.
+
+        Returns:
+            True if successful.
+        """
+
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_save() -> bool:
+            with self._db_lock:
+                self._conn.execute(  # type: ignore[union-attr]
+                    """
+                    INSERT OR IGNORE INTO position_events (
+                        id, deployment_id, position_id, position_type, event_type,
+                        timestamp, protocol, chain,
+                        token0, token1, amount0, amount1, value_usd,
+                        tick_lower, tick_upper, liquidity, in_range,
+                        fees_token0, fees_token1,
+                        leverage, entry_price, mark_price, unrealized_pnl, is_long,
+                        tx_hash, gas_usd, ledger_entry_id,
+                        attribution_json, attribution_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.id,
+                        event.deployment_id,
+                        event.position_id,
+                        event.position_type,
+                        event.event_type,
+                        event.timestamp.isoformat(),
+                        event.protocol,
+                        event.chain,
+                        event.token0,
+                        event.token1,
+                        event.amount0,
+                        event.amount1,
+                        event.value_usd,
+                        event.tick_lower,
+                        event.tick_upper,
+                        event.liquidity,
+                        event.in_range,
+                        event.fees_token0,
+                        event.fees_token1,
+                        event.leverage,
+                        event.entry_price,
+                        event.mark_price,
+                        event.unrealized_pnl,
+                        event.is_long,
+                        event.tx_hash,
+                        event.gas_usd,
+                        event.ledger_entry_id,
+                        event.attribution_json,
+                        event.attribution_version,
+                    ),
+                )
+                self._conn.commit()  # type: ignore[union-attr]
+            return True
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_save)
+
+    async def update_position_attribution(self, event_id: str, attribution_json: str, attribution_version: int) -> bool:
+        """Update only the attribution fields of a position event.
+
+        Unlike save_position_event (INSERT OR REPLACE), this preserves all
+        other stored fields (timestamp, token0/token1, ticks, liquidity, etc.).
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_update() -> bool:
+            with self._db_lock:
+                cursor = self._conn.execute(  # type: ignore[union-attr]
+                    """
+                    UPDATE position_events
+                    SET attribution_json = ?, attribution_version = ?
+                    WHERE id = ?
+                    """,
+                    (attribution_json, attribution_version, event_id),
+                )
+                self._conn.commit()  # type: ignore[union-attr]
+            return cursor.rowcount > 0
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_update)
+
+    async def get_position_events(
+        self,
+        deployment_id: str,
+        position_id: str | None = None,
+        event_type: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Query position lifecycle events.
+
+        Args:
+            deployment_id: Strategy deployment identifier.
+            position_id: Optional filter by position_id.
+            event_type: Optional filter by event type (OPEN, CLOSE, etc.).
+            limit: Maximum number of events to return.
+
+        Returns:
+            List of event dicts ordered by timestamp descending.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_get() -> list[dict]:
+            query = "SELECT * FROM position_events WHERE deployment_id = ?"
+            params: list = [deployment_id]
+
+            if position_id is not None:
+                query += " AND position_id = ?"
+                params.append(position_id)
+
+            if event_type is not None:
+                query += " AND event_type = ?"
+                params.append(event_type)
+
+            query += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(limit)
+
+            cursor = self._conn.execute(query, params)  # type: ignore[union-attr]
+            return [dict(row) for row in cursor.fetchall()]
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_get)
+
+    async def get_position_history(
+        self,
+        deployment_id: str,
+        position_id: str,
+    ) -> list[dict]:
+        """Get full lifecycle for a single position.
+
+        Returns events ordered chronologically (OPEN -> SNAPSHOT* -> CLOSE).
+
+        Args:
+            deployment_id: Strategy deployment identifier.
+            position_id: The position to query.
+
+        Returns:
+            List of event dicts in chronological order.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_get() -> list[dict]:
+            cursor = self._conn.execute(  # type: ignore[union-attr]
+                """
+                SELECT * FROM position_events
+                WHERE deployment_id = ? AND position_id = ?
+                ORDER BY timestamp ASC
+                """,
+                (deployment_id, position_id),
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get)

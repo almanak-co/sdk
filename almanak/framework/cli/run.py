@@ -1672,32 +1672,20 @@ def run(
 
     effective_dry_run = dry_run or copy_shadow or (normalized_copy_mode in {"shadow", "replay"})
 
-    # Ensure strategy_id is always unique per instance.
-    # The config's strategy_id (or strategy_name) becomes the display name.
-    # A unique runtime ID is always generated unless resuming with --id.
-    strategy_id_generated = False
-    if provided_instance_id:
-        # User provided an ID to resume - use it exactly (format: name:id)
-        if ":" in provided_instance_id:
-            strategy_config["strategy_id"] = provided_instance_id
-            strategy_config["strategy_display_name"] = provided_instance_id.split(":")[0]
-        else:
-            strategy_config["strategy_id"] = f"{strategy_name}:{provided_instance_id}"
-            strategy_config["strategy_display_name"] = strategy_name
-    else:
-        # Strip any existing UUID suffix from config (load_strategy_config may generate one).
-        config_display_name = strategy_config.get("strategy_id", strategy_name)
-        if ":" in config_display_name:
-            config_display_name = config_display_name.split(":")[0]
+    # --- Three-tier identity model (VIB-2764) ---
+    # strategy_name: human/code reference (display name).
+    # deployment_id: stable primary key for all DB tables (survives restarts).
+    # run_id: per-process ephemeral UUID (forensics only).
+    from almanak.framework.runner.identity import generate_run_id, resolve_deployment_id
 
-        if once:
-            # For --once runs, use a stable ID so state persists across reruns.
-            strategy_config["strategy_id"] = config_display_name
-        else:
-            # For continuous runs, generate a unique runtime ID to prevent collisions.
-            strategy_config["strategy_id"] = f"{config_display_name}:{uuid.uuid4().hex[:12]}"
-            strategy_id_generated = True
-        strategy_config["strategy_display_name"] = config_display_name
+    config_display_name = strategy_config.get("strategy_id", strategy_name)
+    if ":" in config_display_name:
+        config_display_name = config_display_name.split(":")[0]
+    strategy_config["strategy_display_name"] = config_display_name
+
+    # deployment_id is resolved after wallet/chain are known (below).
+    # For now, stash the cli_id for the resolver.
+    _cli_id_override = provided_instance_id
 
     # Determine chain: config.json (explicit override) > decorator default_chain > supported_chains[0]
     # Config.json chain wins when present so users can override without editing code.
@@ -1928,6 +1916,50 @@ def run(
         else:
             strategy_config["wallet_address"] = runtime_config.execution_address
 
+    # --- Resolve deployment_id now that wallet + chain are known (VIB-2764) ---
+    # For multi-chain strategies, hash all chains so different chain combinations
+    # produce distinct deployment_ids (e.g., [arbitrum,base] vs [arbitrum,optimism]).
+    identity_chain = str(strategy_config.get("chain", ""))
+    if multi_chain and strategy_chains:
+        identity_chain = ",".join(sorted(str(c).lower() for c in strategy_chains))
+    deployment_id = resolve_deployment_id(
+        strategy_name=config_display_name,
+        wallet_address=strategy_config.get("wallet_address", ""),
+        chain=identity_chain,
+        cli_id=_cli_id_override,
+    )
+    strategy_config["strategy_id"] = deployment_id
+    run_id = generate_run_id()
+    strategy_config["run_id"] = run_id
+
+    # Backfill: migrate data from bare strategy name to deployment_id (VIB-2767).
+    # This ensures historical data from --once runs (which used bare names) is
+    # accessible under the new deterministic deployment_id.
+    # Uses the centralized SQLiteStore.backfill_deployment_id helper so that ALL
+    # tables (including timeline_events) are migrated consistently with _db_lock.
+    if deployment_id != config_display_name:
+        state_db_path = Path(os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db")
+        if state_db_path.exists():
+            try:
+                import asyncio
+
+                from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+
+                backfill_config = SQLiteConfig(db_path=str(state_db_path))
+                backfill_store = SQLiteStore(backfill_config)
+                loop = asyncio.new_event_loop()
+                try:
+                    total_migrated = loop.run_until_complete(
+                        backfill_store.backfill_deployment_id(config_display_name, deployment_id)
+                    )
+                    if total_migrated > 0:
+                        click.echo(f"Migrated {total_migrated} rows from '{config_display_name}' to '{deployment_id}'")
+                finally:
+                    loop.run_until_complete(backfill_store.close())
+                    loop.close()
+            except Exception as e:
+                logger.debug("Backfill migration skipped: %s", e)
+
     # Handle --fresh flag: clear state to prevent cross-strategy contamination
     # VIB-2573: On Anvil, clear ALL strategy state (not just current strategy)
     # to prevent TokenNotFoundError from stale state referencing wrong-chain tokens.
@@ -2016,7 +2048,8 @@ def run(
     click.echo("ALMANAK STRATEGY RUNNER")
     click.echo("=" * 60)
     click.echo(f"Strategy: {strategy_name}")
-    click.echo(f"Instance ID: {strategy_id}" + (" (generated)" if strategy_id_generated else ""))
+    click.echo(f"Deployment ID: {strategy_id}")
+    click.echo(f"Run ID: {run_id}")
     if is_resume:
         click.secho("Mode: RESUME (existing state found)", fg="yellow", bold=True)
         if existing_state_info:

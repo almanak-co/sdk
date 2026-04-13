@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Supported data types
-EXPORT_TYPES = ("trades", "timeline", "pnl")
+EXPORT_TYPES = ("trades", "timeline", "pnl", "positions")
 EXPORT_FORMATS = ("csv", "json")
 
 
@@ -108,6 +108,25 @@ def export_pnl(
     """
     points = client.get_pnl_history(strategy_id, since=since)
     rows = [p.to_dict() for p in points]
+    return _format_rows(rows, fmt)
+
+
+def export_positions(
+    rows: list[dict[str, Any]],
+    fmt: str = "csv",
+) -> bytes:
+    """Export position lifecycle events.
+
+    Unlike other export functions, this accepts pre-fetched rows because
+    position events are queried from SQLite directly (no gateway gRPC path yet).
+
+    Args:
+        rows: List of position event dicts (from SQLiteStore.get_position_events).
+        fmt: Output format ("csv" or "json").
+
+    Returns:
+        Encoded bytes (UTF-8).
+    """
     return _format_rows(rows, fmt)
 
 

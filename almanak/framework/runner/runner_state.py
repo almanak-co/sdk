@@ -237,8 +237,18 @@ async def capture_portfolio_snapshot(
                 iteration_number=iteration_number,
             )
 
-        # Persist snapshot (never skip -- failure contract)
-        snapshot_id = await runner.state_manager.save_portfolio_snapshot(snapshot)
+        # Build metrics for atomic co-write (VIB-2765)
+        metrics = await _build_metrics_for_snapshot(runner, strategy.strategy_id, snapshot)
+
+        # Atomic co-write: snapshot + metrics in one transaction when supported.
+        if metrics and hasattr(runner.state_manager, "save_snapshot_and_metrics"):
+            snapshot_id = await runner.state_manager.save_snapshot_and_metrics(snapshot, metrics)
+        else:
+            # Fallback: separate writes (GatewayStateManager, etc.)
+            snapshot_id = await runner.state_manager.save_portfolio_snapshot(snapshot)
+            if metrics:
+                await runner.state_manager.save_portfolio_metrics(metrics)
+
         if snapshot_id > 0:
             runner._last_snapshot_time = now
             logger.debug(
@@ -272,9 +282,6 @@ async def capture_portfolio_snapshot(
         except Exception as ve:
             logger.debug("Failed to write valuation into strategy state: %s", ve)
 
-        # Initialize or update portfolio metrics for PnL tracking
-        await update_portfolio_metrics(runner, strategy.strategy_id, snapshot)
-
         return snapshot
 
     except Exception as e:
@@ -302,52 +309,66 @@ async def capture_portfolio_snapshot(
         return None
 
 
-async def update_portfolio_metrics(
+async def _build_metrics_for_snapshot(
     runner: Any,
     strategy_id: str,
     snapshot: PortfolioSnapshot,
-) -> None:
-    """Update portfolio metrics for PnL tracking.
+) -> PortfolioMetrics | None:
+    """Build a PortfolioMetrics object for the given snapshot.
 
-    On first run, stores initial_value_usd as baseline for PnL calculation.
-    This baseline survives restarts for accurate cumulative PnL.
+    On first run, establishes ``initial_value_usd`` as baseline.
+    On subsequent runs, preserves the baseline and updates current value.
 
-    Args:
-        runner: StrategyRunner instance
-        strategy_id: Strategy identifier
-        snapshot: Current portfolio snapshot
+    Returns:
+        A PortfolioMetrics ready to persist, or None if metrics shouldn't
+        be written (e.g., unavailable snapshot, unsupported state manager).
     """
     try:
-        # Skip if state manager doesn't support portfolio metrics (e.g., GatewayStateManager)
         if not hasattr(runner.state_manager, "get_portfolio_metrics"):
-            return
+            return None
 
-        # Skip if snapshot value is unavailable (would seed bad baseline)
         if snapshot.error or snapshot.value_confidence == ValueConfidence.UNAVAILABLE:
-            logger.info(f"Skipping portfolio metrics update for {strategy_id}: snapshot unavailable")
-            return
+            logger.info(f"Skipping portfolio metrics for {strategy_id}: snapshot unavailable")
+            return None
 
-        # Get existing metrics (may be None on first run)
         existing = await runner.state_manager.get_portfolio_metrics(strategy_id)
 
         if existing is None:
-            # First run - establish baseline
             metrics = PortfolioMetrics(
                 strategy_id=strategy_id,
                 timestamp=snapshot.timestamp,
                 total_value_usd=snapshot.total_value_usd,
                 initial_value_usd=snapshot.total_value_usd,
             )
-            await runner.state_manager.save_portfolio_metrics(metrics)
             logger.info(f"Portfolio baseline established for {strategy_id}: ${snapshot.total_value_usd:.2f}")
-        else:
-            # Update current value (preserve initial_value)
-            existing.timestamp = snapshot.timestamp
-            existing.total_value_usd = snapshot.total_value_usd
-            await runner.state_manager.save_portfolio_metrics(existing)
+            return metrics
+
+        existing.timestamp = snapshot.timestamp
+        existing.total_value_usd = snapshot.total_value_usd
+        return existing
 
     except Exception as e:
-        logger.warning(f"Failed to update portfolio metrics: {e}")
+        logger.warning(f"Failed to build portfolio metrics: {e}")
+        return None
+
+
+async def update_portfolio_metrics(
+    runner: Any,
+    strategy_id: str,
+    snapshot: PortfolioSnapshot,
+) -> None:
+    """Update portfolio metrics for PnL tracking (legacy entry point).
+
+    Delegates to ``_build_metrics_for_snapshot`` + save.
+    Kept for backward compatibility with code paths that don't use
+    the atomic co-write.
+    """
+    metrics = await _build_metrics_for_snapshot(runner, strategy_id, snapshot)
+    if metrics is not None:
+        try:
+            await runner.state_manager.save_portfolio_metrics(metrics)
+        except Exception as e:
+            logger.warning(f"Failed to save portfolio metrics: {e}")
 
 
 # -------------------------------------------------------------------------
