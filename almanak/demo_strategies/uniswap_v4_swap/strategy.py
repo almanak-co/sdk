@@ -16,8 +16,12 @@ KEY V4 SWAP CONCEPTS:
 - V4SwapExactInSingle command encoded in UniversalRouter.execute()
 - Receipt events: PoolManager emits Swap(poolId, sender, amount0, amount1, ...)
 
+NOTE: Defaults to Base chain where V4 pools have confirmed liquidity on
+Anvil forks. Ethereum is supported but V4 swaps may silently no-op or
+revert on Anvil forks due to pool state issues.
+
 USAGE:
-    # Run on Anvil fork (auto-starts Anvil + gateway)
+    # Run on Anvil fork (auto-starts Anvil + gateway, defaults to Base)
     almanak strat run -d strategies/demo/uniswap_v4_swap --network anvil --once
 
     # Run twice to see BUY then SELL
@@ -49,10 +53,10 @@ logger = logging.getLogger(__name__)
     version="1.0.0",
     author="Almanak",
     tags=["demo", "v4", "swap", "uniswap", "permit2"],
-    supported_chains=["ethereum", "arbitrum", "base", "optimism"],
+    supported_chains=["base", "ethereum", "arbitrum", "optimism"],
     supported_protocols=["uniswap_v4"],
     intent_types=["SWAP", "HOLD"],
-    default_chain="ethereum",
+    default_chain="base",
 )
 class UniswapV4SwapStrategy(IntentStrategy):
     """Uniswap V4 swap demo: alternates BUY and SELL each iteration.
