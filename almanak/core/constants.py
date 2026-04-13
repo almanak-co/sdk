@@ -48,6 +48,7 @@ CHAIN_IDS: dict[Chain, int] = {
     Chain.BERACHAIN: 80094,
     Chain.MONAD: 143,
     Chain.XLAYER: 196,
+    Chain.ZEROG: 16661,
     Chain.SOLANA: 0,  # Non-EVM chain, no EIP-155 chain ID
 }
 
@@ -77,6 +78,8 @@ _CHAIN_ALIASES: dict[str, Chain] = {
     "bera": Chain.BERACHAIN,
     "monad": Chain.MONAD,
     "xlayer": Chain.XLAYER,
+    "zerog": Chain.ZEROG,
+    "0g": Chain.ZEROG,
     "solana": Chain.SOLANA,
     "sol": Chain.SOLANA,
 }

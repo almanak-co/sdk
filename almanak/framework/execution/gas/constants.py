@@ -36,6 +36,7 @@ CHAIN_GAS_BUFFERS: dict[str, float] = {
     "berachain": 1.2,  # 20% buffer for L1
     "monad": 1.1,  # 10% buffer for high-throughput L1
     "xlayer": 1.3,  # 30% buffer for zkEVM L2 (Polygon CDK)
+    "zerog": 1.1,  # 10% buffer for AI L1
 }
 
 # =============================================================================
@@ -88,6 +89,7 @@ CHAIN_GAS_PRICE_CAPS_GWEI: dict[str, int] = {
     "sonic": 100,  # L1
     "monad": 50,  # High-throughput L1
     "xlayer": 10,  # zkEVM L2: sub-cent fees
+    "zerog": 50,  # L1
 }
 
 # =============================================================================
@@ -109,6 +111,7 @@ CHAIN_GAS_COST_CAPS_NATIVE: dict[str, float] = {
     "berachain": 10.0,  # 10 BERA
     "monad": 10.0,  # 10 MON
     "xlayer": 1.0,  # 1 OKB (~$50 at $50/OKB)
+    "zerog": 10.0,  # 10 A0GI
 }
 
 # =============================================================================
@@ -133,6 +136,7 @@ CHAIN_TX_TIMEOUTS: dict[str, int] = {
     "berachain": 120,  # 120s - EVM-compatible L1
     "monad": 60,  # 60s - 1s blocks, high throughput
     "xlayer": 120,  # 120s - zkEVM L2 (~2s blocks)
+    "zerog": 120,  # 120s - EVM-compatible L1
 }
 
 # =============================================================================
@@ -161,6 +165,7 @@ CHAIN_GRPC_EXECUTE_TIMEOUTS: dict[str, int] = {
     "berachain": 300,  # 120s TX + 180s overhead
     "monad": 240,  # 60s TX + 180s overhead
     "xlayer": 300,  # 120s TX + 180s overhead
+    "zerog": 300,  # 120s TX + 180s overhead
 }
 
 CHAIN_SIMULATION_BUFFERS: dict[str, float] = {
@@ -179,4 +184,5 @@ CHAIN_SIMULATION_BUFFERS: dict[str, float] = {
     "sonic": 0.1,  # 10% buffer (from gateway)
     "monad": 0.1,  # 10% buffer for high-throughput L1
     "xlayer": 0.3,  # 30% buffer for zkEVM L2 data cost
+    "zerog": 0.1,  # 10% buffer for L1
 }

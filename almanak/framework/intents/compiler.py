@@ -5034,6 +5034,7 @@ class IntentCompiler:
         Routes to the appropriate staking adapter based on protocol:
         - 'lido': Uses LidoAdapter for ETH staking (stETH/wstETH)
         - 'ethena': Uses EthenaAdapter for USDe staking (sUSDe)
+        - 'gimo': Uses GimoAdapter for A0GI staking (st0G) on 0G Chain
 
         Args:
             intent: StakeIntent to compile
@@ -5042,6 +5043,7 @@ class IntentCompiler:
             CompilationResult with stake ActionBundle
         """
         from ..connectors import EthenaAdapter, EthenaConfig, LidoAdapter, LidoConfig
+        from ..connectors.gimo import GimoAdapter, GimoConfig
 
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
@@ -5100,10 +5102,32 @@ class IntentCompiler:
                 ethena_adapter = EthenaAdapter(ethena_config)
                 action_bundle = ethena_adapter.compile_stake_intent(intent)
 
+            elif protocol == "gimo":
+                # Validate chain - Gimo only on 0G Chain
+                if self.chain != "zerog":
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=f"Gimo staking only supported on 0G Chain (zerog), got: {self.chain}",
+                        intent_id=intent.intent_id,
+                    )
+
+                gimo_config = GimoConfig(
+                    chain=self.chain,
+                    wallet_address=self.wallet_address,
+                )
+                gimo_adapter = GimoAdapter(gimo_config)
+                action_bundle = gimo_adapter.compile_stake_intent(intent)
+                if action_bundle.metadata.get("error"):
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=action_bundle.metadata["error"],
+                        intent_id=intent.intent_id,
+                    )
+
             else:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=f"Unsupported staking protocol: {protocol}. Supported: lido, ethena",
+                    error=f"Unsupported staking protocol: {protocol}. Supported: lido, ethena, gimo",
                     intent_id=intent.intent_id,
                 )
 
@@ -5144,6 +5168,7 @@ class IntentCompiler:
         Routes to the appropriate staking adapter based on protocol:
         - 'lido': Uses LidoAdapter for stETH/wstETH unstaking
         - 'ethena': Uses EthenaAdapter for sUSDe unstaking (initiates cooldown)
+        - 'gimo': Uses GimoAdapter for st0G unstaking on 0G Chain
 
         Args:
             intent: UnstakeIntent to compile
@@ -5152,6 +5177,7 @@ class IntentCompiler:
             CompilationResult with unstake ActionBundle
         """
         from ..connectors import EthenaAdapter, EthenaConfig, LidoAdapter, LidoConfig
+        from ..connectors.gimo import GimoAdapter, GimoConfig
 
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
@@ -5204,10 +5230,32 @@ class IntentCompiler:
                 ethena_adapter = EthenaAdapter(ethena_config)
                 action_bundle = ethena_adapter.compile_unstake_intent(intent)
 
+            elif protocol == "gimo":
+                # Validate chain - Gimo only on 0G Chain
+                if self.chain != "zerog":
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=f"Gimo unstaking only supported on 0G Chain (zerog), got: {self.chain}",
+                        intent_id=intent.intent_id,
+                    )
+
+                gimo_config = GimoConfig(
+                    chain=self.chain,
+                    wallet_address=self.wallet_address,
+                )
+                gimo_adapter = GimoAdapter(gimo_config)
+                action_bundle = gimo_adapter.compile_unstake_intent(intent)
+                if action_bundle.metadata.get("error"):
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=action_bundle.metadata["error"],
+                        intent_id=intent.intent_id,
+                    )
+
             else:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=f"Unsupported unstaking protocol: {protocol}. Supported: lido, ethena",
+                    error=f"Unsupported unstaking protocol: {protocol}. Supported: lido, ethena, gimo",
                     intent_id=intent.intent_id,
                 )
 

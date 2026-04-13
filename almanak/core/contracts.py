@@ -99,6 +99,15 @@ UNISWAP_V3: dict[str, dict[str, str]] = {
         "position_manager": "0x315e413A11AB0df498eF83873012430ca36638Ae",
         "quoter_v2": "0x976183AC3d09840D243A88c0268BADb3B3e3259f",
     },
+    "zerog": {
+        # JAINE DEX — Uniswap V3 fork on 0G Chain (verified on explorer)
+        # Source: https://github.com/RabbyHub/Rabby/issues/3225
+        "swap_router": "0x18cCa38E51c4C339A6BD6e174025f08360FEEf30",
+        "swap_router_02": "0x18cCa38E51c4C339A6BD6e174025f08360FEEf30",
+        "factory": "0x6F3945Ab27296D1D66D8EEB042ff1B4fb2E0CE70",
+        "position_manager": "0x5143ba6007C197b4cF66c20601b9dB97E0F98c6A",
+        "quoter_v2": "0x23b55293b7F06F6c332a0dDA3D88d8921218425B",
+    },
 }
 
 UNISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
@@ -199,6 +208,11 @@ UNISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
         "USDC": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
         "USDT": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USD₮0 (Aave V3.6 reserve)
         "WBTC": "0xEA034fb02eB1808C2cc3adbC15f447B93CbE08e1",
+    },
+    "zerog": {
+        # 0G Chain tokens (verified on-chain)
+        "A0GI": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+        "W0G": "0x1Cd0690fF9a693f5EF2dD976660a8dAFc81A109c",
     },
 }
 

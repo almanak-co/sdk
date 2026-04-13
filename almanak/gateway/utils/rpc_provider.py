@@ -203,6 +203,12 @@ _BUILTIN_CHAINS: dict[str, dict] = {
         "anvil_port": 8557,
         "poa": False,
     },
+    "zerog": {
+        "chain_id": 16661,
+        "public_rpc": "https://0g-rpc.publicnode.com",
+        "anvil_port": 8558,
+        "poa": False,
+    },
 }
 
 _BUILTIN_SOLANA_CLUSTERS: dict[str, str] = {

@@ -55,6 +55,7 @@ WRAPPED_NATIVE: dict[str, str] = {
     "berachain": "0x6969696969696969696969696969696969696969",  # WBERA
     "monad": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",  # WMON
     "xlayer": "0xe538905cf8410324e03A5A23C1c177a474D59b2b",  # WOKB
+    "zerog": "0x1Cd0690fF9a693f5EF2dD976660a8dAFc81A109c",  # W0G (Wrapped 0G)
 }
 
 # Re-exported from almanak.core.constants for backwards compatibility.
@@ -1372,6 +1373,46 @@ USDG_XLAYER = Token(
 )
 
 # =============================================================================
+# 0G CHAIN TOKENS
+# =============================================================================
+
+# A0GI (native gas token on 0G Chain)
+A0GI = Token(
+    symbol="A0GI",
+    name="A0GI",
+    decimals=18,
+    addresses={
+        "zerog": NATIVE_SENTINEL,
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
+# st0G (Gimo Finance liquid staking token)
+ST0G = Token(
+    symbol="st0G",
+    name="Staked 0G",
+    decimals=18,
+    addresses={
+        "zerog": "0x7bBC63D01CA42491c3E084C941c3E86e55951404",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
+# W0G (Wrapped 0G — native wrapped token on 0G Chain)
+W0G = Token(
+    symbol="W0G",
+    name="Wrapped 0G",
+    decimals=18,
+    addresses={
+        "zerog": "0x1Cd0690fF9a693f5EF2dD976660a8dAFc81A109c",
+    },
+    coingecko_id=None,
+    is_stablecoin=False,
+)
+
+# =============================================================================
 # PENDLE SY MINT TOKENS (tokens that mint SY for Pendle markets)
 # These are the underlying tokens that Pendle's SY contract accepts.
 # Required for pre-swap routing in the Pendle compiler (VIB-2560).
@@ -1634,6 +1675,10 @@ DEFAULT_TOKENS: list[Token] = [
     XBTC,
     USDT0_XLAYER,
     USDG_XLAYER,
+    # 0G chain tokens
+    A0GI,
+    ST0G,
+    W0G,
     # Portfolio Manager custom tokens (LP strategies)
     ATH,
     TORIVA,
@@ -1801,6 +1846,10 @@ __all__ = [
     "MON",
     "WMON",
     "USDT0_MONAD",
+    # 0G chain tokens
+    "A0GI",
+    "ST0G",
+    "W0G",
     # Pendle SY mint tokens
     "USDG_ETH",
     "aEthPYUSD",

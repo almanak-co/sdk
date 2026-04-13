@@ -96,6 +96,12 @@
       "anvil_port": 8557,
       "poa": false
     },
+    "zerog": {
+      "chain_id": 16661,
+      "public_rpc": "https://0g-rpc.publicnode.com",
+      "anvil_port": 8558,
+      "poa": false
+    },
     "solana": {
       "chain_id": 0,
       "public_rpc": "https://api.mainnet-beta.solana.com",

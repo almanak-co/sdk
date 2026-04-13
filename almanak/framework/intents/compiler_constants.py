@@ -168,6 +168,9 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
     "monad": {
         "uniswap_v3": "0xfE31F71C1b106EAc32F1A19239c9a9A72ddfb900",  # SwapRouter02 — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
     },
+    "zerog": {
+        "uniswap_v3": "0x18cCa38E51c4C339A6BD6e174025f08360FEEf30",  # JAINE DEX SwapRouter (Uniswap V3 fork)
+    },
 }
 
 # Uniswap V3 NonfungiblePositionManager addresses per chain
@@ -234,6 +237,9 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     },
     "monad": {
         "uniswap_v3": "0x7197E214c0b767cFB76Fb734ab638E2c192F4E53",  # NonfungiblePositionManager — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
+    },
+    "zerog": {
+        "uniswap_v3": "0x5143ba6007C197b4cF66c20601b9dB97E0F98c6A",  # JAINE DEX NonfungiblePositionManager (Uniswap V3 fork)
     },
 }
 
@@ -392,6 +398,9 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
     },
     "monad": {
         "uniswap_v3": "0x661E93cca42AfacB172121EF892830cA3b70F08d",  # QuoterV2 — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
+    },
+    "zerog": {
+        "uniswap_v3": "0x23b55293b7F06F6c332a0dDA3D88d8921218425B",  # JAINE DEX QuoterV2 (Uniswap V3 fork)
     },
 }
 

@@ -99,6 +99,7 @@ CHAIN_IDS: dict[str, int] = {
     "sonic": 146,
     "monad": 143,
     "xlayer": 196,
+    "zerog": 16661,
 }
 
 

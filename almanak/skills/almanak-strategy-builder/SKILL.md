@@ -1258,6 +1258,7 @@ class MyStrategy(IntentStrategy):
 | Berachain | `BERACHAIN` | `berachain` |
 | Monad | `MONAD` | `monad` |
 | X-Layer | `XLAYER` | `xlayer` |
+| 0G Chain | `ZEROG` | `zerog` |
 | Solana | `SOLANA` | `solana` |
 
 <!-- almanak-sdk-end: supported-chains -->

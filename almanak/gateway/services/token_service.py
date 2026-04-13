@@ -60,6 +60,7 @@ COINGECKO_PLATFORM_IDS: dict[str, str] = {
     "berachain": "berachain",
     "monad": "monad",
     "xlayer": "xlayer",
+    "zerog": "zerog",
 }
 
 

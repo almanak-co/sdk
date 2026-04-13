@@ -72,6 +72,7 @@ class Chain(Enum):
     SOLANA = "SOLANA"
     MONAD = "MONAD"
     XLAYER = "XLAYER"
+    ZEROG = "ZEROG"  # Preview support — 0G Chain (AI L1)
 
 
 class ChainFamily(Enum):
@@ -98,6 +99,7 @@ CHAIN_FAMILY_MAP: dict[Chain, "ChainFamily"] = {
     Chain.BERACHAIN: ChainFamily.EVM,
     Chain.MONAD: ChainFamily.EVM,
     Chain.XLAYER: ChainFamily.EVM,
+    Chain.ZEROG: ChainFamily.EVM,
     Chain.SOLANA: ChainFamily.SOLANA,
 }
 

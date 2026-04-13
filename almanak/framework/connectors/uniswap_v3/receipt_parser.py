@@ -54,6 +54,7 @@ POSITION_MANAGER_ADDRESSES: dict[str, str] = {
     "mantle": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni Finance fork
     "monad": "0x7197E214c0b767cFB76Fb734ab638E2c192F4E53",
     "xlayer": "0x315e413A11AB0df498eF83873012430ca36638Ae",  # Non-canonical (Governance Proposal 67)
+    "zerog": "0x5143ba6007C197b4cF66c20601b9dB97E0F98c6A",  # JAINE DEX (Uniswap V3 fork)
 }
 
 # Zero address for detecting mints

@@ -137,6 +137,7 @@ NATIVE_TOKEN_SYMBOLS: dict[str, str] = {
     "berachain": "BERA",
     "monad": "MON",
     "xlayer": "OKB",
+    "zerog": "A0GI",
 }
 
 

@@ -347,6 +347,7 @@ class ManagedGateway:
         "berachain": "BERA",
         "monad": "MON",
         "xlayer": "OKB",
+        "zerog": "A0GI",
     }
 
     async def _fund_anvil_wallets(self, chains: list[str] | None = None) -> None:

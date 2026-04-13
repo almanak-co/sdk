@@ -68,6 +68,9 @@ _KNOWN_GAPS: set[tuple[str, str, str]] = {
     ("uniswap_v3", "SWAP", "xlayer"),
     ("uniswap_v3", "LP_OPEN", "xlayer"),
     ("aave_v3", "SUPPLY", "xlayer"),
+    # 0G Chain: JAINE DEX addresses added but permission hints not yet implemented
+    ("uniswap_v3", "SWAP", "zerog"),
+    ("uniswap_v3", "LP_OPEN", "zerog"),
 }
 
 

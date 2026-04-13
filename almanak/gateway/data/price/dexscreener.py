@@ -56,6 +56,7 @@ CHAIN_TO_DEXSCREENER_PLATFORM: dict[str, str] = {
     "monad": "monad",
     "plasma": "plasma",
     "xlayer": "xlayer",
+    "zerog": "zerog",
     # Non-EVM
     "solana": "solana",
 }

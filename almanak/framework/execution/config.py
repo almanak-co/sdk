@@ -149,6 +149,7 @@ CHAIN_IDS: dict[str, int] = {
     "sonic": 146,
     "monad": 143,
     "xlayer": 196,
+    "zerog": 16661,
 }
 
 # Supported protocols and which chains they are available on
@@ -166,6 +167,7 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
         "blast",
         "monad",
         "xlayer",
+        "zerog",  # JAINE DEX (Uniswap V3 fork on 0G Chain)
     },
     "agni_finance": {"mantle"},  # Agni Finance (Uniswap V3 fork, primary DEX on Mantle)
     "gmx_v2": {"arbitrum", "avalanche"},
@@ -202,6 +204,7 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
     "joelend": {"avalanche"},  # Joe Lend / Banker Joe (Compound V2 fork) on Avalanche
     "euler_v2": {"avalanche", "ethereum"},  # Euler V2 (ERC-4626 vaults + EVC)
     "silo_v2": {"avalanche"},  # Silo V2 isolated lending on Avalanche
+    "gimo": {"zerog"},  # Gimo Finance liquid staking on 0G Chain
 }
 
 

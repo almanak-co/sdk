@@ -226,6 +226,10 @@ class ReceiptParserRegistry:
             "almanak.framework.connectors.ethena.receipt_parser",
             "EthenaReceiptParser",
         ),
+        "gimo": (
+            "almanak.framework.connectors.gimo.receipt_parser",
+            "GimoReceiptParser",
+        ),
         # Aggregators
         "enso": (
             "almanak.framework.connectors.enso.receipt_parser",

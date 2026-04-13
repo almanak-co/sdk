@@ -75,6 +75,7 @@ class Chain(StrEnum):
     BERACHAIN = "berachain"
     MONAD = "monad"
     XLAYER = "xlayer"
+    ZEROG = "zerog"
 
 
 # =============================================================================

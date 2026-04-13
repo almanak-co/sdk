@@ -1,0 +1,12 @@
+{
+    "pool": "W0G/st0G/3000",
+    "range_width_pct": 0.50,
+    "amount0": "10",
+    "amount1": "10",
+    "force_action": "open",
+    "anvil_funding": {
+        "A0GI": 1000,
+        "W0G": 100,
+        "st0G": 100
+    }
+}
