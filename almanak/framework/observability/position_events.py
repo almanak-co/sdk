@@ -98,6 +98,8 @@ class PositionEvent:
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     deployment_id: str = ""
+    cycle_id: str = ""  # Phase 4: correlation to iteration (VIB-2835)
+    execution_mode: str = ""  # Phase 4: "live" or "dry_run" (VIB-2837)
     position_id: str = ""
     position_type: str = ""
     event_type: str = ""

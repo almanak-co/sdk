@@ -331,6 +331,23 @@ async def _build_metrics_for_snapshot(
             logger.info(f"Skipping portfolio metrics for {strategy_id}: snapshot unavailable")
             return None
 
+        # Phase 4: derive deployment_id, execution_mode, and cycle_id from runner context
+        execution_mode = "dry_run" if runner.config.dry_run else "live"
+
+        # Get cycle_id: prefer runner._last_cycle_id (survives clear_cycle_id in finally block)
+        # Fall back to observability context for non-runner callers
+        cycle_id = getattr(runner, "_last_cycle_id", "") or ""
+        if not cycle_id:
+            try:
+                from almanak.framework.observability.context import get_cycle_id
+
+                cycle_id = get_cycle_id() or ""
+            except Exception:
+                pass
+
+        # Resolve deployment_id: prefer runner's deployment_id, fall back to strategy_id
+        deployment_id = getattr(runner, "deployment_id", "") or snapshot.strategy_id
+
         existing = await runner.state_manager.get_portfolio_metrics(strategy_id)
 
         if existing is None:
@@ -339,12 +356,20 @@ async def _build_metrics_for_snapshot(
                 timestamp=snapshot.timestamp,
                 total_value_usd=snapshot.total_value_usd,
                 initial_value_usd=snapshot.total_value_usd,
+                deployment_id=deployment_id,
+                execution_mode=execution_mode,
+                cycle_id=cycle_id,
             )
             logger.info(f"Portfolio baseline established for {strategy_id}: ${snapshot.total_value_usd:.2f}")
             return metrics
 
         existing.timestamp = snapshot.timestamp
         existing.total_value_usd = snapshot.total_value_usd
+        # Phase 4: always refresh execution_mode, deployment_id, and cycle_id
+        existing.execution_mode = execution_mode
+        existing.cycle_id = cycle_id
+        if not existing.deployment_id:
+            existing.deployment_id = deployment_id
         return existing
 
     except Exception as e:

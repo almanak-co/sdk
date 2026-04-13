@@ -115,6 +115,12 @@ CREATE TABLE IF NOT EXISTS portfolio_metrics (
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Migration: add Phase 4 accounting columns to portfolio_metrics
+ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS deployment_id TEXT DEFAULT '';
+ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS cycle_id TEXT DEFAULT '';
+ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS execution_mode TEXT DEFAULT '';
+ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS is_complete BOOLEAN DEFAULT true;
+
 -- CLOB orders table ---------------------------------------------------------
 CREATE TABLE IF NOT EXISTS clob_orders (
     id                 BIGSERIAL PRIMARY KEY,

@@ -682,14 +682,20 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     """
                     INSERT INTO portfolio_metrics (
                         agent_id, initial_value_usd, initial_timestamp,
-                        deposits_usd, withdrawals_usd, gas_spent_usd, updated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        deposits_usd, withdrawals_usd, gas_spent_usd,
+                        deployment_id, cycle_id, execution_mode, is_complete,
+                        updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     ON CONFLICT (agent_id) DO UPDATE SET
                         initial_value_usd = EXCLUDED.initial_value_usd,
                         initial_timestamp = EXCLUDED.initial_timestamp,
                         deposits_usd = EXCLUDED.deposits_usd,
                         withdrawals_usd = EXCLUDED.withdrawals_usd,
                         gas_spent_usd = EXCLUDED.gas_spent_usd,
+                        deployment_id = EXCLUDED.deployment_id,
+                        cycle_id = EXCLUDED.cycle_id,
+                        execution_mode = EXCLUDED.execution_mode,
+                        is_complete = EXCLUDED.is_complete,
                         updated_at = EXCLUDED.updated_at
                     RETURNING agent_id
                     """,
@@ -699,6 +705,10 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     str(deposits_usd),
                     str(withdrawals_usd),
                     str(gas_spent_usd),
+                    request.deployment_id or "",
+                    request.cycle_id or "",
+                    request.execution_mode or "",
+                    request.is_complete,
                     now,
                 )
                 logger.debug("Portfolio metrics saved for strategy=%s", strategy_id)
@@ -739,6 +749,11 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     deposits_usd=deposits_usd,
                     withdrawals_usd=withdrawals_usd,
                     gas_spent_usd=gas_spent_usd,
+                    # Phase 4 accounting identity fields (VIB-2835/2837/2839)
+                    deployment_id=request.deployment_id or "",
+                    cycle_id=request.cycle_id or None,
+                    execution_mode=request.execution_mode or "",
+                    is_complete=request.is_complete,
                 )
 
                 warm = self._state_manager.warm_backend
@@ -782,7 +797,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 row = await self._snapshot_fetchrow(
                     """
                     SELECT agent_id, initial_value_usd, initial_timestamp,
-                           deposits_usd, withdrawals_usd, gas_spent_usd, updated_at
+                           deposits_usd, withdrawals_usd, gas_spent_usd,
+                           deployment_id, cycle_id, execution_mode, is_complete,
+                           updated_at
                     FROM portfolio_metrics
                     WHERE agent_id = $1
                     """,
@@ -800,6 +817,10 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     gas_spent_usd=row["gas_spent_usd"] or "0",
                     updated_at=int(row["updated_at"].timestamp()),
                     found=True,
+                    deployment_id=row["deployment_id"] or "",
+                    cycle_id=row["cycle_id"] or "",
+                    execution_mode=row["execution_mode"] or "",
+                    is_complete=bool(row["is_complete"]) if row["is_complete"] is not None else True,
                 )
             except Exception as e:
                 logger.error("GetPortfolioMetrics failed for %s: %s", strategy_id, e)
@@ -827,6 +848,10 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                         gas_spent_usd=str(metrics.gas_spent_usd),
                         updated_at=int(metrics.timestamp.timestamp()),
                         found=True,
+                        deployment_id=getattr(metrics, "deployment_id", "") or "",
+                        cycle_id=getattr(metrics, "cycle_id", "") or "",
+                        execution_mode=getattr(metrics, "execution_mode", "") or "",
+                        is_complete=getattr(metrics, "is_complete", True),
                     )
 
                 return gateway_pb2.PortfolioMetricsData(found=False)

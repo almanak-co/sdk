@@ -197,6 +197,9 @@ class StrategyRunner:
         self._terminal_lifecycle_error_message: str | None = None
         self._current_loop_task: asyncio.Task[None] | None = None
 
+        # Phase 4: cycle_id preserved for snapshot capture after iteration
+        self._last_cycle_id: str = ""
+
         # Metrics tracking
         self._consecutive_errors = 0
         self._first_error_at: datetime | None = None  # Timestamp of first error in current streak
@@ -352,6 +355,7 @@ class StrategyRunner:
         from almanak.framework.observability.context import clear_cycle_id, new_cycle_id
 
         cycle_id = new_cycle_id()
+        self._last_cycle_id = cycle_id  # Phase 4: preserve for snapshot capture after iteration
         add_context(cycle_id=cycle_id)
 
         logger.info(f"Starting iteration for strategy: {strategy_id}")
@@ -1254,6 +1258,13 @@ class StrategyRunner:
                 success=success,
                 error=error,
             )
+
+            # Phase 4: stamp deployment_id and execution_mode onto the entry (VIB-2835/2837)
+            deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+            execution_mode = "dry_run" if self.config.dry_run else "live"
+            entry.deployment_id = deployment_id
+            entry.execution_mode = execution_mode
+
             if self.state_manager:
                 await self.state_manager.save_ledger_entry(entry)
 
@@ -1263,13 +1274,16 @@ class StrategyRunner:
                     from ..observability.position_events import build_position_event_from_intent
 
                     pos_event = build_position_event_from_intent(
-                        deployment_id=strategy.strategy_id,
+                        deployment_id=deployment_id,
                         intent=intent,
                         result=result,
                         ledger_entry_id=entry.id,
                         chain=chain,
                     )
                     if pos_event is not None:
+                        # Phase 4: stamp cycle_id and execution_mode (VIB-2835/2837)
+                        pos_event.cycle_id = cycle_id
+                        pos_event.execution_mode = execution_mode
                         await self.state_manager.save_position_event(pos_event)
                         logger.debug(
                             "Position event %s emitted for %s (position=%s)",

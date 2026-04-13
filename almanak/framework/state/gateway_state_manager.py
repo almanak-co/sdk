@@ -309,6 +309,11 @@ class GatewayStateManager:
                 deposits_usd=str(metrics.deposits_usd),
                 withdrawals_usd=str(metrics.withdrawals_usd),
                 gas_spent_usd=str(metrics.gas_spent_usd),
+                # Phase 4 accounting identity fields (VIB-2835/2837/2839)
+                deployment_id=getattr(metrics, "deployment_id", "") or "",
+                cycle_id=getattr(metrics, "cycle_id", "") or "",
+                execution_mode=getattr(metrics, "execution_mode", "") or "",
+                is_complete=getattr(metrics, "is_complete", True),
             )
             response = self._client.state.SavePortfolioMetrics(request, timeout=self._timeout)
 
@@ -352,6 +357,11 @@ class GatewayStateManager:
                 deposits_usd=Decimal(response.deposits_usd or "0"),
                 withdrawals_usd=Decimal(response.withdrawals_usd or "0"),
                 gas_spent_usd=Decimal(response.gas_spent_usd or "0"),
+                # Phase 4 accounting identity fields (VIB-2835/2837/2839)
+                deployment_id=response.deployment_id or "",
+                cycle_id=response.cycle_id or "",
+                execution_mode=response.execution_mode or "",
+                is_complete=response.is_complete,
             )
         except Exception as e:
             logger.debug("Failed to get portfolio metrics via gateway: %s", e)

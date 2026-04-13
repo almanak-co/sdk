@@ -245,6 +245,11 @@ message SaveMetricsRequest {
   string deposits_usd = 4;
   string withdrawals_usd = 5;
   string gas_spent_usd = 6;
+  // Phase 4 accounting identity fields (VIB-2835/2837/2839)
+  string deployment_id = 7;
+  string cycle_id = 8;
+  string execution_mode = 9;
+  bool is_complete = 10;
 }
 
 message SaveMetricsResponse {
@@ -265,6 +270,11 @@ message PortfolioMetricsData {
   string gas_spent_usd = 6;
   int64 updated_at = 7;
   bool found = 8;
+  // Phase 4 accounting identity fields (VIB-2835/2837/2839)
+  string deployment_id = 9;
+  string cycle_id = 10;
+  string execution_mode = 11;
+  bool is_complete = 12;
 }
 
 // =============================================================================

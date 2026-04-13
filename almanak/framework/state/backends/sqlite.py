@@ -275,6 +275,9 @@ ON clob_orders (market_id, status);
 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy_id TEXT NOT NULL,
+    deployment_id TEXT DEFAULT '',  -- Phase 4: canonical identity key (VIB-2835)
+    cycle_id TEXT DEFAULT '',  -- Phase 4: correlation to iteration (VIB-2835)
+    execution_mode TEXT DEFAULT '',  -- Phase 4: live or dry_run (VIB-2837)
     timestamp TEXT NOT NULL,
     iteration_number INTEGER DEFAULT 0,
     total_value_usd TEXT NOT NULL,  -- Decimal as string
@@ -311,6 +314,9 @@ CREATE TABLE IF NOT EXISTS portfolio_metrics (
     total_value_usd TEXT DEFAULT '0',  -- Current portfolio value (VIB-2765)
     positions_json TEXT DEFAULT '[]',  -- Snapshot of position state (VIB-2765)
     cycle_id TEXT,  -- Correlation to portfolio_snapshots (VIB-2765)
+    deployment_id TEXT DEFAULT '',  -- Phase 4: canonical identity key (VIB-2835)
+    execution_mode TEXT DEFAULT '',  -- Phase 4: live or dry_run (VIB-2837)
+    is_complete BOOLEAN DEFAULT 1,  -- Phase 4: all records for this cycle committed (VIB-2839)
     updated_at TEXT NOT NULL
 );
 
@@ -319,6 +325,8 @@ CREATE TABLE IF NOT EXISTS transaction_ledger (
     id TEXT PRIMARY KEY,
     cycle_id TEXT NOT NULL,
     strategy_id TEXT NOT NULL,
+    deployment_id TEXT DEFAULT '',  -- Phase 4: canonical identity key (VIB-2835)
+    execution_mode TEXT DEFAULT '',  -- Phase 4: live or dry_run (VIB-2837)
     timestamp TEXT NOT NULL,
     intent_type TEXT NOT NULL,
     token_in TEXT,
@@ -354,6 +362,8 @@ ON transaction_ledger (strategy_id, intent_type);
 CREATE TABLE IF NOT EXISTS position_events (
     id TEXT PRIMARY KEY,
     deployment_id TEXT NOT NULL,
+    cycle_id TEXT DEFAULT '',  -- Phase 4: correlation to iteration (VIB-2835)
+    execution_mode TEXT DEFAULT '',  -- Phase 4: live or dry_run (VIB-2837)
     position_id TEXT NOT NULL,
     position_type TEXT NOT NULL,  -- LP, PERP
     event_type TEXT NOT NULL,  -- OPEN, CLOSE, COLLECT_FEES, SNAPSHOT
@@ -557,6 +567,18 @@ class SQLiteStore:
         # Phase 1c: token_prices_json and wallet_balances_json on portfolio_snapshots
         _add_column_if_missing("portfolio_snapshots", "token_prices_json", "TEXT DEFAULT '{}'")
         _add_column_if_missing("portfolio_snapshots", "wallet_balances_json", "TEXT DEFAULT '[]'")
+
+        # Phase 4: deployment_id, cycle_id, execution_mode across all tables (VIB-2835, VIB-2837)
+        _add_column_if_missing("portfolio_snapshots", "deployment_id", "TEXT DEFAULT ''")
+        _add_column_if_missing("portfolio_snapshots", "cycle_id", "TEXT DEFAULT ''")
+        _add_column_if_missing("portfolio_snapshots", "execution_mode", "TEXT DEFAULT ''")
+        _add_column_if_missing("portfolio_metrics", "deployment_id", "TEXT DEFAULT ''")
+        _add_column_if_missing("portfolio_metrics", "execution_mode", "TEXT DEFAULT ''")
+        _add_column_if_missing("portfolio_metrics", "is_complete", "BOOLEAN DEFAULT 1")
+        _add_column_if_missing("transaction_ledger", "deployment_id", "TEXT DEFAULT ''")
+        _add_column_if_missing("transaction_ledger", "execution_mode", "TEXT DEFAULT ''")
+        _add_column_if_missing("position_events", "cycle_id", "TEXT DEFAULT ''")
+        _add_column_if_missing("position_events", "execution_mode", "TEXT DEFAULT ''")
 
     async def backfill_deployment_id(self, old_strategy_id: str, new_deployment_id: str) -> int:
         """Migrate data from a bare strategy name to the canonical deployment_id.
@@ -1592,18 +1614,27 @@ class SQLiteStore:
             with self._db_lock:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
+                    # Extract Phase 4 fields from metrics (single source of truth)
+                    deployment_id = getattr(metrics, "deployment_id", "") or ""
+                    cycle_id = getattr(metrics, "cycle_id", "") or ""
+                    execution_mode = getattr(metrics, "execution_mode", "") or ""
+
                     # 1. Save snapshot
                     cursor = conn.execute(
                         """
                         INSERT OR REPLACE INTO portfolio_snapshots (
-                            strategy_id, timestamp, iteration_number, total_value_usd,
+                            strategy_id, deployment_id, cycle_id, execution_mode,
+                            timestamp, iteration_number, total_value_usd,
                             available_cash_usd, value_confidence, positions_json,
                             token_prices_json, wallet_balances_json,
                             chain, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             snapshot.strategy_id,
+                            deployment_id,
+                            cycle_id,
+                            execution_mode,
                             snapshot.timestamp.isoformat(),
                             snapshot.iteration_number,
                             str(snapshot.total_value_usd),
@@ -1637,8 +1668,9 @@ class SQLiteStore:
                         INSERT OR REPLACE INTO portfolio_metrics (
                             strategy_id, initial_value_usd, initial_timestamp,
                             deposits_usd, withdrawals_usd, gas_spent_usd,
-                            total_value_usd, positions_json, cycle_id, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            total_value_usd, positions_json, cycle_id,
+                            deployment_id, execution_mode, is_complete, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             metrics.strategy_id,
@@ -1649,7 +1681,10 @@ class SQLiteStore:
                             str(metrics.gas_spent_usd),
                             str(metrics.total_value_usd),
                             getattr(metrics, "positions_json", "[]"),
-                            getattr(metrics, "cycle_id", None),
+                            cycle_id,
+                            deployment_id,
+                            execution_mode,
+                            getattr(metrics, "is_complete", True),
                             now,
                         ),
                     )
@@ -1858,8 +1893,9 @@ class SQLiteStore:
                 INSERT OR REPLACE INTO portfolio_metrics (
                     strategy_id, initial_value_usd, initial_timestamp,
                     deposits_usd, withdrawals_usd, gas_spent_usd,
-                    total_value_usd, positions_json, cycle_id, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    total_value_usd, positions_json, cycle_id,
+                    deployment_id, execution_mode, is_complete, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     metrics.strategy_id,
@@ -1871,6 +1907,9 @@ class SQLiteStore:
                     str(metrics.total_value_usd),
                     getattr(metrics, "positions_json", "[]"),
                     getattr(metrics, "cycle_id", None),
+                    getattr(metrics, "deployment_id", "") or "",
+                    getattr(metrics, "execution_mode", "") or "",
+                    getattr(metrics, "is_complete", True),
                     now,
                 ),
             )
@@ -1901,7 +1940,8 @@ class SQLiteStore:
                 """
                 SELECT strategy_id, initial_value_usd, initial_timestamp,
                        deposits_usd, withdrawals_usd, gas_spent_usd,
-                       total_value_usd, positions_json, cycle_id, updated_at
+                       total_value_usd, positions_json, cycle_id,
+                       deployment_id, execution_mode, is_complete, updated_at
                 FROM portfolio_metrics
                 WHERE strategy_id = ?
                 """,
@@ -1920,6 +1960,23 @@ class SQLiteStore:
             if isinstance(updated_at, str):
                 updated_at = datetime.fromisoformat(updated_at)
 
+            # Read Phase 4 fields safely (may not exist in old DBs)
+            deployment_id = ""
+            execution_mode = ""
+            is_complete = True
+            try:
+                deployment_id = row["deployment_id"] or ""
+            except (KeyError, IndexError):
+                pass
+            try:
+                execution_mode = row["execution_mode"] or ""
+            except (KeyError, IndexError):
+                pass
+            try:
+                is_complete = bool(row["is_complete"]) if row["is_complete"] is not None else True
+            except (KeyError, IndexError):
+                pass
+
             return PortfolioMetrics(
                 strategy_id=row["strategy_id"],
                 timestamp=updated_at,
@@ -1930,6 +1987,9 @@ class SQLiteStore:
                 gas_spent_usd=Decimal(row["gas_spent_usd"]),
                 positions_json=row["positions_json"] or "[]",
                 cycle_id=row["cycle_id"],
+                deployment_id=deployment_id,
+                execution_mode=execution_mode,
+                is_complete=is_complete,
             )
 
         loop = asyncio.get_event_loop()
@@ -1957,7 +2017,8 @@ class SQLiteStore:
                 self._conn.execute(  # type: ignore[union-attr]
                     """
                     INSERT OR IGNORE INTO position_events (
-                        id, deployment_id, position_id, position_type, event_type,
+                        id, deployment_id, cycle_id, execution_mode,
+                        position_id, position_type, event_type,
                         timestamp, protocol, chain,
                         token0, token1, amount0, amount1, value_usd,
                         tick_lower, tick_upper, liquidity, in_range,
@@ -1965,11 +2026,13 @@ class SQLiteStore:
                         leverage, entry_price, mark_price, unrealized_pnl, is_long,
                         tx_hash, gas_usd, ledger_entry_id,
                         attribution_json, attribution_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event.id,
                         event.deployment_id,
+                        getattr(event, "cycle_id", "") or "",
+                        getattr(event, "execution_mode", "") or "",
                         event.position_id,
                         event.position_type,
                         event.event_type,
@@ -2152,17 +2215,20 @@ class SQLiteStore:
                 self._conn.execute(  # type: ignore[union-attr]
                     """
                     INSERT OR REPLACE INTO transaction_ledger
-                    (id, cycle_id, strategy_id, timestamp, intent_type,
+                    (id, cycle_id, strategy_id, deployment_id, execution_mode,
+                     timestamp, intent_type,
                      token_in, amount_in, token_out, amount_out,
                      effective_price, slippage_bps, gas_used, gas_usd,
                      tx_hash, chain, protocol, success, error,
                      extracted_data_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         entry.id,
                         entry.cycle_id,
                         entry.strategy_id,
+                        getattr(entry, "deployment_id", "") or "",
+                        getattr(entry, "execution_mode", "") or "",
                         entry.timestamp.isoformat(),
                         entry.intent_type,
                         entry.token_in,
@@ -2236,12 +2302,17 @@ class SQLiteStore:
                 rows = cursor.fetchall()
 
             entries = []
+            row_keys = None
             for row in rows:
+                if row_keys is None:
+                    row_keys = row.keys()
                 entries.append(
                     LedgerEntry(
                         id=row["id"],
                         cycle_id=row["cycle_id"],
                         strategy_id=row["strategy_id"],
+                        deployment_id=row["deployment_id"] if "deployment_id" in row_keys else "",
+                        execution_mode=row["execution_mode"] if "execution_mode" in row_keys else "",
                         timestamp=datetime.fromisoformat(row["timestamp"]),
                         intent_type=row["intent_type"],
                         token_in=row["token_in"] or "",
@@ -2257,7 +2328,7 @@ class SQLiteStore:
                         protocol=row["protocol"] or "",
                         success=bool(row["success"]),
                         error=row["error"] or "",
-                        extracted_data_json=row["extracted_data_json"] if "extracted_data_json" in row.keys() else "",
+                        extracted_data_json=row["extracted_data_json"] if "extracted_data_json" in row_keys else "",
                     )
                 )
             return entries

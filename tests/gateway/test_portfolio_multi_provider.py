@@ -752,45 +752,14 @@ class TestIntegrationServicePortfolio:
 
 
 class TestDashboardServicePortfolio:
-    @pytest.mark.asyncio
-    async def test_none_portfolio_chain_returns_none(self):
-        from almanak.gateway.services.dashboard_service import DashboardServiceServicer
+    """Tests for dashboard portfolio methods.
 
-        svc = DashboardServiceServicer.__new__(DashboardServiceServicer)
-        svc._portfolio_chain = None
+    Note: _get_external_portfolio_total and _resolve_portfolio_contexts were removed
+    in Phase 4 (VIB-2838) as part of the dashboard read-path simplification.
+    The dashboard now uses a 2-level read path (metrics, fresh snapshot) only.
+    """
 
-        result = await svc._get_external_portfolio_total("arbitrum", "0x1234")
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_all_providers_fail_returns_none(self):
-        from almanak.gateway.services.dashboard_service import DashboardServiceServicer
-
-        svc = DashboardServiceServicer.__new__(DashboardServiceServicer)
-        mock_chain = AsyncMock(spec=PortfolioProviderChain)
-        mock_chain.get_wallet_portfolio = AsyncMock(return_value=None)
-        svc._portfolio_chain = mock_chain
-
-        result = await svc._get_external_portfolio_total("arbitrum", "0x1234")
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_successful_portfolio_returns_total(self):
-        from almanak.gateway.services.dashboard_service import DashboardServiceServicer
-
-        svc = DashboardServiceServicer.__new__(DashboardServiceServicer)
-        snapshot = WalletPortfolioSnapshot(
-            provider="zerion",
-            wallet_address="0x1234",
-            chain="arbitrum",
-            total_value_usd="500.00",
-        )
-        mock_chain = AsyncMock(spec=PortfolioProviderChain)
-        mock_chain.get_wallet_portfolio = AsyncMock(return_value=snapshot)
-        svc._portfolio_chain = mock_chain
-
-        result = await svc._get_external_portfolio_total("arbitrum", "0x1234")
-        assert result == Decimal("500.00")
+    pass
 
 
 # =============================================================================

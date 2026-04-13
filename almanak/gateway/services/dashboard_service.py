@@ -7,7 +7,6 @@ receive the formatted data.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -444,24 +443,21 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     async def _get_portfolio_value_and_pnl(
         self,
         strategy_id: str,
-        state: dict | None = None,
-        chain: str = "",
-        wallet_address: str = "",
-        chain_wallets: dict[str, str] | None = None,
     ) -> tuple[str, str]:
         """Get portfolio total value and PnL.
 
-        Primary source: PortfolioMetrics (framework-owned, populated by PortfolioValuer).
-        Fallback order:
-        1. Fresh latest snapshot
-        2. External wallet portfolio API (read-only)
-        3. Stale snapshot
-        4. Strategy state dict (legacy)
+        Two-level read path (simplified from the former 6-level cascade):
+        1. PortfolioMetrics (framework-owned, populated by PortfolioValuer)
+        2. Fresh latest snapshot (grace period for newly-started strategies)
+
+        If neither source has data, returns ("0", "0") — explicitly meaning
+        "no data yet" rather than masking a write-side bug with stale or
+        external fallbacks.
 
         Returns:
-            Tuple of (total_value_usd, pnl_usd) as strings. Defaults to "0".
+            Tuple of (total_value_usd, pnl_usd) as strings.
         """
-        # Primary: PortfolioMetrics are always authoritative when available.
+        # Level 1 — PortfolioMetrics are always authoritative when available.
         # They are framework-owned and updated by PortfolioValuer each iteration.
         if self._state_manager is not None:
             try:
@@ -472,37 +468,18 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             except Exception:
                 logger.debug("Failed to get portfolio metrics for %s", strategy_id, exc_info=True)
 
+        # Level 2 — Fresh snapshot (brief grace period for new strategies that
+        # haven't written PortfolioMetrics yet).
         latest_snapshot = await self._get_latest_snapshot(strategy_id)
         if latest_snapshot is not None and self._snapshot_is_fresh(latest_snapshot):
             return str(latest_snapshot.total_value_usd), "0"
 
-        external_total = await self._get_external_portfolio_total(
-            chain=chain,
-            wallet_address=wallet_address,
-            chain_wallets=chain_wallets,
+        # No data — don't mask write-side bugs with stale/external fallbacks.
+        logger.info(
+            "No portfolio data available for %s — neither metrics nor a fresh snapshot exist. "
+            "The dashboard will show $0 until the strategy's PortfolioValuer writes data.",
+            strategy_id,
         )
-        if external_total is not None:
-            return str(external_total), "0"
-
-        if latest_snapshot is not None:
-            return str(latest_snapshot.total_value_usd), "0"
-
-        # Fallback: extract from state dict (legacy strategies)
-        if state:
-            for key in (
-                "total_value_usd",
-                "total_position_value_usd",
-                "portfolio_value_usd",
-                "total_collateral_value_usd",
-                "position_value_usd",
-                "net_value_usd",
-            ):
-                if key in state:
-                    try:
-                        return str(Decimal(str(state[key]))), "0"
-                    except (ValueError, TypeError):
-                        continue
-
         return "0", "0"
 
     async def _compute_pnl_24h(self, strategy_id: str, current_value: Decimal) -> Decimal:
@@ -600,68 +577,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             timestamp = timestamp.replace(tzinfo=UTC)
         age = (datetime.now(UTC) - timestamp).total_seconds()
         return age <= stale_threshold_seconds
-
-    async def _get_external_portfolio_total(
-        self,
-        chain: str,
-        wallet_address: str,
-        chain_wallets: dict[str, str] | None = None,
-    ) -> Decimal | None:
-        """Fetch external portfolio totals for one or more chain/wallet contexts."""
-        if self._portfolio_chain is None:
-            return None
-
-        contexts = self._resolve_portfolio_contexts(
-            chain=chain, wallet_address=wallet_address, chain_wallets=chain_wallets
-        )
-        if not contexts:
-            return None
-
-        async def _fetch_one(context_chain: str, context_wallet: str) -> Decimal | None:
-            try:
-                snapshot = await self._portfolio_chain.get_wallet_portfolio(context_wallet, context_chain)  # type: ignore[union-attr]
-                if snapshot is None:
-                    logger.warning(
-                        "All portfolio providers failed for %s on %s",
-                        context_wallet,
-                        context_chain,
-                    )
-                    return None
-                return Decimal(snapshot.total_value_usd)
-            except Exception:
-                logger.debug(
-                    "External portfolio lookup failed for %s on %s",
-                    context_wallet,
-                    context_chain,
-                    exc_info=True,
-                )
-                return None
-
-        results = await asyncio.gather(*[_fetch_one(c, w) for c, w in contexts])
-        # Return None unless ALL contexts succeeded — partial totals would under-report
-        totals = [r for r in results if r is not None]
-        if len(totals) != len(results):
-            return None
-        return sum(totals, Decimal("0")) if totals else None
-
-    @staticmethod
-    def _resolve_portfolio_contexts(
-        chain: str,
-        wallet_address: str,
-        chain_wallets: dict[str, str] | None = None,
-    ) -> list[tuple[str, str]]:
-        """Resolve the chain/wallet contexts to query for dashboard fallback."""
-        if chain_wallets:
-            return [
-                (context_chain.lower(), context_wallet)
-                for context_chain, context_wallet in chain_wallets.items()
-                if context_chain and context_wallet
-            ]
-
-        chains = [value.strip().lower() for value in chain.split(",") if value.strip()]
-        if not chains or not wallet_address:
-            return []
-        return [(context_chain, wallet_address) for context_chain in chains]
 
     async def _get_portfolio_metrics(self, strategy_id: str) -> Decimal | None:
         """Return pnl_after_gas for a strategy, or None if unavailable."""
@@ -825,13 +740,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                         # Enrich with state data
                         state = await self._get_strategy_state_data(inst.strategy_id)
 
-                        # Portfolio metrics (framework-owned, state fallback for legacy)
+                        # Portfolio metrics (framework-owned, fresh snapshot grace period)
                         total_value, pnl = await self._get_portfolio_value_and_pnl(
                             inst.strategy_id,
-                            state,
-                            chain=inst.chain,
-                            wallet_address=inst.wallet_address,
-                            chain_wallets=inst_chain_wallets,
                         )
                         strategy_info["total_value_usd"] = total_value
                         strategy_info["pnl_24h_usd"] = pnl
@@ -1023,13 +934,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # Enrich with state data (fallback bridges legacy pre-normalization state)
         state = await self._get_strategy_state_data(strategy_id, fallback_strategy_id=original_strategy_id)
 
-        # Portfolio metrics (framework-owned, state fallback for legacy)
+        # Portfolio metrics (framework-owned, fresh snapshot grace period)
         total_value, pnl = await self._get_portfolio_value_and_pnl(
             strategy_id,
-            state,
-            chain=str(strategy_info.get("chain", "")),
-            wallet_address=str(strategy_info.get("wallet_address", "")),
-            chain_wallets=strategy_info.get("chain_wallets"),  # type: ignore[arg-type]
         )
         strategy_info["total_value_usd"] = total_value
         strategy_info["pnl_24h_usd"] = pnl

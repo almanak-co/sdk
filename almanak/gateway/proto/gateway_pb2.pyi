@@ -740,12 +740,20 @@ class SaveMetricsRequest(_message.Message):
     DEPOSITS_USD_FIELD_NUMBER: _builtins.int
     WITHDRAWALS_USD_FIELD_NUMBER: _builtins.int
     GAS_SPENT_USD_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    EXECUTION_MODE_FIELD_NUMBER: _builtins.int
+    IS_COMPLETE_FIELD_NUMBER: _builtins.int
     strategy_id: _builtins.str
     initial_value_usd: _builtins.str
     initial_timestamp: _builtins.int
     deposits_usd: _builtins.str
     withdrawals_usd: _builtins.str
     gas_spent_usd: _builtins.str
+    deployment_id: _builtins.str
+    cycle_id: _builtins.str
+    execution_mode: _builtins.str
+    is_complete: _builtins.bool
     def __init__(
         self,
         *,
@@ -755,8 +763,12 @@ class SaveMetricsRequest(_message.Message):
         deposits_usd: _builtins.str = ...,
         withdrawals_usd: _builtins.str = ...,
         gas_spent_usd: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        execution_mode: _builtins.str = ...,
+        is_complete: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id", "initial_value_usd", b"initial_value_usd", "initial_timestamp", b"initial_timestamp", "deposits_usd", b"deposits_usd", "withdrawals_usd", b"withdrawals_usd", "gas_spent_usd", b"gas_spent_usd"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id", "initial_value_usd", b"initial_value_usd", "initial_timestamp", b"initial_timestamp", "deposits_usd", b"deposits_usd", "withdrawals_usd", b"withdrawals_usd", "gas_spent_usd", b"gas_spent_usd", "deployment_id", b"deployment_id", "cycle_id", b"cycle_id", "execution_mode", b"execution_mode", "is_complete", b"is_complete"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___SaveMetricsRequest: _TypeAlias = SaveMetricsRequest  # noqa: Y015
@@ -808,6 +820,10 @@ class PortfolioMetricsData(_message.Message):
     GAS_SPENT_USD_FIELD_NUMBER: _builtins.int
     UPDATED_AT_FIELD_NUMBER: _builtins.int
     FOUND_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    EXECUTION_MODE_FIELD_NUMBER: _builtins.int
+    IS_COMPLETE_FIELD_NUMBER: _builtins.int
     strategy_id: _builtins.str
     initial_value_usd: _builtins.str
     initial_timestamp: _builtins.int
@@ -816,6 +832,10 @@ class PortfolioMetricsData(_message.Message):
     gas_spent_usd: _builtins.str
     updated_at: _builtins.int
     found: _builtins.bool
+    deployment_id: _builtins.str
+    cycle_id: _builtins.str
+    execution_mode: _builtins.str
+    is_complete: _builtins.bool
     def __init__(
         self,
         *,
@@ -827,8 +847,12 @@ class PortfolioMetricsData(_message.Message):
         gas_spent_usd: _builtins.str = ...,
         updated_at: _builtins.int = ...,
         found: _builtins.bool = ...,
+        deployment_id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        execution_mode: _builtins.str = ...,
+        is_complete: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id", "initial_value_usd", b"initial_value_usd", "initial_timestamp", b"initial_timestamp", "deposits_usd", b"deposits_usd", "withdrawals_usd", b"withdrawals_usd", "gas_spent_usd", b"gas_spent_usd", "updated_at", b"updated_at", "found", b"found"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id", "initial_value_usd", b"initial_value_usd", "initial_timestamp", b"initial_timestamp", "deposits_usd", b"deposits_usd", "withdrawals_usd", b"withdrawals_usd", "gas_spent_usd", b"gas_spent_usd", "updated_at", b"updated_at", "found", b"found", "deployment_id", b"deployment_id", "cycle_id", b"cycle_id", "execution_mode", b"execution_mode", "is_complete", b"is_complete"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PortfolioMetricsData: _TypeAlias = PortfolioMetricsData  # noqa: Y015

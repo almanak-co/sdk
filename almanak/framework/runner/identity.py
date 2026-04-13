@@ -11,7 +11,13 @@ Three-tier identity:
 """
 
 import hashlib
+import logging
 import uuid
+
+logger = logging.getLogger(__name__)
+
+# Module-level flag: emit the bare-name deprecation warning at most once per process.
+_BARE_NAME_WARNING_EMITTED = False
 
 
 def resolve_deployment_id(
@@ -27,8 +33,9 @@ def resolve_deployment_id(
         1. ``cli_id`` (user-supplied ``--id``) wins unconditionally.
         2. If wallet + chain are available, deterministic
            ``{name}:{hash(wallet+chain+name)[:12]}``.
-        3. Fallback: bare ``strategy_name`` (backward-compatible with
-           ``--once`` behavior for local dev without a wallet).
+        3. Fallback: bare ``strategy_name`` with a deprecation warning.
+           This keeps backward compatibility for local ``--once`` dev runs
+           without a wallet, but will be removed in a future release.
 
     Args:
         strategy_name: The human-readable strategy name (e.g. class name).
@@ -39,6 +46,8 @@ def resolve_deployment_id(
     Returns:
         A stable deployment_id string.
     """
+    global _BARE_NAME_WARNING_EMITTED  # noqa: PLW0603
+
     if cli_id:
         # User override — use exactly as given.
         # If it already has the name: prefix, keep it; otherwise prefix.
@@ -53,7 +62,30 @@ def resolve_deployment_id(
         return f"{strategy_name}:{short_hash}"
 
     # Fallback: bare name (local dev, no wallet yet).
+    # Deprecated — will be removed in a future release.
+    if not _BARE_NAME_WARNING_EMITTED:
+        logger.warning(
+            "deployment_id falling back to bare strategy name '%s' because wallet_address "
+            "and chain are not available. This produces a non-canonical identity that cannot "
+            "be used for cross-session accounting. Supply --id or ensure wallet+chain are "
+            "configured. This fallback will be removed in a future release.",
+            strategy_name,
+        )
+        _BARE_NAME_WARNING_EMITTED = True
     return strategy_name
+
+
+def validate_deployment_id(deployment_id: str) -> bool:
+    """Check whether a deployment_id is canonical (hash-based or user-supplied).
+
+    A canonical deployment_id contains a ``":"`` separator, meaning it was
+    produced by the deterministic hash path or by a user-supplied ``--id``.
+    Bare strategy names (the deprecated fallback) do not contain ``":"``.
+
+    Returns:
+        True if the deployment_id is canonical, False otherwise.
+    """
+    return ":" in deployment_id
 
 
 def generate_run_id() -> str:

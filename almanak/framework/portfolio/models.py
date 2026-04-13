@@ -79,10 +79,51 @@ class PositionValue:
     # Protocol-specific details for drill-down views
     details: dict[str, Any] = field(default_factory=dict)
 
+    # Per-position economic state (Phase 4, VIB-2833)
+    cost_basis_usd: Decimal = Decimal("0")  # Total capital deployed
+    unrealized_pnl_usd: Decimal = Decimal("0")  # value - cost_basis
+    realized_pnl_usd: Decimal = Decimal("0")  # Accumulated from closes
+    entry_timestamp: str = ""  # ISO timestamp when position was opened
+    last_update_timestamp: str = ""  # ISO timestamp of last valuation
+    ledger_entry_id: str = ""  # FK to transaction_ledger for traceability
+
     def __post_init__(self) -> None:
         """Normalize numeric fields to Decimal."""
         if isinstance(self.value_usd, int | float | str):
             self.value_usd = Decimal(str(self.value_usd))
+        for attr in ["cost_basis_usd", "unrealized_pnl_usd", "realized_pnl_usd"]:
+            value = getattr(self, attr)
+            if isinstance(value, int | float | str):
+                setattr(self, attr, Decimal(str(value)))
+
+
+def _position_to_dict(p: "PositionValue") -> dict[str, Any]:
+    """Serialize a PositionValue to dict, including Phase 4 economic state fields."""
+    d: dict[str, Any] = {
+        "position_type": p.position_type.value if hasattr(p.position_type, "value") else str(p.position_type),
+        "protocol": p.protocol,
+        "chain": p.chain,
+        "value_usd": str(p.value_usd),
+        "label": p.label,
+        "tokens": p.tokens,
+        "details": p.details,
+    }
+    # Phase 4 economic state fields — only include when set to keep payload lean.
+    # Use explicit != Decimal("0") to avoid Decimal truthiness bug (Decimal("0") is falsy).
+    _ZERO = Decimal("0")
+    if p.cost_basis_usd != _ZERO:
+        d["cost_basis_usd"] = str(p.cost_basis_usd)
+    if p.unrealized_pnl_usd != _ZERO:
+        d["unrealized_pnl_usd"] = str(p.unrealized_pnl_usd)
+    if p.realized_pnl_usd != _ZERO:
+        d["realized_pnl_usd"] = str(p.realized_pnl_usd)
+    if p.entry_timestamp:
+        d["entry_timestamp"] = p.entry_timestamp
+    if p.last_update_timestamp:
+        d["last_update_timestamp"] = p.last_update_timestamp
+    if p.ledger_entry_id:
+        d["ledger_entry_id"] = p.ledger_entry_id
+    return d
 
 
 @dataclass
@@ -153,20 +194,7 @@ class PortfolioSnapshot:
             "available_cash_usd": str(self.available_cash_usd),
             "value_confidence": self.value_confidence.value,
             "error": self.error,
-            "positions": [
-                {
-                    "position_type": p.position_type.value
-                    if hasattr(p.position_type, "value")
-                    else str(p.position_type),
-                    "protocol": p.protocol,
-                    "chain": p.chain,
-                    "value_usd": str(p.value_usd),
-                    "label": p.label,
-                    "tokens": p.tokens,
-                    "details": p.details,
-                }
-                for p in self.positions
-            ],
+            "positions": [_position_to_dict(p) for p in self.positions],
             "wallet_balances": [
                 {
                     "symbol": b.symbol,
@@ -191,18 +219,7 @@ class PortfolioSnapshot:
         Legacy rows store a bare positions list. New rows may store an envelope
         with reconciliation metadata.
         """
-        positions = [
-            {
-                "position_type": p.position_type.value if hasattr(p.position_type, "value") else str(p.position_type),
-                "protocol": p.protocol,
-                "chain": p.chain,
-                "value_usd": str(p.value_usd),
-                "label": p.label,
-                "tokens": p.tokens,
-                "details": p.details,
-            }
-            for p in self.positions
-        ]
+        positions = [_position_to_dict(p) for p in self.positions]
         if not self.snapshot_metadata:
             return positions
         return {
@@ -226,6 +243,12 @@ class PortfolioSnapshot:
                     label=p["label"],
                     tokens=p.get("tokens", []),
                     details=p.get("details", {}),
+                    cost_basis_usd=Decimal(p.get("cost_basis_usd", "0")),
+                    unrealized_pnl_usd=Decimal(p.get("unrealized_pnl_usd", "0")),
+                    realized_pnl_usd=Decimal(p.get("realized_pnl_usd", "0")),
+                    entry_timestamp=p.get("entry_timestamp", ""),
+                    last_update_timestamp=p.get("last_update_timestamp", ""),
+                    ledger_entry_id=p.get("ledger_entry_id", ""),
                 )
             )
 
@@ -299,6 +322,11 @@ class PortfolioMetrics:
     positions_json: str = "[]"  # JSON-encoded position details
     cycle_id: str | None = None  # Current execution cycle
 
+    # Phase 4: canonical identity and execution mode (VIB-2835/2837)
+    deployment_id: str = ""  # Canonical deployment key (wallet+chain hash or --id)
+    execution_mode: str = ""  # "live", "dry_run", or "paper" (future: "backtest")
+    is_complete: bool = True  # Whether all expected records for this cycle were committed
+
     def __post_init__(self) -> None:
         """Normalize numeric fields to Decimal."""
         for attr in ["total_value_usd", "initial_value_usd", "deposits_usd", "withdrawals_usd", "gas_spent_usd"]:
@@ -338,6 +366,9 @@ class PortfolioMetrics:
             "gas_spent_usd": str(self.gas_spent_usd),
             "positions_json": self.positions_json,
             "cycle_id": self.cycle_id,
+            "deployment_id": self.deployment_id,
+            "execution_mode": self.execution_mode,
+            "is_complete": self.is_complete,
         }
 
     @classmethod
@@ -353,4 +384,7 @@ class PortfolioMetrics:
             gas_spent_usd=Decimal(data.get("gas_spent_usd", "0")),
             positions_json=data.get("positions_json", "[]"),
             cycle_id=data.get("cycle_id"),
+            deployment_id=data.get("deployment_id", ""),
+            execution_mode=data.get("execution_mode", ""),
+            is_complete=data.get("is_complete", True),
         )
