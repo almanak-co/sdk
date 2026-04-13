@@ -15,5 +15,21 @@
         "ETH": 10,
         "USDC": 10000,
         "WETH": 5
-    }
+    },
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+            "chain": "arbitrum",
+            "amount": "5",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            "chain": "arbitrum",
+            "amount": "10000",
+            "amount_type": "usd"
+        }
+    ]
 }
