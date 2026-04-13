@@ -353,13 +353,70 @@ class JoeLendReceiptParser:
 
     # =========================================================================
     # Extraction Methods for Result Enrichment
+    #
+    # Method names MUST match the enricher's EXTRACTION_SPECS field names:
+    #   extract_{field}(receipt) -> value | None
     # =========================================================================
 
-    def extract_supply_data(self, result: dict[str, Any]) -> dict | None:
-        """Extract supply data from a parsed transaction receipt.
+    def extract_supply_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Extract supply amount from receipt for ResultEnricher.
 
-        Called by ResultEnricher for SUPPLY intents.
+        Called by ResultEnricher for SUPPLY intents (field: supply_amount).
         """
+        try:
+            parsed = self.parse_receipt(receipt)
+            if not parsed.success or parsed.supply_amount == Decimal("0"):
+                return None
+            return int(parsed.supply_amount)
+        except Exception as e:
+            logger.warning("Failed to extract supply amount: %s", e)
+            return None
+
+    def extract_borrow_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Extract borrow amount from receipt for ResultEnricher.
+
+        Called by ResultEnricher for BORROW intents (field: borrow_amount).
+        """
+        try:
+            parsed = self.parse_receipt(receipt)
+            if not parsed.success or parsed.borrow_amount == Decimal("0"):
+                return None
+            return int(parsed.borrow_amount)
+        except Exception as e:
+            logger.warning("Failed to extract borrow amount: %s", e)
+            return None
+
+    def extract_withdraw_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Extract withdraw amount from receipt for ResultEnricher.
+
+        Called by ResultEnricher for WITHDRAW intents (field: withdraw_amount).
+        """
+        try:
+            parsed = self.parse_receipt(receipt)
+            if not parsed.success or parsed.withdraw_amount == Decimal("0"):
+                return None
+            return int(parsed.withdraw_amount)
+        except Exception as e:
+            logger.warning("Failed to extract withdraw amount: %s", e)
+            return None
+
+    def extract_repay_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Extract repay amount from receipt for ResultEnricher.
+
+        Called by ResultEnricher for REPAY intents (field: repay_amount).
+        """
+        try:
+            parsed = self.parse_receipt(receipt)
+            if not parsed.success or parsed.repay_amount == Decimal("0"):
+                return None
+            return int(parsed.repay_amount)
+        except Exception as e:
+            logger.warning("Failed to extract repay amount: %s", e)
+            return None
+
+    # Legacy methods kept for backward compatibility
+    def extract_supply_data(self, result: dict[str, Any]) -> dict | None:
+        """Extract supply data from receipt (legacy API)."""
         try:
             parsed = self.parse_receipt(result)
             if not parsed.success or parsed.supply_amount == Decimal("0"):
@@ -373,10 +430,7 @@ class JoeLendReceiptParser:
             return None
 
     def extract_borrow_data(self, result: dict[str, Any]) -> dict | None:
-        """Extract borrow data from a parsed transaction receipt.
-
-        Called by ResultEnricher for BORROW intents.
-        """
+        """Extract borrow data from receipt (legacy API)."""
         try:
             parsed = self.parse_receipt(result)
             if not parsed.success or parsed.borrow_amount == Decimal("0"):
@@ -389,10 +443,7 @@ class JoeLendReceiptParser:
             return None
 
     def extract_withdraw_data(self, result: dict[str, Any]) -> dict | None:
-        """Extract withdraw data from a parsed transaction receipt.
-
-        Called by ResultEnricher for WITHDRAW intents.
-        """
+        """Extract withdraw data from receipt (legacy API)."""
         try:
             parsed = self.parse_receipt(result)
             if not parsed.success or parsed.withdraw_amount == Decimal("0"):
@@ -405,10 +456,7 @@ class JoeLendReceiptParser:
             return None
 
     def extract_repay_data(self, result: dict[str, Any]) -> dict | None:
-        """Extract repay data from a parsed transaction receipt.
-
-        Called by ResultEnricher for REPAY intents.
-        """
+        """Extract repay data from receipt (legacy API)."""
         try:
             parsed = self.parse_receipt(result)
             if not parsed.success or parsed.repay_amount == Decimal("0"):

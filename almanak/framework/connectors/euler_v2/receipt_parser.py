@@ -254,10 +254,55 @@ class EulerV2ReceiptParser:
 
     # =========================================================================
     # Extraction methods for ResultEnricher
+    #
+    # Method names MUST match the enricher's EXTRACTION_SPECS field names:
+    #   extract_{field}(receipt) -> value | None
+    # E.g., SUPPLY spec has "supply_amount" -> enricher calls extract_supply_amount()
     # =========================================================================
 
+    def extract_supply_amount(self, receipt: dict) -> int | None:
+        """Extract supply amount from receipt for ResultEnricher.
+
+        Called by ResultEnricher for SUPPLY intents (field: supply_amount).
+        """
+        result = self.parse_receipt(receipt)
+        if result.deposit_amount > 0:
+            return result.deposit_amount
+        return None
+
+    def extract_borrow_amount(self, receipt: dict) -> int | None:
+        """Extract borrow amount from receipt for ResultEnricher.
+
+        Called by ResultEnricher for BORROW intents (field: borrow_amount).
+        """
+        result = self.parse_receipt(receipt)
+        if result.borrow_amount > 0:
+            return result.borrow_amount
+        return None
+
+    def extract_withdraw_amount(self, receipt: dict) -> int | None:
+        """Extract withdraw amount from receipt for ResultEnricher.
+
+        Called by ResultEnricher for WITHDRAW intents (field: withdraw_amount).
+        """
+        result = self.parse_receipt(receipt)
+        if result.withdraw_amount > 0:
+            return result.withdraw_amount
+        return None
+
+    def extract_repay_amount(self, receipt: dict) -> int | None:
+        """Extract repay amount from receipt for ResultEnricher.
+
+        Called by ResultEnricher for REPAY intents (field: repay_amount).
+        """
+        result = self.parse_receipt(receipt)
+        if result.repay_amount > 0:
+            return result.repay_amount
+        return None
+
+    # Legacy methods kept for backward compatibility
     def extract_supply_data(self, receipt: dict, vault_address: str | None = None) -> dict | None:
-        """Extract supply data from receipt for ResultEnricher."""
+        """Extract supply data from receipt (legacy API)."""
         result = self.parse_receipt(receipt, vault_address=vault_address)
         if result.deposit_amount > 0:
             return {
@@ -267,7 +312,7 @@ class EulerV2ReceiptParser:
         return None
 
     def extract_borrow_data(self, receipt: dict, vault_address: str | None = None) -> dict | None:
-        """Extract borrow data from receipt for ResultEnricher."""
+        """Extract borrow data from receipt (legacy API)."""
         result = self.parse_receipt(receipt, vault_address=vault_address)
         if result.borrow_amount > 0:
             return {
@@ -276,7 +321,7 @@ class EulerV2ReceiptParser:
         return None
 
     def extract_withdraw_data(self, receipt: dict, vault_address: str | None = None) -> dict | None:
-        """Extract withdraw data from receipt for ResultEnricher."""
+        """Extract withdraw data from receipt (legacy API)."""
         result = self.parse_receipt(receipt, vault_address=vault_address)
         if result.withdraw_amount > 0:
             return {
@@ -286,7 +331,7 @@ class EulerV2ReceiptParser:
         return None
 
     def extract_repay_data(self, receipt: dict, vault_address: str | None = None) -> dict | None:
-        """Extract repay data from receipt for ResultEnricher."""
+        """Extract repay data from receipt (legacy API)."""
         result = self.parse_receipt(receipt, vault_address=vault_address)
         if result.repay_amount > 0:
             return {
