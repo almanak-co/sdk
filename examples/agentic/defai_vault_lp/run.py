@@ -605,8 +605,9 @@ async def run_once(config: dict, *, use_mock: bool = False, scenario: str = "ini
             alert_manager=alert_manager,
         )
 
-        # 3. Get OpenAI tool definitions from catalog
-        tools_openai = catalog.to_openai_tools()
+        # 3. Get OpenAI tool definitions filtered by policy's allowed_tools
+        tools_openai = executor.get_filtered_openai_tools()
+        logger.info("Tool catalog: %d/%d tools (filtered by policy)", len(tools_openai), len(catalog))
 
         # 4. Create LLM client
         if use_mock:
@@ -691,6 +692,7 @@ async def run_once(config: dict, *, use_mock: bool = False, scenario: str = "ini
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     max_rounds=config.get("max_tool_rounds", 15),
+                    strategy_id=strategy_id,
                 ),
                 timeout=iteration_timeout,
             )

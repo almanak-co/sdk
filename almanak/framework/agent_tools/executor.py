@@ -196,6 +196,21 @@ class ToolExecutor:
         self._settlement_nonce: int = 0
         self._vault_epoch_counter: int = 0
 
+    def get_filtered_openai_tools(self) -> list[dict]:
+        """Return OpenAI tool definitions filtered by the policy's allowed_tools.
+
+        Combines the catalog with the agent policy to produce a minimal tool list
+        that only includes tools the agent is actually permitted to call. This
+        reduces LLM input tokens by excluding tool schemas the agent cannot use.
+
+        If the policy has no allowed_tools restriction (None), returns all tools.
+        An empty set means zero tools are allowed.
+        """
+        allowed = self._policy_engine.policy.allowed_tools
+        if allowed is None:
+            return self._catalog.to_openai_tools()
+        return self._catalog.to_openai_tools(allowed=allowed)
+
     def _lookup_token_price(self, token: str) -> Decimal | None:
         """Synchronous price lookup for spend-limit pre-checks.
 

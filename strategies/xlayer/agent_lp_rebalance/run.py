@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-"""AgentLP -- Autonomous LP agent on Trader Joe V2.
+"""Agentic LP rebalance on X-Layer (Uniswap V3 WOKB/USDT).
 
-Demonstrates how a third-party consumer uses the Almanak agent_tools framework
-to build an autonomous LP management agent. The LLM reads market data, decides
-whether to open/close/rebalance an LP position, and executes via the gateway.
+LLM-driven counterpart of the deterministic
+`almanak/demo_strategies/xlayer_lp_rebalance` demo. Instead of a hand-rolled
+state machine, an LLM reads market data through the Almanak gateway and
+decides whether to open, hold, or rebalance a Uniswap V3 LP position on
+the X-Layer WOKB/USDT pool.
 
-Usage:
-    # Start gateway first (separate terminal):
+Usage::
+
+    # Terminal 1: start the gateway against an X-Layer Anvil fork
     almanak gateway --network anvil
 
-    # Run the agent (real LLM):
-    AGENT_LLM_API_KEY=sk-... python examples/agentic/agent_lp/run.py --once
+    # Terminal 2: run the agent (real LLM)
+    AGENT_LLM_API_KEY=sk-... python strategies/xlayer/agent_lp_rebalance/run.py --once
 
-    # Run smoke test with mock LLM (no API key needed):
-    python examples/agentic/agent_lp/run.py --once --mock
+    # Or smoke test with a scripted mock LLM (no API key needed)
+    python strategies/xlayer/agent_lp_rebalance/run.py --once --mock
 """
 
 from __future__ import annotations
@@ -26,12 +29,13 @@ import sys
 from decimal import Decimal
 from pathlib import Path
 
-# Almanak SDK imports -- these are the only framework dependencies
+# Almanak SDK imports -- the only framework dependencies
 from almanak.framework.agent_tools import AgentPolicy, ToolExecutor, get_default_catalog
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
 
-# Local shared utilities
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Reuse the shared agent loop / LLM client utilities from examples/agentic
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_REPO_ROOT / "examples" / "agentic"))
 from shared.agent_loop import run_agent_loop  # noqa: E402
 from shared.llm_client import LLMClient, LLMConfig, LLMConfigError, MockLLMClient, validate_llm_config  # noqa: E402
 
@@ -39,7 +43,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
-logger = logging.getLogger("agent_lp")
+logger = logging.getLogger("agent_xlayer_lp_rebalance")
 
 
 def load_config() -> dict:
@@ -50,18 +54,19 @@ def load_config() -> dict:
 
 
 def create_policy() -> AgentPolicy:
-    """Create a tightly scoped policy for the LP agent."""
+    """Create a tightly scoped policy for the X-Layer LP agent."""
     return AgentPolicy(
-        allowed_chains={"avalanche"},
-        allowed_tokens={"WAVAX", "USDC", "AVAX"},
-        max_single_trade_usd=Decimal("100"),
-        max_daily_spend_usd=Decimal("500"),
-        cooldown_seconds=30,
-        max_trades_per_hour=5,
+        allowed_chains={"xlayer"},
+        allowed_tokens={"WOKB", "OKB", "USDT", "USDC"},
+        max_single_trade_usd=Decimal("500"),
+        max_daily_spend_usd=Decimal("2000"),
+        cooldown_seconds=5,
+        max_trades_per_hour=20,
         allowed_tools={
             "get_price",
             "get_balance",
-            "get_indicator",
+            "get_lp_position",
+            "compute_rebalance_candidate",
             "open_lp_position",
             "close_lp_position",
             "swap_tokens",
@@ -73,7 +78,7 @@ def create_policy() -> AgentPolicy:
 
 
 def _mock_tool_call(name: str, args: dict) -> dict:
-    """Helper to build an OpenAI tool_call response."""
+    """Helper to build an OpenAI-style tool_call response."""
     import uuid
 
     return {
@@ -92,53 +97,62 @@ def _mock_response(*tool_calls, content: str | None = None) -> dict:
 
 
 def create_mock_llm(config: dict) -> MockLLMClient:
-    """Create a MockLLMClient with realistic scripted responses for LP agent smoke test.
-
-    Sequence: load_state -> get_price -> get_balance x2 -> open_lp_position ->
-    save_agent_state -> record_agent_decision -> final text
-    """
+    """Scripted mock LLM that opens an LP position once and reports status."""
     pool = config["pool"]
-    token_a, token_b, fee = pool.split("/")
+    token0, token1, fee = pool.split("/")
+    strategy_id = config.get("strategy_id", "agent-xlayer-lp-rebalance")
 
     return MockLLMClient([
-        # Round 1: load state + get price + get balances (parallel)
+        # Round 1: load state + get prices + get balances (parallel)
         _mock_response(
-            _mock_tool_call("load_agent_state", {"strategy_id": config.get("strategy_id", "agent-lp")}),
-            _mock_tool_call("get_price", {"token": token_a}),
-            _mock_tool_call("get_balance", {"token": token_a}),
-            _mock_tool_call("get_balance", {"token": token_b}),
+            _mock_tool_call("load_agent_state", {"strategy_id": strategy_id}),
+            _mock_tool_call("get_price", {"token": token0, "chain": config["chain"]}),
+            _mock_tool_call("get_price", {"token": token1, "chain": config["chain"]}),
+            _mock_tool_call("get_balance", {"token": token0, "chain": config["chain"]}),
+            _mock_tool_call("get_balance", {"token": token1, "chain": config["chain"]}),
         ),
-        # Round 2: open LP position
+        # Round 2: open LP position around the current pair price
         _mock_response(
             _mock_tool_call("open_lp_position", {
-                "token_a": token_a,
-                "token_b": token_b,
-                "amount_a": config["amount_x"],
-                "amount_b": config["amount_y"],
-                "price_lower": "8.5",
-                "price_upper": "10.0",
+                "token_a": token0,
+                "token_b": token1,
+                "amount_a": config["amount_token0"],
+                "amount_b": config["amount_token1"],
+                "price_lower": "0.0190",
+                "price_upper": "0.0210",
                 "fee_tier": int(fee),
-                "protocol": "traderjoe_v2",
+                "protocol": "uniswap_v3",
+                "chain": config["chain"],
             }),
         ),
-        # Round 3: save state + record decision
+        # Round 3: persist state + record decision
         _mock_response(
             _mock_tool_call("save_agent_state", {
-                "strategy_id": config.get("strategy_id", "agent-lp"),
-                "state": {"position": "open", "range": [8.5, 10.0], "pool": pool},
+                "strategy_id": strategy_id,
+                "state": {
+                    "position": "open",
+                    "pool": pool,
+                    "range_lower": "0.0190",
+                    "range_upper": "0.0210",
+                },
             }),
             _mock_tool_call("record_agent_decision", {
-                "strategy_id": config.get("strategy_id", "agent-lp"),
-                "decision_summary": "Opened LP position on WAVAX/USDC with range 8.5-10.0. No existing position; price is 9.23 within range.",
+                "strategy_id": strategy_id,
+                "decision_summary": (
+                    f"Opened concentrated LP on {pool} centred on the current "
+                    "pair price with a +/-5% range. No prior state."
+                ),
             }),
         ),
         # Round 4: final text response
-        _mock_response(content="Opened LP position on WAVAX/USDC/20. Range: $8.50 - $10.00. Will monitor."),
+        _mock_response(content=(
+            f"Opened LP position on {pool}. Range: 0.0190 - 0.0210 USDT/WOKB. Will monitor."
+        )),
     ])
 
 
 async def run_once(config: dict, *, use_mock: bool = False) -> None:
-    """Run a single iteration of the LP agent."""
+    """Run a single iteration of the agentic LP rebalancer."""
     # 0. Validate LLM config before anything else (fail-fast)
     if not use_mock:
         llm_config = LLMConfig.from_env()
@@ -165,8 +179,8 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
             policy=policy,
             catalog=catalog,
             wallet_address=config.get("wallet_address", ""),
-            strategy_id=config.get("strategy_id", "agent-lp"),
-            default_chain=config.get("chain", "avalanche"),
+            strategy_id=config.get("strategy_id", "agent-xlayer-lp-rebalance"),
+            default_chain=config.get("chain", "xlayer"),
         )
 
         # 3. Get OpenAI tool definitions filtered by policy's allowed_tools
@@ -181,8 +195,9 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
             llm = LLMClient(llm_config)
             logger.info("LLM: %s via %s", llm_config.model, llm_config.base_url)
 
-        # 5. Build prompt
-        from agent_lp.prompts import USER_PROMPT, build_system_prompt  # noqa: E402
+        # 5. Build prompt (local to this strategy directory)
+        sys.path.insert(0, str(Path(__file__).parent))
+        from prompts import USER_PROMPT, build_system_prompt  # noqa: E402
 
         system_prompt = build_system_prompt(config)
 
@@ -194,8 +209,8 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
                 tools_openai=tools_openai,
                 system_prompt=system_prompt,
                 user_prompt=USER_PROMPT,
-                max_rounds=config.get("max_tool_rounds", 10),
-                strategy_id=config.get("strategy_id", "agent-lp"),
+                max_rounds=config.get("max_tool_rounds", 12),
+                strategy_id=config.get("strategy_id", "agent-xlayer-lp-rebalance"),
             )
             logger.info("Agent result: %s", result)
         finally:
@@ -220,13 +235,13 @@ async def run_loop(config: dict, *, use_mock: bool = False) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="AgentLP -- Autonomous LP agent")
+    parser = argparse.ArgumentParser(description="Agentic X-Layer LP rebalance")
     parser.add_argument("--once", action="store_true", help="Run a single iteration then exit")
     parser.add_argument("--mock", action="store_true", help="Use mock LLM (no API key needed)")
     args = parser.parse_args()
 
     config = load_config()
-    logger.info("AgentLP starting: pool=%s chain=%s", config["pool"], config["chain"])
+    logger.info("AgentXLayerLPRebalance starting: pool=%s chain=%s", config["pool"], config["chain"])
 
     try:
         if args.once:

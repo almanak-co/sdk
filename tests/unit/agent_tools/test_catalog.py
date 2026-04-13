@@ -1,5 +1,8 @@
 """Tests for agent tool catalog."""
 
+from decimal import Decimal
+from unittest.mock import MagicMock
+
 from almanak.framework.agent_tools.catalog import (
     LatencyClass,
     RiskTier,
@@ -8,6 +11,8 @@ from almanak.framework.agent_tools.catalog import (
     ToolDefinition,
     get_default_catalog,
 )
+from almanak.framework.agent_tools.executor import ToolExecutor
+from almanak.framework.agent_tools.policy import AgentPolicy
 from almanak.framework.agent_tools.schemas import GetPriceRequest, GetPriceResponse
 
 
@@ -148,3 +153,85 @@ class TestToolCatalog:
         catalog = get_default_catalog()
         for tool in catalog.list_tools(category=ToolCategory.ACTION):
             assert tool.idempotent is False
+
+    # -- Filtered tool generation (VIB-2810) --------------------------------
+
+    def test_openai_tools_filtered_by_allowed(self):
+        catalog = get_default_catalog()
+        allowed = {"get_price", "get_balance"}
+        filtered = catalog.to_openai_tools(allowed=allowed)
+        assert len(filtered) == 2
+        names = {t["function"]["name"] for t in filtered}
+        assert names == {"get_price", "get_balance"}
+
+    def test_openai_tools_allowed_none_returns_all(self):
+        catalog = get_default_catalog()
+        all_tools = catalog.to_openai_tools(allowed=None)
+        assert len(all_tools) == len(catalog)
+
+    def test_openai_tools_allowed_empty_set_returns_empty(self):
+        catalog = get_default_catalog()
+        filtered = catalog.to_openai_tools(allowed=set())
+        assert len(filtered) == 0
+
+    def test_openai_tools_allowed_nonexistent_returns_empty(self):
+        catalog = get_default_catalog()
+        filtered = catalog.to_openai_tools(allowed={"nonexistent_tool"})
+        assert len(filtered) == 0
+
+    def test_openai_tools_allowed_partial_match(self):
+        catalog = get_default_catalog()
+        allowed = {"get_price", "nonexistent_tool", "swap_tokens"}
+        filtered = catalog.to_openai_tools(allowed=allowed)
+        assert len(filtered) == 2
+        names = {t["function"]["name"] for t in filtered}
+        assert names == {"get_price", "swap_tokens"}
+
+    def test_mcp_tools_filtered_by_allowed(self):
+        catalog = get_default_catalog()
+        allowed = {"get_price", "save_agent_state"}
+        filtered = catalog.to_mcp_tools(allowed=allowed)
+        assert len(filtered) == 2
+        names = {t["name"] for t in filtered}
+        assert names == {"get_price", "save_agent_state"}
+
+    def test_mcp_tools_allowed_none_returns_all(self):
+        catalog = get_default_catalog()
+        all_tools = catalog.to_mcp_tools(allowed=None)
+        assert len(all_tools) == len(catalog)
+
+
+class TestToolExecutorFiltering:
+    """Tests for ToolExecutor.get_filtered_openai_tools() wrapper."""
+
+    @staticmethod
+    def _make_executor(allowed_tools=None):
+        mock_client = MagicMock()
+        mock_client.market.GetPrice.return_value = MagicMock(price=1.0, source="mock", timestamp="now")
+        return ToolExecutor(
+            mock_client,
+            policy=AgentPolicy(
+                allowed_tools=allowed_tools,
+                max_single_trade_usd=Decimal("1000"),
+                cooldown_seconds=0,
+            ),
+            wallet_address="0x" + "ab" * 20,
+            strategy_id="test-filter",
+        )
+
+    def test_executor_none_returns_all(self):
+        executor = self._make_executor(allowed_tools=None)
+        tools = executor.get_filtered_openai_tools()
+        assert len(tools) == len(get_default_catalog())
+
+    def test_executor_empty_set_returns_empty(self):
+        executor = self._make_executor(allowed_tools=set())
+        tools = executor.get_filtered_openai_tools()
+        assert len(tools) == 0
+
+    def test_executor_specific_set_filters(self):
+        executor = self._make_executor(allowed_tools={"get_price", "swap_tokens"})
+        tools = executor.get_filtered_openai_tools()
+        assert len(tools) == 2
+        names = {t["function"]["name"] for t in tools}
+        assert names == {"get_price", "swap_tokens"}

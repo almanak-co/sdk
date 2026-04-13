@@ -136,13 +136,25 @@ class ToolCatalog:
             logger.warning("Overwriting existing tool registration: %s", tool.name)
         self._tools[tool.name] = tool
 
-    def to_mcp_tools(self) -> list[dict]:
-        """Generate MCP tools/list payload."""
-        return [t.to_mcp_schema() for t in self._tools.values()]
+    def to_mcp_tools(self, *, allowed: set[str] | None = None) -> list[dict]:
+        """Generate MCP tools/list payload.
 
-    def to_openai_tools(self) -> list[dict]:
-        """Generate OpenAI-compatible function tool list."""
-        return [t.to_openai_schema() for t in self._tools.values()]
+        Args:
+            allowed: If provided, only include tools whose names are in this set.
+                     If None, all tools are included (backwards-compatible default).
+        """
+        tools = self._tools.values() if allowed is None else (t for t in self._tools.values() if t.name in allowed)
+        return [t.to_mcp_schema() for t in tools]
+
+    def to_openai_tools(self, *, allowed: set[str] | None = None) -> list[dict]:
+        """Generate OpenAI-compatible function tool list.
+
+        Args:
+            allowed: If provided, only include tools whose names are in this set.
+                     If None, all tools are included (backwards-compatible default).
+        """
+        tools = self._tools.values() if allowed is None else (t for t in self._tools.values() if t.name in allowed)
+        return [t.to_openai_schema() for t in tools]
 
     def __len__(self) -> int:
         return len(self._tools)
