@@ -155,6 +155,36 @@ XLAYER_TOKEN_IDS: dict[str, str] = {
     "USDG": "usd-coin",  # Gravity USD stablecoin, pegged ~$1
 }
 
+ETHEREUM_TOKEN_IDS: dict[str, str] = {
+    "ETH": "ethereum",
+    "WETH": "weth",
+    "USDC": "usd-coin",
+    "USDT": "tether",
+    "DAI": "dai",
+    "WBTC": "wrapped-bitcoin",
+    "LINK": "chainlink",
+    "UNI": "uniswap",
+    "AAVE": "aave",
+    "CRV": "curve-dao-token",
+    "CVX": "convex-finance",
+    "COMP": "compound-governance-token",
+    "MKR": "maker",
+    "SNX": "havven",
+    "LDO": "lido-dao",
+    "RPL": "rocket-pool",
+    "ENS": "ethereum-name-service",
+    "PENDLE": "pendle",
+    "GHO": "gho",
+    "CRVUSD": "crvusd",
+    "WSTETH": "wrapped-steth",
+    "RETH": "rocket-pool-eth",
+    "CBETH": "coinbase-wrapped-staked-eth",
+    "WEETH": "wrapped-eeth",
+    "PUFETH": "pufeth",
+    "USDE": "ethena-usde",
+    "SUSDE": "ethena-staked-usde",
+}
+
 GLOBAL_TOKEN_IDS: dict[str, str] = {
     **ARBITRUM_TOKEN_IDS,
     **AVALANCHE_TOKEN_IDS,
@@ -163,9 +193,8 @@ GLOBAL_TOKEN_IDS: dict[str, str] = {
     **MANTLE_TOKEN_IDS,
     **XLAYER_TOKEN_IDS,
     **SOLANA_TOKEN_IDS,
-    # Ethena tokens (available on multiple chains)
-    "USDE": "ethena-usde",
-    "SUSDE": "ethena-staked-usde",
+    # Ethereum last so canonical IDs (e.g. WSTETH -> wrapped-steth) win over chain variants
+    **ETHEREUM_TOKEN_IDS,
 }
 
 
