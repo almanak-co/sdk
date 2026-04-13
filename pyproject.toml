@@ -30,10 +30,10 @@ dependencies = [
     "PyYAML>=6.0.1",
     "fastapi>=0.128.0",
     # V2 Framework dependencies
-    "eth-account>=0.10.0",
+    "eth-account>=0.13.7,<0.14.0",
     "eth-abi>=5.0.0",
     # Solana dependencies (Ed25519 keypairs, transaction serialization)
-    "solders>=0.21.0",
+    "solders>=0.27.1",
     "structlog>=24.1.0",
     "nest_asyncio>=1.6.0",
     "matplotlib>=3.10.8",
@@ -45,7 +45,7 @@ dependencies = [
     "grpcio-health-checking>=1.76.0",
     "grpcio-reflection>=1.76.0",
     "pydantic-settings>=2.0.0", # For gateway configuration
-    "prometheus-client>=0.20.0", # For gateway metrics
+    "prometheus-client>=0.25.0", # For gateway metrics
     # Backtesting dependencies
     "tqdm>=4.66.0", # Progress bar for backtest sweeps
     "optuna>=3.5.0", # Bayesian optimization for parameter tuning
@@ -78,7 +78,7 @@ dev = [
     "pytest>=8.4.1",
     "pytest-asyncio>=0.25.0",
     "pytest-xdist>=3.5.0",
-    "pytest-cov>=6.0",
+    "pytest-cov>=7.1.0",
     "pytest-timeout>=2.3.1",
     "asgi-lifespan>=2.1.0",
 ]
@@ -113,7 +113,7 @@ dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-xdist>=3.5.0",
-    "pytest-cov>=6.0",
+    "pytest-cov>=7.1.0",
     "pytest-timeout>=2.3.1",
     "asgi-lifespan>=2.1.0",
 ]
