@@ -143,6 +143,7 @@ async def capture_portfolio_snapshot(
     runner: Any,
     strategy: StrategyProtocol,
     iteration_number: int,
+    force_snapshot: bool = False,
 ) -> PortfolioSnapshot | None:
     """Capture and persist portfolio snapshot after iteration.
 
@@ -156,14 +157,17 @@ async def capture_portfolio_snapshot(
         runner: StrategyRunner instance
         strategy: The strategy to capture snapshot from
         iteration_number: Current iteration count
+        force_snapshot: If True, bypass the throttle (e.g., trade executed this cycle)
 
     Returns:
         PortfolioSnapshot if captured, None if skipped or not supported
     """
     now = datetime.now(UTC)
 
-    # Rate-limit snapshot persistence (store every 5 min for time-series)
-    if runner._last_snapshot_time is not None:
+    # Rate-limit snapshot persistence (store every 5 min for time-series).
+    # Always snapshot when a trade executed (force_snapshot=True) so every
+    # trade gets before/after valuation for accounting.
+    if not force_snapshot and runner._last_snapshot_time is not None:
         elapsed = (now - runner._last_snapshot_time).total_seconds()
         if elapsed < runner._snapshot_interval_seconds:
             return None

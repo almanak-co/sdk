@@ -118,6 +118,10 @@ class PortfolioSnapshot:
     # Wallet balances (uninvested funds)
     wallet_balances: list[TokenBalance] = field(default_factory=list)
 
+    # Token prices used for valuation (audit trail)
+    # key: "chain:address", value: {"price_usd": str, "symbol": str, "decimals": int|None}
+    token_prices: dict[str, dict] = field(default_factory=dict)
+
     # Metadata
     chain: str = ""
     iteration_number: int = 0
@@ -173,6 +177,7 @@ class PortfolioSnapshot:
                 }
                 for b in self.wallet_balances
             ],
+            "token_prices": self.token_prices,
             "chain": self.chain,
             "iteration_number": self.iteration_number,
         }
@@ -246,6 +251,7 @@ class PortfolioSnapshot:
             error=data.get("error"),
             positions=positions,
             wallet_balances=wallet_balances,
+            token_prices=data.get("token_prices", {}),
             chain=data.get("chain", ""),
             iteration_number=data.get("iteration_number", 0),
             snapshot_metadata=data.get("snapshot_metadata", {}),

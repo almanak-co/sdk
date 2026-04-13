@@ -8,9 +8,12 @@ The ledger is populated by ``StrategyRunner`` after result enrichment and
 stored alongside timeline events in the gateway state store.
 """
 
+import json
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
+from enum import Enum
 from typing import Any
 
 
@@ -57,6 +60,7 @@ class LedgerEntry:
     protocol: str = ""
     success: bool = True
     error: str = ""
+    extracted_data_json: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary for storage."""
@@ -91,6 +95,7 @@ class LedgerEntry:
             protocol=data.get("protocol", ""),
             success=data.get("success", True),
             error=data.get("error", ""),
+            extracted_data_json=data.get("extracted_data_json", ""),
         )
 
 
@@ -170,6 +175,33 @@ def build_ledger_entry(
     if not success and not error and result:
         error = getattr(result, "error", "") or ""
 
+    # Serialize extracted_data with type tags for round-trip fidelity
+    extracted_data_json = ""
+    if result and hasattr(result, "extracted_data") and result.extracted_data:
+        extracted_data_json = serialize_extracted_data(result.extracted_data)
+
+    # Capture all tx results for multi-action bundles (approve+swap, etc.)
+    if (
+        extracted_data_json
+        and result
+        and hasattr(result, "transaction_results")
+        and result.transaction_results
+        and len(result.transaction_results) > 1
+    ):
+        try:
+            parsed = json.loads(extracted_data_json)
+            parsed["all_tx_results"] = [
+                {
+                    "tx_hash": getattr(tr, "tx_hash", "") or "",
+                    "gas_used": getattr(tr, "gas_used", 0) or 0,
+                    "success": getattr(tr, "success", True),
+                }
+                for tr in result.transaction_results
+            ]
+            extracted_data_json = json.dumps(parsed)
+        except (json.JSONDecodeError, TypeError):
+            pass  # Keep existing serialization on failure
+
     return LedgerEntry(
         cycle_id=cycle_id,
         strategy_id=strategy_id,
@@ -187,4 +219,142 @@ def build_ledger_entry(
         protocol=protocol,
         success=success,
         error=error,
+        extracted_data_json=extracted_data_json,
     )
+
+
+def serialize_extracted_data(extracted_data: dict[str, Any]) -> str:
+    """Serialize extracted_data dict with type tags for round-trip fidelity.
+
+    Each value that has a ``to_dict()`` method (the typed dataclasses like
+    SwapAmounts, LPOpenData, PerpData, etc.) is serialized with a ``_type``
+    tag so ``deserialize_extracted_data()`` can reconstruct the original type.
+    """
+    serializable: dict[str, Any] = {}
+    for key, val in extracted_data.items():
+        if hasattr(val, "to_dict"):
+            d = val.to_dict()
+            d["_type"] = type(val).__name__
+            serializable[key] = d
+        elif isinstance(val, Decimal):
+            serializable[key] = {"_type": "Decimal", "value": str(val)}
+        elif isinstance(val, datetime):
+            serializable[key] = {"_type": "datetime", "value": val.isoformat()}
+        elif isinstance(val, Enum):
+            serializable[key] = {"_type": "Enum", "name": type(val).__name__, "value": val.value}
+        else:
+            serializable[key] = val
+    try:
+        return json.dumps(serializable, default=str)
+    except (TypeError, ValueError):
+        return ""
+
+
+def deserialize_extracted_data(json_str: str) -> dict[str, Any]:
+    """Deserialize extracted_data JSON back into typed objects where possible.
+
+    Values tagged with ``_type`` are reconstructed into their original types.
+    Unknown types are returned as plain dicts.
+    """
+    if not json_str:
+        return {}
+    try:
+        data = json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+    # Lazy import to avoid circular deps
+    from almanak.framework.execution.extracted_data import (
+        BorrowData,
+        LPCloseData,
+        LPOpenData,
+        PerpData,
+        StakeData,
+        SupplyData,
+        SwapAmounts,
+    )
+
+    type_map: dict[str, type] = {
+        "SwapAmounts": SwapAmounts,
+        "LPOpenData": LPOpenData,
+        "LPCloseData": LPCloseData,
+        "BorrowData": BorrowData,
+        "SupplyData": SupplyData,
+        "PerpData": PerpData,
+        "StakeData": StakeData,
+    }
+
+    result: dict[str, Any] = {}
+    for key, val in data.items():
+        if not isinstance(val, dict) or "_type" not in val:
+            result[key] = val
+            continue
+
+        type_name = val.pop("_type")
+        if type_name == "Decimal":
+            result[key] = Decimal(val["value"])
+        elif type_name == "datetime":
+            result[key] = datetime.fromisoformat(val["value"])
+        elif type_name == "Enum":
+            result[key] = val  # Return as dict; caller knows the enum type
+        elif type_name in type_map:
+            try:
+                cls = type_map[type_name]
+                # Convert string values back to appropriate types
+                result[key] = _reconstruct_dataclass(cls, val)
+            except (TypeError, ValueError):
+                val["_type"] = type_name
+                result[key] = val
+        else:
+            val["_type"] = type_name
+            result[key] = val
+
+    return result
+
+
+def _reconstruct_dataclass(cls: type, data: dict[str, Any]) -> Any:
+    """Reconstruct a frozen dataclass from a dict of string values."""
+    import dataclasses
+    import inspect
+
+    fields = {f.name: f for f in dataclasses.fields(cls)}
+    sig = inspect.signature(cls)
+    kwargs: dict[str, Any] = {}
+
+    for name, _param in sig.parameters.items():
+        if name not in data:
+            continue
+        val = data[name]
+        if val is None:
+            kwargs[name] = None
+            continue
+
+        f = fields.get(name)
+        if f is None:
+            continue
+
+        # Infer type from field annotation string
+        ann = str(f.type)
+        if "Decimal" in ann:
+            kwargs[name] = Decimal(val)
+        elif "int" in ann and "str" not in ann:
+            try:
+                kwargs[name] = int(val)
+            except (ValueError, TypeError):
+                kwargs[name] = val
+        elif "float" in ann:
+            try:
+                kwargs[name] = float(val)
+            except (ValueError, TypeError):
+                kwargs[name] = val
+        elif "bool" in ann:
+            if isinstance(val, bool):
+                kwargs[name] = val
+            elif isinstance(val, str):
+                kwargs[name] = val.lower() in ("true", "1", "yes")
+            else:
+                kwargs[name] = bool(val)
+        else:
+            kwargs[name] = val
+
+    return cls(**kwargs)

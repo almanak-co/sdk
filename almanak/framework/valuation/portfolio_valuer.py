@@ -190,6 +190,9 @@ class PortfolioValuer:
             else:
                 confidence = ValueConfidence.HIGH
 
+            # Step 6: Build audit-safe token price map (chain:address keyed)
+            token_price_records = self._build_token_price_records(chain, prices, tracked_tokens)
+
             framework_snapshot = PortfolioSnapshot(
                 timestamp=now,
                 strategy_id=strategy_id,
@@ -198,6 +201,7 @@ class PortfolioValuer:
                 value_confidence=confidence,
                 positions=positions,
                 wallet_balances=wallet_balances,
+                token_prices=token_price_records,
                 chain=chain,
                 iteration_number=iteration_number,
             )
@@ -466,6 +470,52 @@ class PortfolioValuer:
             return Decimal("0")
         return abs(framework_total - external_total) / baseline
 
+    @staticmethod
+    def _build_token_price_records(
+        chain: str,
+        prices: dict[str, Decimal],
+        tracked_tokens: list[str],
+    ) -> dict[str, dict]:
+        """Build an audit-safe token price map keyed by chain:address.
+
+        Each entry contains the USD price, display symbol, and decimals so
+        historical snapshots can be re-verified without re-querying oracles.
+        """
+        token_price_records: dict[str, dict] = {}
+        try:
+            from almanak.framework.data.tokens import get_token_resolver
+
+            resolver = get_token_resolver()
+        except Exception:
+            resolver = None
+
+        for token in tracked_tokens:
+            price = prices.get(token)
+            if price is None or price <= 0:
+                continue
+            try:
+                if resolver:
+                    resolved = resolver.resolve(token, chain)
+                    address = resolved.address if resolved else token
+                    decimals = resolved.decimals if resolved else None
+                else:
+                    address = token
+                    decimals = None
+                key = f"{chain}:{address.lower()}" if address.startswith("0x") else f"{chain}:{token}"
+                token_price_records[key] = {
+                    "price_usd": str(price),
+                    "symbol": token,
+                    "decimals": decimals,
+                }
+            except Exception:
+                # Best-effort: fall back to symbol-only key
+                token_price_records[f"{chain}:{token}"] = {
+                    "price_usd": str(price),
+                    "symbol": token,
+                    "decimals": None,
+                }
+        return token_price_records
+
     def _get_positions(
         self,
         strategy: StrategyLike,
@@ -536,10 +586,13 @@ class PortfolioValuer:
         if not all_position_infos:
             return [], Decimal("0"), positions_incomplete
 
-        # Re-price all positions
+        # Re-price all positions and enrich details with valuer breakdown
         positions: list[PositionValue] = []
         for p in all_position_infos.values():
-            value_usd = self._reprice_position(p, strategy.chain, market)
+            value_usd, enriched_details = self._reprice_position_enriched(p, strategy.chain, market)
+
+            # Merge enriched valuer details into position details
+            merged_details = {**p.details, **enriched_details}
 
             positions.append(
                 PositionValue(
@@ -549,7 +602,7 @@ class PortfolioValuer:
                     value_usd=value_usd,
                     label=f"{p.protocol} {p.position_type.value}",
                     tokens=p.details.get("tokens", []),
-                    details=p.details,
+                    details=merged_details,
                 )
             )
 
@@ -670,6 +723,326 @@ class PortfolioValuer:
             return position.value_usd
 
         return position.value_usd
+
+    def _reprice_position_enriched(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any]]:
+        """Re-price a position and return enriched details for persistence.
+
+        Returns:
+            (value_usd, enriched_details) where enriched_details contains
+            the full valuer breakdown (amounts, ticks, health factor, etc.)
+        """
+        from almanak.framework.teardown.models import PositionType
+
+        if position.position_type == PositionType.LP:
+            result = self._reprice_lp_on_chain_enriched(position, chain, market)
+            if result is not None:
+                return result
+            return position.value_usd, {}
+
+        if position.position_type in (PositionType.SUPPLY, PositionType.BORROW):
+            result = self._reprice_lending_on_chain_enriched(position, chain, market)
+            if result is not None:
+                return result
+            if position.position_type == PositionType.BORROW and position.value_usd > 0:
+                return -position.value_usd, {}
+            return position.value_usd, {}
+
+        if position.position_type == PositionType.PERP:
+            result = self._reprice_perps_on_chain_enriched(position, chain, market)
+            if result is not None:
+                return result
+            return position.value_usd, {}
+
+        return position.value_usd, {}
+
+    def _reprice_lp_on_chain_enriched(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any]] | None:
+        """Re-price LP and return enriched details for snapshot persistence."""
+        try:
+            token_id = self._extract_token_id(position)
+            if token_id is None:
+                return None
+
+            on_chain = self._lp_reader.read_position(chain=chain, token_id=token_id, protocol=position.protocol)
+            if on_chain is None:
+                return None
+
+            if on_chain.liquidity == 0 and on_chain.tokens_owed0 == 0 and on_chain.tokens_owed1 == 0:
+                return Decimal("0"), {"position_id": str(token_id), "liquidity": "0"}
+
+            token0_symbol = self._resolve_token_symbol(on_chain.token0, position, "token0")
+            token1_symbol = self._resolve_token_symbol(on_chain.token1, position, "token1")
+            if not token0_symbol or not token1_symbol:
+                return None
+
+            try:
+                token0_price = Decimal(str(market.price(token0_symbol)))
+                token1_price = Decimal(str(market.price(token1_symbol)))
+            except Exception:
+                return None
+
+            if token0_price <= 0 or token1_price <= 0:
+                return None
+
+            token0_decimals = self._get_token_decimals(token0_symbol, chain)
+            token1_decimals = self._get_token_decimals(token1_symbol, chain)
+            if token0_decimals is None or token1_decimals is None:
+                return None
+
+            pool_address = position.details.get("pool") or position.details.get("pool_address")
+            current_tick: int | None = None
+            sqrt_price_x96: int | None = None
+            if pool_address:
+                slot0 = self._lp_reader.read_pool_slot0(chain, pool_address)
+                if slot0:
+                    current_tick = slot0.tick
+                    sqrt_price_x96 = slot0.sqrt_price_x96
+
+            if current_tick is None:
+                current_tick = self._price_ratio_to_tick(token0_price, token1_price, token0_decimals, token1_decimals)
+
+            lp_value = value_lp_position(
+                liquidity=on_chain.liquidity,
+                tick_lower=on_chain.tick_lower,
+                tick_upper=on_chain.tick_upper,
+                current_tick=current_tick,
+                token0_price_usd=token0_price,
+                token1_price_usd=token1_price,
+                token0_decimals=token0_decimals,
+                token1_decimals=token1_decimals,
+                sqrt_price_x96=sqrt_price_x96,
+            )
+
+            fees_usd = Decimal("0")
+            fees0_human = Decimal("0")
+            fees1_human = Decimal("0")
+            if on_chain.tokens_owed0 > 0:
+                fees0_human = Decimal(on_chain.tokens_owed0) / Decimal(10**token0_decimals)
+                fees_usd += fees0_human * token0_price
+            if on_chain.tokens_owed1 > 0:
+                fees1_human = Decimal(on_chain.tokens_owed1) / Decimal(10**token1_decimals)
+                fees_usd += fees1_human * token1_price
+
+            total = lp_value.value_usd + fees_usd
+
+            enriched = {
+                "position_id": str(token_id),
+                "amount0": str(lp_value.amount0),
+                "amount1": str(lp_value.amount1),
+                "token0_value_usd": str(lp_value.token0_value_usd),
+                "token1_value_usd": str(lp_value.token1_value_usd),
+                "in_range": lp_value.in_range,
+                "tick_lower": on_chain.tick_lower,
+                "tick_upper": on_chain.tick_upper,
+                "liquidity": str(on_chain.liquidity),
+                "fees0": str(fees0_human),
+                "fees1": str(fees1_human),
+                "fees_usd": str(fees_usd),
+                "token0_symbol": token0_symbol,
+                "token1_symbol": token1_symbol,
+                "valuation_source": "on_chain",
+            }
+
+            return total, enriched
+
+        except Exception:
+            logger.debug("LP enriched re-pricing failed for %s", position.position_id, exc_info=True)
+            return None
+
+    def _reprice_lending_on_chain_enriched(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any]] | None:
+        """Re-price lending position and return enriched details."""
+        from almanak.framework.teardown.models import PositionType
+
+        try:
+            asset_address = self._extract_asset_address(position)
+            if not asset_address:
+                asset_symbol = position.details.get("asset")
+                if asset_symbol:
+                    try:
+                        from almanak.framework.data.tokens import get_token_resolver
+
+                        resolved = get_token_resolver().resolve(asset_symbol, chain)
+                        if resolved and resolved.address:
+                            asset_address = resolved.address
+                    except Exception:
+                        pass
+
+            wallet_address = (
+                position.details.get("wallet")
+                or position.details.get("wallet_address")
+                or position.details.get("owner")
+            )
+            if not asset_address or not wallet_address:
+                return None
+
+            on_chain = self._lending_reader.read_position(
+                chain=chain, asset_address=asset_address, wallet_address=wallet_address
+            )
+            if on_chain is None:
+                return None
+
+            if not on_chain.is_active:
+                return Decimal("0"), {"valuation_source": "on_chain", "is_active": False}
+
+            token_symbol = self._resolve_token_symbol(on_chain.asset_address, position, "asset")
+            if not token_symbol:
+                token_symbol = position.details.get("asset")
+            if not token_symbol:
+                return None
+
+            try:
+                token_price = Decimal(str(market.price(token_symbol)))
+            except Exception:
+                return None
+
+            if token_price <= 0:
+                return None
+
+            token_decimals = self._get_token_decimals(token_symbol, chain)
+            if token_decimals is None:
+                return None
+
+            valued = value_lending_position(
+                atoken_balance=on_chain.current_atoken_balance,
+                stable_debt=on_chain.current_stable_debt,
+                variable_debt=on_chain.current_variable_debt,
+                token_price_usd=token_price,
+                token_decimals=token_decimals,
+                collateral_enabled=on_chain.usage_as_collateral_enabled,
+                asset=token_symbol,
+            )
+
+            if position.position_type == PositionType.BORROW:
+                result_value = -valued.debt_value_usd
+            else:
+                result_value = valued.net_value_usd
+
+            enriched = {
+                "supply_balance": str(valued.supply_balance),
+                "supply_value_usd": str(valued.supply_value_usd),
+                "stable_debt_balance": str(valued.stable_debt_balance),
+                "variable_debt_balance": str(valued.variable_debt_balance),
+                "debt_value_usd": str(valued.debt_value_usd),
+                "net_value_usd": str(valued.net_value_usd),
+                "collateral_enabled": valued.collateral_enabled,
+                "health_factor": str(on_chain.health_factor) if hasattr(on_chain, "health_factor") else None,
+                "valuation_source": "on_chain",
+            }
+
+            return result_value, enriched
+
+        except Exception:
+            logger.debug("Lending enriched re-pricing failed for %s", position.position_id, exc_info=True)
+            return None
+
+    def _reprice_perps_on_chain_enriched(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any]] | None:
+        """Re-price perps position and return enriched details."""
+        try:
+            wallet_address = (
+                position.details.get("wallet")
+                or position.details.get("wallet_address")
+                or position.details.get("owner")
+            )
+            if not wallet_address:
+                return None
+
+            on_chain_positions = self._perps_reader.read_positions(chain, wallet_address)
+            if not on_chain_positions:
+                return None
+
+            market_address = position.details.get("market", "").lower()
+            if "is_long" not in position.details:
+                return None
+            is_long = position.details["is_long"]
+            collateral_token = position.details.get("collateral_token", "").lower()
+
+            matched = None
+            for ocp in on_chain_positions:
+                if ocp.market.lower() == market_address and ocp.is_long == is_long:
+                    if collateral_token and ocp.collateral_token.lower() != collateral_token:
+                        continue
+                    matched = ocp
+                    break
+
+            if matched is None:
+                return None
+
+            index_token_symbol = self._resolve_perps_index_token(matched.market, chain)
+            if not index_token_symbol:
+                return None
+
+            try:
+                mark_price = Decimal(str(market.price(index_token_symbol)))
+            except Exception:
+                return None
+            if mark_price <= 0:
+                return None
+
+            collateral_symbol = self._resolve_token_symbol(matched.collateral_token, position, "collateral_token")
+            if not collateral_symbol:
+                return None
+
+            try:
+                collateral_price = Decimal(str(market.price(collateral_symbol)))
+            except Exception:
+                return None
+            if collateral_price <= 0:
+                return None
+
+            collateral_decimals = self._get_token_decimals(collateral_symbol, chain)
+            index_decimals = self._get_perps_index_decimals(matched.market, chain)
+            if collateral_decimals is None or index_decimals is None:
+                return None
+
+            valued = value_perps_position(
+                size_in_usd=matched.size_in_usd,
+                size_in_tokens=matched.size_in_tokens,
+                collateral_amount=matched.collateral_amount,
+                is_long=matched.is_long,
+                mark_price_usd=mark_price,
+                collateral_token_price_usd=collateral_price,
+                collateral_token_decimals=collateral_decimals,
+                index_token_decimals=index_decimals,
+                market=matched.market,
+            )
+
+            enriched = {
+                "market": valued.market,
+                "is_long": valued.is_long,
+                "size_usd": str(valued.size_usd),
+                "collateral_value_usd": str(valued.collateral_value_usd),
+                "entry_price_usd": str(valued.entry_price_usd),
+                "mark_price_usd": str(valued.mark_price_usd),
+                "unrealized_pnl_usd": str(valued.unrealized_pnl_usd),
+                "pending_fees_usd": str(valued.pending_fees_usd),
+                "leverage": str(valued.leverage),
+                "valuation_source": "on_chain",
+            }
+
+            return valued.net_value_usd, enriched
+
+        except Exception:
+            logger.debug("Perps enriched re-pricing failed for %s", position.position_id, exc_info=True)
+            return None
 
     def _reprice_lp_on_chain(
         self,

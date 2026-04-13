@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -467,9 +467,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             try:
                 metrics = await self._state_manager.get_portfolio_metrics(strategy_id)
                 if metrics is not None:
-                    # pnl_after_gas is cumulative since deploy, not 24h.
-                    # Return "0" for pnl_24h until a true 24h window is available.
-                    return str(metrics.total_value_usd), "0"
+                    pnl_24h = await self._compute_pnl_24h(strategy_id, metrics.total_value_usd)
+                    return str(metrics.total_value_usd), str(pnl_24h)
             except Exception:
                 logger.debug("Failed to get portfolio metrics for %s", strategy_id, exc_info=True)
 
@@ -505,6 +504,78 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                         continue
 
         return "0", "0"
+
+    async def _compute_pnl_24h(self, strategy_id: str, current_value: Decimal) -> Decimal:
+        """Compute PnL over a 24-hour window using snapshot history.
+
+        Falls back to lifetime PnL if strategy has been running < 24h.
+
+        Note: Both paths report PnL net of gas — in the 24h path, gas is
+        implicitly captured because total_value_usd on snapshots already
+        reflects the lower wallet balance after gas expenditure. The fallback
+        path uses the same implicit approach: current_value already accounts
+        for gas spent. Neither path adjusts for capital flows (deposits/
+        withdrawals), which are rare for SDK strategies.
+        """
+        if self._state_manager is None or current_value <= 0:
+            return Decimal("0")
+
+        try:
+            target_time = datetime.now(UTC) - timedelta(hours=24)
+            snapshot_24h = await self._state_manager.get_snapshot_at(strategy_id, target_time)
+
+            if snapshot_24h is not None and snapshot_24h.total_value_usd > 0:
+                return current_value - snapshot_24h.total_value_usd
+
+            # Strategy running < 24h: fall back to lifetime PnL.
+            # Gas is already reflected in current_value (wallet balance reduced).
+            metrics = await self._state_manager.get_portfolio_metrics(strategy_id)
+            if metrics is not None and metrics.initial_value_usd > 0:
+                return current_value - metrics.initial_value_usd
+
+        except Exception:
+            logger.debug("Failed to compute PnL 24h for %s", strategy_id, exc_info=True)
+
+        return Decimal("0")
+
+    async def _build_pnl_history(self, strategy_id: str) -> list:
+        """Build PnL time series from portfolio snapshots for chart rendering.
+
+        Returns a list of PnLDataPoint protos from the last 7 days of snapshots.
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        pnl_points: list[gateway_pb2.PnLDataPoint] = []
+        if self._state_manager is None:
+            return pnl_points
+
+        try:
+            since = datetime.now(UTC) - timedelta(days=7)
+            snapshots = await self._state_manager.get_snapshots_since(strategy_id, since, limit=168)
+
+            if not snapshots:
+                return pnl_points
+
+            # Get initial value for PnL calculation
+            metrics = await self._state_manager.get_portfolio_metrics(strategy_id)
+            initial_value = metrics.initial_value_usd if metrics else Decimal("0")
+
+            for snap in snapshots:
+                ts = snap.timestamp
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+                pnl = snap.total_value_usd - initial_value if initial_value > 0 else Decimal("0")
+                pnl_points.append(
+                    gateway_pb2.PnLDataPoint(
+                        timestamp=int(ts.timestamp()),
+                        value_usd=str(snap.total_value_usd),
+                        pnl_usd=str(pnl),
+                    )
+                )
+        except Exception:
+            logger.debug("Failed to build PnL history for %s", strategy_id, exc_info=True)
+
+        return pnl_points
 
     async def _get_latest_snapshot(self, strategy_id: str) -> PortfolioSnapshot | None:
         """Get the most recent portfolio snapshot for staleness checks."""
@@ -1034,20 +1105,39 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             summary_kwargs["chain_wallets"] = strategy_info["chain_wallets"]
         summary = gateway_pb2.StrategySummary(**summary_kwargs)  # type: ignore[arg-type]
 
-        # Build position info from state
+        # Build position info — prefer framework snapshot over state dict
         position = gateway_pb2.PositionInfo()
-        if state:
-            # Extract token balances
-            balances = state.get("balances", {})
-            for symbol, balance_data in balances.items():
-                if isinstance(balance_data, dict):
+
+        # Primary: wallet balances from persisted portfolio snapshot (Phase 1c)
+        snapshot_balances_populated = False
+        try:
+            latest_snap = await self._get_latest_snapshot(strategy_id)
+            if latest_snap and latest_snap.wallet_balances:
+                for wb in latest_snap.wallet_balances:
                     position.token_balances.append(
                         gateway_pb2.TokenBalanceInfo(
-                            symbol=symbol,
-                            balance=str(balance_data.get("balance", "0")),
-                            value_usd=str(balance_data.get("value_usd", "0")),
+                            symbol=wb.symbol,
+                            balance=str(wb.balance),
+                            value_usd=str(wb.value_usd),
                         )
                     )
+                snapshot_balances_populated = True
+        except Exception:
+            logger.debug("Failed to get snapshot balances for %s", strategy_id, exc_info=True)
+
+        if state:
+            # Fallback: extract token balances from state dict if snapshot didn't have them
+            if not snapshot_balances_populated:
+                balances = state.get("balances", {})
+                for symbol, balance_data in balances.items():
+                    if isinstance(balance_data, dict):
+                        position.token_balances.append(
+                            gateway_pb2.TokenBalanceInfo(
+                                symbol=symbol,
+                                balance=str(balance_data.get("balance", "0")),
+                                value_usd=str(balance_data.get("value_usd", "0")),
+                            )
+                        )
 
             # Extract health factor and leverage if present
             if "health_factor" in state:
@@ -1070,19 +1160,10 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             )
             timeline = list(timeline_response.events)
 
-        # Derive PnL snapshot from already-extracted portfolio values
+        # Build PnL history time series from portfolio snapshots
         pnl_history = []
         if request.include_pnl_history:
-            total_value = str(strategy_info["total_value_usd"])
-            pnl = str(strategy_info["pnl_24h_usd"])
-            if total_value != "0":
-                pnl_history.append(
-                    gateway_pb2.PnLDataPoint(
-                        timestamp=int(datetime.now(UTC).timestamp()),
-                        value_usd=total_value,
-                        pnl_usd=pnl,
-                    )
-                )
+            pnl_history = await self._build_pnl_history(strategy_id)
 
         # Derive chain health from strategy chains.
         # Stub: reports UNKNOWN until real health probing (RPC latency, block number, gas price) is wired.

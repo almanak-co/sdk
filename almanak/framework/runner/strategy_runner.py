@@ -211,6 +211,7 @@ class StrategyRunner:
         self._last_snapshot_time: datetime | None = None
         self._snapshot_interval_seconds = 300  # Capture time-series snapshot every 5 min
         self._portfolio_valuer = PortfolioValuer()
+        self._iteration_had_trade = False  # Set by _write_ledger_entry on success
 
         # Optional explicit gateway client (set via set_gateway_client for multi-chain)
         self._gateway_client: Any | None = None
@@ -1255,6 +1256,9 @@ class StrategyRunner:
             )
             if self.state_manager:
                 await self.state_manager.save_ledger_entry(entry)
+            # Signal that this iteration executed a trade — forces snapshot
+            if success:
+                self._iteration_had_trade = True
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Failed to write ledger entry: {e}")
 
@@ -2958,7 +2962,14 @@ class StrategyRunner:
     async def _capture_portfolio_snapshot(self, strategy, iteration_number):
         from .runner_state import capture_portfolio_snapshot
 
-        return await capture_portfolio_snapshot(self, strategy, iteration_number)
+        # Pass trade flag to force snapshot on trade iterations (bypass throttle).
+        # Only clear the flag after successful persistence so a transient
+        # snapshot failure doesn't lose the forced-snapshot opportunity.
+        force = self._iteration_had_trade
+        result = await capture_portfolio_snapshot(self, strategy, iteration_number, force_snapshot=force)
+        if result is not None:
+            self._iteration_had_trade = False
+        return result
 
     async def _update_portfolio_metrics(self, strategy_id, snapshot):
         from .runner_state import update_portfolio_metrics

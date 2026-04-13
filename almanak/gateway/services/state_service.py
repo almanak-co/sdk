@@ -458,6 +458,12 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     positions, snapshot_metadata = PortfolioSnapshot.unpack_positions_payload(positions_payload)
                     snapshot_dict["positions"] = positions
                     snapshot_dict["snapshot_metadata"] = snapshot_metadata
+                    # Extract accounting data from envelope (Phase 1c)
+                    if isinstance(positions_payload, dict):
+                        if "token_prices" in positions_payload:
+                            snapshot_dict["token_prices"] = positions_payload["token_prices"]
+                        if "wallet_balances" in positions_payload:
+                            snapshot_dict["wallet_balances"] = positions_payload["wallet_balances"]
                     snapshot = PortfolioSnapshot.from_dict(snapshot_dict)
 
                 snapshot_id = await warm.save_portfolio_snapshot(snapshot)  # type: ignore[attr-defined]

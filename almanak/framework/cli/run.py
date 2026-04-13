@@ -2731,6 +2731,14 @@ def run(
 
                 result = await runner.run_iteration(strategy_instance)
 
+                # Capture portfolio snapshot after --once iteration
+                # (run_loop does this automatically but run_iteration does not)
+                if runner.config.enable_state_persistence:
+                    await runner._capture_portfolio_snapshot(
+                        strategy=strategy_instance,
+                        iteration_number=runner._total_iterations,
+                    )
+
                 # Emit structured iteration summary for JSONL log analysis
                 runner._emit_iteration_summary(result, chain=getattr(strategy_instance, "chain", None))
 

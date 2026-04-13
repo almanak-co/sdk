@@ -280,6 +280,8 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     available_cash_usd TEXT NOT NULL,  -- Decimal as string
     value_confidence TEXT DEFAULT 'HIGH',  -- HIGH, ESTIMATED, STALE, UNAVAILABLE
     positions_json TEXT NOT NULL,  -- JSON array of positions
+    token_prices_json TEXT DEFAULT '{}',  -- {chain:address: {price_usd, symbol, decimals}}
+    wallet_balances_json TEXT DEFAULT '[]',  -- JSON array of TokenBalance dicts
     chain TEXT,
     created_at TEXT NOT NULL
 );
@@ -327,7 +329,8 @@ CREATE TABLE IF NOT EXISTS transaction_ledger (
     chain TEXT,
     protocol TEXT,
     success BOOLEAN NOT NULL DEFAULT 1,
-    error TEXT
+    error TEXT,
+    extracted_data_json TEXT DEFAULT ''
 );
 
 -- Index for strategy + time queries
@@ -469,10 +472,36 @@ class SQLiteStore:
 
         def _sync_create_schema() -> None:
             self._conn.executescript(SCHEMA_SQL)  # type: ignore[union-attr]
+            self._run_migrations()
             self._conn.commit()  # type: ignore[union-attr]
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _sync_create_schema)
+
+    def _run_migrations(self) -> None:
+        """Run schema migrations for existing databases.
+
+        Adds columns that may be missing from databases created before
+        the accounting PRD changes. Each migration is idempotent.
+        """
+        conn = self._conn
+        if conn is None:
+            return
+
+        def _add_column_if_missing(table: str, column: str, col_type: str) -> None:
+            """Add a column to a table if it doesn't already exist."""
+            cursor = conn.execute(f"PRAGMA table_info({table})")
+            existing = {row["name"] for row in cursor.fetchall()}
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+                logger.info(f"Migration: added {table}.{column}")
+
+        # Phase 1b: extracted_data_json on transaction_ledger
+        _add_column_if_missing("transaction_ledger", "extracted_data_json", "TEXT DEFAULT ''")
+
+        # Phase 1c: token_prices_json and wallet_balances_json on portfolio_snapshots
+        _add_column_if_missing("portfolio_snapshots", "token_prices_json", "TEXT DEFAULT '{}'")
+        _add_column_if_missing("portfolio_snapshots", "wallet_balances_json", "TEXT DEFAULT '[]'")
 
     async def close(self) -> None:
         """Close database connection."""
@@ -1352,8 +1381,10 @@ class SQLiteStore:
                 """
                 INSERT OR REPLACE INTO portfolio_snapshots (
                     strategy_id, timestamp, iteration_number, total_value_usd,
-                    available_cash_usd, value_confidence, positions_json, chain, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    available_cash_usd, value_confidence, positions_json,
+                    token_prices_json, wallet_balances_json,
+                    chain, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot.strategy_id,
@@ -1363,6 +1394,21 @@ class SQLiteStore:
                     str(snapshot.available_cash_usd),
                     snapshot.value_confidence.value,
                     json.dumps(snapshot.to_positions_payload()),
+                    json.dumps(snapshot.token_prices) if snapshot.token_prices else "{}",
+                    json.dumps(
+                        [
+                            {
+                                "symbol": b.symbol,
+                                "balance": str(b.balance),
+                                "value_usd": str(b.value_usd),
+                                "address": b.address,
+                                "price_usd": str(b.price_usd) if b.price_usd is not None else None,
+                            }
+                            for b in snapshot.wallet_balances
+                        ]
+                    )
+                    if snapshot.wallet_balances
+                    else "[]",
                     snapshot.chain,
                     now,
                 ),
@@ -1390,7 +1436,8 @@ class SQLiteStore:
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
                 SELECT strategy_id, timestamp, iteration_number, total_value_usd,
-                       available_cash_usd, value_confidence, positions_json, chain
+                       available_cash_usd, value_confidence, positions_json,
+                       token_prices_json, wallet_balances_json, chain
                 FROM portfolio_snapshots
                 WHERE strategy_id = ?
                 ORDER BY timestamp DESC
@@ -1432,7 +1479,8 @@ class SQLiteStore:
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
                 SELECT strategy_id, timestamp, iteration_number, total_value_usd,
-                       available_cash_usd, value_confidence, positions_json, chain
+                       available_cash_usd, value_confidence, positions_json,
+                       token_prices_json, wallet_balances_json, chain
                 FROM portfolio_snapshots
                 WHERE strategy_id = ? AND timestamp >= ?
                 ORDER BY timestamp ASC
@@ -1470,7 +1518,8 @@ class SQLiteStore:
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
                 SELECT strategy_id, timestamp, iteration_number, total_value_usd,
-                       available_cash_usd, value_confidence, positions_json, chain
+                       available_cash_usd, value_confidence, positions_json,
+                       token_prices_json, wallet_balances_json, chain
                 FROM portfolio_snapshots
                 WHERE strategy_id = ? AND timestamp <= ?
                 ORDER BY timestamp DESC
@@ -1506,6 +1555,24 @@ class SQLiteStore:
             positions_payload = json.loads(positions_payload)
         positions, snapshot_metadata = PortfolioSnapshot.unpack_positions_payload(positions_payload)
 
+        # Deserialize token_prices_json (new column, may not exist in old DBs)
+        token_prices: dict[str, dict] = {}
+        try:
+            tp_raw = row["token_prices_json"]
+            if tp_raw and isinstance(tp_raw, str):
+                token_prices = json.loads(tp_raw)
+        except (KeyError, json.JSONDecodeError):
+            pass
+
+        # Deserialize wallet_balances_json (new column, may not exist in old DBs)
+        wallet_balances_raw: list[dict] = []
+        try:
+            wb_raw = row["wallet_balances_json"]
+            if wb_raw and isinstance(wb_raw, str):
+                wallet_balances_raw = json.loads(wb_raw)
+        except (KeyError, json.JSONDecodeError):
+            pass
+
         return PortfolioSnapshot.from_dict(
             {
                 "timestamp": timestamp.isoformat(),
@@ -1514,7 +1581,8 @@ class SQLiteStore:
                 "available_cash_usd": str(row["available_cash_usd"]),
                 "value_confidence": row["value_confidence"],
                 "positions": positions,
-                "wallet_balances": [],
+                "wallet_balances": wallet_balances_raw,
+                "token_prices": token_prices,
                 "chain": row["chain"] or "",
                 "iteration_number": row["iteration_number"] or 0,
                 "snapshot_metadata": snapshot_metadata,
@@ -1666,8 +1734,9 @@ class SQLiteStore:
                     (id, cycle_id, strategy_id, timestamp, intent_type,
                      token_in, amount_in, token_out, amount_out,
                      effective_price, slippage_bps, gas_used, gas_usd,
-                     tx_hash, chain, protocol, success, error)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     tx_hash, chain, protocol, success, error,
+                     extracted_data_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         entry.id,
@@ -1688,6 +1757,7 @@ class SQLiteStore:
                         entry.protocol,
                         entry.success,
                         entry.error,
+                        entry.extracted_data_json,
                     ),
                 )
                 self._conn.commit()  # type: ignore[union-attr]
@@ -1766,6 +1836,7 @@ class SQLiteStore:
                         protocol=row["protocol"] or "",
                         success=bool(row["success"]),
                         error=row["error"] or "",
+                        extracted_data_json=row["extracted_data_json"] if "extracted_data_json" in row.keys() else "",
                     )
                 )
             return entries

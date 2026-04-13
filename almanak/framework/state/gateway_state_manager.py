@@ -210,7 +210,29 @@ class GatewayStateManager:
             Snapshot ID from the database
         """
         try:
-            positions_bytes = json.dumps(snapshot.to_positions_payload(), default=str, sort_keys=True).encode("utf-8")
+            # Pack positions, token_prices, and wallet_balances into the
+            # positions_json envelope. The state_service on the receiving end
+            # unpacks this and persists each field to its own column.
+            payload = snapshot.to_positions_payload()
+            if isinstance(payload, list):
+                # Convert bare list to envelope so we can attach extra data
+                payload = {"positions": payload, "metadata": {}}
+            # Attach accounting data to the envelope
+            if snapshot.token_prices:
+                payload["token_prices"] = snapshot.token_prices
+            if snapshot.wallet_balances:
+                payload["wallet_balances"] = [
+                    {
+                        "symbol": b.symbol,
+                        "balance": str(b.balance),
+                        "value_usd": str(b.value_usd),
+                        "address": b.address,
+                        "price_usd": str(b.price_usd) if b.price_usd is not None else None,
+                    }
+                    for b in snapshot.wallet_balances
+                ]
+
+            positions_bytes = json.dumps(payload, default=str, sort_keys=True).encode("utf-8")
 
             request = gateway_pb2.SaveSnapshotRequest(
                 strategy_id=snapshot.strategy_id,
@@ -343,6 +365,13 @@ class GatewayStateManager:
         positions_payload = json.loads(data.positions_json.decode("utf-8")) if data.positions_json else []
         positions_list, snapshot_metadata = PortfolioSnapshot.unpack_positions_payload(positions_payload)
 
+        # Extract accounting data from envelope (Phase 1c)
+        token_prices: dict = {}
+        wallet_balances_raw: list[dict] = []
+        if isinstance(positions_payload, dict):
+            token_prices = positions_payload.get("token_prices", {})
+            wallet_balances_raw = positions_payload.get("wallet_balances", [])
+
         snapshot_dict = {
             "timestamp": datetime.fromtimestamp(data.timestamp, tz=UTC).isoformat(),
             "strategy_id": data.strategy_id,
@@ -351,7 +380,8 @@ class GatewayStateManager:
             "value_confidence": data.value_confidence or "HIGH",
             "error": None,
             "positions": positions_list,
-            "wallet_balances": [],
+            "wallet_balances": wallet_balances_raw,
+            "token_prices": token_prices,
             "chain": data.chain or "",
             "iteration_number": data.iteration_number,
             "snapshot_metadata": snapshot_metadata,
