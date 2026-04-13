@@ -1941,13 +1941,13 @@ def run(
         state_db_path = Path(os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db")
         if state_db_path.exists():
             try:
-                import asyncio
+                import asyncio as _asyncio_backfill
 
                 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 
                 backfill_config = SQLiteConfig(db_path=str(state_db_path))
                 backfill_store = SQLiteStore(backfill_config)
-                loop = asyncio.new_event_loop()
+                loop = _asyncio_backfill.new_event_loop()
                 try:
                     total_migrated = loop.run_until_complete(
                         backfill_store.backfill_deployment_id(config_display_name, deployment_id)
