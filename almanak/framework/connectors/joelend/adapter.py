@@ -51,9 +51,9 @@ JOELEND_JOETROLLER_ADDRESS = "0xdc13687554205E5b89Ac783db14bb5bba4A1eDaC"
 JOELEND_J_TOKENS: dict[str, dict[str, Any]] = {
     "AVAX": {
         "j_token": "0xC22F01ddc8010Ee05574028528614634684EC29e",
-        "underlying": None,  # Native AVAX
+        "underlying": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",  # WAVAX — jAVAX rejects raw native deposits
         "decimals": 18,
-        "is_native": True,
+        "is_native": False,
     },
     "USDC.e": {
         "j_token": "0xEd6AaF91a2B084bd594DBd1245be3691F9f637aC",

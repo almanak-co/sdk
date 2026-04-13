@@ -843,14 +843,31 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
 
                 collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
 
-                # Build approve TX for jToken (skip for native AVAX)
-                if not jl_collateral_market.is_native:
-                    approve_txs = compiler._build_approve_tx(
-                        collateral_token.address,
-                        jl_collateral_market.j_token_address,
-                        collateral_amount_wei,
+                # If collateral is native AVAX, wrap to WAVAX first.
+                # jAVAX rejects raw native deposits ("only wrapped native contract
+                # could send native token") so we must go through WAVAX.
+                if collateral_token.is_native and jl_collateral_market.underlying_address:
+                    wavax_address = jl_collateral_market.underlying_address
+                    wrap_tx = TransactionData(
+                        to=wavax_address,
+                        value=collateral_amount_wei,
+                        data="0xd0e30db0",  # WAVAX deposit() selector
+                        gas_estimate=50_000,
+                        description=f"Wrap {collateral_amount_decimal} AVAX to WAVAX for Joe Lend collateral",
+                        tx_type="wrap_native",
                     )
-                    transactions.extend(approve_txs)
+                    transactions.append(wrap_tx)
+                    approve_token_address = wavax_address
+                else:
+                    approve_token_address = collateral_token.address
+
+                # Build approve TX for jToken
+                approve_txs = compiler._build_approve_tx(
+                    approve_token_address,
+                    jl_collateral_market.j_token_address,
+                    collateral_amount_wei,
+                )
+                transactions.extend(approve_txs)
 
                 # Build supply (mint) TX
                 jl_supply_result = joelend_adapter.supply(
@@ -1925,8 +1942,56 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
                     intent_id=intent.intent_id,
                 )
 
-            # Build approve TX for jToken (skip for native AVAX)
-            if not jl_repay_market.is_native and not intent.repay_full:
+            # If repaying native AVAX, wrap to WAVAX first.
+            # jAVAX rejects raw native deposits so we must go through WAVAX.
+            if repay_token.is_native and jl_repay_market.underlying_address:
+                # For native AVAX repay_full, recover an explicit amount because
+                # we need a concrete value for the wrap TX.
+                if intent.repay_full and not repay_amount_decimal:
+                    if intent.amount is not None and intent.amount != "all" and Decimal(str(intent.amount)) > 0:
+                        repay_amount_decimal = Decimal(str(intent.amount))
+                        logger.info(
+                            "Recovered repay amount %s from intent for native AVAX repay_full",
+                            repay_amount_decimal,
+                        )
+                    else:
+                        return CompilationResult(
+                            status=CompilationStatus.FAILED,
+                            error="Joe Lend native AVAX repay_full requires an explicit positive repay amount (query debt balance first)",
+                            intent_id=intent.intent_id,
+                        )
+
+                if not intent.repay_full:
+                    if repay_amount_decimal is None:
+                        return CompilationResult(
+                            status=CompilationStatus.FAILED,
+                            error="Joe Lend repay requires an explicit amount (or use repay_full=True)",
+                            intent_id=intent.intent_id,
+                        )
+
+                assert repay_amount_decimal is not None  # guaranteed by branches above
+                wavax_address = jl_repay_market.underlying_address
+                wrap_amount = repay_amount_decimal
+                if intent.repay_full:
+                    # Add 0.1% buffer to account for interest accrual between
+                    # debt query and execution (matches the old native repay path).
+                    wrap_amount = repay_amount_decimal * Decimal("1.001")
+                repay_amount_wei = int(wrap_amount * Decimal(10**repay_token.decimals))
+                wrap_tx = TransactionData(
+                    to=wavax_address,
+                    value=repay_amount_wei,
+                    data="0xd0e30db0",  # WAVAX deposit() selector
+                    gas_estimate=50_000,
+                    description=f"Wrap {wrap_amount} AVAX to WAVAX for Joe Lend repay",
+                    tx_type="wrap_native",
+                )
+                transactions.append(wrap_tx)
+                approve_token_address = wavax_address
+            else:
+                approve_token_address = repay_token.address
+
+            # Build approve TX for jToken
+            if not intent.repay_full:
                 if repay_amount_decimal is None:
                     return CompilationResult(
                         status=CompilationStatus.FAILED,
@@ -1935,40 +2000,21 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
                     )
                 repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
                 approve_txs = compiler._build_approve_tx(
-                    repay_token.address,
+                    approve_token_address,
                     jl_repay_market.j_token_address,
                     repay_amount_wei,
                 )
                 transactions.extend(approve_txs)
-            elif not jl_repay_market.is_native and intent.repay_full:
+            else:
                 # For repay_full, approve MAX_UINT256
                 from ..connectors.joelend.adapter import MAX_UINT256 as JOELEND_MAX_UINT256
 
                 approve_txs = compiler._build_approve_tx(
-                    repay_token.address,
+                    approve_token_address,
                     jl_repay_market.j_token_address,
                     JOELEND_MAX_UINT256,
                 )
                 transactions.extend(approve_txs)
-
-            # Native AVAX repay_full requires an explicit amount because msg.value
-            # can't be MAX_UINT256.  The generic repay_full path (line ~1328) sets
-            # repay_amount_decimal = None, but the strategy may have provided an
-            # explicit intent.amount — recover it here so the adapter can use it
-            # as msg.value (with its own 0.1 % interest buffer).
-            if jl_repay_market.is_native and intent.repay_full and not repay_amount_decimal:
-                if intent.amount is not None and intent.amount != "all":
-                    repay_amount_decimal = Decimal(str(intent.amount))
-                    logger.info(
-                        "Recovered repay amount %s from intent for native AVAX repay_full",
-                        repay_amount_decimal,
-                    )
-                else:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error="Joe Lend native AVAX repay_full requires an explicit repay amount (query debt balance first)",
-                        intent_id=intent.intent_id,
-                    )
 
             # Build repay TX
             repay_result = joelend_adapter.repay(
@@ -2950,14 +2996,30 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:
 
             supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
 
-            # Build approve TX for jToken (skip for native AVAX)
-            if not jl_supply_market.is_native:
-                approve_txs = compiler._build_approve_tx(
-                    supply_token.address,
-                    jl_supply_market.j_token_address,
-                    supply_amount_wei,
+            # If supplying native AVAX, wrap to WAVAX first.
+            # jAVAX rejects raw native deposits so we must go through WAVAX.
+            if supply_token.is_native and jl_supply_market.underlying_address:
+                wavax_address = jl_supply_market.underlying_address
+                wrap_tx = TransactionData(
+                    to=wavax_address,
+                    value=supply_amount_wei,
+                    data="0xd0e30db0",  # WAVAX deposit() selector
+                    gas_estimate=50_000,
+                    description=f"Wrap {amount_decimal} AVAX to WAVAX for Joe Lend supply",
+                    tx_type="wrap_native",
                 )
-                transactions.extend(approve_txs)
+                transactions.append(wrap_tx)
+                approve_token_address = wavax_address
+            else:
+                approve_token_address = supply_token.address
+
+            # Build approve TX for jToken
+            approve_txs = compiler._build_approve_tx(
+                approve_token_address,
+                jl_supply_market.j_token_address,
+                supply_amount_wei,
+            )
+            transactions.extend(approve_txs)
 
             # Build supply (mint) TX
             jl_supply_result = joelend_adapter.supply(

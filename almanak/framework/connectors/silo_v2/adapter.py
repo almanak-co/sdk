@@ -206,7 +206,7 @@ class SiloV2Adapter:
             market_name: Optional market name to narrow lookup
 
         Returns:
-            Tuple of (market_info, silo_address, asset_index) or None
+            Tuple of (market_info, checksummed_silo_address, asset_index) or None
         """
         key = asset_symbol.upper()
         entries = _TOKEN_TO_SILO_MAP.get(key, [])
@@ -217,12 +217,12 @@ class SiloV2Adapter:
         if market_name:
             for mname, silo_addr, idx in entries:
                 if mname == market_name:
-                    return SILO_V2_MARKETS[mname], silo_addr, idx
+                    return SILO_V2_MARKETS[mname], Web3.to_checksum_address(silo_addr), idx
             return None
 
         # Default to first entry (most liquid market listed first)
         mname, silo_addr, idx = entries[0]
-        return SILO_V2_MARKETS[mname], silo_addr, idx
+        return SILO_V2_MARKETS[mname], Web3.to_checksum_address(silo_addr), idx
 
     def _encode_deposit(self, amount_wei: int, receiver: str, collateral_type: int = 0) -> str:
         """Encode deposit(uint256,address,uint8) calldata."""

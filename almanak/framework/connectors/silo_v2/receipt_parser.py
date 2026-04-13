@@ -87,11 +87,33 @@ class SiloV2ReceiptParser:
 
         Args:
             receipt: Transaction receipt dict with 'logs' list
-            silo_address: Optional silo address to filter events
+            silo_address: Optional silo address to filter events.
+                If filtering yields no events, automatically retries
+                without the filter (handles proxy/router patterns).
 
         Returns:
             SiloV2ParseResult with extracted data
         """
+        result = self._parse_logs(receipt, silo_address)
+
+        # Fallback: if silo_address filter was applied but found nothing,
+        # retry without the filter.  Silo V2 may emit events from a
+        # proxy or implementation contract whose address differs.
+        if not result.success and silo_address:
+            logger.debug(
+                "No Silo V2 events from silo %s — retrying without address filter",
+                silo_address,
+            )
+            result = self._parse_logs(receipt, silo_address=None)
+
+        return result
+
+    def _parse_logs(
+        self,
+        receipt: dict,
+        silo_address: str | None = None,
+    ) -> SiloV2ParseResult:
+        """Internal: scan receipt logs for Silo V2 events."""
         result = SiloV2ParseResult()
 
         try:

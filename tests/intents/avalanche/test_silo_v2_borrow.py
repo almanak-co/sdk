@@ -43,7 +43,7 @@ CHAIN_NAME = "avalanche"
 
 # Silo V2 WAVAX/USDC market silo addresses
 SILO_V2_WAVAX_SILO = "0xDa4b05e351696296060e6a1245C55e32DF8bFC84"  # WAVAX vault (silo0)
-SILO_V2_USDC_SILO = "0xfa5f7d5bcd70dc2f031ee906fc692a9e19584cb0"  # USDC vault (silo1)
+SILO_V2_USDC_SILO = "0xfA5f7d5BcD70dC2F031eE906fc692a9e19584CB0"  # USDC vault (silo1)
 
 # Skip reason for borrow/repay tests that require USDC liquidity
 SKIP_NO_LIQUIDITY = (
