@@ -6,6 +6,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-04-14
+
+### Added
+- Euler V2 lending connector on Avalanche and Ethereum with multi-chain adapter (#1409, #1453, #1424)
+- Silo V2 isolated lending connector on Avalanche (#1407)
+- Joe Lend (Banker Joe) lending connector on Avalanche (#1404)
+- BenQi lending connector for Avalanche (#1402, #1396)
+- Gimo Finance liquid staking connector for 0G Chain (#1456)
+- 0G Chain (Zero Gravity) integration - enums, gas constants, RPC, token registry, demo strategies (#1456)
+- X-Layer intent tests and documentation (#1416)
+- Yield-aware paper trading with persistent fork, YieldPoker, and PnLBreakdown (#1428)
+- Paper trading teardown - close positions on shutdown (#1441)
+- Dashboard Accounting Phases 1-4 - rich accounting data, identity model, equity curve, traceability (#1457, #1463, #1482)
+- OKX OnchainOS portfolio provider with Balance and DeFi APIs (#1410)
+- `token_funding` field in strategy config.json for declarative Anvil wallet funding (#1406)
+- Agentic cost optimization - tool catalog filtering, token telemetry, HuggingFace guard (#1465)
+- 9 new demo strategies: Morpho+UniV3, Morpho+Enso, Aave+PancakeSwap, Aerodrome+Aave, Compound+Velodrome carry trades, Compound V3 on Polygon, Joe Lend lifecycle, Aave V3 debt probe, BenQi lifecycle (#1468, #1395, #1393, #1367, #1365, #1429, #1433, #1417, #1396)
+- Chain registry and receipt parser registry completeness guard tests (#1446, #1452)
+
+### Changed
+- Upgrade Moralis to v2.2 endpoints for prices and DeFi positions (#1412)
+- Update Meteora DLMM API to new datapi.meteora.ag endpoint (#1390)
+- Bump almanak-code to v1.0.4 (#1476)
+- V4 demo strategies default to Base instead of Ethereum (#1437)
+
+### Fixed
+- Fix asyncio UnboundLocalError in run.py that blocked `--once` runs (#1473)
+- Gate gateway readiness on warmup completion (#1438)
+- Pre-warm price cache before decide() to prevent cold-fork timeouts (#1388)
+- Resolve amount='all' for withdraw/repay intents across all lending protocols (#1380)
+- Retry on HTTP 429 in BaseIntegration instead of failing immediately (#1415)
+- Prevent Compound V3 market IDs from leaking into token resolver (#1442)
+- Compound V3 collateral withdraw_all uint128 overflow (#1363)
+- Fix compiler repay_full bug for native AVAX (#1433)
+- Paper trading balance-delta accounting and chain-ID integrity (#1382)
+- Avalanche connector improvements - 17 issues across 4 lending adapters (#1414)
+- Pendle pre-swap balance check, market coverage, and auto-detection (#1379)
+- Stale Orca pool 404 and Anvil shutdown race (#1377)
+- Add Ethereum token CoinGecko ID mappings for CVX, CRV, COMP, etc. (#1487)
+- Verify Linea token decimals and storage slots (#1447)
+- Anvil funding - WETH deposit() via wrapper, USDC whale impersonation, Sonic WETH (#1389)
+- Make force_action one-shot across 12+ incubating strategies (#1485, #1484)
+- 20+ strategy config and timeout fixes (#1400, #1399, #1392, #1479, #1486, #1480, #1478, #1466, #1430, #1431, #1467, #1474, #1481)
+
+### Removed
+- Remove uniswap_v3_swap_bsc strategy - no V3 liquidity on BSC (#1436)
+
+### Security
+- Bump cryptography from 46.0.6 to 46.0.7 (#1397)
+- Remove leaked artifact, harden public mirror syncignore (#1422)
+
 ## [2.11.1] - 2026-04-07
 
 ### Changed
