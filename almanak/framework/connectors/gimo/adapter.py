@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from eth_abi import encode as abi_encode
+
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
     from almanak.framework.intents.vocabulary import StakeIntent, UnstakeIntent
@@ -46,17 +48,15 @@ logger = logging.getLogger(__name__)
 GIMO_ADDRESSES: dict[str, dict[str, str]] = {
     "zerog": {
         "st0g": "0x7bBC63D01CA42491c3E084C941c3E86e55951404",
-        # StakeManager and StakePool addresses TBD — contracts unverified
-        # Using st0G contract as the primary stake entry point
-        # StaFi LSD pattern: stake() is called on the StakePool contract
-        # For now, we encode a direct stake via the StakePool proxy
-        "stake_pool": "0x7bBC63D01CA42491c3E084C941c3E86e55951404",
+        # StakePool contract found via app.gimofinance.xyz — receives native A0GI and mints st0G
+        "stake_pool": "0xAc06d1Df23a4Fa00981aFAC0f33A5936Bd2135aF",
     },
 }
 
 # Function selectors (StaFi EVM LSD Stack pattern)
-# stake() payable — deposit native token, receive LSD token
-GIMO_STAKE_SELECTOR = "0x3a4b66f1"  # stake()
+# stake(string) payable — deposit native token, receive LSD token
+# The string parameter is a pool/validator hint (empty string selects default pool)
+GIMO_STAKE_SELECTOR = "0x46f45b8d"  # stake(string)
 # unstake(uint256 _lsdTokenAmount) — burn LSD, initiate unbonding
 GIMO_UNSTAKE_SELECTOR = "0x2e17de78"  # unstake(uint256)
 
@@ -158,8 +158,8 @@ class GimoAdapter:
         try:
             amount_wei = int(amount * Decimal(10**18))
 
-            # StaFi LSD pattern: stake() is a payable function with no args
-            calldata = GIMO_STAKE_SELECTOR
+            # StaFi LSD pattern: stake(string) payable — empty string selects the default pool
+            calldata = GIMO_STAKE_SELECTOR + abi_encode(["string"], [""]).hex()
 
             return TransactionResult(
                 success=True,

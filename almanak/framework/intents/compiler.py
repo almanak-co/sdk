@@ -5846,6 +5846,7 @@ class IntentCompiler:
             "sonic": "WS",
             "xlayer": "WOKB",
             "monad": "WMON",
+            "zerog": "W0G",
         }
         symbol = wrapped_symbols.get(self.chain)
         if not symbol:

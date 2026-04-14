@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 GIMO_ADDRESSES: dict[str, dict[str, str]] = {
     "zerog": {
         "st0g": "0x7bBC63D01CA42491c3E084C941c3E86e55951404",
-        "stake_pool": "0x7bBC63D01CA42491c3E084C941c3E86e55951404",
+        # StakePool contract (receives native A0GI, mints st0G) — found via app.gimofinance.xyz
+        "stake_pool": "0xAc06d1Df23a4Fa00981aFAC0f33A5936Bd2135aF",
     },
 }
 

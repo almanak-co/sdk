@@ -1,27 +1,19 @@
 """
 ===============================================================================
-0G Swap Strategy — Swap A0GI via JAINE DEX (Uniswap V3 fork) on 0G Chain
+0G Wrap Strategy — Wrap native A0GI into W0G on 0G Chain
 ===============================================================================
 
-This strategy demonstrates token swapping on 0G Chain via JAINE DEX, which is
-a Uniswap V3 fork with verified contracts.
+Minimal demo exercising the WRAP_NATIVE intent on 0G Chain. Wraps a configured
+amount of the native A0GI token into W0G and then holds.
 
 WHAT THIS STRATEGY DOES:
 ------------------------
-1. Wraps A0GI -> W0G (required for Uniswap V3 pool interaction)
-2. Swaps W0G -> target token via JAINE DEX (Uniswap V3 router)
-3. Holds when swap is complete
+1. Wraps `wrap_amount` A0GI -> W0G via Intent.wrap() on chain "zerog"
+2. Holds when the wrap is complete
 
-JAINE DEX:
-----------
-JAINE (Justified AI for Next-Gen Exchange) is a Uniswap V3 fork on 0G Chain.
-Contracts are verified on the 0G block explorer:
-- SwapRouter: 0x18cCa38E51c4C339A6BD6e174025f08360FEEf30
-- Factory: 0x6F3945Ab27296D1D66D8EEB042ff1B4fb2E0CE70
-- NonfungiblePositionManager: 0x5143ba6007C197b4cF66c20601b9dB97E0F98c6A
-
-Since it's a standard Uniswap V3 fork, the SDK's existing uniswap_v3 connector
-handles it natively — no custom connector needed.
+Intent.wrap() resolves the wrapped-native symbol via the compiler's
+`wrapped_symbols` map (zerog -> W0G). No custom connector is needed — the
+framework's built-in WRAP_NATIVE compilation handles it.
 
 USAGE:
 ------
@@ -45,92 +37,82 @@ logger = logging.getLogger(__name__)
 
 @almanak_strategy(
     name="demo_0g_swap",
-    description="Swap tokens on 0G Chain via JAINE DEX (Uniswap V3 fork)",
+    description="Wrap native A0GI into W0G on 0G Chain",
     version="2.0.0",
     author="Almanak",
-    tags=["demo", "0g", "zerog", "swap", "jaine", "uniswap-v3"],
+    tags=["demo", "0g", "zerog", "wrap"],
     supported_chains=["zerog"],
-    supported_protocols=["uniswap_v3"],
-    intent_types=["SWAP", "HOLD"],
+    supported_protocols=[],
+    intent_types=["WRAP_NATIVE", "HOLD"],
     default_chain="zerog",
 )
 class ZeroGSwapStrategy(IntentStrategy):
-    """0G Chain swap strategy via JAINE DEX (Uniswap V3 fork).
+    """0G Chain wrap strategy: A0GI -> W0G.
 
     Configuration Parameters (from config.json):
-    - swap_amount: Amount of A0GI to swap (default: "1.0")
-    - target_token: Token to swap to (default: "W0G" — wrap only)
-    - max_slippage_pct: Max slippage percentage (default: 1.0)
-    - force_action: Force "swap" for testing (default: "")
+    - wrap_amount: Amount of A0GI to wrap to W0G (default: "5")
+    - force_action: Force "wrap" (alias "swap" accepted for backward compat) (default: "")
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.swap_amount = Decimal(str(self.get_config("swap_amount", "1.0")))
-        self.target_token = str(self.get_config("target_token", "W0G"))
-        self.max_slippage_pct = float(self.get_config("max_slippage_pct", 1.0))
+        self.wrap_amount = Decimal(str(self.get_config("wrap_amount", "5")))
         self.force_action = str(self.get_config("force_action", "")).lower()
 
-        self._swapped = False
+        self._wrapped = False
 
         logger.info(
-            f"ZeroGSwapStrategy initialized: swap_amount={self.swap_amount} A0GI -> {self.target_token}"
+            f"ZeroGSwapStrategy initialized: wrap_amount={self.wrap_amount} A0GI -> W0G"
         )
 
     def decide(self, market: MarketSnapshot) -> Intent | None:
-        """Swap A0GI for target token via JAINE DEX.
+        """Wrap A0GI -> W0G on 0G Chain.
 
         Decision Flow:
-        1. If force_action is "swap", execute swap
-        2. If not swapped yet, swap
+        1. If force_action is "wrap" (or legacy alias "swap"), execute wrap
+        2. If not wrapped yet, wrap
         3. If done, hold
         """
-        if self.force_action == "swap":
-            return self._create_swap_intent()
+        if self.force_action in ("wrap", "swap"):
+            return self._create_wrap_intent()
 
-        if not self._swapped:
-            logger.info(f"Swapping {self.swap_amount} A0GI -> {self.target_token} via JAINE (Uniswap V3)")
-            return self._create_swap_intent()
+        if not self._wrapped:
+            logger.info(f"Wrapping {self.wrap_amount} A0GI -> W0G")
+            return self._create_wrap_intent()
 
-        return Intent.hold(reason=f"Swap complete: {self.swap_amount} A0GI -> {self.target_token}")
+        return Intent.hold(reason=f"Wrap complete: {self.wrap_amount} A0GI -> W0G")
 
-    def _create_swap_intent(self) -> Intent:
-        max_slippage = Decimal(str(self.max_slippage_pct)) / Decimal("100")
-
-        return Intent.swap(
-            from_token="A0GI",
-            to_token=self.target_token,
-            amount=self.swap_amount,
-            max_slippage=max_slippage,
-            protocol="uniswap_v3",
+    def _create_wrap_intent(self) -> Intent:
+        return Intent.wrap(
+            token="W0G",
+            amount=self.wrap_amount,
             chain="zerog",
         )
 
     def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
-        if success and intent.intent_type.value == "SWAP":
-            self._swapped = True
-            logger.info(f"Swap successful: {self.swap_amount} A0GI -> {self.target_token}")
+        if success and intent.intent_type.value == "WRAP_NATIVE":
+            self._wrapped = True
+            logger.info(f"Wrap successful: {self.wrap_amount} A0GI -> W0G")
         elif not success:
-            logger.warning("Swap failed")
+            logger.warning("Wrap failed")
 
     def get_status(self) -> dict[str, Any]:
         return {
             "strategy": "demo_0g_swap",
             "chain": self.chain,
             "config": {
-                "swap_amount": str(self.swap_amount),
-                "target_token": self.target_token,
+                "wrap_amount": str(self.wrap_amount),
             },
-            "state": {"swapped": self._swapped},
+            "state": {"wrapped": self._wrapped},
         }
 
     def get_persistent_state(self) -> dict[str, Any]:
-        return {"swapped": self._swapped}
+        return {"wrapped": self._wrapped}
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
-        if "swapped" in state:
-            self._swapped = state["swapped"]
+        if "wrapped" in state:
+            self._wrapped = state["wrapped"]
 
     def get_open_positions(self):
         from almanak.framework.teardown import TeardownPositionSummary

@@ -415,6 +415,7 @@ class DefaultSwapAdapter:
             "sonic": "WS",
             "xlayer": "WOKB",
             "monad": "WMON",
+            "zerog": "W0G",
         }
         _wn_symbol = _wrapped_symbols.get(self.chain)
         wrapped_native_addr = resolve_address(_wn_symbol) if _wn_symbol else None
