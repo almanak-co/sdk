@@ -207,6 +207,11 @@ nav:
       - api/connectors/morpho_vault.md
       - api/connectors/orca.md
       - api/connectors/raydium.md
+      - api/connectors/gimo.md
+      - api/connectors/jupiter.md
+      - api/connectors/jupiter_lend.md
+      - api/connectors/kamino.md
+      - api/connectors/lifi.md
       - api/connectors/bridges.md
       - api/connectors/flash_loan.md
       - api/connectors/base.md

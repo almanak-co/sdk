@@ -27,6 +27,7 @@ ALLOWED_CHAINS = frozenset(
         "solana",
         "monad",
         "xlayer",
+        "zerog",
     }
 )
 

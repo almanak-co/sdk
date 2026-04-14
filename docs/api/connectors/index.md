@@ -35,14 +35,15 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [Joe Lend](joelend.md) | Lending | Avalanche | `joelend` |
 | [Euler V2](euler_v2.md) | Lending | Avalanche | `euler_v2` |
 | [Fluid DEX](fluid.md) | DEX | Ethereum, Arbitrum | `fluid` |
-| Jupiter | DEX Aggregator | Solana | `jupiter` |
-| Jupiter Lend | Lending | Solana | `jupiter_lend` |
-| Kamino | Lending | Solana | `kamino` |
+| [Gimo Finance](gimo.md) | Liquid Staking | 0G Chain | `gimo` |
+| [Jupiter](jupiter.md) | DEX Aggregator | Solana | `jupiter` |
+| [Jupiter Lend](jupiter_lend.md) | Lending | Solana | `jupiter_lend` |
+| [Kamino](kamino.md) | Lending | Solana | `kamino` |
 | [Lagoon](lagoon.md) | Vault | Multi-chain | `lagoon` |
 | [Meteora](meteora.md) | DEX / LP | Solana | `meteora` |
 | [Morpho Vault](morpho_vault.md) | Vault | Ethereum, Base | `morpho_vault` |
 | [Orca](orca.md) | DEX / LP | Solana | `orca` |
 | [Raydium](raydium.md) | DEX / LP | Solana | `raydium` |
-| LiFi | Bridge Aggregator | Multi-chain | `lifi` |
+| [LiFi](lifi.md) | Bridge Aggregator | Multi-chain | `lifi` |
 | Radiant V2 | Lending | Arbitrum | (via Aave V3 fork) |
 | [Base Infrastructure](base.md) | Shared | N/A | `base` |

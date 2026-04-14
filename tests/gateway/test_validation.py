@@ -7,6 +7,7 @@ and prevents injection attacks.
 import pytest
 
 from almanak.gateway.validation import (
+    ALLOWED_CHAINS,
     MAX_BATCH_SIZE,
     MAX_GRAPHQL_QUERY_LENGTH,
     MAX_STATE_SIZE_BYTES,
@@ -31,8 +32,7 @@ class TestChainValidation:
 
     def test_valid_chains(self):
         """Test that valid chains pass validation."""
-        valid_chains = ["ethereum", "arbitrum", "base", "optimism", "polygon"]
-        for chain in valid_chains:
+        for chain in ALLOWED_CHAINS:
             assert validate_chain(chain) == chain.lower()
 
     def test_chain_normalization(self):
