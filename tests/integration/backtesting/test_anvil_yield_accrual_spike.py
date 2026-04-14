@@ -98,11 +98,17 @@ async def _get_balance(fork: RollingForkManager, token: str, wallet: str) -> int
 
 
 async def _send_tx(fork: RollingForkManager, from_addr: str, to: str, data: str, value: str = "0x0") -> str | None:
-    """Send a transaction via eth_sendTransaction (auto-impersonate on Anvil)."""
+    """Send a transaction via eth_sendTransaction (auto-impersonate on Anvil).
+
+    Calls evm_mine after sending to ensure the transaction is included in a block
+    before returning, preventing race conditions with subsequent balance checks.
+    """
     tx_hash = await fork._rpc_call(
         "eth_sendTransaction",
         [{"from": from_addr, "to": to, "data": data, "value": value, "gas": "0x500000"}],
     )
+    if tx_hash:
+        await fork._rpc_call("evm_mine", [])
     return tx_hash
 
 
