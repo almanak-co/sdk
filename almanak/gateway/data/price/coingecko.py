@@ -324,8 +324,6 @@ class CoinGeckoPriceSource(BasePriceSource):
     # Supported tokens on Arbitrum
     _SUPPORTED_TOKENS = list(ARBITRUM_TOKEN_IDS.keys())
 
-    # Cached token registry (lazy-loaded)
-    _token_registry: Any = None
     # Reverse mapping: lowercased contract address -> CoinGecko ID (lazy-built)
     _address_to_coingecko_id_map: dict[str, str] | None = None
 
@@ -436,9 +434,9 @@ class CoinGeckoPriceSource(BasePriceSource):
         """Resolve token symbol or contract address to CoinGecko ID.
 
         Resolution order:
-        1. Token registry by symbol (dynamic, uses Token.coingecko_id)
+        1. DEFAULT_TOKENS by symbol (uses Token.coingecko_id)
         2. Hardcoded symbol mappings (backward compatibility)
-        3. Token registry by contract address (for callers that pass addresses)
+        3. DEFAULT_TOKENS by contract address (for callers that pass addresses)
 
         Args:
             token: Token symbol (already uppercased) or contract address
@@ -446,45 +444,42 @@ class CoinGeckoPriceSource(BasePriceSource):
         Returns:
             CoinGecko ID if found, None otherwise
         """
-        # Try token registry first (dynamic, uses Token.coingecko_id)
-        if CoinGeckoPriceSource._token_registry is None:
-            try:
-                from almanak.framework.data.tokens import get_default_registry
+        # Try DEFAULT_TOKENS first (uses Token.coingecko_id)
+        try:
+            from almanak.framework.data.tokens.defaults import get_coingecko_id
 
-                CoinGeckoPriceSource._token_registry = get_default_registry()
-            except Exception:
-                # Registry unavailable, will fall back to hardcoded mappings
-                CoinGeckoPriceSource._token_registry = False  # Mark as attempted
+            cg_id = get_coingecko_id(token)
+            if cg_id:
+                return cg_id
+        except ImportError:
+            pass
 
-        if CoinGeckoPriceSource._token_registry:
-            token_obj = CoinGeckoPriceSource._token_registry.get(token)
-            if token_obj and token_obj.coingecko_id:
-                return token_obj.coingecko_id
-
-        # Fall back to hardcoded mappings (backward compatibility)
+        # Fall back to hardcoded mappings
         result = GLOBAL_TOKEN_IDS.get(token)
         if result:
             return result
 
-        # If token looks like a valid EVM address, try address-based lookup in registry
+        # If token looks like a valid EVM address, try address-based lookup
         _HEX_CHARS = frozenset("0123456789abcdefABCDEF")
-        if (
-            len(token) == 42
-            and token[:2].lower() == "0x"
-            and all(c in _HEX_CHARS for c in token[2:])
-            and CoinGeckoPriceSource._token_registry
-        ):
+        if len(token) == 42 and token[:2].lower() == "0x" and all(c in _HEX_CHARS for c in token[2:]):
             # Build reverse mapping (address -> coingecko_id) once and cache on the class
             if CoinGeckoPriceSource._address_to_coingecko_id_map is None:
-                address_map: dict[str, str] = {}
-                for token_obj in CoinGeckoPriceSource._token_registry.list_tokens():
-                    if token_obj.coingecko_id:
-                        for chain_addr in token_obj.addresses.values():
-                            address_map[chain_addr.lower()] = token_obj.coingecko_id
-                CoinGeckoPriceSource._address_to_coingecko_id_map = address_map
+                try:
+                    from almanak.framework.data.tokens.defaults import DEFAULT_TOKENS
+
+                    address_map: dict[str, str] = {}
+                    for token_obj in DEFAULT_TOKENS:
+                        if token_obj.coingecko_id:
+                            for chain_addr in token_obj.addresses.values():
+                                address_map[chain_addr.lower()] = token_obj.coingecko_id
+                    CoinGeckoPriceSource._address_to_coingecko_id_map = address_map
+                except ImportError:
+                    logger.warning("DEFAULT_TOKENS import failed during address map init; will retry next call")
+                    # Leave as None so initialization is retried on the next call
 
             addr_lower = token.lower()
-            coingecko_id = CoinGeckoPriceSource._address_to_coingecko_id_map.get(addr_lower)
+            addr_map = CoinGeckoPriceSource._address_to_coingecko_id_map
+            coingecko_id = addr_map.get(addr_lower) if addr_map is not None else None
             if coingecko_id:
                 logger.debug("Resolved address %s to CoinGecko ID '%s'", addr_lower, coingecko_id)
                 return coingecko_id

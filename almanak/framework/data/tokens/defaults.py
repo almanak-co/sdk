@@ -26,7 +26,6 @@ Last Updated: 2026-02-05
 """
 
 from .models import BridgeType, ChainTokenConfig, Token
-from .registry import TokenRegistry
 
 # =============================================================================
 # CONSTANTS
@@ -1697,25 +1696,6 @@ DEFAULT_TOKENS: list[Token] = [
 ]
 
 
-def get_default_registry() -> TokenRegistry:
-    """Create a TokenRegistry pre-populated with common DeFi tokens.
-
-    Returns:
-        TokenRegistry with ETH, WETH, WBNB, USDC, USDT, DAI, WBTC, ARB, OP,
-        MATIC, LINK, UNI, AAVE, CRV, GMX, PENDLE, and more pre-registered.
-
-    Example:
-        registry = get_default_registry()
-        usdc = registry.get("USDC")
-        assert usdc is not None
-        assert usdc.decimals == 6
-    """
-    registry = TokenRegistry()
-    for token in DEFAULT_TOKENS:
-        registry.register(token)
-    return registry
-
-
 def get_coingecko_id(symbol: str) -> str | None:
     """Get CoinGecko ID for a token symbol.
 
@@ -1864,7 +1844,6 @@ __all__ = [
     "YT_wstETH",
     # Functions and lists
     "DEFAULT_TOKENS",
-    "get_default_registry",
     "get_coingecko_id",
     "get_coingecko_ids",
 ]
