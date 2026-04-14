@@ -999,6 +999,7 @@ class IntentStateMachine:
             "no size specified",
             "unknown router",
             "unknown protocol",
+            "unknown market",
             "no router configured",
             "no adapter found",
             "no connector found",

@@ -132,6 +132,12 @@ class TestErrorCategorization:
         sm = self._make_state_machine()
         assert sm._categorize_error("Protocol not available on this chain") == "COMPILATION_PERMANENT"
 
+    def test_unknown_market(self):
+        # Morpho Blue on a chain where the contract isn't deployed reports
+        # "Unknown market" — deterministic, should fail fast (no retries).
+        sm = self._make_state_machine()
+        assert sm._categorize_error("Unknown market: 0xabc") == "COMPILATION_PERMANENT"
+
     def test_not_deployed(self):
         sm = self._make_state_machine()
         assert sm._categorize_error("PancakeSwap V3 not deployed on optimism") == "COMPILATION_PERMANENT"
