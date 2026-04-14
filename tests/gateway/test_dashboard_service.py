@@ -423,6 +423,7 @@ class TestPortfolioFallback:
         )
 
         assert result == ("123.45", "0")
+        dashboard_service._portfolio_chain.get_wallet_portfolio.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_metrics_always_win_even_with_stale_snapshot(self, dashboard_service):
@@ -448,6 +449,8 @@ class TestPortfolioFallback:
         )
 
         assert result == ("100", "0")
+        # Zerion should not be called when metrics are available
+        dashboard_service._portfolio_chain.get_wallet_portfolio.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_stale_snapshot_returns_zeros_when_no_metrics(self, dashboard_service):

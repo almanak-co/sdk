@@ -108,14 +108,12 @@ def _position_to_dict(p: "PositionValue") -> dict[str, Any]:
         "tokens": p.tokens,
         "details": p.details,
     }
-    # Phase 4 economic state fields — only include when set to keep payload lean.
-    # Use explicit != Decimal("0") to avoid Decimal truthiness bug (Decimal("0") is falsy).
-    _ZERO = Decimal("0")
-    if p.cost_basis_usd != _ZERO:
+    # Phase 4 economic state fields — only include when set to keep payload lean
+    if p.cost_basis_usd:
         d["cost_basis_usd"] = str(p.cost_basis_usd)
-    if p.unrealized_pnl_usd != _ZERO:
+    if p.unrealized_pnl_usd:
         d["unrealized_pnl_usd"] = str(p.unrealized_pnl_usd)
-    if p.realized_pnl_usd != _ZERO:
+    if p.realized_pnl_usd:
         d["realized_pnl_usd"] = str(p.realized_pnl_usd)
     if p.entry_timestamp:
         d["entry_timestamp"] = p.entry_timestamp
@@ -324,7 +322,7 @@ class PortfolioMetrics:
 
     # Phase 4: canonical identity and execution mode (VIB-2835/2837)
     deployment_id: str = ""  # Canonical deployment key (wallet+chain hash or --id)
-    execution_mode: str = ""  # "live", "dry_run", or "paper" (future: "backtest")
+    execution_mode: str = ""  # "live", "paper", "dry_run", "backtest"
     is_complete: bool = True  # Whether all expected records for this cycle were committed
 
     def __post_init__(self) -> None:

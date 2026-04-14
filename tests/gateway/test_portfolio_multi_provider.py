@@ -747,22 +747,6 @@ class TestIntegrationServicePortfolio:
 
 
 # =============================================================================
-# DashboardService portfolio chain tests
-# =============================================================================
-
-
-class TestDashboardServicePortfolio:
-    """Tests for dashboard portfolio methods.
-
-    Note: _get_external_portfolio_total and _resolve_portfolio_contexts were removed
-    in Phase 4 (VIB-2838) as part of the dashboard read-path simplification.
-    The dashboard now uses a 2-level read path (metrics, fresh snapshot) only.
-    """
-
-    pass
-
-
-# =============================================================================
 # GatewaySettings integration
 # =============================================================================
 

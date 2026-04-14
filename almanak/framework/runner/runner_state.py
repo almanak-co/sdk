@@ -342,8 +342,8 @@ async def _build_metrics_for_snapshot(
                 from almanak.framework.observability.context import get_cycle_id
 
                 cycle_id = get_cycle_id() or ""
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("cycle_id context fallback failed: %s", e)
 
         # Resolve deployment_id: prefer runner's deployment_id, fall back to strategy_id
         deployment_id = getattr(runner, "deployment_id", "") or snapshot.strategy_id

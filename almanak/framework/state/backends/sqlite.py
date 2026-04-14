@@ -277,7 +277,7 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     strategy_id TEXT NOT NULL,
     deployment_id TEXT DEFAULT '',  -- Phase 4: canonical identity key (VIB-2835)
     cycle_id TEXT DEFAULT '',  -- Phase 4: correlation to iteration (VIB-2835)
-    execution_mode TEXT DEFAULT '',  -- Phase 4: live or dry_run (VIB-2837)
+    execution_mode TEXT DEFAULT '',  -- Phase 4: live, paper, dry_run (VIB-2837)
     timestamp TEXT NOT NULL,
     iteration_number INTEGER DEFAULT 0,
     total_value_usd TEXT NOT NULL,  -- Decimal as string
@@ -315,7 +315,7 @@ CREATE TABLE IF NOT EXISTS portfolio_metrics (
     positions_json TEXT DEFAULT '[]',  -- Snapshot of position state (VIB-2765)
     cycle_id TEXT,  -- Correlation to portfolio_snapshots (VIB-2765)
     deployment_id TEXT DEFAULT '',  -- Phase 4: canonical identity key (VIB-2835)
-    execution_mode TEXT DEFAULT '',  -- Phase 4: live or dry_run (VIB-2837)
+    execution_mode TEXT DEFAULT '',  -- Phase 4: live, paper, dry_run (VIB-2837)
     is_complete BOOLEAN DEFAULT 1,  -- Phase 4: all records for this cycle committed (VIB-2839)
     updated_at TEXT NOT NULL
 );
@@ -326,7 +326,7 @@ CREATE TABLE IF NOT EXISTS transaction_ledger (
     cycle_id TEXT NOT NULL,
     strategy_id TEXT NOT NULL,
     deployment_id TEXT DEFAULT '',  -- Phase 4: canonical identity key (VIB-2835)
-    execution_mode TEXT DEFAULT '',  -- Phase 4: live or dry_run (VIB-2837)
+    execution_mode TEXT DEFAULT '',  -- Phase 4: live, paper, dry_run (VIB-2837)
     timestamp TEXT NOT NULL,
     intent_type TEXT NOT NULL,
     token_in TEXT,
@@ -363,7 +363,7 @@ CREATE TABLE IF NOT EXISTS position_events (
     id TEXT PRIMARY KEY,
     deployment_id TEXT NOT NULL,
     cycle_id TEXT DEFAULT '',  -- Phase 4: correlation to iteration (VIB-2835)
-    execution_mode TEXT DEFAULT '',  -- Phase 4: live or dry_run (VIB-2837)
+    execution_mode TEXT DEFAULT '',  -- Phase 4: live, paper, dry_run (VIB-2837)
     position_id TEXT NOT NULL,
     position_type TEXT NOT NULL,  -- LP, PERP
     event_type TEXT NOT NULL,  -- OPEN, CLOSE, COLLECT_FEES, SNAPSHOT
@@ -649,6 +649,22 @@ class SQLiteStore:
                             (new_deployment_id, old_strategy_id),
                         )
                         total += cursor.rowcount
+
+                    # position_events uses deployment_id instead of strategy_id
+                    pe_exists = conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='position_events'",
+                    ).fetchone()
+                    if pe_exists:
+                        pe_old = conn.execute(
+                            "SELECT COUNT(*) FROM position_events WHERE deployment_id = ?",
+                            (old_strategy_id,),
+                        ).fetchone()[0]
+                        if pe_old > 0:
+                            pe_cursor = conn.execute(
+                                "UPDATE position_events SET deployment_id = ? WHERE deployment_id = ?",
+                                (new_deployment_id, old_strategy_id),
+                            )
+                            total += pe_cursor.rowcount
 
                     conn.execute("COMMIT")
                     if total > 0:

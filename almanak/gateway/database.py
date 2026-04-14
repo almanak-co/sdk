@@ -104,6 +104,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolio_snapshots_agent_time
 CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_cleanup
     ON portfolio_snapshots (created_at);
 
+-- Migration: add Phase 4 columns to portfolio_snapshots
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS deployment_id TEXT DEFAULT '';
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS cycle_id TEXT DEFAULT '';
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS execution_mode TEXT DEFAULT '';
+
 -- Portfolio metrics table ---------------------------------------------------
 CREATE TABLE IF NOT EXISTS portfolio_metrics (
     agent_id          TEXT PRIMARY KEY,
@@ -112,14 +117,22 @@ CREATE TABLE IF NOT EXISTS portfolio_metrics (
     deposits_usd      TEXT DEFAULT '0',
     withdrawals_usd   TEXT DEFAULT '0',
     gas_spent_usd     TEXT DEFAULT '0',
+    deployment_id     TEXT DEFAULT '',
+    cycle_id          TEXT DEFAULT '',
+    execution_mode    TEXT DEFAULT '',
+    is_complete       BOOLEAN DEFAULT TRUE,
+    total_value_usd   TEXT DEFAULT '0',
+    positions_json    JSONB DEFAULT '[]',
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Migration: add Phase 4 accounting columns to portfolio_metrics
+-- Migration: add Phase 4 columns to portfolio_metrics
 ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS deployment_id TEXT DEFAULT '';
 ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS cycle_id TEXT DEFAULT '';
 ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS execution_mode TEXT DEFAULT '';
-ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS is_complete BOOLEAN DEFAULT true;
+ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS is_complete BOOLEAN DEFAULT TRUE;
+ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS total_value_usd TEXT DEFAULT '0';
+ALTER TABLE portfolio_metrics ADD COLUMN IF NOT EXISTS positions_json JSONB DEFAULT '[]';
 
 -- CLOB orders table ---------------------------------------------------------
 CREATE TABLE IF NOT EXISTS clob_orders (
@@ -208,6 +221,10 @@ CREATE INDEX IF NOT EXISTS idx_transaction_ledger_cycle_id
 
 CREATE INDEX IF NOT EXISTS idx_transaction_ledger_intent_type
     ON transaction_ledger (agent_id, intent_type);
+
+-- Migration: add Phase 4 columns to transaction_ledger
+ALTER TABLE transaction_ledger ADD COLUMN IF NOT EXISTS deployment_id TEXT DEFAULT '';
+ALTER TABLE transaction_ledger ADD COLUMN IF NOT EXISTS execution_mode TEXT DEFAULT '';
 """
 
 

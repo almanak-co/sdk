@@ -99,11 +99,11 @@ class UniswapV4HooksConfig:
     description="Hook-aware V4 LP — dynamic fee hooks, HookFlags discovery, typed hookData encoding",
     version="1.0.0",
     author="Almanak",
-    tags=["demo", "lp", "hooks", "uniswap-v4", "base", "v4"],
-    supported_chains=["base", "ethereum", "arbitrum"],
+    tags=["demo", "lp", "hooks", "uniswap-v4", "ethereum", "v4"],
+    supported_chains=["ethereum", "arbitrum", "base"],
     supported_protocols=["uniswap_v4"],
     intent_types=["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES", "HOLD"],
-    default_chain="base",
+    default_chain="ethereum",
 )
 class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
     """Hook-aware Uniswap V4 LP strategy (reference implementation).

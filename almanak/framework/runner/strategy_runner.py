@@ -197,9 +197,6 @@ class StrategyRunner:
         self._terminal_lifecycle_error_message: str | None = None
         self._current_loop_task: asyncio.Task[None] | None = None
 
-        # Phase 4: cycle_id preserved for snapshot capture after iteration
-        self._last_cycle_id: str = ""
-
         # Metrics tracking
         self._consecutive_errors = 0
         self._first_error_at: datetime | None = None  # Timestamp of first error in current streak

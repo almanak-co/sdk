@@ -75,19 +75,6 @@ def resolve_deployment_id(
     return strategy_name
 
 
-def validate_deployment_id(deployment_id: str) -> bool:
-    """Check whether a deployment_id is canonical (hash-based or user-supplied).
-
-    A canonical deployment_id contains a ``":"`` separator, meaning it was
-    produced by the deterministic hash path or by a user-supplied ``--id``.
-    Bare strategy names (the deprecated fallback) do not contain ``":"``.
-
-    Returns:
-        True if the deployment_id is canonical, False otherwise.
-    """
-    return ":" in deployment_id
-
-
 def generate_run_id() -> str:
     """Generate a fresh per-process run_id (UUID4 hex, 12 chars)."""
     return uuid.uuid4().hex[:12]

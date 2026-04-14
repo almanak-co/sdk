@@ -69,7 +69,7 @@ async def test_schema_has_required_columns(store: SQLiteStore):
 
     expected_columns = {
         "portfolio_snapshots": {"deployment_id", "cycle_id", "execution_mode"},
-        "portfolio_metrics": {"deployment_id", "execution_mode", "is_complete"},
+        "portfolio_metrics": {"deployment_id", "cycle_id", "execution_mode", "is_complete"},
         "transaction_ledger": {"deployment_id", "execution_mode"},
         "position_events": {"cycle_id", "execution_mode"},
     }
@@ -457,6 +457,7 @@ async def test_migration_adds_new_columns():
 
     assert "deployment_id" not in _column_names("portfolio_snapshots")
     assert "execution_mode" not in _column_names("portfolio_metrics")
+    assert "cycle_id" not in _column_names("portfolio_metrics")
     assert "cycle_id" not in _column_names("position_events")
     assert "deployment_id" not in _column_names("transaction_ledger")
 
@@ -473,6 +474,7 @@ async def test_migration_adds_new_columns():
 
     met_cols = _column_names("portfolio_metrics")
     assert "deployment_id" in met_cols
+    assert "cycle_id" in met_cols
     assert "execution_mode" in met_cols
     assert "is_complete" in met_cols
 

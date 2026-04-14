@@ -46,7 +46,7 @@ class LedgerEntry:
     cycle_id: str = ""
     strategy_id: str = ""
     deployment_id: str = ""  # Phase 4: canonical identity key (VIB-2835)
-    execution_mode: str = ""  # Phase 4: "live", "dry_run", or "paper" (VIB-2837, VIB-2832)
+    execution_mode: str = ""  # Phase 4: "live", "paper", "dry_run" (VIB-2837)
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     intent_type: str = ""
     token_in: str = ""
@@ -82,8 +82,8 @@ class LedgerEntry:
             id=data.get("id", str(uuid.uuid4())),
             cycle_id=data.get("cycle_id", ""),
             strategy_id=data.get("strategy_id", ""),
-            deployment_id=data.get("deployment_id") or "",
-            execution_mode=data.get("execution_mode") or "",
+            deployment_id=data.get("deployment_id", ""),
+            execution_mode=data.get("execution_mode", ""),
             timestamp=ts,
             intent_type=data.get("intent_type", ""),
             token_in=data.get("token_in", ""),
