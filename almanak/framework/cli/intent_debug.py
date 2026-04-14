@@ -213,17 +213,29 @@ def load_strategy_from_file(file_path: Path) -> tuple[type[IntentStrategy[Any]] 
         sys.modules["strategy_module"] = module
         spec.loader.exec_module(module)
 
-        # Find IntentStrategy subclasses
+        # Find concrete IntentStrategy subclasses (skip abstract base classes
+        # like StatelessStrategy that may be imported but not instantiable).
         strategy_classes = []
         for name in dir(module):
             obj = getattr(module, name)
-            if isinstance(obj, type) and obj is not IntentStrategy and issubclass(obj, IntentStrategy):
+            if (
+                isinstance(obj, type)
+                and obj is not IntentStrategy
+                and issubclass(obj, IntentStrategy)
+                and not getattr(obj, "__abstractmethods__", frozenset())
+            ):
                 strategy_classes.append(obj)
 
         if not strategy_classes:
-            return None, "No IntentStrategy subclass found in file"
+            return None, "No concrete IntentStrategy subclass found in file"
 
-        # Return the first one (or could return all)
+        # Prefer the most-derived class (defined in this file, not just imported)
+        if len(strategy_classes) > 1:
+            # Filter to classes defined in this module (not imported base classes)
+            local_classes = [c for c in strategy_classes if c.__module__ == module.__name__]
+            if local_classes:
+                strategy_classes = local_classes
+
         return strategy_classes[0], None
 
     except Exception as e:
