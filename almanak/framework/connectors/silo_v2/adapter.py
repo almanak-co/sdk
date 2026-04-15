@@ -53,9 +53,12 @@ SILO_V2_FUNCTION_SELECTORS = {
     "get_silos": "0xaecc90cb",
 }
 
-# CollateralType enum values
-COLLATERAL_TYPE_COLLATERAL = 0  # Borrowable deposits, earns interest
-COLLATERAL_TYPE_PROTECTED = 1  # Non-borrowable, guaranteed withdrawal
+# Silo V2 AssetType enum (on-chain): Protected = 0, Collateral = 1, Debt = 2.
+# Verified against silo 0xfA5f7d5BcD70dC2F031eE906fc692a9e19584CB0 on Avalanche —
+# deposit(..., 0) emits DepositProtected and deposit(..., 1) emits the ERC-4626
+# Deposit event. See VIB-2897.
+COLLATERAL_TYPE_PROTECTED = 0  # Non-borrowable, guaranteed withdrawal
+COLLATERAL_TYPE_COLLATERAL = 1  # Borrowable deposits, earns interest
 
 
 @dataclass
@@ -285,7 +288,7 @@ class SiloV2Adapter:
             asset: Token symbol to deposit (e.g., "USDC")
             amount: Amount in human-readable units
             market_name: Optional market name (e.g., "WAVAX/USDC")
-            collateral_type: 0=Collateral (borrowable), 1=Protected
+            collateral_type: 0=Protected (non-borrowable), 1=Collateral (borrowable)
 
         Returns:
             TransactionResult with encoded calldata
@@ -340,7 +343,7 @@ class SiloV2Adapter:
             amount: Amount in human-readable units (ignored if withdraw_all)
             market_name: Optional market name
             withdraw_all: If True, withdraw all available balance
-            collateral_type: 0=Collateral, 1=Protected
+            collateral_type: 0=Protected, 1=Collateral
 
         Returns:
             TransactionResult with encoded calldata
@@ -548,7 +551,7 @@ class SiloV2Adapter:
             shares: Exact share amount to redeem
             market_name: Market name for metadata
             silo_address: The silo vault address
-            collateral_type: 0=Collateral, 1=Protected
+            collateral_type: 0=Protected, 1=Collateral
 
         Returns:
             TransactionResult with encoded calldata
