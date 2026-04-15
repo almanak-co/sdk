@@ -860,13 +860,17 @@ def on_intent_executed(self, intent, success: bool, result):
 
 ### config.json
 
-Contains only tunable runtime parameters. Structural metadata (name, description, chains) lives in
-the `@almanak_strategy` decorator on your strategy class.
+Contains the target chain and tunable runtime parameters. `name`, `description`, and
+`supported_chains` still live in the `@almanak_strategy` decorator on your strategy class; the
+config.json `chain` field acts as an explicit override of the decorator's `default_chain` and
+lets tooling (sdk-planner, operators, deployment UIs) read the target chain without importing
+the strategy module.
 
 **Single-chain:**
 
 ```json
 {
+    "chain": "arbitrum",
     "base_token": "WETH",
     "quote_token": "USDC",
     "rsi_period": 14,

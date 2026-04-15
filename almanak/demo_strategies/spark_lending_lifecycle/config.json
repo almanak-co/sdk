@@ -1,4 +1,5 @@
 {
+    "chain": "ethereum",
     "token_funding": [
         {
             "symbol": "DAI",

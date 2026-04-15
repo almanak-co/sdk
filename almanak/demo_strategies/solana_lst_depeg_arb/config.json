@@ -1,4 +1,5 @@
 {
+    "chain": "solana",
     "lst_token": "mSOL",
     "base_token": "SOL",
     "depeg_entry_threshold_pct": 0.8,

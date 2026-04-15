@@ -1,4 +1,5 @@
 {
+    "chain": "monad",
     "token_funding": [
         {
             "symbol": "WETH",

@@ -1,4 +1,5 @@
 {
+    "chain": "arbitrum",
     "token_funding": [
         {
             "symbol": "WETH",

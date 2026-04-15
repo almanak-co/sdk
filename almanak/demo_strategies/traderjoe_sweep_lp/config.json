@@ -1,4 +1,5 @@
 {
+    "chain": "avalanche",
     "token_funding": [
         {
             "symbol": "WAVAX",

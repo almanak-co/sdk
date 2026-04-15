@@ -1,4 +1,5 @@
 {
+    "chain": "bsc",
     "token_funding": [
         {
             "symbol": "USDC",

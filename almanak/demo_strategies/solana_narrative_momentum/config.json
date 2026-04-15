@@ -1,4 +1,5 @@
 {
+    "chain": "solana",
     "base_token": "USDC",
     "lp_amount_base": "0.5",
     "lp_amount_quote": "0.5",

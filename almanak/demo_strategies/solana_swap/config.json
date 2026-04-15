@@ -1,4 +1,5 @@
 {
+    "chain": "solana",
     "from_token": "USDC",
     "to_token": "SOL",
     "amount": "0.10",

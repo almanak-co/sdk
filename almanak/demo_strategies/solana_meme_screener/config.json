@@ -1,4 +1,5 @@
 {
+    "chain": "solana",
     "base_token": "USDC",
     "swap_amount": "1.0",
     "max_slippage_pct": 5.0,

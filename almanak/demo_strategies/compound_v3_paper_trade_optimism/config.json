@@ -1,4 +1,5 @@
 {
+    "chain": "optimism",
     "token_funding": [
         {
             "symbol": "USDC",

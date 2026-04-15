@@ -1,4 +1,5 @@
 {
+    "chain": "solana",
     "lp_pool": "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv",
     "lp_protocol": "raydium_clmm",
     "lp_amount_sol": "0.005",

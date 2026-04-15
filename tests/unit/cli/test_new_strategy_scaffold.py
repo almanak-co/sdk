@@ -147,6 +147,30 @@ def test_config_json_is_valid(template: StrategyTemplate) -> None:
     assert isinstance(config, dict)
 
 
+@pytest.mark.parametrize(
+    "chain",
+    [SupportedChain.ARBITRUM, SupportedChain.BASE, SupportedChain.MANTLE, SupportedChain.SOLANA],
+    ids=lambda c: c.value,
+)
+def test_config_json_emits_chain_as_first_key(chain: SupportedChain) -> None:
+    """Generated config.json must emit the chain as the first top-level key.
+
+    sdk-planner and other tooling read chain from config.json rather than
+    importing the strategy module. The framework reads this as an explicit
+    override of the @almanak_strategy decorator's default_chain.
+    """
+    import json
+
+    config_str = generate_config_json(
+        name="Chain Field Test",
+        template=StrategyTemplate.TA_SWAP,
+        chain=chain,
+    )
+    config = json.loads(config_str)
+    assert list(config.keys())[0] == "chain", "chain must be the first top-level key"
+    assert config["chain"] == chain.value
+
+
 # ---------------------------------------------------------------------------
 # Mantle-specific anvil_funding config branch
 # ---------------------------------------------------------------------------

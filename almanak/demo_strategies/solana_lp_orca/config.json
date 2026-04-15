@@ -1,4 +1,5 @@
 {
+    "chain": "solana",
     "pool": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
     "amount_sol": "0.001",
     "amount_usdc": "0.15",

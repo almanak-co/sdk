@@ -1,4 +1,5 @@
 {
+    "chain": "xlayer",
     "token_funding": [
         {
             "symbol": "WOKB",

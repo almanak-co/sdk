@@ -1,4 +1,5 @@
 {
+    "chain": "mantle",
     "token_funding": [
         {
             "symbol": "WETH",

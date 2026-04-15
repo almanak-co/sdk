@@ -1,4 +1,5 @@
 {
+    "chain": "zerog",
     "min_stake_amount": "5",
     "force_action": ""
 }

@@ -1,4 +1,5 @@
 {
+    "chain": "solana",
     "market": "SOL-PERP",
     "collateral_token": "USDC",
     "collateral_amount": "100.0",

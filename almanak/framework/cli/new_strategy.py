@@ -2285,13 +2285,16 @@ def generate_config_json(
     """Generate config.json content for the strategy.
 
     This produces the runtime config file that load_strategy_config() reads.
-    Structural metadata (strategy_id, chain) lives in the @almanak_strategy decorator,
-    not here. Config.json is for tunable parameters only.
+    The top-level ``chain`` field is emitted so tools reading config.json (AI
+    planners, operators, deployment UIs) can see the target chain without
+    importing the strategy module. At runtime it acts as an explicit override
+    of the @almanak_strategy decorator's default_chain (priority order set in
+    ``almanak/framework/cli/run.py``).
     """
     import json
 
-    # Tunable parameters only - no structural metadata
-    data: dict[str, object] = {}
+    # Chain first, then tunable template parameters.
+    data: dict[str, object] = {"chain": chain.value}
 
     # Template-specific parameters (matching what __init__ reads via get_config)
     if template == StrategyTemplate.TA_SWAP:
