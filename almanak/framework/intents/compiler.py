@@ -6231,7 +6231,13 @@ class IntentCompiler:
         Supports formats:
         - "TOKEN0/TOKEN1/FEE" (e.g., "WETH/USDC/3000")
         - "TOKEN0/TOKEN1" (defaults to 3000 fee tier)
-        - Pool address starting with "0x" (returns default tokens)
+        - "0xTOKEN0/0xTOKEN1/FEE" (raw token addresses also work)
+
+        Bare pool addresses ("0x..." with no "/") are NOT supported. Resolving a
+        pool address to its token pair requires an on-chain lookup (calling the
+        pool contract's token0()/token1()/fee() view functions), which this
+        compiler doesn't currently implement. Use the TOKEN0/TOKEN1/FEE format
+        instead.
 
         Args:
             pool: Pool identifier string
@@ -6245,19 +6251,23 @@ class IntentCompiler:
         # Default fee tier (0.3%)
         default_fee = 3000
 
-        # Handle single pool address format (e.g., "0xbDbC38652D78AF...")
-        # Only match if no "/" present -- a pool string like "0xToken0/0xToken1/3000"
-        # should fall through to the TOKEN0/TOKEN1/FEE parsing below.
+        # Reject bare pool address format (e.g., "0xbDbC38652D78AF..." with no "/").
+        # The previous behavior here silently substituted WETH/USDC as a
+        # placeholder pair, which would compile a working LP intent against the
+        # WRONG pool and only fail on-chain (or worse, succeed in a different
+        # pool entirely -- silent data corruption with real-money risk). Until
+        # we implement an on-chain pool resolver that calls the pool contract's
+        # token0()/token1()/fee() view functions, this path must fail hard.
+        # See compiler.py:_parse_pool_info docstring for supported formats.
         if pool.startswith("0x") and "/" not in pool:
-            # For pool addresses, we need external lookup in production
-            # For now, return placeholder tokens based on common patterns
-            # This would query the pool contract for token addresses
-            logger.warning(f"Pool address format requires on-chain lookup: {pool}. Using default WETH/USDC pair.")
-            token0 = self._resolve_token("WETH")
-            token1 = self._resolve_token("USDC")
-            if token0 is None or token1 is None:
-                return None
-            return (token0, token1, default_fee, False)
+            logger.error(
+                "Bare pool address '%s' is not supported by the LP compiler. "
+                "Use 'TOKEN0/TOKEN1/FEE' format instead (e.g., 'WETH/USDC/3000'); "
+                "raw token addresses are accepted, e.g. "
+                "'0xToken0Addr.../0xToken1Addr.../3000'.",
+                pool,
+            )
+            return None
 
         # Handle TOKEN0/TOKEN1/FEE or TOKEN0/TOKEN1 format
         parts = pool.split("/")

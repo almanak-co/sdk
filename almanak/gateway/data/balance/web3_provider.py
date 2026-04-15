@@ -35,6 +35,7 @@ Example:
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -49,9 +50,20 @@ from almanak.framework.data.interfaces import (
     DataSourceError,
     DataSourceUnavailable,
 )
+from almanak.framework.data.tokens.exceptions import (
+    TokenNotFoundError as FrameworkTokenNotFoundError,
+)
+from almanak.framework.data.tokens.exceptions import (
+    TokenResolutionError,
+)
+from almanak.gateway.services.onchain_lookup import OnChainLookup
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver
+
+# EVM address pattern (0x + 40 hex chars). Used to decide whether to attempt
+# the on-chain ERC20 metadata fallback when static resolution misses.
+_EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +262,9 @@ class TokenNotFoundError(DataSourceError):
         self.token = token
         self.chain = chain
         super().__init__(
-            f"Token '{token}' not found in registry for chain '{chain}'. Use add_token() to register it or provide an address."
+            f"Token '{token}' could not be resolved on chain '{chain}'. "
+            f"For unknown tokens, pass the contract address; for unknown symbols, "
+            f"register them via add_token()."
         )
 
 
@@ -340,6 +354,9 @@ class Web3BalanceProvider:
         # Balance cache: token_symbol -> BalanceCacheEntry
         self._cache: dict[str, BalanceCacheEntry] = {}
 
+        # Lazy on-chain ERC20 metadata lookup (built on first miss for an address)
+        self._onchain_lookup: OnChainLookup | None = None
+
         # Health metrics
         self._metrics = ProviderHealthMetrics()
 
@@ -399,7 +416,7 @@ class Web3BalanceProvider:
             return cached.result
 
         # Resolve token metadata
-        token_meta = self._resolve_token(token)
+        token_meta = await self._resolve_token(token)
         if token_meta is None:
             raise TokenNotFoundError(token, self._chain)
 
@@ -591,18 +608,37 @@ class Web3BalanceProvider:
     # Private Methods
     # =========================================================================
 
-    def _resolve_token(self, token: str) -> TokenMetadata | None:
+    async def _resolve_token(self, token: str) -> TokenMetadata | None:
         """Resolve a token symbol or address to TokenMetadata.
 
-        Uses the unified TokenResolver as the single source of truth for
-        token resolution across the codebase.
+        Resolution order:
+        1. Static / cached registry via TokenResolver (fast, in-process).
+        2. If the input is a raw EVM address that missed the static path,
+           query the contract on-chain via OnChainLookup for
+           decimals/symbol/name. The result is **not** written back into
+           the shared TokenResolver -- the contract's self-reported
+           symbol() is attacker-controlled and persisting it would create
+           a symbol-squatting surface (see SECURITY note below).
+
+        Returns None for legitimate misses:
+        - Symbol input not in the static registry (no symbol-fallback path).
+        - EVM address that resolves on-chain to a non-ERC20 contract.
+
+        Raises (does NOT swallow) infrastructure failures:
+        - Unexpected exceptions from TokenResolver (programmer errors,
+          unicode bugs, etc.) propagate so the gateway surfaces them as
+          service errors instead of "token not found".
+        - Network/RPC failures from OnChainLookup (timeouts, connection
+          errors, etc.) propagate for the same reason.
 
         Args:
-            token: Token symbol (e.g., "WETH") or address (e.g., "0x...")
+            token: Token symbol (e.g., "WETH") or address (e.g., "0x...").
 
         Returns:
-            TokenMetadata or None if not found
+            TokenMetadata, or None if the token is a legitimate miss.
         """
+        # 1. Fast path: static / cached resolver
+        static_failure_reason: str | None = None
         try:
             resolved = self._token_resolver.resolve(token, self._chain)
             return TokenMetadata(
@@ -611,13 +647,74 @@ class Web3BalanceProvider:
                 decimals=resolved.decimals,
                 is_native=resolved.is_native,
             )
-        except Exception:
+        except (FrameworkTokenNotFoundError, TokenResolutionError) as e:
+            static_failure_reason = str(e)
+        # NOTE: any other exception from the resolver propagates intentionally.
+        # Coercing them to "token not found" would mask programmer errors
+        # and put strategies into HOLD instead of surfacing the real failure.
+
+        # 2. On-chain fallback: only meaningful for raw EVM addresses.
+        # Symbol misses cannot be recovered without dynamic discovery
+        # (CoinGecko/Jupiter), which is intentionally out of scope here.
+        if not _EVM_ADDRESS_RE.match(token):
             logger.debug(
-                "TokenResolver failed for %s on %s",
+                "TokenResolver miss for symbol-like input '%s' on %s: %s",
+                token,
+                self._chain,
+                static_failure_reason,
+            )
+            return None
+
+        # OnChainLookup internally handles ContractLogicError (non-ERC20
+        # contracts) and returns None for that case. Other exceptions
+        # (network errors, RPC timeouts, web3 client failures) propagate
+        # so the gateway returns a service error rather than a misleading
+        # "token not found" -- conflating the two would cause strategies
+        # to HOLD on transient infrastructure issues instead of retrying.
+        lookup = self._get_onchain_lookup()
+        metadata = await lookup.lookup(self._chain, token)
+
+        if metadata is None:
+            logger.warning(
+                "Address %s on %s is not a valid ERC20 contract",
                 token,
                 self._chain,
             )
             return None
+
+        # SECURITY: do NOT write the discovered token back into the shared
+        # TokenResolver. The resolver cache indexes by both address AND symbol
+        # (TokenCacheManager.put in almanak/framework/data/tokens/cache.py:278-315),
+        # and `metadata.symbol` comes from the contract's on-chain symbol() call.
+        # That value is attacker-controlled -- any deployer can make their
+        # contract return "USDC", "WETH", etc. Publishing a
+        # (chain, symbol) -> address entry from an untrusted contract would
+        # create a symbol-squatting surface for every other in-process caller
+        # that later resolves by symbol. The provider's own BalanceCacheEntry
+        # TTL already makes repeat balance calls cheap within the cache window;
+        # after TTL expiry a single ~150ms on-chain metadata call is acceptable.
+        # We report the on-chain symbol back to the caller for display only;
+        # it is never trusted as a cache key.
+        return TokenMetadata(
+            symbol=metadata.symbol,
+            address=metadata.address,
+            decimals=metadata.decimals,
+            # Respect OnChainLookup's is_native detection: it correctly
+            # returns True for the NATIVE_SENTINEL_ADDRESS (0xEeee...EEeE)
+            # so balance queries for that address dispatch to
+            # eth_getBalance instead of failing on a balanceOf() call to
+            # a non-contract.
+            is_native=metadata.is_native,
+        )
+
+    def _get_onchain_lookup(self) -> OnChainLookup:
+        """Return the lazy-built OnChainLookup for this provider's RPC."""
+        if self._onchain_lookup is None:
+            self._onchain_lookup = OnChainLookup(
+                rpc_url=self._rpc_url,
+                timeout=self._request_timeout,
+            )
+        return self._onchain_lookup
 
     def _get_cached(self, token: str) -> BalanceCacheEntry | None:
         """Get cached entry if exists and not expired."""

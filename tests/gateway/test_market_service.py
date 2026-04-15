@@ -157,6 +157,94 @@ class TestMarketServiceGetBalance:
                 assert response.balance == "10.5"
                 assert response.decimals == 18
 
+    @pytest.mark.asyncio
+    async def test_get_balance_unknown_address_dynamic_resolution(
+        self, market_service, mock_context
+    ):
+        """GetBalance resolves an unknown ERC20 address on-chain and returns the balance.
+
+        Direct regression for the OPENAGENTS staging bug: a strategy passes a raw
+        ERC20 address that isn't in DEFAULT_TOKENS, and we expect the gateway to
+        fetch decimals on-chain via OnChainLookup rather than raising
+        "Use add_token()".
+        """
+        from almanak.framework.data.tokens.exceptions import (
+            TokenNotFoundError as FrameworkTokenNotFoundError,
+        )
+        from almanak.gateway.data.balance.web3_provider import Web3BalanceProvider
+        from almanak.gateway.services.onchain_lookup import (
+            TokenMetadata as OnChainTokenMetadata,
+        )
+
+        unknown_address = "0xcb5ff7331193c45f61f05b035ddabe08f13f6ba3"
+        wallet_address = "0x1234567890123456789012345678901234567890"
+
+        # Isolate the test from the global TokenResolver singleton (which has a
+        # persistent disk cache) so prior runs can't pollute state. We replace it
+        # with a mock that always misses statically and swallows register() calls.
+        isolated_resolver = MagicMock()
+        isolated_resolver.resolve.side_effect = FrameworkTokenNotFoundError(
+            token=unknown_address, chain="base"
+        )
+
+        # OnChainLookup returns valid ERC20 metadata for the unknown address.
+        fake_lookup = MagicMock()
+        fake_lookup.lookup = AsyncMock(
+            return_value=OnChainTokenMetadata(
+                address=unknown_address,
+                symbol="OPENAGENTS",
+                decimals=18,
+                name="OpenAgents",
+                is_native=False,
+            )
+        )
+
+        # 3.14 OPENAGENTS in raw base units (18 decimals).
+        raw_balance = 3_140_000_000_000_000_000
+
+        # Patch at the class level so the real Web3BalanceProvider (built by
+        # MarketServiceServicer._get_balance_provider) picks them up.
+        with patch(
+            "almanak.framework.data.tokens.resolver.get_token_resolver",
+            return_value=isolated_resolver,
+        ), patch.object(
+            Web3BalanceProvider, "_get_onchain_lookup", return_value=fake_lookup
+        ), patch.object(
+            Web3BalanceProvider,
+            "_get_erc20_balance_with_retry",
+            new=AsyncMock(return_value=raw_balance),
+        ):
+            market_service._initialized = True
+            # Skip the USD-conversion pricing branch.
+            with patch.object(market_service, "_price_aggregator") as mock_aggregator:
+                mock_aggregator.get_aggregated_price = AsyncMock(
+                    side_effect=Exception("Skip USD")
+                )
+
+                request = gateway_pb2.BalanceRequest(
+                    token=unknown_address,
+                    chain="base",
+                    wallet_address=wallet_address,
+                )
+                response = await market_service.GetBalance(request, mock_context)
+
+            # Response success: status code was never overridden to an error.
+            mock_context.set_code.assert_not_called()
+
+            assert response.balance == "3.14"
+            assert response.decimals == 18
+            assert response.address == unknown_address
+            assert response.raw_balance == str(raw_balance)
+
+        fake_lookup.lookup.assert_awaited_once_with("base", unknown_address)
+        # SECURITY: register() must NOT be called -- the contract-reported symbol
+        # is untrusted, and persisting (chain, SYMBOL) -> address into the shared
+        # TokenResolver cache would create a symbol-squatting surface across
+        # providers. The balance provider's own BalanceCacheEntry TTL handles
+        # repeat-call efficiency; after TTL expiry we pay one more ~150ms
+        # OnChainLookup call, which is acceptable.
+        isolated_resolver.register.assert_not_called()
+
 
 class TestMarketServiceBatchGetBalances:
     """Tests for MarketService.BatchGetBalances."""

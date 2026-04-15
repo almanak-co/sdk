@@ -74,13 +74,22 @@ class TestParsePoolInfoTokenSwapFlag:
         assert fee == 500
         assert swapped is True
 
-    def test_pool_address_format_returns_false(self, compiler):
-        """Pool address format (0x...) always returns tokens_swapped=False."""
-        with patch.object(compiler, "_resolve_token", side_effect=[WETH, USDC]):
+    def test_bare_pool_address_fails_hard(self, compiler, caplog):
+        """Bare pool address (no '/') must fail hard with a clear error.
+
+        Previously this path silently substituted WETH/USDC as a placeholder
+        pair, which would compile a working LP intent against the wrong pool
+        and only fail on-chain -- silent data corruption with real-money risk.
+        Until an on-chain pool resolver is implemented (calling
+        Pool.token0()/token1()/fee()), bare pool addresses must return None.
+        """
+        with caplog.at_level("ERROR"):
             result = compiler._parse_pool_info("0xABCDEF1234567890ABCDEF1234567890ABCDEF12")
-        assert result is not None
-        _, _, _, swapped = result
-        assert swapped is False
+        assert result is None
+        assert any(
+            "bare pool address" in rec.message.lower() and "not supported" in rec.message.lower()
+            for rec in caplog.records
+        )
 
     def test_default_fee_tier_without_fee(self, compiler):
         """Pool without fee part -> default 3000."""
