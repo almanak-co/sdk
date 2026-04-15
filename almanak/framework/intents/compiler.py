@@ -4454,9 +4454,11 @@ class IntentCompiler:
         Returns:
             CompilationResult with perp open ActionBundle
         """
-        protocol = intent.protocol.lower()
+        protocol = self._resolve_protocol(intent.protocol)
         if protocol == "drift":
             return self._compile_drift_perp_open(intent)
+        if protocol == "pancakeswap_perps":
+            return self._compile_pancakeswap_perps_perp_open(intent)
 
         # Fail explicitly for unsupported perp protocols on Solana
         if self._is_solana_chain():
@@ -4464,6 +4466,18 @@ class IntentCompiler:
                 status=CompilationStatus.FAILED,
                 intent_id=intent.intent_id,
                 error=f"Protocol '{intent.protocol}' is not supported for PERP_OPEN on Solana. Supported: drift",
+            )
+
+        # Gate the GMX path on the canonical key so a typo / unknown alias fails fast
+        # instead of silently compiling a GMX order for the wrong venue.
+        if protocol != "gmx_v2":
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=(
+                    f"Protocol '{intent.protocol}' is not supported for PERP_OPEN on "
+                    f"{self.chain}. Supported: gmx_v2, pancakeswap_perps (bsc)."
+                ),
             )
 
         from ..connectors import GMXv2Adapter, GMXv2Config
@@ -4673,9 +4687,11 @@ class IntentCompiler:
         Returns:
             CompilationResult with perp close ActionBundle
         """
-        protocol = intent.protocol.lower()
+        protocol = self._resolve_protocol(intent.protocol)
         if protocol == "drift":
             return self._compile_drift_perp_close(intent)
+        if protocol == "pancakeswap_perps":
+            return self._compile_pancakeswap_perps_perp_close(intent)
 
         # Fail explicitly for unsupported perp protocols on Solana
         if self._is_solana_chain():
@@ -4683,6 +4699,18 @@ class IntentCompiler:
                 status=CompilationStatus.FAILED,
                 intent_id=intent.intent_id,
                 error=f"Protocol '{intent.protocol}' is not supported for PERP_CLOSE on Solana. Supported: drift",
+            )
+
+        # Gate the GMX path on the canonical key so a typo / unknown alias fails fast
+        # instead of silently compiling a GMX close for the wrong venue.
+        if protocol != "gmx_v2":
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=(
+                    f"Protocol '{intent.protocol}' is not supported for PERP_CLOSE on "
+                    f"{self.chain}. Supported: gmx_v2, pancakeswap_perps (bsc)."
+                ),
             )
 
         from ..connectors import GMXv2Adapter, GMXv2Config
@@ -4947,6 +4975,337 @@ class IntentCompiler:
         from .compiler_solana import compile_drift_perp_close
 
         return compile_drift_perp_close(self, intent)
+
+    # ==========================================================================
+    # PANCAKESWAP PERPS (ApolloX Diamond on BSC, broker id = 2)
+    # ==========================================================================
+
+    def _compile_pancakeswap_perps_perp_open(self, intent: PerpOpenIntent) -> CompilationResult:
+        """Compile a PERP_OPEN intent via PancakeSwap Perps (ApolloX on BSC).
+
+        v1 limitations (see docs/internal/discussions/pancakeswap-perps-integration-20260415.md):
+          - chain must be 'bsc'
+          - market must be in PANCAKESWAP_PERPS_MARKETS['bsc'] (BTC/USD, ETH/USD, BNB/USD)
+          - native BNB margin (collateral_token='BNB') goes via openMarketTradeBNB (value-carrying)
+          - ERC20 margin (USDT/USDC) goes via openMarketTrade (compiler prepends approve)
+          - no SL/TP, no limit orders
+        """
+        from ..connectors.pancakeswap_perps import (
+            PancakeSwapPerpsAdapter,
+            PancakeSwapPerpsConfig,
+        )
+
+        if self.chain != "bsc":
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=f"PancakeSwap Perps v1 requires chain='bsc', got '{self.chain}'",
+            )
+
+        if intent.collateral_amount == "all":
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=(
+                    "collateral_amount='all' must be resolved before compilation. "
+                    "Use Intent.set_resolved_amount() to resolve chained amounts."
+                ),
+            )
+
+        result = CompilationResult(status=CompilationStatus.SUCCESS, intent_id=intent.intent_id)
+        transactions: list[TransactionData] = []
+        warnings: list[str] = []
+
+        try:
+            adapter = PancakeSwapPerpsAdapter(
+                PancakeSwapPerpsConfig(chain=self.chain, wallet_address=self.wallet_address)
+            )
+
+            # Resolve mark price for the base asset (e.g. 'BTC/USD' -> 'BTC').
+            # ApolloX trades crypto perps as synthetics; the *trading* market name
+            # uses canonical symbols ('BTC', 'ETH'), but on-chain price oracles
+            # for BSC are keyed on the wrapped/bridged token ('WBTC' for BTCB,
+            # 'WETH' for ETH-bsc, etc.). We try the bare symbol first and fall
+            # back to the wrapped symbol so strategies can pass either.
+            base_symbol = intent.market.split("/")[0] if "/" in intent.market else intent.market
+            _BSC_PERP_PRICE_ALIAS = {"BTC": "WBTC", "ETH": "WETH", "BNB": "WBNB"}
+            try:
+                mark_price = self._require_token_price(base_symbol)
+            except ValueError:
+                wrapped = _BSC_PERP_PRICE_ALIAS.get(base_symbol.upper())
+                if not wrapped:
+                    raise
+                mark_price = self._require_token_price(wrapped)
+
+            # Resolve collateral decimals and normalize the collateral input for the adapter.
+            # Accept either symbol (case-insensitive) or a 0x-prefixed address — per the
+            # PerpOpenIntent docstring both forms are supported.
+            from almanak.core.contracts import PANCAKESWAP_PERPS_TOKENS
+
+            from ..connectors.pancakeswap_perps.sdk import NATIVE_BNB_ADDRESS
+
+            raw_collateral = intent.collateral_token
+            # The native sentinel (address(0) via NATIVE_BNB_ADDRESS) is only honoured by
+            # PancakeSwapPerpsAdapter.build_open() when spelled as a symbol ("BNB"/"NATIVE").
+            # Normalize the sentinel address *to* the "BNB" symbol so address-form callers
+            # still route through openMarketTradeBNB instead of falling into the ERC-20 branch.
+            if (
+                isinstance(raw_collateral, str)
+                and raw_collateral.startswith("0x")
+                and raw_collateral.lower() == NATIVE_BNB_ADDRESS.lower()
+            ):
+                normalized_collateral = "BNB"
+                resolver_key = "BNB"
+            elif isinstance(raw_collateral, str) and raw_collateral.startswith("0x"):
+                normalized_collateral = raw_collateral
+                resolver_key = raw_collateral  # preserve case for address lookups
+            else:
+                normalized_collateral = raw_collateral
+                resolver_key = raw_collateral.upper()
+
+            # Venue allowlist: PCS Perps only accepts BNB (native), WBNB, USDT, USDC as
+            # margin. Reject anything else at compile time so we never approve an unrelated
+            # ERC-20 to the router or submit an openMarketTrade that will revert on-chain.
+            # The native sentinel was already normalized to "BNB" above, so the address
+            # allowlist intentionally only contains real ERC-20 margin tokens.
+            supported_tokens = PANCAKESWAP_PERPS_TOKENS.get(self.chain, {})
+            allowed_symbols = {"BNB", "NATIVE"} | set(supported_tokens.keys())
+            allowed_addresses = {addr.lower() for addr in supported_tokens.values()}
+            if resolver_key.startswith("0x"):
+                if resolver_key.lower() not in allowed_addresses:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        intent_id=intent.intent_id,
+                        error=(
+                            f"Collateral address '{intent.collateral_token}' is not a supported "
+                            f"PancakeSwap Perps margin token on {self.chain}. "
+                            f"Allowed: BNB (native) + {sorted(supported_tokens.keys())}."
+                        ),
+                    )
+            elif resolver_key not in allowed_symbols:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    intent_id=intent.intent_id,
+                    error=(
+                        f"Collateral symbol '{intent.collateral_token}' is not a supported "
+                        f"PancakeSwap Perps margin token on {self.chain}. "
+                        f"Allowed: BNB (native) + {sorted(supported_tokens.keys())}."
+                    ),
+                )
+
+            if resolver_key in ("BNB", "NATIVE", "WBNB"):
+                collateral_decimals = 18
+            else:
+                try:
+                    collateral_decimals = self._token_resolver.get_decimals(self.chain, resolver_key)
+                except Exception as e:  # noqa: BLE001 — TokenNotFoundError or similar
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        intent_id=intent.intent_id,
+                        error=(
+                            f"Could not resolve decimals for collateral token "
+                            f"'{intent.collateral_token}' on {self.chain}: {e}"
+                        ),
+                    )
+
+            order = adapter.build_open(
+                market=intent.market,
+                collateral_token=normalized_collateral,
+                collateral_amount=intent.collateral_amount,  # type: ignore[arg-type]  # validated above
+                collateral_decimals=collateral_decimals,
+                size_usd=intent.size_usd,
+                mark_price=mark_price,
+                is_long=intent.is_long,
+                max_slippage=intent.max_slippage,
+            )
+            if not order.success or order.tx is None:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    intent_id=intent.intent_id,
+                    error=order.error or "Adapter failed to build open transaction",
+                )
+
+            # Prepend ERC20 approve when the margin is non-native.
+            if not order.native and order.margin_token_address:
+                approve_txs = self._build_approve_tx(
+                    token_address=order.margin_token_address,
+                    spender=order.tx.to,
+                    amount=order.amount_in_wei,
+                )
+                transactions.extend(approve_txs)
+
+            open_tx = TransactionData(
+                to=order.tx.to,
+                value=order.tx.value,
+                data="0x" + order.tx.data.hex(),
+                gas_estimate=order.tx.gas_estimate,
+                description=order.tx.description,
+                tx_type="perp_open",
+            )
+            transactions.append(open_tx)
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+            action_bundle = ActionBundle(
+                intent_type=IntentType.PERP_OPEN.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "protocol": intent.protocol,
+                    "market": intent.market,
+                    "pair_base": order.pair_base,
+                    "collateral_token": intent.collateral_token,
+                    "collateral_amount": str(intent.collateral_amount),
+                    "size_usd": str(intent.size_usd),
+                    "is_long": intent.is_long,
+                    "max_slippage": str(intent.max_slippage),
+                    "qty_1e10": order.qty,  # qty is 10-decimal fixed-point on ApolloX
+                    "limit_price_1e8": order.limit_price,
+                    "native_margin": order.native,
+                    "chain": self.chain,
+                    "broker_id": adapter.config.broker_id,
+                },
+            )
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+            result.warnings = warnings
+            logger.info(
+                f"Compiled PancakeSwap Perps PERP_OPEN: {'LONG' if intent.is_long else 'SHORT'} "
+                f"{intent.market} size=${intent.size_usd} margin={intent.collateral_amount} "
+                f"{intent.collateral_token} ({len(transactions)} txs, {total_gas} gas)"
+            )
+        except Exception as e:
+            logger.exception(f"Failed to compile PancakeSwap Perps PERP_OPEN: {e}")
+            result.status = CompilationStatus.FAILED
+            result.error = str(e)
+
+        return result
+
+    def _compile_pancakeswap_perps_perp_close(self, intent: PerpCloseIntent) -> CompilationResult:
+        """Compile a PERP_CLOSE intent via PancakeSwap Perps (ApolloX on BSC).
+
+        Closes the position identified by ``intent.position_id`` (a 0x-prefixed
+        bytes32 ``tradeHash``). Strategies obtain the ``tradeHash`` from the
+        open receipt's ``MarketPendingTrade`` event (surfaced as
+        ``result.position_id`` / ``result.extracted_data['position_id']`` by
+        the receipt parser + ``ResultEnricher``) and persist it across ticks.
+
+        v1 limitations:
+          - chain must be 'bsc'
+          - ``closeTrade(bytes32)`` always flattens the full position; partial closes
+            are NOT supported. If ``intent.size_usd`` is set, compilation fails fast
+            (``CompilationStatus.FAILED``) instead of silently flattening the full
+            position — callers must omit ``size_usd`` to opt into the full-close semantics.
+
+        See ``almanak/framework/intents/perp_intents.py::PerpCloseIntent.position_id``
+        for the cross-venue rationale.
+        """
+        from ..connectors.pancakeswap_perps import (
+            PancakeSwapPerpsAdapter,
+            PancakeSwapPerpsConfig,
+        )
+
+        if self.chain != "bsc":
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=f"PancakeSwap Perps v1 requires chain='bsc', got '{self.chain}'",
+            )
+
+        position_id = intent.position_id
+        if not position_id:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=(
+                    "PancakeSwap Perps PERP_CLOSE requires intent.position_id (the bytes32 "
+                    "tradeHash returned from the open). Strategies must persist the tradeHash "
+                    "from on_intent_executed(result.position_id) after the open."
+                ),
+            )
+
+        # Strict bytes32 validation for the PCS path: 0x + 64 hex chars = 66 chars total,
+        # all characters must be valid hex. Generic vocabulary validation accepts any
+        # shape; the venue compiler enforces length + hex-ness so malformed hashes fail
+        # at compile time instead of surfacing as an opaque adapter/tx error later.
+        pid_clean = position_id.lower()
+        if not pid_clean.startswith("0x") or len(pid_clean) != 66:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=(
+                    f"PancakeSwap Perps requires a 0x-prefixed bytes32 tradeHash "
+                    f"(66 chars total). Got: '{position_id}' (len={len(position_id)})."
+                ),
+            )
+        try:
+            int(pid_clean[2:], 16)
+        except ValueError:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=(
+                    f"PancakeSwap Perps requires position_id to be a valid hex bytes32 tradeHash. Got: '{position_id}'."
+                ),
+            )
+
+        # Partial closes (size_usd) are NOT representable on ApolloX's closeTrade(bytes32)
+        # selector — it always closes 100% of the position. Reject fast so callers asking
+        # for a partial close never silently execute a full close.
+        if intent.size_usd is not None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=(
+                    "PancakeSwap Perps does not support partial PERP_CLOSE via size_usd. "
+                    "Omit size_usd to close the full position identified by position_id."
+                ),
+            )
+        warnings: list[str] = []
+
+        try:
+            adapter = PancakeSwapPerpsAdapter(
+                PancakeSwapPerpsConfig(chain=self.chain, wallet_address=self.wallet_address)
+            )
+            close_tx = adapter.build_close(trade_hash=position_id)
+        except Exception as e:
+            logger.exception(f"Failed to build PancakeSwap Perps close transaction: {e}")
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=str(e),
+            )
+
+        tx = TransactionData(
+            to=close_tx.to,
+            value=close_tx.value,
+            data="0x" + close_tx.data.hex(),
+            gas_estimate=close_tx.gas_estimate,
+            description=close_tx.description,
+            tx_type="perp_close",
+        )
+        action_bundle = ActionBundle(
+            intent_type=IntentType.PERP_CLOSE.value,
+            transactions=[tx.to_dict()],
+            metadata={
+                "protocol": intent.protocol,
+                "market": intent.market,
+                "collateral_token": intent.collateral_token,
+                "is_long": intent.is_long,
+                "max_slippage": str(intent.max_slippage),
+                "position_id": position_id,
+                "chain": self.chain,
+            },
+        )
+        result = CompilationResult(status=CompilationStatus.SUCCESS, intent_id=intent.intent_id)
+        result.action_bundle = action_bundle
+        result.transactions = [tx]
+        result.total_gas_estimate = tx.gas_estimate
+        result.warnings = warnings
+        logger.info(
+            f"Compiled PancakeSwap Perps PERP_CLOSE: tradeHash={position_id[:18]}... "
+            f"market={intent.market} (1 tx, {tx.gas_estimate} gas)"
+        )
+        return result
 
     def _compile_flash_loan(self, intent: FlashLoanIntent) -> CompilationResult:
         """Compile a FLASH_LOAN intent into an ActionBundle."""

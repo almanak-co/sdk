@@ -139,8 +139,19 @@ def _collect_lending_params() -> list[tuple[str, str]]:
 
 
 def _collect_perp_params() -> list[tuple[str, str]]:
-    """Collect (protocol, chain) pairs for perp intents."""
-    return [(p, "arbitrum") for p in sorted(_PERP_PROTOCOLS)]
+    """Collect (protocol, chain) pairs for perp intents.
+
+    Most perp protocols (gmx_v2, hyperliquid, drift, …) are arbitrum-first in the
+    current registry. ``pancakeswap_perps`` is BSC-only (ApolloX router), so it
+    gets exercised on its actual supported chain instead.
+    """
+    params: list[tuple[str, str]] = []
+    for protocol in sorted(_PERP_PROTOCOLS):
+        if protocol == "pancakeswap_perps":
+            params.append((protocol, "bsc"))
+        else:
+            params.append((protocol, "arbitrum"))
+    return params
 
 
 def _collect_flash_loan_params() -> list[tuple[str, str]]:

@@ -303,8 +303,14 @@ def _has_lp_protocol(protocols: list[str]) -> bool:
 
 
 def _has_perps_protocol(protocols: list[str]) -> bool:
-    """Check if any protocol in the list is a GMX V2 perpetuals protocol."""
-    perps_protocols = {"gmx_v2", "gmx"}
+    """Check if any protocol in the list is a perpetuals protocol.
+
+    Kept consistent with ``_PERP_PROTOCOLS`` in
+    ``almanak/framework/permissions/synthetic_intents.py`` so that every perp
+    venue whose synthetic intents are generated for permission discovery is
+    also discovered/valued by the position-discovery flow.
+    """
+    perps_protocols = {"gmx_v2", "gmx", "pancakeswap_perps"}
     return bool({p.lower() for p in protocols} & perps_protocols)
 
 

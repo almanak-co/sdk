@@ -1250,6 +1250,7 @@ class Intent:
         max_slippage: Decimal = Decimal("0.01"),
         protocol: str = "gmx_v2",
         chain: str | None = None,
+        position_id: str | None = None,
     ) -> PerpCloseIntent:
         """Create a perpetual position close intent.
 
@@ -1261,24 +1262,29 @@ class Intent:
             max_slippage: Maximum acceptable slippage (default 1%)
             protocol: Perpetuals protocol (default "gmx_v2")
             chain: Target chain for execution (defaults to strategy's primary chain)
+            position_id: Optional venue-specific identifier (0x-prefixed hex). Required
+                for venues that key positions on a ``bytes32`` (notably
+                ``pancakeswap_perps``); ignored by venues that close by market+side
+                (``gmx_v2``, ``hyperliquid``, ``drift``).
 
         Returns:
             PerpCloseIntent: The created perp close intent
 
         Example:
-            # Close entire long ETH position
+            # Close entire long ETH position on GMX V2 (no position_id needed)
             intent = Intent.perp_close(
                 market="ETH/USD",
                 collateral_token="WETH",
                 is_long=True,
             )
 
-            # Close $500 of position
+            # Close a PancakeSwap Perps position by tradeHash
             intent = Intent.perp_close(
-                market="ETH/USD",
-                collateral_token="WETH",
+                market="BTC/USD",
+                collateral_token="BNB",
                 is_long=True,
-                size_usd=Decimal("500"),
+                protocol="pancakeswap_perps",
+                position_id="0xabcd...",  # bytes32 tradeHash from open receipt
             )
         """
         return PerpCloseIntent(
@@ -1289,6 +1295,7 @@ class Intent:
             max_slippage=max_slippage,
             protocol=protocol,
             chain=chain,
+            position_id=position_id,
         )
 
     @staticmethod

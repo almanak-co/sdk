@@ -325,8 +325,11 @@ class AnvilFixture:
         asyncio.set_event_loop(self._loop)
 
         try:
-            # Map bsc -> bnb for RollingForkManager (which uses bnb internally)
-            chain_for_manager = "bnb" if self.chain == "bsc" else self.chain
+            # RollingForkManager uses canonical chain names (bsc, not bnb). The
+            # older "bnb" alias was removed from fork_manager's chain registry —
+            # passing "bnb" now raises "Unsupported chain 'bnb'". Keep the chain
+            # key as-is; the rpc_provider still accepts "bnb" for env-var lookup.
+            chain_for_manager = self.chain
 
             # Allow pinning the fork block via env var to maximise --cache-path hit rate.
             # Use chain-specific var first (e.g. ANVIL_FORK_BLOCK_ARBITRUM), then generic.

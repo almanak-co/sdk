@@ -146,6 +146,15 @@ class PerpCloseIntent(AlmanakImmutableModel):
         max_slippage: Maximum acceptable slippage (e.g., 0.01 = 1%)
         protocol: Perpetuals protocol (default "gmx_v2")
         chain: Optional target chain for execution (defaults to strategy's primary chain)
+        position_id: Optional venue-specific position identifier. Required for venues
+            where (market, is_long, collateral_token) is insufficient to disambiguate
+            an open position — in particular **PancakeSwap Perps (ApolloX)** which
+            keys positions on a ``bytes32`` ``tradeHash``. Format is venue-specific:
+              - ``pancakeswap_perps``: 0x-prefixed 32-byte hex (66 chars)
+              - ``gmx_v2`` / ``hyperliquid`` / ``drift``: ignored (market+side suffices)
+            Strategies obtain the ``tradeHash`` from the open receipt
+            (``MarketPendingTrade`` / ``OpenMarketTrade`` events) via the
+            ``ResultEnricher`` and persist it in their state.
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
     """
@@ -157,6 +166,7 @@ class PerpCloseIntent(AlmanakImmutableModel):
     max_slippage: SafeDecimal = Field(default=Decimal("0.01"))
     protocol: str = "gmx_v2"
     chain: str | None = None
+    position_id: str | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
 
@@ -167,6 +177,18 @@ class PerpCloseIntent(AlmanakImmutableModel):
             raise ValueError("size_usd must be positive if specified")
         if self.max_slippage < 0 or self.max_slippage > 1:
             raise ValueError("max_slippage must be between 0 and 1")
+        if self.position_id is not None:
+            pid = self.position_id
+            if not isinstance(pid, str) or not pid.startswith("0x"):
+                raise ValueError("position_id must be a 0x-prefixed hex string")
+            # bytes32 = 32 bytes = 64 hex chars + "0x" prefix = 66 chars total.
+            # We accept any positive-length hex past the 0x prefix to keep the
+            # field venue-agnostic; protocol-specific compilers do the strict
+            # length check (e.g., PCS Perps requires exactly bytes32).
+            try:
+                int(pid, 16)
+            except ValueError as e:
+                raise ValueError(f"position_id must be valid hex: {e}") from e
         return self
 
     @property

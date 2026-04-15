@@ -217,6 +217,10 @@ class ReceiptParserRegistry:
             "almanak.framework.connectors.gmx_v2.receipt_parser",
             "GMXv2ReceiptParser",
         ),
+        "pancakeswap_perps": (
+            "almanak.framework.connectors.pancakeswap_perps.receipt_parser",
+            "PancakeSwapPerpsReceiptParser",
+        ),
         # Staking Protocols
         "lido": (
             "almanak.framework.connectors.lido.receipt_parser",

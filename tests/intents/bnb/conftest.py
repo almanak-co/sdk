@@ -126,3 +126,131 @@ def orchestrator(test_private_key: str, anvil_rpc_url: str) -> ExecutionOrchestr
         rpc_url=anvil_rpc_url,
         tx_timeout_seconds=TEST_TX_TIMEOUT_SECONDS,
     )
+
+
+# =============================================================================
+# PancakeSwap Perps test helpers (VIB-2874)
+# =============================================================================
+# The ApolloX router on BSC uses a two-phase oracle-fill flow:
+#   1. User signs openMarketTradeBNB -> emits MarketPendingTrade(tradeHash, ...)
+#      + an earlier log carrying the priceRequestId.
+#   2. Off-chain keeper (holding PRICE_FEEDER_ROLE) calls
+#      PriceFacadeFacet.requestPriceCallback(priceRequestId, price) which
+#      internally invokes TradingOpenFacet.marketTradeCallback to settle the
+#      pending trade into an open position (or refund it).
+# To test the close path on a local fork we must simulate step (2). The keeper
+# fulfillment event (topic 0x0a6da834...) carries the priceRequestId in
+# topics[1]; this helper extracts it, impersonates a PRICE_FEEDER_ROLE holder,
+# and submits the fill at a caller-chosen price.
+
+
+def pcs_perps_extract_price_request_id(receipt: dict) -> str | None:
+    """Extract the PCS Perps priceRequestId from an open/close TX receipt.
+
+    The priceRequestId is a bytes32 hash emitted alongside MarketPendingTrade
+    (by the PairsManager/TradingCore layer) as the topic[1] of a log whose
+    topic[0] is 0x0a6da834... and whose topic[2] is the pair-base address.
+
+    Accepts web3.py HexBytes or plain hex strings in the topics list.
+    """
+
+    def _to_hex(value) -> str:
+        if isinstance(value, str):
+            s = value
+        elif hasattr(value, "hex"):
+            s = value.hex()
+        else:
+            s = str(value)
+        if not s.startswith("0x") and not s.startswith("0X"):
+            s = "0x" + s
+        return s.lower()
+
+    target = "0x0a6da83417411689fd88436e7fa57a7cf1cf635a35194c0658314d4a037382af"
+    for log in receipt.get("logs", []) or []:
+        topics = log.get("topics", []) or []
+        if len(topics) < 2:
+            continue
+        if _to_hex(topics[0]) == target:
+            return _to_hex(topics[1])
+    return None
+
+
+def pcs_perps_keeper_fulfill(web3, price_request_id: str, price_1e8: int) -> dict:
+    """Impersonate a PancakeSwap Perps PRICE_FEEDER_ROLE holder and fulfill a price request.
+
+    This simulates the off-chain keeper's action so tests can run end-to-end
+    (pending -> settled) without waiting for a real keeper.
+
+    Args:
+        web3: Web3 instance connected to the Anvil fork.
+        price_request_id: bytes32 hash (0x-prefixed 64-char hex) from
+            pcs_perps_extract_price_request_id().
+        price_1e8: oracle price to supply, scaled by 1e8 (uint64 range).
+
+    Returns:
+        The transaction receipt dict from the fulfill call.
+
+    Raises:
+        AssertionError: if the Anvil fork is not in a state where impersonation
+            can succeed, or if the fulfill TX reverts.
+    """
+    from almanak.core.contracts import PANCAKESWAP_PERPS
+    from almanak.framework.connectors.pancakeswap_perps.sdk import (
+        _check_address as _addr_ok,  # noqa: F401 (sanity import)
+    )
+
+    router = PANCAKESWAP_PERPS["bsc"]["router"]
+    # Known mainnet holder of PRICE_FEEDER_ROLE on ApolloX Diamond.
+    keeper = Web3.to_checksum_address("0x2b7363708984aa25a90450cfca7bedaf6804115c")
+
+    # Impersonate + fund via Anvil RPC extensions
+    web3.provider.make_request("anvil_impersonateAccount", [keeper])
+    web3.provider.make_request("anvil_setBalance", [keeper, hex(10 * 10**18)])
+
+    # Diagnostic: confirm the keeper holds PRICE_FEEDER_ROLE on this fork state.
+    from eth_utils import keccak
+    role = "0x" + keccak(b"PRICE_FEEDER_ROLE").hex()
+    has_role_calldata = (
+        bytes.fromhex("91d14854")  # hasRole(bytes32,address)
+        + bytes.fromhex(role[2:])
+        + bytes.fromhex("000000000000000000000000" + keeper[2:].lower())
+    )
+    res = web3.eth.call({"to": router, "data": "0x" + has_role_calldata.hex()})
+    has_role = int.from_bytes(res, "big") != 0
+    assert has_role, f"Impersonated keeper {keeper} lacks PRICE_FEEDER_ROLE on this fork"
+
+    # Build calldata: requestPriceCallback(bytes32,uint64) — selector 0x2103188a
+    # Manually encode to avoid pulling in an eth_abi dep here.
+    assert price_request_id.startswith("0x") and len(price_request_id) == 66, (
+        f"Invalid price_request_id: {price_request_id!r}"
+    )
+    # bytes32 is already 32 bytes; uint64 left-padded to 32 bytes.
+    calldata = (
+        bytes.fromhex("2103188a")
+        + bytes.fromhex(price_request_id[2:])
+        + (price_1e8).to_bytes(32, "big")
+    )
+
+    # Use raw JSON-RPC eth_sendTransaction so the Anvil node signs as the
+    # impersonated keeper. web3.eth.send_transaction tries to pre-validate /
+    # route through local signers which interacts badly with impersonation.
+    response = web3.provider.make_request(
+        "eth_sendTransaction",
+        [
+            {
+                "from": keeper,
+                "to": router,
+                "data": "0x" + calldata.hex(),
+                "gas": "0x" + format(2_000_000, "x"),
+            }
+        ],
+    )
+    if "error" in response:
+        raise AssertionError(
+            f"Keeper fulfill reverted: {response['error']}. "
+            f"priceRequestId={price_request_id}, price={price_1e8}"
+        )
+    tx_hash_hex = response["result"]
+    receipt = web3.eth.wait_for_transaction_receipt(tx_hash_hex, timeout=30)
+    assert receipt["status"] == 1, f"Keeper fulfill TX {tx_hash_hex} reverted post-mining"
+    return dict(receipt)

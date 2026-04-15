@@ -11,6 +11,7 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [Aave V3](aave_v3.md) | Lending | Ethereum, Arbitrum, Optimism, Base, Avalanche | `aave_v3` |
 | [Morpho Blue](morpho_blue.md) | Lending | Ethereum, Base | `morpho_blue` |
 | [GMX V2](gmx_v2.md) | Perpetuals | Arbitrum, Avalanche | `gmx_v2` |
+| [PancakeSwap Perps](pancakeswap_perps.md) | Perpetuals | BSC | `pancakeswap_perps` |
 | [Aerodrome](aerodrome.md) | DEX | Base | `aerodrome` |
 | [TraderJoe V2](traderjoe_v2.md) | DEX | Avalanche, Arbitrum | `traderjoe_v2` |
 | [PancakeSwap V3](pancakeswap_v3.md) | DEX | BSC, Ethereum, Arbitrum | `pancakeswap_v3` |
