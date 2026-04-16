@@ -1,0 +1,38 @@
+{
+    "strategy_name": "joelend_lending_lifecycle_avalanche",
+    "description": "Joe Lend (Banker Joe) full lending lifecycle on Avalanche: supply USDC.e -> borrow USDT.e -> repay -> withdraw",
+    "chain": "avalanche",
+    "network": "anvil",
+    "tokens": [
+        "USDC.e",
+        "USDT.e",
+        "AVAX"
+    ],
+    "collateral_token": "USDC.e",
+    "collateral_amount": "100",
+    "borrow_token": "USDT.e",
+    "borrow_amount_override": "30",
+    "ltv_target": "0.3",
+    "anvil_funding": {
+        "AVAX": 50,
+        "USDC.e": 1000,
+        "USDT.e": 500
+    },
+    "token_funding": [
+        {
+            "token": "AVAX",
+            "amount": 50,
+            "chain": "avalanche"
+        },
+        {
+            "token": "USDC.e",
+            "amount": 1000,
+            "chain": "avalanche"
+        },
+        {
+            "token": "USDT.e",
+            "amount": 500,
+            "chain": "avalanche"
+        }
+    ]
+}
