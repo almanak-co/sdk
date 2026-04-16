@@ -204,17 +204,23 @@ class GatewayClientConfig:
     def from_env(cls) -> "GatewayClientConfig":
         """Load configuration from environment variables.
 
-        Environment variables:
-            GATEWAY_HOST: Gateway hostname
-            GATEWAY_PORT: Gateway port
-            GATEWAY_TIMEOUT: RPC timeout in seconds
-            GATEWAY_AUTH_TOKEN: Authentication token for gateway access
+        Environment variables (preferred names with fallback):
+            ALMANAK_GATEWAY_HOST: Gateway hostname (preferred, falls back to GATEWAY_HOST)
+            ALMANAK_GATEWAY_PORT: Gateway port (preferred, falls back to GATEWAY_PORT)
+            ALMANAK_GATEWAY_TIMEOUT: RPC timeout in seconds (preferred, falls back to GATEWAY_TIMEOUT)
+            ALMANAK_GATEWAY_AUTH_TOKEN: Authentication token (preferred, falls back to GATEWAY_AUTH_TOKEN)
         """
+        # Read each config value: prefer ALMANAK_* names, fallback to legacy GATEWAY_* names
+        host = os.environ.get("ALMANAK_GATEWAY_HOST") or os.environ.get("GATEWAY_HOST", "localhost")
+        port_str = os.environ.get("ALMANAK_GATEWAY_PORT") or os.environ.get("GATEWAY_PORT", "50051")
+        timeout_str = os.environ.get("ALMANAK_GATEWAY_TIMEOUT") or os.environ.get("GATEWAY_TIMEOUT", "30.0")
+        auth_token = os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN") or os.environ.get("GATEWAY_AUTH_TOKEN")
+
         return cls(
-            host=os.environ.get("GATEWAY_HOST", "localhost"),
-            port=int(os.environ.get("GATEWAY_PORT", "50051")),
-            timeout=float(os.environ.get("GATEWAY_TIMEOUT", "30.0")),
-            auth_token=os.environ.get("GATEWAY_AUTH_TOKEN"),
+            host=host,
+            port=int(port_str),
+            timeout=float(timeout_str),
+            auth_token=auth_token,
         )
 
 
