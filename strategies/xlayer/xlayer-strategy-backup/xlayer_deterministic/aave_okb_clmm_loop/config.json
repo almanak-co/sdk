@@ -1,0 +1,22 @@
+{
+    "force_teardown": false,
+    "supply_token": "USDT0",
+    "borrow_token": "USDG",
+    "initial_supply_amount": "200.0",
+    "ltv_target": 0.5,
+    "min_health_factor": 1.5,
+    "interest_rate_mode": "variable",
+    "lp_pool": "WOKB/USDT/3000",
+    "lp_range_width_pct": "0.40",
+    "max_slippage": "0.01",
+    "dynamic_range": true,
+    "range_vol_multiplier": "6.0",
+    "vol_lookback_periods": 200,
+    "confirmation_cycles": 10,
+    "rebalance_cooldown_s": 3600,
+    "anvil_funding": {
+        "OKB": 100,
+        "WOKB": 10,
+        "USDT0": 20000
+    }
+}

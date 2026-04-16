@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environment / secrets — NEVER commit these
+.env
+.env.*
+*.env
+!.env.example
+!.env.template
+secrets.yaml
+secrets.json
+.envrc
+
+# Local state / databases
+*.db
+*.db-shm
+*.db-wal
+local_storage/
+almanak_state.db
+
+# Backtest output
+backtest_results/
+*.csv
+*.png
+!img/*.png
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
