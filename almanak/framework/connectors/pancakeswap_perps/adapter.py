@@ -1,15 +1,20 @@
 """PancakeSwap Perps adapter — translates PerpOpenIntent / PerpCloseIntent into TransactionData.
 
+PancakeSwap Perps V2 is powered by Aster (formerly ApolloX/Astherus). The on-chain
+contracts use a Diamond proxy (EIP-2535) at the same address across the rebrand.
+Aster provides liquidity via its ALP pool and supports BSC, Arbitrum, opBNB, and Base.
+
 Keeps the protocol-specific concerns (selectors, struct encoding, native-BNB vs ERC20
 margin routing, oracle price unit conversion) localized so the compiler only has to
 decide "which adapter" and pass through a straightforward intent.
 
 Scope (v1):
-    - BSC only
+    - BSC only (Aster also supports Arbitrum, opBNB, Base — future expansion)
     - Market orders only, no SL/TP (those are deferred per design doc)
     - Crypto markets only (BTC/USD, ETH/USD, BNB/USD via the token-address pairBase registry)
     - Fixed broker id = 2 (PancakeSwap)
     - Native BNB margin (openMarketTradeBNB) or ERC20 margin (openMarketTrade)
+    - Min notional ~$200-250 per pair (enforced by TradingCheckerFacet)
 
 Deliberately small surface vs gmx_v2 — position-query / teardown helpers are deferred
 to a later iteration that can build the full TradingReaderFacet client. For v1 the

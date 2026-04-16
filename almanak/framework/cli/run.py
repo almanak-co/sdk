@@ -1188,7 +1188,8 @@ def run(
 
         # --no-gateway: connect to an existing gateway, fail if unavailable
         click.echo(f"Connecting to existing gateway at {effective_host}:{gateway_port}...")
-        auth_token = os.environ.get("GATEWAY_AUTH_TOKEN")
+        # Read ALMANAK_GATEWAY_AUTH_TOKEN with fallback to GATEWAY_AUTH_TOKEN for backward compatibility
+        auth_token = os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN") or os.environ.get("GATEWAY_AUTH_TOKEN")
         gateway_config = GatewayClientConfig(host=effective_host, port=gateway_port, auth_token=auth_token)
         gateway_client = GatewayClient(gateway_config)
         gateway_client.connect()

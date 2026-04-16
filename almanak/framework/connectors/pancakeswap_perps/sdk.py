@@ -1,8 +1,9 @@
-"""PancakeSwap Perps SDK (ApolloX Diamond on BSC).
+"""PancakeSwap Perps SDK (Aster/ApolloX Diamond on BSC).
 
 Low-level struct encoding and contract-interaction helpers for the PancakeSwap Perps
-router, which is a Diamond proxy (EIP-2535) fronting the ApolloX perpetual trading
-platform. PCS is broker id = 2 on this platform.
+router, which is a Diamond proxy (EIP-2535) fronting the Aster perpetual trading
+platform (formerly ApolloX, rebranded March 2025 after ApolloX + Astherus merger).
+PCS is broker id = 2 on this platform.
 
 The trade surface relevant to v1 (crypto perps, market orders, no SL/TP):
 
