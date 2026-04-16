@@ -56,6 +56,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         self._price_aggregator: Any = None
         self._balance_providers: dict[str, object] = {}
         self._initialized = False
+        self._init_lock = asyncio.Lock()
         self.wallet_registry: object | None = None
 
     async def close(self) -> None:
@@ -71,7 +72,16 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         """Lazy initialization of data providers."""
         if self._initialized:
             return
+        async with self._init_lock:
+            if self._initialized:
+                return
+            self._do_initialize()
 
+    def _do_initialize(self) -> None:
+        """Build price sources and aggregator based on current settings.chains.
+
+        Must be called while holding self._init_lock.
+        """
         from almanak.framework.data.interfaces import BasePriceSource
         from almanak.gateway.data.price.aggregator import PriceAggregator
         from almanak.gateway.data.price.coingecko import CoinGeckoPriceSource
@@ -135,6 +145,34 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         self._price_aggregator = PriceAggregator(sources=sources)
 
         self._initialized = True
+
+    async def reinitialize(self, chain: str) -> None:
+        """Re-initialize price sources with full pricing stack for the given chain.
+
+        Called by RegisterChains when chain info becomes available after startup.
+        Upgrades from CoinGecko-only to the full 4-source stack.
+        """
+        async with self._init_lock:
+            if self._price_aggregator is not None and hasattr(self._price_aggregator, "close"):
+                try:
+                    await self._price_aggregator.close()
+                except Exception as e:
+                    logger.warning("Error closing old price aggregator during reinit: %s", e)
+                self._price_aggregator = None
+
+            if not self.settings.chains:
+                self.settings.chains = [chain]
+            else:
+                # Always ensure the requested chain is at index 0 (primary),
+                # since _do_initialize uses chains[0] for on-chain pricing.
+                if chain in self.settings.chains:
+                    self.settings.chains.remove(chain)
+                self.settings.chains.insert(0, chain)
+
+            self._initialized = False
+            self._do_initialize()
+
+        logger.info("MarketService re-initialized with chain=%s", chain)
 
     async def warmup(self, wallet_address: str | None = None) -> None:
         """Pre-warm price caches and balance providers to avoid first-call delays.
@@ -291,6 +329,15 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             BalanceResponse with balance in human-readable units
         """
         await self._ensure_initialized()
+
+        # If we initialized with CoinGecko-only (no chain at startup) and
+        # now have a chain from the request, upgrade to full pricing stack.
+        if request.chain and not self.settings.chains:
+            try:
+                chain = validate_chain(request.chain)
+                await self.reinitialize(chain)
+            except Exception as e:
+                logger.warning("MarketService auto-reinit failed for chain %s: %s", request.chain, e)
 
         token = request.token
 

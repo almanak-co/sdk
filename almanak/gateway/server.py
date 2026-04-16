@@ -62,11 +62,13 @@ class _RegisterChainsServicer(gateway_pb2_grpc.HealthServicer):
         execution_servicer: "ExecutionServiceServicer",
         settings: "GatewaySettings",
         wallet_registry: "Any | None" = None,
+        market_servicer: "Any | None" = None,
     ):
         self._health = health_servicer
         self._execution = execution_servicer
         self._settings = settings
         self._wallet_registry: Any = wallet_registry
+        self._market: Any = market_servicer
 
     async def Check(self, request, context):
         return await self._health.Check(request, context)
@@ -172,6 +174,15 @@ class _RegisterChainsServicer(gateway_pb2_grpc.HealthServicer):
 
         # Store initialized chains
         self._execution._registered_chains = set(initialized)
+
+        # Re-initialize MarketService with full pricing stack now that we know
+        # the chain. This upgrades from CoinGecko-only (the default when no
+        # chains are configured at startup) to the full 4-source stack.
+        if self._market is not None and initialized:
+            try:
+                await self._market.reinitialize(initialized[0])
+            except Exception as e:
+                logger.warning("MarketService reinit failed for chain %s: %s", initialized[0], e)
 
         # Derive a legacy wallet_address for backward compat
         legacy_wallet = wallet_address or (full_chain_wallets.get(initialized[0], "") if initialized else "")
@@ -393,9 +404,14 @@ class GatewayServer:
         self._execution_servicer = ExecutionServiceServicer(self.settings)
         gateway_pb2_grpc.add_ExecutionServiceServicer_to_server(self._execution_servicer, self.server)
 
-        # Assign wallet registry to execution and market servicers
+        # Assign wallet registry to execution servicer
         self._execution_servicer.wallet_registry = wallet_registry
-        # (market servicer created below, assigned after creation)
+
+        # Create market servicer early so RegisterChains can reinitialize it
+        # when chain info arrives (upgrades from CoinGecko-only to full 4-source stack)
+        self._market_servicer = MarketServiceServicer(self.settings)
+        self._market_servicer.wallet_registry = wallet_registry
+        gateway_pb2_grpc.add_MarketServiceServicer_to_server(self._market_servicer, self.server)
 
         # Add custom health servicer with RegisterChains support
         register_chains_servicer = _RegisterChainsServicer(
@@ -403,12 +419,9 @@ class GatewayServer:
             self._execution_servicer,
             self.settings,
             wallet_registry=wallet_registry,
+            market_servicer=self._market_servicer,
         )
         gateway_pb2_grpc.add_HealthServicer_to_server(register_chains_servicer, self.server)
-
-        self._market_servicer = MarketServiceServicer(self.settings)
-        self._market_servicer.wallet_registry = wallet_registry
-        gateway_pb2_grpc.add_MarketServiceServicer_to_server(self._market_servicer, self.server)
 
         # Give execution service access to market service for self-serve price fetching
         self._execution_servicer.market_servicer = self._market_servicer
