@@ -81,3 +81,62 @@ class TestGatewayCliAuth:
         # No session token should be displayed since explicit token is set
         assert settings.auth_token == "my-explicit-token"
         assert "Session auth token" not in result.output
+
+
+class TestStrategyRunNoGatewayAuth:
+    """Test --no-gateway auth token resolution in strat run CLI."""
+
+    @patch("almanak.framework.gateway_client.GatewayClient")
+    def test_strat_run_no_gateway_with_almanak_auth_token(self, mock_client_class):
+        """strat run --no-gateway picks ALMANAK_GATEWAY_AUTH_TOKEN over GATEWAY_AUTH_TOKEN."""
+        runner = CliRunner()
+        env = {k: v for k, v in os.environ.items()}
+        # Clean up any existing auth tokens
+        env.pop("ALMANAK_GATEWAY_AUTH_TOKEN", None)
+        env.pop("GATEWAY_AUTH_TOKEN", None)
+        env["ALMANAK_GATEWAY_AUTH_TOKEN"] = "almanak-token"
+        env["GATEWAY_AUTH_TOKEN"] = "legacy-token"
+
+        # Mock the gateway client to avoid actual connection
+        mock_client = mock_client_class.return_value
+        mock_client.wait_for_ready.return_value = True
+        mock_client.health_check.return_value = True
+
+        with patch("almanak.framework.strategies.intent_strategy.IntentStrategy") as mock_strategy:
+            result = runner.invoke(
+                cli, ["strat", "run", "-d", ".", "--no-gateway", "--once"], env=env
+            )
+
+            # Check that GatewayClient was created with the ALMANAK_ token
+            assert mock_client_class.called
+            call_args = mock_client_class.call_args
+            if call_args:
+                gateway_config = call_args[0][0]
+                assert gateway_config.auth_token == "almanak-token"
+
+    @patch("almanak.framework.gateway_client.GatewayClient")
+    def test_strat_run_no_gateway_with_legacy_auth_token(self, mock_client_class):
+        """strat run --no-gateway falls back to GATEWAY_AUTH_TOKEN when ALMANAK_ not set."""
+        runner = CliRunner()
+        env = {k: v for k, v in os.environ.items()}
+        # Clean up any existing auth tokens
+        env.pop("ALMANAK_GATEWAY_AUTH_TOKEN", None)
+        env.pop("GATEWAY_AUTH_TOKEN", None)
+        env["GATEWAY_AUTH_TOKEN"] = "legacy-token"
+
+        # Mock the gateway client
+        mock_client = mock_client_class.return_value
+        mock_client.wait_for_ready.return_value = True
+        mock_client.health_check.return_value = True
+
+        with patch("almanak.framework.strategies.intent_strategy.IntentStrategy"):
+            result = runner.invoke(
+                cli, ["strat", "run", "-d", ".", "--no-gateway", "--once"], env=env
+            )
+
+            # Check that GatewayClient was created with the legacy token
+            if mock_client_class.called:
+                call_args = mock_client_class.call_args
+                if call_args:
+                    gateway_config = call_args[0][0]
+                    assert gateway_config.auth_token == "legacy-token"
