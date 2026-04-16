@@ -47,11 +47,14 @@ from almanak.framework.dashboard.templates.lending_dashboard import (
 
 # LP/DEX templates
 from almanak.framework.dashboard.templates.lp_dashboard import (
+    LP_CRITICAL_KEYS,
     LPDashboardConfig,
+    LPSessionState,
     get_aerodrome_config,
     get_pancakeswap_v3_config,
     get_traderjoe_v2_config,
     get_uniswap_v3_config,
+    prepare_lp_session_state,
     render_lp_dashboard,
 )
 
@@ -95,7 +98,10 @@ __all__ = [
     "get_bollinger_config",
     # LP templates
     "LPDashboardConfig",
+    "LPSessionState",
+    "LP_CRITICAL_KEYS",
     "render_lp_dashboard",
+    "prepare_lp_session_state",
     "get_uniswap_v3_config",
     "get_aerodrome_config",
     "get_traderjoe_v2_config",
