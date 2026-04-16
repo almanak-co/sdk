@@ -1003,6 +1003,13 @@ class StrategyRunner:
                     except Exception as e:
                         logger.error(f"Pre-iteration callback error: {e}")
 
+                # Snapshot the error-streak flag BEFORE the iteration runs. Successful
+                # iterations reset `_consecutive_errors` to 0 inside `run_iteration`
+                # (via `_record_success`), so we must capture "were we in an error
+                # streak?" before that reset happens — otherwise the recovery branch
+                # below is unreachable.
+                was_in_error_streak = self._consecutive_errors >= self.config.max_consecutive_errors
+
                 # Run iteration
                 result = await self.run_iteration(strategy)
 
@@ -1066,6 +1073,26 @@ class StrategyRunner:
                             strategy_id, "ERROR", error_message=str(result.error) if result.error else None
                         )
                 else:
+                    # Recover lifecycle state if we were in an error streak before
+                    # this iteration succeeded. The counter has already been reset to
+                    # 0 inside `run_iteration` via `_record_success`, so we rely on the
+                    # pre-iteration snapshot captured above. Skip the recovery write
+                    # when the same iteration has already transitioned to a terminal
+                    # state (e.g., teardown writes TERMINATED and requests shutdown) —
+                    # otherwise we would clobber that terminal state with RUNNING.
+                    if was_in_error_streak and not self._shutdown_requested and self._terminal_lifecycle_state is None:
+                        self._lifecycle_write_state(strategy_id, "RUNNING")
+                        logger.info(
+                            "Strategy %s recovered after error streak (max_consecutive_errors=%d) "
+                            "- lifecycle state reset to RUNNING",
+                            strategy_id,
+                            self.config.max_consecutive_errors,
+                        )
+                    elif was_in_error_streak:
+                        logger.debug(
+                            "Skipping lifecycle recovery write for %s: shutdown/terminal state active",
+                            strategy_id,
+                        )
                     self._consecutive_errors = 0
                     self._first_error_at = None
                     # Reset emergency guard so a future HALF_OPEN->OPEN relapse can re-fire

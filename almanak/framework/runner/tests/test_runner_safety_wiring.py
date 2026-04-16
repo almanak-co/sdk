@@ -451,6 +451,188 @@ class TestStuckDetectorWiring:
         assert runner._first_error_at is None
 
     @pytest.mark.asyncio
+    async def test_lifecycle_state_recovers_to_running_after_error_streak(self, monkeypatch):
+        """After max_consecutive_errors, the next successful iteration writes RUNNING to the lifecycle store.
+
+        Regression guard: `_record_success()` inside `run_iteration` zeroes
+        `_consecutive_errors` before the run_loop sees it, so the recovery branch
+        must rely on a pre-iteration snapshot — not on inspecting the counter after
+        the iteration returns.
+        """
+        config = RunnerConfig(max_consecutive_errors=2)
+        runner = _make_runner(config=config)
+
+        states_written: list[str] = []
+        original_write = runner._lifecycle_write_state
+
+        def spy(agent_id, state, error_message=None):
+            states_written.append(state)
+            return original_write(agent_id, state, error_message)
+
+        monkeypatch.setattr(runner, "_lifecycle_write_state", spy)
+
+        class _FailThenSucceed:
+            """Fails for the first N calls, then returns a HOLD on every subsequent call."""
+
+            def __init__(self, n_fails: int):
+                self._strategy_id = "recovery_test"
+                self._chain = "arbitrum"
+                self._wallet_address = "0x1234567890123456789012345678901234567890"
+                self._n_fails = n_fails
+                self.decide_call_count = 0
+
+            @property
+            def strategy_id(self) -> str:
+                return self._strategy_id
+
+            @property
+            def chain(self) -> str:
+                return self._chain
+
+            @property
+            def wallet_address(self) -> str:
+                return self._wallet_address
+
+            def decide(self, market):
+                self.decide_call_count += 1
+                if self.decide_call_count <= self._n_fails:
+                    raise ValueError(f"fail {self.decide_call_count}")
+                return HoldIntent(reason="recovered")
+
+            def create_market_snapshot(self) -> MockMarketSnapshot:
+                return MockMarketSnapshot(chain=self._chain, wallet_address=self._wallet_address)
+
+        strategy = _FailThenSucceed(n_fails=2)
+
+        await runner.run_loop(strategy, max_iterations=3)
+
+        # Expected sequence of writes: startup RUNNING, ERROR (after 2nd fail), RUNNING (recovery)
+        assert "ERROR" in states_written, f"ERROR not written; saw {states_written}"
+        error_idx = states_written.index("ERROR")
+        running_after_error = [s for s in states_written[error_idx + 1 :] if s == "RUNNING"]
+        assert running_after_error, f"Expected a RUNNING write after ERROR (lifecycle recovery), got {states_written}"
+        # Counter is zeroed on the recovering success
+        assert runner._consecutive_errors == 0
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_recovery_not_triggered_below_threshold(self, monkeypatch):
+        """Failures BELOW threshold followed by success must NOT emit a recovery RUNNING write."""
+        config = RunnerConfig(max_consecutive_errors=5)  # high threshold
+        runner = _make_runner(config=config)
+
+        states_written: list[str] = []
+        original_write = runner._lifecycle_write_state
+
+        def spy(agent_id, state, error_message=None):
+            states_written.append(state)
+            return original_write(agent_id, state, error_message)
+
+        monkeypatch.setattr(runner, "_lifecycle_write_state", spy)
+
+        class _FailThenSucceed:
+            """One failure, then permanent success — never reaches the ERROR threshold."""
+
+            def __init__(self):
+                self._strategy_id = "below_threshold_test"
+                self._chain = "arbitrum"
+                self._wallet_address = "0x1234567890123456789012345678901234567890"
+                self.decide_call_count = 0
+
+            @property
+            def strategy_id(self) -> str:
+                return self._strategy_id
+
+            @property
+            def chain(self) -> str:
+                return self._chain
+
+            @property
+            def wallet_address(self) -> str:
+                return self._wallet_address
+
+            def decide(self, market):
+                self.decide_call_count += 1
+                if self.decide_call_count == 1:
+                    raise ValueError("transient failure")
+                return HoldIntent(reason="all good")
+
+            def create_market_snapshot(self) -> MockMarketSnapshot:
+                return MockMarketSnapshot(chain=self._chain, wallet_address=self._wallet_address)
+
+        strategy = _FailThenSucceed()
+        await runner.run_loop(strategy, max_iterations=2)
+
+        # Only the startup RUNNING write should be present — no recovery write and no ERROR write
+        # (we stayed below max_consecutive_errors).
+        running_writes = [s for s in states_written if s == "RUNNING"]
+        assert len(running_writes) == 1, f"Unexpected extra RUNNING writes: {states_written}"
+        assert "ERROR" not in states_written, f"Should not write ERROR below threshold: {states_written}"
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_recovery_skipped_when_terminal_state_active(self, monkeypatch):
+        """Recovery RUNNING write must not clobber a terminal state set during the same iteration.
+
+        Regression guard: if run_iteration performs a terminal transition (e.g., teardown
+        writes TERMINATED and requests shutdown), the post-iteration recovery branch must
+        NOT overwrite that terminal state with RUNNING just because the runner had been
+        in an error streak before.
+        """
+        config = RunnerConfig(max_consecutive_errors=2)
+        runner = _make_runner(config=config)
+        # Pre-populate the error streak state
+        runner._consecutive_errors = config.max_consecutive_errors
+
+        states_written: list[str] = []
+        original_write = runner._lifecycle_write_state
+
+        def spy(agent_id, state, error_message=None):
+            states_written.append(state)
+            return original_write(agent_id, state, error_message)
+
+        monkeypatch.setattr(runner, "_lifecycle_write_state", spy)
+
+        class _TerminalStrategy:
+            """Successful iteration that simulates a teardown by writing TERMINATED + requesting shutdown."""
+
+            def __init__(self, runner_ref: StrategyRunner):
+                self._runner = runner_ref
+                self._strategy_id = "terminal_test"
+                self._chain = "arbitrum"
+                self._wallet_address = "0x1234567890123456789012345678901234567890"
+                self.decide_call_count = 0
+
+            @property
+            def strategy_id(self) -> str:
+                return self._strategy_id
+
+            @property
+            def chain(self) -> str:
+                return self._chain
+
+            @property
+            def wallet_address(self) -> str:
+                return self._wallet_address
+
+            def decide(self, market):
+                self.decide_call_count += 1
+                # Simulate a teardown-style transition: terminal write + shutdown request
+                self._runner._lifecycle_write_state(self._strategy_id, "TERMINATED")
+                self._runner.request_shutdown()
+                return HoldIntent(reason="terminal")
+
+            def create_market_snapshot(self) -> MockMarketSnapshot:
+                return MockMarketSnapshot(chain=self._chain, wallet_address=self._wallet_address)
+
+        strategy = _TerminalStrategy(runner)
+        await runner.run_loop(strategy, max_iterations=1)
+
+        # TERMINATED must appear and must NOT be followed by a recovery RUNNING write.
+        assert "TERMINATED" in states_written, f"Expected TERMINATED: {states_written}"
+        terminated_idx = states_written.index("TERMINATED")
+        later_running = [s for s in states_written[terminated_idx + 1 :] if s == "RUNNING"]
+        assert not later_running, f"Recovery RUNNING write clobbered terminal state: {states_written}"
+
+    @pytest.mark.asyncio
     async def test_stuck_detection_is_non_fatal(self):
         """Even if stuck detection crashes, the runner should continue."""
         config = RunnerConfig(max_consecutive_errors=1)
