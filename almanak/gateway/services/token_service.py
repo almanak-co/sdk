@@ -45,8 +45,14 @@ from almanak.gateway.services.dexscreener_lookup import (
     find_token_address as dexscreener_find_token_address,
 )
 from almanak.gateway.services.onchain_lookup import OnChainLookup, TokenMetadata
+from almanak.gateway.services.spl_mint_lookup import SplMintInfo, SplMintLookup
 from almanak.gateway.utils import get_rpc_url
-from almanak.gateway.validation import ValidationError, validate_address, validate_batch_size, validate_chain
+from almanak.gateway.validation import (
+    ValidationError,
+    validate_address_for_chain,
+    validate_batch_size,
+    validate_chain,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +186,13 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         self._jupiter: Any = None  # JupiterTokenLookup, typed as Any to avoid import cycle
         self._jupiter_lock = asyncio.Lock()
 
+        # SPL mint RPC lookup (Solana on-chain fallback for any valid mint,
+        # including long-tail tokens Jupiter's curated list doesn't cover).
+        # Lazy-initialised because the Solana RPC URL isn't needed until a
+        # Solana resolution request lands.
+        self._spl_lookup: SplMintLookup | None = None
+        self._spl_lookup_lock = asyncio.Lock()
+
         logger.debug(
             "TokenService initialized",
             extra={
@@ -300,6 +313,105 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
                 self._jupiter = await get_jupiter_lookup()
             return self._jupiter
 
+    async def _get_spl_lookup(self) -> SplMintLookup:
+        """Get (or lazily create) the SplMintLookup for Solana.
+
+        Reuses the gateway's standard RPC configuration via ``get_rpc_url`` —
+        same URL the ExecutionService already uses for signing and submission,
+        so there's no new config surface.
+        """
+        if self._spl_lookup is not None:
+            return self._spl_lookup
+        async with self._spl_lookup_lock:
+            if self._spl_lookup is None:
+                rpc_url = get_rpc_url("solana", network=self.settings.network)
+                self._spl_lookup = SplMintLookup(rpc_url=rpc_url, timeout=self._onchain_timeout)
+            return self._spl_lookup
+
+    def _build_resolved_from_spl(self, info: SplMintInfo) -> ResolvedToken:
+        """Build a ResolvedToken from on-chain SPL mint metadata.
+
+        Symbol and name are not stored in the mint account itself — those live
+        in off-chain registries or (sometimes) Metaplex metadata. We use the
+        mint address as the canonical symbol: unique, unambiguous, and honest
+        about what we know. Consumers that need a human-readable symbol should
+        pass it in via ``register_token()`` alongside the Edge-provided address.
+        """
+        from datetime import UTC, datetime
+
+        from almanak.core.enums import Chain
+        from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
+
+        chain_enum = Chain.SOLANA
+        return ResolvedToken(
+            symbol=info.address,  # mint address as stable identifier
+            address=info.address,
+            decimals=info.decimals,
+            chain=chain_enum,
+            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            name=None,
+            coingecko_id=None,
+            is_stablecoin=False,
+            is_native=False,
+            is_wrapped_native=False,
+            canonical_symbol=info.address,
+            bridge_type=BridgeType.NATIVE,
+            source="spl_onchain",
+            is_verified=False,  # on-chain read, no off-chain attestation
+            resolved_at=datetime.now(UTC),
+        )
+
+    async def _try_spl_mint_rpc_lookup(self, mint: str) -> gateway_pb2.TokenMetadataResponse | None:
+        """Resolve a Solana mint via direct SPL mint account RPC read.
+
+        This is the last-resort fallback after Jupiter. Works for any valid
+        SPL/Token-2022 mint, regardless of whether it's in Jupiter's curated
+        list.
+
+        Returns:
+            ``TokenMetadataResponse`` on success, ``None`` on a definitive
+            miss (account does not exist, wrong owner, malformed data,
+            uninitialized mint, decimals out of range).
+
+        Raises:
+            TimeoutError: SPL RPC call timed out.
+            SolanaRpcError: SPL RPC returned an error.
+            Exception: Other network / transport failures.
+
+        Transient errors propagate so the caller can emit the appropriate
+        gRPC status and avoid negative-caching a mint that is actually
+        valid but temporarily unreachable.
+        """
+        lookup = await self._get_spl_lookup()
+        info = await lookup.lookup(mint)
+        if info is None:
+            return None
+
+        # Route through _cache_discovered_token so the first-write-wins
+        # provenance guard applies: an existing higher-ranked entry
+        # (static=100, coingecko_dynamic=60, on_chain=50, jupiter=30) is
+        # preserved, while unranked or lower-ranked entries are replaced.
+        # Without this, a later SPL fallback for a mint that was already
+        # resolved via Jupiter would silently replace a real symbol with
+        # the mint address.
+        metadata = TokenMetadata(
+            symbol=info.address,  # mint address as stable identifier
+            name=None,
+            decimals=info.decimals,
+            address=info.address,
+            is_native=False,
+        )
+        self._cache_discovered_token(metadata, "solana", source="spl_onchain")
+
+        logger.info(
+            "token_onchain_resolved_solana_mint mint=%s decimals=%d owner=%s",
+            mint,
+            info.decimals,
+            info.owner_program,
+        )
+        resolved = self._build_resolved_from_spl(info)
+        return self._resolved_to_response(resolved)
+
     async def _try_solana_symbol_lookup(self, symbol: str) -> gateway_pb2.TokenMetadataResponse | None:
         """Try to resolve a Solana token by symbol via Jupiter token list.
 
@@ -325,28 +437,39 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             return None
 
     async def _try_solana_mint_lookup(self, mint: str) -> gateway_pb2.TokenMetadataResponse | None:
-        """Try to resolve a Solana mint address via Jupiter token list.
+        """Resolve a Solana mint address with a two-stage fallback.
 
-        Returns a TokenMetadataResponse on success, None if not found.
+        Stage 1: Jupiter token list — preferred when present because it gives
+            us a human-readable symbol and name.
+        Stage 2: Direct SPL mint account RPC read — the safety net that
+            guarantees any valid mint resolves with correct decimals, even if
+            Jupiter's curated list doesn't know about it. This is what lets
+            long-tail tokens (new launches, meme coins) work E2E.
+
+        Returns a TokenMetadataResponse on success, None if both stages miss
+        (truly invalid mint) or the RPC is unreachable.
         """
+        # Stage 1: Jupiter
         try:
             jupiter = await self._get_jupiter()
             meta = jupiter.lookup_by_mint(mint)
-            if meta is None:
-                return None
-
-            resolved = self._build_resolved_from_jupiter(meta)
-            self._resolver.register(resolved)
-            logger.info(
-                "token_dynamic_resolved_solana_mint: mint=%s symbol=%s decimals=%d",
-                mint,
-                meta.symbol,
-                meta.decimals,
-            )
-            return self._resolved_to_response(resolved)
+            if meta is not None:
+                resolved = self._build_resolved_from_jupiter(meta)
+                self._resolver.register(resolved)
+                logger.info(
+                    "token_dynamic_resolved_solana_mint: mint=%s symbol=%s decimals=%d",
+                    mint,
+                    meta.symbol,
+                    meta.decimals,
+                )
+                return self._resolved_to_response(resolved)
         except Exception as exc:
             logger.warning("Jupiter mint lookup failed for %s: %s", mint, exc)
-            return None
+            # Fall through to SPL RPC — a Jupiter failure must not block the
+            # on-chain fallback.
+
+        # Stage 2: SPL mint account RPC read
+        return await self._try_spl_mint_rpc_lookup(mint)
 
     def _build_resolved_from_jupiter(self, meta: Any) -> ResolvedToken:
         """Build a ResolvedToken from JupiterTokenMetadata."""
@@ -668,8 +791,35 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
 
         if is_solana:
             if is_solana_mint:
-                # Try Jupiter by mint address
-                result = await self._try_solana_mint_lookup(token)
+                # Rate-limit the Solana mint path the same way
+                # GetTokenMetadata does. Without this guard, ResolveToken is
+                # a second unthrottled entry point into the Solana RPC — a
+                # stream of unique base58 mints would sidestep the EVM-side
+                # 10/sec budget entirely.
+                if not await self._rate_limiter.wait_and_acquire(timeout=2.0):
+                    error_msg = "Rate limit exceeded for on-chain lookups"
+                    context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
+                    context.set_details(error_msg)
+                    logger.warning("Rate limited Solana mint lookup for %s", token)
+                    return self._error_response(error_msg)
+                # Catch transient RPC failures so they surface with a
+                # retryable gRPC status instead of escaping as an
+                # uncategorized INTERNAL and poisoning the client-side
+                # negative cache. Mirrors GetTokenMetadata exactly.
+                try:
+                    result = await self._try_solana_mint_lookup(token)
+                except TimeoutError:
+                    error_msg = f"SPL mint RPC lookup timed out for {token}"
+                    context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
+                    context.set_details(error_msg)
+                    logger.warning(error_msg)
+                    return self._error_response(error_msg)
+                except Exception as exc:
+                    error_msg = f"SPL mint RPC lookup failed for {token}: {exc}"
+                    context.set_code(grpc.StatusCode.UNAVAILABLE)
+                    context.set_details(error_msg)
+                    logger.warning(error_msg)
+                    return self._error_response(error_msg)
             else:
                 # Try Jupiter by symbol
                 result = await self._try_solana_symbol_lookup(token)
@@ -731,30 +881,46 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             context.set_details(str(e))
             return self._error_response(str(e))
 
-        # Validate address
+        # Validate address (chain-aware: accepts EVM hex or Solana base58 based on chain).
+        # Using the plain EVM validator here would reject all SPL mints before
+        # they ever reach the Solana branch below.
         try:
-            address = validate_address(address, "address")
+            address = validate_address_for_chain(address, chain, "address")
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return self._error_response(str(e))
 
-        # Guard: on-chain ERC20 lookup is EVM-only.
-        # Solana mints are SPL tokens -- querying them via the EVM ABI would hang
-        # for ~30 seconds then fail.  Route Solana addresses through Jupiter instead.
-        if chain.lower() == "solana":
-            result = await self._try_solana_mint_lookup(address)
-            if result is not None:
-                return result
-            error_msg = (
-                f"On-chain ERC20 lookup is not supported for Solana. "
-                f"Add '{address}' to the static registry or ensure it is in the Jupiter token list."
+        # Fast path: static registry / memory cache / disk cache. Applies
+        # uniformly to EVM and Solana so that pre-registered mints
+        # (``register_token()``) or previously discovered tokens are served
+        # without issuing any external RPC.  ``skip_gateway=True`` keeps the
+        # resolution local — the gateway process must not recurse through
+        # itself for a cache check.
+        try:
+            resolved = self._resolver.resolve(address, chain, skip_gateway=True)
+            return self._resolved_to_response(resolved)
+        except TokenNotFoundError:
+            pass  # Fall through to dynamic lookup
+        except TokenResolutionError as exc:
+            # Ambiguous / invalid-address / resolver-internal failure. Surface
+            # explicitly rather than silently falling through to the RPC
+            # path — the resolver already evaluated the input and the answer
+            # is "can't resolve locally for a non-missing reason".
+            logger.warning(
+                "token_fastpath_resolver_error address=%s chain=%s error=%s",
+                address,
+                chain,
+                exc,
             )
-            context.set_code(grpc.StatusCode.NOT_FOUND)
-            context.set_details(error_msg)
-            return self._error_response(error_msg)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return self._error_response(str(exc))
 
-        # Check rate limit
+        # Rate limit the on-chain / dynamic path. Applies to BOTH the EVM
+        # ERC-20 branch and the Solana Jupiter+SPL branch so a strategy that
+        # issues a stream of unique unknown addresses cannot bypass the
+        # service's 10/sec bucket by simply targeting solana.
         if not await self._rate_limiter.wait_and_acquire(timeout=2.0):
             context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
             error_msg = "Rate limit exceeded for on-chain lookups"
@@ -762,15 +928,44 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             logger.warning(f"Rate limited on-chain lookup for {address} on {chain}")
             return self._error_response(error_msg)
 
-        try:
-            # First try static resolution (fast path)
+        # Solana: route through the Solana-specific lookup chain (Jupiter,
+        # then direct SPL mint account RPC read). ERC-20 ABI queries are
+        # EVM-only and would just time out against an SPL mint account
+        # layout.
+        if chain.lower() == "solana":
             try:
-                resolved = self._resolver.resolve(address, chain)
-                return self._resolved_to_response(resolved)
-            except TokenNotFoundError:
-                pass  # Fall through to on-chain lookup
+                result = await self._try_solana_mint_lookup(address)
+            except TimeoutError:
+                # Transient: caller must NOT negative-cache.
+                context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
+                error_msg = f"SPL mint RPC lookup timed out for {address}"
+                context.set_details(error_msg)
+                logger.warning(error_msg)
+                return self._error_response(error_msg)
+            except Exception as exc:  # SolanaRpcError + network/transport
+                # Transient: caller must NOT negative-cache. UNAVAILABLE
+                # signals "try again" to the resolver's error handling.
+                context.set_code(grpc.StatusCode.UNAVAILABLE)
+                error_msg = f"SPL mint RPC lookup failed for {address}: {exc}"
+                context.set_details(error_msg)
+                logger.warning(error_msg)
+                return self._error_response(error_msg)
 
-            # On-chain lookup
+            if result is not None:
+                return result
+            # Definitive miss: Jupiter did not know the mint and the SPL
+            # mint account either does not exist, has the wrong owner, or
+            # fails integrity checks. Safe to negative-cache.
+            error_msg = (
+                f"Could not resolve Solana mint {address}: not in Jupiter token list "
+                f"and the on-chain account is not a valid SPL mint."
+            )
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(error_msg)
+            return self._error_response(error_msg)
+
+        try:
+            # On-chain lookup (EVM)
             lookup = await self._get_onchain_lookup(chain)
             metadata = await asyncio.wait_for(
                 lookup.lookup(chain, address),
@@ -811,6 +1006,12 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         "on_chain": 50,
         "dexscreener_dynamic": 40,
         "jupiter": 30,
+        # SPL on-chain fallback has the correct decimals but no off-chain
+        # symbol/name (we store the mint address as a stand-in). It ranks
+        # below Jupiter so a later Jupiter hit with real metadata can
+        # replace an SPL entry. Do not drop it to 0 / unranked — that
+        # would block ANY future overwrite and pin the low-quality entry.
+        "spl_onchain": 20,
     }
 
     def _cache_discovered_token(self, metadata: TokenMetadata, chain: str, *, source: str = "on_chain") -> None:
@@ -1078,6 +1279,10 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             for lookup in self._onchain_lookups.values():
                 await lookup.close()
             self._onchain_lookups.clear()
+        async with self._spl_lookup_lock:
+            if self._spl_lookup is not None:
+                await self._spl_lookup.close()
+                self._spl_lookup = None
         logger.info("TokenService closed")
 
 
