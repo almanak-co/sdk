@@ -107,7 +107,7 @@ class TimelineStore:
 
     Backend selection:
     - If ``database_url`` is provided: PostgreSQL via asyncpg (deployed mode).
-      Table DDL is managed by ``gateway.database.ensure_schema()``.
+      Table DDL is owned by the ``metrics-database`` repo's Prisma migrations.
     - If ``db_path`` is provided: SQLite file (local development).
     - If neither: in-memory only (no persistence).
 
@@ -257,7 +257,7 @@ class TimelineStore:
             init=_init_connection,
             statement_cache_size=0,
         )
-        # Table DDL is managed by ensure_schema() at gateway startup.
+        # Table DDL is owned by the metrics-database repo's Prisma migrations.
 
     def _pg_submit(self, coro: Any) -> Any:
         """Submit coroutine to the background event loop and wait for result."""

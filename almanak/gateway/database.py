@@ -1,12 +1,17 @@
-"""Centralized PostgreSQL schema management for the gateway.
+"""Gateway schema helpers.
 
-All PostgreSQL DDL (lifecycle tables, strategy state tables) is consolidated
-here and applied once at gateway startup via ``ensure_schema()``.  Individual
-stores no longer create their own tables -- they rely on this module.
+Historically this module ran Postgres DDL at gateway startup via
+``ensure_schema()``. That path silently drifted production and has been
+retired: the ``metrics-database`` repo's Prisma migrations are now the
+sole source of Postgres schema. ``ensure_schema()`` remains as a guard
+that refuses non-SQLite URLs. ``POSTGRES_SCHEMA`` is kept as dead
+intent-of-record until platform confirms Prisma parity.
 """
 
 import logging
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+from almanak.gateway.validation import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -229,28 +234,28 @@ ALTER TABLE transaction_ledger ADD COLUMN IF NOT EXISTS execution_mode TEXT DEFA
 
 
 async def ensure_schema(database_url: str) -> None:
-    """Create all gateway PostgreSQL tables (idempotent).
+    """SQLite-only schema bootstrap guard.
 
-    Opens a short-lived asyncpg connection, runs the consolidated DDL, and
-    disconnects.  Safe to call on every startup -- every statement uses
-    ``CREATE TABLE IF NOT EXISTS`` / ``CREATE INDEX IF NOT EXISTS``.
+    Historically this function issued ``CREATE TABLE`` / ``ALTER TABLE``
+    against the central ``metrics_db`` at gateway startup. That pattern
+    silently drifted production schema outside of Prisma migrations, so
+    SDK-side DDL against Postgres is no longer permitted: the
+    ``metrics-database`` repo owns the canonical schema and its migrations
+    must be applied before the gateway starts.
 
-    If the URL contains a ``?schema=`` parameter the corresponding
-    ``search_path`` is set before executing DDL so that tables land in the
-    correct schema.
+    Behaviour:
+    - SQLite URL: no-op (``SQLiteStore`` bootstraps its own tables).
+    - Anything else: raises ``ValidationError`` to fail the gateway fast
+      rather than silently drifting production.
     """
-    import asyncpg
+    scheme = urlparse(database_url).scheme.lower()
+    if scheme == "sqlite" or scheme.startswith("sqlite+"):
+        logger.debug("ensure_schema: SQLite URL detected, skipping (SQLiteStore handles its own DDL)")
+        return
 
-    clean_url, schema = _strip_schema_param(database_url)
-
-    conn = await asyncpg.connect(clean_url, statement_cache_size=0)
-    try:
-        async with conn.transaction():
-            if schema:
-                await conn.fetchval(
-                    "SELECT pg_catalog.set_config('search_path', $1, true)",
-                    schema,
-                )
-            await conn.execute(POSTGRES_SCHEMA)
-    finally:
-        await conn.close()
+    raise ValidationError(
+        "database_url",
+        f"ensure_schema() refuses to run DDL against scheme='{scheme}'. "
+        "Postgres schema must be applied via metrics-database Prisma migrations "
+        "(see metrics-database/prisma/migrations) before gateway startup.",
+    )
