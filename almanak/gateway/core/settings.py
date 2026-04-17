@@ -38,6 +38,15 @@ class GatewaySettings(BaseSettings):
     # Pre-initialize chains (comma-separated). Empty = accept any chain on-demand.
     chains: list[str] = []
 
+    # Enable the ManualPriceOverrideSource last-resort fallback. When True, the
+    # gateway consults ``ALMANAK_PRICE_OVERRIDE_<TOKEN>`` env vars for tokens
+    # that every real oracle source failed to price (e.g. W0G on 0G Chain).
+    # Off by default because a mis-set env var can feed a wrong price into
+    # slippage / teardown decisions. Operators with long-tail tokens should
+    # enable it explicitly via ``ALMANAK_GATEWAY_ENABLE_MANUAL_PRICE_OVERRIDES=true``
+    # alongside the per-token ``ALMANAK_PRICE_OVERRIDE_<TOKEN>`` values.
+    enable_manual_price_overrides: bool = False
+
     # Metrics settings
     metrics_enabled: bool = True
     metrics_port: int = 9090

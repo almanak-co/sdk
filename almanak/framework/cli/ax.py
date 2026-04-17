@@ -297,11 +297,20 @@ def _get_executor(ctx: click.Context):
     if "executor" in ctx.obj:
         return ctx.obj["executor"], ctx.obj["client"]
 
+    import os
+
     from almanak.framework.agent_tools.cli_executor import create_cli_executor
 
     host = ctx.obj["gateway_host"]
     port = ctx.obj["gateway_port"]
     network = ctx.obj.get("network")
+
+    # Read the auth token from env so the CLI can reach a gateway that was
+    # started by another process (e.g. a long-running strategy) and therefore
+    # has auth enabled. ALMANAK_GATEWAY_AUTH_TOKEN is the canonical name;
+    # GATEWAY_AUTH_TOKEN is accepted for parity with other clients. Bug 5 of
+    # the 0G DogFooding report (2026-04-16).
+    env_auth_token = os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN") or os.environ.get("GATEWAY_AUTH_TOKEN") or None
 
     # Try connecting to an existing gateway first.
     # Suppress gateway_client logger during the quick probe so users don't
@@ -320,7 +329,12 @@ def _get_executor(ctx: click.Context):
             wallet_address=ctx.obj["wallet"],
             max_single_trade_usd=ctx.obj["max_trade_usd"],
             connect_timeout=2.0,  # quick probe
+            auth_token=env_auth_token,
         )
+        # Remember the token so follow-up commands in the same CLI session
+        # (e.g. the auto-start path below) can reuse it.
+        if env_auth_token is not None:
+            ctx.obj.setdefault("gateway_auth_token", env_auth_token)
         ctx.obj["executor"] = executor
         ctx.obj["client"] = client
         return executor, client

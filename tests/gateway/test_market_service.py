@@ -305,9 +305,15 @@ class TestMarketServiceInitialization:
 
             assert service._price_aggregator is not None
             sources = service._price_aggregator.sources
+            # 4 real data sources in the median-voting aggregator. The
+            # manual_override source is kept OUT of this list (held as
+            # service._manual_price_override) so a low-confidence override
+            # never corrupts the median of real feeds — see GetPrice's
+            # AllDataSourcesFailed fallback path. Off by default.
             assert len(sources) == 4
             source_names = [s.source_name for s in sources]
             assert source_names == ["onchain", "binance", "dexscreener", "coingecko"]
+            assert service._manual_price_override is None  # opt-in
 
             coingecko_sources = [source for source in sources if source.source_name == "coingecko"]
             assert len(coingecko_sources) == 1
@@ -317,7 +323,7 @@ class TestMarketServiceInitialization:
 
     @pytest.mark.asyncio
     async def test_evm_chain_with_cg_key_has_four_sources(self):
-        """EVM chain with CG key still gets 4-source pricing."""
+        """EVM chain with CG key still gets 4-source pricing; override off by default."""
         settings = GatewaySettings(coingecko_api_key="test-key-123", chains=["arbitrum"])
         service = MarketServiceServicer(settings)
 
@@ -331,6 +337,7 @@ class TestMarketServiceInitialization:
             assert source_names == ["onchain", "binance", "dexscreener", "coingecko"]
             cg = [s for s in sources if s.source_name == "coingecko"][0]
             assert cg._api_key == "test-key-123"
+            assert service._manual_price_override is None
         finally:
             await service.close()
 
@@ -338,7 +345,7 @@ class TestMarketServiceInitialization:
     @pytest.mark.parametrize("chain", ["arbitrum", "mantle"])
     @pytest.mark.parametrize("cg_key", [None, "key-123"])
     async def test_all_evm_chains_get_four_sources(self, chain, cg_key):
-        """Aggregator has 4 sources for any EVM chain, regardless of CG key."""
+        """Aggregator has 4 real sources for any EVM chain; override off by default."""
         settings = GatewaySettings(coingecko_api_key=cg_key, chains=[chain])
         service = MarketServiceServicer(settings)
 
@@ -347,6 +354,28 @@ class TestMarketServiceInitialization:
                 await service._ensure_initialized()
 
             assert len(service._price_aggregator.sources) == 4
+            assert service._manual_price_override is None
+        finally:
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_manual_override_opt_in_via_settings_flag(self):
+        """enable_manual_price_overrides=True wires the fallback source in."""
+        settings = GatewaySettings(
+            chains=["arbitrum"],
+            enable_manual_price_overrides=True,
+        )
+        service = MarketServiceServicer(settings)
+
+        try:
+            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+                await service._ensure_initialized()
+
+            # Override still stays OUT of the median aggregator
+            assert len(service._price_aggregator.sources) == 4
+            # But it's available as a last-resort fallback
+            assert service._manual_price_override is not None
+            assert service._manual_price_override.source_name == "manual_override"
         finally:
             await service.close()
 
@@ -376,9 +405,12 @@ class TestMarketServiceInitialization:
         try:
             await service._ensure_initialized()
 
-            # Only CoinGecko source when no chain is configured
+            # Only CoinGecko in the aggregator when no chain is configured.
+            # The manual_override safety valve is held separately and only
+            # consulted when enable_manual_price_overrides=True (off here).
             assert len(service._price_aggregator.sources) == 1
             assert service._price_aggregator.sources[0].source_name == "coingecko"
+            assert service._manual_price_override is None
         finally:
             await service.close()
 
@@ -464,3 +496,117 @@ class TestMarketServiceGetIndicator:
 
         mock_context.set_code.assert_called()
         assert "not supported" in str(mock_context.set_details.call_args)
+
+
+class TestGetPriceManualOverrideFallback:
+    """Tests for GetPrice's AllDataSourcesFailed fallback to the manual override
+    source. This is the core Bug 3 fix path — the override must kick in ONLY
+    when every real oracle source failed, must NOT perturb the price when real
+    sources succeeded, and must cleanly fall through to INTERNAL when the
+    operator hasn't configured an override for the token.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fallback_returns_override_when_aggregator_fails(self, mock_context):
+        """AllDataSourcesFailed → manual override is consulted and returned."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.interfaces import AllDataSourcesFailed, PriceResult
+
+        settings = GatewaySettings(chains=["zerog"], enable_manual_price_overrides=True)
+        service = MarketServiceServicer(settings)
+
+        try:
+            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+                await service._ensure_initialized()
+
+            # Aggregator fails for W0G (no oracle coverage)
+            service._price_aggregator.get_aggregated_price = AsyncMock(
+                side_effect=AllDataSourcesFailed(errors={"onchain": "no feed", "coingecko": "unknown"})
+            )
+            service._price_aggregator.get_last_details = MagicMock(return_value=None)
+
+            # Override has a price for it
+            override_result = PriceResult(
+                price=Decimal("0.12"),
+                source="manual_override",
+                timestamp=datetime.now(UTC),
+                confidence=0.5,
+                stale=False,
+            )
+            service._manual_price_override.get_price = AsyncMock(return_value=override_result)
+
+            response = await service.GetPrice(
+                gateway_pb2.PriceRequest(token="W0G", quote="USD"),
+                mock_context,
+            )
+
+            assert response.price == "0.12"
+            assert response.source == "manual_override"
+            assert response.confidence == 0.5
+            service._manual_price_override.get_price.assert_awaited_once_with("W0G", "USD")
+        finally:
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_fallback_falls_through_to_internal_when_no_override(self, mock_context):
+        """Aggregator fails AND override has no value → INTERNAL error path."""
+        import grpc as grpc_mod
+        from almanak.framework.data.interfaces import AllDataSourcesFailed, DataSourceUnavailable
+
+        settings = GatewaySettings(chains=["zerog"], enable_manual_price_overrides=True)
+        service = MarketServiceServicer(settings)
+
+        try:
+            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+                await service._ensure_initialized()
+
+            service._price_aggregator.get_aggregated_price = AsyncMock(
+                side_effect=AllDataSourcesFailed(errors={"onchain": "no feed"})
+            )
+            service._price_aggregator.get_last_details = MagicMock(return_value=None)
+            service._manual_price_override.get_price = AsyncMock(
+                side_effect=DataSourceUnavailable(source="manual_override", reason="no override")
+            )
+
+            response = await service.GetPrice(
+                gateway_pb2.PriceRequest(token="UNKNOWN_TOKEN", quote="USD"),
+                mock_context,
+            )
+
+            # Empty response, INTERNAL code
+            assert response.price == ""
+            mock_context.set_code.assert_called_with(grpc_mod.StatusCode.INTERNAL)
+        finally:
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_fallback_not_used_when_override_disabled(self, mock_context):
+        """With enable_manual_price_overrides=False (default), aggregator
+        failure goes straight to INTERNAL — override is never consulted."""
+        import grpc as grpc_mod
+        from almanak.framework.data.interfaces import AllDataSourcesFailed
+
+        settings = GatewaySettings(chains=["zerog"])  # default: override off
+        service = MarketServiceServicer(settings)
+
+        try:
+            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+                await service._ensure_initialized()
+
+            assert service._manual_price_override is None
+
+            service._price_aggregator.get_aggregated_price = AsyncMock(
+                side_effect=AllDataSourcesFailed(errors={"onchain": "no feed"})
+            )
+            service._price_aggregator.get_last_details = MagicMock(return_value=None)
+
+            response = await service.GetPrice(
+                gateway_pb2.PriceRequest(token="W0G", quote="USD"),
+                mock_context,
+            )
+
+            assert response.price == ""
+            mock_context.set_code.assert_called_with(grpc_mod.StatusCode.INTERNAL)
+        finally:
+            await service.close()

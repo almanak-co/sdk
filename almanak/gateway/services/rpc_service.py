@@ -165,6 +165,25 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             self._rate_limiters[chain] = ChainRateLimiter(limit)
         return self._rate_limiters[chain]
 
+    def _chain_not_configured_error(self, chain: str) -> str | None:
+        """Return an error message if chain is not in the gateway's configured list.
+
+        When settings.chains is non-empty, reject RPC calls to other chains —
+        otherwise a gateway started with ``--chains zerog`` would silently
+        forward calls to whatever chain the CLI default happens to name
+        (e.g. "arbitrum"), returning data from the wrong chain. Empty
+        settings.chains = accept any chain (on-demand mode).
+        """
+        if not self.settings.chains or chain in self.settings.chains:
+            return None
+        configured = ", ".join(sorted(self.settings.chains))
+        return (
+            f"Chain '{chain}' is not configured on this gateway. "
+            f"Configured chains: [{configured}]. "
+            f"Pass --chain {next(iter(sorted(self.settings.chains)))} "
+            f"or start the gateway with --chains {chain}."
+        )
+
     def _get_rpc_url(self, chain: str, network_override: str | None = None) -> str | None:
         """Get RPC URL for a chain.
 
@@ -294,6 +313,17 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                 id=request.id,
             )
 
+        msg = self._chain_not_configured_error(chain)
+        if msg is not None:
+            self._metrics.failed_requests += 1
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(msg)
+            return gateway_pb2.RpcResponse(
+                success=False,
+                error=json.dumps({"code": -32603, "message": msg}),
+                id=request.id,
+            )
+
         # Resolve effective network so validation and execution use the same policy
         network_override = request.network if request.network else None
         effective_network = network_override or self.settings.network
@@ -406,6 +436,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             self._metrics.failed_requests += num_requests
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
+            return gateway_pb2.RpcBatchResponse(responses=[])
+
+        msg = self._chain_not_configured_error(chain)
+        if msg is not None:
+            self._metrics.failed_requests += num_requests
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(msg)
             return gateway_pb2.RpcBatchResponse(responses=[])
 
         # Validate batch size
@@ -552,6 +589,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.AllowanceResponse(success=False, error=str(e))
 
+        msg = self._chain_not_configured_error(chain)
+        if msg is not None:
+            self._metrics.failed_requests += 1
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(msg)
+            return gateway_pb2.AllowanceResponse(success=False, error=msg)
+
         # Solana SPL tokens don't use ERC-20 allowances — return max (always approved)
         if is_solana_chain(chain):
             self._metrics.successful_requests += 1
@@ -651,6 +695,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.BalanceQueryResponse(success=False, error=str(e))
 
+        msg = self._chain_not_configured_error(chain)
+        if msg is not None:
+            self._metrics.failed_requests += 1
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(msg)
+            return gateway_pb2.BalanceQueryResponse(success=False, error=msg)
+
         # Solana doesn't support ERC-20 eth_call queries — use MarketService.GetBalance()
         if is_solana_chain(chain):
             self._metrics.successful_requests += 1
@@ -748,6 +799,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.PositionLiquidityResponse(success=False, error=str(e))
+
+        msg = self._chain_not_configured_error(chain)
+        if msg is not None:
+            self._metrics.failed_requests += 1
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(msg)
+            return gateway_pb2.PositionLiquidityResponse(success=False, error=msg)
 
         # Solana LP positions don't use Uniswap V3 position manager
         if is_solana_chain(chain):
@@ -870,6 +928,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.PositionTokensOwedResponse(success=False, error=str(e))
+
+        msg = self._chain_not_configured_error(chain)
+        if msg is not None:
+            self._metrics.failed_requests += 1
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(msg)
+            return gateway_pb2.PositionTokensOwedResponse(success=False, error=msg)
 
         # Solana LP positions don't use Uniswap V3 position manager
         if is_solana_chain(chain):

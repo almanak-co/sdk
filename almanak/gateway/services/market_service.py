@@ -54,6 +54,9 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         """
         self.settings = settings
         self._price_aggregator: Any = None
+        # Last-resort price fallback (populated by _do_initialize). Consulted
+        # by GetPrice only when the primary aggregator raises AllDataSourcesFailed.
+        self._manual_price_override: Any = None
         self._balance_providers: dict[str, object] = {}
         self._initialized = False
         self._init_lock = asyncio.Lock()
@@ -85,6 +88,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         from almanak.framework.data.interfaces import BasePriceSource
         from almanak.gateway.data.price.aggregator import PriceAggregator
         from almanak.gateway.data.price.coingecko import CoinGeckoPriceSource
+        from almanak.gateway.data.price.manual_override import ManualPriceOverrideSource
         from almanak.gateway.data.price.onchain import OnChainPriceSource
         from almanak.gateway.validation import is_solana_chain
 
@@ -106,8 +110,8 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             sources = [cg_source]
             logger.warning(
                 "MarketService: No chain configured -- on-chain (Chainlink) pricing DISABLED. "
-                "Only CoinGecko is available. Pass --chains to the gateway or set ALMANAK_GATEWAY_CHAINS "
-                "for accurate on-chain pricing."
+                "Only CoinGecko is available. Pass --chains to the gateway or set "
+                "ALMANAK_GATEWAY_CHAINS for accurate on-chain pricing."
             )
         elif is_solana_chain(chain):
             # Solana: Pyth (primary) + DexScreener (secondary) + CoinGecko (fallback)
@@ -143,6 +147,23 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             )
 
         self._price_aggregator = PriceAggregator(sources=sources)
+        # Last-resort manual override source — reads ALMANAK_PRICE_OVERRIDE_<TOKEN>
+        # env vars. Kept OUT of the aggregator's median vote because
+        # PriceAggregator computes a plain median without weighting by
+        # confidence (a live $0.20 + override $0.12 would yield a corrupt
+        # $0.16). Consulted only in GetPrice when the aggregator raises
+        # AllDataSourcesFailed. Added for Bug 3 of the 0G DogFooding report
+        # (2026-04-16). Off by default — a mis-set env var could corrupt
+        # teardown/slippage decisions, so operators must explicitly opt in.
+        if getattr(self.settings, "enable_manual_price_overrides", False):
+            self._manual_price_override = ManualPriceOverrideSource()
+            logger.info(
+                "MarketService: manual price override fallback ENABLED. "
+                "ALMANAK_PRICE_OVERRIDE_<TOKEN> env vars will be consulted "
+                "if every primary oracle source fails for a given token."
+            )
+        else:
+            self._manual_price_override = None
 
         self._initialized = True
 
@@ -301,8 +322,43 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 except Exception as alias_err:
                     logger.debug(f"GetPrice: alias {alias} also failed for {token}/{quote}: {alias_err}")
 
-            from almanak.framework.data.interfaces import AllDataSourcesFailed
+            from almanak.framework.data.interfaces import (
+                AllDataSourcesFailed,
+                DataSourceUnavailable,
+            )
             from almanak.gateway.data.price.aggregator import _is_known_unpriceable
+
+            # Last-resort fallback: consult the manual override source if all
+            # real oracle sources failed. Kept out of the aggregator's median
+            # vote so a low-confidence override never corrupts a live price;
+            # only activates when no real source produced a result. Logged
+            # at WARNING so audit trails always show when a price came from
+            # an operator-supplied env var instead of a real oracle.
+            # ``getattr`` tolerates ``__new__``-constructed test doubles that
+            # bypass ``__init__``.
+            manual_override = getattr(self, "_manual_price_override", None)
+            if isinstance(e, AllDataSourcesFailed) and manual_override is not None:
+                try:
+                    override_result = await manual_override.get_price(token, quote)
+                    logger.warning(
+                        "GetPrice: %s/%s unresolved by every primary oracle source; "
+                        "returning MANUAL OVERRIDE price=%s confidence=%s. "
+                        "This value came from an ALMANAK_PRICE_OVERRIDE_* env var, "
+                        "not a real oracle — confirm it is current before acting on it.",
+                        token,
+                        quote,
+                        override_result.price,
+                        override_result.confidence,
+                    )
+                    return gateway_pb2.PriceResponse(
+                        price=str(override_result.price),
+                        timestamp=int(override_result.timestamp.timestamp()),
+                        source=override_result.source,
+                        confidence=override_result.confidence,
+                        stale=override_result.stale,
+                    )
+                except DataSourceUnavailable:
+                    pass  # No override configured — fall through to the normal error path
 
             # Only downgrade to WARNING for known-unpriceable tokens when the failure
             # is "all sources failed" (expected). Keep ERROR for infra/unexpected failures.

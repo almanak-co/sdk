@@ -1241,6 +1241,45 @@ class StrategyRunner:
                 error = getattr(result, "error", "Unknown error") if result else "Unknown error"
                 description = f"{intent_type_str} failed: {error}"
 
+            details: dict[str, Any] = {
+                "intent_type": intent_type_str,
+                "success": success,
+                "gas_used": gas_used,
+            }
+
+            # Enrich details with position/swap data extracted by ResultEnricher
+            # so downstream consumers (teardown, audits, PM dashboard) can recover
+            # position IDs and ranges directly from timeline events without
+            # reparsing receipts. Bug 4 of the 0G DogFooding report (2026-04-16).
+            if success and result is not None:
+                position_id = getattr(result, "position_id", None)
+                if position_id is not None:
+                    # NFT tokenIds can exceed JS's safe-integer range on chains
+                    # with high-throughput NPMs (Solana ALT indices, V4 salt-
+                    # derived IDs). Stringify oversized ints so dashboards
+                    # and webhooks that consume details_json as JSON don't
+                    # silently truncate them — matches the safeguard below
+                    # for liquidity / amount values.
+                    if isinstance(position_id, int) and abs(position_id) >= 2**53:
+                        details["position_id"] = str(position_id)
+                    elif isinstance(position_id, int | str):
+                        details["position_id"] = position_id
+                    else:
+                        details["position_id"] = str(position_id)
+                extracted = getattr(result, "extracted_data", None) or {}
+                for key in ("tick_lower", "tick_upper", "liquidity", "amount0", "amount1"):
+                    value = extracted.get(key)
+                    if value is None:
+                        continue
+                    # liquidity/amount0/amount1 can exceed JSON's safe integer range
+                    details[key] = str(value) if isinstance(value, int) and abs(value) >= 2**53 else value
+                lp_close_data = getattr(result, "lp_close_data", None)
+                if lp_close_data is not None and hasattr(lp_close_data, "to_dict"):
+                    details["lp_close"] = lp_close_data.to_dict()
+                swap_amounts = getattr(result, "swap_amounts", None)
+                if swap_amounts is not None and hasattr(swap_amounts, "to_dict"):
+                    details["swap"] = swap_amounts.to_dict()
+
             event = TimelineEvent(
                 timestamp=datetime.now(UTC),
                 event_type=event_type,
@@ -1248,11 +1287,7 @@ class StrategyRunner:
                 strategy_id=strategy_id,
                 chain=getattr(strategy, "chain", "") or getattr(self.config, "chain", ""),
                 tx_hash=tx_hash,
-                details={
-                    "intent_type": intent_type_str,
-                    "success": success,
-                    "gas_used": gas_used,
-                },
+                details=details,
             )
             add_event(event)
         except Exception as e:  # noqa: BLE001

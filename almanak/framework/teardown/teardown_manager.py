@@ -270,6 +270,8 @@ class TeardownManager:
         on_progress: Callable[[int, str], Awaitable[None]] | None = None,
         is_auto_mode: bool = False,
         market: Any = None,
+        precomputed_positions: Any = None,
+        precomputed_intents: list[Any] | None = None,
     ) -> TeardownResult:
         """Execute teardown with full safety guarantees.
 
@@ -288,6 +290,17 @@ class TeardownManager:
             on_cancel_check: Callback to check if user cancelled
             on_progress: Callback for progress updates
             is_auto_mode: Whether this is an auto-protect triggered exit
+            market: Optional market snapshot for pricing
+            precomputed_positions: Optional TeardownPositionSummary supplied by
+                the caller when the strategy has no local record of the open
+                positions (e.g. gateway-restart recovery). When provided,
+                ``strategy.get_open_positions()`` is skipped.
+            precomputed_intents: Optional list of Intents to execute. When
+                provided, ``strategy.generate_teardown_intents()`` is skipped.
+                The CLI's ``--discover`` flow uses this to close on-chain-
+                discovered positions that the strategy doesn't know about.
+                Both ``precomputed_positions`` and ``precomputed_intents``
+                should be supplied together for consistency.
 
         Returns:
             TeardownResult with complete execution details
@@ -305,16 +318,27 @@ class TeardownManager:
             if self.alert_manager:
                 await self.alert_manager.send_teardown_started(strategy.strategy_id, mode)
 
-            # Step 2: Get positions and generate intents
-            positions = strategy.get_open_positions()
-            try:
-                intents = strategy.generate_teardown_intents(internal_mode, market=market)
-            except TypeError as exc:
-                if "market" in str(exc):
-                    # Backward compat: old strategies without market param
-                    intents = strategy.generate_teardown_intents(internal_mode)
-                else:
-                    raise
+            # Step 2: Get positions and generate intents. When the caller has
+            # supplied precomputed_positions/intents (e.g. the CLI's --discover
+            # flow after a gateway restart wiped the strategy's local state),
+            # trust them instead of re-querying the strategy — the strategy
+            # doesn't know about those positions.
+            if precomputed_positions is not None:
+                positions = precomputed_positions
+            else:
+                positions = strategy.get_open_positions()
+
+            if precomputed_intents is not None:
+                intents = list(precomputed_intents)
+            else:
+                try:
+                    intents = strategy.generate_teardown_intents(internal_mode, market=market)
+                except TypeError as exc:
+                    if "market" in str(exc):
+                        # Backward compat: old strategies without market param
+                        intents = strategy.generate_teardown_intents(internal_mode)
+                    else:
+                        raise
 
             if not intents:
                 logger.info(f"No intents to execute for {strategy.strategy_id}")
@@ -371,8 +395,12 @@ class TeardownManager:
                 market=market,
             )
 
-            # Step 7: Verify positions closed
-            await self._verify_closure(strategy)
+            # Step 7: Verify positions closed. Pass precomputed_positions
+            # (when present) so the --discover flow checks closure against the
+            # on-chain-discovered IDs rather than re-reading
+            # strategy.get_open_positions(), which is empty-in / empty-out
+            # for the recovery scenario.
+            await self._verify_closure(strategy, expected_positions=precomputed_positions)
 
             # Step 8: Send completion alert
             if self.alert_manager:
@@ -933,9 +961,44 @@ class TeardownManager:
 
         return state
 
-    async def _verify_closure(self, strategy: IntentStrategy) -> bool:
-        """Verify that positions are actually closed on-chain."""
-        # In real implementation, this queries on-chain state
+    async def _verify_closure(
+        self,
+        strategy: IntentStrategy,
+        expected_positions: Any = None,
+    ) -> bool:
+        """Verify that positions are actually closed on-chain.
+
+        When ``expected_positions`` is supplied (the ``--discover`` flow
+        threads its TeardownPositionSummary through), closure is checked
+        against those specific position IDs instead of re-reading
+        ``strategy.get_open_positions()`` — which in the recovery scenario
+        is empty both before AND after execution, so checking it alone
+        would falsely report "success" while discovered NFTs remained
+        live on-chain (CodeRabbit review #1522).
+
+        The verifier is intentionally conservative: for the precomputed
+        case we log the specific position IDs that were expected to close
+        so the operator sees the audit trail. The on-chain re-scan that
+        would definitively confirm each position's liquidity == 0 is
+        tracked as a follow-up; for now, trust the orchestrator's
+        per-intent success signal (already enforced by the retry loop)
+        together with this log.
+        """
+        if expected_positions is not None and getattr(expected_positions, "positions", None):
+            expected_ids = [p.position_id for p in expected_positions.positions]
+            logger.info(
+                "Teardown verification: %d precomputed position(s) executed %s; "
+                "closure signalled by per-intent orchestrator success, not by "
+                "strategy.get_open_positions() (which is empty by design on the "
+                "discover path).",
+                len(expected_ids),
+                expected_ids,
+            )
+            # The orchestrator already succeeded (checked upstream before this
+            # verify step); treat that as authoritative for discovered
+            # positions. A stronger on-chain re-scan belongs in a follow-up.
+            return True
+
         positions = strategy.get_open_positions()
         return len(positions.positions) == 0
 

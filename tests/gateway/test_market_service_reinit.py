@@ -30,14 +30,21 @@ class TestMarketServiceReinitialize:
 
     @pytest.mark.asyncio
     async def test_reinit_upgrades_from_coingecko_only(self):
-        """Reinitializing with a chain should upgrade from 1 source to 4 sources."""
+        """Reinitializing with a chain upgrades from 1 source (CoinGecko) to
+        4 sources (Chainlink + Binance + DexScreener + CoinGecko). The
+        manual_override safety valve is held separately on the servicer and
+        consulted only as a last-resort fallback in GetPrice, so it is not
+        counted in the aggregator's source list — keeping it out of the
+        median vote prevents a low-confidence override from corrupting a
+        live price (Bug 3 of the 0G DogFooding report, 2026-04-16)."""
         settings = _make_settings()
         servicer = MarketServiceServicer(settings)
 
-        # Initial init: no chains -> CoinGecko only
+        # Initial init: no chains -> CoinGecko only (override off by default)
         await servicer._ensure_initialized()
         assert servicer._initialized is True
         assert len(servicer._price_aggregator._sources) == 1
+        assert servicer._manual_price_override is None
 
         # Reinitialize with a chain
         await servicer.reinitialize("arbitrum")
@@ -46,6 +53,8 @@ class TestMarketServiceReinitialize:
         assert settings.chains[0] == "arbitrum"
         # Full EVM stack: Chainlink + Binance + DexScreener + CoinGecko
         assert len(servicer._price_aggregator._sources) == 4
+        # Override still off (setting wasn't changed)
+        assert servicer._manual_price_override is None
 
     @pytest.mark.asyncio
     async def test_reinit_closes_old_aggregator(self):
@@ -109,7 +118,7 @@ class TestGetBalanceAutoReinit:
         settings = _make_settings()
         servicer = MarketServiceServicer(settings)
 
-        # Pre-initialize with CoinGecko-only
+        # Pre-initialize: CoinGecko only (manual_override held separately)
         await servicer._ensure_initialized()
         assert len(servicer._price_aggregator._sources) == 1
 
@@ -127,7 +136,7 @@ class TestGetBalanceAutoReinit:
 
             await servicer.GetBalance(mock_request, mock_context)
 
-        # After GetBalance, should have upgraded to 4-source
+        # After GetBalance, should have upgraded to full EVM stack (override still separate)
         assert settings.chains[0] == "arbitrum"
         assert len(servicer._price_aggregator._sources) == 4
 
