@@ -1835,3 +1835,60 @@ class TestDecodeInt24:
         val = 887272  # 0x0D8A08
         word = "0" * 58 + f"{val:06x}"
         assert _decode_int24(word) == 887272
+
+
+class TestWithdrawLendingIntentMapping:
+    """_action_to_intent gates Morpho-specific fields so direct agent-tool
+    invocations can't bypass the CLI-layer guard on non-Morpho withdraws.
+
+    Regression: CodeRabbit PR #1535 round 4 — is_collateral used to leak
+    into Aave/Compound/etc. withdraw params when an agent called the tool
+    directly (not via the CLI).
+    """
+
+    def test_withdraw_on_aave_v3_does_not_set_is_collateral(self, executor):
+        intent_type, params = executor._action_to_intent(
+            "withdraw_lending",
+            {"token": "USDC", "amount": "all", "protocol": "aave_v3", "is_collateral": True},
+        )
+        assert intent_type == "withdraw"
+        assert "is_collateral" not in params
+        assert params["withdraw_all"] is True
+
+    def test_withdraw_on_morpho_blue_sets_is_collateral(self, executor):
+        intent_type, params = executor._action_to_intent(
+            "withdraw_lending",
+            {
+                "token": "USDC",
+                "amount": "all",
+                "protocol": "morpho_blue",
+                "is_collateral": False,
+                "market_id": "0xabc",
+            },
+        )
+        assert intent_type == "withdraw"
+        assert params["is_collateral"] is False
+        assert params["market_id"] == "0xabc"
+
+    def test_withdraw_on_morpho_blue_alias_normalizes(self, executor):
+        """`morpho-blue` and `morpho blue` aliases must take the Morpho path."""
+        for alias in ("morpho-blue", "Morpho Blue", "MORPHO_BLUE"):
+            _, params = executor._action_to_intent(
+                "withdraw_lending",
+                {
+                    "token": "USDC",
+                    "amount": "all",
+                    "protocol": alias,
+                    "is_collateral": True,
+                    "market_id": "0xabc",
+                },
+            )
+            assert params["is_collateral"] is True, f"alias {alias!r} missed the gate"
+
+    def test_withdraw_compound_v3_does_not_set_is_collateral(self, executor):
+        """Compound V3 is not Morpho-like; is_collateral must not leak."""
+        _, params = executor._action_to_intent(
+            "withdraw_lending",
+            {"token": "USDC", "amount": "100", "protocol": "compound_v3", "is_collateral": True},
+        )
+        assert "is_collateral" not in params

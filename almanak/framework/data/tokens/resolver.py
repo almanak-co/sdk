@@ -387,7 +387,7 @@ class TokenResolver:
                 if symbol_upper in chain_symbols:
                     existing = chain_symbols[symbol_upper]
                     if existing is not token:
-                        logger.warning(
+                        logger.debug(
                             "token_registry_symbol_collision chain=%s symbol=%s "
                             "kept=%s dropped=%s reason=first-write-wins",
                             chain_lower,
@@ -459,7 +459,7 @@ class TokenResolver:
                     if symbol_upper not in chain_symbols:
                         chain_symbols[symbol_upper] = token
                     elif chain_symbols[symbol_upper] is not token:
-                        logger.warning(
+                        logger.debug(
                             "pendle_registry_symbol_collision chain=%s symbol=%s kept=%s dropped_pendle=%s",
                             chain_lower,
                             symbol_upper,

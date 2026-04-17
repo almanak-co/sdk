@@ -47,6 +47,43 @@ def _validate_non_negative_int_string(v: str, field_name: str) -> str:
 
 _ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
+
+def _normalize_protocol_key(protocol: str) -> str:
+    """Canonicalize protocol identifiers for capability lookups.
+
+    The PROTOCOL_CAPABILITIES table uses snake_case keys (e.g. ``morpho_blue``).
+    Operators typing ``--protocol morpho-blue`` or ``"morpho blue"`` on the CLI
+    (or agents passing aliases) would otherwise miss the capability entry and
+    skip schema-level guards. Collapse hyphens and whitespace into underscores
+    before lookup. (CodeRabbit PR #1535 review.)
+    """
+    return protocol.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _protocol_requires_market_id(protocol: str) -> bool:
+    """Return True if the protocol uses isolated markets and needs ``market_id``.
+
+    Read from the authoritative PROTOCOL_CAPABILITIES table so schema checks
+    stay in sync with the intent-layer validator. Imported lazily to avoid a
+    circular import between schemas.py and framework/intents/*.
+    """
+    from almanak.framework.intents.vocabulary import PROTOCOL_CAPABILITIES
+
+    return bool(PROTOCOL_CAPABILITIES.get(_normalize_protocol_key(protocol), {}).get("requires_market_id", False))
+
+
+def _check_market_id(protocol: str, market_id: str | None, op: str) -> None:
+    """Fail fast if ``market_id`` is missing for an isolated-market protocol.
+
+    Surfacing this at the schema layer means tool invocations (via agent or
+    CLI) fail before the gateway RPC round-trip, matching the UX of other
+    required fields. The compiler still validates independently as defense in
+    depth. (Review: CodeRabbit + Claude pr-auditor on PR #1535.)
+    """
+    if _protocol_requires_market_id(protocol) and (not market_id or not market_id.strip()):
+        raise ValueError(f"market_id is required when protocol='{protocol}' for {op} (isolated-market protocol)")
+
+
 # =============================================================================
 # Shared envelope
 # =============================================================================
@@ -398,6 +435,10 @@ class SupplyLendingRequest(BaseModel):
     amount: str = Field(description="Amount as decimal string")
     protocol: str = Field(default="aave_v3", description="Lending protocol")
     use_as_collateral: bool = Field(default=True)
+    market_id: str | None = Field(
+        default=None,
+        description="Required for isolated-market protocols (Morpho Blue); ignored for unified-pool protocols",
+    )
     chain: str = Field(default="arbitrum")
     dry_run: bool = Field(default=False)
 
@@ -405,6 +446,11 @@ class SupplyLendingRequest(BaseModel):
     @classmethod
     def amount_must_be_positive(cls, v: str) -> str:
         return _validate_positive_decimal(v, "amount")
+
+    @model_validator(mode="after")
+    def validate_market_id(self) -> SupplyLendingRequest:
+        _check_market_id(self.protocol, self.market_id, "supply")
+        return self
 
 
 class SupplyLendingResponse(BaseModel):
@@ -421,6 +467,10 @@ class BorrowLendingRequest(BaseModel):
     collateral_token: str = Field(description="Token to use as collateral")
     collateral_amount: str = Field(description="Amount of collateral as decimal string, or 'all'")
     protocol: str = Field(default="aave_v3")
+    market_id: str | None = Field(
+        default=None,
+        description="Required for isolated-market protocols (Morpho Blue); ignored for unified-pool protocols",
+    )
     chain: str = Field(default="arbitrum")
     dry_run: bool = Field(default=False)
 
@@ -433,6 +483,11 @@ class BorrowLendingRequest(BaseModel):
     @classmethod
     def collateral_amount_must_be_positive_or_all(cls, v: str) -> str:
         return _validate_positive_or_all(v, "collateral_amount")
+
+    @model_validator(mode="after")
+    def validate_market_id(self) -> BorrowLendingRequest:
+        _check_market_id(self.protocol, self.market_id, "borrow")
+        return self
 
 
 class BorrowLendingResponse(BaseModel):
@@ -447,6 +502,10 @@ class RepayLendingRequest(BaseModel):
     token: str = Field(description="Token to repay")
     amount: str = Field(description="Amount as decimal string, or 'all' for full repayment")
     protocol: str = Field(default="aave_v3")
+    market_id: str | None = Field(
+        default=None,
+        description="Required for isolated-market protocols (Morpho Blue); ignored for unified-pool protocols",
+    )
     chain: str = Field(default="arbitrum")
     dry_run: bool = Field(default=False)
 
@@ -455,10 +514,49 @@ class RepayLendingRequest(BaseModel):
     def amount_must_be_positive_or_all(cls, v: str) -> str:
         return _validate_positive_or_all(v, "amount")
 
+    @model_validator(mode="after")
+    def validate_market_id(self) -> RepayLendingRequest:
+        _check_market_id(self.protocol, self.market_id, "repay")
+        return self
+
 
 class RepayLendingResponse(BaseModel):
     tx_hash: str | None = None
     amount_repaid: str = ""
+    gas_usd: str = ""
+
+
+class WithdrawLendingRequest(BaseModel):
+    """Withdraw supplied tokens from a lending protocol."""
+
+    token: str = Field(description="Token to withdraw")
+    amount: str = Field(description="Amount as decimal string, or 'all' for full withdrawal")
+    protocol: str = Field(default="aave_v3")
+    market_id: str | None = Field(
+        default=None,
+        description="Required for protocols with isolated markets (e.g. Morpho Blue); ignored for Aave V3",
+    )
+    is_collateral: bool = Field(
+        default=True,
+        description="Morpho Blue only: True withdraws collateral, False withdraws loan token",
+    )
+    chain: str = Field(default="arbitrum")
+    dry_run: bool = Field(default=False)
+
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_positive_or_all(cls, v: str) -> str:
+        return _validate_positive_or_all(v, "amount")
+
+    @model_validator(mode="after")
+    def validate_market_id(self) -> WithdrawLendingRequest:
+        _check_market_id(self.protocol, self.market_id, "withdraw")
+        return self
+
+
+class WithdrawLendingResponse(BaseModel):
+    tx_hash: str | None = None
+    amount_withdrawn: str = ""
     gas_usd: str = ""
 
 

@@ -358,6 +358,16 @@ _BUILTIN_TOOLS: list[ToolDefinition] = [
         latency_class=LatencyClass.SLOW,
     ),
     ToolDefinition(
+        name="withdraw_lending",
+        description="Withdraw supplied tokens from a lending protocol (full or partial). Supports dry_run.",
+        category=ToolCategory.ACTION,
+        risk_tier=RiskTier.MEDIUM,
+        request_schema=schemas.WithdrawLendingRequest,
+        response_schema=schemas.WithdrawLendingResponse,
+        idempotent=False,
+        latency_class=LatencyClass.SLOW,
+    ),
+    ToolDefinition(
         name="bridge_tokens",
         description="Bridge tokens from one chain to another. Uses Across or Stargate bridges. Supports dry_run.",
         category=ToolCategory.ACTION,

@@ -1118,28 +1118,66 @@ class ToolExecutor:
             }
 
         if tool_name == "supply_lending":
-            return "supply", {
+            params = {
                 "token": args["token"],
                 "amount": args["amount"],
                 "protocol": args.get("protocol", "aave_v3"),
                 "use_as_collateral": args.get("use_as_collateral", True),
             }
+            if args.get("market_id"):
+                params["market_id"] = args["market_id"]
+            return "supply", params
 
         if tool_name == "borrow_lending":
-            return "borrow", {
+            params = {
                 "borrow_token": args["token"],
                 "borrow_amount": args["amount"],
                 "collateral_token": args["collateral_token"],
                 "collateral_amount": args["collateral_amount"],
                 "protocol": args.get("protocol", "aave_v3"),
             }
+            if args.get("market_id"):
+                params["market_id"] = args["market_id"]
+            return "borrow", params
 
         if tool_name == "repay_lending":
-            return "repay", {
+            params = {
                 "token": args["token"],
                 "amount": args["amount"],
                 "protocol": args.get("protocol", "aave_v3"),
             }
+            if args.get("market_id"):
+                params["market_id"] = args["market_id"]
+            return "repay", params
+
+        if tool_name == "withdraw_lending":
+            # The WithdrawIntent compiler already falls back to the withdraw_all
+            # path when amount=="all" (see compiler_lending.py). We set the flag
+            # explicitly here only to match repay_lending's intent shape (which
+            # uses repay_full) so response-enrichment and strategy-author code
+            # reading the intent see a consistent "full close" signal.
+            #
+            # is_collateral is a Morpho-specific field that selects loan-token
+            # vs collateral-token side. Gate it to Morpho-like protocols so
+            # direct agent-tool invocations (bypassing the CLI guard) can't
+            # silently send this flag through to Aave-style adapters that
+            # would ignore it. (CodeRabbit PR #1535 round 4.)
+            from almanak.framework.agent_tools.schemas import _normalize_protocol_key
+
+            protocol = args.get("protocol", "aave_v3")
+            params = {
+                "token": args["token"],
+                "amount": args["amount"],
+                "protocol": protocol,
+            }
+            if _normalize_protocol_key(protocol) in {"morpho", "morpho_blue"}:
+                params["is_collateral"] = args.get("is_collateral", True)
+            if str(args.get("amount", "")).lower() == "all":
+                params["withdraw_all"] = True
+            market_id = args.get("market_id")
+            if market_id:
+                params["market_id"] = market_id
+            return "withdraw", params
 
         if tool_name == "bridge_tokens":
             bridge_params: dict = {
@@ -1204,7 +1242,13 @@ class ToolExecutor:
         if tool_name == "borrow_lending":
             return {**base, "amount_borrowed": args.get("amount", "")}
         if tool_name == "repay_lending":
-            return {**base, "amount_repaid": args.get("amount", "")}
+            requested = str(args.get("amount", ""))
+            # amount="all" is a sentinel, not a numeric value — don't leak it
+            # into a field downstream consumers will parse as a number.
+            return {**base, "amount_repaid": "" if requested.lower() == "all" else requested}
+        if tool_name == "withdraw_lending":
+            requested = str(args.get("amount", ""))
+            return {**base, "amount_withdrawn": "" if requested.lower() == "all" else requested}
 
         if tool_name == "bridge_tokens":
             return {
@@ -1292,7 +1336,13 @@ class ToolExecutor:
         if tool_name == "borrow_lending":
             return {**base, "amount_borrowed": args.get("amount", "")}
         if tool_name == "repay_lending":
-            return {**base, "amount_repaid": args.get("amount", "")}
+            requested = str(args.get("amount", ""))
+            # amount="all" is a sentinel, not a numeric value — don't leak it
+            # into a field downstream consumers will parse as a number.
+            return {**base, "amount_repaid": "" if requested.lower() == "all" else requested}
+        if tool_name == "withdraw_lending":
+            requested = str(args.get("amount", ""))
+            return {**base, "amount_withdrawn": "" if requested.lower() == "all" else requested}
 
         if tool_name == "bridge_tokens":
             metadata = enriched.extracted_data or {}
@@ -2213,6 +2263,7 @@ class ToolExecutor:
         "supply": "supply_lending",
         "borrow": "borrow_lending",
         "repay": "repay_lending",
+        "withdraw": "withdraw_lending",
         "flash_loan": "flash_loan",
         "wrap_native": "wrap_native",
         "unwrap_native": "unwrap_native",

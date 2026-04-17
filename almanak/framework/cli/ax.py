@@ -970,6 +970,339 @@ def lp_info(ctx, position_id, protocol, lp_network):
 
 
 # ---------------------------------------------------------------------------
+# almanak ax lending-supply / lending-borrow / lending-repay / lending-withdraw
+# ---------------------------------------------------------------------------
+
+
+_MORPHO_LIKE_PROTOCOLS = frozenset({"morpho", "morpho_blue"})
+
+
+def _is_morpho_like(protocol: str) -> bool:
+    """True if the protocol string canonicalizes to Morpho / Morpho Blue.
+
+    Normalizes hyphens and whitespace to underscores so ``morpho-blue`` and
+    ``"morpho blue"`` are accepted alongside ``morpho_blue`` — consistent with
+    the schema-layer protocol-key normalization.
+    """
+    from almanak.framework.agent_tools.schemas import _normalize_protocol_key
+
+    return _normalize_protocol_key(protocol) in _MORPHO_LIKE_PROTOCOLS
+
+
+def _guard_market_id_flag(protocol: str, market_id: str | None) -> None:
+    """Reject --market-id on protocols that ignore it.
+
+    The schema / intent layer accepts ``market_id=None`` for any protocol, so
+    downstream won't complain — but an operator who typed ``--market-id`` and
+    it silently had no effect deserves a clear error. Only Morpho Blue uses
+    isolated markets today; others (Aave V3, Compound, Spark, ...) use a
+    unified pool.
+    """
+    if market_id is not None and not _is_morpho_like(protocol):
+        raise click.UsageError(f"--market-id is only supported on Morpho Blue; got protocol={protocol}")
+
+
+def _run_lending_tool(
+    ctx: click.Context,
+    tool_name: str,
+    args: dict,
+    action_desc: str,
+    title: str,
+    sub_yes: bool,
+    sub_dry_run: bool,
+    sub_json_output: bool,
+) -> None:
+    """Shared plumbing for ax lending-* commands.
+
+    Mirrors the dry-run/confirm/execute loop used by ax swap and ax lp-close
+    so all four lending CLIs behave identically.
+    """
+    from almanak.framework.cli.ax_render import (
+        check_safety_gate,
+        render_error,
+        render_result,
+        render_simulation,
+    )
+
+    yes, dry_run, json_output = _merge_flags(ctx, sub_yes, sub_dry_run, sub_json_output)
+
+    try:
+        if dry_run:
+            args = {**args, "dry_run": True}
+            response = _run_tool(ctx, tool_name, args)
+            render_simulation(response, json_output=json_output)
+            if response.status == "error":
+                sys.exit(1)
+            return
+
+        proceed = check_safety_gate(dry_run=False, yes=yes, action_description=action_desc)
+        if not proceed:
+            click.echo("Cancelled.")
+            return
+
+        response = _run_tool(ctx, tool_name, args)
+        render_result(response, json_output=json_output, title=title)
+        if response.status == "error":
+            sys.exit(1)
+    except click.ClickException:
+        raise
+    except Exception as e:
+        render_error(str(e), json_output=json_output)
+        sys.exit(1)
+
+
+@ax.command("lending-supply")
+@click.argument("token")
+@click.argument("amount")
+@click.option("--protocol", default="aave_v3", help="Lending protocol (default: aave_v3).")
+@click.option("--no-collateral", is_flag=True, default=False, help="Supply without enabling as collateral.")
+@click.option("--market-id", default=None, help="Market id for isolated-market protocols (e.g. Morpho Blue).")
+@_action_options
+@click.pass_context
+def lending_supply(ctx, token, amount, protocol, no_collateral, market_id, sub_yes, sub_dry_run, sub_json_output):
+    """Supply tokens to a lending protocol.
+
+    \b
+    Examples:
+        almanak ax lending-supply USDC 100
+        almanak ax lending-supply USDC 100 --protocol aave_v3 --dry-run
+        almanak ax lending-supply WETH 0.5 --no-collateral
+        almanak ax lending-supply USDC 100 --protocol morpho_blue --market-id 0x...
+    """
+    _guard_market_id_flag(protocol, market_id)
+
+    args: dict = {
+        "token": token,
+        "amount": amount,
+        "protocol": protocol,
+        "use_as_collateral": not no_collateral,
+        "chain": ctx.obj["chain"],
+    }
+    if market_id:
+        args["market_id"] = market_id
+    _run_lending_tool(
+        ctx,
+        "supply_lending",
+        args,
+        action_desc=f"Supply {amount} {token.upper()} to {protocol} on {ctx.obj['chain']}",
+        title=f"Lending Supply: {amount} {token.upper()}",
+        sub_yes=sub_yes,
+        sub_dry_run=sub_dry_run,
+        sub_json_output=sub_json_output,
+    )
+
+
+@ax.command("lending-borrow")
+@click.argument("token")
+@click.argument("amount")
+@click.option("--collateral", "collateral_token", required=True, help="Collateral token symbol.")
+@click.option(
+    "--collateral-amount",
+    required=True,
+    help="Collateral amount (decimal) or 'all' to use full balance.",
+)
+@click.option("--protocol", default="aave_v3", help="Lending protocol (default: aave_v3).")
+@click.option("--market-id", default=None, help="Market id for isolated-market protocols (e.g. Morpho Blue).")
+@_action_options
+@click.pass_context
+def lending_borrow(
+    ctx,
+    token,
+    amount,
+    collateral_token,
+    collateral_amount,
+    protocol,
+    market_id,
+    sub_yes,
+    sub_dry_run,
+    sub_json_output,
+):
+    """Borrow tokens from a lending protocol.
+
+    \b
+    Examples:
+        almanak ax lending-borrow USDC 100 --collateral WETH --collateral-amount 0.1
+        almanak ax lending-borrow USDC 100 --collateral WETH --collateral-amount all --dry-run
+        almanak ax lending-borrow USDC 100 --collateral WETH --collateral-amount 0.1 \\
+            --protocol morpho_blue --market-id 0x...
+    """
+    _guard_market_id_flag(protocol, market_id)
+
+    args: dict = {
+        "token": token,
+        "amount": amount,
+        "collateral_token": collateral_token,
+        "collateral_amount": collateral_amount,
+        "protocol": protocol,
+        "chain": ctx.obj["chain"],
+    }
+    if market_id:
+        args["market_id"] = market_id
+    _run_lending_tool(
+        ctx,
+        "borrow_lending",
+        args,
+        action_desc=(
+            f"Borrow {amount} {token.upper()} against {collateral_amount} "
+            f"{collateral_token.upper()} on {protocol} ({ctx.obj['chain']})"
+        ),
+        title=f"Lending Borrow: {amount} {token.upper()}",
+        sub_yes=sub_yes,
+        sub_dry_run=sub_dry_run,
+        sub_json_output=sub_json_output,
+    )
+
+
+@ax.command("lending-repay")
+@click.argument("token")
+@click.argument("amount", required=False, default=None)
+@click.option(
+    "--full",
+    "repay_full",
+    is_flag=True,
+    default=False,
+    help="Repay the entire outstanding debt (shortcut for amount='all').",
+)
+@click.option("--protocol", default="aave_v3", help="Lending protocol (default: aave_v3).")
+@click.option("--market-id", default=None, help="Market id for isolated-market protocols (e.g. Morpho Blue).")
+@_action_options
+@click.pass_context
+def lending_repay(ctx, token, amount, repay_full, protocol, market_id, sub_yes, sub_dry_run, sub_json_output):
+    """Repay a lending position.
+
+    \b
+    Examples:
+        almanak ax lending-repay USDC 100            # Repay 100 USDC
+        almanak ax lending-repay USDC --full          # Repay full debt (= amount 'all')
+        almanak ax lending-repay USDC all             # Same as --full
+        almanak ax lending-repay USDC --full --protocol morpho_blue --market-id 0x...
+    """
+    if repay_full:
+        if amount is not None and str(amount).lower() != "all":
+            raise click.UsageError("--full conflicts with a non-'all' positional amount; pass one or the other")
+        resolved_amount = "all"
+    elif amount is None:
+        raise click.UsageError("Pass an amount, or use --full for full repayment")
+    else:
+        resolved_amount = amount
+
+    _guard_market_id_flag(protocol, market_id)
+
+    args: dict = {
+        "token": token,
+        "amount": resolved_amount,
+        "protocol": protocol,
+        "chain": ctx.obj["chain"],
+    }
+    if market_id:
+        args["market_id"] = market_id
+    _run_lending_tool(
+        ctx,
+        "repay_lending",
+        args,
+        action_desc=f"Repay {resolved_amount} {token.upper()} on {protocol} ({ctx.obj['chain']})",
+        title=f"Lending Repay: {resolved_amount} {token.upper()}",
+        sub_yes=sub_yes,
+        sub_dry_run=sub_dry_run,
+        sub_json_output=sub_json_output,
+    )
+
+
+@ax.command("lending-withdraw")
+@click.argument("token")
+@click.argument("amount", required=False, default=None)
+@click.option(
+    "--all",
+    "withdraw_all",
+    is_flag=True,
+    default=False,
+    help=(
+        "Withdraw the full supplied balance (shortcut for amount='all'). "
+        "Queries the protocol for the current balance at execution time."
+    ),
+)
+@click.option("--protocol", default="aave_v3", help="Lending protocol (default: aave_v3).")
+@click.option(
+    "--market-id",
+    default=None,
+    help="Morpho Blue market id. Rejected for non-Morpho protocols (unified pools don't use markets).",
+)
+@click.option(
+    "--loan-token/--collateral",
+    "is_loan_token",
+    default=False,
+    help=(
+        "Morpho Blue only: --loan-token withdraws the loan token, "
+        "--collateral (default) withdraws the collateral token."
+    ),
+)
+@_action_options
+@click.pass_context
+def lending_withdraw(
+    ctx,
+    token,
+    amount,
+    withdraw_all,
+    protocol,
+    market_id,
+    is_loan_token,
+    sub_yes,
+    sub_dry_run,
+    sub_json_output,
+):
+    """Withdraw supplied tokens from a lending protocol.
+
+    \b
+    Examples:
+        almanak ax lending-withdraw USDC 100         # Withdraw 100 USDC
+        almanak ax lending-withdraw USDC --all        # Withdraw full supplied balance
+        almanak ax lending-withdraw USDC all          # Same as --all
+        almanak ax lending-withdraw USDC --all --protocol morpho_blue --market-id 0xabc...
+    """
+    if withdraw_all:
+        if amount is not None and str(amount).lower() != "all":
+            raise click.UsageError("--all conflicts with a non-'all' positional amount; pass one or the other")
+        resolved_amount = "all"
+    elif amount is None:
+        raise click.UsageError("Pass an amount, or use --all to withdraw full supplied balance")
+    else:
+        resolved_amount = amount
+
+    # Reject Morpho-only flags on non-Morpho protocols rather than silently
+    # ignoring them. Downstream WithdrawIntent would accept the fields without
+    # complaint (CodeRabbit PR #1535 review), leaving the operator to wonder
+    # why their --market-id or --loan-token had no effect.
+    _guard_market_id_flag(protocol, market_id)
+    _is_morpho = _is_morpho_like(protocol)
+    if is_loan_token and not _is_morpho:
+        raise click.UsageError(f"--loan-token is only supported on Morpho Blue; got protocol={protocol}")
+
+    args: dict = {
+        "token": token,
+        "amount": resolved_amount,
+        "protocol": protocol,
+        "chain": ctx.obj["chain"],
+    }
+    # is_collateral and market_id are Morpho-specific; only forward them when
+    # the protocol actually uses them.
+    if _is_morpho:
+        args["is_collateral"] = not is_loan_token
+        if market_id:
+            args["market_id"] = market_id
+
+    _run_lending_tool(
+        ctx,
+        "withdraw_lending",
+        args,
+        action_desc=f"Withdraw {resolved_amount} {token.upper()} from {protocol} ({ctx.obj['chain']})",
+        title=f"Lending Withdraw: {resolved_amount} {token.upper()}",
+        sub_yes=sub_yes,
+        sub_dry_run=sub_dry_run,
+        sub_json_output=sub_json_output,
+    )
+
+
+# ---------------------------------------------------------------------------
 # almanak ax pool <token_a> <token_b>
 # ---------------------------------------------------------------------------
 
