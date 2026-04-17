@@ -25,6 +25,7 @@ import time
 from decimal import Decimal
 
 import pytest
+from pydantic import ValidationError
 from web3 import Web3
 
 from almanak.core.contracts import PANCAKESWAP_PERPS
@@ -374,32 +375,24 @@ class TestPancakeSwapPerpsCloseViaIntent:
         anvil_rpc_url: str,
         perps_price_oracle: dict[str, Decimal],
     ):
-        """Compiler MUST reject a 66-char position_id that contains non-hex characters.
+        """PerpCloseIntent MUST reject a 66-char position_id that contains non-hex characters.
 
         Failure-mode test: guards against malformed trade hashes reaching the adapter
         where they would surface as opaque encoding errors instead of a deterministic
-        compile-time failure.
+        validation failure.
         """
         # 0x + 64 chars, but contains 'z' which is not a valid hex character.
+        # PerpCloseIntent's model_validator catches this at construction time.
         non_hex = "0x" + ("z" * 64)
-        intent = PerpCloseIntent(
-            market="BTC/USD",
-            collateral_token="BNB",
-            is_long=True,
-            protocol="pancakeswap_perps",
-            position_id=non_hex,
-        )
-        compiler = IntentCompiler(
-            chain=CHAIN_NAME,
-            wallet_address=funded_wallet,
-            price_oracle=perps_price_oracle,
-            rpc_url=anvil_rpc_url,
-        )
-        compilation = compiler.compile(intent)
-        assert compilation.status.value == "FAILED"
-        assert compilation.action_bundle is None
-        assert "hex" in (compilation.error or "").lower()
-        print(f"Correctly rejected non-hex position_id: {compilation.error[:80]}...")
+        with pytest.raises(ValidationError, match="position_id must be valid hex"):
+            PerpCloseIntent(
+                market="BTC/USD",
+                collateral_token="BNB",
+                is_long=True,
+                protocol="pancakeswap_perps",
+                position_id=non_hex,
+            )
+        print(f"Correctly rejected non-hex position_id at validation time")
 
     async def test_close_intent_partial_close_via_size_usd_fails(
         self,

@@ -209,15 +209,10 @@ class TestPancakeSwapPerpsOpenIntent:
         bnb_after_wei = web3.eth.get_balance(funded_wallet)
         bnb_spent_wei = bnb_before_wei - bnb_after_wei
         margin_wei = int(collateral_amount * Decimal(10**18))
-        # Compute gas cost directly from the receipt — effectiveGasPrice is always
-        # populated on post-1559 receipts and avoids relying on pre-exec tx metadata.
-        effective_gas_price_raw = receipt.get("effectiveGasPrice", 0)
-        effective_gas_price = (
-            int(effective_gas_price_raw, 16)
-            if isinstance(effective_gas_price_raw, str)
-            else int(effective_gas_price_raw)
-        )
-        gas_cost_wei = tx_result.gas_used * effective_gas_price
+        # Use the orchestrator's pre-computed gas cost — it reads effective_gas_price
+        # from the TransactionReceipt dataclass directly, avoiding camelCase/snake_case
+        # mismatches when reading from the serialized receipt dict.
+        gas_cost_wei = tx_result.gas_cost_wei
         # Exact native-BNB delta: trader pays margin + gas, nothing else moves native BNB
         # on the open path (margin is wrapped to WBNB inside the router via msg.value).
         expected_spent = margin_wei + gas_cost_wei
