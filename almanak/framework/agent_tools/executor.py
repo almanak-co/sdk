@@ -48,6 +48,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Native-token decimals for chains exposed through ``get_portfolio`` /
+# ``list_lp_positions``. Every currently-registered EVM chain uses 18 decimals
+# for its native currency (ETH, MATIC, AVAX, BNB, S, MNT, PLM, etc.), so the
+# default below is safe — but pull the value from this map explicitly rather
+# than hardcoding ``18`` at the call site so a future non-EVM chain (e.g., a
+# chain with a different native scale) surfaces as a one-line fix here rather
+# than a silent ×10^N rendering bug. (Gemini PR #1536 high-priority review.)
+_NATIVE_TOKEN_DECIMALS: dict[str, int] = {
+    # Populate only chains that need a non-18 override; everything else
+    # falls through to the default via ``.get(chain, 18)``.
+}
+
 
 def _coerce_floats_to_str(obj: Any) -> Any:
     """Recursively coerce float values to strings for Pydantic SafeDecimal compatibility.
@@ -658,6 +670,15 @@ class ToolExecutor:
 
         if tool_name == "get_lp_position":
             return await self._execute_get_lp_position(args)
+
+        if tool_name == "list_lp_positions":
+            return await self._execute_list_lp_positions(args)
+
+        if tool_name == "list_lending_positions":
+            return await self._execute_list_lending_positions(args)
+
+        if tool_name == "get_portfolio":
+            return await self._execute_get_portfolio(args)
 
         if tool_name == "resolve_token":
             from almanak.framework.data.tokens import get_token_resolver
@@ -2001,6 +2022,497 @@ class ToolExecutor:
             logger.warning("fee USD enrichment block failed, failing open: %s", exc)
 
         return ToolResponse(status="success", data=data)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Read-only list helpers (VIB-2995)
+    # ─────────────────────────────────────────────────────────────────────
+
+    # Named constants for ABI selectors used across the read-only list paths.
+    # Keeping them as class-level attributes so mocked gateway tests can
+    # inspect them and they're discoverable alongside the methods that use
+    # them. (Gemini PR #1536 review.)
+    _SELECTOR_BALANCE_OF = "0x70a08231"  # ERC20/ERC721 balanceOf(address)
+    _SELECTOR_GET_USER_ACCOUNT_DATA = "0xbf92857c"  # Aave V3 Pool.getUserAccountData(address)
+
+    def _rpc_call(self, chain: str, to: str, data: str, id_: str, network: str = "") -> tuple[bool, str]:
+        """Single eth_call helper used by list/portfolio read paths.
+
+        Returns (success, result_hex_without_0x | error_message). When the
+        gateway surfaces a JSON-RPC error envelope (``{"code": ..., "message":
+        ...}``), extract the revert message so callers get something useful
+        instead of ``"unexpected rpc result type: dict"``.
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        resp = self._client.rpc.Call(
+            gateway_pb2.RpcRequest(
+                chain=chain,
+                method="eth_call",
+                params=json.dumps([{"to": to, "data": data}, "latest"]),
+                id=id_,
+                network=network,
+            ),
+            timeout=30.0,
+        )
+        if not resp.success:
+            return False, resp.error or "rpc error"
+        try:
+            raw = json.loads(resp.result)
+        except (json.JSONDecodeError, TypeError) as exc:
+            return False, f"bad rpc result: {exc}"
+        if isinstance(raw, str):
+            return True, raw.removeprefix("0x")
+        if isinstance(raw, dict):
+            err = raw.get("error") if isinstance(raw.get("error"), dict) else raw
+            message = err.get("message") if isinstance(err, dict) else None
+            return False, f"rpc error: {message or raw}"
+        return False, f"unexpected rpc result type: {type(raw).__name__}"
+
+    def _resolve_wallet(self, args: dict, tool_name: str = "list_lp_positions") -> str | None:
+        """Pick the wallet address: explicit arg > executor default. None if neither.
+
+        Validates hex format before returning so downstream eth_call calldata
+        always has a known-good 40-char address — otherwise nonsense inputs
+        like ``"wallet1"`` or ``"0xABC"`` get padded into gibberish calldata
+        and surface as opaque RPC errors. ``tool_name`` is threaded through so
+        the resulting ToolValidationError gets attributed to the caller
+        (CodeRabbit PR #1536 round 3 review).
+        """
+        import re
+
+        addr = (args.get("wallet_address") or self._wallet_address or "").strip()
+        if not addr:
+            return None
+        if not re.fullmatch(r"0x[0-9a-fA-F]{40}", addr):
+            raise ToolValidationError(
+                f"Invalid wallet address '{addr}' — expected 0x-prefixed 40-char hex",
+                tool_name=tool_name,
+            )
+        return addr.lower()
+
+    async def _execute_list_lp_positions(self, args: dict) -> ToolResponse:
+        """Enumerate LP NFTs owned by a wallet across every registered V3-fork NPM.
+
+        Delegates to :func:`almanak.framework.teardown.discovery.discover_lp_positions`
+        — the canonical walker already used for teardown. That module handles:
+
+        * **Multi-protocol coverage**: walks Uniswap V3 + PancakeSwap V3 +
+          SushiSwap V3 + Agni Finance NPMs registered for the chain, so a
+          wallet that holds positions on several V3 forks on the same chain
+          gets all of them in one call.
+        * **DOS cap**: ``_MAX_POSITIONS_PER_NPM = 256`` caps the enumeration
+          loop so a hostile / buggy NPM returning ``2**256-1`` from
+          ``balanceOf`` can't DOS the gateway.
+        * **Retries + incomplete-discovery signalling**: per-position reads
+          are retried; unreadable positions are surfaced (in non-strict
+          mode via a logged warning, not silently dropped).
+
+        The ``protocol`` request field is accepted for forward compatibility
+        but currently only used to reject unsupported slugs — the walker
+        always reports the actual protocol per position. (CodeRabbit / Claude
+        pr-auditor PR #1536 round 1.)
+        """
+        from almanak.framework.data.tokens import TokenNotFoundError, get_token_resolver
+        from almanak.framework.teardown.discovery import (
+            _MAX_POSITIONS_PER_NPM,
+            DiscoveryIncomplete,
+            _npms_for_chain,
+            discover_lp_positions,
+        )
+
+        chain = args.get("chain", self._default_chain)
+        network = args.get("network", "")
+        protocol_arg = args.get("protocol", "")
+        include_empty = bool(args.get("include_empty", False))
+
+        # Accept the legacy "uniswap_v3" slug (matches the old behavior where
+        # the tool silently ignored other protocols). Anything else is a
+        # typo — report supported protocols explicitly, no external ticket
+        # reference (tickets get closed/renamed and leave stale pointers).
+        supported_protocols = sorted({p for p, _ in _npms_for_chain(chain)} | {"uniswap_v3"})
+        if protocol_arg and protocol_arg not in supported_protocols and protocol_arg != "uniswap_v3":
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    f"list_lp_positions: unsupported protocol '{protocol_arg}' on chain={chain}. "
+                    f"Supported on this chain: {supported_protocols}",
+                ),
+            )
+
+        wallet = self._resolve_wallet(args, tool_name="list_lp_positions")
+        if not wallet:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    "wallet_address is required (none passed and no default wallet configured)",
+                ),
+            )
+
+        if not _npms_for_chain(chain):
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.UNSUPPORTED_CHAIN,
+                    f"No V3-fork NonfungiblePositionManager registered for chain={chain}",
+                ),
+            )
+
+        # strict=False: log-and-continue on unreadable positions. Agent-callable
+        # tools must never raise — the response envelope carries status.
+        try:
+            discovered = await discover_lp_positions(
+                self._client,
+                chain,
+                wallet,
+                include_zero_liquidity=include_empty,
+                network=network,
+                strict=False,
+            )
+        except DiscoveryIncomplete as exc:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.RPC_FAILED,
+                    f"LP discovery failed: {exc}",
+                    recoverable=True,
+                ),
+            )
+
+        resolver = get_token_resolver()
+
+        def _resolve_symbol(addr: str) -> str:
+            try:
+                return resolver.resolve(addr, chain).symbol
+            except TokenNotFoundError:
+                return ""
+            except Exception as exc:
+                # Unexpected: log so we don't silently hide resolver bugs, but
+                # still return "" — a missing symbol shouldn't fail the whole
+                # portfolio query. (Gemini PR #1536 review.)
+                logger.warning(
+                    "list_lp_positions: unexpected error resolving symbol for %s on %s: %s",
+                    addr,
+                    chain,
+                    exc,
+                )
+                return ""
+
+        positions = [
+            {
+                "position_id": str(p.token_id),
+                "token0": p.token0.lower(),
+                "token1": p.token1.lower(),
+                "token0_symbol": _resolve_symbol(p.token0),
+                "token1_symbol": _resolve_symbol(p.token1),
+                "fee_tier": p.fee,
+                "liquidity": str(p.liquidity),
+                "protocol": p.protocol,
+                "npm_address": p.npm_address,
+            }
+            for p in discovered
+        ]
+
+        return ToolResponse(
+            status="success",
+            data={
+                "chain": chain,
+                "protocol": protocol_arg or "all",
+                "wallet_address": wallet,
+                "count": len(positions),
+                "positions": positions,
+                # Surface the cap so operators know if they might be hitting it.
+                "max_positions_per_npm": _MAX_POSITIONS_PER_NPM,
+            },
+        )
+
+    async def _execute_list_lending_positions(self, args: dict) -> ToolResponse:
+        """Summarize an Aave V3 account via Pool.getUserAccountData(user).
+
+        Returns the same fields Aave's UI shows at the top of the dashboard:
+        totals (in base currency units — 8 decimals on mainnet), liquidation
+        threshold, LTV, and health factor (1e18-scaled; MAX_UINT256 when the
+        account has no debt).
+        """
+        from almanak.framework.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
+
+        chain = args.get("chain", self._default_chain)
+        network = args.get("network", "")
+        protocol = args.get("protocol", "aave_v3")
+
+        if protocol != "aave_v3":
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    f"list_lending_positions: unsupported protocol '{protocol}'. Supported: ['aave_v3']",
+                ),
+            )
+
+        wallet = self._resolve_wallet(args, tool_name="list_lending_positions")
+        if not wallet:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    "wallet_address is required (none passed and no default wallet configured)",
+                ),
+            )
+
+        pool_addr = AAVE_V3_POOL_ADDRESSES.get(chain)
+        if not pool_addr:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(AgentErrorCode.UNSUPPORTED_CHAIN, f"Aave V3 not configured on {chain}"),
+            )
+
+        wallet_padded = wallet.removeprefix("0x").lower().zfill(64)
+        ok, raw = self._rpc_call(
+            chain, pool_addr, self._SELECTOR_GET_USER_ACCOUNT_DATA + wallet_padded, "aave_acct_data", network
+        )
+        if not ok:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(AgentErrorCode.RPC_FAILED, f"getUserAccountData() failed: {raw}", recoverable=True),
+            )
+        if len(raw) < 384:  # 6 words * 64 hex
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.RPC_FAILED,
+                    f"getUserAccountData() returned short payload: {len(raw)} hex chars",
+                    recoverable=True,
+                ),
+            )
+
+        words = [raw[i * 64 : (i + 1) * 64] for i in range(6)]
+        total_collateral_base = int(words[0], 16)
+        total_debt_base = int(words[1], 16)
+        available_borrows_base = int(words[2], 16)
+        current_liq_threshold = int(words[3], 16)  # bps
+        ltv = int(words[4], 16)  # bps
+        health_factor_raw = int(words[5], 16)
+
+        # Aave reports totals in its "base currency" with 8 decimals. On every
+        # currently-deployed Aave V3 chain the base currency is USD (verified
+        # against PriceOracle.BASE_CURRENCY() = 0x0, which maps to USD in
+        # Aave's convention), so we hardcode the scale here.
+        #
+        # TODO(VIB-3000+): once an Aave instance with a non-USD base currency
+        # is registered (e.g. sUSDe-denominated markets), switch to reading
+        # PriceOracle.BASE_CURRENCY_UNIT() + BASE_CURRENCY() on the chain's
+        # oracle and rename the response field from ``*_usd`` to ``*_base``.
+        def _base_to_usd(n: int) -> str:
+            return str(Decimal(n) / Decimal(10**8))
+
+        # Health factor is 1e18-scaled. MAX_UINT256 means "no debt" → infinity.
+        if health_factor_raw == (1 << 256) - 1:
+            hf_str = "∞"
+        else:
+            hf_str = str(Decimal(health_factor_raw) / Decimal(10**18))
+
+        return ToolResponse(
+            status="success",
+            data={
+                "chain": chain,
+                "protocol": protocol,
+                "wallet_address": wallet,
+                "total_collateral_usd": _base_to_usd(total_collateral_base),
+                "total_debt_usd": _base_to_usd(total_debt_base),
+                "available_borrows_usd": _base_to_usd(available_borrows_base),
+                "current_liquidation_threshold_bps": current_liq_threshold,
+                "ltv_bps": ltv,
+                "health_factor": hf_str,
+            },
+        )
+
+    async def _execute_get_portfolio(self, args: dict) -> ToolResponse:
+        """One-shot portfolio summary: native + ERC20 balances + LP + lending.
+
+        Read-only aggregate. Every section is queried independently and any
+        per-section failure is reported via a ``warnings`` list in the
+        response. The top-level ``status`` is set to ``"partial"`` (instead
+        of ``"success"``) whenever any section fails — callers must not
+        treat empty fields as authoritative without checking ``warnings``.
+
+        This fixes Blocker #3 from the PR #1536 audit: previously every
+        ``except`` logged at DEBUG and left the field empty, making RPC
+        failures indistinguishable from "no positions" on a $10M treasury
+        query.
+        """
+        from almanak.framework.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
+        from almanak.framework.teardown.discovery import _npms_for_chain
+        from almanak.gateway.proto import gateway_pb2
+
+        chain = args.get("chain", self._default_chain)
+        network = args.get("network", "")
+        wallet = self._resolve_wallet(args, tool_name="get_portfolio")
+        if not wallet:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    "wallet_address is required (none passed and no default wallet configured)",
+                ),
+            )
+
+        warnings: list[dict] = []
+        summary: dict = {
+            "chain": chain,
+            "wallet_address": wallet,
+            "native_balance": "",
+            "native_symbol": "",
+            "token_balances": [],
+            "lp_positions": [],
+            "lending": None,
+        }
+
+        def _warn(section: str, code: str, message: str) -> None:
+            logger.warning("portfolio %s failed (%s): %s", section, code, message)
+            warnings.append({"section": section, "code": code, "message": message})
+
+        # Native balance (eth_getBalance)
+        try:
+            from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
+
+            bal_resp = self._client.rpc.Call(
+                gateway_pb2.RpcRequest(
+                    chain=chain,
+                    method="eth_getBalance",
+                    params=json.dumps([wallet, "latest"]),
+                    id="portfolio_eth_balance",
+                    network=network,
+                ),
+                timeout=30.0,
+            )
+            if not bal_resp.success:
+                _warn("native_balance", "rpc_failed", bal_resp.error or "unknown rpc error")
+            else:
+                raw_bal = json.loads(bal_resp.result)
+                if not isinstance(raw_bal, str):
+                    _warn("native_balance", "bad_response", f"eth_getBalance returned {type(raw_bal).__name__}")
+                else:
+                    native_wei = int(raw_bal, 16)
+                    chain_key = chain.lower()
+                    native_symbol = NATIVE_TOKEN_SYMBOLS.get(chain_key)
+                    # Repo convention (VIB-2950): never silently default
+                    # decimals. If we don't know the native symbol for this
+                    # chain, we also don't know its decimals — surface the
+                    # gap via warnings rather than pretending 18. (CodeRabbit
+                    # PR #1536 round 3 major.)
+                    if not native_symbol:
+                        _warn(
+                            "native_balance",
+                            "unknown_chain",
+                            f"chain={chain} not in NATIVE_TOKEN_SYMBOLS; "
+                            f"register it in gateway/data/balance/web3_provider.py "
+                            f"to get native balance",
+                        )
+                    else:
+                        native_decimals = _NATIVE_TOKEN_DECIMALS.get(chain_key, 18)
+                        summary["native_balance"] = str(Decimal(native_wei) / Decimal(10**native_decimals))
+                        summary["native_symbol"] = native_symbol
+        except Exception as exc:
+            _warn("native_balance", "exception", str(exc))
+
+        # ERC20 balances: call balanceOf directly via eth_call so the
+        # ``network`` override is honored (BalanceRequest has no network
+        # field today) and we don't re-enter the policy engine for an
+        # already-approved portfolio read. (Codex PR #1536 P2 x2.)
+        tokens = list(args.get("tokens") or [])
+        if tokens:
+            from almanak.framework.data.tokens import TokenNotFoundError, get_token_resolver
+
+            resolver = get_token_resolver()
+            wallet_padded = wallet.removeprefix("0x").zfill(64)
+            token_balances: list[dict] = []
+            for sym in tokens:
+                try:
+                    resolved = resolver.resolve(sym, chain)
+                except TokenNotFoundError as exc:
+                    _warn("token_balances", "unknown_token", f"{sym}: {exc}")
+                    continue
+                except Exception as exc:
+                    _warn("token_balances", "resolver_error", f"{sym}: {exc}")
+                    continue
+
+                ok, raw = self._rpc_call(
+                    chain,
+                    resolved.address,
+                    self._SELECTOR_BALANCE_OF + wallet_padded,
+                    f"portfolio_erc20_{sym}",
+                    network,
+                )
+                if not ok:
+                    _warn("token_balances", "rpc_failed", f"{sym}: {raw}")
+                    continue
+                try:
+                    raw_units = int(raw, 16) if raw else 0
+                    human = Decimal(raw_units) / Decimal(10**resolved.decimals)
+                    token_balances.append(
+                        {
+                            "token": sym,
+                            "address": resolved.address,
+                            "balance": str(human),
+                            "raw_balance": str(raw_units),
+                            "decimals": resolved.decimals,
+                        }
+                    )
+                except (ArithmeticError, ValueError) as exc:
+                    _warn("token_balances", "decode_error", f"{sym}: {exc}")
+            summary["token_balances"] = token_balances
+
+        # LP positions: gate on the canonical discovery registry so we don't
+        # skip PancakeSwap V3 / SushiSwap V3 / Agni positions on chains where
+        # only those forks are registered (previously we checked only the
+        # Uniswap V3 receipt parser's POSITION_MANAGER_ADDRESSES — CodeRabbit
+        # PR #1536 round 3 major).
+        if _npms_for_chain(chain):
+            lp_resp = await self._execute_list_lp_positions(
+                {"chain": chain, "wallet_address": wallet, "network": network}
+            )
+            if lp_resp.status == "success" and lp_resp.data:
+                summary["lp_positions"] = lp_resp.data.get("positions", [])
+            else:
+                _warn(
+                    "lp_positions",
+                    (lp_resp.error or {}).get("error_code", "unknown"),
+                    (lp_resp.error or {}).get("message", "list_lp_positions returned no data"),
+                )
+
+        # Lending (Aave V3 only for v1).
+        if AAVE_V3_POOL_ADDRESSES.get(chain):
+            lend_resp = await self._execute_list_lending_positions(
+                {"chain": chain, "wallet_address": wallet, "network": network}
+            )
+            if lend_resp.status == "success" and lend_resp.data:
+                total_debt = lend_resp.data.get("total_debt_usd", "0")
+                total_collat = lend_resp.data.get("total_collateral_usd", "0")
+                try:
+                    if Decimal(total_debt) > 0 or Decimal(total_collat) > 0:
+                        summary["lending"] = {
+                            "protocol": "aave_v3",
+                            "total_collateral_usd": total_collat,
+                            "total_debt_usd": total_debt,
+                            "health_factor": lend_resp.data.get("health_factor", ""),
+                        }
+                except (ArithmeticError, ValueError) as exc:
+                    # Keep the lending field shape consistent — leave as None
+                    # and surface the decode error via warnings rather than
+                    # returning the raw lend_resp.data with a different
+                    # schema. (Gemini PR #1536 high-priority review.)
+                    _warn("lending", "decode_error", f"could not parse totals as Decimal: {exc}")
+            else:
+                _warn(
+                    "lending",
+                    (lend_resp.error or {}).get("error_code", "unknown"),
+                    (lend_resp.error or {}).get("message", "list_lending_positions returned no data"),
+                )
+
+        summary["warnings"] = warnings
+        status = "partial" if warnings else "success"
+        return ToolResponse(status=status, data=summary)
 
     async def _execute_compute_rebalance_candidate(self, args: dict) -> ToolResponse:
         """Deterministic economic viability check for LP rebalancing.

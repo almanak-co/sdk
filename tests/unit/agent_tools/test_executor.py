@@ -1892,3 +1892,335 @@ class TestWithdrawLendingIntentMapping:
             {"token": "USDC", "amount": "100", "protocol": "compound_v3", "is_collateral": True},
         )
         assert "is_collateral" not in params
+
+
+class TestListReadCommands:
+    """VIB-2995: list_lp_positions + list_lending_positions + get_portfolio.
+
+    The LP tests mock whatever ``discover_lp_positions`` returns, since that
+    module has its own battery of tests (`tests/unit/teardown/test_discovery.py`).
+    We focus here on the executor's envelope contract: wallet validation,
+    unsupported-chain handling, and forwarding the discovered positions.
+
+    The lending / portfolio tests still mock ``mock_gateway.rpc.Call``
+    directly because those paths use the executor's own ``_rpc_call`` helper.
+    """
+
+    @staticmethod
+    def _pack_uint256(value: int) -> str:
+        return hex(value)[2:].zfill(64)
+
+    @staticmethod
+    def _pack_address(addr: str) -> str:
+        return addr.lower().removeprefix("0x").zfill(64)
+
+    def _rpc_result(self, hex_payload: str):
+        """Build a MagicMock that mimics the gateway RpcResponse shape."""
+        resp = MagicMock()
+        resp.success = True
+        resp.result = f'"0x{hex_payload}"'
+        resp.error = ""
+        return resp
+
+    def _rpc_error(self, msg: str):
+        resp = MagicMock()
+        resp.success = False
+        resp.result = ""
+        resp.error = msg
+        return resp
+
+    def _discovered(self, token_id, token0, token1, fee=500, liquidity=10**20, protocol="uniswap_v3"):
+        from almanak.framework.teardown.discovery import DiscoveredPosition
+
+        return DiscoveredPosition(
+            token_id=token_id,
+            npm_address="0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+            chain="arbitrum",
+            protocol=protocol,
+            token0=token0.lower(),
+            token1=token1.lower(),
+            fee=fee,
+            tick_lower=0,
+            tick_upper=10000,
+            liquidity=liquidity,
+        )
+
+    @pytest.mark.asyncio
+    async def test_list_lp_positions_rejects_unsupported_protocol(self, executor):
+        resp = await executor.execute("list_lp_positions", {"chain": "arbitrum", "protocol": "curve"})
+        assert resp.status == "error"
+        # New message lists supported protocols explicitly; no ticket reference.
+        assert "uniswap_v3" in resp.error["message"]
+        assert "VIB-" not in resp.error["message"], "error message must not reference a ticket"
+
+    @pytest.mark.asyncio
+    async def test_list_lp_positions_requires_wallet(self, mock_gateway):
+        """No explicit wallet AND no default wallet on executor → clear error."""
+        from almanak.framework.agent_tools.executor import ToolExecutor
+        from almanak.framework.agent_tools.policy import AgentPolicy
+
+        executor = ToolExecutor(
+            mock_gateway,
+            policy=AgentPolicy(allowed_chains={"arbitrum"}, max_tool_calls_per_minute=100, cooldown_seconds=0),
+            wallet_address="",
+            strategy_id="test",
+        )
+        resp = await executor.execute("list_lp_positions", {"chain": "arbitrum"})
+        assert resp.status == "error"
+        assert "wallet_address" in resp.error["message"]
+
+    @pytest.mark.asyncio
+    async def test_list_lp_positions_rejects_malformed_wallet(self, executor):
+        """Audit Important #4: nonsense wallet input must fail fast at VALIDATION_ERROR."""
+        resp = await executor.execute(
+            "list_lp_positions",
+            {"chain": "arbitrum", "wallet_address": "not-an-address"},
+        )
+        assert resp.status == "error"
+        assert resp.error["error_code"] == "validation_error"
+        assert "Invalid wallet address" in resp.error["message"]
+
+    @pytest.mark.asyncio
+    async def test_list_lp_positions_unsupported_chain(self, mock_gateway):
+        """Chain with no registered V3 NPM returns unsupported_chain.
+
+        Uses a dedicated executor whose policy allows 'sonic' (absent from
+        every protocol's NPM registry) so the error comes from the tool, not
+        from PolicyEngine's allowed_chains gate.
+        """
+        from almanak.framework.agent_tools.executor import ToolExecutor
+        from almanak.framework.agent_tools.policy import AgentPolicy
+
+        executor = ToolExecutor(
+            mock_gateway,
+            policy=AgentPolicy(
+                allowed_chains={"sonic"},
+                max_tool_calls_per_minute=100,
+                cooldown_seconds=0,
+                max_single_trade_usd=Decimal("999999999"),
+                max_daily_spend_usd=Decimal("999999999"),
+                max_position_size_usd=Decimal("999999999"),
+                require_human_approval_above_usd=Decimal("999999999"),
+                require_rebalance_check=False,
+            ),
+            wallet_address="0xabc0000000000000000000000000000000000000",
+            strategy_id="test",
+        )
+        resp = await executor.execute("list_lp_positions", {"chain": "sonic"})
+        assert resp.status == "error"
+        assert resp.error["error_code"] == "unsupported_chain"
+
+    @pytest.mark.asyncio
+    async def test_list_lp_positions_delegates_to_discover(self, executor):
+        """Happy path: whatever discover_lp_positions returns gets surfaced.
+
+        Regression for the audit finding that we used to reinvent the walker
+        — tests that we now delegate and preserve protocol + npm_address.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        usdc = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        weth = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+        discovered = [
+            self._discovered(token_id=42, token0=usdc, token1=weth, fee=500, liquidity=10**20),
+            self._discovered(
+                token_id=99, token0=usdc, token1=weth, fee=3000, liquidity=500, protocol="sushiswap_v3"
+            ),
+        ]
+        with patch(
+            "almanak.framework.teardown.discovery.discover_lp_positions",
+            new=AsyncMock(return_value=discovered),
+        ):
+            resp = await executor.execute(
+                "list_lp_positions",
+                {"chain": "arbitrum", "wallet_address": "0xabc0000000000000000000000000000000000000"},
+            )
+        assert resp.status == "success", resp.error
+        assert resp.data["count"] == 2
+        ids = {p["position_id"] for p in resp.data["positions"]}
+        assert ids == {"42", "99"}
+        protocols = {p["protocol"] for p in resp.data["positions"]}
+        assert protocols == {"uniswap_v3", "sushiswap_v3"}
+        # The cap gets surfaced so operators know the upper bound
+        assert resp.data["max_positions_per_npm"] == 256
+
+    @pytest.mark.asyncio
+    async def test_list_lp_positions_empty_delegation(self, executor):
+        """Wallet with no positions returns count=0 (not an error)."""
+        from unittest.mock import AsyncMock, patch
+
+        with patch(
+            "almanak.framework.teardown.discovery.discover_lp_positions",
+            new=AsyncMock(return_value=[]),
+        ):
+            resp = await executor.execute(
+                "list_lp_positions",
+                {"chain": "arbitrum", "wallet_address": "0xabc0000000000000000000000000000000000000"},
+            )
+        assert resp.status == "success"
+        assert resp.data["count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_list_lp_positions_discovery_incomplete_surfaces(self, executor):
+        """When the walker raises DiscoveryIncomplete the tool returns RPC_FAILED."""
+        from unittest.mock import AsyncMock, patch
+
+        from almanak.framework.teardown.discovery import DiscoveryIncomplete
+
+        err = DiscoveryIncomplete(chain="arbitrum", npm="0xC36442b4a4522E871399CD717aBDD847Ab11FE88", missing=[3])
+        with patch(
+            "almanak.framework.teardown.discovery.discover_lp_positions",
+            new=AsyncMock(side_effect=err),
+        ):
+            resp = await executor.execute(
+                "list_lp_positions",
+                {"chain": "arbitrum", "wallet_address": "0xabc0000000000000000000000000000000000000"},
+            )
+        assert resp.status == "error"
+        assert resp.error["error_code"] == "rpc_failed"
+
+    @pytest.mark.asyncio
+    async def test_list_lending_positions_unsupported_protocol(self, executor):
+        """Protocol gate must fire even when wallet address is valid — otherwise
+        the test would falsely pass on chains where the validation order
+        changes. (CodeRabbit PR #1536 round 4 minor.)"""
+        resp = await executor.execute(
+            "list_lending_positions",
+            {
+                "chain": "arbitrum",
+                "protocol": "compound_v3",
+                "wallet_address": "0xabc0000000000000000000000000000000000000",
+            },
+        )
+        assert resp.status == "error"
+        assert "aave_v3" in resp.error["message"]
+
+    @pytest.mark.asyncio
+    async def test_list_lending_positions_decodes_account_data(self, executor, mock_gateway):
+        """Aave V3 Pool.getUserAccountData returns 6 uint256 words.
+
+        Values chosen: $2000 collateral, $500 debt, $1000 available, LT=80%,
+        LTV=75%, HF=3.2 (1e18-scaled). Collateral/debt use 8 decimals.
+        """
+        words = [
+            self._pack_uint256(2000 * 10**8),  # totalCollateralBase
+            self._pack_uint256(500 * 10**8),  # totalDebtBase
+            self._pack_uint256(1000 * 10**8),  # availableBorrowsBase
+            self._pack_uint256(8000),  # LT bps
+            self._pack_uint256(7500),  # LTV bps
+            self._pack_uint256(32 * 10**17),  # HF = 3.2e18
+        ]
+        mock_gateway.rpc.Call.return_value = self._rpc_result("".join(words))
+
+        resp = await executor.execute(
+            "list_lending_positions",
+            {"chain": "arbitrum", "wallet_address": "0xabc0000000000000000000000000000000000000"},
+        )
+        assert resp.status == "success", resp.error
+        assert resp.data["total_collateral_usd"] == "2000"
+        assert resp.data["total_debt_usd"] == "500"
+        assert resp.data["available_borrows_usd"] == "1000"
+        assert resp.data["current_liquidation_threshold_bps"] == 8000
+        assert resp.data["ltv_bps"] == 7500
+        assert resp.data["health_factor"] == "3.2"
+
+    @pytest.mark.asyncio
+    async def test_list_lending_positions_no_debt_health_factor_infinity(self, executor, mock_gateway):
+        """MAX_UINT256 health factor → '∞' rendering."""
+        max_uint = (1 << 256) - 1
+        words = [
+            self._pack_uint256(1000 * 10**8),
+            self._pack_uint256(0),
+            self._pack_uint256(0),
+            self._pack_uint256(8000),
+            self._pack_uint256(7500),
+            self._pack_uint256(max_uint),
+        ]
+        mock_gateway.rpc.Call.return_value = self._rpc_result("".join(words))
+
+        resp = await executor.execute(
+            "list_lending_positions",
+            {"chain": "arbitrum", "wallet_address": "0xabc0000000000000000000000000000000000000"},
+        )
+        assert resp.status == "success"
+        assert resp.data["health_factor"] == "∞"
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Audit-blocker regression coverage (PR #1536 round 1)
+    # ─────────────────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_portfolio_returns_partial_status_on_rpc_failure(self, executor, mock_gateway):
+        """Blocker #3: any section failure → status='partial' + warnings entry.
+
+        Previously the tool logged at DEBUG and returned status='success' with
+        an empty native_balance — operators couldn't tell "wallet is empty"
+        from "RPC died". Now the warnings list makes failures explicit.
+        """
+        # eth_getBalance fails; everything else also uses the same rpc.Call
+        # mock, but we only care that the failure surfaces.
+        mock_gateway.rpc.Call.return_value = self._rpc_error("simulated rpc outage")
+
+        resp = await executor.execute(
+            "get_portfolio",
+            {"chain": "arbitrum", "wallet_address": "0xabc0000000000000000000000000000000000000"},
+        )
+        assert resp.status == "partial"
+        warnings = resp.data.get("warnings", [])
+        sections = {w["section"] for w in warnings}
+        assert "native_balance" in sections
+        # native_balance must stay "" so the operator sees "failed", not "0"
+        assert resp.data["native_balance"] == ""
+
+    @pytest.mark.asyncio
+    async def test_portfolio_erc20_uses_eth_call_not_batch(self, executor, mock_gateway):
+        """Codex P2 x2: ERC20 lookup must honor network + bypass nested policy.
+
+        The new path calls balanceOf via _rpc_call (eth_call) rather than
+        re-entering self.execute('batch_get_balances'). We verify the RPC
+        method is eth_call and the network override is forwarded.
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        # Native balance + ERC20 balance both use rpc.Call; return a
+        # neutral "0" for any eth_* call so both succeed.
+        mock_gateway.rpc.Call.return_value = self._rpc_result(self._pack_uint256(0))
+
+        resp = await executor.execute(
+            "get_portfolio",
+            {
+                "chain": "arbitrum",
+                "wallet_address": "0xabc0000000000000000000000000000000000000",
+                "tokens": ["USDC"],
+                "network": "anvil",
+            },
+        )
+        assert resp.status in ("success", "partial"), resp.error
+        # The ERC20 lookup MUST use eth_call (not batch_get_balances), AND
+        # must forward network='anvil' so portfolio data is coherent across
+        # sections. eth_getBalance is also fine (native balance section).
+        erc20_call_seen = False
+        for call in mock_gateway.rpc.Call.call_args_list:
+            request = call.args[0]
+            assert isinstance(request, gateway_pb2.RpcRequest)
+            assert request.network == "anvil", f"network not forwarded to {request.method}"
+            assert request.method in ("eth_call", "eth_getBalance"), (
+                f"portfolio must use eth_call for ERC20 balances, not {request.method}"
+            )
+            if request.method == "eth_call" and "portfolio_erc20_" in request.id:
+                erc20_call_seen = True
+        assert erc20_call_seen, "portfolio did not issue an ERC20 eth_call for USDC"
+
+    @pytest.mark.asyncio
+    async def test_rpc_call_extracts_revert_message_from_dict(self, executor, mock_gateway):
+        """Audit Potential #9: JSON-RPC error envelopes must surface the revert message."""
+        resp = MagicMock()
+        resp.success = True
+        # Gateway returns a dict error envelope instead of a hex string
+        resp.result = '{"error": {"code": -32000, "message": "execution reverted: INSUFFICIENT_LIQUIDITY"}}'
+        resp.error = ""
+        mock_gateway.rpc.Call.return_value = resp
+
+        ok, msg = executor._rpc_call("arbitrum", "0xabc", "0x70a08231", "test")
+        assert ok is False
+        assert "INSUFFICIENT_LIQUIDITY" in msg

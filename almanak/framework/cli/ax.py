@@ -970,6 +970,181 @@ def lp_info(ctx, position_id, protocol, lp_network):
 
 
 # ---------------------------------------------------------------------------
+# almanak ax lp-list / lending-list / portfolio -- read-only discovery (VIB-2995)
+# ---------------------------------------------------------------------------
+
+
+@ax.command("lp-list")
+@click.option("--protocol", default="uniswap_v3", help="LP protocol (default: uniswap_v3).")
+@click.option(
+    "--wallet-override",
+    default=None,
+    help="Override the wallet address (default: ax's configured wallet).",
+)
+@click.option(
+    "--include-empty",
+    is_flag=True,
+    default=False,
+    help="Include positions with zero liquidity (burned or fully withdrawn).",
+)
+@click.option(
+    "--network",
+    "lp_network",
+    type=click.Choice(["mainnet", "anvil"], case_sensitive=False),
+    default=None,
+    help="Network to query. Defaults to group-level --network, then 'mainnet'.",
+)
+@click.pass_context
+def lp_list(ctx, protocol, wallet_override, include_empty, lp_network):
+    """List all LP positions owned by your wallet on a chain.
+
+    Enumerates NonfungiblePositionManager.tokenOfOwnerByIndex + positions().
+    Pair with `ax lp-info <id>` to drill into any specific position.
+
+    \b
+    Examples:
+        almanak ax lp-list                                 # Arbitrum Uniswap V3
+        almanak ax --chain base lp-list                    # Base
+        almanak ax lp-list --include-empty                 # Include burned/empty
+        almanak ax --chain zerog lp-list --protocol uniswap_v3 --network mainnet
+    """
+    from almanak.framework.cli.ax_render import render_error, render_result
+
+    json_output = ctx.obj["json_output"]
+    effective_network = lp_network or ctx.obj.get("network") or "mainnet"
+    try:
+        response = _run_tool(
+            ctx,
+            "list_lp_positions",
+            {
+                "chain": ctx.obj["chain"],
+                "protocol": protocol,
+                "wallet_address": wallet_override or "",
+                "include_empty": include_empty,
+                "network": effective_network,
+            },
+        )
+        render_result(response, json_output=json_output, title=f"LP Positions ({ctx.obj['chain']})")
+        if response.status == "error":
+            sys.exit(1)
+    except click.ClickException:
+        raise
+    except Exception as e:
+        render_error(str(e), json_output=json_output)
+        sys.exit(1)
+
+
+@ax.command("lending-list")
+@click.option("--protocol", default="aave_v3", help="Lending protocol (default: aave_v3).")
+@click.option(
+    "--wallet-override",
+    default=None,
+    help="Override the wallet address (default: ax's configured wallet).",
+)
+@click.option(
+    "--network",
+    "lend_network",
+    type=click.Choice(["mainnet", "anvil"], case_sensitive=False),
+    default=None,
+    help="Network to query. Defaults to group-level --network, then 'mainnet'.",
+)
+@click.pass_context
+def lending_list(ctx, protocol, wallet_override, lend_network):
+    """List a wallet's lending positions (account totals + health factor).
+
+    v1 queries Aave V3's Pool.getUserAccountData — the same totals you see
+    at the top of Aave's dashboard. Per-reserve breakdown is a follow-up.
+
+    \b
+    Examples:
+        almanak ax lending-list                    # Arbitrum Aave V3
+        almanak ax --chain base lending-list       # Base Aave V3
+    """
+    from almanak.framework.cli.ax_render import render_error, render_result
+
+    json_output = ctx.obj["json_output"]
+    effective_network = lend_network or ctx.obj.get("network") or "mainnet"
+    try:
+        response = _run_tool(
+            ctx,
+            "list_lending_positions",
+            {
+                "chain": ctx.obj["chain"],
+                "protocol": protocol,
+                "wallet_address": wallet_override or "",
+                "network": effective_network,
+            },
+        )
+        render_result(response, json_output=json_output, title=f"Lending ({protocol}, {ctx.obj['chain']})")
+        if response.status == "error":
+            sys.exit(1)
+    except click.ClickException:
+        raise
+    except Exception as e:
+        render_error(str(e), json_output=json_output)
+        sys.exit(1)
+
+
+@ax.command("portfolio")
+@click.option(
+    "--tokens",
+    default=None,
+    help="Comma-separated ERC20 symbols to include in the balance snapshot (e.g. 'USDC,WETH').",
+)
+@click.option(
+    "--wallet-override",
+    default=None,
+    help="Override the wallet address (default: ax's configured wallet).",
+)
+@click.option(
+    "--network",
+    "pf_network",
+    type=click.Choice(["mainnet", "anvil"], case_sensitive=False),
+    default=None,
+    help="Network to query. Defaults to group-level --network, then 'mainnet'.",
+)
+@click.pass_context
+def portfolio(ctx, tokens, wallet_override, pf_network):
+    """Aggregate snapshot: native + ERC20 balances, LP positions, lending.
+
+    Read-only. Combines list_lp_positions + list_lending_positions + native
+    balance + (optional) batch_get_balances for a chain in one call.
+
+    \b
+    Examples:
+        almanak ax portfolio                                   # Arbitrum, no ERC20 list
+        almanak ax portfolio --tokens USDC,WETH,ARB             # With balances
+        almanak ax --chain base portfolio --tokens USDC,WETH    # Different chain
+    """
+    from almanak.framework.cli.ax_render import render_error, render_result
+
+    json_output = ctx.obj["json_output"]
+    # Strip + drop empty entries so "USDC,,WETH," doesn't trigger a bogus
+    # "" lookup that fails resolver validation. (CodeRabbit PR #1536.)
+    token_list = [t for t in (s.strip() for s in tokens.split(",")) if t] if tokens else []
+    effective_network = pf_network or ctx.obj.get("network") or "mainnet"
+    try:
+        response = _run_tool(
+            ctx,
+            "get_portfolio",
+            {
+                "chain": ctx.obj["chain"],
+                "wallet_address": wallet_override or "",
+                "tokens": token_list,
+                "network": effective_network,
+            },
+        )
+        render_result(response, json_output=json_output, title=f"Portfolio ({ctx.obj['chain']})")
+        if response.status == "error":
+            sys.exit(1)
+    except click.ClickException:
+        raise
+    except Exception as e:
+        render_error(str(e), json_output=json_output)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # almanak ax lending-supply / lending-borrow / lending-repay / lending-withdraw
 # ---------------------------------------------------------------------------
 

@@ -210,6 +210,98 @@ class GetLPPositionResponse(BaseModel):
     total_fees_usd: float | None = None
 
 
+class ListLPPositionsRequest(BaseModel):
+    """List all LP positions owned by a wallet.
+
+    Iterates NonfungiblePositionManager.tokenOfOwnerByIndex(owner, i) for
+    i in [0, balanceOf(owner)). Returns a compact summary per position so
+    operators can pick a tokenId without drilling into `get_lp_position`.
+    """
+
+    chain: str = Field(default="arbitrum")
+    protocol: str = Field(default="uniswap_v3", description="LP protocol (uniswap_v3 only for v1).")
+    wallet_address: str = Field(default="", description="Wallet to query. Defaults to strategy wallet.")
+    network: str = Field(default="", description="'mainnet' or 'anvil'; empty means gateway default.")
+    include_empty: bool = Field(
+        default=False,
+        description="Include positions with zero liquidity (default: skip burned/fully-withdrawn positions).",
+    )
+
+
+class LPPositionSummary(BaseModel):
+    position_id: str
+    token0: str = Field(description="token0 contract address (lowercased)")
+    token1: str = Field(description="token1 contract address (lowercased)")
+    token0_symbol: str = ""
+    token1_symbol: str = ""
+    fee_tier: int = 0
+    liquidity: str = ""
+
+
+class ListLPPositionsResponse(BaseModel):
+    chain: str
+    protocol: str
+    wallet_address: str
+    count: int = 0
+    positions: list[LPPositionSummary] = []
+
+
+class ListLendingPositionsRequest(BaseModel):
+    """List lending positions for a wallet on a supported protocol.
+
+    v1: Aave V3 only. Returns account-level totals + health factor via
+    Pool.getUserAccountData(user). Per-reserve drill-down is a future
+    extension.
+    """
+
+    chain: str = Field(default="arbitrum")
+    protocol: str = Field(default="aave_v3", description="Lending protocol (aave_v3 only for v1).")
+    wallet_address: str = Field(default="", description="Wallet to query. Defaults to strategy wallet.")
+    network: str = Field(default="", description="'mainnet' or 'anvil'; empty means gateway default.")
+
+
+class ListLendingPositionsResponse(BaseModel):
+    chain: str
+    protocol: str
+    wallet_address: str
+    total_collateral_usd: str = ""
+    total_debt_usd: str = ""
+    available_borrows_usd: str = ""
+    current_liquidation_threshold_bps: int = 0
+    ltv_bps: int = 0
+    health_factor: str = Field(default="", description="1e18-scaled health factor as decimal string; '∞' when no debt.")
+
+
+class GetPortfolioRequest(BaseModel):
+    """Summarize a wallet's on-chain positions on a single chain.
+
+    Combines native balance, ERC20 balances (via batch_get_balances for
+    common symbols or a caller-supplied list), LP positions, and lending
+    positions.
+    """
+
+    chain: str = Field(default="arbitrum")
+    wallet_address: str = Field(default="", description="Wallet to query. Defaults to strategy wallet.")
+    tokens: list[str] = Field(
+        default_factory=list,
+        description="ERC20 symbols to include in the balance snapshot (e.g. ['USDC', 'WETH']).",
+    )
+    network: str = Field(default="", description="'mainnet' or 'anvil'; empty means gateway default.")
+
+
+class GetPortfolioResponse(BaseModel):
+    chain: str
+    wallet_address: str
+    native_balance: str = ""
+    native_symbol: str = ""
+    token_balances: list[dict] = Field(default_factory=list)
+    lp_positions: list[LPPositionSummary] = Field(default_factory=list)
+    lending: dict | None = Field(
+        default=None,
+        description="Aave V3 summary (total_collateral_usd / total_debt_usd / health_factor) or None if no position.",
+    )
+
+
 class ResolveTokenRequest(BaseModel):
     """Resolve a token symbol or address to full metadata."""
 

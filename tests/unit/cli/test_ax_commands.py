@@ -998,3 +998,186 @@ class TestAxLending:
         assert result.exit_code == 0
         assert "is_collateral" not in captured["args"]
         assert "market_id" not in captured["args"]
+
+
+class TestAxReadCommands:
+    """Tests for `ax lp-list`, `ax lending-list`, `ax portfolio` (VIB-2995)."""
+
+    def test_lp_list_help(self):
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "lp-list", "--help"])
+        assert result.exit_code == 0
+        assert "LP positions" in result.output
+        assert "--include-empty" in result.output
+
+    def test_lending_list_help(self):
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "lending-list", "--help"])
+        assert result.exit_code == 0
+        assert "lending" in result.output.lower()
+
+    def test_portfolio_help(self):
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "portfolio", "--help"])
+        assert result.exit_code == 0
+        assert "--tokens" in result.output
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_lp_list_forwards_args(self, mock_get_exec):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        captured: dict = {}
+
+        async def mock_execute(tool_name, args):
+            captured["tool_name"] = tool_name
+            captured["args"] = args
+            return ToolResponse(
+                status="success",
+                data={"chain": "arbitrum", "protocol": "uniswap_v3", "count": 0, "positions": []},
+            )
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--chain", "base", "lp-list", "--include-empty"])
+        assert result.exit_code == 0
+        assert captured["tool_name"] == "list_lp_positions"
+        assert captured["args"]["chain"] == "base"
+        assert captured["args"]["include_empty"] is True
+        assert captured["args"]["protocol"] == "uniswap_v3"
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_lending_list_forwards_args(self, mock_get_exec):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        captured: dict = {}
+
+        async def mock_execute(tool_name, args):
+            captured["tool_name"] = tool_name
+            captured["args"] = args
+            return ToolResponse(
+                status="success",
+                data={
+                    "chain": "arbitrum",
+                    "protocol": "aave_v3",
+                    "total_collateral_usd": "1000",
+                    "total_debt_usd": "500",
+                    "health_factor": "2.0",
+                },
+            )
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "lending-list"])
+        assert result.exit_code == 0
+        assert captured["tool_name"] == "list_lending_positions"
+        assert captured["args"]["protocol"] == "aave_v3"
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_portfolio_parses_token_list(self, mock_get_exec):
+        """--tokens 'USDC,WETH' should split into a list before dispatch."""
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        captured: dict = {}
+
+        async def mock_execute(tool_name, args):
+            captured["args"] = args
+            return ToolResponse(status="success", data={"chain": "arbitrum", "wallet_address": "0x0"})
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "portfolio", "--tokens", "USDC,WETH,ARB"])
+        assert result.exit_code == 0
+        assert captured["args"]["tokens"] == ["USDC", "WETH", "ARB"]
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_portfolio_empty_tokens_sends_empty_list(self, mock_get_exec):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        captured: dict = {}
+
+        async def mock_execute(tool_name, args):
+            captured["args"] = args
+            return ToolResponse(status="success", data={"chain": "arbitrum", "wallet_address": "0x0"})
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "portfolio"])
+        assert result.exit_code == 0
+        assert captured["args"]["tokens"] == []
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_portfolio_filters_empty_token_entries(self, mock_get_exec):
+        """--tokens "USDC,,WETH," drops empty entries (CodeRabbit PR #1536)."""
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        captured: dict = {}
+
+        async def mock_execute(tool_name, args):
+            captured["args"] = args
+            return ToolResponse(status="success", data={"chain": "arbitrum", "wallet_address": "0x0"})
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "portfolio", "--tokens", "USDC,,WETH,"])
+        assert result.exit_code == 0
+        assert captured["args"]["tokens"] == ["USDC", "WETH"]
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_group_level_network_cascades_to_read_commands(self, mock_get_exec):
+        """`ax --network anvil lp-list` forwards network='anvil' (CodeRabbit Major).
+
+        Previously the subcommand default='mainnet' overrode the group
+        value, silently returning mainnet snapshots from an Anvil gateway.
+        """
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        captured: list = []
+
+        async def mock_execute(tool_name, args):
+            captured.append({"tool": tool_name, "network": args.get("network")})
+            return ToolResponse(
+                status="success", data={"chain": "arbitrum", "count": 0, "positions": []}
+            )
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        for cmd in (["lp-list"], ["lending-list"], ["portfolio"]):
+            captured.clear()
+            result = runner.invoke(almanak, ["ax", "--network", "anvil", *cmd])
+            assert result.exit_code == 0, result.output
+            assert captured[0]["network"] == "anvil", f"{cmd} dropped group-level network=anvil"
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_subcommand_network_overrides_group_level(self, mock_get_exec):
+        """Explicit subcommand --network takes precedence over group-level."""
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        captured: list = []
+
+        async def mock_execute(tool_name, args):
+            captured.append(args.get("network"))
+            return ToolResponse(
+                status="success", data={"chain": "arbitrum", "count": 0, "positions": []}
+            )
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(
+            almanak, ["ax", "--network", "anvil", "lp-list", "--network", "mainnet"]
+        )
+        assert result.exit_code == 0
+        assert captured[0] == "mainnet"

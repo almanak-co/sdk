@@ -63,7 +63,7 @@ class TestToolDefinition:
 class TestToolCatalog:
     def test_default_catalog_has_tools(self):
         catalog = get_default_catalog()
-        assert len(catalog) == 35
+        assert len(catalog) == 38
 
     def test_get_existing_tool(self):
         catalog = get_default_catalog()
@@ -82,6 +82,17 @@ class TestToolCatalog:
         assert tool.risk_tier == RiskTier.MEDIUM
         assert tool.request_schema is not None
         assert tool.response_schema is not None
+
+    def test_list_read_tools_registered(self):
+        """list_lp_positions / list_lending_positions / get_portfolio — VIB-2995."""
+        catalog = get_default_catalog()
+        for name in ("list_lp_positions", "list_lending_positions", "get_portfolio"):
+            tool = catalog.get(name)
+            assert tool is not None, f"{name} not registered"
+            assert tool.category == ToolCategory.DATA
+            assert tool.risk_tier == RiskTier.NONE
+            assert tool.request_schema is not None
+            assert tool.response_schema is not None
 
     def test_get_nonexistent_tool(self):
         catalog = get_default_catalog()
@@ -102,13 +113,16 @@ class TestToolCatalog:
         assert "get_wallet_overview" in names
         assert "check_protocol_support" in names
         assert "withdraw_lending" in names
-        assert len(names) == 35
+        assert "list_lp_positions" in names
+        assert "list_lending_positions" in names
+        assert "get_portfolio" in names
+        assert len(names) == 38
 
     def test_filter_by_category(self):
         catalog = get_default_catalog()
 
         data_tools = catalog.list_tools(category=ToolCategory.DATA)
-        assert len(data_tools) == 11
+        assert len(data_tools) == 14
         assert all(t.category == ToolCategory.DATA for t in data_tools)
         data_names = {t.name for t in data_tools}
         assert "get_wallet_overview" in data_names
@@ -128,13 +142,13 @@ class TestToolCatalog:
     def test_mcp_tools_output(self):
         catalog = get_default_catalog()
         mcp_tools = catalog.to_mcp_tools()
-        assert len(mcp_tools) == 35
+        assert len(mcp_tools) == 38
         assert all("name" in t and "description" in t and "inputSchema" in t for t in mcp_tools)
 
     def test_openai_tools_output(self):
         catalog = get_default_catalog()
         openai_tools = catalog.to_openai_tools()
-        assert len(openai_tools) == 35
+        assert len(openai_tools) == 38
         assert all(t["type"] == "function" for t in openai_tools)
 
     def test_custom_tool_registration(self):
@@ -149,7 +163,7 @@ class TestToolCatalog:
         )
         catalog.register(custom)
         assert "custom_tool" in catalog
-        assert len(catalog) == 36
+        assert len(catalog) == 39
 
     def test_risk_tiers_assigned(self):
         catalog = get_default_catalog()
