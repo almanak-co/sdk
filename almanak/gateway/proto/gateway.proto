@@ -74,6 +74,11 @@ service MarketService {
 message PriceRequest {
   string token = 1;
   string quote = 2;  // Default: USD
+  // Optional chain hint. Required for address-based lookups (so the gateway
+  // knows which chain to resolve an unknown contract address on) and for
+  // picking the right CoinGecko asset-platform for the contract-address
+  // pricing endpoint. Empty string = fall back to the gateway's primary chain.
+  string chain = 3;
 }
 
 message PriceResponse {

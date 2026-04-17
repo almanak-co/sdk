@@ -86,8 +86,12 @@ class TestMarketServiceGetPrice:
             request = gateway_pb2.PriceRequest(token="WBTC")  # No quote specified
             await market_service.GetPrice(request, mock_context)
 
-            # Verify USD was used as default
-            mock_aggregator.get_aggregated_price.assert_called_once_with("WBTC", "USD")
+            # Verify USD was used as default. `resolved_token=None` is
+            # always forwarded since the aggregator supports address-based
+            # price lookups for unknown tokens.
+            mock_aggregator.get_aggregated_price.assert_called_once_with(
+                "WBTC", "USD", resolved_token=None
+            )
 
     @pytest.mark.asyncio
     async def test_get_price_error_handling(self, market_service, mock_context):
@@ -478,8 +482,10 @@ class TestMarketServicePriceAlias:
         response = await market_service.GetPrice(request, mock_context)
 
         assert response.price == "3000.00"
-        # Should only call once - no fallback needed
-        market_service._price_aggregator.get_aggregated_price.assert_called_once_with("ETH", "USD")
+        # Should only call once - no fallback needed.
+        market_service._price_aggregator.get_aggregated_price.assert_called_once_with(
+            "ETH", "USD", resolved_token=None
+        )
 
 
 class TestMarketServiceGetIndicator:

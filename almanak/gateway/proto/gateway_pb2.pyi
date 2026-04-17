@@ -167,16 +167,24 @@ class PriceRequest(_message.Message):
 
     TOKEN_FIELD_NUMBER: _builtins.int
     QUOTE_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
     token: _builtins.str
     quote: _builtins.str
     """Default: USD"""
+    chain: _builtins.str
+    """Optional chain hint. Required for address-based lookups (so the gateway
+    knows which chain to resolve an unknown contract address on) and for
+    picking the right CoinGecko asset-platform for the contract-address
+    pricing endpoint. Empty string = fall back to the gateway's primary chain.
+    """
     def __init__(
         self,
         *,
         token: _builtins.str = ...,
         quote: _builtins.str = ...,
+        chain: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["quote", b"quote", "token", b"token"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "quote", b"quote", "token", b"token"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PriceRequest: _TypeAlias = PriceRequest  # noqa: Y015
@@ -732,6 +740,8 @@ Global___SnapshotList: _TypeAlias = SnapshotList  # noqa: Y015
 
 @_typing.final
 class SaveMetricsRequest(_message.Message):
+    """Portfolio metrics messages (PnL baseline tracking)"""
+
     DESCRIPTOR: _descriptor.Descriptor
 
     STRATEGY_ID_FIELD_NUMBER: _builtins.int
@@ -747,10 +757,12 @@ class SaveMetricsRequest(_message.Message):
     strategy_id: _builtins.str
     initial_value_usd: _builtins.str
     initial_timestamp: _builtins.int
+    """Unix epoch seconds"""
     deposits_usd: _builtins.str
     withdrawals_usd: _builtins.str
     gas_spent_usd: _builtins.str
     deployment_id: _builtins.str
+    """Phase 4 accounting identity fields (VIB-2835/2837/2839)"""
     cycle_id: _builtins.str
     execution_mode: _builtins.str
     is_complete: _builtins.bool
@@ -768,7 +780,7 @@ class SaveMetricsRequest(_message.Message):
         execution_mode: _builtins.str = ...,
         is_complete: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id", "initial_value_usd", b"initial_value_usd", "initial_timestamp", b"initial_timestamp", "deposits_usd", b"deposits_usd", "withdrawals_usd", b"withdrawals_usd", "gas_spent_usd", b"gas_spent_usd", "deployment_id", b"deployment_id", "cycle_id", b"cycle_id", "execution_mode", b"execution_mode", "is_complete", b"is_complete"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "deposits_usd", b"deposits_usd", "execution_mode", b"execution_mode", "gas_spent_usd", b"gas_spent_usd", "initial_timestamp", b"initial_timestamp", "initial_value_usd", b"initial_value_usd", "is_complete", b"is_complete", "strategy_id", b"strategy_id", "withdrawals_usd", b"withdrawals_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___SaveMetricsRequest: _TypeAlias = SaveMetricsRequest  # noqa: Y015
@@ -787,7 +799,7 @@ class SaveMetricsResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["success", b"success", "error", b"error"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___SaveMetricsResponse: _TypeAlias = SaveMetricsResponse  # noqa: Y015
@@ -833,6 +845,7 @@ class PortfolioMetricsData(_message.Message):
     updated_at: _builtins.int
     found: _builtins.bool
     deployment_id: _builtins.str
+    """Phase 4 accounting identity fields (VIB-2835/2837/2839)"""
     cycle_id: _builtins.str
     execution_mode: _builtins.str
     is_complete: _builtins.bool
@@ -852,7 +865,7 @@ class PortfolioMetricsData(_message.Message):
         execution_mode: _builtins.str = ...,
         is_complete: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id", "initial_value_usd", b"initial_value_usd", "initial_timestamp", b"initial_timestamp", "deposits_usd", b"deposits_usd", "withdrawals_usd", b"withdrawals_usd", "gas_spent_usd", b"gas_spent_usd", "updated_at", b"updated_at", "found", b"found", "deployment_id", b"deployment_id", "cycle_id", b"cycle_id", "execution_mode", b"execution_mode", "is_complete", b"is_complete"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "deposits_usd", b"deposits_usd", "execution_mode", b"execution_mode", "found", b"found", "gas_spent_usd", b"gas_spent_usd", "initial_timestamp", b"initial_timestamp", "initial_value_usd", b"initial_value_usd", "is_complete", b"is_complete", "strategy_id", b"strategy_id", "updated_at", b"updated_at", "withdrawals_usd", b"withdrawals_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PortfolioMetricsData: _TypeAlias = PortfolioMetricsData  # noqa: Y015
@@ -2771,9 +2784,9 @@ class StrategySummary(_message.Message):
     """lifetime PnL after gas; empty if unavailable"""
     wallet_address: _builtins.str
     execution_mode: _builtins.str
-    """\"live\" (default) or \"paper\""""
+    """"live" (default) or "paper" """
     paper_metrics_json: _builtins.str
-    """JSON-encoded paper trading metrics (when execution_mode=\"paper\")"""
+    """JSON-encoded paper trading metrics (when execution_mode="paper")"""
     @_builtins.property
     def chains(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
     @_builtins.property
@@ -3633,6 +3646,8 @@ Global___PurgeInstanceResponse: _TypeAlias = PurgeInstanceResponse  # noqa: Y015
 
 @_typing.final
 class GetTransactionLedgerRequest(_message.Message):
+    """Transaction ledger messages (VIB-2402) -------------------------------------"""
+
     DESCRIPTOR: _descriptor.Descriptor
 
     STRATEGY_ID_FIELD_NUMBER: _builtins.int
@@ -3641,8 +3656,11 @@ class GetTransactionLedgerRequest(_message.Message):
     LIMIT_FIELD_NUMBER: _builtins.int
     strategy_id: _builtins.str
     since_timestamp: _builtins.int
+    """Optional: only entries after this time (unix)"""
     intent_type_filter: _builtins.str
+    """Optional: filter by intent type"""
     limit: _builtins.int
+    """Default 100"""
     def __init__(
         self,
         *,
@@ -3651,6 +3669,8 @@ class GetTransactionLedgerRequest(_message.Message):
         intent_type_filter: _builtins.str = ...,
         limit: _builtins.int = ...,
     ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["intent_type_filter", b"intent_type_filter", "limit", b"limit", "since_timestamp", b"since_timestamp", "strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetTransactionLedgerRequest: _TypeAlias = GetTransactionLedgerRequest  # noqa: Y015
 
@@ -3669,6 +3689,8 @@ class GetTransactionLedgerResponse(_message.Message):
         entries: _abc.Iterable[Global___LedgerEntryInfo] | None = ...,
         has_more: _builtins.bool = ...,
     ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["entries", b"entries", "has_more", b"has_more"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetTransactionLedgerResponse: _TypeAlias = GetTransactionLedgerResponse  # noqa: Y015
 
@@ -3734,6 +3756,8 @@ class LedgerEntryInfo(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "effective_price", b"effective_price", "error", b"error", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "protocol", b"protocol", "slippage_bps", b"slippage_bps", "strategy_id", b"strategy_id", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___LedgerEntryInfo: _TypeAlias = LedgerEntryInfo  # noqa: Y015
 

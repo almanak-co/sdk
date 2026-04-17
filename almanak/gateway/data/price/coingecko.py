@@ -41,6 +41,31 @@ from almanak.gateway.utils.ssl_context import build_ssl_context
 logger = logging.getLogger(__name__)
 
 
+# CoinGecko "asset platform" identifiers keyed by our internal chain name.
+# Used by the contract-address endpoint (/simple/token_price/{platform}),
+# which prices a token by its on-chain address — no CoinGecko ID needed.
+# This lets us resolve tokens that aren't in our static symbol registry
+# (e.g. cbBTC, niche LSTs) as long as the caller supplies chain + address.
+COINGECKO_PLATFORM_IDS: dict[str, str] = {
+    "ethereum": "ethereum",
+    "arbitrum": "arbitrum-one",
+    "optimism": "optimistic-ethereum",
+    "base": "base",
+    "polygon": "polygon-pos",
+    "avalanche": "avalanche",
+    "bsc": "binance-smart-chain",
+    "sonic": "sonic",
+    "mantle": "mantle",
+    "berachain": "berachain",
+    "monad": "monad",
+    "xlayer": "xlayer",
+    "zerog": "zerog",
+    "linea": "linea",
+    "blast": "blast",
+    "plasma": "plasma",
+}
+
+
 # Token ID mappings for Arbitrum tokens
 # CoinGecko uses specific IDs for each token
 ARBITRUM_TOKEN_IDS: dict[str, str] = {
@@ -486,12 +511,24 @@ class CoinGeckoPriceSource(BasePriceSource):
 
         return None
 
-    async def get_price(self, token: str, quote: str = "USD", *, resolved_token: object | None = None) -> PriceResult:
+    async def get_price(
+        self,
+        token: str,
+        quote: str = "USD",
+        *,
+        resolved_token: "Any | None" = None,
+    ) -> PriceResult:
         """Fetch the current price for a token.
 
         Args:
-            token: Token symbol (e.g., "WETH", "ARB", "USDC")
+            token: Token symbol (e.g., "WETH", "ARB", "USDC") or contract address.
             quote: Quote currency (default "USD")
+            resolved_token: Optional ResolvedToken with chain + address. When the
+                symbol/ID registry misses, the source falls back to CoinGecko's
+                contract-address endpoint (/simple/token_price/{platform}) using
+                resolved_token.address + resolved_token.chain. This lets the
+                source price unknown-to-our-registry tokens without adding them
+                to any hardcoded list.
 
         Returns:
             PriceResult with price and metadata
@@ -504,7 +541,7 @@ class CoinGeckoPriceSource(BasePriceSource):
         token_upper = token.upper()
         quote_upper = quote.upper()
 
-        # Check for cached data first
+        # Check the primary cache (keyed by symbol/address string as given).
         cached = self._get_cached(token_upper, quote_upper)
         if cached is not None:
             self._metrics.cache_hits += 1
@@ -517,6 +554,17 @@ class CoinGeckoPriceSource(BasePriceSource):
             )
             return cached.result
 
+        # Address-endpoint hits are stored under a chain-scoped key so that
+        # the same contract address on two different chains doesn't collide.
+        # Check this cache separately before firing any request.
+        address_cache_key = self._address_cache_key(resolved_token)
+        if address_cache_key is not None:
+            cached_addr = self._get_cached(address_cache_key, quote_upper)
+            if cached_addr is not None:
+                self._metrics.cache_hits += 1
+                self._metrics.successful_requests += 1
+                return cached_addr.result
+
         # Check rate limit backoff
         wait_time = self._rate_limit_state.get_wait_time()
         if wait_time > 0:
@@ -528,8 +576,21 @@ class CoinGeckoPriceSource(BasePriceSource):
             )
             await asyncio.sleep(wait_time)
 
-        # Resolve token ID
+        # Resolve token ID (symbol/address -> CoinGecko ID via static registry)
         token_id = self._resolve_token_id(token_upper)
+
+        # If ID resolution missed but we have a chain + contract address,
+        # fall back to CoinGecko's contract-address endpoint. That way a
+        # token not in our registry (e.g. cbBTC) is still priceable.
+        if token_id is None and resolved_token is not None and address_cache_key is not None:
+            address_result = await self._try_fetch_by_address(
+                resolved_token,
+                address_cache_key,
+                quote_upper,
+            )
+            if address_result is not None:
+                return address_result
+
         if token_id is None:
             # Stablecoin fallback: tokens like FUSDT0, USDbC, etc. may not be
             # listed on CoinGecko but are known USD-pegged stablecoins.
@@ -771,6 +832,234 @@ class CoinGeckoPriceSource(BasePriceSource):
                     stale=True,
                 )
 
+            raise DataSourceUnavailable(
+                source=self.source_name,
+                reason=str(e),
+            ) from e
+
+    @staticmethod
+    def _address_cache_key(resolved_token: Any) -> str | None:
+        """Chain-scoped cache key for address-based CoinGecko lookups.
+
+        Returns something like ``BASE:0xcbb7c0000...`` so the same contract
+        address on two different chains caches independently. Returns None
+        if ``resolved_token`` doesn't carry a chain + address.
+        """
+        if resolved_token is None:
+            return None
+        address = getattr(resolved_token, "address", None)
+        chain = getattr(resolved_token, "chain", None)
+        if not address or chain is None:
+            return None
+        chain_key = getattr(chain, "value", chain)
+        if not isinstance(chain_key, str):
+            return None
+        return f"{chain_key.upper()}:{address.lower()}"
+
+    async def _try_fetch_by_address(
+        self,
+        resolved_token: Any,
+        cache_token_key: str,
+        quote_upper: str,
+    ) -> PriceResult | None:
+        """Fetch price via CoinGecko's contract-address endpoint.
+
+        Return semantics mirror the main `/simple/price` path:
+          - ``None``: "not applicable" — no chain context, chain not on
+            CoinGecko, or the token is simply absent from the endpoint.
+            Caller falls through to the symbol/ID path and the
+            "Unknown token" error.
+          - ``PriceResult``: success (fresh or stale-from-cache fallback).
+          - raises ``DataSourceRateLimited`` / ``DataSourceUnavailable``:
+            transient CoinGecko outages that callers should see as real
+            failures, not silent token misses.
+
+        Args:
+            resolved_token: ResolvedToken with chain + address. Typed as Any
+                to avoid an import cycle with the framework data layer.
+            cache_token_key: Cache key used elsewhere (uppercased symbol/address),
+                so address-endpoint hits participate in the same TTL cache.
+            quote_upper: Uppercased quote currency (e.g. "USD").
+        """
+        address = getattr(resolved_token, "address", None)
+        chain = getattr(resolved_token, "chain", None)
+        if not address or chain is None:
+            return None
+
+        # ResolvedToken.chain is a Chain enum; accept str too for safety.
+        chain_key = getattr(chain, "value", chain)
+        if not isinstance(chain_key, str):
+            return None
+        platform = COINGECKO_PLATFORM_IDS.get(chain_key.lower())
+        if not platform:
+            logger.debug(
+                "CoinGecko has no platform mapping for chain %r; skipping address endpoint",
+                chain_key,
+            )
+            return None
+
+        address_lower = address.lower()
+        url = f"{self._api_base}/simple/token_price/{platform}"
+        params: dict[str, str] = {
+            "contract_addresses": address_lower,
+            "vs_currencies": quote_upper.lower(),
+        }
+        if self._api_key:
+            params["x_cg_pro_api_key"] = self._api_key
+
+        start_time = time.time()
+        try:
+            session = await self._get_session()
+            async with session.get(url, params=params) as response:
+                latency_ms = (time.time() - start_time) * 1000
+
+                if response.status == 429:
+                    # Rate limit is a transient outage, not "unknown token".
+                    # Mirror the main path: return stale cache if available,
+                    # otherwise raise DataSourceRateLimited so the aggregator
+                    # accounts for it in health/confidence.
+                    self._rate_limit_state.record_rate_limit()
+                    self._metrics.rate_limits += 1
+                    retry_after = self._rate_limit_state.backoff_seconds
+                    logger.warning(
+                        "Rate limited by CoinGecko on address endpoint for %s/%s, backoff: %.2fs",
+                        address_lower,
+                        quote_upper,
+                        retry_after,
+                    )
+                    stale = self._get_stale_cached(cache_token_key, quote_upper)
+                    if stale is not None:
+                        self._metrics.successful_requests += 1
+                        return PriceResult(
+                            price=stale.result.price,
+                            source=self.source_name,
+                            timestamp=stale.result.timestamp,
+                            confidence=stale.result.confidence * self._stale_confidence_multiplier,
+                            stale=True,
+                        )
+                    raise DataSourceRateLimited(
+                        source=self.source_name,
+                        retry_after=retry_after,
+                    )
+
+                if response.status != 200:
+                    # Other HTTP errors — also transient. Try stale cache,
+                    # then surface as DataSourceUnavailable so the aggregator
+                    # can fall over to another source cleanly.
+                    body = await response.text()
+                    error_msg = f"HTTP {response.status}: {body[:200]}"
+                    self._metrics.errors += 1
+                    self._metrics.last_error = error_msg
+                    self._metrics.last_error_time = datetime.now(UTC)
+                    logger.info(
+                        "CoinGecko address endpoint returned HTTP %s for %s on %s",
+                        response.status,
+                        address_lower,
+                        platform,
+                    )
+                    stale = self._get_stale_cached(cache_token_key, quote_upper)
+                    if stale is not None:
+                        self._metrics.successful_requests += 1
+                        return PriceResult(
+                            price=stale.result.price,
+                            source=self.source_name,
+                            timestamp=stale.result.timestamp,
+                            confidence=stale.result.confidence * self._stale_confidence_multiplier,
+                            stale=True,
+                        )
+                    raise DataSourceUnavailable(
+                        source=self.source_name,
+                        reason=error_msg,
+                    )
+
+                data = await response.json()
+                self._rate_limit_state.record_success()
+
+                # Response shape: {"0xabc...": {"usd": 1234.56}}
+                # CoinGecko lowercases addresses in its responses.
+                entry = data.get(address_lower) or data.get(address) or {}
+                quote_lower = quote_upper.lower()
+                raw_price = entry.get(quote_lower)
+                if raw_price is None:
+                    # Token genuinely isn't listed — this is a normal miss,
+                    # not an outage. Return None so the caller's "unknown
+                    # token" path runs and surfaces a clean error.
+                    logger.info(
+                        "CoinGecko address endpoint had no %s price for %s on %s",
+                        quote_upper,
+                        address_lower,
+                        platform,
+                    )
+                    return None
+
+                price = Decimal(str(raw_price))
+                # Address-endpoint listings aren't hand-curated like the
+                # CoinGecko IDs in our static registry — CoinGecko exposes a
+                # price for any token with a listed pool, including thin
+                # and spammy ones. Lower confidence matches what DexScreener
+                # assigns to similarly "automatic" listings so the aggregator
+                # doesn't treat a new low-liquidity token the same as ETH/USDC.
+                result = PriceResult(
+                    price=price,
+                    source=self.source_name,
+                    timestamp=datetime.now(UTC),
+                    confidence=0.85,
+                    stale=False,
+                )
+                self._update_cache(cache_token_key, quote_upper, result, latency_ms)
+                self._metrics.successful_requests += 1
+                self._metrics.total_latency_ms += latency_ms
+                logger.debug(
+                    "Priced %s on %s via CoinGecko address endpoint: %s (latency: %.2fms)",
+                    address_lower,
+                    platform,
+                    price,
+                    latency_ms,
+                )
+                return result
+
+        except TimeoutError as e:
+            self._metrics.timeouts += 1
+            stale = self._get_stale_cached(cache_token_key, quote_upper)
+            if stale is not None:
+                logger.info(
+                    "Returning stale data for %s/%s (address endpoint timeout)",
+                    address_lower,
+                    quote_upper,
+                )
+                self._metrics.successful_requests += 1
+                return PriceResult(
+                    price=stale.result.price,
+                    source=self.source_name,
+                    timestamp=stale.result.timestamp,
+                    confidence=stale.result.confidence * self._stale_confidence_multiplier,
+                    stale=True,
+                )
+            raise DataSourceUnavailable(
+                source=self.source_name,
+                reason=f"Address endpoint timeout after {self._request_timeout}s with no cache",
+            ) from e
+
+        except aiohttp.ClientError as e:
+            self._metrics.errors += 1
+            self._metrics.last_error = str(e)
+            self._metrics.last_error_time = datetime.now(UTC)
+            stale = self._get_stale_cached(cache_token_key, quote_upper)
+            if stale is not None:
+                logger.info(
+                    "Returning stale data for %s/%s (address endpoint network error: %s)",
+                    address_lower,
+                    quote_upper,
+                    e,
+                )
+                self._metrics.successful_requests += 1
+                return PriceResult(
+                    price=stale.result.price,
+                    source=self.source_name,
+                    timestamp=stale.result.timestamp,
+                    confidence=stale.result.confidence * self._stale_confidence_multiplier,
+                    stale=True,
+                )
             raise DataSourceUnavailable(
                 source=self.source_name,
                 reason=str(e),

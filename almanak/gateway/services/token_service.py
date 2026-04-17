@@ -31,6 +31,11 @@ from almanak.framework.data.tokens import (
 )
 from almanak.framework.data.tokens.exceptions import AmbiguousTokenError
 from almanak.gateway.core.settings import GatewaySettings
+
+# Single source of truth for chain -> CoinGecko platform IDs lives alongside
+# the price source so both search/resolver paths and the contract-address
+# price endpoint use the same mapping.
+from almanak.gateway.data.price.coingecko import COINGECKO_PLATFORM_IDS
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.services.dexscreener_lookup import (
     DexScreenerError,
@@ -53,23 +58,6 @@ _SOLANA_MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 # CoinGecko free-tier search endpoint
 COINGECKO_SEARCH_URL = "https://api.coingecko.com/api/v3/search?query={symbol}"
-
-# CoinGecko platform IDs for each chain
-COINGECKO_PLATFORM_IDS: dict[str, str] = {
-    "ethereum": "ethereum",
-    "arbitrum": "arbitrum-one",
-    "optimism": "optimistic-ethereum",
-    "base": "base",
-    "polygon": "polygon-pos",
-    "avalanche": "avalanche",
-    "bsc": "binance-smart-chain",
-    "sonic": "sonic",
-    "mantle": "mantle",
-    "berachain": "berachain",
-    "monad": "monad",
-    "xlayer": "xlayer",
-    "zerog": "zerog",
-}
 
 
 # =============================================================================
