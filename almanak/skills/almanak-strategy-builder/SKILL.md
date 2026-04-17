@@ -440,9 +440,11 @@ Intent.flash_loan(
 
 ```python
 Intent.vault_deposit(
-    vault="0x...",           # Vault contract address
-    asset_token="USDC",
-    amount=Decimal("1000"),
+    protocol="metamorpho",           # Vault protocol
+    vault_address="0x...",           # Vault contract address
+    amount=Decimal("1000"),          # Amount of underlying to deposit (or "all")
+    deposit_token="USDC",            # Underlying token symbol (for backtesting)
+    chain="ethereum",                # Optional: override chain
 )
 ```
 
@@ -450,17 +452,33 @@ Intent.vault_deposit(
 
 ```python
 Intent.vault_redeem(
-    vault="0x...",
-    shares_amount=Decimal("1000"),
+    protocol="metamorpho",           # Vault protocol
+    vault_address="0x...",           # Vault contract address
+    shares=Decimal("1000"),          # Shares to redeem (or "all")
+    deposit_token="USDC",            # Underlying token symbol (for backtesting)
+    chain="ethereum",                # Optional: override chain
 )
 ```
 
 ### Prediction Markets
 
 ```python
-Intent.prediction_buy(protocol="polymarket", market="...", amount_usd=Decimal("100"))
-Intent.prediction_sell(protocol="polymarket", market="...", amount_shares=Decimal("50"))
-Intent.prediction_redeem(protocol="polymarket", market="...")
+Intent.prediction_buy(
+    market_id="will-bitcoin-exceed-100000",  # Polymarket market ID or slug
+    outcome="YES",                            # "YES" or "NO"
+    amount_usd=Decimal("100"),                # USDC to spend (or use shares=)
+    protocol="polymarket",
+)
+Intent.prediction_sell(
+    market_id="will-bitcoin-exceed-100000",
+    outcome="YES",
+    shares=Decimal("50"),                     # Shares to sell (or "all")
+    protocol="polymarket",
+)
+Intent.prediction_redeem(
+    market_id="will-bitcoin-exceed-100000",   # Redeem after market resolves
+    protocol="polymarket",
+)
 ```
 
 ### Cross-Chain
