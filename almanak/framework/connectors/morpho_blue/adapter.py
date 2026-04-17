@@ -13,6 +13,7 @@ Supported chains:
 - Ethereum
 - Base
 - Arbitrum
+- Monad
 
 Example:
     from almanak.framework.connectors.morpho_blue import MorphoBlueAdapter, MorphoBlueConfig
@@ -254,6 +255,34 @@ MORPHO_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
             "lltv": 860000000000000000,  # 86%
         },
     },
+    "monad": {
+        # Markets sourced from Morpho GraphQL API (blue-api.morpho.org) for chainId 143,
+        # sorted by supply TVL. All markets use AdaptiveCurveIRM
+        # 0x09475a3D6eA8c314c592b1a3799bDE044E2F400F.
+        #
+        # WETH/wstETH market (94.5% LLTV) — largest Monad Morpho market (~$61.8M supply).
+        "0x8bdb7d2c5024d349772884afb3c5c409bc8de58ed63d79618bf48fb57b595060": {
+            "name": "wstETH/WETH",
+            "loan_token": "WETH",
+            "loan_token_address": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",
+            "collateral_token": "wstETH",
+            "collateral_token_address": "0x10Aeaf63194db8d453d4D85a06E5eFE1dd0b5417",
+            "oracle": "0xBB16f6B3c5422209ee1d9b0f63761F159C136694",
+            "irm": "0x09475a3D6eA8c314c592b1a3799bDE044E2F400F",
+            "lltv": 945000000000000000,  # 94.5%
+        },
+        # WBTC/AUSD market (86% LLTV) — BTC-backed lending (~$13.2M supply).
+        "0x0ce0a3398925f5112360db21750912f2a834c5cb90ecf03f461b2e2561320955": {
+            "name": "WBTC/AUSD",
+            "loan_token": "AUSD",
+            "loan_token_address": "0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a",
+            "collateral_token": "WBTC",
+            "collateral_token_address": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
+            "oracle": "0xda77Cf67fFEECC7fc64a4767837D1fFEad1Bc73C",
+            "irm": "0x09475a3D6eA8c314c592b1a3799bDE044E2F400F",
+            "lltv": 860000000000000000,  # 86%
+        },
+    },
 }
 
 
@@ -282,7 +311,7 @@ class MorphoBlueConfig:
     """Configuration for Morpho Blue adapter.
 
     Attributes:
-        chain: Blockchain network (ethereum, base)
+        chain: Blockchain network (ethereum, base, arbitrum, monad)
         wallet_address: User wallet address
         default_slippage_bps: Default slippage tolerance in basis points
         rpc_url: Optional RPC URL. If not provided, uses ALCHEMY_API_KEY.

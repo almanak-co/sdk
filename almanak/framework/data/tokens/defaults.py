@@ -805,13 +805,15 @@ CRVUSD = Token(
     is_stablecoin=True,
 )
 
-# Agora USD (AUSD) — stablecoin on Avalanche used in Euler V2 and Joe V2 LP signals
+# Agora USD (AUSD) — stablecoin on Avalanche used in Euler V2 and Joe V2 LP signals,
+# also live on Monad where it backs the WBTC/AUSD Morpho Blue market.
 AUSD = Token(
     symbol="AUSD",
     name="Agora USD",
     decimals=6,
     addresses={
         "avalanche": "0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a",
+        "monad": "0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a",
     },
     coingecko_id="agora-dollar",
     is_stablecoin=True,
@@ -832,6 +834,7 @@ wstETH = Token(
         "optimism": "0x1f32B1C2345538c0C6F582FB0220C6C2C0C9c6c6",
         "base": "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452",
         "polygon": "0x03b54A6e9a984069379fae1a4fC4dBAE93B3bCCD",
+        "monad": "0x10Aeaf63194db8d453d4D85a06E5eFE1dd0b5417",
     },
     coingecko_id="wrapped-steth",
     is_stablecoin=False,

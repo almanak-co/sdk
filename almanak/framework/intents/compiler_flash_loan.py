@@ -463,8 +463,13 @@ def build_morpho_flash_loan(
     Returns:
         Dict with transaction, pool_address, premium_bps (0), premium_amount (0), total_repay
     """
-    from ..connectors.flash_loan.selector import MORPHO_BLUE_ADDRESSES
+    from ..connectors.flash_loan.selector import MORPHO_BLUE_ADDRESSES, MORPHO_SUPPORTED_CHAINS
 
+    # MORPHO_BLUE_ADDRESSES lists chains where Morpho Blue is *deployed*, but
+    # flash-loan enablement is a separate, more conservative set: only chains
+    # where fee behaviour and callback semantics have been validated.
+    if compiler.chain not in MORPHO_SUPPORTED_CHAINS:
+        return {"error": f"Morpho Blue flash loans not enabled on chain: {compiler.chain}"}
     morpho_address = MORPHO_BLUE_ADDRESSES.get(compiler.chain)
     if not morpho_address:
         return {"error": f"Morpho Blue not available on chain: {compiler.chain}"}

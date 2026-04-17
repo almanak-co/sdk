@@ -800,7 +800,10 @@ TRADERJOE_V2_TOKENS: dict[str, dict[str, str]] = {
 # Morpho Blue
 # =============================================================================
 
-# Morpho Blue singleton contract address (same on all supported chains)
+# Default Morpho Blue deployment address, used on chains where Morpho deployed via the
+# vanity-address factory. Not universal: Monad deployed at a distinct address. Always
+# look the per-chain address up in MORPHO_BLUE[chain]["morpho"] rather than relying on
+# this constant directly.
 MORPHO_BLUE_ADDRESS = "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb"
 
 MORPHO_BLUE: dict[str, dict[str, str]] = {
@@ -815,6 +818,12 @@ MORPHO_BLUE: dict[str, dict[str, str]] = {
     "arbitrum": {
         "morpho": MORPHO_BLUE_ADDRESS,
         "bundler": "0x1FA4431bC113D308beE1d46B0e98Cb805FB48C13",
+    },
+    "monad": {
+        # Monad uses a distinct deployment (chain-specific deployer pattern, block 31,907,457).
+        # Bundler3 variant — equivalent to the universal Bundler on other chains.
+        "morpho": "0xD5D960E8C380B724a48AC59E2DfF1b2CB4a1eAee",
+        "bundler": "0x82b684483e844422FD339df0b67b3B111F02c66E",
     },
 }
 
@@ -848,6 +857,19 @@ MORPHO_BLUE_TOKENS: dict[str, dict[str, str]] = {
         "WBTC": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
         "wstETH": "0x5979D7b546E38E414F7E9822514be443A4800529",
         "weETH": "0x35751007a407ca6FEFfE80b3cB397736D2cf4dbe",
+    },
+    "monad": {
+        # Tokens used in live Monad Morpho Blue markets (sourced from
+        # morpho-org/morpho-blue-api-metadata `tokens.json` and verified on-chain).
+        "WETH": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",
+        "WMON": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
+        "USDC": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "USDT0": "0xe7cd86e13AC4309349F30B3435a9d337750fC82D",
+        "WBTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
+        "cbBTC": "0xd18B7EC58Cdf4876f6AFebd3Ed1730e4Ce10414b",
+        "wstETH": "0x10Aeaf63194db8d453d4D85a06E5eFE1dd0b5417",
+        "weETH": "0xA3D68b74bF0528fdD07263c60d6488749044914b",
+        "AUSD": "0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a",
     },
 }
 

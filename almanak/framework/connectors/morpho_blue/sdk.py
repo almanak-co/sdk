@@ -33,6 +33,7 @@ from web3 import Web3
 from web3.exceptions import ContractLogicError
 from web3.types import HexStr
 
+from almanak.core.contracts import MORPHO_BLUE as _MORPHO_BLUE_REGISTRY
 from almanak.core.contracts import MORPHO_BLUE_ADDRESS
 from almanak.framework.utils.rpc_provider import get_rpc_url, is_poa_chain
 
@@ -44,7 +45,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 # Supported chains
-SUPPORTED_CHAINS = {"ethereum", "base", "arbitrum"}
+SUPPORTED_CHAINS = {"ethereum", "base", "arbitrum", "monad"}
 
 # Morpho Blue function selectors for view functions
 # position(bytes32 id, address user) -> (uint256 supplyShares, uint128 borrowShares, uint128 collateral)
@@ -64,6 +65,7 @@ MORPHO_DEPLOYMENT_BLOCKS: dict[str, int] = {
     "ethereum": 18883124,  # Dec 2023
     "base": 18883124,  # Approximate
     "arbitrum": 292000000,  # Jan 2025 (Morpho Blue Arbitrum launch)
+    "monad": 31907457,  # Monad mainnet deployment
 }
 
 # Max uint values
@@ -331,7 +333,7 @@ class MorphoBlueSDK:
         """Initialize the SDK.
 
         Args:
-            chain: Chain name (ethereum, base)
+            chain: Chain name (ethereum, base, arbitrum, monad)
             rpc_url: Optional RPC URL. If not provided, uses ALCHEMY_API_KEY.
 
         Raises:
@@ -342,7 +344,22 @@ class MorphoBlueSDK:
 
         self.chain = chain.lower()
         self.rpc_url = rpc_url or get_rpc_url(self.chain)
-        self.morpho_address = Web3.to_checksum_address(MORPHO_BLUE_ADDRESS)
+        # Resolve Morpho Blue address per chain. Most chains share the universal address,
+        # but some (e.g., Monad) use a chain-specific deployment. Fail fast if the chain
+        # is in SUPPORTED_CHAINS but the address registry was missed — silent fallback to
+        # the universal address on an unregistered chain would route txs to an EOA on
+        # chains like Monad.
+        chain_entry = _MORPHO_BLUE_REGISTRY.get(self.chain)
+        if chain_entry is None:
+            # Chain is in SUPPORTED_CHAINS but missing from the address registry —
+            # a configuration mismatch, not an unsupported-chain input error. Using
+            # MorphoBlueSDKError avoids stuffing the full message into
+            # UnsupportedChainError.chain (which is expected to hold just the name).
+            raise MorphoBlueSDKError(
+                f"Morpho Blue address registry has no entry for supported chain '{self.chain}'. "
+                "Add it to MORPHO_BLUE in almanak/core/contracts.py."
+            )
+        self.morpho_address = Web3.to_checksum_address(chain_entry["morpho"])
 
         # Initialize Web3
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))

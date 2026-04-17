@@ -9,7 +9,7 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [Uniswap V3](uniswap_v3.md) | DEX | Ethereum, Arbitrum, Optimism, Base, Polygon | `uniswap_v3` |
 | [Uniswap V4](uniswap_v4.md) | DEX | Ethereum, Arbitrum, Base | `uniswap_v4` |
 | [Aave V3](aave_v3.md) | Lending | Ethereum, Arbitrum, Optimism, Base, Avalanche | `aave_v3` |
-| [Morpho Blue](morpho_blue.md) | Lending | Ethereum, Base | `morpho_blue` |
+| [Morpho Blue](morpho_blue.md) | Lending | Ethereum, Base, Arbitrum, Monad | `morpho_blue` |
 | [GMX V2](gmx_v2.md) | Perpetuals | Arbitrum, Avalanche | `gmx_v2` |
 | [PancakeSwap Perps](pancakeswap_perps.md) | Perpetuals | BSC | `pancakeswap_perps` |
 | [Aerodrome](aerodrome.md) | DEX | Base | `aerodrome` |

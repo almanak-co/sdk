@@ -30,6 +30,8 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
+from almanak.core.contracts import MORPHO_BLUE as _MORPHO_BLUE_REGISTRY
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,13 +55,14 @@ BALANCER_VAULT_ADDRESS = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
 # Balancer supported chains
 BALANCER_SUPPORTED_CHAINS = {"ethereum", "arbitrum", "optimism", "polygon", "base"}
 
-# Morpho Blue addresses per chain (singleton contract)
-MORPHO_BLUE_ADDRESSES: dict[str, str] = {
-    "ethereum": "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
-    "base": "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
-}
+# Morpho Blue addresses per chain — derived from the central registry in
+# almanak.core.contracts so we don't duplicate the source of truth. Each entry's value
+# is the chain-specific Morpho deployment (e.g., Monad uses a distinct address).
+MORPHO_BLUE_ADDRESSES: dict[str, str] = {chain: addrs["morpho"] for chain, addrs in _MORPHO_BLUE_REGISTRY.items()}
 
-# Morpho supported chains for flash loans
+# Morpho chains enabled for flash loans. Kept as an explicit set because availability
+# here reflects tested flash-loan support, not just the presence of the core contract.
+# Expand deliberately after validating fee behaviour and callback semantics per chain.
 MORPHO_SUPPORTED_CHAINS = {"ethereum", "base"}
 
 # Flash loan fees in basis points
