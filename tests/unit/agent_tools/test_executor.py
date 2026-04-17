@@ -393,6 +393,298 @@ class TestActionToolDispatch:
         assert "not found" in result.error["message"].lower()
 
     @pytest.mark.asyncio
+    async def test_execute_compiled_bundle_across_process_boundary(self, mock_gateway, tmp_path):
+        """VIB-2996 regression: compile in one executor, execute in a brand new one.
+
+        Mirrors the real-world ``ax`` usage where ``compile_intent`` and
+        ``execute_compiled_bundle`` run in different CLI invocations and thus
+        different Python processes. The persistent disk cache has to bridge
+        that gap.
+        """
+        from almanak.framework.agent_tools.bundle_cache import BundleCache
+        from almanak.framework.agent_tools.executor import ToolExecutor
+
+        cache_dir = tmp_path / "bundles"
+
+        compile_resp = MagicMock()
+        compile_resp.success = True
+        compile_resp.action_bundle = b'{"actions": []}'
+        compile_resp.error = ""
+        mock_gateway.execution.CompileIntent.return_value = compile_resp
+
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+            max_single_trade_usd=Decimal("999999999"),
+            max_daily_spend_usd=Decimal("999999999"),
+            max_position_size_usd=Decimal("999999999"),
+            require_human_approval_above_usd=Decimal("999999999"),
+            require_rebalance_check=False,
+        )
+
+        first = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address="0x1234567890abcdef1234567890abcdef12345678",
+            strategy_id="test-strategy",
+            bundle_cache=BundleCache(cache_dir=cache_dir),
+        )
+        compile_result = await first.execute(
+            "compile_intent", {"intent_type": "swap", "params": {}}
+        )
+        bundle_id = compile_result.data["bundle_id"]
+
+        # Completely new executor, same cache dir -> should resolve the bundle.
+        exec_resp = MagicMock()
+        exec_resp.success = True
+        exec_resp.tx_hashes = ["0xabc"]
+        exec_resp.error = ""
+        mock_gateway.execution.Execute.return_value = exec_resp
+
+        second = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address="0x1234567890abcdef1234567890abcdef12345678",
+            strategy_id="test-strategy",
+            bundle_cache=BundleCache(cache_dir=cache_dir),
+        )
+        result = await second.execute(
+            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
+        )
+        assert result.status == "success"
+        assert result.data["tx_hashes"] == ["0xabc"]
+
+    @pytest.mark.asyncio
+    async def test_execute_compiled_bundle_consumes_before_gateway_call(
+        self, mock_gateway, tmp_path
+    ):
+        """VIB-2996 TOCTOU (Claude auditor item #2): the bundle must be
+        popped BEFORE the Execute gateway call so two concurrent
+        ``ax run execute_compiled_bundle`` invocations can never both
+        submit transactions from the same bundle_id.
+        """
+        from almanak.framework.agent_tools.bundle_cache import BundleCache
+        from almanak.framework.agent_tools.executor import ToolExecutor
+
+        cache_dir = tmp_path / "bundles"
+
+        compile_resp = MagicMock()
+        compile_resp.success = True
+        compile_resp.action_bundle = b'{"actions": []}'
+        compile_resp.error = ""
+        mock_gateway.execution.CompileIntent.return_value = compile_resp
+
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+            max_single_trade_usd=Decimal("999999999"),
+            max_daily_spend_usd=Decimal("999999999"),
+            max_position_size_usd=Decimal("999999999"),
+            require_human_approval_above_usd=Decimal("999999999"),
+            require_rebalance_check=False,
+        )
+
+        shared_cache = BundleCache(cache_dir=cache_dir)
+        wallet = "0x1234567890abcdef1234567890abcdef12345678"
+        executor = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address=wallet,
+            strategy_id="t",
+            bundle_cache=shared_cache,
+        )
+        compile_result = await executor.execute(
+            "compile_intent", {"intent_type": "swap", "params": {}}
+        )
+        bundle_id = compile_result.data["bundle_id"]
+
+        # Inside the Execute mock, assert the cache no longer contains the
+        # bundle_id — i.e., pop happened before the gateway call.
+        def assert_consumed_before_exec(_req):
+            from almanak.framework.agent_tools.bundle_cache import BundleCache as _BC
+
+            fresh = _BC(cache_dir=cache_dir)
+            assert fresh.get(bundle_id) is None, "bundle must be popped BEFORE Execute()"
+            resp = MagicMock()
+            resp.success = True
+            resp.tx_hashes = ["0xok"]
+            resp.error = ""
+            return resp
+
+        mock_gateway.execution.Execute.side_effect = assert_consumed_before_exec
+
+        result = await executor.execute(
+            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
+        )
+        assert result.status == "success"
+
+    @pytest.mark.asyncio
+    async def test_execute_compiled_bundle_rejects_wrong_wallet(self, mock_gateway, tmp_path):
+        """VIB-2996 P1 (Codex + CodeRabbit high-confidence): a bundle compiled
+        under wallet A must NOT execute under wallet B, even if they share a
+        per-user cache dir.
+        """
+        from almanak.framework.agent_tools.bundle_cache import BundleCache
+        from almanak.framework.agent_tools.executor import ToolExecutor
+
+        cache_dir = tmp_path / "bundles"
+
+        compile_resp = MagicMock()
+        compile_resp.success = True
+        compile_resp.action_bundle = b'{"actions": []}'
+        compile_resp.error = ""
+        mock_gateway.execution.CompileIntent.return_value = compile_resp
+
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+            max_single_trade_usd=Decimal("999999999"),
+            max_daily_spend_usd=Decimal("999999999"),
+            max_position_size_usd=Decimal("999999999"),
+            require_human_approval_above_usd=Decimal("999999999"),
+            require_rebalance_check=False,
+        )
+
+        wallet_a = "0x1111111111111111111111111111111111111111"
+        wallet_b = "0x2222222222222222222222222222222222222222"
+
+        compiler = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address=wallet_a,
+            strategy_id="strat-a",
+            bundle_cache=BundleCache(cache_dir=cache_dir),
+        )
+        compile_result = await compiler.execute(
+            "compile_intent", {"intent_type": "swap", "params": {}}
+        )
+        bundle_id = compile_result.data["bundle_id"]
+
+        # Different wallet, same cache dir.
+        attacker = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address=wallet_b,
+            strategy_id="strat-a",
+            bundle_cache=BundleCache(cache_dir=cache_dir),
+        )
+        result = await attacker.execute(
+            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
+        )
+        assert result.status == "error"
+        assert result.error["error_code"] == "validation_error"
+        assert "wallet" in result.error["message"].lower()
+        # And gateway.Execute must NOT have been called — hard gate.
+        mock_gateway.execution.Execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_compiled_bundle_rejects_wrong_strategy(self, mock_gateway, tmp_path):
+        """VIB-2996 P1: same wallet but different strategy_id must also reject."""
+        from almanak.framework.agent_tools.bundle_cache import BundleCache
+        from almanak.framework.agent_tools.executor import ToolExecutor
+
+        cache_dir = tmp_path / "bundles"
+
+        compile_resp = MagicMock()
+        compile_resp.success = True
+        compile_resp.action_bundle = b'{"actions": []}'
+        compile_resp.error = ""
+        mock_gateway.execution.CompileIntent.return_value = compile_resp
+
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+            max_single_trade_usd=Decimal("999999999"),
+            max_daily_spend_usd=Decimal("999999999"),
+            max_position_size_usd=Decimal("999999999"),
+            require_human_approval_above_usd=Decimal("999999999"),
+            require_rebalance_check=False,
+        )
+
+        wallet = "0x1234567890abcdef1234567890abcdef12345678"
+
+        compiler = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address=wallet,
+            strategy_id="strat-a",
+            bundle_cache=BundleCache(cache_dir=cache_dir),
+        )
+        compile_result = await compiler.execute(
+            "compile_intent", {"intent_type": "swap", "params": {}}
+        )
+        bundle_id = compile_result.data["bundle_id"]
+
+        attacker = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address=wallet,
+            strategy_id="strat-b",
+            bundle_cache=BundleCache(cache_dir=cache_dir),
+        )
+        result = await attacker.execute(
+            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
+        )
+        assert result.status == "error"
+        assert result.error["error_code"] == "validation_error"
+        assert "strategy" in result.error["message"].lower()
+        mock_gateway.execution.Execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_compiled_bundle_expired_returns_friendly_error(
+        self, mock_gateway, tmp_path
+    ):
+        """Expired bundles surface a clear 'expired' message, not a generic 'not found'."""
+        from almanak.framework.agent_tools.bundle_cache import BundleCache
+        from almanak.framework.agent_tools.executor import ToolExecutor
+
+        cache_dir = tmp_path / "bundles"
+
+        compile_resp = MagicMock()
+        compile_resp.success = True
+        compile_resp.action_bundle = b'{"actions": []}'
+        compile_resp.error = ""
+        mock_gateway.execution.CompileIntent.return_value = compile_resp
+
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+            max_single_trade_usd=Decimal("999999999"),
+            max_daily_spend_usd=Decimal("999999999"),
+            max_position_size_usd=Decimal("999999999"),
+            require_human_approval_above_usd=Decimal("999999999"),
+            require_rebalance_check=False,
+        )
+
+        executor = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address="0x1234567890abcdef1234567890abcdef12345678",
+            strategy_id="test-strategy",
+            bundle_cache=BundleCache(cache_dir=cache_dir, default_ttl_seconds=1),
+        )
+        compile_result = await executor.execute(
+            "compile_intent", {"intent_type": "swap", "params": {}}
+        )
+        bundle_id = compile_result.data["bundle_id"]
+
+        import time as _time
+
+        _time.sleep(1.2)
+
+        result = await executor.execute(
+            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
+        )
+        assert result.status == "error"
+        assert result.error["error_code"] == "validation_error"
+        assert "expired" in result.error["message"].lower()
+
+    @pytest.mark.asyncio
     async def test_execute_compiled_bundle_removes_from_cache(self, executor, mock_gateway):
         """Bundle should be one-shot: removed from cache after execution."""
         compile_resp = MagicMock()

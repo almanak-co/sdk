@@ -22,6 +22,10 @@ from almanak.framework.agent_tools.approval import (
     ApprovalStatus,
     HumanApprovalActuator,
 )
+from almanak.framework.agent_tools.bundle_cache import (
+    BundleCache,
+    BundleExpiredError,
+)
 from almanak.framework.agent_tools.catalog import (
     RiskTier,
     ToolCatalog,
@@ -152,6 +156,7 @@ class ToolExecutor:
         max_retry_delay: float = 60.0,
         approval_config: ApprovalConfig | None = None,
         approval_notifier: ApprovalNotifier | None = None,
+        bundle_cache: BundleCache | None = None,
     ) -> None:
         self._client = gateway_client
         self._catalog = catalog or get_default_catalog()
@@ -190,12 +195,11 @@ class ToolExecutor:
                 notifier=approval_notifier,
             )
 
-        # Bundle cache for compile -> execute flow
-        # Each entry stores (chain, bundle_bytes, original_args) to prevent cross-chain
-        # execution and enable spend tracking on compiled bundle execution.
-        # Capped at 100 entries to prevent unbounded memory growth.
-        self._compiled_bundles: dict[str, tuple[str, bytes, dict]] = {}
-        self._max_compiled_bundles = 100
+        # Bundle cache for compile -> execute flow.
+        # Persists to ${XDG_CACHE_HOME:-~/.cache}/almanak/bundles/ so the
+        # one-shot ``ax`` CLI can span compile_intent + execute_compiled_bundle
+        # across shells (VIB-2996). In-memory LRU remains the hot layer.
+        self._bundle_cache = bundle_cache if bundle_cache is not None else BundleCache()
 
         # State version tracking for optimistic locking
         self._state_versions: dict[str, int] = {}
@@ -740,13 +744,24 @@ class ToolExecutor:
                 )
 
             # Cache the compiled bundle with chain metadata and original args for
-            # later execution and spend tracking
+            # later execution and spend tracking. The cache persists to disk so
+            # the one-shot CLI can execute a bundle compiled in a previous shell.
+            # wallet_address/strategy_id are recorded to reject cross-identity
+            # reuse — the cache is per-machine, so a bundle compiled under
+            # wallet A must not execute under wallet B (VIB-2996 P1).
+            # sanitize_args is applied defensively: callers that smuggle a
+            # secret field (``api_key``, ``private_key``, ...) into ``params``
+            # must not end up with it plaintext on disk (VIB-2996 P3 / Claude
+            # auditor item #3).
             bundle_id = str(uuid.uuid4())
-            # Evict oldest entries if cache is full
-            if len(self._compiled_bundles) >= self._max_compiled_bundles:
-                oldest_key = next(iter(self._compiled_bundles))
-                del self._compiled_bundles[oldest_key]
-            self._compiled_bundles[bundle_id] = (chain, resp.action_bundle, args)
+            self._bundle_cache.put(
+                bundle_id,
+                chain,
+                resp.action_bundle,
+                sanitize_args(args),
+                wallet_address=self._wallet_address,
+                strategy_id=self._strategy_id,
+            )
 
             # Parse actions for the response
             try:
@@ -767,10 +782,30 @@ class ToolExecutor:
 
         if tool_name == "simulate_intent":
             sim_bundle_id = args.get("bundle_id")
-            cached_chain = None
-            if sim_bundle_id and sim_bundle_id in self._compiled_bundles:
-                cached_chain, bundle_bytes, _original_args = self._compiled_bundles[sim_bundle_id]
-            elif args.get("intent_type"):
+            cached_chain: str | None = None
+            bundle_bytes: bytes | None = None
+            if sim_bundle_id:
+                try:
+                    cached_entry = self._bundle_cache.get(sim_bundle_id)
+                except BundleExpiredError as exc:
+                    return ToolResponse(
+                        status="error",
+                        error=_error_dict(
+                            AgentErrorCode.VALIDATION_ERROR,
+                            str(exc),
+                            recoverable=True,
+                        ),
+                    )
+                if cached_entry is not None:
+                    cached_chain = cached_entry.chain
+                    bundle_bytes = cached_entry.bundle_bytes
+
+            if bundle_bytes is None:
+                if not args.get("intent_type"):
+                    raise ToolValidationError(
+                        "Must provide either bundle_id or intent_type+params for simulation.",
+                        tool_name=tool_name,
+                    )
                 # Compile on the fly for simulation
                 chain = args.get("chain", self._default_chain)
                 params = args.get("params", {})
@@ -791,11 +826,6 @@ class ToolExecutor:
                         error=_error_dict(AgentErrorCode.SIMULATION_FAILED, compile_resp.error, recoverable=True),
                     )
                 bundle_bytes = compile_resp.action_bundle
-            else:
-                raise ToolValidationError(
-                    "Must provide either bundle_id or intent_type+params for simulation.",
-                    tool_name=tool_name,
-                )
 
             # Use the cached chain from the bundle if available, otherwise fall back to args
             chain = cached_chain or args.get("chain", self._default_chain)
@@ -960,21 +990,50 @@ class ToolExecutor:
         dry_run = args.get("dry_run", False)
         chain = args.get("chain", self._default_chain)
 
-        cached = self._compiled_bundles.get(bundle_id)
+        try:
+            cached = self._bundle_cache.get(bundle_id)
+        except BundleExpiredError as exc:
+            raise ToolValidationError(
+                str(exc),
+                tool_name="execute_compiled_bundle",
+            ) from exc
         if cached is None:
             raise ToolValidationError(
-                f"Bundle '{bundle_id}' not found. It may have expired or was never compiled. "
-                "Use compile_intent first to create a bundle.",
+                f"Bundle '{bundle_id}' not found. Use compile_intent first to create a bundle "
+                "(bundles live under ${XDG_CACHE_HOME:-~/.cache}/almanak/bundles/).",
                 tool_name="execute_compiled_bundle",
             )
 
-        compiled_chain, bundle_bytes, original_args = cached
+        compiled_chain = cached.chain
+        bundle_bytes = cached.bundle_bytes
+        original_args = cached.args
 
         # Enforce chain match to prevent wrong-network execution
         if chain.lower() != compiled_chain.lower():
             raise ToolValidationError(
                 f"Bundle was compiled for chain '{compiled_chain}' but execution requested on '{chain}'. "
                 "Recompile the bundle for the target chain.",
+                tool_name="execute_compiled_bundle",
+            )
+
+        # Enforce wallet/strategy identity match. The persistent cache is
+        # per-machine, so a bundle compiled under wallet A must not execute
+        # under wallet B even if the bundle_id leaks (VIB-2996 P1). EVM
+        # addresses are compared case-insensitively; empty strings (legacy
+        # flows that never set a wallet) fall through without gating.
+        if cached.wallet_address and self._wallet_address:
+            if cached.wallet_address.lower() != self._wallet_address.lower():
+                raise ToolValidationError(
+                    f"Bundle was compiled under wallet '{cached.wallet_address}' but "
+                    f"execution requested under '{self._wallet_address}'. "
+                    "Recompile with compile_intent for the current wallet.",
+                    tool_name="execute_compiled_bundle",
+                )
+        if cached.strategy_id and self._strategy_id and cached.strategy_id != self._strategy_id:
+            raise ToolValidationError(
+                f"Bundle was compiled under strategy '{cached.strategy_id}' but "
+                f"execution requested under '{self._strategy_id}'. "
+                "Recompile with compile_intent for the current strategy.",
                 tool_name="execute_compiled_bundle",
             )
 
@@ -1015,6 +1074,16 @@ class ToolExecutor:
             "require_simulation", True
         )
 
+        # Reserve the bundle one-shot BEFORE hitting the gateway. With the
+        # persistent cache, two concurrent ``ax`` invocations on the same
+        # machine could both ``get()`` the same entry and both submit
+        # transactions. Popping before Execute means at most one caller wins
+        # the pop; the other sees a cache miss and must recompile (VIB-2996
+        # / Claude PR auditor item #2). dry_run paths don't consume — they
+        # re-use the bundle.
+        if not dry_run:
+            self._bundle_cache.pop(bundle_id)
+
         exec_resp = self._client.execution.Execute(
             gateway_pb2.ExecuteRequest(
                 action_bundle=bundle_bytes,
@@ -1044,9 +1113,6 @@ class ToolExecutor:
                 f"Execution of compiled bundle failed: {exec_resp.error}",
                 tool_name="execute_compiled_bundle",
             )
-
-        # Remove from cache after execution (one-shot)
-        self._compiled_bundles.pop(bundle_id, None)
 
         tx_hashes = list(exec_resp.tx_hashes) if exec_resp.tx_hashes else []
         status = "simulated" if dry_run else ("success" if exec_resp.success else "error")

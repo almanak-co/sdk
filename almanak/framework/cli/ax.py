@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from typing import TYPE_CHECKING
 
 import click
@@ -1688,6 +1689,115 @@ def unwrap(ctx, token, amount, sub_yes, sub_dry_run, sub_json_output):
     except Exception as e:
         render_error(str(e), json_output=json_output)
         sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# almanak ax bundle-list / bundle-clear
+# ---------------------------------------------------------------------------
+
+
+@ax.command("bundle-list")
+@click.pass_context
+def bundle_list(ctx):
+    """List compiled intent bundles cached on disk.
+
+    Bundles produced by ``ax run compile_intent`` persist to
+    ``${XDG_CACHE_HOME:-~/.cache}/almanak/bundles/`` so a follow-up
+    ``ax run execute_compiled_bundle '{"bundle_id":"..."}'`` from a new
+    shell can still find them. Expired entries are shown with remaining
+    TTL <= 0; run ``ax bundle-clear --expired`` to prune them.
+    """
+    import json as json_mod
+
+    from almanak.framework.agent_tools.bundle_cache import BundleCache
+
+    json_output = ctx.obj["json_output"]
+    cache = BundleCache()
+    now = time.time()
+    entries = cache.list_entries()
+
+    if json_output:
+        payload = [
+            {
+                "bundle_id": bid,
+                "chain": entry.chain,
+                "age_seconds": round(entry.age_seconds(now), 2),
+                "ttl_seconds": entry.ttl_seconds,
+                "expired": entry.is_expired(now),
+                "intent_type": entry.args.get("intent_type"),
+            }
+            for bid, entry in entries
+        ]
+        click.echo(json_mod.dumps({"cache_dir": str(cache.cache_dir), "entries": payload}, indent=2))
+        return
+
+    if not entries:
+        click.echo(f"No cached bundles in {cache.cache_dir}")
+        return
+
+    click.echo(f"\nCached bundles ({len(entries)}) in {cache.cache_dir}:")
+    click.echo("-" * 100)
+    click.echo(f"  {'bundle_id':<38} {'chain':<10} {'intent':<20} {'age':>6} {'ttl':>6} state")
+    click.echo("-" * 100)
+    for bundle_id, entry in entries:
+        age = int(entry.age_seconds(now))
+        intent_type = str(entry.args.get("intent_type") or "-")[:20]
+        state = "EXPIRED" if entry.is_expired(now) else "live"
+        color = "red" if state == "EXPIRED" else "green"
+        click.echo(
+            f"  {bundle_id:<38} {entry.chain:<10} {intent_type:<20} "
+            f"{age:>5}s {entry.ttl_seconds:>5}s {click.style(state, fg=color)}"
+        )
+    click.echo()
+
+
+@ax.command("bundle-clear")
+@click.option("--expired", is_flag=True, default=False, help="Only remove entries past their TTL.")
+@click.option("--yes", is_flag=True, default=False, help="Skip interactive confirmation.")
+@click.pass_context
+def bundle_clear(ctx, expired, yes):
+    """Remove cached compiled bundles from disk.
+
+    Default is to clear all entries; pass ``--expired`` to prune only
+    entries past their TTL.
+    """
+    import json as json_mod
+
+    from almanak.framework.agent_tools.bundle_cache import BundleCache
+
+    json_output = ctx.obj["json_output"]
+    cache = BundleCache()
+    entries = cache.list_entries()
+
+    if expired:
+        now = time.time()
+        target_count = sum(1 for _, e in entries if e.is_expired(now))
+    else:
+        target_count = len(entries)
+
+    if target_count == 0:
+        msg = "No expired bundles to clear." if expired else f"No bundles to clear in {cache.cache_dir}"
+        if json_output:
+            click.echo(json_mod.dumps({"removed": 0, "cache_dir": str(cache.cache_dir)}))
+        else:
+            click.echo(msg)
+        return
+
+    # Respect the group-level --yes/-y flag so ``ax --yes bundle-clear`` works
+    # without an additional subcommand flag, matching other ax commands.
+    effective_yes = yes or ctx.obj.get("yes", False)
+    if not effective_yes and not json_output:
+        target = "expired" if expired else "all"
+        if not click.confirm(f"Remove {target_count} {target} bundle(s) from {cache.cache_dir}?"):
+            click.echo("Cancelled.")
+            return
+
+    removed = cache.prune_expired() if expired else cache.clear()
+
+    if json_output:
+        click.echo(json_mod.dumps({"removed": removed, "cache_dir": str(cache.cache_dir)}))
+    else:
+        click.echo(f"Removed {removed} bundle(s) from {cache.cache_dir}")
 
 
 # ---------------------------------------------------------------------------

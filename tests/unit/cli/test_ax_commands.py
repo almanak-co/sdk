@@ -1181,3 +1181,103 @@ class TestAxReadCommands:
         )
         assert result.exit_code == 0
         assert captured[0] == "mainnet"
+
+
+class TestAxBundleCommands:
+    """Tests for ``ax bundle-list`` and ``ax bundle-clear`` admin commands."""
+
+    def test_bundle_list_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "bundle-list"])
+        assert result.exit_code == 0
+        assert "No cached bundles" in result.output
+
+    def test_bundle_list_renders_entries(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        from almanak.framework.agent_tools.bundle_cache import BundleCache
+
+        cache = BundleCache()
+        cache.put("deadbeef-0000-4000-8000-000000000001", "arbitrum", b"x", {"intent_type": "swap"})
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "bundle-list"])
+        assert result.exit_code == 0
+        assert "deadbeef-0000-4000-8000-000000000001" in result.output
+        assert "arbitrum" in result.output
+        assert "swap" in result.output
+        assert "live" in result.output
+
+    def test_bundle_list_json_output(self, tmp_path, monkeypatch):
+        import json as json_mod
+
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        from almanak.framework.agent_tools.bundle_cache import BundleCache
+
+        cache = BundleCache()
+        cache.put("bundle-json-1", "base", b"y", {"intent_type": "lp_open"})
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--json", "bundle-list"])
+        assert result.exit_code == 0
+        payload = json_mod.loads(result.output)
+        assert len(payload["entries"]) == 1
+        entry = payload["entries"][0]
+        assert entry["bundle_id"] == "bundle-json-1"
+        assert entry["chain"] == "base"
+        assert entry["intent_type"] == "lp_open"
+        assert entry["expired"] is False
+
+    def test_bundle_clear_all_requires_confirm(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        from almanak.framework.agent_tools.bundle_cache import BundleCache
+
+        cache = BundleCache()
+        cache.put("bundle-clear-1", "arbitrum", b"x", {})
+
+        runner = CliRunner()
+        # Simulate user saying "no" to the prompt.
+        result = runner.invoke(almanak, ["ax", "bundle-clear"], input="n\n")
+        assert result.exit_code == 0
+        assert "Cancelled" in result.output
+        # Bundle still present.
+        assert BundleCache().get("bundle-clear-1") is not None
+
+    def test_bundle_clear_all_with_yes_flag(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        from almanak.framework.agent_tools.bundle_cache import BundleCache
+
+        cache = BundleCache()
+        cache.put("bundle-yes-1", "arbitrum", b"x", {})
+        cache.put("bundle-yes-2", "base", b"y", {})
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "bundle-clear", "--yes"])
+        assert result.exit_code == 0
+        assert "Removed" in result.output
+        # Both gone.
+        assert BundleCache().get("bundle-yes-1") is None
+        assert BundleCache().get("bundle-yes-2") is None
+
+    def test_bundle_clear_expired_only(self, tmp_path, monkeypatch):
+        import time as _time
+
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        from almanak.framework.agent_tools.bundle_cache import BundleCache
+
+        # Two caches with different TTLs so the "fresh" control entry cannot
+        # inherit the 1s clock and become flaky on a slow CI runner.
+        # (CodeRabbit round 2.)
+        short_ttl_cache = BundleCache(default_ttl_seconds=1)
+        short_ttl_cache.put("bundle-expired", "arbitrum", b"x", {})
+        _time.sleep(1.2)
+        BundleCache(default_ttl_seconds=900).put("bundle-fresh", "base", b"y", {})
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "bundle-clear", "--expired", "--yes"])
+        assert result.exit_code == 0
+        # Fresh bundle survives.
+        fresh = BundleCache()
+        assert fresh.get("bundle-fresh") is not None
+        # Expired bundle gone (must not raise expired error).
+        assert fresh.get("bundle-expired") is None
