@@ -400,6 +400,10 @@ class RunnerConfig:
         initial_retry_delay: Initial delay between retries in seconds (default 1.0)
         max_retry_delay: Maximum delay between retries in seconds (default 60.0)
         decide_timeout_seconds: Hard timeout for strategy.decide() in seconds (default 30.0)
+        allow_unsafe_teardown_fallback: If True, allow inline teardown execution without
+            TeardownManager safety features (no loss caps, no slippage escalation, no
+            approval gates, no verification). Default False — only enable for local
+            development/testing where safety features aren't needed.
     """
 
     default_interval_seconds: int = 60
@@ -412,6 +416,7 @@ class RunnerConfig:
     max_retry_delay: float = 60.0
     lifecycle_poll_interval: float = 2.0
     decide_timeout_seconds: float = 30.0
+    allow_unsafe_teardown_fallback: bool = False
 
 
 # =============================================================================

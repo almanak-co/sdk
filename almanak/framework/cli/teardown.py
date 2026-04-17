@@ -795,10 +795,14 @@ def execute_teardown(
             config=compiler_config,
         )
 
-        # Create teardown manager
+        # Create teardown manager with state persistence (VIB-2924)
+        from almanak.framework.teardown.state_manager import TeardownStateAdapter
+
+        teardown_state_adapter = TeardownStateAdapter()
         teardown_manager = TeardownManager(
             orchestrator=orchestrator,  # type: ignore[arg-type]  # duck-typed orchestrator
             compiler=compiler,
+            state_manager=teardown_state_adapter,
         )
 
         # Execute with progress callback. When --discover is active the

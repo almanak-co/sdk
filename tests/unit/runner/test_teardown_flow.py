@@ -19,6 +19,7 @@ import pytest
 from almanak.framework.runner.strategy_runner import (
     IterationResult,
     IterationStatus,
+    RunnerConfig,
     StrategyRunner,
 )
 from almanak.framework.teardown.models import TeardownMode
@@ -648,6 +649,7 @@ class TestTeardownViaManager:
     async def test_fallback_to_inline_when_compiler_fails(self, mock_get_manager):
         """Falls back to inline execution when compiler cannot be built."""
         runner = _make_runner()
+        runner.config = RunnerConfig(allow_unsafe_teardown_fallback=True)
         intent = _make_intent()
         strategy = _make_strategy(should_teardown=True, teardown_intents=[intent])
 
@@ -689,6 +691,7 @@ class TestTeardownViaManager:
         (which would trivially pass loss caps). Instead, fall back to inline.
         """
         runner = _make_runner()
+        runner.config = RunnerConfig(allow_unsafe_teardown_fallback=True)
         intent = _make_intent()
         strategy = _make_strategy(should_teardown=True, teardown_intents=[intent])
         strategy.get_open_positions.side_effect = RuntimeError("RPC timeout")

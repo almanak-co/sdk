@@ -298,11 +298,19 @@ class EscalatingSlippageManager:
                     approval_response = await on_approval_needed(approval_request)
 
                     if not approval_response.approved:
-                        if approval_response.action == "wait_and_retry":
-                            # Wait and retry at same level
-                            logger.info("User chose to wait and retry")
+                        if approval_response.action == "wait_and_escalate":
+                            # Operator declined the current level. Sleep briefly
+                            # to let market conditions settle, then advance to
+                            # the next (higher-slippage) level. The CURRENT
+                            # level is not retried — the operator already
+                            # declined it. The outer for loop's next iteration
+                            # is the next escalation level.
+                            logger.info(
+                                "Operator declined level %s; sleeping %.1fs then escalating to next level",
+                                level_config.level,
+                                self.config.retry_delay_seconds * 2,
+                            )
                             await asyncio.sleep(self.config.retry_delay_seconds * 2)
-                            # Will continue to next iteration
                             continue
                         else:
                             # User cancelled or chose different action
@@ -446,7 +454,7 @@ class EscalatingSlippageManager:
             estimated_loss_usd=estimated_loss,
             position_value_usd=position_value,
             reason=reason,
-            options=["Accept cost", "Wait & Retry", "Cancel"],
+            options=["Accept cost", "Wait & Escalate to next level", "Cancel"],
             requested_at=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=30),
         )

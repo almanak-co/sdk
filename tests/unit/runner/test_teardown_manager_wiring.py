@@ -257,6 +257,8 @@ class TestTeardownFallback:
 
         strategy = _make_teardown_strategy()
         runner = _make_runner()
+        # Enable unsafe fallback for this test (VIB-2926: disabled by default)
+        runner.config = RunnerConfig(allow_unsafe_teardown_fallback=True)
 
         # Make compiler building fail -> should fallback to inline
         runner._build_teardown_compiler = MagicMock(return_value=None)

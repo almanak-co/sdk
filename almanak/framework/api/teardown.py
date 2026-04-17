@@ -12,6 +12,7 @@ Endpoints:
 - POST /{strategy_id}/close/approve-escalation - Approve higher slippage
 """
 
+import json
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -27,6 +28,7 @@ from ..teardown import (
     TeardownMode,
     TeardownPositionSummary,
     TeardownRequest,
+    TeardownStateAdapter,
     TeardownStatus,
     calculate_max_acceptable_loss,
     get_teardown_state_manager,
@@ -216,8 +218,12 @@ class EscalationApprovalRequest(BaseModel):
     """Request to approve higher slippage."""
 
     action: str = Field(
-        pattern="^(approve|wait_and_retry|cancel)$",
-        description="Action to take: 'approve', 'wait_and_retry', or 'cancel'",
+        pattern="^(approve|wait_and_escalate|cancel)$",
+        description=(
+            "Action to take: 'approve' (accept current slippage level), "
+            "'wait_and_escalate' (pause briefly then try the next-higher "
+            "slippage level; the current level is not retried), or 'cancel'"
+        ),
     )
     approved_slippage: float | None = Field(
         default=None,
@@ -258,6 +264,22 @@ class TeardownState:
 
 
 _teardown_state = TeardownState()
+
+
+# Process-wide adapter singleton. Both API and runner construct adapters with
+# db_path=None, so they resolve via TeardownStateManager._resolve_db_path — which
+# honours ALMANAK_STATE_DB. The runner polls the `teardown_approvals` table;
+# API endpoints write responses into the same table so the two channels stay
+# in sync. See blueprints/14-teardown-system.md (Approval Flow).
+_teardown_adapter: TeardownStateAdapter | None = None
+
+
+def _get_teardown_adapter() -> TeardownStateAdapter:
+    """Lazy-init the SQLite adapter used to relay approval responses to the runner."""
+    global _teardown_adapter
+    if _teardown_adapter is None:
+        _teardown_adapter = TeardownStateAdapter()
+    return _teardown_adapter
 
 
 def _get_strategy_data(strategy_id: str) -> dict[str, Any]:
@@ -690,6 +712,18 @@ async def cancel_close(
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Failed to mark persisted teardown as cancelled for {strategy_id}: {e}")
 
+    # If the runner is waiting on an approval response in the SQLite channel,
+    # write a cancel response so its poll loop wakes up immediately rather than
+    # sitting out the full expiry window. No-op if no pending approval exists.
+    try:
+        adapter = _get_teardown_adapter()
+        adapter.write_approval_response_by_strategy(
+            strategy_id=strategy_id,
+            response_json=json.dumps({"approved": False, "action": "cancel"}),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Failed to write SQLite cancel response for {strategy_id}: {e}")
+
     # Emit audit event
     emit_audit_event(
         strategy_id=strategy_id,
@@ -728,59 +762,109 @@ async def approve_escalation(
     Returns:
         ApprovalResponseModel with result
     """
-    teardown = _teardown_state.get_teardown(strategy_id)
-    if not teardown:
+    # Look up pending approval in the shared SQLite channel first — covers
+    # both runner-initiated teardowns (which never populate _teardown_state)
+    # and API-initiated teardowns (which populate both).
+    adapter = _get_teardown_adapter()
+    pending_sqlite = adapter.get_latest_pending_approval(strategy_id)
+    in_memory_teardown = _teardown_state.get_teardown(strategy_id)
+
+    if pending_sqlite is None and in_memory_teardown is None:
         raise HTTPException(
             status_code=404,
             detail=f"No active teardown for strategy {strategy_id}",
         )
 
-    if teardown["status"] != "paused":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Teardown is not paused (status: {teardown['status']})",
-        )
+    # If in-memory state exists, validate it's in the right state for approval.
+    if in_memory_teardown is not None:
+        if in_memory_teardown["status"] != "paused":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Teardown is not paused (status: {in_memory_teardown['status']})",
+            )
+        if not in_memory_teardown.get("approval_needed"):
+            raise HTTPException(
+                status_code=400,
+                detail="No approval request pending",
+            )
 
-    if not teardown.get("approval_needed"):
-        raise HTTPException(
-            status_code=400,
-            detail="No approval request pending",
-        )
-
-    # Handle the action
+    # Handle the action — update in-memory (for API-initiated flows) and
+    # write to SQLite (for runner-initiated flows). Either path alone is
+    # sufficient; writing to both keeps them in sync.
     if request.action == "approve":
-        teardown["status"] = "executing"
-        teardown["approval_needed"] = None
-        if request.approved_slippage:
-            teardown["approved_slippage"] = request.approved_slippage
         message = "Slippage approved. Continuing teardown."
-
-    elif request.action == "wait_and_retry":
-        teardown["status"] = "waiting_retry"
-        message = "Waiting for better market conditions. Will retry in 5 minutes."
-
+        response_payload = {
+            "approved": True,
+            "action": "approve",
+            "approved_slippage": str(request.approved_slippage) if request.approved_slippage else None,
+        }
+    elif request.action == "wait_and_escalate":
+        message = "Operator declined current level; advancing to next escalation level."
+        response_payload = {"approved": False, "action": "wait_and_escalate"}
     else:  # cancel
-        teardown["status"] = "cancelled"
-        teardown["approval_needed"] = None
         message = "Teardown cancelled by operator."
+        response_payload = {"approved": False, "action": "cancel"}
 
-    _teardown_state.set_teardown(strategy_id, teardown)
+    if in_memory_teardown is not None:
+        if request.action == "approve":
+            in_memory_teardown["status"] = "executing"
+            in_memory_teardown["approval_needed"] = None
+            if request.approved_slippage:
+                in_memory_teardown["approved_slippage"] = request.approved_slippage
+        elif request.action == "wait_and_escalate":
+            in_memory_teardown["status"] = "waiting_retry"
+        else:  # cancel
+            in_memory_teardown["status"] = "cancelled"
+            in_memory_teardown["approval_needed"] = None
+        _teardown_state.set_teardown(strategy_id, in_memory_teardown)
+        teardown_id_for_audit = in_memory_teardown["teardown_id"]
+    else:
+        teardown_id_for_audit = pending_sqlite["teardown_id"] if pending_sqlite else None
+
+    # Write to the SQLite channel so a runner waiting on the approval wakes up.
+    # This is the path that was broken before — runner's poll loop reads here.
+    sqlite_updated = adapter.write_approval_response_by_strategy(
+        strategy_id=strategy_id,
+        response_json=json.dumps(response_payload),
+    )
+    if not sqlite_updated and in_memory_teardown is None:
+        # Pending SQLite approval disappeared between the check above and the
+        # write (race with runner timing out). Surface as 409 — operator should
+        # refresh and check teardown status.
+        raise HTTPException(
+            status_code=409,
+            detail="Pending approval was resolved before response could be recorded",
+        )
 
     # Emit audit event
     emit_audit_event(
         strategy_id=strategy_id,
         action="TEARDOWN_ESCALATION_RESPONSE",
         details={
-            "teardown_id": teardown["teardown_id"],
+            "teardown_id": teardown_id_for_audit,
             "action": request.action,
             "approved_slippage": request.approved_slippage,
+            "channel": "sqlite" if sqlite_updated else "in_memory",
         },
         api_key=api_key,
     )
 
+    # Prefer in-memory state for new_status; fall back to SQLite pending payload
+    # for runner-initiated teardowns where in-memory is empty.
+    if in_memory_teardown is not None:
+        new_status = in_memory_teardown["status"]
+        teardown_id_for_response = in_memory_teardown["teardown_id"]
+    else:
+        teardown_id_for_response = teardown_id_for_audit or ""
+        new_status = {
+            "approve": "executing",
+            "wait_and_escalate": "waiting_retry",
+            "cancel": "cancelled",
+        }[request.action]
+
     return ApprovalResponseModel(
         success=True,
         message=message,
-        teardown_id=teardown["teardown_id"],
-        new_status=teardown["status"],
+        teardown_id=teardown_id_for_response,
+        new_status=new_status,
     )

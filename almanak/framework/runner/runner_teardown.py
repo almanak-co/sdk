@@ -7,9 +7,13 @@ via a thin delegation stub in StrategyRunner.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-from datetime import datetime
-from decimal import Decimal
+import time
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 from ..intents.compiler import IntentCompiler, IntentCompilerConfig
@@ -22,6 +26,317 @@ if TYPE_CHECKING:
 # Use the original strategy_runner logger so existing log-capture tests and
 # log-filtering rules continue to work after the extraction.
 logger = logging.getLogger("almanak.framework.runner.strategy_runner")
+
+
+# -------------------------------------------------------------------------
+# Approval callback for slippage escalation (VIB-2927)
+# -------------------------------------------------------------------------
+
+# Valid approval actions. Defensive against typos or legacy payloads.
+# "approve" and "continue" both mean "accept this level"; "wait_and_escalate"
+# advances to the next slippage level after a pause; "cancel" aborts.
+_VALID_APPROVAL_ACTIONS = {"approve", "continue", "wait_and_escalate", "cancel"}
+
+# Teardown request sources that imply a human operator is actively watching.
+# Everything else — including ``request=None`` and unknown future sources —
+# is treated as auto mode. Fail-closed: adding a new source requires an
+# explicit decision to put it on this list, so a new source cannot silently
+# start blocking on approvals no one will give. Tests import this constant
+# directly so the taxonomy cannot drift between runtime and test expectations.
+_MANUAL_TEARDOWN_REQUESTERS: frozenset[str] = frozenset({"cli", "dashboard", "dashboard_api"})
+
+
+def derive_teardown_auto_mode(request: Any) -> bool:
+    """Return True when teardown should run in auto mode (no approval callback).
+
+    Exposed as a standalone helper so tests can exercise the predicate directly
+    instead of re-implementing it. The production call site in
+    ``execute_teardown_via_manager`` uses this function as well.
+
+    Rules:
+    - ``request is None`` → auto (strategy self-signalled; no operator present)
+    - ``requested_by`` in ``_MANUAL_TEARDOWN_REQUESTERS`` → manual
+    - everything else (including unknown future sources) → auto (fail-closed)
+    """
+    if request is None:
+        return True
+    return getattr(request, "requested_by", None) not in _MANUAL_TEARDOWN_REQUESTERS
+
+
+# Safe default when an approval payload is missing or malformed. Cancelling a
+# teardown on malformed input would be destructive (operator loses the chance
+# to approve). wait_and_escalate advances through the EscalatingSlippageManager
+# under auto-approve rules, which is the safe fallback.
+_SAFE_DEFAULT_APPROVAL_ACTION = "wait_and_escalate"
+
+# Poll interval for the approval SQLite channel. Short enough to feel responsive
+# to an operator click; long enough to avoid hammering SQLite.
+_APPROVAL_POLL_INTERVAL_S = 5.0
+
+# Fallback approval deadline when ApprovalRequest.expires_at is None. Matches
+# the typical escalation-level window in EscalatingSlippageManager.
+_APPROVAL_DEFAULT_TIMEOUT = timedelta(minutes=30)
+
+
+def _parse_approval_response(response_json: str, teardown_id: str) -> Any:
+    """Parse an approval response JSON string into an ApprovalResponse.
+
+    Defensive against malformed payloads: JSON errors and unknown actions are
+    logged and treated as wait_and_escalate (safe default) rather than cancel.
+    """
+    from ..teardown.models import ApprovalResponse
+
+    try:
+        data = json.loads(response_json)
+    except json.JSONDecodeError as e:
+        logger.error(
+            "Malformed approval response JSON for teardown %s (%s); treating as %s",
+            teardown_id,
+            e,
+            _SAFE_DEFAULT_APPROVAL_ACTION,
+        )
+        return ApprovalResponse(
+            approved=False,
+            teardown_id=teardown_id,
+            action=_SAFE_DEFAULT_APPROVAL_ACTION,
+        )
+
+    if not isinstance(data, dict):
+        logger.error(
+            "Approval response for teardown %s is not a JSON object; treating as %s",
+            teardown_id,
+            _SAFE_DEFAULT_APPROVAL_ACTION,
+        )
+        return ApprovalResponse(
+            approved=False,
+            teardown_id=teardown_id,
+            action=_SAFE_DEFAULT_APPROVAL_ACTION,
+        )
+
+    action = data.get("action")
+    if action not in _VALID_APPROVAL_ACTIONS:
+        logger.error(
+            "Approval response for teardown %s has unknown action %r; treating as %s",
+            teardown_id,
+            action,
+            _SAFE_DEFAULT_APPROVAL_ACTION,
+        )
+        action = _SAFE_DEFAULT_APPROVAL_ACTION
+
+    # Parse `approved` explicitly so `{"approved": "false"}` does not collapse
+    # to True via bool() on a non-empty string. Accept bool / canonical string
+    # forms and reject everything else.
+    approved_raw = data.get("approved", False)
+    if isinstance(approved_raw, bool):
+        approved = approved_raw
+    elif isinstance(approved_raw, str):
+        approved = approved_raw.strip().lower() in {"true", "1", "yes"}
+    elif isinstance(approved_raw, int | float):
+        approved = bool(approved_raw)
+    else:
+        approved = False
+
+    # Parse approved_slippage defensively — an invalid Decimal string would
+    # have crashed the callback and fallen into the outer try/except of the
+    # approval loop. Fall back to safe-default action instead.
+    approved_slippage: Decimal | None = None
+    approved_slippage_raw = data.get("approved_slippage")
+    if approved_slippage_raw is not None:
+        try:
+            approved_slippage = Decimal(str(approved_slippage_raw))
+        except (InvalidOperation, TypeError, ValueError):
+            logger.error(
+                "Approval response for teardown %s has invalid approved_slippage %r; treating as %s",
+                teardown_id,
+                approved_slippage_raw,
+                _SAFE_DEFAULT_APPROVAL_ACTION,
+            )
+            action = _SAFE_DEFAULT_APPROVAL_ACTION
+            approved = False
+
+    return ApprovalResponse(
+        approved=approved,
+        teardown_id=teardown_id,
+        action=action,
+        approved_slippage=approved_slippage,
+    )
+
+
+def _make_approval_callback(runner: Any, state_adapter: Any):
+    """Create the approval callback wired to the shared SQLite channel.
+
+    Flow:
+    1. On escalation, write a row to ``teardown_approvals`` keyed by
+       ``(teardown_id, level)``. Operator responds by writing to the same row
+       via the teardown API or CLI (both go through the same adapter).
+    2. Send an alert so the operator knows to look.
+    3. Poll the row until a response arrives or the expiry deadline passes.
+       Uses ``time.monotonic()`` for the deadline — wall-clock skew or NTP
+       adjustments must not extend or truncate the window unexpectedly.
+    4. Parse the response defensively; unknown or malformed actions fall back
+       to ``wait_and_escalate`` (safe escalation) instead of ``cancel``.
+    5. On timeout, auto-escalate via ``wait_and_escalate`` rather than cancelling.
+    """
+
+    async def on_approval_needed(request):
+        # Expiry fallback: ApprovalRequest.expires_at is typed Optional, so don't
+        # crash if a future caller omits it.
+        expires_at = request.expires_at or datetime.now(UTC) + _APPROVAL_DEFAULT_TIMEOUT
+        timeout_s = max(0.0, (expires_at - datetime.now(UTC)).total_seconds())
+        monotonic_deadline = time.monotonic() + timeout_s
+
+        # Persist the request. Include fields that let the operator make an
+        # informed decision (age of request, next-level slippage if declined).
+        await asyncio.to_thread(
+            state_adapter.create_approval_request,
+            teardown_id=request.teardown_id,
+            strategy_id=request.strategy_id,
+            level=request.current_level,
+            request_json=json.dumps(
+                {
+                    "teardown_id": request.teardown_id,
+                    "strategy_id": request.strategy_id,
+                    "current_level": request.current_level.value
+                    if hasattr(request.current_level, "value")
+                    else str(request.current_level),
+                    "current_slippage": str(request.current_slippage),
+                    "estimated_loss_usd": str(request.estimated_loss_usd),
+                    "position_value_usd": str(request.position_value_usd),
+                    "reason": request.reason,
+                    "options": request.options,
+                    "requested_at": request.requested_at.isoformat()
+                    if getattr(request, "requested_at", None)
+                    else datetime.now(UTC).isoformat(),
+                    "expires_at": expires_at.isoformat(),
+                }
+            ),
+            expires_at=expires_at.isoformat(),
+        )
+
+        # Alert operator. Failure to alert is serious — without the alert, the
+        # operator may never know approval is waiting. Log as error with stack.
+        if runner.alert_manager:
+            try:
+                await runner.alert_manager.send_approval_needed(request)
+            except Exception:
+                logger.error(
+                    "Failed to send approval alert for teardown %s — operator may be unaware",
+                    request.teardown_id,
+                    exc_info=True,
+                )
+
+        logger.info(
+            "Approval required for teardown %s (level %s): %s. Polling every %.1fs up to %s...",
+            request.teardown_id,
+            request.current_level,
+            request.reason,
+            _APPROVAL_POLL_INTERVAL_S,
+            expires_at.isoformat(),
+        )
+
+        # Poll the SQLite channel until response or monotonic timeout.
+        while time.monotonic() < monotonic_deadline:
+            response_json = await asyncio.to_thread(
+                state_adapter.get_approval_response,
+                request.teardown_id,
+                request.current_level,
+            )
+            if response_json:
+                return _parse_approval_response(response_json, request.teardown_id)
+            await asyncio.sleep(_APPROVAL_POLL_INTERVAL_S)
+
+        # Timeout — try to mark the row resolved so a late API response
+        # doesn't land on this stale level. The UPDATE uses
+        # `WHERE response_json IS NULL`, so if an operator responded in the
+        # final sleep gap their response wins and our timeout write returns
+        # False. In that case, read the row back and honour the real response
+        # instead of auto-escalating.
+        timeout_payload = json.dumps(
+            {
+                "approved": False,
+                "action": _SAFE_DEFAULT_APPROVAL_ACTION,
+                "timeout": True,
+            }
+        )
+        wrote_timeout: bool | None = None
+        try:
+            wrote_timeout = await asyncio.to_thread(
+                state_adapter.write_approval_response,
+                request.teardown_id,
+                request.current_level,
+                timeout_payload,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to mark approval row resolved on timeout for teardown %s (level %s); "
+                "a late operator response may land on this stale row",
+                request.teardown_id,
+                request.current_level,
+                exc_info=True,
+            )
+
+        if wrote_timeout is False:
+            # Someone else wrote first — likely a just-in-time operator response.
+            # Read it back and honour it.
+            try:
+                late_response = await asyncio.to_thread(
+                    state_adapter.get_approval_response,
+                    request.teardown_id,
+                    request.current_level,
+                )
+            except Exception:
+                late_response = None
+                logger.warning(
+                    "Failed to re-read approval row after timeout-write race for teardown %s",
+                    request.teardown_id,
+                    exc_info=True,
+                )
+            if late_response:
+                logger.info(
+                    "Late operator response beat timeout write for teardown %s (level %s); honouring it",
+                    request.teardown_id,
+                    request.current_level,
+                )
+                return _parse_approval_response(late_response, request.teardown_id)
+
+        from ..teardown.models import ApprovalResponse
+
+        logger.warning(
+            "Approval timeout for teardown %s (level %s). Auto-escalating to next slippage level.",
+            request.teardown_id,
+            request.current_level,
+        )
+        return ApprovalResponse(
+            approved=False,
+            teardown_id=request.teardown_id,
+            action=_SAFE_DEFAULT_APPROVAL_ACTION,
+        )
+
+    return on_approval_needed
+
+
+def _safe_mark(state_manager: Any, method_name: str, strategy_id: str, **kwargs: Any) -> None:
+    """Call a ``mark_*`` state-manager method, swallowing any persistence error.
+
+    ``mark_completed`` / ``mark_failed`` / ``mark_cancelled`` touch SQLite and
+    can fail transiently (lock contention, disk full). A failure here must NOT
+    crash the runner — the teardown has already run to its terminal state in
+    memory. Log and continue.
+    """
+    if state_manager is None:
+        return
+    method = getattr(state_manager, method_name, None)
+    if method is None:
+        return
+    try:
+        method(strategy_id, **kwargs)
+    except Exception:
+        logger.warning(
+            "Failed to call %s for strategy %s (non-fatal)",
+            method_name,
+            strategy_id,
+            exc_info=True,
+        )
 
 
 # -------------------------------------------------------------------------
@@ -90,18 +405,19 @@ async def execute_teardown(
     except Exception as e:
         logger.error(f"Failed to generate teardown intents for {strategy_id}: {e}")
         if request:
-            try:
-                manager.mark_failed(strategy_id, error=str(e))
-            except Exception:
-                logger.warning("Failed to update teardown state for %s", strategy_id, exc_info=True)
+            _safe_mark(manager, "mark_failed", strategy_id, error=str(e))
         runner._request_teardown_failure_shutdown(str(e))
         return runner._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
 
     if not teardown_intents:
         logger.info(f"🛑 {strategy_id} teardown complete (no positions to close)")
         if request:
-            manager.mark_completed(strategy_id, result={"reason": "no_positions"})
+            _safe_mark(manager, "mark_completed", strategy_id, result={"reason": "no_positions"})
         runner.request_shutdown()
+        # Match the adjacent all-balances-zero + TeardownManager-success paths —
+        # the lifecycle supervisor must see TERMINATED so it doesn't treat a
+        # teardown-with-no-positions as still running.
+        runner._lifecycle_write_state(strategy_id, "TERMINATED")
         runner._record_success()
         return IterationResult(
             status=IterationStatus.TEARDOWN,
@@ -112,7 +428,7 @@ async def execute_teardown(
 
     logger.info(f"🛑 {strategy_id} entering TEARDOWN mode ({len(teardown_intents)} intents to execute)")
     if request:
-        manager.mark_started(strategy_id, total_positions=len(teardown_intents))
+        _safe_mark(manager, "mark_started", strategy_id, total_positions=len(teardown_intents))
 
     # Step T2.5: Pre-fetch prices for tokens in teardown intents
     if teardown_market is not None and hasattr(teardown_market, "price"):
@@ -129,7 +445,7 @@ async def execute_teardown(
     if not teardown_intents:
         logger.info(f"🛑 {strategy_id} teardown complete (all positions already closed)")
         if request:
-            manager.mark_completed(strategy_id, result={"reason": "all_balances_zero"})
+            _safe_mark(manager, "mark_completed", strategy_id, result={"reason": "all_balances_zero"})
         runner.request_shutdown()
         runner._lifecycle_write_state(strategy_id, "TERMINATED")
         runner._record_success()
@@ -154,13 +470,10 @@ async def execute_teardown(
             logger.info(f"🛑 {strategy_id} teardown complete - shutting down strategy runner")
             runner.request_shutdown()
             if request:
-                manager.mark_completed(strategy_id, result={"intents": len(teardown_intents)})
+                _safe_mark(manager, "mark_completed", strategy_id, result={"intents": len(teardown_intents)})
         else:
             if request:
-                try:
-                    manager.mark_failed(strategy_id, error=result.error or "execution failed")
-                except Exception:
-                    logger.warning("Failed to update teardown state for %s", strategy_id, exc_info=True)
+                _safe_mark(manager, "mark_failed", strategy_id, error=result.error or "execution failed")
             runner._request_teardown_failure_shutdown(result.error or "multi-chain teardown execution failed")
         return result
     else:
@@ -224,20 +537,51 @@ async def execute_teardown_via_manager(
     strategy_id = strategy.strategy_id
     mode_str = "graceful" if teardown_mode == TeardownMode.SOFT else "emergency"
 
+    # Derive auto mode from teardown request source (VIB-2923). See
+    # ``derive_teardown_auto_mode`` at module level for the predicate —
+    # exposed there so tests exercise the real logic.
+    is_auto_mode = derive_teardown_auto_mode(request)
+
     # Build compiler for TeardownManager
     # Call through runner method so instance-level mock patching in tests works.
     compiler = runner._build_teardown_compiler(strategy, teardown_market)
     if compiler is None:
-        logger.warning(f"Cannot build compiler for TeardownManager — falling back to inline teardown for {strategy_id}")
+        if not runner.config.allow_unsafe_teardown_fallback:
+            error_msg = (
+                f"Cannot build TeardownManager compiler for {strategy_id}. "
+                f"Inline fallback is disabled (allow_unsafe_teardown_fallback=False). "
+                f"Fix compiler dependencies or enable fallback for local testing."
+            )
+            logger.error(error_msg)
+            if request:
+                _safe_mark(state_manager, "mark_failed", strategy_id, error=error_msg)
+            runner._request_teardown_failure_shutdown(error_msg)
+            return runner._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, error_msg, start_time)
+        logger.warning(
+            f"Cannot build compiler for TeardownManager — falling back to inline teardown "
+            f"for {strategy_id} (unsafe fallback enabled)"
+        )
         return await runner._execute_teardown_inline(
             strategy, teardown_intents, teardown_market, start_time, request, state_manager
         )
 
-    # Create TeardownManager with safety features
+    # Create TeardownManager with safety features, including state persistence (VIB-2924).
+    # Prefer an explicit DB path from the StateManager when it's a real filesystem
+    # path; otherwise fall through to the adapter's default resolution (which
+    # honours ``ALMANAK_STATE_DB``). This keeps tests with mock StateManagers
+    # working while production still converges on the shared DB file.
+    from pathlib import Path as _Path
+
+    from ..teardown.state_manager import TeardownStateAdapter
+
+    _raw_db_path = getattr(state_manager, "db_path", None)
+    _adapter_db_path = _raw_db_path if isinstance(_raw_db_path, str | _Path) else None
+    teardown_state_adapter = TeardownStateAdapter(db_path=_adapter_db_path)
     teardown_mgr = TeardownManager(
         orchestrator=runner.execution_orchestrator,
         compiler=compiler,
         alert_manager=runner.alert_manager,
+        state_manager=teardown_state_adapter,
     )
 
     # Execute with TeardownManager safety: loss caps, escalating slippage,
@@ -254,9 +598,19 @@ async def execute_teardown_via_manager(
         try:
             positions = strategy.get_open_positions()
         except Exception as pos_err:
+            if not runner.config.allow_unsafe_teardown_fallback:
+                error_msg = (
+                    f"Cannot fetch positions for safety validation for {strategy_id}: {pos_err}. "
+                    f"Inline fallback is disabled (allow_unsafe_teardown_fallback=False)."
+                )
+                logger.error(error_msg)
+                if request:
+                    _safe_mark(state_manager, "mark_failed", strategy_id, error=error_msg)
+                runner._request_teardown_failure_shutdown(error_msg)
+                return runner._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, error_msg, start_time)
             logger.warning(
                 f"Cannot fetch positions for safety validation — "
-                f"falling back to inline teardown for {strategy_id}: {pos_err}"
+                f"falling back to inline teardown for {strategy_id} (unsafe fallback enabled): {pos_err}"
             )
             return await runner._execute_teardown_inline(
                 strategy, teardown_intents, teardown_market, start_time, request, state_manager
@@ -267,12 +621,12 @@ async def execute_teardown_via_manager(
         if not validation.all_passed:
             logger.error(f"🛑 Teardown safety validation failed: {validation.blocked_reason}")
             if request:
-                try:
-                    state_manager.mark_failed(
-                        strategy_id, error=f"Safety validation failed: {validation.blocked_reason}"
-                    )
-                except Exception:
-                    logger.warning("Failed to update teardown state for %s", strategy_id, exc_info=True)
+                _safe_mark(
+                    state_manager,
+                    "mark_failed",
+                    strategy_id,
+                    error=f"Safety validation failed: {validation.blocked_reason}",
+                )
             runner._request_teardown_failure_shutdown(f"Teardown safety validation failed: {validation.blocked_reason}")
             return runner._create_error_result(
                 strategy_id,
@@ -293,7 +647,7 @@ async def execute_teardown_via_manager(
         # Run cancel window — gives operator time to abort
         cancel_result = await teardown_mgr.cancel_window.run_cancel_window(
             teardown_id=teardown_id,
-            is_auto_mode=True,
+            is_auto_mode=is_auto_mode,
         )
         if cancel_result.was_cancelled:
             logger.info(f"🛑 Teardown {teardown_id} cancelled during window")
@@ -322,6 +676,12 @@ async def execute_teardown_via_manager(
         if not price_oracle:
             price_oracle = get_fallback_teardown_prices(teardown_market)
 
+        # Build approval callback for slippage escalation (VIB-2927).
+        # Only wire for manual mode — auto mode uses hard slippage limits.
+        approval_callback = None
+        if not is_auto_mode:
+            approval_callback = _make_approval_callback(runner, teardown_state_adapter)
+
         # Execute intents with escalating slippage
         teardown_result = await teardown_mgr._execute_intents(
             teardown_id=teardown_state.teardown_id,
@@ -330,38 +690,56 @@ async def execute_teardown_via_manager(
             positions=positions,
             mode=teardown_mode,
             teardown_state=teardown_state,
-            is_auto_mode=True,
+            on_approval_needed=approval_callback,
+            is_auto_mode=is_auto_mode,
             price_oracle=price_oracle,
             market=teardown_market,
         )
 
         # Post-execution verification: check positions are actually closed.
-        # Fail closed: if verification raises, treat teardown as failed to
-        # avoid reporting success while positions may still be open.
-        try:
-            positions_closed = await teardown_mgr._verify_closure(strategy)  # type: ignore[arg-type]
-            if not positions_closed:
-                # Log warning but don't fail — some strategies have advisory
-                # get_open_positions() that doesn't reflect on-chain state.
-                # Matches TeardownManager.execute() which also doesn't fail on this.
-                logger.warning(
-                    f"Post-teardown verification: {strategy_id} still reports open positions "
-                    f"(may be advisory — check strategy's get_open_positions())"
+        # Fail-closed (VIB-2925): if execution succeeded but positions remain,
+        # mark as failed. Skip verification when execution already failed — the
+        # original error is more actionable than "positions still open".
+        # Catch verification exceptions locally so we don't discard the
+        # successful on-chain execution stats in the teardown_result.
+        if teardown_result.success:
+            verify_error_msg: str | None = None
+            try:
+                positions_closed = await teardown_mgr._verify_closure(strategy)  # type: ignore[arg-type]
+            except Exception as verify_err:
+                logger.exception(
+                    "Post-teardown verification raised for %s — treating as verify-fail",
+                    strategy_id,
                 )
-        except Exception as verify_err:
-            logger.error(f"Post-teardown verification failed: {verify_err}")
-            if request:
+                positions_closed = False
+                verify_error_msg = f"Post-teardown verification error: {verify_err}. Manual check required."
+
+            if not positions_closed:
+                if verify_error_msg is None:
+                    verify_error_msg = "Post-teardown verification failed: positions still open. Manual check required."
+                logger.warning(f"Post-teardown verification: {strategy_id} incomplete. Marking as failed.")
+                teardown_result = replace(
+                    teardown_result,
+                    success=False,
+                    error=verify_error_msg,
+                    recovery_options=["Verify positions on-chain", "Re-run teardown"],
+                )
+                # Persist the failure so the SQLite row reflects reality —
+                # `_execute_intents` already set status=COMPLETED; flip it
+                # to FAILED so a postmortem reader doesn't see a row
+                # claiming success while the teardown actually failed.
+                teardown_state.status = TeardownStatus.FAILED
+                teardown_state.updated_at = datetime.now(UTC)
                 try:
-                    state_manager.mark_failed(strategy_id, error=f"Post-teardown verification failed: {verify_err}")
+                    await teardown_state_adapter.save_teardown_state(teardown_state)
                 except Exception:
-                    logger.warning("Failed to update teardown state for %s", strategy_id, exc_info=True)
-            runner._request_teardown_failure_shutdown(f"Post-teardown verification failed: {verify_err}")
-            return runner._create_error_result(
-                strategy_id,
-                IterationStatus.STRATEGY_ERROR,
-                f"Post-teardown verification failed: {verify_err}",
-                start_time,
-            )
+                    logger.warning(
+                        "Failed to persist FAILED status for teardown %s after verify-fail",
+                        teardown_state.teardown_id,
+                        exc_info=True,
+                    )
+                if request:
+                    _safe_mark(state_manager, "mark_failed", strategy_id, error=verify_error_msg)
 
         # Send completion alert
         if teardown_mgr.alert_manager and teardown_result.success:
@@ -380,10 +758,25 @@ async def execute_teardown_via_manager(
     except Exception as e:
         logger.error(f"🛑 TeardownManager execution failed for {strategy_id}: {e}")
         if request:
-            try:
-                state_manager.mark_failed(strategy_id, error=str(e))
-            except Exception:
-                logger.warning("Failed to update teardown state for %s", strategy_id, exc_info=True)
+            _safe_mark(state_manager, "mark_failed", strategy_id, error=str(e))
+        # Also reflect the failure in the TeardownStateAdapter row so that
+        # postmortem readers don't see an EXECUTING teardown_execution_state
+        # row paired with a FAILED teardown_requests row. Best-effort: the
+        # exception may have fired before the state row or adapter was even
+        # initialised, in which case we silently skip.
+        try:
+            if "teardown_state" in locals() and "teardown_state_adapter" in locals():
+                from ..teardown.models import TeardownStatus as _TS
+
+                teardown_state.status = _TS.FAILED
+                teardown_state.updated_at = datetime.now(UTC)
+                await teardown_state_adapter.save_teardown_state(teardown_state)
+        except Exception:
+            logger.warning(
+                "Failed to persist FAILED teardown_execution_state for %s after exception",
+                strategy_id,
+                exc_info=True,
+            )
         runner._request_teardown_failure_shutdown(str(e))
         return runner._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
 
@@ -397,7 +790,9 @@ async def execute_teardown_via_manager(
         runner.request_shutdown()
         runner._lifecycle_write_state(strategy_id, "TERMINATED")
         if request:
-            state_manager.mark_completed(
+            _safe_mark(
+                state_manager,
+                "mark_completed",
                 strategy_id,
                 result={
                     "intents": teardown_result.intents_succeeded,
@@ -415,10 +810,7 @@ async def execute_teardown_via_manager(
     else:
         logger.warning(f"🛑 {strategy_id} teardown incomplete via TeardownManager: {teardown_result.error}")
         if request:
-            try:
-                state_manager.mark_failed(strategy_id, error=teardown_result.error or "teardown failed")
-            except Exception:
-                logger.warning("Failed to update teardown state for %s", strategy_id, exc_info=True)
+            _safe_mark(state_manager, "mark_failed", strategy_id, error=teardown_result.error or "teardown failed")
         runner._request_teardown_failure_shutdown(teardown_result.error or "teardown failed")
         return IterationResult(
             status=IterationStatus.STRATEGY_ERROR,
@@ -531,14 +923,11 @@ async def execute_teardown_inline(
             runner._lifecycle_write_state(strategy_id, "TERMINATED")
             runner._record_success()
             if request:
-                state_manager.mark_completed(strategy_id, result={"intents": len(teardown_intents)})
+                _safe_mark(state_manager, "mark_completed", strategy_id, result={"intents": len(teardown_intents)})
         else:
             logger.warning(f"🛑 {strategy_id} teardown incomplete - manual intervention may be required")
             if request:
-                try:
-                    state_manager.mark_failed(strategy_id, error=last_result.error or "execution failed")
-                except Exception:
-                    logger.warning("Failed to update teardown state for %s", strategy_id, exc_info=True)
+                _safe_mark(state_manager, "mark_failed", strategy_id, error=last_result.error or "execution failed")
             runner._request_teardown_failure_shutdown(last_result.error or "inline teardown execution failed")
         return last_result
 
@@ -548,7 +937,7 @@ async def execute_teardown_inline(
     runner._lifecycle_write_state(strategy_id, "TERMINATED")
     runner._record_success()
     if request:
-        state_manager.mark_completed(strategy_id, result={"reason": "all_positions_already_closed"})
+        _safe_mark(state_manager, "mark_completed", strategy_id, result={"reason": "all_positions_already_closed"})
     return IterationResult(
         status=IterationStatus.TEARDOWN,
         intent=None,

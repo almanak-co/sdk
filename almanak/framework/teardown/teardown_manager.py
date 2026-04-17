@@ -395,12 +395,56 @@ class TeardownManager:
                 market=market,
             )
 
-            # Step 7: Verify positions closed. Pass precomputed_positions
-            # (when present) so the --discover flow checks closure against the
-            # on-chain-discovered IDs rather than re-reading
-            # strategy.get_open_positions(), which is empty-in / empty-out
-            # for the recovery scenario.
-            await self._verify_closure(strategy, expected_positions=precomputed_positions)
+            # Step 7: Verify positions closed (fail-closed, VIB-2925).
+            # Only run verification on successful executions — if execution
+            # already failed (manual intervention required, partial failure,
+            # etc.) the original error is more actionable than
+            # "positions still open". Catch verification exceptions locally:
+            # the outer except would return a zero-stats _failed_result and
+            # discard the successful on-chain execution data.
+            #
+            # Pass precomputed_positions when present so the --discover flow
+            # checks closure against on-chain-discovered IDs rather than
+            # re-reading strategy.get_open_positions() (empty-in/empty-out
+            # in the recovery scenario). See PR #1522.
+            if result.success:
+                try:
+                    positions_closed = await self._verify_closure(strategy, expected_positions=precomputed_positions)
+                except Exception as verify_err:
+                    logger.exception(
+                        "Post-teardown verification raised for %s — treating as verify-fail",
+                        strategy.strategy_id,
+                    )
+                    positions_closed = False
+                    verify_error_msg = f"Post-teardown verification error: {verify_err}. Manual check required."
+                else:
+                    verify_error_msg = "Post-teardown verification failed: positions still open. Manual check required."
+
+                if not positions_closed:
+                    logger.warning(
+                        f"Post-teardown verification: {strategy.strategy_id} still reports "
+                        f"open positions (or verification errored). Marking teardown as incomplete."
+                    )
+                    result = replace(
+                        result,
+                        success=False,
+                        error=verify_error_msg,
+                        recovery_options=["Verify positions on-chain", "Re-run teardown"],
+                    )
+                    # Reflect the verification failure in persisted state — otherwise
+                    # a postmortem reader sees status=COMPLETED even though the
+                    # result says the teardown failed.
+                    teardown_state.status = TeardownStatus.FAILED
+                    teardown_state.updated_at = datetime.now(UTC)
+                    if self.state_manager:
+                        try:
+                            await self.state_manager.save_teardown_state(teardown_state)
+                        except Exception:
+                            logger.warning(
+                                "Failed to persist FAILED status for teardown %s after verify-fail",
+                                teardown_id,
+                                exc_info=True,
+                            )
 
             # Step 8: Send completion alert
             if self.alert_manager:
@@ -895,7 +939,11 @@ class TeardownManager:
                         total_costs_usd=total_costs,
                         final_balances=final_balances,
                         error="Paused awaiting approval",
-                        recovery_options=["Approve higher slippage", "Wait and retry", "Cancel"],
+                        recovery_options=[
+                            "Approve higher slippage",
+                            "Wait & Escalate to next level",
+                            "Cancel",
+                        ],
                     )
 
             # Update completed count and persist teardown progress so that
