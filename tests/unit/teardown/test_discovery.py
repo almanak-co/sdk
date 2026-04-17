@@ -215,7 +215,7 @@ class TestDiscoverLpPositions:
         assert p.tick_lower == 343_800
         assert p.tick_upper == 349_800
         assert p.liquidity == 700_417_431_525
-        assert p.npm_address.lower() == "0x5143ba6007c197b4cf66c20601b9db97e0f98c6a"
+        assert p.npm_address.lower() == "0x8f67a30ed186e3e1f6504c6de3239ef43a2e0d72"
 
     def test_filters_zero_liquidity_by_default(self):
         """Withdrawn-but-not-burned NFTs (liquidity=0) are filtered out."""
@@ -519,7 +519,7 @@ class TestToTeardownSummary:
     def test_wraps_discovered_positions(self):
         p = DiscoveredPosition(
             token_id=2359,
-            npm_address="0x5143ba6007C197b4cF66c20601b9dB97E0F98c6A",
+            npm_address="0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72",
             chain="zerog",
             protocol="uniswap_v3",
             token0="0xtoken0",

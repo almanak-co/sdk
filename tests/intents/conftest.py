@@ -274,6 +274,18 @@ CHAIN_CONFIGS = {
             "USDT0": 51,  # OpenZeppelin upgradeable pattern
         },
     },
+    "zerog": {
+        "rpc_url": "https://0g-rpc.publicnode.com",
+        "chain_id": 16661,
+        "alchemy_key": None,  # 0G uses public RPC only
+        "tokens": {
+            "W0G": "0x1Cd0690fF9a693f5EF2dD976660a8dAFc81A109c",
+            "USDC.e": "0x1f3AA82227281cA364bFb3d253B0f1af1Da6473E",
+        },
+        # Storage slots not yet mapped for 0G tokens — native-only funding.
+        # Tests that need ERC20 acquire it by swapping from native via Jaine.
+        "balance_slots": {},
+    },
 }
 # Import Anvil fixtures and constants from shared gateway conftest.
 # Note: We do NOT import CHAIN_CONFIGS from conftest_gateway to avoid conflict with local definition
@@ -291,6 +303,7 @@ from tests.conftest_gateway import (
     anvil_optimism,
     anvil_polygon,
     anvil_xlayer,
+    anvil_zerog,
     get_anvil_rpc_url,
 )
 
@@ -306,6 +319,7 @@ __all__ = [
     "anvil_optimism",
     "anvil_polygon",
     "anvil_xlayer",
+    "anvil_zerog",
     # Price oracle fixtures (session-scoped per chain)
     "price_oracle_arbitrum",
     "price_oracle_avalanche",
@@ -947,6 +961,7 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "blast: Tests that run on Blast chain")
     config.addinivalue_line("markers", "mantle: Tests that run on Mantle chain")
     config.addinivalue_line("markers", "xlayer: Tests that run on X-Layer chain")
+    config.addinivalue_line("markers", "zerog: Tests that run on 0G Chain (Jaine DEX)")
     config.addinivalue_line("markers", "swap: Tests for SwapIntent")
     config.addinivalue_line("markers", "lp: Tests for LP intents (Open/Close)")
     config.addinivalue_line("markers", "lending: Tests for lending intents")

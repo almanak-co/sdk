@@ -169,7 +169,7 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "uniswap_v3": "0xfE31F71C1b106EAc32F1A19239c9a9A72ddfb900",  # SwapRouter02 — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
     },
     "zerog": {
-        "uniswap_v3": "0x18cCa38E51c4C339A6BD6e174025f08360FEEf30",  # JAINE DEX SwapRouter (Uniswap V3 fork)
+        "uniswap_v3": "0x8B598A7C136215A95ba0282b4d832B9f9801f2e2",  # JAINE DEX SwapRouter02 (Uniswap V3 fork)
     },
 }
 
@@ -239,7 +239,7 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
         "uniswap_v3": "0x7197E214c0b767cFB76Fb734ab638E2c192F4E53",  # NonfungiblePositionManager — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
     },
     "zerog": {
-        "uniswap_v3": "0x5143ba6007C197b4cF66c20601b9dB97E0F98c6A",  # JAINE DEX NonfungiblePositionManager (Uniswap V3 fork)
+        "uniswap_v3": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72",  # JAINE DEX NonfungiblePositionManager (Uniswap V3 fork)
     },
 }
 
@@ -346,6 +346,7 @@ SWAP_ROUTER_V1_PROTOCOLS: frozenset[str] = frozenset({"sushiswap_v3"})
 # Maps chain -> set of protocols that use the V1 router interface on that chain.
 SWAP_ROUTER_V1_CHAIN_OVERRIDES: dict[str, frozenset[str]] = {
     "mantle": frozenset({"agni_finance"}),  # Agni Finance uses original SwapRouter (with deadline)
+    "zerog": frozenset({"uniswap_v3"}),  # Jaine DEX SwapRouter accepts only the V1 8-arg form
 }
 
 # Quoter addresses used for AUTO fee tier selection.
@@ -400,7 +401,7 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
         "uniswap_v3": "0x661E93cca42AfacB172121EF892830cA3b70F08d",  # QuoterV2 — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
     },
     "zerog": {
-        "uniswap_v3": "0x23b55293b7F06F6c332a0dDA3D88d8921218425B",  # JAINE DEX QuoterV2 (Uniswap V3 fork)
+        "uniswap_v3": "0xd00883722cECAD3A1c60bCA611f09e1851a0bE02",  # JAINE DEX QuoterV2 (Uniswap V3 fork)
     },
 }
 

@@ -100,13 +100,15 @@ UNISWAP_V3: dict[str, dict[str, str]] = {
         "quoter_v2": "0x976183AC3d09840D243A88c0268BADb3B3e3259f",
     },
     "zerog": {
-        # JAINE DEX — Uniswap V3 fork on 0G Chain (verified on explorer)
-        # Source: https://github.com/RabbyHub/Rabby/issues/3225
-        "swap_router": "0x18cCa38E51c4C339A6BD6e174025f08360FEEf30",
-        "swap_router_02": "0x18cCa38E51c4C339A6BD6e174025f08360FEEf30",
-        "factory": "0x6F3945Ab27296D1D66D8EEB042ff1B4fb2E0CE70",
-        "position_manager": "0x5143ba6007C197b4cF66c20601b9dB97E0F98c6A",
-        "quoter_v2": "0x23b55293b7F06F6c332a0dDA3D88d8921218425B",
+        # JAINE DEX (Uniswap V3 fork) on 0G Chain.
+        # Verified on-chain 2026-04-17: NPM.name() = "Jaine V3 Positions NFT",
+        # and Router/NPM/Quoter all return factory() = 0x9bdcA5...7ef4 and WETH9() = W0G.
+        # Source: Jaine UI JS bundle (jaine.app) + on-chain verification via 0G RPC.
+        "swap_router": "0x8B598A7C136215A95ba0282b4d832B9f9801f2e2",
+        "swap_router_02": "0x8B598A7C136215A95ba0282b4d832B9f9801f2e2",
+        "factory": "0x9bdcA5798E52e592A08e3b34d3F18EeF76Af7ef4",
+        "position_manager": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72",
+        "quoter_v2": "0xd00883722cECAD3A1c60bCA611f09e1851a0bE02",
     },
 }
 

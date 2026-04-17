@@ -505,6 +505,7 @@ anvil_optimism = _create_anvil_fixture("optimism")
 anvil_polygon = _create_anvil_fixture("polygon")
 anvil_mantle = _create_anvil_fixture("mantle")
 anvil_xlayer = _create_anvil_fixture("xlayer")
+anvil_zerog = _create_anvil_fixture("zerog")
 
 
 # =============================================================================
@@ -658,6 +659,7 @@ CHAIN_ANVIL_PORTS = {
     "optimism": 8550,
     "polygon": 8551,
     "mantle": 8556,
+    "zerog": 8558,  # Matches anvil_port in almanak/gateway/utils/rpc_provider.py
 }
 # Alias for internal use
 _DEFAULT_ANVIL_PORTS = CHAIN_ANVIL_PORTS

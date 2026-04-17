@@ -455,7 +455,11 @@ class DefaultSwapAdapter:
         if not web3.is_connected():
             return None
 
-        quoter_abi = [
+        # Two Quoter ABIs exist in the wild. Most Uniswap V3 forks deploy the
+        # V2 struct-form Quoter, but some (e.g. Jaine on 0G Chain) ship the
+        # older V1 five-arg signature. We try V2 first and transparently fall
+        # back to V1 per-call if the contract reverts, so either variant works.
+        quoter_abi_v2 = [
             {
                 "inputs": [
                     {
@@ -482,15 +486,32 @@ class DefaultSwapAdapter:
                 "type": "function",
             }
         ]
+        quoter_abi_v1 = [
+            {
+                "inputs": [
+                    {"internalType": "address", "name": "tokenIn", "type": "address"},
+                    {"internalType": "address", "name": "tokenOut", "type": "address"},
+                    {"internalType": "uint24", "name": "fee", "type": "uint24"},
+                    {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+                    {"internalType": "uint160", "name": "sqrtPriceLimitX96", "type": "uint160"},
+                ],
+                "name": "quoteExactInputSingle",
+                "outputs": [{"internalType": "uint256", "name": "amountOut", "type": "uint256"}],
+                "stateMutability": "nonpayable",
+                "type": "function",
+            }
+        ]
 
-        contract = web3.eth.contract(address=web3.to_checksum_address(quoter_address), abi=quoter_abi)
+        quoter_checksum = web3.to_checksum_address(quoter_address)
+        contract_v2 = web3.eth.contract(address=quoter_checksum, abi=quoter_abi_v2)
+        contract_v1 = web3.eth.contract(address=quoter_checksum, abi=quoter_abi_v1)
         from_addr = web3.to_checksum_address(from_token)
         to_addr = web3.to_checksum_address(to_token)
 
         def _quote_fee_tier(fee_tier: int) -> dict[str, int] | None:
             """Quote a single fee tier. Returns result dict or None on failure."""
             try:
-                amount_out, _, _, gas_estimate = contract.functions.quoteExactInputSingle(
+                amount_out, _, _, gas_estimate = contract_v2.functions.quoteExactInputSingle(
                     (from_addr, to_addr, amount_in, fee_tier, 0)
                 ).call()
                 if amount_out > 0:
@@ -499,8 +520,32 @@ class DefaultSwapAdapter:
                         "amount_out": int(amount_out),
                         "gas_estimate": int(gas_estimate),
                     }
-            except Exception as exc:
-                logger.debug("Fee-tier quote failed for fee_tier=%s: %s", fee_tier, exc)
+            except Exception as exc_v2:
+                # Fall through to V1: some UniV3 forks (Jaine/0G) only ship the
+                # legacy 5-arg Quoter. V1 doesn't return gas_estimate; use a
+                # conservative placeholder so downstream tier selection falls
+                # back to `amount_out` as the sole ranking signal rather than
+                # treating V1 quotes as "free" relative to V2 ones.
+                try:
+                    amount_out = contract_v1.functions.quoteExactInputSingle(
+                        from_addr, to_addr, fee_tier, amount_in, 0
+                    ).call()
+                    if amount_out > 0:
+                        return {
+                            "fee_tier": fee_tier,
+                            "amount_out": int(amount_out),
+                            # Typical single-pool V3 swap ≈ 120–180k gas; pick a
+                            # mid-range sentinel that's distinguishable from a
+                            # real V2 zero-gas reading without skewing ranking.
+                            "gas_estimate": 150_000,
+                        }
+                except Exception as exc_v1:
+                    logger.debug(
+                        "Fee-tier quote failed for fee_tier=%s (v2: %s | v1: %s)",
+                        fee_tier,
+                        exc_v2,
+                        exc_v1,
+                    )
             return None
 
         # Query all fee tiers in parallel to avoid sequential RPC latency
