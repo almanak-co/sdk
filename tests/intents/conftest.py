@@ -171,11 +171,17 @@ CHAIN_CONFIGS = {
             "USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
             "WETH": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
             "USDT": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+            "WBTC": "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",
         },
         "balance_slots": {
             "USDC": 9,
             "WETH": 0,  # UChildERC20Proxy (PoS bridge): _balances is slot 0 in ERC20 base
             "USDT": 0,  # UChildERC20Proxy (PoS bridge): _balances is slot 0 in ERC20 base
+            # Polygon WBTC (PoS-bridged) uses slot 0 for `_balances`. Verified
+            # 2026-04-17 by computing keccak256(abi.encode(holder, slot=0)) for
+            # Morpho Blue (a known holder with ~143 WBTC) and confirming storage
+            # value matched balanceOf(). Holder-independent.
+            "WBTC": 0,
         },
     },
     "bsc": {

@@ -87,6 +87,9 @@ WRAPPED_NATIVE: dict[str, str] = {chain: cfg["wrapped_native_address"] for chain
 # -----------------------------------------------------------------------------
 
 _aliases_blob = _load_json("symbol_aliases.json")
+# The upstream VIB-2950 token-resolution overhaul moved SYMBOL_ALIASES out of this
+# Python file and into ``data/symbol_aliases.json``. Polygon's WPOL/POL aliases
+# (added in VIB-2971) are maintained there alongside the rest.
 SYMBOL_ALIASES: dict[tuple[str, str], str] = {
     (chain, alias): address
     for chain, chain_aliases in _aliases_blob["aliases"].items()

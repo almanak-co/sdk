@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 # Supported chains
-SUPPORTED_CHAINS = {"ethereum", "base", "arbitrum", "monad"}
+SUPPORTED_CHAINS = {"ethereum", "base", "arbitrum", "polygon", "monad"}
 
 # Morpho Blue function selectors for view functions
 # position(bytes32 id, address user) -> (uint256 supplyShares, uint128 borrowShares, uint128 collateral)
@@ -65,6 +65,7 @@ MORPHO_DEPLOYMENT_BLOCKS: dict[str, int] = {
     "ethereum": 18883124,  # Dec 2023
     "base": 18883124,  # Approximate
     "arbitrum": 296000000,  # Morpho Blue Arbitrum (0x6c24...) deployed ~block 296.3M (verified on-chain 2026-04-17)
+    "polygon": 66931042,  # Morpho Blue Polygon (0x1bF0...) creation block (Morpho GraphQL, 2026-04-17)
     "monad": 31907457,  # Monad mainnet deployment
 }
 
@@ -333,7 +334,7 @@ class MorphoBlueSDK:
         """Initialize the SDK.
 
         Args:
-            chain: Chain name (ethereum, base, arbitrum, monad)
+            chain: Chain name (ethereum, base, arbitrum, polygon, monad)
             rpc_url: Optional RPC URL. If not provided, uses ALCHEMY_API_KEY.
 
         Raises:

@@ -13,6 +13,7 @@ Supported chains:
 - Ethereum
 - Base
 - Arbitrum
+- Polygon
 - Monad
 
 Example:
@@ -256,6 +257,48 @@ MORPHO_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
             "oracle": "0x88193FcB705d29724A40Bb818eCAA47dD5F014d9",
             "irm": "0x66F30587FB8D4206918deb78ecA7d5eBbafD06DA",
             "lltv": 860000000000000000,  # 86%
+        },
+    },
+    "polygon": {
+        # Polygon Morpho Blue markets use the chain-specific AdaptiveCurveIRM at
+        # 0xe675A2161D4a6E2de2eeD70ac98EEBf257FBF0B0. Market IDs sourced from
+        # blue-api.morpho.org (chainId=137, sorted by supply TVL) and verified
+        # on-chain 2026-04-17.
+        #
+        # WBTC/WPOL market (77% LLTV) — top-TVL Polygon Morpho market (~$3.2M supply).
+        "0x96e62bd75493006b81dae51d5db3c5af4b3ced65133dab60e70df9dc8e38bf2c": {
+            "name": "WBTC/WPOL",
+            "loan_token": "WPOL",
+            "loan_token_address": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+            "collateral_token": "WBTC",
+            "collateral_token_address": "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",
+            "oracle": "0x624d826C5233A7426C98d1BE789E70583A296b24",
+            "irm": "0xe675A2161D4a6E2de2eeD70ac98EEBf257FBF0B0",
+            "lltv": 770000000000000000,  # 77%
+        },
+        # WBTC/USDC market (86% LLTV) — ~$1.7M supply. Used by the intent test because
+        # USDC is the loan token (well-known storage slot 9) and WBTC has a clean
+        # storage slot 0 on Polygon.
+        "0x1cfe584af3db05c7f39d60e458a87a8b2f6b5d8c6125631984ec489f1d13553b": {
+            "name": "WBTC/USDC",
+            "loan_token": "USDC",
+            "loan_token_address": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+            "collateral_token": "WBTC",
+            "collateral_token_address": "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",
+            "oracle": "0x15B4e0eE3DC3D20D9d261da2D3E0d2a86A6A6291",
+            "irm": "0xe675A2161D4a6E2de2eeD70ac98EEBf257FBF0B0",
+            "lltv": 860000000000000000,  # 86%
+        },
+        # wstETH/WETH market (91.5% LLTV) — ~$1.1M supply. High-LLTV correlated pair.
+        "0xb8ae474af3b91c8143303723618b31683b52e9c86566aa54c06f0bc27906bcae": {
+            "name": "wstETH/WETH",
+            "loan_token": "WETH",
+            "loan_token_address": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+            "collateral_token": "wstETH",
+            "collateral_token_address": "0x03b54A6e9a984069379fae1a4fC4dBAE93B3bCCD",
+            "oracle": "0x1Dc2444b54945064c131145cD6b8701e3454C63a",
+            "irm": "0xe675A2161D4a6E2de2eeD70ac98EEBf257FBF0B0",
+            "lltv": 915000000000000000,  # 91.5%
         },
     },
     "base": {

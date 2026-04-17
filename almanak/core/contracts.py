@@ -827,6 +827,19 @@ MORPHO_BLUE: dict[str, dict[str, str]] = {
         # wiring it into execution (tracked as a follow-up in VIB-2967 epic).
         "bundler": "0x1FA4431bC113D308beE1d46B0e98Cb805FB48C13",
     },
+    "polygon": {
+        # Polygon uses a chain-specific deployment; the universal 0xBBBB...FFCb
+        # vanity address has 0 bytes of code here (verified 2026-04-17 via Morpho
+        # GraphQL blue-api.morpho.org and on-chain eth_getCode). Contract creation
+        # block is 66,931,042. Same Arbitrum-style pattern: the dispatch address
+        # reported by Morpho's own API is the one the factory actually deployed to.
+        "morpho": "0x1bF0c2541F820E775182832f06c0B7Fc27A25f67",
+        # Bundler3 (Morpho multicall router on Polygon). Sourced from Morpho's
+        # official blue-sdk addresses.ts and verified on-chain (1,547 bytes).
+        # Listed for future multicall integration — not used by any current
+        # supply/borrow/repay/withdraw path.
+        "bundler": "0x2d9C3A9E67c966C711208cc78b34fB9E9f8db589",
+    },
     "monad": {
         # Monad uses a distinct deployment (chain-specific deployer pattern, block 31,907,457).
         # Bundler3 variant — equivalent to the universal Bundler on other chains.
@@ -865,6 +878,18 @@ MORPHO_BLUE_TOKENS: dict[str, dict[str, str]] = {
         "WBTC": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
         "wstETH": "0x5979D7b546E38E414F7E9822514be443A4800529",
         "weETH": "0x35751007a407ca6FEFfE80b3cB397736D2cf4dbe",
+    },
+    "polygon": {
+        # Tokens used in live Polygon Morpho Blue markets. USDC here is the
+        # native Circle USDC (NOT the bridged USDC.e at 0x2791...) — markets
+        # created after Circle's native launch quote prices against this one.
+        "USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        "USDC.e": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        "WETH": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+        "WBTC": "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",
+        "WPOL": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+        "wstETH": "0x03b54A6e9a984069379fae1a4fC4dBAE93B3bCCD",
+        "USDT": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
     },
     "monad": {
         # Tokens used in live Monad Morpho Blue markets (sourced from
