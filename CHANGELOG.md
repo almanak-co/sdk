@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-04-17
+
+### Added
+- PancakeSwap Perps connector on BSC (ApolloX) with 4-layer intent tests and demo strategy (#1506)
+- PancakeSwap delta-neutral dynamic LP strategy (PCS V3 + PCS Perps hedge on BSC) (#1511)
+- Morpho Blue on Monad with chain-specific deployment and 2 top-TVL markets (#1526)
+- Morpho Blue on Polygon with 3 markets and WPOL/POL token aliases (#1529)
+- Token resolution UX overhaul: 2500-token pre-populated JSON registry, negative cache, `almanak ax resolve` CLI (#1525)
+- DexScreener fallback for EVM symbol resolution (#1530)
+- Gateway address-based pricing for unknown tokens (#1532)
+- 5 new demo strategies: Silo V2, Joe Lend, Euler V2, Lido staker, GMX V2 perp lifecycle (#1520)
+- Top-level `chain` field in scaffold and demo config.json (#1508)
+
+### Changed
+- Remove deprecated TokenRegistry; use `get_token_resolver()` (#1495)
+
+### Fixed
+- Teardown production readiness: unified approval channel, hardened persistence, fail-closed safety (#1521)
+- 0G Chain: Jaine DEX addresses, Gimo StakePool, W0G wrap mapping (#1528, #1502, #1522)
+- Morpho Blue Arbitrum address correction (#1527)
+- Runner lifecycle state reset after error recovery (#1519)
+- Gateway auth token standardization (#1517, #1518)
+- Silo V2 inverted collateral type enum (#1504)
+- Address-only strategy hardening (#1505)
+- PCS Perps Aster rebrand + over-hedge safety (#1514)
+- LP dashboard template key alignment (#1516)
+- MarketService reinitialization on chain info (#1512)
+- Strategy loader skips abstract base classes (#1499)
+- SQLite-only assertion on ensure_schema() (#1531)
+
 ## [2.12.0] - 2026-04-14
 
 ### Added
