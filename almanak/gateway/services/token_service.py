@@ -29,8 +29,16 @@ from almanak.framework.data.tokens import (
     TokenResolutionError,
     get_token_resolver,
 )
+from almanak.framework.data.tokens.exceptions import AmbiguousTokenError
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+from almanak.gateway.services.dexscreener_lookup import (
+    DexScreenerError,
+    chain_slug_for,
+)
+from almanak.gateway.services.dexscreener_lookup import (
+    find_token_address as dexscreener_find_token_address,
+)
 from almanak.gateway.services.onchain_lookup import OnChainLookup, TokenMetadata
 from almanak.gateway.utils import get_rpc_url
 from almanak.gateway.validation import ValidationError, validate_address, validate_batch_size, validate_chain
@@ -73,6 +81,13 @@ DEFAULT_ONCHAIN_TIMEOUT = 10.0
 
 # Rate limiting: max on-chain lookups per second
 DEFAULT_RATE_LIMIT = 10  # lookups per second
+
+# Marker prefix for ambiguous-symbol errors returned via gRPC NOT_FOUND.
+# The resolver looks for this prefix in the error details string to
+# distinguish ambiguity (which should raise AmbiguousTokenError client-side
+# with the candidate list) from a genuine "not found" (which is safe to
+# negative-cache for 5 minutes).
+AMBIGUOUS_SYMBOL_MARKER = "AMBIGUOUS_SYMBOL"
 
 
 # =============================================================================
@@ -238,6 +253,8 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         metadata: TokenMetadata,
         success: bool = True,
         error: str = "",
+        *,
+        source: str = "on_chain",
     ) -> gateway_pb2.TokenMetadataResponse:
         """Convert TokenMetadata to gRPC response.
 
@@ -245,6 +262,10 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             metadata: On-chain token metadata
             success: Whether lookup succeeded
             error: Error message if failed
+            source: Provenance of the metadata ("on_chain", "coingecko_dynamic",
+                "dexscreener_dynamic"). The resolver persists this on the
+                ResolvedToken so observability can distinguish dynamic lookups
+                from address-only on-chain queries.
 
         Returns:
             TokenMetadataResponse protobuf message
@@ -256,8 +277,8 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             address=metadata.address,
             decimals=metadata.decimals,
             name=metadata.name or "",
-            is_verified=False,  # On-chain lookups are not verified
-            source="on_chain",
+            is_verified=False,  # Dynamic lookups are not verified
+            source=source,
         )
 
     def _error_response(self, error: str) -> gateway_pb2.TokenMetadataResponse:
@@ -366,52 +387,167 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         )
 
     async def _try_evm_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
-        """Try to resolve an EVM token by symbol via CoinGecko + on-chain lookup.
+        """Try to resolve an EVM token by symbol via CoinGecko, then DexScreener.
 
-        Flow:
-        1. Search CoinGecko free-tier for the symbol
-        2. Find the contract address for the target chain
-        3. Do an on-chain ERC20 lookup for decimals/name confirmation
-        4. Cache the result
+        Resolution tiers:
+        1. CoinGecko free-tier search (established tokens with broad listings)
+        2. DexScreener symbol search with 4-gate scam-resistance policy
+           (new launches and chains CoinGecko does not index)
 
-        Returns a TokenMetadataResponse on success, None if not found.
+        For any positive result, an on-chain ERC20 lookup confirms decimals and
+        name before the address is returned and cached.
+
+        Returns:
+            TokenMetadataResponse on success, None if neither source produced
+            a confirmable address.
+
+        Raises:
+            AmbiguousTokenError: DexScreener found multiple liquid contracts
+                claiming ``symbol`` on ``chain`` with no dominant leader. The
+                caller should surface the message so strategy authors can
+                disambiguate with an explicit address.
         """
+        # Tier 1: CoinGecko (if the chain is listed)
         platform = COINGECKO_PLATFORM_IDS.get(chain.lower())
-        if not platform:
+        if platform:
+            try:
+                cg_address = await self._coingecko_find_address(symbol, platform)
+                if cg_address:
+                    cg_metadata = await self._confirm_address_on_chain(
+                        cg_address,
+                        chain,
+                        expected_symbol=symbol,
+                    )
+                    if cg_metadata is not None:
+                        self._cache_discovered_token(cg_metadata, chain, source="coingecko_dynamic")
+                        logger.info(
+                            "token_dynamic_resolved_evm symbol=%s chain=%s address=%s decimals=%d source=coingecko",
+                            symbol,
+                            chain,
+                            cg_address,
+                            cg_metadata.decimals,
+                        )
+                        return self._metadata_to_response(cg_metadata, source="coingecko_dynamic")
+            except Exception as exc:
+                logger.warning("CoinGecko symbol lookup failed for %s on %s: %s", symbol, chain, exc)
+
+        # Tier 2: DexScreener (primary source on non-CoinGecko chains and new launches)
+        if chain_slug_for(chain) is None:
             return None
 
         try:
-            address = await self._coingecko_find_address(symbol, platform)
-            if not address:
-                return None
+            ds_result = await dexscreener_find_token_address(symbol, chain)
+        except AmbiguousTokenError:
+            # Propagate so ResolveToken can surface the candidate list.
+            raise
+        except DexScreenerError as exc:
+            logger.warning("DexScreener API error for %s on %s: %s", symbol, chain, exc)
+            return None
+        except Exception as exc:
+            logger.warning("DexScreener lookup failed for %s on %s: %s", symbol, chain, exc)
+            return None
 
-            # Use the on-chain lookup to confirm and get full metadata
-            try:
-                lookup = await self._get_onchain_lookup(chain)
-                metadata = await asyncio.wait_for(
-                    lookup.lookup(chain, address),
-                    timeout=self._onchain_timeout,
-                )
-            except Exception as exc:
-                logger.warning("On-chain confirm failed for CoinGecko address %s on %s: %s", address, chain, exc)
-                return None
+        if ds_result is None:
+            return None
 
-            if metadata is None:
-                return None
-
-            self._cache_discovered_token(metadata, chain)
-            logger.info(
-                "token_dynamic_resolved_evm: symbol=%s chain=%s address=%s decimals=%d (via CoinGecko)",
+        ds_metadata = await self._confirm_address_on_chain(
+            ds_result.address,
+            chain,
+            expected_symbol=symbol,
+        )
+        if ds_metadata is None:
+            logger.warning(
+                "dexscreener_onchain_confirm_failed symbol=%s chain=%s address=%s",
                 symbol,
                 chain,
-                address,
-                metadata.decimals,
+                ds_result.address,
             )
-            return self._metadata_to_response(metadata)
-
-        except Exception as exc:
-            logger.warning("CoinGecko symbol lookup failed for %s on %s: %s", symbol, chain, exc)
             return None
+
+        self._cache_discovered_token(ds_metadata, chain, source="dexscreener_dynamic")
+        logger.info(
+            "token_dynamic_resolved_evm symbol=%s chain=%s address=%s decimals=%d source=dexscreener liq=%.0f vol24h=%.0f pair_url=%s",
+            symbol,
+            chain,
+            ds_result.address,
+            ds_metadata.decimals,
+            ds_result.liquidity_usd,
+            ds_result.volume_24h_usd,
+            ds_result.pair_url or "",
+        )
+        return self._metadata_to_response(ds_metadata, source="dexscreener_dynamic")
+
+    async def _confirm_address_on_chain(
+        self,
+        address: str,
+        chain: str,
+        *,
+        expected_symbol: str | None = None,
+    ) -> TokenMetadata | None:
+        """Confirm a dynamically-discovered address via on-chain ERC20 lookup.
+
+        Every dynamic-path lookup also passes through the shared RPC rate
+        limiter so a burst of unknown-symbol queries cannot exhaust the
+        Alchemy budget or push the provider into 429s.
+
+        Args:
+            address: EVM contract address to confirm.
+            chain: Chain name.
+            expected_symbol: If provided, the on-chain ``symbol()`` reading
+                must case-insensitively match this value. A mismatch
+                indicates the external data source (DexScreener or
+                CoinGecko) returned a contract whose on-chain identity
+                does not match the requested symbol — treat as untrusted
+                and return ``None``. This is the integrity check that
+                prevents a scam contract reporting ``symbol() = "USDC"``
+                on chain from being silently accepted when a different
+                symbol was requested.
+
+        Returns:
+            TokenMetadata if confirmation succeeds, None otherwise.
+        """
+        # Gate on the same RPC rate limiter used by GetTokenMetadata. Bursts
+        # of unknown-symbol resolves must not bypass the budget.
+        if not await self._rate_limiter.wait_and_acquire(timeout=2.0):
+            logger.warning(
+                "onchain_confirm_rate_limited address=%s chain=%s",
+                address,
+                chain,
+            )
+            return None
+
+        try:
+            lookup = await self._get_onchain_lookup(chain)
+            metadata = await asyncio.wait_for(
+                lookup.lookup(chain, address),
+                timeout=self._onchain_timeout,
+            )
+        except Exception as exc:
+            logger.warning("On-chain confirm failed for %s on %s: %s", address, chain, exc)
+            return None
+
+        if metadata is None:
+            return None
+
+        # Identity check: protect against dynamic sources returning a contract
+        # whose on-chain ``symbol()`` does not match the requested symbol.
+        # Without this, a scam contract that reports ``symbol() = "USDC"`` on
+        # a chain with no static USDC entry would silently resolve to the
+        # attacker address for any ``resolve("USDC", chain)`` call.
+        if expected_symbol is not None:
+            expected = expected_symbol.strip().casefold()
+            got = (metadata.symbol or "").strip().casefold()
+            if expected != got:
+                logger.warning(
+                    "onchain_symbol_mismatch requested=%s got=%s address=%s chain=%s",
+                    expected_symbol,
+                    metadata.symbol,
+                    address,
+                    chain,
+                )
+                return None
+
+        return metadata
 
     async def _coingecko_find_address(self, symbol: str, platform: str) -> str | None:
         """Search CoinGecko for a token symbol and return its address on the given platform.
@@ -553,10 +689,24 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             if result is not None:
                 return result
         else:
-            # EVM: only try CoinGecko for symbol lookups (not address lookups --
-            # those go through GetTokenMetadata / on-chain ERC20 lookup instead)
+            # EVM: dynamic symbol lookup via CoinGecko -> DexScreener.
+            # Address lookups go through GetTokenMetadata / on-chain ERC20 instead.
             if not is_evm_address:
-                result = await self._try_evm_symbol_lookup(token, chain)
+                try:
+                    result = await self._try_evm_symbol_lookup(token, chain)
+                except AmbiguousTokenError as exc:
+                    # DexScreener found multiple liquid contracts with no
+                    # dominant leader -- surface the candidate list so the
+                    # resolver can raise AmbiguousTokenError with the
+                    # addresses on the client side. The error payload is
+                    # prefixed with AMBIGUOUS_SYMBOL_MARKER so the resolver
+                    # can distinguish ambiguity from a plain NOT_FOUND and
+                    # avoid poisoning its negative cache on this path.
+                    candidates = ",".join(exc.matching_addresses)
+                    marker_error = f"{AMBIGUOUS_SYMBOL_MARKER}|addresses={candidates}|{exc}"
+                    context.set_code(grpc.StatusCode.NOT_FOUND)
+                    context.set_details(marker_error)
+                    return self._error_response(marker_error)
                 if result is not None:
                     return result
 
@@ -663,12 +813,32 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             context.set_details(str(e))
             return self._error_response(str(e))
 
-    def _cache_discovered_token(self, metadata: TokenMetadata, chain: str) -> None:
+    # Provenance hierarchy: a higher-ranked existing cache entry must never
+    # be overwritten by a newly-discovered (lower-ranked) one. This is the
+    # first-write-wins invariant extended from the static JSON registry into
+    # the in-memory/disk cache.
+    _SOURCE_RANK: dict[str, int] = {
+        "static": 100,
+        "coingecko_dynamic": 60,
+        "on_chain": 50,
+        "dexscreener_dynamic": 40,
+        "jupiter": 30,
+    }
+
+    def _cache_discovered_token(self, metadata: TokenMetadata, chain: str, *, source: str = "on_chain") -> None:
         """Cache a discovered token in the resolver.
+
+        Refuses to overwrite an existing cached entry whose source is ranked
+        higher than the incoming one (see ``_SOURCE_RANK``). This prevents
+        a later ``dexscreener_dynamic`` lookup from clobbering a prior
+        ``coingecko_dynamic`` or ``static`` entry for the same address or
+        symbol, which would corrupt long-running gateway state.
 
         Args:
             metadata: On-chain token metadata
             chain: Chain name
+            source: Provenance tag stored on the ResolvedToken (e.g.
+                ``"on_chain"``, ``"dexscreener_dynamic"``, ``"coingecko_dynamic"``).
         """
         try:
             from datetime import datetime
@@ -687,6 +857,42 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
                 logger.warning(f"Unknown chain {chain} - not caching discovered token")
                 return
 
+            incoming_rank = self._SOURCE_RANK.get(source, 0)
+
+            # Check for an existing cache entry under either the address key
+            # or the symbol key. Using the resolver's own cache guarantees we
+            # see both memory and disk layers. ``skip_gateway=True`` keeps the
+            # lookup local (the gateway process must not recurse through
+            # itself for a cache existence check).
+            def _existing_rank(token: str | None) -> int:
+                if not token:
+                    return -1
+                try:
+                    existing = self._resolver.resolve(token, chain, skip_gateway=True)
+                except TokenResolutionError:
+                    return -1
+                existing_source = getattr(existing, "source", "") or ""
+                return self._SOURCE_RANK.get(existing_source, 0)
+
+            best_existing = max(_existing_rank(metadata.address), _existing_rank(metadata.symbol))
+            # First-write-wins: block BOTH higher-ranked and equal-ranked
+            # overwrites. Two dexscreener_dynamic lookups resolving the same
+            # symbol to different answers must not silently replace each
+            # other — the first one is treated as authoritative for the
+            # session; subsequent conflicting results are logged and dropped.
+            if best_existing >= incoming_rank and best_existing >= 0:
+                logger.info(
+                    "token_dynamic_overwrite_blocked symbol=%s address=%s chain=%s "
+                    "incoming_source=%s incoming_rank=%d existing_rank=%d",
+                    metadata.symbol,
+                    metadata.address,
+                    chain,
+                    source,
+                    incoming_rank,
+                    best_existing,
+                )
+                return
+
             # Create ResolvedToken for caching
             resolved = ResolvedToken(
                 symbol=metadata.symbol,
@@ -701,7 +907,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
                 is_wrapped_native=False,
                 canonical_symbol=metadata.symbol,
                 bridge_type=BridgeType.NATIVE,
-                source="on_chain",
+                source=source,
                 is_verified=False,
                 resolved_at=datetime.now(),
             )

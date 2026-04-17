@@ -61,7 +61,12 @@ from almanak.core.enums import Chain
 
 from .cache import TokenCacheManager
 from .defaults import DEFAULT_TOKENS, NATIVE_SENTINEL, SYMBOL_ALIASES, WRAPPED_NATIVE
-from .exceptions import InvalidTokenAddressError, TokenNotFoundError, TokenResolutionError
+from .exceptions import (
+    AmbiguousTokenError,
+    InvalidTokenAddressError,
+    TokenNotFoundError,
+    TokenResolutionError,
+)
 from .models import CHAIN_ID_MAP, BridgeType, ResolvedToken, Token
 
 if TYPE_CHECKING:
@@ -207,6 +212,21 @@ def _normalize_chain(chain: str | Chain) -> tuple[str, Chain]:
         reason=f"Unknown chain '{chain}'",
         suggestions=[f"Supported chains: {', '.join(c.value.lower() for c in Chain)}"],
     )
+
+
+def _parse_ambiguous_candidates(error_str: str) -> list[str]:
+    """Parse candidate addresses out of an AMBIGUOUS_SYMBOL marker string.
+
+    The gateway encodes ambiguity as
+    ``AMBIGUOUS_SYMBOL|addresses=0xA,0xB,0xC|<exc-details>`` inside the gRPC
+    error details. This helper pulls the address list so the client-side
+    AmbiguousTokenError can carry it into the strategy author's error path.
+    """
+    for segment in error_str.split("|"):
+        if segment.startswith("addresses="):
+            raw = segment[len("addresses=") :]
+            return [addr for addr in raw.split(",") if addr]
+    return []
 
 
 class TokenResolver:
@@ -1252,6 +1272,31 @@ class TokenResolver:
             if is_unavailable:
                 self._gateway_available = False
                 self._gateway_check_time = time.time()
+
+            # Ambiguity marker: the gateway surfaced multiple liquid contracts
+            # claiming this symbol. Raise AmbiguousTokenError client-side with
+            # the candidate list so the strategy author can disambiguate with
+            # an explicit address. This path must NOT poison the negative
+            # cache — the symbol is not missing, it is ambiguous.
+            if "AMBIGUOUS_SYMBOL" in error_str:
+                candidates = _parse_ambiguous_candidates(error_str)
+                logger.info(
+                    "token_gateway_symbol_ambiguous: symbol=%s chain=%s candidates=%s",
+                    symbol,
+                    chain_lower,
+                    candidates,
+                )
+                raise AmbiguousTokenError(
+                    token=symbol,
+                    chain=chain_lower,
+                    reason=(
+                        f"Gateway returned multiple liquid contracts claiming '{symbol}' on "
+                        f"{chain_lower}. Disambiguate with an explicit address."
+                    ),
+                    matching_addresses=candidates,
+                    suggestions=[f"Candidate: {addr}" for addr in candidates],
+                ) from e
+
             logger.debug("token_gateway_symbol_lookup_error: symbol=%s chain=%s error=%s", symbol, chain_lower, e)
             return None
 
