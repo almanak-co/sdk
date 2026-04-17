@@ -231,6 +231,33 @@ MORPHO_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
             "is_pt_market": True,
         },
     },
+    "arbitrum": {
+        # Arbitrum Morpho Blue markets use a chain-specific AdaptiveCurveIRM at
+        # 0x66F30587FB8D4206918deb78ecA7d5eBbafD06DA (different from the Ethereum IRM).
+        # Market IDs sourced from blue-api.morpho.org and verified on-chain 2026-04-17.
+        # wstETH/USDC market (86% LLTV) - top-TVL Arbitrum market (~$12M supply)
+        "0x33e0c8ab132390822b07e5dc95033cf250c963153320b7ffca73220664da2ea0": {
+            "name": "wstETH/USDC",
+            "loan_token": "USDC",
+            "loan_token_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "collateral_token": "wstETH",
+            "collateral_token_address": "0x5979D7b546E38E414F7E9822514be443A4800529",
+            "oracle": "0x8e02a9b9Cc29d783b2fCB71C3a72651B591cae31",
+            "irm": "0x66F30587FB8D4206918deb78ecA7d5eBbafD06DA",
+            "lltv": 860000000000000000,  # 86%
+        },
+        # WBTC/USDC market (86% LLTV) - top-TVL WBTC market on Arbitrum (~$3.2M supply)
+        "0xe6392ff19d10454b099d692b58c361ef93e31af34ed1ef78232e07c78fe99169": {
+            "name": "WBTC/USDC",
+            "loan_token": "USDC",
+            "loan_token_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "collateral_token": "WBTC",
+            "collateral_token_address": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
+            "oracle": "0x88193FcB705d29724A40Bb818eCAA47dD5F014d9",
+            "irm": "0x66F30587FB8D4206918deb78ecA7d5eBbafD06DA",
+            "lltv": 860000000000000000,  # 86%
+        },
+    },
     "base": {
         # cbETH/USDC market (86% LLTV)
         "0xdba352d93a64b17c71104cbddc6aef85cd432322a1446b5b65163cbbc615cd0c": {

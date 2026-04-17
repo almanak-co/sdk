@@ -399,7 +399,11 @@ class TestMorphoBlueArbitrumConfig:
         from almanak.core.contracts import MORPHO_BLUE
 
         assert "arbitrum" in MORPHO_BLUE
-        assert MORPHO_BLUE["arbitrum"]["morpho"] == "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb"
+        # Arbitrum deploys Morpho Blue at a chain-specific address (NOT the universal
+        # 0xBBBB...FFCb vanity address used on Ethereum/Base). Registry corrected in
+        # VIB-2969 after iter-173 discovered the previously-registered universal
+        # address had 0 bytes of code on Arbitrum.
+        assert MORPHO_BLUE["arbitrum"]["morpho"] == "0x6c247b1F6182318877311737BaC0844bAa518F5e"
 
     def test_morpho_blue_arbitrum_tokens(self):
         from almanak.core.contracts import MORPHO_BLUE_TOKENS

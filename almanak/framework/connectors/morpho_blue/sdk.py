@@ -64,7 +64,7 @@ CREATE_MARKET_EVENT_TOPIC = HexStr("0xac4b2400f169220b0c0afdde7a0b32e775ba727ea1
 MORPHO_DEPLOYMENT_BLOCKS: dict[str, int] = {
     "ethereum": 18883124,  # Dec 2023
     "base": 18883124,  # Approximate
-    "arbitrum": 292000000,  # Jan 2025 (Morpho Blue Arbitrum launch)
+    "arbitrum": 296000000,  # Morpho Blue Arbitrum (0x6c24...) deployed ~block 296.3M (verified on-chain 2026-04-17)
     "monad": 31907457,  # Monad mainnet deployment
 }
 

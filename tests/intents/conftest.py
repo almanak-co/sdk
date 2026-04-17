@@ -135,11 +135,17 @@ CHAIN_CONFIGS = {
             "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
             "WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
             "USDT": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
+            "wstETH": "0x5979D7b546E38E414F7E9822514be443A4800529",
         },
         "balance_slots": {
             "USDC": 9,
             "WETH": 51,
             "USDT": 51,
+            # Arbitrum wstETH (OFT bridged): OpenZeppelin-style ERC20 with `_balances`
+            # mapping at storage slot 1. Slot verified 2026-04-17 by computing
+            # keccak256(abi.encode(holder, slot=1)) for a known holder and confirming
+            # the resulting storage value matched balanceOf(). Holder-independent.
+            "wstETH": 1,
         },
     },
     "optimism": {
@@ -941,6 +947,8 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "perps: Tests for perps intents")
     config.addinivalue_line("markers", "supply: Tests for supply intents")
     config.addinivalue_line("markers", "borrow: Tests for borrow intents")
+    config.addinivalue_line("markers", "repay: Tests for repay intents")
+    config.addinivalue_line("markers", "withdraw: Tests for withdraw intents")
     config.addinivalue_line("markers", "l3_semantic: L3 semantic verification — cross-checks intent params against receipt")
 
 

@@ -816,7 +816,15 @@ MORPHO_BLUE: dict[str, dict[str, str]] = {
         "bundler": "0x23055618898e202386e6c13955a58D3C68200BFB",
     },
     "arbitrum": {
-        "morpho": MORPHO_BLUE_ADDRESS,
+        # Arbitrum deployed via a distinct factory — the universal
+        # 0xBBBB...FFCb address has 0 bytes of code here. Registry fixed 2026-04-17
+        # after on-chain verification (prior value was the non-deployed vanity address
+        # and caused every Morpho Blue compile call to fail with "Unknown market").
+        # Source: Morpho's GraphQL API (blue-api.morpho.org) + on-chain eth_getCode.
+        "morpho": "0x6c247b1F6182318877311737BaC0844bAa518F5e",
+        # Bundler address listed for future multicall integration. Not used by any
+        # current supply/borrow/repay/withdraw path — verify live selectors before
+        # wiring it into execution (tracked as a follow-up in VIB-2967 epic).
         "bundler": "0x1FA4431bC113D308beE1d46B0e98Cb805FB48C13",
     },
     "monad": {
