@@ -40,7 +40,7 @@ Example:
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any
@@ -49,6 +49,7 @@ from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
+    from almanak.framework.gateway_client import GatewayClient
 
 from almanak.core.contracts import MORPHO_BLUE as _MORPHO_BLUE_REGISTRY
 
@@ -396,10 +397,11 @@ class MorphoBlueConfig:
     chain: str
     wallet_address: str
     default_slippage_bps: int = 50  # 0.5%
-    rpc_url: str | None = None
+    rpc_url: str | None = None  # DEPRECATED — use gateway_client
     price_provider: dict[str, Decimal] | None = None
     allow_placeholder_prices: bool = False
     enable_sdk: bool = True  # Enable SDK by default for production use
+    gateway_client: "GatewayClient | None" = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -748,6 +750,7 @@ class MorphoBlueAdapter:
             self._sdk = MorphoBlueSDK(
                 chain=self.chain,
                 rpc_url=self.config.rpc_url,
+                gateway_client=self.config.gateway_client,
             )
 
         return self._sdk

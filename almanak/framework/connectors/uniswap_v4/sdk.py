@@ -33,8 +33,12 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from almanak.core.contracts import UNISWAP_V4
+
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -267,12 +271,23 @@ class UniswapV4SDK:
 
     Args:
         chain: Chain name (e.g. "arbitrum", "ethereum").
-        rpc_url: Optional RPC URL for on-chain queries.
+        rpc_url: Optional RPC URL for on-chain queries (direct HTTP fallback).
+        gateway_client: Optional GatewayClient. When provided, on-chain
+            ``eth_call`` queries go through ``gateway_client.rpc.Call`` instead
+            of direct urllib/HTTP. Strategy containers in production have no
+            outbound HTTP so the gateway is required there; local dev and
+            gateway-internal execution may still pass ``rpc_url`` instead.
     """
 
-    def __init__(self, chain: str, rpc_url: str | None = None) -> None:
+    def __init__(
+        self,
+        chain: str,
+        rpc_url: str | None = None,
+        gateway_client: "GatewayClient | None" = None,
+    ) -> None:
         self.chain = chain.lower()
         self.rpc_url = rpc_url
+        self._gateway_client = gateway_client
 
         if self.chain not in UNISWAP_V4:
             raise ValueError(
@@ -284,6 +299,30 @@ class UniswapV4SDK:
         self.position_manager = self.addresses["position_manager"]
         self.router = self.addresses["universal_router"]
         self.quoter = self.addresses["quoter"]
+
+    def _eth_call_via_gateway(self, to: str, data: str, call_id: str) -> str | None:
+        """Issue eth_call through the gateway. Returns the hex result or None on failure."""
+        if self._gateway_client is None:
+            raise RuntimeError("_eth_call_via_gateway called without gateway_client")
+        from almanak.gateway.proto import gateway_pb2
+
+        rpc_request = gateway_pb2.RpcRequest(
+            chain=self.chain,
+            method="eth_call",
+            params=json.dumps([{"to": to, "data": data}, "latest"]),
+            id=call_id,
+        )
+        response = self._gateway_client.rpc.Call(rpc_request, timeout=10.0)
+        if not response.success:
+            return None
+        if not response.result:
+            return None
+        # gateway returns result as JSON-encoded string ("0x..." wrapped in quotes)
+        try:
+            decoded = json.loads(response.result)
+            return decoded if isinstance(decoded, str) else None
+        except json.JSONDecodeError:
+            return None
 
     # =========================================================================
     # On-Chain Queries
@@ -302,18 +341,32 @@ class UniswapV4SDK:
         Raises:
             ValueError: If no RPC URL is available or the call fails.
         """
+        # getPositionLiquidity(uint256) selector = 0x1efeed33
+        # Verified: keccak256("getPositionLiquidity(uint256)")[:4] == 0x1efeed33
+        selector = "1efeed33"
+        token_id_hex = format(token_id, "064x")
+        calldata = "0x" + selector + token_id_hex
+
+        # Prefer gateway when available (production containers have no HTTP egress).
+        if self._gateway_client is not None:
+            hex_result = self._eth_call_via_gateway(self.position_manager, calldata, "v4_get_position_liquidity")
+            if hex_result is None:
+                raise ValueError("Gateway eth_call for getPositionLiquidity returned no result")
+            try:
+                liquidity = int(hex_result, 16)
+            except (TypeError, ValueError) as e:
+                raise ValueError(
+                    f"Malformed liquidity hex for position {token_id} on {self.chain}: {hex_result!r}"
+                ) from e
+            logger.info("V4 position %d liquidity: %d (chain=%s, via=gateway)", token_id, liquidity, self.chain)
+            return liquidity
+
         url = rpc_url or self.rpc_url
         if not url:
             raise ValueError("RPC URL required to query on-chain position liquidity")
 
         if not url.startswith(("http://", "https://")):
             raise ValueError(f"RPC URL must use http:// or https:// scheme, got: {url[:20]}")
-
-        # getPositionLiquidity(uint256) selector = 0x1efeed33
-        # Verified: keccak256("getPositionLiquidity(uint256)")[:4] == 0x1efeed33
-        selector = "1efeed33"
-        token_id_hex = format(token_id, "064x")
-        calldata = "0x" + selector + token_id_hex
 
         payload = json.dumps(
             {
@@ -324,9 +377,12 @@ class UniswapV4SDK:
             }
         ).encode()
 
-        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        # Direct urllib fallback for trusted contexts only (gateway-internal / local dev).
+        req = urllib.request.Request(  # vib-2986-exempt: gateway-internal fallback
+            url, data=payload, headers={"Content-Type": "application/json"}
+        )
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310  # vib-2986-exempt: gateway-internal fallback
                 result = json.loads(resp.read())
         except Exception as e:
             raise ValueError(f"RPC call to getPositionLiquidity failed: {e}") from e
@@ -360,14 +416,6 @@ class UniswapV4SDK:
         Returns:
             sqrtPriceX96 (int) if successful, None if query fails or no RPC available.
         """
-        url = rpc_url or self.rpc_url
-        if not url:
-            return None
-
-        if not url.startswith(("http://", "https://")):
-            logger.warning("RPC URL must use http:// or https:// scheme, got: %s", url[:20])
-            return None
-
         state_view = self.addresses.get("state_view")
         if not state_view:
             return None
@@ -375,6 +423,42 @@ class UniswapV4SDK:
         from almanak.framework.connectors.uniswap_v4.hooks import build_get_slot0_calldata, decode_slot0_response
 
         calldata = build_get_slot0_calldata(pool_key)
+
+        # Prefer gateway when available. Returns None on any failure to preserve
+        # the existing "fall back to estimated sqrtPrice" semantics.
+        if self._gateway_client is not None:
+            hex_result = self._eth_call_via_gateway(state_view, calldata, "v4_get_pool_sqrt_price")
+            if hex_result is None:
+                logger.warning(
+                    "V4 StateView.getSlot0 via gateway failed on %s — falling back to estimated sqrtPrice",
+                    self.chain,
+                )
+                return None
+            try:
+                pool_state = decode_slot0_response(hex_result)
+            except Exception:
+                logger.warning(
+                    "V4 StateView.getSlot0 decode failed on %s, falling back to estimated sqrtPrice", self.chain
+                )
+                return None
+            if not pool_state.exists or pool_state.sqrt_price_x96 == 0:
+                logger.warning("V4 pool not initialized on %s, falling back to estimated sqrtPrice", self.chain)
+                return None
+            logger.info(
+                "V4 on-chain sqrtPriceX96=%d tick=%d (chain=%s, via=gateway)",
+                pool_state.sqrt_price_x96,
+                pool_state.tick,
+                self.chain,
+            )
+            return pool_state.sqrt_price_x96
+
+        url = rpc_url or self.rpc_url
+        if not url:
+            return None
+
+        if not url.startswith(("http://", "https://")):
+            logger.warning("RPC URL must use http:// or https:// scheme, got: %s", url[:20])
+            return None
 
         payload = json.dumps(
             {
@@ -385,9 +469,12 @@ class UniswapV4SDK:
             }
         ).encode()
 
-        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        # Direct urllib fallback for trusted contexts only (gateway-internal / local dev).
+        req = urllib.request.Request(  # vib-2986-exempt: gateway-internal fallback
+            url, data=payload, headers={"Content-Type": "application/json"}
+        )
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310  # vib-2986-exempt: gateway-internal fallback
                 result = json.loads(resp.read())
         except Exception as e:
             logger.warning(

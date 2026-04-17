@@ -340,6 +340,7 @@ class TestCompoundV3Supply:
             chain="ethereum",
             wallet_address=compiler.wallet_address,
             market="usdc",
+            gateway_client=None,
         )
 
     @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
@@ -805,6 +806,7 @@ class TestCompoundV3Optimism:
             chain="optimism",
             wallet_address=optimism_compiler.wallet_address,
             market="usdc",
+            gateway_client=None,
         )
 
     @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)

@@ -31,7 +31,7 @@ def adapter():
         a.market_config = COMPOUND_V3_MARKETS["arbitrum"]["weth"]
         a.wallet_address = "0x" + "0" * 40
         a._token_resolver = None
-        a.rpc_url = None
+        a._gateway_client = None
 
         # Stub _get_decimals to return 18 for all
         a._get_decimals = MagicMock(return_value=18)
@@ -104,7 +104,7 @@ class TestWithdrawCollateralCaseInsensitive:
         assert result.success is True
 
     def test_withdraw_all_wsteth_no_rpc_no_amount_fails(self, adapter):
-        """withdraw_all=True with amount=0 and no rpc_url fails gracefully."""
+        """withdraw_all=True with amount=0 and no gateway_client fails gracefully."""
         result = adapter.withdraw_collateral("WSTETH", Decimal("0"), withdraw_all=True)
         assert result.success is False
         assert "on-chain balance query failed" in result.error

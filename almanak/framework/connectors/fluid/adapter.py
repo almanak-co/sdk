@@ -16,7 +16,7 @@ Example:
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +32,7 @@ from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -54,14 +55,22 @@ class FluidConfig:
     Args:
         chain: Chain name (must be "arbitrum" for phase 1)
         wallet_address: Address of the wallet executing transactions
-        rpc_url: RPC endpoint URL
+        rpc_url: DEPRECATED — direct RPC URL. Kept for ad-hoc script usage.
+            Strategies running in isolated containers must use gateway_client.
+        gateway_client: Gateway client for routing eth_call through the
+            gateway's RpcService. Preferred over rpc_url.
         default_slippage_bps: Default slippage tolerance in basis points (default: 50 = 0.5%)
     """
 
     chain: str
     wallet_address: str
-    rpc_url: str
+    rpc_url: str | None = None
     default_slippage_bps: int = 50
+    gateway_client: "GatewayClient | None" = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.rpc_url is None and self.gateway_client is None:
+            raise FluidSDKError("FluidConfig requires either rpc_url (deprecated) or gateway_client")
 
 
 @dataclass
@@ -156,7 +165,11 @@ class FluidAdapter:
         if self.chain != "arbitrum":
             raise FluidSDKError(f"Fluid DEX phase 1 supports Arbitrum only. Got: {config.chain}")
 
-        self._sdk = FluidSDK(chain=self.chain, rpc_url=config.rpc_url)
+        self._sdk = FluidSDK(
+            chain=self.chain,
+            rpc_url=config.rpc_url,
+            gateway_client=config.gateway_client,
+        )
 
         if token_resolver is not None:
             self._token_resolver = token_resolver

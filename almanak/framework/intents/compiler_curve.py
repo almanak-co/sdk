@@ -139,7 +139,8 @@ def compile_swap_curve(compiler, intent: SwapIntent) -> CompilationResult:
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
             default_slippage_bps=slippage_bps,
-            rpc_url=compiler._get_chain_rpc_url(),
+            rpc_url=compiler._get_chain_rpc_url(),  # DEPRECATED — fallback
+            gateway_client=compiler._gateway_client,
         )
         adapter = CurveAdapter(config)
 
@@ -301,7 +302,8 @@ def compile_lp_open_curve(compiler, intent: LPOpenIntent) -> CompilationResult:
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
             default_slippage_bps=slippage_bps,
-            rpc_url=compiler._get_chain_rpc_url(),
+            rpc_url=compiler._get_chain_rpc_url(),  # DEPRECATED — fallback
+            gateway_client=compiler._gateway_client,
         )
         adapter = CurveAdapter(config)
 
@@ -510,7 +512,8 @@ def compile_lp_close_curve(compiler, intent: LPCloseIntent) -> CompilationResult
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
             default_slippage_bps=slippage_bps,
-            rpc_url=compiler._get_chain_rpc_url(),
+            rpc_url=compiler._get_chain_rpc_url(),  # DEPRECATED — fallback
+            gateway_client=compiler._gateway_client,
         )
         adapter = CurveAdapter(config)
 

@@ -26,7 +26,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from web3 import Web3
 from web3.contract import Contract
@@ -34,6 +34,9 @@ from web3.contract import Contract
 logger = logging.getLogger(__name__)
 
 from almanak.core.contracts import GMX_V2, GMX_V2_TOKENS
+
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
 
 
 class PositionQueryError(Exception):
@@ -164,18 +167,33 @@ class GMXV2SDK:
 
     GAS_BUFFER = 0.3
 
-    def __init__(self, rpc_url: str, chain: str = "arbitrum"):
+    def __init__(
+        self,
+        rpc_url: str | None = None,
+        chain: str = "arbitrum",
+        gateway_client: "GatewayClient | None" = None,
+    ):
         """
         Initialize GMX V2 SDK.
 
         Args:
-            rpc_url: RPC endpoint URL
+            rpc_url: DEPRECATED — direct RPC URL. Prefer gateway_client for
+                any code path running in a strategy container.
             chain: Target chain (only 'arbitrum' supported currently)
+            gateway_client: Gateway client for routing eth_call through the
+                gateway. Preferred over rpc_url.
         """
         if chain != "arbitrum":
             raise ValueError(f"GMX V2 SDK only supports Arbitrum, got {chain}")
+        if rpc_url is None and gateway_client is None:
+            raise ValueError("GMXV2SDK requires either rpc_url (deprecated) or gateway_client")
 
-        self.web3 = Web3(Web3.HTTPProvider(rpc_url))
+        if gateway_client is not None:
+            from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+
+            self.web3 = Web3(GatewayWeb3Provider(gateway_client, chain=chain))
+        else:
+            self.web3 = Web3(Web3.HTTPProvider(rpc_url))  # vib-2986-exempt: gateway-internal fallback
         self.chain = chain
 
         # Get contract addresses
@@ -731,6 +749,10 @@ class GMXV2SDK:
         )
 
 
-def get_gmx_v2_sdk(rpc_url: str, chain: str = "arbitrum") -> GMXV2SDK:
+def get_gmx_v2_sdk(
+    rpc_url: str | None = None,
+    chain: str = "arbitrum",
+    gateway_client: "GatewayClient | None" = None,
+) -> GMXV2SDK:
     """Factory function to create a GMX V2 SDK instance."""
-    return GMXV2SDK(rpc_url, chain)
+    return GMXV2SDK(rpc_url=rpc_url, chain=chain, gateway_client=gateway_client)

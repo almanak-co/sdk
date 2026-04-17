@@ -22,6 +22,7 @@ import logging
 from typing import Any
 
 from web3 import Web3
+from web3.providers.async_base import AsyncJSONBaseProvider
 from web3.providers.base import JSONBaseProvider
 from web3.types import RPCEndpoint, RPCResponse
 
@@ -136,7 +137,7 @@ class GatewayWeb3Provider(JSONBaseProvider):
             }
 
 
-class AsyncGatewayWeb3Provider(JSONBaseProvider):
+class AsyncGatewayWeb3Provider(AsyncJSONBaseProvider):
     """Async version of GatewayWeb3Provider.
 
     For use with AsyncWeb3. Routes JSON-RPC calls through the gateway
@@ -152,6 +153,8 @@ class AsyncGatewayWeb3Provider(JSONBaseProvider):
         block = await w3.eth.get_block("latest")
     """
 
+    # AsyncJSONBaseProvider sets is_async=True on the class; we keep it
+    # explicit here so grep/readers see the async contract at a glance.
     is_async = True
 
     def __init__(
@@ -178,7 +181,7 @@ class AsyncGatewayWeb3Provider(JSONBaseProvider):
         self._request_counter += 1
         return str(self._request_counter)
 
-    async def make_request(self, method: RPCEndpoint, params: Any) -> RPCResponse:  # type: ignore[override]
+    async def make_request(self, method: RPCEndpoint, params: Any) -> RPCResponse:
         """Make an async JSON-RPC request through the gateway.
 
         Args:
@@ -199,18 +202,15 @@ class AsyncGatewayWeb3Provider(JSONBaseProvider):
         )
 
         try:
-            # For async we need to use the async stub
-            # The gateway client would need async support
-            # For now, run sync in thread pool
+            # The GatewayClient RPC stub is sync gRPC; run it in a worker thread
+            # so we don't block the event loop. ``asyncio.to_thread`` uses the
+            # running loop's default executor and is safe in a coroutine.
             import asyncio
 
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self._gateway_client.rpc.Call(
-                    rpc_request,
-                    timeout=self._request_timeout,
-                ),
+            response = await asyncio.to_thread(
+                self._gateway_client.rpc.Call,
+                rpc_request,
+                timeout=self._request_timeout,
             )
 
             if response.success:

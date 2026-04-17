@@ -11,10 +11,13 @@ All calls are standard eth_call (no auth, no proprietary multicall).
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from web3 import Web3
 from web3.providers import HTTPProvider
+
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -333,17 +336,35 @@ class FluidSDK:
 
     Args:
         chain: Chain name (must be "arbitrum" for phase 1)
-        rpc_url: RPC endpoint URL
+        rpc_url: DEPRECATED — direct RPC URL. Bypasses the gateway and is
+            only used for ad-hoc scripts. Prefer gateway_client for any
+            code path that runs in a strategy container.
+        gateway_client: Gateway client used to route all eth_call traffic
+            through the gateway's RpcService. Preferred over rpc_url for
+            production code paths.
     """
 
-    def __init__(self, chain: str, rpc_url: str) -> None:
+    def __init__(
+        self,
+        chain: str,
+        rpc_url: str | None = None,
+        gateway_client: "GatewayClient | None" = None,
+    ) -> None:
         chain_lower = chain.lower()
         if chain_lower not in FLUID_ADDRESSES:
             raise FluidSDKError(f"Fluid DEX not supported on chain: {chain}. Supported: {list(FLUID_ADDRESSES.keys())}")
+        if rpc_url is None and gateway_client is None:
+            raise FluidSDKError("FluidSDK requires either rpc_url (deprecated) or gateway_client")
 
         self.chain = chain_lower
         self.rpc_url = rpc_url
-        self.w3 = Web3(HTTPProvider(rpc_url))
+        self._gateway_client = gateway_client
+        if gateway_client is not None:
+            from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+
+            self.w3 = Web3(GatewayWeb3Provider(gateway_client, chain=chain_lower))
+        else:
+            self.w3 = Web3(HTTPProvider(rpc_url))  # vib-2986-exempt: gateway-internal fallback
         self._addresses = FLUID_ADDRESSES[chain_lower]
 
         self._factory = self.w3.eth.contract(

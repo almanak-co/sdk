@@ -28,7 +28,7 @@ Example:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -46,6 +46,7 @@ from almanak.framework.data.tokens import TokenNotFoundError
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver
+    from almanak.framework.gateway_client import GatewayClient
     from almanak.framework.intents.vocabulary import LPCloseIntent, LPOpenIntent, SwapIntent
     from almanak.framework.models.reproduction_bundle import ActionBundle
 
@@ -64,9 +65,12 @@ class UniswapV4Config:
     Attributes:
         chain: Chain name (e.g. "arbitrum").
         wallet_address: Wallet address for building transactions.
-        rpc_url: Optional RPC URL for on-chain quotes.
+        rpc_url: Optional RPC URL for on-chain quotes (direct-HTTP fallback).
         default_fee_tier: Default fee tier for swaps. Default 3000 (0.3%).
         default_slippage_bps: Default slippage in basis points. Default 50 (0.5%).
+        gateway_client: Optional GatewayClient. When provided, on-chain
+            eth_call queries route through ``gateway_client.rpc.Call`` and
+            the ``rpc_url`` fallback is never exercised.
     """
 
     chain: str
@@ -74,6 +78,7 @@ class UniswapV4Config:
     rpc_url: str | None = None
     default_fee_tier: int = 3000
     default_slippage_bps: int = 50
+    gateway_client: GatewayClient | None = field(default=None, repr=False, compare=False)
 
 
 # =============================================================================
@@ -98,6 +103,7 @@ class UniswapV4Adapter:
         chain: str | None = None,
         config: UniswapV4Config | None = None,
         token_resolver: TokenResolver | None = None,
+        gateway_client: GatewayClient | None = None,
     ) -> None:
         if config is not None:
             self.chain = config.chain.lower()
@@ -105,12 +111,14 @@ class UniswapV4Adapter:
             self.rpc_url = config.rpc_url
             self.default_fee_tier = config.default_fee_tier
             self.default_slippage_bps = config.default_slippage_bps
+            self._gateway_client = gateway_client or config.gateway_client
         elif chain is not None:
             self.chain = chain.lower()
             self.wallet_address = ""
             self.rpc_url = None
             self.default_fee_tier = 3000
             self.default_slippage_bps = 50
+            self._gateway_client = gateway_client
         else:
             raise ValueError("Either chain or config must be provided")
 
@@ -118,7 +126,7 @@ class UniswapV4Adapter:
             raise ValueError(f"Uniswap V4 not supported on '{self.chain}'. Supported: {', '.join(UNISWAP_V4.keys())}")
 
         self.addresses = UNISWAP_V4[self.chain]
-        self._sdk = UniswapV4SDK(chain=self.chain, rpc_url=self.rpc_url)
+        self._sdk = UniswapV4SDK(chain=self.chain, rpc_url=self.rpc_url, gateway_client=self._gateway_client)
         self._token_resolver = token_resolver
 
     def get_position_liquidity(self, token_id: int, rpc_url: str | None = None) -> int:

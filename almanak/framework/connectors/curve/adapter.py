@@ -31,6 +31,7 @@ from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -341,7 +342,8 @@ class CurveConfig:
     wallet_address: str
     default_slippage_bps: int = 50
     deadline_seconds: int = 300
-    rpc_url: str | None = None
+    rpc_url: str | None = None  # DEPRECATED — use gateway_client
+    gateway_client: "GatewayClient | None" = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -581,6 +583,7 @@ class CurveAdapter:
         self.chain = config.chain
         self.wallet_address = config.wallet_address
         self._rpc_url = config.rpc_url
+        self._gateway_client = config.gateway_client
 
         # Load contract addresses
         self.addresses = CURVE_ADDRESSES[self.chain]
@@ -1372,13 +1375,13 @@ class CurveAdapter:
             Returns [0, ..., 0] when on-chain estimation is unavailable.
         """
         zero_amounts = [0] * pool_info.n_coins
-        if not self._rpc_url:
+        if self._gateway_client is None and not self._rpc_url:
             logger.warning(
-                f"remove_liquidity: rpc_url not configured for {pool_info.name} -- "
+                f"remove_liquidity: no gateway_client or rpc_url configured for {pool_info.name} -- "
                 "min_amounts will be [0, ..., 0] (no slippage protection). "
-                "Set CurveConfig.rpc_url to enable on-chain estimation."
+                "Set CurveConfig.gateway_client to enable on-chain estimation."
             )
-            self._last_estimation_error = "rpc_url not configured"
+            self._last_estimation_error = "gateway_client or rpc_url not configured"
             return zero_amounts
 
         try:
@@ -1415,9 +1418,7 @@ class CurveAdapter:
             ValueError: If RPC returns unexpected data
             Exception: On network or parsing errors (caller handles fallback)
         """
-        import httpx
-
-        assert self._rpc_url is not None
+        import json as _json
 
         # ABI selectors
         TOTAL_SUPPLY_SELECTOR = "18160ddd"  # totalSupply() -> uint256
@@ -1429,14 +1430,41 @@ class CurveAdapter:
             return hex(value)[2:].zfill(64)
 
         def _eth_call(to: str, data: str) -> int:
-            """Make a synchronous eth_call and return the result as int."""
+            """Make a synchronous eth_call and return the result as int.
+
+            Routes through the gateway when gateway_client is configured.
+            Falls back to direct httpx POST only for ad-hoc script usage.
+            """
+            if self._gateway_client is not None:
+                from almanak.gateway.proto import gateway_pb2
+
+                rpc_request = gateway_pb2.RpcRequest(
+                    chain=self.chain,
+                    method="eth_call",
+                    params=_json.dumps([{"to": to, "data": data}, "latest"]),
+                    id="curve_remove_liquidity",
+                )
+                response = self._gateway_client.rpc.Call(rpc_request, timeout=10.0)
+                if not response.success:
+                    raise ValueError(f"eth_call error: {response.error or 'gateway returned failure'}")
+                hex_result = _json.loads(response.result) if response.result else "0x"
+                if not hex_result or hex_result == "0x":
+                    raise ValueError("eth_call returned empty result")
+                return int(hex_result, 16)
+
+            # Fallback: direct RPC (deprecated, ad-hoc use only)
+            import httpx
+
+            assert self._rpc_url is not None
             payload = {
                 "jsonrpc": "2.0",
                 "method": "eth_call",
                 "params": [{"to": to, "data": data}, "latest"],
                 "id": 1,
             }
-            response = httpx.post(self._rpc_url, json=payload, timeout=10.0)  # type: ignore[arg-type]
+            response = httpx.post(
+                self._rpc_url, json=payload, timeout=10.0
+            )  # vib-2986-exempt: gateway-internal fallback
             response.raise_for_status()
             result = response.json()
             if "error" in result:

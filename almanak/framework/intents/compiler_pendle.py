@@ -120,12 +120,21 @@ def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:
                 intent_id=intent.intent_id,
             )
 
-        # Get RPC URL
-        rpc_url = compiler._get_chain_rpc_url()
-        if not rpc_url:
+        # Pendle adapter accepts either a connected gateway_client (production
+        # path) or an RPC URL (local/backtest fallback). Normalize a
+        # disconnected gateway_client to None so we fall back cleanly.
+        gateway_client = compiler._gateway_client
+        if gateway_client is not None and not gateway_client.is_connected:
+            gateway_client = None
+
+        rpc_url = None if gateway_client is not None else compiler._get_chain_rpc_url()
+        if gateway_client is None and not rpc_url:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error=f"RPC URL not available for {compiler.chain}. Configure gateway client or provide rpc_url.",
+                error=(
+                    f"Pendle requires either a connected gateway_client or an RPC URL "
+                    f"for {compiler.chain}. Configure gateway client or provide rpc_url."
+                ),
                 intent_id=intent.intent_id,
             )
 
@@ -134,6 +143,7 @@ def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:
             rpc_url=rpc_url,
             chain=compiler.chain,
             wallet_address=compiler.wallet_address,
+            gateway_client=gateway_client,
         )
 
         # Determine swap type based on token names
@@ -661,7 +671,12 @@ def compile_pendle_lp_open(compiler, intent: LPOpenIntent) -> CompilationResult:
                 intent_id=intent.intent_id,
             )
 
-        adapter = PendleAdapter(rpc_url=rpc_url, chain=compiler.chain, wallet_address=compiler.wallet_address)
+        adapter = PendleAdapter(
+            rpc_url=rpc_url,
+            chain=compiler.chain,
+            wallet_address=compiler.wallet_address,
+            gateway_client=compiler._gateway_client,
+        )
 
         # Build approval
         router_address = adapter.get_router_address()
@@ -795,7 +810,12 @@ def compile_pendle_lp_close(compiler, intent: LPCloseIntent) -> CompilationResul
                 intent_id=intent.intent_id,
             )
 
-        adapter = PendleAdapter(rpc_url=rpc_url, chain=compiler.chain, wallet_address=compiler.wallet_address)
+        adapter = PendleAdapter(
+            rpc_url=rpc_url,
+            chain=compiler.chain,
+            wallet_address=compiler.wallet_address,
+            gateway_client=compiler._gateway_client,
+        )
 
         # Build approval for LP token (market address IS the LP token)
         approve_txs = compiler._build_approve_tx(market, adapter.get_router_address(), lp_amount)
@@ -920,7 +940,12 @@ def compile_pendle_redeem(compiler, intent: WithdrawIntent) -> CompilationResult
                 intent_id=intent.intent_id,
             )
 
-        adapter = PendleAdapter(rpc_url=rpc_url, chain=compiler.chain, wallet_address=compiler.wallet_address)
+        adapter = PendleAdapter(
+            rpc_url=rpc_url,
+            chain=compiler.chain,
+            wallet_address=compiler.wallet_address,
+            gateway_client=compiler._gateway_client,
+        )
 
         # Build redeem TX
         redeem_params = PendleRedeemParams(

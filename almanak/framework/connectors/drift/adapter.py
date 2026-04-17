@@ -87,12 +87,13 @@ class DriftAdapter:
         self.config = config
         self.wallet_address = config.wallet_address
 
-        # Resolve RPC URL: config > env > empty
+        # Resolve RPC URL: config > env > empty (only used when no gateway_client)
         rpc_url = config.rpc_url or os.environ.get("SOLANA_RPC_URL", "")
         self.sdk = DriftSDK(
             wallet_address=config.wallet_address,
             rpc_url=rpc_url,
             timeout=config.timeout,
+            gateway_client=config.gateway_client,
         )
         self.client = DriftDataClient(
             base_url=config.data_api_base_url,

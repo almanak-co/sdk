@@ -32,6 +32,7 @@ from web3.contract import Contract
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
+    from almanak.framework.gateway_client import GatewayClient
 
 from almanak.core.contracts import PENDLE as _PENDLE_REGISTRY
 from almanak.core.contracts import PENDLE_TOKENS as _PENDLE_TOKENS
@@ -382,19 +383,35 @@ class PendleSDK:
         )
     """
 
-    def __init__(self, rpc_url: str, chain: str = "arbitrum", token_resolver: "TokenResolverType | None" = None):
+    def __init__(
+        self,
+        rpc_url: str | None = None,
+        chain: str = "arbitrum",
+        token_resolver: "TokenResolverType | None" = None,
+        gateway_client: "GatewayClient | None" = None,
+    ):
         """
         Initialize Pendle SDK.
 
         Args:
-            rpc_url: RPC endpoint URL
+            rpc_url: DEPRECATED — direct RPC URL. Prefer gateway_client for
+                any code path running in a strategy container.
             chain: Target chain (arbitrum, ethereum)
             token_resolver: Optional TokenResolver instance. If None, uses singleton.
+            gateway_client: Gateway client for routing eth_call through the
+                gateway's RpcService. Preferred over rpc_url.
         """
         if chain not in PENDLE_ADDRESSES:
             raise ValueError(f"Unsupported chain: {chain}. Supported: {list(PENDLE_ADDRESSES.keys())}")
+        if rpc_url is None and gateway_client is None:
+            raise ValueError("PendleSDK requires either rpc_url (deprecated) or gateway_client")
 
-        self.web3 = Web3(Web3.HTTPProvider(rpc_url))
+        if gateway_client is not None:
+            from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+
+            self.web3 = Web3(GatewayWeb3Provider(gateway_client, chain=chain))
+        else:
+            self.web3 = Web3(Web3.HTTPProvider(rpc_url))  # vib-2986-exempt: gateway-internal fallback
         self.chain = chain
         self.addresses = PENDLE_ADDRESSES[chain]
         self.router_address = self.addresses["ROUTER"]
@@ -1214,9 +1231,13 @@ class PendleSDK:
 # =============================================================================
 
 
-def get_pendle_sdk(rpc_url: str, chain: str = "arbitrum") -> PendleSDK:
+def get_pendle_sdk(
+    rpc_url: str | None = None,
+    chain: str = "arbitrum",
+    gateway_client: "GatewayClient | None" = None,
+) -> PendleSDK:
     """Factory function to create a PendleSDK instance."""
-    return PendleSDK(rpc_url, chain)
+    return PendleSDK(rpc_url=rpc_url, chain=chain, gateway_client=gateway_client)
 
 
 __all__ = [

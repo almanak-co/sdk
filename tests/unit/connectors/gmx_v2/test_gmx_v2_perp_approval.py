@@ -23,6 +23,7 @@ def _make_mock_compiler(chain: str = "arbitrum") -> IntentCompiler:
     compiler.wallet_address = "0x" + "1" * 40
     compiler.rpc_url = "http://localhost:8545"
     compiler._approve_cache = {}
+    compiler._gateway_client = None
     return compiler
 
 

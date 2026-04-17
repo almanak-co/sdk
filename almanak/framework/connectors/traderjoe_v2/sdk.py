@@ -42,12 +42,15 @@ import os
 import time
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from web3 import Web3
 from web3.contract import Contract
 
 from almanak.core.contracts import TRADERJOE_V2 as TRADERJOE_V2_ADDRESSES
+
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -192,12 +195,14 @@ class TraderJoeV2SDK:
     def __init__(
         self,
         chain: str,
-        rpc_url: str,
+        rpc_url: str | None = None,
         wallet_address: str | None = None,
+        gateway_client: "GatewayClient | None" = None,
     ) -> None:
         self.chain = chain.lower()
         self.rpc_url = rpc_url
         self.wallet_address = wallet_address
+        self._gateway_client = gateway_client
 
         # Validate chain
         if self.chain not in TRADERJOE_V2_ADDRESSES:
@@ -205,12 +210,24 @@ class TraderJoeV2SDK:
                 f"Chain '{chain}' not supported. Supported: {list(TRADERJOE_V2_ADDRESSES.keys())}"
             )
 
-        # Initialize Web3
-        self.web3 = Web3(Web3.HTTPProvider(rpc_url))
-        if not self.web3.is_connected():
-            raise TraderJoeV2SDKError(f"Failed to connect to RPC: {rpc_url}")
+        if rpc_url is None and gateway_client is None:
+            raise TraderJoeV2SDKError("TraderJoeV2SDK requires either rpc_url (deprecated) or gateway_client")
 
-        # Inject POA middleware for chains with non-standard extraData (Avalanche, BSC, Polygon)
+        # Initialize Web3 — route through gateway when available; otherwise
+        # direct RPC (deprecated ad-hoc use).
+        if gateway_client is not None:
+            from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+
+            self.web3 = Web3(GatewayWeb3Provider(gateway_client, chain=self.chain))
+        else:
+            self.web3 = Web3(Web3.HTTPProvider(rpc_url))  # vib-2986-exempt: gateway-internal fallback
+            # Preflight only for direct-RPC path. The gateway sidecar runs on
+            # localhost and this round-trip adds no value over connecting lazily.
+            if not self.web3.is_connected():
+                raise TraderJoeV2SDKError(f"Failed to connect to RPC: {rpc_url}")
+
+        # Inject POA middleware for chains with non-standard extraData (Avalanche, BSC, Polygon).
+        # POA middleware is a client-side concern; the gateway forwards raw JSON-RPC unchanged.
         from almanak.gateway.utils.rpc_provider import is_poa_chain
 
         if is_poa_chain(self.chain):

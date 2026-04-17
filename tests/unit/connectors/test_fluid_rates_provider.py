@@ -128,6 +128,23 @@ class TestFluidRatesProvider:
         with pytest.raises(FluidSDKError, match="rpc_url"):
             provider.get_all_pool_rates()
 
+    def test_gateway_client_only_initializes_sdk(self):
+        """Provider initializes successfully with gateway_client but no rpc_url."""
+        gateway_client = MagicMock()
+        provider = FluidRatesProvider(chain="arbitrum", rpc_url=None, gateway_client=gateway_client)
+        with patch(
+            "almanak.framework.connectors.fluid.rates_provider.FluidSDK"
+        ) as mock_sdk_cls:
+            mock_sdk_cls.return_value = MagicMock()
+            sdk = provider._get_sdk()
+            # FluidSDK should be constructed with the gateway_client threaded through.
+            mock_sdk_cls.assert_called_once()
+            kwargs = mock_sdk_cls.call_args.kwargs
+            assert kwargs["chain"] == "arbitrum"
+            assert kwargs["gateway_client"] is gateway_client
+            assert kwargs["rpc_url"] is None
+            assert sdk is mock_sdk_cls.return_value
+
     def test_pool_rate_frozen(self):
         """FluidPoolRate is frozen (immutable)."""
         rate = FluidPoolRate(

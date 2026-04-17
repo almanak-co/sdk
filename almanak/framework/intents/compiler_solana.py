@@ -147,7 +147,10 @@ def get_drift_adapter(compiler) -> Any:
     if compiler._cached_drift_adapter is None:
         from almanak.framework.connectors.drift import DriftAdapter, DriftConfig
 
-        config = DriftConfig(wallet_address=compiler.wallet_address)
+        config = DriftConfig(
+            wallet_address=compiler.wallet_address,
+            gateway_client=compiler._gateway_client,
+        )
         compiler._cached_drift_adapter = DriftAdapter(config=config, token_resolver=compiler._token_resolver)
     return compiler._cached_drift_adapter
 

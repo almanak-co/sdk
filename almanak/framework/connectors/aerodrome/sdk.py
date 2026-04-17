@@ -37,6 +37,7 @@ from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
+    from almanak.framework.gateway_client import GatewayClient
 
 from almanak.core.contracts import AERODROME as AERODROME_ADDRESSES
 
@@ -241,19 +242,26 @@ class AerodromeSDK:
         chain: str = "base",
         rpc_url: str | None = None,
         token_resolver: "TokenResolverType | None" = None,
+        gateway_client: "GatewayClient | None" = None,
     ) -> None:
         """Initialize the SDK.
 
         Args:
             chain: Target chain ("base" for Aerodrome, "optimism" for Velodrome V2)
-            rpc_url: RPC endpoint URL (optional)
+            rpc_url: DEPRECATED — direct RPC URL. Bypasses the gateway and is
+                only used for ad-hoc scripts. Prefer gateway_client for any
+                code path that runs in a strategy container.
             token_resolver: Optional TokenResolver instance. If None, uses singleton.
+            gateway_client: Gateway client used to route on-chain queries
+                (eth_call) through the gateway's RpcService. Preferred over
+                rpc_url for all production code paths.
         """
         if chain not in AERODROME_ADDRESSES:
             raise ValueError(f"Unsupported chain: {chain}. Supported: {list(AERODROME_ADDRESSES.keys())}")
 
         self.chain = chain
         self.rpc_url = rpc_url
+        self._gateway_client = gateway_client
 
         # Load contract addresses
         self.addresses = AERODROME_ADDRESSES[chain]
@@ -299,7 +307,11 @@ class AerodromeSDK:
         token_b: str,
         stable: bool,
     ) -> str | None:
-        """Get pool address from factory (uses internal RPC or env var).
+        """Get pool address from factory.
+
+        Routes eth_call through the gateway when gateway_client is set on
+        the SDK. Falls back to direct RPC only for ad-hoc script usage
+        (deprecated).
 
         Args:
             token_a: First token address
@@ -309,26 +321,30 @@ class AerodromeSDK:
         Returns:
             Pool address if exists, None otherwise
         """
-        from web3 import Web3
-
-        # Get RPC URL from instance or centralized resolver
-        rpc_url = self.rpc_url
-        if not rpc_url:
-            try:
-                from almanak.gateway.utils.rpc_provider import get_rpc_url
-
-                rpc_url = get_rpc_url(self.chain)
-            except (ImportError, ValueError):
-                pass
-
-        if not rpc_url:
-            logger.warning("No RPC URL available - cannot query pool address from factory")
-            return None
-
         try:
             from web3 import Web3
 
-            web3 = Web3(Web3.HTTPProvider(rpc_url))
+            if self._gateway_client is not None:
+                from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+
+                web3 = Web3(GatewayWeb3Provider(self._gateway_client, chain=self.chain))
+                return self.get_pool_address_from_factory(token_a, token_b, stable, web3)
+
+            # Fallback: direct RPC (deprecated, ad-hoc scripts only)
+            rpc_url = self.rpc_url
+            if not rpc_url:
+                try:
+                    from almanak.gateway.utils.rpc_provider import get_rpc_url
+
+                    rpc_url = get_rpc_url(self.chain)
+                except (ImportError, ValueError):
+                    pass
+
+            if not rpc_url:
+                logger.warning("No gateway_client or RPC URL available - cannot query pool address from factory")
+                return None
+
+            web3 = Web3(Web3.HTTPProvider(rpc_url))  # vib-2986-exempt: gateway-internal fallback
             return self.get_pool_address_from_factory(token_a, token_b, stable, web3)
         except Exception as e:
             logger.error(f"Failed to query pool address: {e}")

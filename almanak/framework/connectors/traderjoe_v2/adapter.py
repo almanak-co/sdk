@@ -48,7 +48,7 @@ Example:
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -76,6 +76,7 @@ __all__ = [
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -112,10 +113,15 @@ class TraderJoeV2Config:
 
     chain: str
     wallet_address: str
-    rpc_url: str
+    rpc_url: str | None = None  # DEPRECATED — use gateway_client
     private_key: str | None = None
     default_slippage_bps: int = 50  # 0.5%
     default_deadline_seconds: int = 300  # 5 minutes
+    gateway_client: "GatewayClient | None" = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.rpc_url is None and self.gateway_client is None:
+            raise TraderJoeV2SDKError("TraderJoeV2Config requires either rpc_url (deprecated) or gateway_client")
 
 
 @dataclass
@@ -297,6 +303,7 @@ class TraderJoeV2Adapter:
             chain=self.chain,
             rpc_url=config.rpc_url,
             wallet_address=config.wallet_address,
+            gateway_client=config.gateway_client,
         )
 
         # TokenResolver integration

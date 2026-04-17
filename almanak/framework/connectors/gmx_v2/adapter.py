@@ -28,6 +28,7 @@ from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
+    from almanak.framework.gateway_client import GatewayClient
     from almanak.framework.teardown import TeardownPositionSummary
 
 logger = logging.getLogger(__name__)
@@ -1008,7 +1009,11 @@ class GMXv2Adapter:
         """
         return list(self._positions.values())
 
-    def get_positions_onchain(self, rpc_url: str) -> list[GMXv2Position]:
+    def get_positions_onchain(
+        self,
+        rpc_url: str | None = None,
+        gateway_client: "GatewayClient | None" = None,
+    ) -> list[GMXv2Position]:
         """Read all open positions for this wallet directly from on-chain state.
 
         Uses the GMX V2 SyntheticsReader contract to query the DataStore
@@ -1037,9 +1042,12 @@ class GMXv2Adapter:
 
         from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
 
+        if rpc_url is None and gateway_client is None:
+            raise ValueError("get_positions_onchain requires either rpc_url (deprecated) or gateway_client")
+
         if self.chain == "arbitrum":
             # SDK handles fallback logic internally
-            sdk = GMXV2SDK(rpc_url, chain="arbitrum")
+            sdk = GMXV2SDK(rpc_url=rpc_url, chain="arbitrum", gateway_client=gateway_client)
             raw_positions_dicts = sdk.get_account_positions(self.wallet_address)
             return self._parse_position_dicts(raw_positions_dicts)
 
@@ -1047,7 +1055,12 @@ class GMXv2Adapter:
         import json
         import os
 
-        w3 = Web3(Web3.HTTPProvider(rpc_url))
+        if gateway_client is not None:
+            from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+
+            w3 = Web3(GatewayWeb3Provider(gateway_client, chain=self.chain))
+        else:
+            w3 = Web3(Web3.HTTPProvider(rpc_url))  # vib-2986-exempt: gateway-internal fallback
         abi_dir = os.path.join(os.path.dirname(__file__), "abis")
         with open(os.path.join(abi_dir, "reader.json")) as f:
             reader_abi = json.load(f)
@@ -1286,8 +1299,9 @@ class GMXv2Adapter:
 
     def get_positions_as_teardown_summary(
         self,
-        rpc_url: str,
-        strategy_id: str,
+        rpc_url: str | None = None,
+        strategy_id: str = "",
+        gateway_client: "GatewayClient | None" = None,
     ) -> "TeardownPositionSummary":
         """Read on-chain positions and return as TeardownPositionSummary.
 
@@ -1296,15 +1310,17 @@ class GMXv2Adapter:
         PositionInfo format used by get_open_positions().
 
         Args:
-            rpc_url: RPC endpoint URL for on-chain queries
+            rpc_url: DEPRECATED — RPC endpoint URL. Prefer gateway_client.
             strategy_id: Strategy identifier for the summary
+            gateway_client: Gateway client for routing eth_call through the
+                gateway. Preferred over rpc_url.
 
         Returns:
             TeardownPositionSummary with on-chain position data
         """
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
-        onchain_positions = self.get_positions_onchain(rpc_url)
+        onchain_positions = self.get_positions_onchain(rpc_url=rpc_url, gateway_client=gateway_client)
 
         # Reverse-lookup market names
         market_names = {v: k for k, v in self.markets.items()}

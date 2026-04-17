@@ -120,6 +120,7 @@ def compile_lp_open_aerodrome(compiler, intent: LPOpenIntent) -> CompilationResu
             wallet_address=compiler.wallet_address,
             price_provider=compiler.price_oracle,
             rpc_url=compiler._get_chain_rpc_url(),
+            gateway_client=compiler._gateway_client,
         )
         adapter = AerodromeAdapter(config)
 
@@ -258,6 +259,7 @@ def compile_lp_close_aerodrome(compiler, intent: LPCloseIntent) -> CompilationRe
             wallet_address=compiler.wallet_address,
             price_provider=compiler.price_oracle,
             rpc_url=compiler._get_chain_rpc_url(),
+            gateway_client=compiler._gateway_client,
         )
         adapter = AerodromeAdapter(config)
 
@@ -507,6 +509,7 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:
             default_slippage_bps=int(intent.max_slippage * Decimal("10000")),
             price_provider=compiler.price_oracle,
             rpc_url=compiler._get_chain_rpc_url(),
+            gateway_client=compiler._gateway_client,
         )
         adapter = AerodromeAdapter(config)
 

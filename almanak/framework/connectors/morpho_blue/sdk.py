@@ -27,7 +27,7 @@ Example:
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from web3 import Web3
 from web3.exceptions import ContractLogicError
@@ -36,6 +36,9 @@ from web3.types import HexStr
 from almanak.core.contracts import MORPHO_BLUE as _MORPHO_BLUE_REGISTRY
 from almanak.core.contracts import MORPHO_BLUE_ADDRESS
 from almanak.framework.utils.rpc_provider import get_rpc_url, is_poa_chain
+
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -330,12 +333,18 @@ class MorphoBlueSDK:
         self,
         chain: str = "ethereum",
         rpc_url: str | None = None,
+        gateway_client: "GatewayClient | None" = None,
     ) -> None:
         """Initialize the SDK.
 
         Args:
             chain: Chain name (ethereum, base, arbitrum, polygon, monad)
-            rpc_url: Optional RPC URL. If not provided, uses ALCHEMY_API_KEY.
+            rpc_url: DEPRECATED — direct RPC URL. Prefer gateway_client for
+                any code path running in a strategy container. If None and
+                gateway_client is None, falls back to ALCHEMY_API_KEY via
+                get_rpc_url(chain).
+            gateway_client: Gateway client for routing eth_call through the
+                gateway's RpcService. Preferred over rpc_url.
 
         Raises:
             UnsupportedChainError: If chain is not supported
@@ -344,7 +353,10 @@ class MorphoBlueSDK:
             raise UnsupportedChainError(chain)
 
         self.chain = chain.lower()
-        self.rpc_url = rpc_url or get_rpc_url(self.chain)
+        self._gateway_client = gateway_client
+        self.rpc_url = rpc_url
+        if self._gateway_client is None:
+            self.rpc_url = self.rpc_url or get_rpc_url(self.chain)
         # Resolve Morpho Blue address per chain. Most chains share the universal address,
         # but some (e.g., Monad) use a chain-specific deployment. Fail fast if the chain
         # is in SUPPORTED_CHAINS but the address registry was missed — silent fallback to
@@ -362,10 +374,18 @@ class MorphoBlueSDK:
             )
         self.morpho_address = Web3.to_checksum_address(chain_entry["morpho"])
 
-        # Initialize Web3
-        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
+        # Initialize Web3 — route through the gateway if a client was supplied;
+        # otherwise construct a direct provider (deprecated, ad-hoc script use).
+        if gateway_client is not None:
+            from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
 
-        # Add POA middleware if needed (for chains like Avalanche, BSC)
+            self.w3 = Web3(GatewayWeb3Provider(gateway_client, chain=self.chain))
+        else:
+            self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))  # vib-2986-exempt: gateway-internal fallback
+
+        # Add POA middleware if needed (for chains like Avalanche, BSC).
+        # The gateway provider forwards raw JSON-RPC, so POA middleware
+        # remains a client-side concern regardless of transport.
         if is_poa_chain(self.chain):
             try:
                 from web3.middleware import ExtraDataToPOAMiddleware as poa_middleware
@@ -374,11 +394,14 @@ class MorphoBlueSDK:
 
             self.w3.middleware_onion.inject(poa_middleware, layer=0)
 
-        # Verify connection
-        if not self.w3.is_connected():
+        # Connection preflight only makes sense for direct RPC. For the gateway
+        # path, the gateway sidecar is always on the same host and is_connected
+        # would just add a redundant round-trip.
+        if gateway_client is None and not self.w3.is_connected():
             raise RPCError("Failed to connect to RPC", "init")
 
-        logger.info(f"MorphoBlueSDK initialized for chain={self.chain}, rpc={'custom' if rpc_url else 'alchemy'}")
+        transport = "gateway" if gateway_client is not None else ("custom" if rpc_url else "alchemy")
+        logger.info(f"MorphoBlueSDK initialized for chain={self.chain}, rpc={transport}")
 
     # =========================================================================
     # Position Reading

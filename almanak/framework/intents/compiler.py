@@ -2603,14 +2603,26 @@ class IntentCompiler:
                     intent_id=intent.intent_id,
                 )
 
-            rpc_url = self._get_chain_rpc_url()
-            if not rpc_url:
-                raise ValueError("RPC URL required for Fluid DEX adapter.")
+            # Prefer the gateway transport when a gateway client is injected
+            # AND actually connected. An injected-but-disconnected client
+            # (e.g., construction order bug in local setups) falls back to
+            # the direct RPC URL — mirrors _get_enso_route() behavior.
+            gateway_client = self._gateway_client
+            if gateway_client is not None and not gateway_client.is_connected:
+                gateway_client = None
+
+            if gateway_client is None:
+                rpc_url = self._get_chain_rpc_url()
+                if not rpc_url:
+                    raise ValueError("Connected gateway_client or RPC URL required for Fluid DEX adapter.")
+            else:
+                rpc_url = None
 
             config = FluidConfig(
                 chain=self.chain,
                 wallet_address=self.wallet_address,
                 rpc_url=rpc_url,
+                gateway_client=gateway_client,
             )
             fluid_adapter = FluidAdapter(config)
 
@@ -2678,7 +2690,9 @@ class IntentCompiler:
                 wallet_address=self.wallet_address,
                 rpc_url=self._get_chain_rpc_url(),
             )
-            adapter = UniswapV4Adapter(config=config, token_resolver=self._token_resolver)
+            adapter = UniswapV4Adapter(
+                config=config, token_resolver=self._token_resolver, gateway_client=self._gateway_client
+            )
             bundle = adapter.compile_lp_open_intent(intent, self.price_oracle)
 
             if not bundle.transactions:
@@ -2743,7 +2757,9 @@ class IntentCompiler:
                 wallet_address=self.wallet_address,
                 rpc_url=rpc_url,
             )
-            adapter = UniswapV4Adapter(config=config, token_resolver=self._token_resolver)
+            adapter = UniswapV4Adapter(
+                config=config, token_resolver=self._token_resolver, gateway_client=self._gateway_client
+            )
 
             # Extract liquidity and currency addresses from protocol_params if available
             # LPCloseIntent may not have protocol_params field
@@ -2954,12 +2970,20 @@ class IntentCompiler:
                 )
                 transactions.extend(approve_txs_y)
 
-            # Get RPC URL
-            rpc_url = self._get_chain_rpc_url()
-            if not rpc_url:
+            # TraderJoe V2 adapter accepts either a connected gateway_client
+            # (production path) or a direct RPC URL (local/backtest fallback).
+            # Normalize a disconnected gateway_client to None so we can fall
+            # back to rpc_url cleanly.
+            gateway_client = self._gateway_client
+            if gateway_client is not None and not gateway_client.is_connected:
+                gateway_client = None
+
+            rpc_url = None if gateway_client is not None else self._get_chain_rpc_url()
+            if gateway_client is None and not rpc_url:
                 raise ValueError(
-                    "RPC URL required for TraderJoe V2 adapter. "
-                    "Either provide rpc_url to IntentCompiler or use GatewayExecutionOrchestrator."
+                    "TraderJoe V2 adapter requires either a connected gateway_client "
+                    "or an RPC URL. Provide rpc_url to IntentCompiler or use "
+                    "GatewayExecutionOrchestrator."
                 )
 
             # Create TraderJoe V2 adapter to build the liquidity TX
@@ -2967,6 +2991,7 @@ class IntentCompiler:
                 chain=self.chain,
                 wallet_address=self.wallet_address,
                 rpc_url=rpc_url,
+                gateway_client=gateway_client,
             )
             tj_adapter = TraderJoeV2Adapter(config)
 
@@ -3342,11 +3367,18 @@ class IntentCompiler:
             token_x_addr = token_x_info.address
             token_y_addr = token_y_info.address
 
-            # Get RPC URL
-            rpc_url = self._get_chain_rpc_url()
-            if not rpc_url:
+            # TraderJoe V2 adapter accepts either a connected gateway_client
+            # (production path) or a direct RPC URL (local/backtest fallback).
+            # Treat a disconnected client as unavailable so we don't hand a
+            # dead client to the adapter.
+            gateway_client = self._gateway_client
+            if gateway_client is not None and not gateway_client.is_connected:
+                gateway_client = None
+
+            rpc_url = None if gateway_client is not None else self._get_chain_rpc_url()
+            if gateway_client is None and not rpc_url:
                 raise ValueError(
-                    "RPC URL required for TraderJoe V2 adapter. "
+                    "Connected gateway_client or RPC URL required for TraderJoe V2 adapter. "
                     "Either provide rpc_url to IntentCompiler or use GatewayExecutionOrchestrator."
                 )
 
@@ -3355,6 +3387,7 @@ class IntentCompiler:
                 chain=self.chain,
                 wallet_address=self.wallet_address,
                 rpc_url=rpc_url,
+                gateway_client=gateway_client,
             )
             tj_adapter = TraderJoeV2Adapter(config)
 
@@ -3547,11 +3580,18 @@ class IntentCompiler:
             token_x_addr = token_x_info.address
             token_y_addr = token_y_info.address
 
-            # Get RPC URL
-            rpc_url = self._get_chain_rpc_url()
-            if not rpc_url:
+            # TraderJoe V2 adapter accepts either a connected gateway_client
+            # (production path) or a direct RPC URL (local/backtest fallback).
+            # Treat a disconnected client as unavailable so we don't hand a
+            # dead client to the adapter.
+            gateway_client = self._gateway_client
+            if gateway_client is not None and not gateway_client.is_connected:
+                gateway_client = None
+
+            rpc_url = None if gateway_client is not None else self._get_chain_rpc_url()
+            if gateway_client is None and not rpc_url:
                 raise ValueError(
-                    "RPC URL required for TraderJoe V2 adapter. "
+                    "Connected gateway_client or RPC URL required for TraderJoe V2 adapter. "
                     "Either provide rpc_url to IntentCompiler or use GatewayExecutionOrchestrator."
                 )
 
@@ -3560,6 +3600,7 @@ class IntentCompiler:
                 chain=self.chain,
                 wallet_address=self.wallet_address,
                 rpc_url=rpc_url,
+                gateway_client=gateway_client,
             )
             tj_adapter = TraderJoeV2Adapter(config)
 
@@ -3669,7 +3710,9 @@ class IntentCompiler:
                 wallet_address=self.wallet_address,
                 rpc_url=self._get_chain_rpc_url(),
             )
-            adapter = UniswapV4Adapter(config=config, token_resolver=self._token_resolver)
+            adapter = UniswapV4Adapter(
+                config=config, token_resolver=self._token_resolver, gateway_client=self._gateway_client
+            )
 
             # Extract required params
             protocol_params = getattr(intent, "protocol_params", None) or {}
@@ -3863,11 +3906,17 @@ class IntentCompiler:
 
             amount_in_wei = int(amount_decimal * Decimal(10**from_token.decimals))
 
-            # Get RPC URL
-            rpc_url = self._get_chain_rpc_url()
-            if not rpc_url:
+            # TraderJoe V2 adapter accepts either a connected gateway_client
+            # or a direct RPC URL. Normalize a disconnected gateway client to
+            # None so we fall back to rpc_url cleanly.
+            gateway_client = self._gateway_client
+            if gateway_client is not None and not gateway_client.is_connected:
+                gateway_client = None
+
+            rpc_url = None if gateway_client is not None else self._get_chain_rpc_url()
+            if gateway_client is None and not rpc_url:
                 raise ValueError(
-                    "RPC URL required for TraderJoe V2 swap compilation. "
+                    "Connected gateway_client or RPC URL required for TraderJoe V2 swap compilation. "
                     "Either provide rpc_url to IntentCompiler or use GatewayExecutionOrchestrator."
                 )
 
@@ -3884,6 +3933,7 @@ class IntentCompiler:
                 wallet_address=self.wallet_address,
                 rpc_url=rpc_url,
                 default_slippage_bps=slippage_bps,
+                gateway_client=gateway_client,
             )
             tj_adapter = TraderJoeV2Adapter(config)
 
@@ -4038,11 +4088,22 @@ class IntentCompiler:
                     intent_id=intent.intent_id,
                 )
 
-            rpc_url = self._get_chain_rpc_url()
-            if not rpc_url:
-                raise ValueError("RPC URL required for Fluid DEX adapter.")
+            # Prefer the gateway transport when a gateway client is injected
+            # AND actually connected. An injected-but-disconnected client
+            # (e.g., construction order bug in local setups) falls back to
+            # the direct RPC URL — mirrors _get_enso_route() behavior.
+            gateway_client = self._gateway_client
+            if gateway_client is not None and not gateway_client.is_connected:
+                gateway_client = None
 
-            sdk = FluidSDK(chain=self.chain, rpc_url=rpc_url)
+            if gateway_client is None:
+                rpc_url = self._get_chain_rpc_url()
+                if not rpc_url:
+                    raise ValueError("Connected gateway_client or RPC URL required for Fluid DEX adapter.")
+            else:
+                rpc_url = None
+
+            sdk = FluidSDK(chain=self.chain, rpc_url=rpc_url, gateway_client=gateway_client)
 
             # Find the pool
             pool_addr = sdk.find_dex_by_tokens(from_token_info.address, to_token_info.address)
@@ -4200,7 +4261,9 @@ class IntentCompiler:
                 rpc_url=self._get_chain_rpc_url(),
                 default_slippage_bps=slippage_bps,
             )
-            adapter = UniswapV4Adapter(config=config, token_resolver=self._token_resolver)
+            adapter = UniswapV4Adapter(
+                config=config, token_resolver=self._token_resolver, gateway_client=self._gateway_client
+            )
 
             action_bundle = adapter.compile_swap_intent(intent, price_oracle=self.price_oracle)
 
@@ -4546,17 +4609,27 @@ class IntentCompiler:
             # Use the real SDK to build calldata with proper ABI encoding
             from ..connectors.gmx_v2 import GMX_V2_MARKETS, GMX_V2_TOKENS, GMXV2SDK, GMXV2OrderParams
 
-            # Get RPC URL via centralized resolver
-            rpc_url = self._get_chain_rpc_url()
-            if not rpc_url:
+            # GMX V2 SDK accepts either a connected gateway_client (production
+            # path) or an RPC URL (local/backtest fallback). Normalize a
+            # disconnected gateway_client to None so we fall back cleanly.
+            gateway_client = self._gateway_client
+            if gateway_client is not None and not gateway_client.is_connected:
+                gateway_client = None
+
+            rpc_url = None if gateway_client is not None else self._get_chain_rpc_url()
+            if gateway_client is None and not rpc_url:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=f"No RPC URL available for GMX V2. Set ALMANAK_{self.chain.upper()}_RPC_URL, RPC_URL, or ALCHEMY_API_KEY.",
+                    error=(
+                        f"GMX V2 requires either a connected gateway_client or an RPC URL. "
+                        f"Set ALMANAK_{self.chain.upper()}_RPC_URL, RPC_URL, ALCHEMY_API_KEY, "
+                        "or use GatewayExecutionOrchestrator."
+                    ),
                     intent_id=intent.intent_id,
                 )
 
             # Initialize SDK
-            sdk = GMXV2SDK(rpc_url, chain=self.chain)
+            sdk = GMXV2SDK(rpc_url=rpc_url, chain=self.chain, gateway_client=gateway_client)
 
             # Resolve market address
             market_address = GMX_V2_MARKETS.get(self.chain, {}).get(intent.market)
@@ -4753,17 +4826,27 @@ class IntentCompiler:
             # so we can query on-chain position size for full closes — VIB-1946)
             from ..connectors.gmx_v2 import GMX_V2_MARKETS, GMX_V2_TOKENS, GMXV2SDK, GMXV2OrderParams
 
-            # Get RPC URL via centralized resolver
-            rpc_url = self._get_chain_rpc_url()
-            if not rpc_url:
+            # GMX V2 SDK accepts either a connected gateway_client (production
+            # path) or an RPC URL (local/backtest fallback). Normalize a
+            # disconnected gateway_client to None so we fall back cleanly.
+            gateway_client = self._gateway_client
+            if gateway_client is not None and not gateway_client.is_connected:
+                gateway_client = None
+
+            rpc_url = None if gateway_client is not None else self._get_chain_rpc_url()
+            if gateway_client is None and not rpc_url:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error=f"No RPC URL available for GMX V2. Set ALMANAK_{self.chain.upper()}_RPC_URL, RPC_URL, or ALCHEMY_API_KEY.",
+                    error=(
+                        f"GMX V2 requires either a connected gateway_client or an RPC URL. "
+                        f"Set ALMANAK_{self.chain.upper()}_RPC_URL, RPC_URL, ALCHEMY_API_KEY, "
+                        "or use GatewayExecutionOrchestrator."
+                    ),
                     intent_id=intent.intent_id,
                 )
 
             # Initialize SDK
-            sdk = GMXV2SDK(rpc_url, chain=self.chain)
+            sdk = GMXV2SDK(rpc_url=rpc_url, chain=self.chain, gateway_client=gateway_client)
 
             # Resolve market address
             market_address = GMX_V2_MARKETS.get(self.chain, {}).get(intent.market)

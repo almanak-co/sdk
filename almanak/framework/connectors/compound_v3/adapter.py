@@ -59,6 +59,7 @@ from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -470,14 +471,20 @@ class CompoundV3Config:
         wallet_address: User wallet address
         market: Market identifier (usdc, weth, usdt, etc.)
         default_slippage_bps: Default slippage tolerance in basis points
-        rpc_url: Optional RPC URL for on-chain queries (e.g., collateral balance for withdraw_all)
+        rpc_url: DEPRECATED — direct RPC URL kept for backwards compatibility.
+            Ignored in production gateway-only containers. Prefer ``gateway_client``.
+        gateway_client: Optional gateway client for on-chain queries
+            (e.g., collateral balance for withdraw_all). When set, RPC calls
+            are routed through the gateway; strategies running in isolated
+            containers have no other network access.
     """
 
     chain: str
     wallet_address: str
     market: str = "usdc"
     default_slippage_bps: int = 50  # 0.5%
-    rpc_url: str | None = None
+    rpc_url: str | None = None  # DEPRECATED — prefer gateway_client
+    gateway_client: "GatewayClient | None" = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -737,8 +744,8 @@ class CompoundV3Adapter:
 
             self._token_resolver = get_token_resolver()
 
-        # RPC URL for on-chain queries
-        self.rpc_url = config.rpc_url
+        # Gateway client for on-chain queries (e.g., collateral balance)
+        self._gateway_client = config.gateway_client
 
         logger.info(
             f"CompoundV3Adapter initialized for chain={config.chain}, "
@@ -753,7 +760,7 @@ class CompoundV3Adapter:
         """Query on-chain collateral balance via Comet.userCollateral(address,address).
 
         Returns the collateral balance in wei, or None if the query fails.
-        Requires rpc_url to be set on the config.
+        Requires gateway_client to be set on the config.
 
         Compound V3 stores collateral amounts as uint128, so MAX_UINT256 cannot be
         used for withdraw_all. Unlike the base asset (which has a MAX_UINT256 shortcut),
@@ -764,15 +771,17 @@ class CompoundV3Adapter:
         collateral between query and execution, the withdrawal may revert. This is the
         standard integration pattern for Compound V3 collateral withdrawals.
         """
-        if not self.rpc_url:
-            logger.warning("No rpc_url configured; cannot query on-chain collateral balance")
+        if self._gateway_client is None:
+            logger.warning("No gateway_client configured; cannot query on-chain collateral balance")
             return None
 
         try:
             from web3 import Web3
             from web3.types import HexStr
 
-            w3 = Web3(Web3.HTTPProvider(self.rpc_url, request_kwargs={"timeout": 10}))
+            from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+
+            w3 = Web3(GatewayWeb3Provider(self._gateway_client, chain=self.chain))
 
             # userCollateral(address,address) returns (uint128 balance, uint128 _reserved)
             # selector = keccak256("userCollateral(address,address)")[0:4] = 0x2b92a07d
@@ -1055,7 +1064,7 @@ class CompoundV3Adapter:
                             success=False,
                             error=(
                                 "Cannot withdraw_all collateral: on-chain balance query failed "
-                                "and no fallback amount provided. Set rpc_url on CompoundV3Config "
+                                "and no fallback amount provided. Set gateway_client on CompoundV3Config "
                                 "for on-chain queries."
                             ),
                         )

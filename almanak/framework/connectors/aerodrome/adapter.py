@@ -49,6 +49,7 @@ from .sdk import (
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,8 @@ class AerodromeConfig:
     deadline_seconds: int = DEFAULT_DEADLINE_SECONDS
     price_provider: dict[str, Decimal] | None = None
     allow_placeholder_prices: bool = False
-    rpc_url: str | None = None  # Optional RPC override for SDK on-chain queries
+    rpc_url: str | None = None  # DEPRECATED — use gateway_client
+    gateway_client: "GatewayClient | None" = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -356,7 +358,11 @@ class AerodromeAdapter:
         self.wallet_address = config.wallet_address
 
         # Initialize SDK (includes optional RPC override for pool lookups/quotes)
-        self.sdk = AerodromeSDK(chain=self.chain, rpc_url=config.rpc_url)
+        self.sdk = AerodromeSDK(
+            chain=self.chain,
+            rpc_url=config.rpc_url,
+            gateway_client=config.gateway_client,
+        )
         self._web3: Any = None
 
         # Load contract addresses
@@ -1136,16 +1142,24 @@ class AerodromeAdapter:
     ) -> int | None:
         """Best-effort on-chain quote for amount out via router.getAmountsOut().
 
-        Returns None when rpc_url is not configured or when the quote cannot be fetched.
+        Routes through the gateway when gateway_client is configured. Falls
+        back to direct RPC (rpc_url) only for ad-hoc script usage. Returns
+        None if neither is available or the quote cannot be fetched.
         """
-        if not self.config.rpc_url:
-            return None
-
         try:
             from web3 import Web3
 
             if self._web3 is None:
-                self._web3 = Web3(Web3.HTTPProvider(self.config.rpc_url, request_kwargs={"timeout": 15}))
+                if self.config.gateway_client is not None:
+                    from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+
+                    self._web3 = Web3(GatewayWeb3Provider(self.config.gateway_client, chain=self.chain))
+                elif self.config.rpc_url:
+                    self._web3 = Web3(  # vib-2986-exempt: gateway-internal fallback
+                        Web3.HTTPProvider(self.config.rpc_url, request_kwargs={"timeout": 15})
+                    )
+                else:
+                    return None
 
             from .sdk import SwapRoute
 

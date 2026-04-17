@@ -10,6 +10,10 @@ This reader wraps GMXV2SDK and returns typed dataclasses.
 
 import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -57,14 +61,21 @@ class PerpsPositionReader:
     # Avalanche has GMX V2 markets but the SDK only supports arbitrum currently.
     SUPPORTED_CHAINS = {"arbitrum"}
 
-    def __init__(self, rpc_url: str | None = None) -> None:
-        """Initialize with an optional RPC URL.
+    def __init__(
+        self,
+        rpc_url: str | None = None,
+        gateway_client: "GatewayClient | None" = None,
+    ) -> None:
+        """Initialize with an optional RPC URL or gateway client.
 
         Args:
-            rpc_url: JSON-RPC endpoint for position queries.
-                If None, queries return empty (graceful degradation).
+            rpc_url: DEPRECATED — direct JSON-RPC endpoint. Prefer gateway_client.
+                If both are None, queries return empty (graceful degradation).
+            gateway_client: Gateway client for routing eth_call through the
+                gateway. Preferred over rpc_url.
         """
         self._rpc_url = rpc_url
+        self._gateway_client = gateway_client
 
     def read_positions(
         self,
@@ -80,7 +91,7 @@ class PerpsPositionReader:
         Returns:
             List of active positions, empty on failure.
         """
-        if not self._rpc_url:
+        if not self._rpc_url and self._gateway_client is None:
             return []
 
         if chain not in self.SUPPORTED_CHAINS:
@@ -90,7 +101,7 @@ class PerpsPositionReader:
         try:
             from almanak.framework.connectors.gmx_v2.sdk import GMXV2SDK
 
-            sdk = GMXV2SDK(self._rpc_url, chain=chain)
+            sdk = GMXV2SDK(rpc_url=self._rpc_url, chain=chain, gateway_client=self._gateway_client)
             raw_positions = sdk.get_account_positions(wallet_address)
 
             positions = []
@@ -122,7 +133,9 @@ class PerpsPositionReader:
 
         Extraction order:
         1. DirectRpcAdapter: reads URL from _rpc_stub._rpc_url (paper trading)
-        2. Environment: builds URL from ALCHEMY_API_KEY (live strategy runs)
+        2. Real GatewayClient (``.rpc`` attribute): forward the client so the
+           reader routes eth_call through the gateway
+        3. Environment: builds URL from ALCHEMY_API_KEY (legacy live path)
 
         Args:
             gateway_client: Gateway client or DirectRpcAdapter instance.
@@ -141,7 +154,26 @@ class PerpsPositionReader:
             if rpc_url:
                 return PerpsPositionReader(rpc_url=rpc_url)
 
-        # Live gateway: try to build RPC URL from environment
+        # Real GatewayClient — forward through for gateway-routed eth_call.
+        # The constructor keeps gateway_client alongside rpc_url so both
+        # transports stay available to GMXV2SDK. Use isinstance (and fall
+        # back to duck-typing on the private ``_rpc_stub`` attribute so we
+        # don't trigger ``GatewayClient.rpc`` property, which raises on a
+        # disconnected client).
+        gateway_client_cls: type | None
+        try:
+            from almanak.framework.gateway_client import GatewayClient as _GatewayClient
+
+            gateway_client_cls = _GatewayClient
+        except ImportError:
+            gateway_client_cls = None
+        is_gateway_client = (
+            gateway_client_cls is not None and isinstance(gateway_client, gateway_client_cls)
+        ) or getattr(gateway_client, "_rpc_stub", None) is not None
+        if is_gateway_client:
+            return PerpsPositionReader(gateway_client=gateway_client)  # type: ignore[arg-type]
+
+        # Legacy fallback: try to build RPC URL from environment.
         rpc_url = _get_rpc_url_from_env(chain or "arbitrum")
         if rpc_url:
             return PerpsPositionReader(rpc_url=rpc_url)

@@ -26,6 +26,7 @@ def _make_compiler() -> IntentCompiler:
     compiler.chain = "base"
     compiler.wallet_address = "0x" + "11" * 20
     compiler.price_oracle = {}
+    compiler._gateway_client = None
     return compiler
 
 

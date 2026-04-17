@@ -125,6 +125,7 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
             morpho_config = MorphoBlueConfig(
                 chain=compiler.chain,
                 wallet_address=compiler.wallet_address,
+                gateway_client=compiler._gateway_client,
             )
             morpho_adapter = MorphoBlueAdapter(morpho_config)
 
@@ -537,6 +538,7 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
                 chain=compiler.chain,
                 wallet_address=compiler.wallet_address,
                 market=market,
+                gateway_client=compiler._gateway_client,
             )
             compound_adapter = CompoundV3Adapter(compound_config)
 
@@ -1383,7 +1385,8 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
             morpho_config = MorphoBlueConfig(
                 chain=compiler.chain,
                 wallet_address=compiler.wallet_address,
-                rpc_url=morpho_rpc_url,  # Pass RPC URL for on-chain queries (e.g., repay_full)
+                rpc_url=morpho_rpc_url,  # DEPRECATED — only used when gateway_client is None
+                gateway_client=compiler._gateway_client,
             )
             morpho_adapter = MorphoBlueAdapter(morpho_config)
 
@@ -1723,6 +1726,7 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
                 chain=compiler.chain,
                 wallet_address=compiler.wallet_address,
                 market=market,
+                gateway_client=compiler._gateway_client,
             )
             compound_adapter = CompoundV3Adapter(compound_config)
 
@@ -2405,6 +2409,7 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:
             morpho_config = MorphoBlueConfig(
                 chain=compiler.chain,
                 wallet_address=compiler.wallet_address,
+                gateway_client=compiler._gateway_client,
             )
             morpho_adapter = MorphoBlueAdapter(morpho_config)
 
@@ -2743,6 +2748,7 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:
                 chain=compiler.chain,
                 wallet_address=compiler.wallet_address,
                 market=market,
+                gateway_client=compiler._gateway_client,
             )
             compound_adapter = CompoundV3Adapter(compound_config)
 
@@ -3402,7 +3408,8 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
             morpho_config = MorphoBlueConfig(
                 chain=compiler.chain,
                 wallet_address=compiler.wallet_address,
-                rpc_url=morpho_rpc_url,  # Pass RPC URL for on-chain queries (e.g., withdraw_all)
+                rpc_url=morpho_rpc_url,  # DEPRECATED — only used when gateway_client is None
+                gateway_client=compiler._gateway_client,
             )
             morpho_adapter = MorphoBlueAdapter(morpho_config)
 
@@ -3690,14 +3697,11 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
                     intent_id=intent.intent_id,
                 )
 
-            # Resolve RPC URL for on-chain queries (needed for collateral withdraw_all)
-            compound_rpc_url = compiler._get_chain_rpc_url() if intent.withdraw_all else None
-
             compound_config = CompoundV3Config(
                 chain=compiler.chain,
                 wallet_address=compiler.wallet_address,
                 market=market,
-                rpc_url=compound_rpc_url,
+                gateway_client=compiler._gateway_client,
             )
             compound_adapter = CompoundV3Adapter(compound_config)
 

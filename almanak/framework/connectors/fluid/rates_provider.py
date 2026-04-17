@@ -12,8 +12,12 @@ Rate values from Fluid use 1e12 precision (divide by 1e12 for raw fraction).
 import logging
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from almanak.framework.connectors.fluid.sdk import FLUID_ADDRESSES, FluidSDK, FluidSDKError
+
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +54,11 @@ class FluidRatesProvider:
 
     Args:
         chain: Chain name (default: "arbitrum")
-        rpc_url: RPC endpoint URL (required)
+        rpc_url: DEPRECATED — direct RPC URL. Prefer gateway_client for any
+            path running in a strategy container.
         cache_ttl: Cache TTL in seconds (default: 60)
+        gateway_client: Gateway client for routing eth_call through the
+            gateway. Preferred over rpc_url.
     """
 
     def __init__(
@@ -59,19 +66,25 @@ class FluidRatesProvider:
         chain: str = "arbitrum",
         rpc_url: str | None = None,
         cache_ttl: int = RATES_CACHE_TTL,
+        gateway_client: "GatewayClient | None" = None,
     ) -> None:
         self.chain = chain.lower()
         self._rpc_url = rpc_url
+        self._gateway_client = gateway_client
         self._cache_ttl = cache_ttl
         self._cache: dict[str, tuple[list[FluidPoolRate], float]] = {}
         self._sdk: FluidSDK | None = None
 
     def _get_sdk(self) -> FluidSDK:
-        """Lazily initialize the SDK (requires rpc_url)."""
+        """Lazily initialize the SDK (requires rpc_url or gateway_client)."""
         if self._sdk is None:
-            if not self._rpc_url:
-                raise FluidSDKError("FluidRatesProvider requires an rpc_url")
-            self._sdk = FluidSDK(chain=self.chain, rpc_url=self._rpc_url)
+            if self._gateway_client is None and not self._rpc_url:
+                raise FluidSDKError("FluidRatesProvider requires either rpc_url (deprecated) or gateway_client")
+            self._sdk = FluidSDK(
+                chain=self.chain,
+                rpc_url=self._rpc_url,
+                gateway_client=self._gateway_client,
+            )
         return self._sdk
 
     def get_all_pool_rates(self) -> list[FluidPoolRate]:
