@@ -495,6 +495,201 @@ def price(ctx, token):
 
 
 # ---------------------------------------------------------------------------
+# almanak ax resolve <token>
+# ---------------------------------------------------------------------------
+
+
+@ax.command()
+@click.argument("token")
+@click.option(
+    "--gateway/--no-gateway",
+    default=True,
+    help=(
+        "Dynamic fallback via the gateway (CoinGecko/Jupiter/on-chain ERC20) "
+        "when the token isn't in the static registry. Default ON — matches "
+        "what humans expect. Pass --no-gateway for a strict offline lookup "
+        "(useful in AI-agent code-generation loops where determinism and "
+        "speed matter more than coverage)."
+    ),
+)
+@click.pass_context
+def resolve(ctx, token, gateway: bool):
+    """Resolve a token symbol or address to its metadata on a chain.
+
+    Checks, in order: memory cache -> disk cache -> static JSON registry
+    -> symbol aliases. If ``--gateway`` (default), also tries the gateway's
+    dynamic path (CoinGecko/Jupiter for symbols, on-chain ERC20 for
+    addresses). With ``--no-gateway``, stops at the static layers for a
+    fast, offline, deterministic lookup.
+
+    ``--gateway`` requires a reachable gateway at ``--gateway-host/port``
+    (default ``localhost:50051``). If none is reachable the command
+    still answers from the static registry and flags the miss instead of
+    hanging.
+
+    \b
+    Examples:
+        almanak ax -c arbitrum resolve USDC
+        almanak ax -c arbitrum --json resolve USDC
+        almanak ax -c arbitrum --json resolve LUME              # tries dynamic
+        almanak ax -c arbitrum --no-gateway resolve LUME        # static only
+        almanak ax -c arbitrum resolve 0xaf88d065e77c8cC2239327C5EDb3A432268e5831
+
+    Exit codes:
+        0 -- token resolved.
+        1 -- token not found (address / symbol unknown on this chain).
+        2 -- invalid input (e.g. malformed address).
+    """
+    import json as _json
+
+    from almanak.framework.cli.ax_render import render_error
+    from almanak.framework.data.tokens.exceptions import (
+        InvalidTokenAddressError,
+        TokenNotFoundError,
+        TokenResolutionError,
+    )
+
+    json_output = ctx.obj["json_output"]
+    chain = ctx.obj["chain"]
+
+    resolver, gateway_channel, gateway_note, prior_channel = _build_resolver_for_cli(ctx, use_gateway=gateway)
+
+    try:
+        resolved = resolver.resolve(token, chain, skip_gateway=not gateway, log_errors=False)
+    except InvalidTokenAddressError as e:
+        render_error(f"Invalid address: {e}", json_output=json_output)
+        sys.exit(2)
+    except TokenNotFoundError as e:
+        if json_output:
+            payload = {
+                "status": "not_found",
+                "token": token,
+                "chain": chain,
+                "suggestions": list(e.suggestions or []),
+            }
+            if gateway_note:
+                payload["gateway"] = gateway_note
+            payload["hint"] = (
+                "If you have the contract address, pass it directly or use resolver.register_token() in your strategy."
+            )
+            click.echo(_json.dumps(payload, indent=2))
+        else:
+            if gateway_note:
+                click.echo(f"(gateway: {gateway_note})", err=True)
+            render_error(f"Token not found: {e}", json_output=False)
+        sys.exit(1)
+    except TokenResolutionError as e:
+        # Covers ``TokenResolutionTimeoutError``, ``AmbiguousTokenError``,
+        # and any future subclass. The exit-code contract promises 1 for
+        # "couldn't resolve" (not_found-shaped), 2 for "malformed input"
+        # (the ``InvalidTokenAddressError`` branch above). An ambiguous
+        # or timed-out resolution is functionally "couldn't resolve",
+        # so it falls under exit 1. The JSON payload carries the error
+        # class name so callers can branch on the specifics if they want.
+        if json_output:
+            payload = {
+                "status": "error",
+                "token": token,
+                "chain": chain,
+                "error_type": type(e).__name__,
+                "error": str(e),
+                "suggestions": list(getattr(e, "suggestions", []) or []),
+            }
+            if gateway_note:
+                payload["gateway"] = gateway_note
+            click.echo(_json.dumps(payload, indent=2))
+        else:
+            if gateway_note:
+                click.echo(f"(gateway: {gateway_note})", err=True)
+            render_error(f"{type(e).__name__}: {e}", json_output=False)
+        sys.exit(1)
+    finally:
+        # Restore whatever channel was on the singleton before this
+        # command ran (so an in-process caller that had a live gateway
+        # connection configured doesn't lose it because a one-shot
+        # ``ax resolve`` ran through the singleton), then close the
+        # temporary channel we attached. Both operations are best-
+        # effort -- a failed close on a dead TCP port must not hide
+        # the command's real result.
+        if gateway_channel is not None:
+            try:
+                resolver.set_gateway_channel(prior_channel)
+            except Exception:
+                pass
+            try:
+                gateway_channel.close()
+            except Exception:
+                pass
+
+    payload = {
+        "symbol": resolved.symbol,
+        "address": resolved.address,
+        "decimals": resolved.decimals,
+        "chain": resolved.chain.value.lower(),
+        "chain_id": resolved.chain_id,
+        "name": resolved.name,
+        "coingecko_id": resolved.coingecko_id,
+        "is_stablecoin": resolved.is_stablecoin,
+        "is_native": resolved.is_native,
+        "is_wrapped_native": resolved.is_wrapped_native,
+        "bridge_type": resolved.bridge_type.value,
+        "source": resolved.source,
+        "is_verified": resolved.is_verified,
+    }
+
+    if json_output:
+        click.echo(_json.dumps(payload, indent=2))
+    else:
+        click.echo(f"{resolved.symbol} on {chain}")
+        click.echo(f"  address     {resolved.address}")
+        click.echo(f"  decimals    {resolved.decimals}")
+        click.echo(f"  name        {resolved.name or '-'}")
+        click.echo(f"  coingecko   {resolved.coingecko_id or '-'}")
+        click.echo(f"  source      {resolved.source}")
+        click.echo(f"  stablecoin  {'yes' if resolved.is_stablecoin else 'no'}")
+
+
+def _build_resolver_for_cli(ctx, *, use_gateway: bool):
+    """Return ``(resolver, channel_or_None, gateway_note, prior_channel)``.
+
+    When ``use_gateway`` is True, try to attach a gRPC channel to the
+    configured host/port so the resolver can reach the dynamic fallback.
+    ``prior_channel`` is whatever was on the singleton *before* we
+    attached — the CLI's ``finally`` block restores it so an in-process
+    caller that already had a live gateway configured doesn't lose it
+    because a one-shot ``ax resolve`` ran through the shared singleton.
+
+    If the gateway channel can't be built we fall back to static-only
+    resolution and return a human-readable note explaining what we
+    tried. Never blocks or hangs: we only verify the channel is
+    constructable here, the resolver's own 5s timeout handles calls.
+    """
+    from almanak.framework.data.tokens import get_token_resolver
+
+    resolver = get_token_resolver()
+
+    if not use_gateway:
+        return resolver, None, None, resolver._gateway_channel
+
+    host = ctx.obj.get("gateway_host", "localhost")
+    port = ctx.obj.get("gateway_port", 50051)
+    try:
+        import grpc
+
+        channel = grpc.insecure_channel(f"{host}:{port}")
+    except Exception as e:  # grpc import or construction failure
+        return resolver, None, f"could not build gRPC channel to {host}:{port}: {e}", resolver._gateway_channel
+
+    prior_channel = resolver._gateway_channel
+    # Attach the channel to the singleton for this command via the
+    # locked set_gateway_channel API (never mutate _gateway_channel
+    # directly — that skips the lock and leaves _gateway_stub /
+    # _gateway_available cached against the old channel).
+    resolver.set_gateway_channel(channel)
+    return resolver, channel, f"attempted dynamic lookup via {host}:{port}", prior_channel
+
+
+# ---------------------------------------------------------------------------
 # almanak ax balance <token>
 # ---------------------------------------------------------------------------
 

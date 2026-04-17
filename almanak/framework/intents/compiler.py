@@ -6186,34 +6186,18 @@ class IntentCompiler:
         return symbol.upper() in native_tokens
 
     def _get_wrapped_native_address(self) -> str | None:
-        """Get the wrapped native token address for the current chain.
+        """Return the wrapped native token address for the current chain.
 
-        Uses TokenResolver to resolve WETH/WMATIC/WAVAX/WXPL depending on chain.
-        Returns None if the wrapped native token cannot be resolved.
+        Single source of truth: WRAPPED_NATIVE in
+        ``almanak/framework/data/tokens/data/chains.json`` (exposed via
+        ``defaults.WRAPPED_NATIVE``). Previously this method carried a
+        duplicate per-chain symbol dict that drifted from the real registry
+        (e.g. the ``zerog`` entry was missing until VIB-2896 surfaced it).
+        Reading the canonical dict directly prevents that drift.
         """
-        # Map chains to their wrapped native token symbol
-        wrapped_symbols = {
-            "ethereum": "WETH",
-            "arbitrum": "WETH",
-            "optimism": "WETH",
-            "base": "WETH",
-            "polygon": "WMATIC",
-            "avalanche": "WAVAX",
-            "plasma": "WXPL",
-            "bsc": "WBNB",
-            "mantle": "WMNT",
-            "sonic": "WS",
-            "xlayer": "WOKB",
-            "monad": "WMON",
-            "zerog": "W0G",
-        }
-        symbol = wrapped_symbols.get(self.chain)
-        if not symbol:
-            return None
-        try:
-            return self._token_resolver.get_address(self.chain, symbol)
-        except Exception:
-            return None
+        from almanak.framework.data.tokens.defaults import WRAPPED_NATIVE
+
+        return WRAPPED_NATIVE.get(self.chain)
 
     def _usd_to_token_amount(self, usd_amount: Decimal, token: TokenInfo) -> int:
         """Convert USD amount to token amount in wei.

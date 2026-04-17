@@ -1,0 +1,32 @@
+{
+  "_meta": {
+    "description": "Chain-scoped symbol aliases (bridged tokens). Symbols uppercased, addresses mixed-case as originally recorded.",
+    "source": "exported from defaults.py SYMBOL_ALIASES"
+  },
+  "aliases": {
+    "arbitrum": {
+      "USDC.E": "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",
+      "YT-WSTETH": "0x25BdA1EDd6aF17C61399aA0eb84b93dAA3069764"
+    },
+    "optimism": {
+      "USDC.E": "0x7F5c764cBc14f9669B88837ca1490cCa17c31607"
+    },
+    "base": {
+      "USDBC": "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
+      "AXLUSDC": "0xEB466342C4d449BC9f53A865D5Cb90586f405215"
+    },
+    "polygon": {
+      "USDC.E": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+    },
+    "avalanche": {
+      "USDC.E": "0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664",
+      "USDT.E": "0xc7198437980c041c805A1EDcbA50c1Ce5db95118",
+      "WETH.E": "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",
+      "BTCB": "0x152b9d0FdC40C096757F570A51E494bd4b943E50"
+    },
+    "berachain": {
+      "USDC.E": "0x549943e04f40284185054145c6E4e9568C1D3241",
+      "USDC": "0x549943e04f40284185054145c6E4e9568C1D3241"
+    }
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "_meta": {
+    "description": "Per-chain token config (wrapped native, sentinel).",
+    "source": "exported from defaults.py WRAPPED_NATIVE"
+  },
+  "chains": {
+    "ethereum": {
+      "wrapped_native_address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "arbitrum": {
+      "wrapped_native_address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "optimism": {
+      "wrapped_native_address": "0x4200000000000000000000000000000000000006",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "base": {
+      "wrapped_native_address": "0x4200000000000000000000000000000000000006",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "polygon": {
+      "wrapped_native_address": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "avalanche": {
+      "wrapped_native_address": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "bsc": {
+      "wrapped_native_address": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "sonic": {
+      "wrapped_native_address": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "blast": {
+      "wrapped_native_address": "0x4300000000000000000000000000000000000004",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "linea": {
+      "wrapped_native_address": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "plasma": {
+      "wrapped_native_address": "0x6100E367285b01F48D07953803A2d8dCA5D19873",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "solana": {
+      "wrapped_native_address": "So11111111111111111111111111111111111111112",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "mantle": {
+      "wrapped_native_address": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "berachain": {
+      "wrapped_native_address": "0x6969696969696969696969696969696969696969",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "monad": {
+      "wrapped_native_address": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "xlayer": {
+      "wrapped_native_address": "0xe538905cf8410324e03A5A23C1c177a474D59b2b",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "zerog": {
+      "wrapped_native_address": "0x1Cd0690fF9a693f5EF2dD976660a8dAFc81A109c",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    }
+  }
+}
