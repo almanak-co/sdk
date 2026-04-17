@@ -278,9 +278,14 @@ class PolymarketAdapter:
                 signed_order = self.clob.create_and_sign_market_order(market_params, market=market)
                 order_type = OrderType.IOC  # Market orders use IOC
 
-            # Build order payload
-            order_payload = signed_order.to_api_payload()
-            order_payload["orderType"] = order_type.value
+            # Build order payload (owner = API key, required by CLOB matcher).
+            # Use get_or_create_credentials() so lazy L2 derivation works when
+            # the adapter was initialized with wallet-only config.
+            credentials = self.clob.get_or_create_credentials()
+            order_payload = signed_order.to_api_payload(
+                owner=credentials.api_key,
+                order_type=order_type.value,
+            )
 
             logger.info(
                 "Compiled buy intent",
@@ -401,9 +406,14 @@ class PolymarketAdapter:
                 signed_order = self.clob.create_and_sign_market_order(market_params, market=market)
                 order_type = OrderType.IOC  # Market orders use IOC
 
-            # Build order payload
-            order_payload = signed_order.to_api_payload()
-            order_payload["orderType"] = order_type.value
+            # Build order payload (owner = API key, required by CLOB matcher).
+            # Use get_or_create_credentials() so lazy L2 derivation works when
+            # the adapter was initialized with wallet-only config.
+            credentials = self.clob.get_or_create_credentials()
+            order_payload = signed_order.to_api_payload(
+                owner=credentials.api_key,
+                order_type=order_type.value,
+            )
 
             logger.info(
                 "Compiled sell intent",

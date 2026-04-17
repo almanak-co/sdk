@@ -117,15 +117,19 @@ class TestL1Authentication:
         assert headers["POLY_ADDRESS"] == config.wallet_address
 
     def test_build_l1_headers_signature_is_hex(self, config):
-        """L1 signature should be a valid hex string."""
+        """L1 signature should be a valid hex string with the 0x prefix.
+
+        Regression: VIB-3013. Polymarket's GET /auth/derive-api-key rejects
+        signatures without the `0x` prefix with `400 "Could not derive api key!"`.
+        """
         client = ClobClient(config)
         headers = client._build_l1_headers()
 
         signature = headers["POLY_SIGNATURE"]
-        # Should be hex without 0x prefix (from .hex())
-        assert all(c in "0123456789abcdef" for c in signature)
-        # EIP-712 signatures are 65 bytes = 130 hex chars
-        assert len(signature) == 130
+        assert signature.startswith("0x")
+        # 65-byte signature = 130 hex chars + "0x" = 132 total
+        assert len(signature) == 132
+        assert all(c in "0123456789abcdef" for c in signature[2:])
 
     def test_build_l1_headers_timestamp_is_recent(self, config):
         """L1 timestamp should be recent."""
@@ -183,7 +187,8 @@ class TestL1Authentication:
         }
 
         signable = encode_typed_data(full_message=typed_data)
-        recovered = Account.recover_message(signable, signature=bytes.fromhex(signature_hex))
+        sig_bytes = bytes.fromhex(signature_hex[2:] if signature_hex.startswith("0x") else signature_hex)
+        recovered = Account.recover_message(signable, signature=sig_bytes)
 
         assert recovered == test_account.address
 
@@ -222,18 +227,21 @@ class TestL2Authentication:
         assert headers["POLY_PASSPHRASE"] == "test_passphrase"
 
     def test_build_l2_signature_format(self, config_with_credentials):
-        """L2 signature should be base64 encoded."""
+        """L2 signature should be URL-safe base64 encoded (32 bytes HMAC-SHA256).
+
+        Polymarket API secrets are URL-safe base64 (`-` / `_`) and the server
+        verifies URL-safe encoding on the signature too.
+        """
         client = ClobClient(config_with_credentials)
         headers = client._build_l2_headers("GET", "/test")
 
         signature = headers["POLY_SIGNATURE"]
-        # Should be valid base64
         try:
-            decoded = base64.b64decode(signature)
+            decoded = base64.urlsafe_b64decode(signature)
             # SHA256 produces 32 bytes
             assert len(decoded) == 32
         except Exception:
-            pytest.fail("Signature is not valid base64")
+            pytest.fail("Signature is not valid URL-safe base64")
 
     def test_build_l2_signature_reproducible(self, config_with_credentials):
         """L2 signature should be reproducible with same inputs."""
@@ -268,15 +276,15 @@ class TestL2Authentication:
         with patch("time.time", return_value=int(timestamp)):
             headers = client._build_l2_headers(method, path, body)
 
-        # Manually compute expected signature
+        # Manually compute expected signature (URL-safe base64, matches CLOB server)
         secret = credentials.secret.get_secret_value()
         message = f"{timestamp}{method}{path}{body}"
         expected_sig = hmac.new(
-            base64.b64decode(secret),
+            base64.urlsafe_b64decode(secret),
             message.encode("utf-8"),
             hashlib.sha256,
         ).digest()
-        expected_b64 = base64.b64encode(expected_sig).decode("utf-8")
+        expected_b64 = base64.urlsafe_b64encode(expected_sig).decode("utf-8")
 
         assert headers["POLY_SIGNATURE"] == expected_b64
 
@@ -486,8 +494,9 @@ class TestSignatureTypes:
         client = ClobClient(config)
         headers = client._build_l1_headers()
 
-        # Should still produce valid signature
-        assert len(headers["POLY_SIGNATURE"]) == 130
+        # Should still produce valid signature ("0x" + 65-byte hex = 132 chars)
+        assert headers["POLY_SIGNATURE"].startswith("0x")
+        assert len(headers["POLY_SIGNATURE"]) == 132
 
     def test_signature_type_values(self):
         """Signature types should have correct integer values."""
@@ -1218,9 +1227,10 @@ class TestOrderSigning:
         unsigned = client.build_limit_order(params)
         signed = client.sign_order(unsigned)
 
-        # Signature should be hex string (65 bytes = 130 hex chars)
-        assert len(signed.signature) == 130
-        assert all(c in "0123456789abcdef" for c in signed.signature)
+        # Signature: "0x" + 65-byte hex = 132 chars (VIB-3013 regression)
+        assert signed.signature.startswith("0x")
+        assert len(signed.signature) == 132
+        assert all(c in "0123456789abcdef" for c in signed.signature[2:])
 
         # Order should be preserved
         assert signed.order == unsigned
@@ -1263,7 +1273,8 @@ class TestOrderSigning:
         }
 
         signable = encode_typed_data_local(full_message=typed_data)
-        recovered = Account.recover_message(signable, signature=bytes.fromhex(signed.signature))
+        sig_hex = signed.signature.removeprefix("0x")
+        recovered = Account.recover_message(signable, signature=bytes.fromhex(sig_hex))
 
         assert recovered == test_account.address
 
@@ -1282,7 +1293,8 @@ class TestOrderSigning:
         signed = client.create_and_sign_limit_order(params)
 
         assert signed.order is not None
-        assert len(signed.signature) == 130
+        assert signed.signature.startswith("0x")
+        assert len(signed.signature) == 132
 
     def test_create_and_sign_market_order(self, config_with_credentials):
         """Convenience method should build and sign market order in one call."""
@@ -1300,7 +1312,8 @@ class TestOrderSigning:
 
         assert signed.order is not None
         assert signed.order.side == 1  # SELL
-        assert len(signed.signature) == 130
+        assert signed.signature.startswith("0x")
+        assert len(signed.signature) == 132
 
 
 class TestOrderSubmission:
@@ -1516,7 +1529,13 @@ class TestOrderPayload:
         assert struct["signatureType"] == 0  # EOA
 
     def test_signed_order_to_api_payload(self, config_with_credentials):
-        """SignedOrder.to_api_payload() should produce correct API structure."""
+        """SignedOrder.to_api_payload() should produce canonical CLOB structure.
+
+        Regression: VIB-3012. The prior payload shape was rejected by Polymarket
+        with `400 "Invalid order payload"`. This test pins the canonical shape:
+        signature INSIDE the order dict with `0x` prefix, side as the string
+        "BUY"/"SELL", and `owner` + `orderType` at the top level.
+        """
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
         client = ClobClient(config_with_credentials)
@@ -1528,22 +1547,70 @@ class TestOrderPayload:
         )
 
         signed = client.create_and_sign_limit_order(params)
-        payload = signed.to_api_payload()
+        payload = signed.to_api_payload(owner="test_api_key", order_type="GTC")
 
-        assert "order" in payload
-        assert "signature" in payload
+        # Top-level shape: order + owner + orderType
+        assert set(payload.keys()) == {"order", "owner", "orderType"}
+        assert payload["owner"] == "test_api_key"
+        assert payload["orderType"] == "GTC"
 
         order = payload["order"]
         assert order["salt"] == signed.order.salt
         assert order["maker"] == config_with_credentials.wallet_address
         assert order["tokenId"] == "12345"  # API expects string
-        assert order["makerAmount"] == str(signed.order.maker_amount)  # API expects string
+        assert order["makerAmount"] == str(signed.order.maker_amount)
         assert order["takerAmount"] == str(signed.order.taker_amount)
-        assert order["side"] == 1  # SELL
+        assert order["side"] == "SELL"  # canonical: string, not int
         assert order["signatureType"] == 0  # EOA
 
-        # Signature should be hex string without 0x prefix
-        assert len(payload["signature"]) == 130
+        # Signature must live INSIDE the order and carry the 0x prefix
+        assert "signature" not in payload  # not at top level
+        assert order["signature"].startswith("0x")
+        # 65-byte sig: "0x" + 130 hex chars = 132
+        assert len(order["signature"]) == 132
+
+    def test_signed_order_to_api_payload_buy_side_is_string(self, config_with_credentials):
+        """BUY intent must serialize to `"side": "BUY"`, not 0.
+
+        Regression: VIB-3012.
+        """
+        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+
+        client = ClobClient(config_with_credentials)
+        params = LimitOrderParams(
+            token_id="12345",
+            side="BUY",
+            price=Decimal("0.50"),
+            size=Decimal("10"),
+        )
+        signed = client.create_and_sign_limit_order(params)
+        payload = signed.to_api_payload(owner="test_api_key")
+
+        assert payload["order"]["side"] == "BUY"
+        assert payload["orderType"] == "GTC"  # default
+
+    def test_signed_order_payload_repairs_missing_0x(self, config_with_credentials):
+        """Even if an upstream signer returns hex without `0x`, the payload
+        must still emit `0x`-prefixed signature. Defense-in-depth check.
+        """
+        from almanak.framework.connectors.polymarket.models import LimitOrderParams, SignedOrder
+
+        client = ClobClient(config_with_credentials)
+        params = LimitOrderParams(
+            token_id="12345",
+            side="BUY",
+            price=Decimal("0.50"),
+            size=Decimal("10"),
+        )
+        signed = client.create_and_sign_limit_order(params)
+
+        # Synthesize an "old-style" signature without 0x prefix
+        raw_signed = SignedOrder(
+            order=signed.order,
+            signature=signed.signature.removeprefix("0x"),
+        )
+        payload = raw_signed.to_api_payload(owner="test_api_key")
+        assert payload["order"]["signature"].startswith("0x")
 
 
 # =============================================================================
@@ -2111,6 +2178,96 @@ class TestMarketSpecificMinimumOrderSize:
         # Error should contain market-specific minimum, not default
         assert "42.5" in str(exc_info.value)
         assert exc_info.value.minimum == "42.5"
+
+    # -------------------------------------------------------------------------
+    # VIB-3014: $1 USD minimum makerAmount for BUY orders
+    # -------------------------------------------------------------------------
+
+    def test_validate_order_value_usd_below_floor(self, config_with_credentials):
+        """_validate_order_value_usd should reject BUYs below $1 notional.
+
+        Regression: VIB-3014. Polymarket CLOB rejects BUY orders with
+        makerAmount < $1 with `400 "invalid amount for a marketable BUY order ($X)"`.
+        The `$` prefix on both fields distinguishes this from a share-count floor.
+        """
+        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+
+        client = ClobClient(config_with_credentials)
+
+        with pytest.raises(PolymarketMinimumOrderError) as exc_info:
+            client._validate_order_value_usd(Decimal("0.30"))
+
+        assert exc_info.value.size == "$0.30"
+        assert exc_info.value.minimum == "$1"
+
+    def test_validate_order_value_usd_at_floor(self, config_with_credentials):
+        """_validate_order_value_usd should pass at exactly $1."""
+        client = ClobClient(config_with_credentials)
+        # Must not raise
+        client._validate_order_value_usd(Decimal("1.00"))
+        client._validate_order_value_usd(Decimal("1.01"))
+
+    def test_build_limit_order_buy_rejects_sub_dollar_notional(self, config_with_credentials):
+        """VIB-3014 repro: 5 shares × $0.06 = $0.30 passes share check but fails USD check.
+
+        This is the exact shape that leaked to the CLOB and triggered
+        `min size: $1` before the fix.
+        """
+        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+
+        client = ClobClient(config_with_credentials)
+        market = self._create_market(order_min_size="5")
+
+        params = LimitOrderParams(
+            token_id="123",
+            side="BUY",
+            price=Decimal("0.06"),
+            size=Decimal("5"),  # share count OK (>= 5), value only $0.30
+        )
+
+        with pytest.raises(PolymarketMinimumOrderError) as exc_info:
+            client.build_limit_order(params, market=market)
+
+        # Must be the USD-floor error, not the share-count error
+        assert exc_info.value.minimum == "$1"
+
+    def test_build_limit_order_sell_not_subject_to_usd_floor(self, config_with_credentials):
+        """SELL makerAmount is shares, not USD. $1 floor should NOT apply."""
+        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+
+        client = ClobClient(config_with_credentials)
+        market = self._create_market(order_min_size="5")
+
+        params = LimitOrderParams(
+            token_id="123",
+            side="SELL",
+            price=Decimal("0.06"),
+            size=Decimal("5"),  # $0.30 notional
+        )
+
+        # Must not raise — SELL is not bounded by the BUY-side USD floor
+        client.build_limit_order(params, market=market)
+
+    def test_build_market_order_buy_rejects_sub_dollar_amount(self, config_with_credentials):
+        """Market BUY with <$1 amount should fail at validation, not wire."""
+        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+
+        client = ClobClient(config_with_credentials)
+        market = self._create_market(order_min_size="5")
+
+        params = MarketOrderParams(
+            token_id="123",
+            side="BUY",
+            amount=Decimal("0.50"),  # sub-dollar USDC to spend
+            worst_price=Decimal("0.10"),  # 5 shares, passes share floor
+        )
+
+        with pytest.raises(PolymarketMinimumOrderError) as exc_info:
+            client.build_market_order(params, market=market)
+
+        assert exc_info.value.minimum == "$1"
 
 
 class TestTickSizeValidation:

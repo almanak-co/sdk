@@ -76,10 +76,11 @@ class MockSignedOrder:
     order: Any = None
     signature: str = "0xmocksignature"
 
-    def to_api_payload(self) -> dict[str, Any]:
+    def to_api_payload(self, owner: str, order_type: str = "GTC") -> dict[str, Any]:
         return {
-            "order": {"tokenId": "111111", "side": "BUY"},
-            "signature": self.signature,
+            "order": {"tokenId": "111111", "side": "BUY", "signature": self.signature},
+            "owner": owner,
+            "orderType": order_type,
         }
 
 
@@ -126,6 +127,8 @@ def mock_clob_client(test_market):
     mock.create_and_sign_limit_order.return_value = MockSignedOrder()
     mock.create_and_sign_market_order.return_value = MockSignedOrder()
     mock.close.return_value = None
+    # Adapter reads clob.credentials.api_key to build the order `owner` field
+    mock.credentials.api_key = "test-api-key"
     return mock
 
 
