@@ -115,6 +115,7 @@ from almanak.framework.execution.orchestrator import (
     ExecutionOrchestrator,
     ExecutionResult,
 )
+from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.models.reproduction_bundle import ActionBundle, TransactionReceipt
 from almanak.gateway.data.price import CoinGeckoPriceSource, PriceAggregator
 from almanak.gateway.data.price.binance import BinancePriceSource
@@ -2016,6 +2017,15 @@ class PaperTrader:
 
             # Execute on fork
             result = await self._orchestrator.execute(action_bundle, context)
+
+            # VIB-2918: Enrich result so on_intent_executed receives populated
+            # position_id / swap_amounts / extracted_data, matching StrategyRunner.
+            # Without this, stateful strategies that read result.position_id in
+            # their callback never advance their state machine and re-open
+            # positions every tick. enrich_result uses the singleton enricher
+            # and is fail-safe (logs internally on failure, never raises).
+            if result.success:
+                result = enrich_result(result, intent, context)
 
             # Store for on_intent_executed callback (VIB-1951)
             self._last_execution_result = result

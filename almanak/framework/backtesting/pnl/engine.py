@@ -116,6 +116,10 @@ from almanak.framework.backtesting.pnl.mev_simulator import (
 )
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio, SimulatedPosition
 from almanak.framework.backtesting.pnl.providers.gas import GasPrice, GasPriceProvider
+from almanak.framework.backtesting.pnl.simulated_result import (
+    SimulatedExecutionResult,
+    build_simulated_result,
+)
 
 # Import strategy-related types
 from almanak.framework.strategies.intent_strategy import MarketSnapshot
@@ -666,6 +670,28 @@ class PnLBacktester:
             self._fallback_usage[fallback_type] += 1
         else:
             self._fallback_usage[fallback_type] = 1
+
+    def _build_callback_result(
+        self,
+        intent: Any,
+        trade_record: TradeRecord | None,
+        success: bool,
+        error: str | None = None,
+    ) -> SimulatedExecutionResult:
+        """Build the result object passed to ``strategy.on_intent_executed``.
+
+        VIB-2916: For LP_OPEN intents the real ``SimulatedPosition.position_id``
+        is read from the trade record (populated by
+        ``SimulatedFill.to_trade_record``) so a later
+        ``Intent.lp_close(position_id=self._position_id)`` resolves against
+        the open position the engine actually tracks.
+        """
+        return build_simulated_result(
+            intent=intent,
+            trade_record=trade_record,
+            success=success,
+            error=error,
+        )
 
     def _create_parameter_source_tracker(
         self,
@@ -1636,14 +1662,18 @@ class PnLBacktester:
                             # Notify strategy of successful execution
                             if hasattr(strategy, "on_intent_executed"):
                                 try:
-                                    strategy.on_intent_executed(intent, True, trade_record)
+                                    callback_result = self._build_callback_result(intent, trade_record, success=True)
+                                    strategy.on_intent_executed(intent, True, callback_result)
                                 except Exception as notify_err:
                                     bt_logger.debug(f"on_intent_executed raised: {notify_err}")
                         except Exception as e:
                             # Notify strategy of execution failure
                             if hasattr(strategy, "on_intent_executed"):
                                 try:
-                                    strategy.on_intent_executed(intent, False, str(e))
+                                    callback_result = self._build_callback_result(
+                                        intent, None, success=False, error=str(e)
+                                    )
+                                    strategy.on_intent_executed(intent, False, callback_result)
                                 except Exception as notify_err:
                                     bt_logger.debug(f"on_intent_executed (failure) raised: {notify_err}")
                             # Use error handler for intent execution errors
@@ -1957,14 +1987,16 @@ class PnLBacktester:
                     # Notify strategy of successful execution so state machines can advance
                     if strategy is not None and hasattr(strategy, "on_intent_executed"):
                         try:
-                            strategy.on_intent_executed(intent, True, trade_record)
+                            callback_result = self._build_callback_result(intent, trade_record, success=True)
+                            strategy.on_intent_executed(intent, True, callback_result)
                         except Exception as notify_err:
                             logger.debug(f"on_intent_executed raised: {notify_err}")
                 except Exception as e:
                     # Notify strategy of execution failure
                     if strategy is not None and hasattr(strategy, "on_intent_executed"):
                         try:
-                            strategy.on_intent_executed(intent, False, str(e))
+                            callback_result = self._build_callback_result(intent, None, success=False, error=str(e))
+                            strategy.on_intent_executed(intent, False, callback_result)
                         except Exception as notify_err:
                             logger.debug(f"on_intent_executed (failure) raised: {notify_err}")
                     # Use error handler for intent execution errors

@@ -679,6 +679,9 @@ class SimulatedFill:
         """
         # Use fill's delayed_at_end if not overridden
         actual_delayed_at_end = delayed_at_end if delayed_at_end is not None else self.delayed_at_end
+        # VIB-2916: surface the simulated position_id (open) or the close-target id
+        # so on_intent_executed receives the same id the engine actually tracks.
+        position_id = self.position_delta.position_id if self.position_delta else self.position_close_id
         return TradeRecord(
             timestamp=self.timestamp,
             intent_type=self.intent_type,
@@ -698,6 +701,7 @@ class SimulatedFill:
             gas_price_gwei=self.gas_price_gwei,
             estimated_mev_cost_usd=self.estimated_mev_cost_usd,
             delayed_at_end=actual_delayed_at_end,
+            position_id=position_id,
         )
 
     def to_dict(self) -> dict[str, Any]:

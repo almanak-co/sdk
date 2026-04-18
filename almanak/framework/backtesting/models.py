@@ -1517,6 +1517,11 @@ class TradeRecord:
     gas_price_gwei: Decimal | None = None
     estimated_mev_cost_usd: Decimal | None = None
     delayed_at_end: bool = False
+    # VIB-2916: position_id of the SimulatedPosition created/closed by this trade.
+    # Populated from SimulatedFill.position_delta in to_trade_record(). Used by
+    # the PnL backtester to surface the real ID through on_intent_executed so
+    # strategies can later close via Intent.lp_close(position_id=...).
+    position_id: str | None = None
 
     @property
     def net_pnl_usd(self) -> Decimal:
@@ -1558,6 +1563,7 @@ class TradeRecord:
             if self.estimated_mev_cost_usd is not None
             else None,
             "delayed_at_end": self.delayed_at_end,
+            "position_id": self.position_id,
         }
 
 
@@ -2402,6 +2408,7 @@ class BacktestResult:
                     if t_data.get("estimated_mev_cost_usd") is not None
                     else None,
                     delayed_at_end=t_data.get("delayed_at_end", False),
+                    position_id=t_data.get("position_id"),
                 )
             )
 
