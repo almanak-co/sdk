@@ -140,3 +140,36 @@ class TestSettingsFallback:
             assert not settings.coingecko_api_key
             assert not settings.enso_api_key
             assert not settings.portfolio_api_key
+
+
+class TestAuthTokenInitKwargPrecedence:
+    """VIB-3032: explicit auth_token kwarg must win over ALMANAK_GATEWAY_AUTH_TOKEN env.
+
+    On test networks (anvil/sepolia) the managed-gateway path in
+    ``almanak/framework/cli/run.py`` passes ``auth_token=None`` so the server
+    does not attach AuthInterceptor while the client runs with
+    ``allow_insecure=True``. If pydantic ever re-picked the env value as a
+    fallback, every gRPC call would fail UNAUTHENTICATED.
+    """
+
+    def test_explicit_none_overrides_env_auth_token(self):
+        """Passing auth_token=None as kwarg must win over ALMANAK_GATEWAY_AUTH_TOKEN."""
+        env = {"ALMANAK_GATEWAY_AUTH_TOKEN": "from-env-should-lose"}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings(auth_token=None, allow_insecure=True)
+            assert settings.auth_token is None
+            assert settings.allow_insecure is True
+
+    def test_explicit_token_overrides_env_auth_token(self):
+        """Passing a session token kwarg (mainnet path) overrides env token."""
+        env = {"ALMANAK_GATEWAY_AUTH_TOKEN": "from-env"}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings(auth_token="session-token-xyz")
+            assert settings.auth_token == "session-token-xyz"
+
+    def test_env_still_used_when_no_kwarg_passed(self):
+        """Regression sanity: without kwarg, env token is still honoured (non-test paths)."""
+        env = {"ALMANAK_GATEWAY_AUTH_TOKEN": "env-token"}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.auth_token == "env-token"

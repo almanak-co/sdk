@@ -121,7 +121,7 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
         "pancakeswap_v3": "0x32226588378236Fd0c7c4053999F88aC0e5cAc77",  # SmartRouter (7-param)
         # traderjoe_v2: uses dedicated _compile_swap_traderjoe_v2() (VIB-1928), not DefaultSwapAdapter
         "sushiswap": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
-        "camelot": "0xc873fEcbd354f5A56E00E710B90EF4201db2448d",
+        "camelot": "0x1F721E2E82F6676FCE4eA07A5958cF098D339e18",  # Algebra V3 SwapRouter (VIB-1636)
         "1inch": "0x1111111254EEB25477B68fb85Ed929f73A960582",
     },
     "optimism": {
@@ -348,6 +348,12 @@ SWAP_ROUTER_V1_CHAIN_OVERRIDES: dict[str, frozenset[str]] = {
     "mantle": frozenset({"agni_finance"}),  # Agni Finance uses original SwapRouter (with deadline)
     "zerog": frozenset({"uniswap_v3"}),  # Jaine DEX SwapRouter accepts only the V1 8-arg form
 }
+
+# Protocols using the Algebra V1.9 router interface (VIB-1636).
+# exactInputSingle((address,address,address,uint256,uint256,uint256,uint160)) -> 0xbc651188
+# Struct: tokenIn, tokenOut, recipient, deadline, amountIn, amountOutMinimum, limitSqrtPrice
+# NOTE: Algebra has no `fee` parameter — fees are determined dynamically by the pool.
+SWAP_ROUTER_ALGEBRA_PROTOCOLS: frozenset[str] = frozenset({"camelot"})
 
 # Quoter addresses used for AUTO fee tier selection.
 SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {

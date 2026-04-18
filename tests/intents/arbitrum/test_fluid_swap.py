@@ -56,7 +56,10 @@ class TestFluidSwapIntent:
     Uses USDC/USDT pair (Pool 2) — known working pair on Fluid DEX Arbitrum.
     """
 
-    @pytest.mark.xfail(reason="Fluid DEX pool liquidity is block-dependent on Anvil forks", strict=False)
+    @pytest.mark.xfail(
+        reason="VIB-2822: Fluid connector disabled at compile time — all Arbitrum T1 pools reject swaps",
+        strict=False,
+    )
     @pytest.mark.asyncio
     async def test_swap_usdc_to_usdt_using_intent(
         self,
@@ -196,7 +199,10 @@ class TestFluidSwapIntent:
 
         print("\nALL CHECKS PASSED")
 
-    @pytest.mark.xfail(reason="Fluid DEX pool liquidity is block-dependent on Anvil forks", strict=False)
+    @pytest.mark.xfail(
+        reason="VIB-2822: Fluid connector disabled at compile time — all Arbitrum T1 pools reject swaps",
+        strict=False,
+    )
     @pytest.mark.asyncio
     async def test_swap_usdt_to_usdc_using_intent(
         self,

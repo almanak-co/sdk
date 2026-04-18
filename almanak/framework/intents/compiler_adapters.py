@@ -32,6 +32,7 @@ from .compiler_constants import (
     SWAP_FEE_TIERS,
     SWAP_FEE_TIERS_CHAIN,
     SWAP_QUOTER_ADDRESSES,
+    SWAP_ROUTER_ALGEBRA_PROTOCOLS,
     SWAP_ROUTER_V1_CHAIN_OVERRIDES,
     SWAP_ROUTER_V1_PROTOCOLS,
     get_gas_estimate,
@@ -274,12 +275,31 @@ class DefaultSwapAdapter:
         Returns:
             Encoded calldata for the swap
         """
+        sqrt_price_limit = 0
+
+        # Algebra V1.9 forks (Camelot) use a no-fee, with-deadline encoding.
+        # Fees are determined dynamically by the pool, not passed by the caller (VIB-1636).
+        if self.protocol in SWAP_ROUTER_ALGEBRA_PROTOCOLS:
+            # Algebra V1.9 exactInputSingle: 7-param WITHOUT fee, WITH deadline
+            # selector: 0xbc651188
+            # Struct: tokenIn, tokenOut, recipient, deadline, amountIn, amountOutMinimum, limitSqrtPrice
+            selector = "0xbc651188"
+            params = (
+                self._pad_address(from_token)
+                + self._pad_address(to_token)
+                + self._pad_address(recipient)
+                + self._pad_uint256(deadline)
+                + self._pad_uint256(amount_in)
+                + self._pad_uint256(min_amount_out)
+                + self._pad_uint160(sqrt_price_limit)
+            )
+            return bytes.fromhex(selector[2:] + params)
+
         # Use cached fee tier if pre-selected via select_fee_tier()
         if self._cached_fee is not None:
             fee = self._cached_fee
         else:
             fee = self._select_fee_tier(from_token, to_token, amount_in)
-        sqrt_price_limit = 0
 
         chain_v1_overrides = SWAP_ROUTER_V1_CHAIN_OVERRIDES.get(self.chain, frozenset())
         if self.protocol in SWAP_ROUTER_V1_PROTOCOLS or self.protocol in chain_v1_overrides:

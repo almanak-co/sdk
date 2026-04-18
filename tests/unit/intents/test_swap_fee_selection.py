@@ -49,6 +49,57 @@ class TestDefaultSwapAdapterFeeSelection:
         assert adapter.last_fee_selection["selected_fee_tier"] == 500
         assert adapter.last_fee_selection["source"] == "fixed_config"
 
+    def test_camelot_uses_algebra_calldata(self) -> None:
+        """VIB-1636: Camelot (Algebra V1.9) must use 0xbc651188 selector with no fee param."""
+        adapter = DefaultSwapAdapter(
+            chain="arbitrum",
+            protocol="camelot",
+            pool_selection_mode="auto",
+        )
+        from_token = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"  # USDC
+        to_token = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"  # WETH
+        recipient = "0x1234567890123456789012345678901234567890"
+        calldata = adapter.get_swap_calldata(
+            from_token=from_token,
+            to_token=to_token,
+            amount_in=1_000_000,
+            min_amount_out=1,
+            recipient=recipient,
+            deadline=1_700_000_000,
+        )
+        # Selector is Algebra exactInputSingle (no fee, with deadline, with limitSqrtPrice)
+        assert calldata[:4].hex() == "bc651188"
+        # 7 uint256-padded words = 7 * 32 bytes = 224 bytes params + 4-byte selector = 228 bytes total
+        assert len(calldata) == 4 + 7 * 32
+        body = calldata[4:]
+        # Word 0: tokenIn (padded), Word 1: tokenOut, Word 2: recipient, Word 3: deadline
+        assert body[12:32].hex().lower() == from_token[2:].lower()
+        assert body[44:64].hex().lower() == to_token[2:].lower()
+        assert body[76:96].hex().lower() == recipient[2:].lower()
+        assert int.from_bytes(body[96:128], "big") == 1_700_000_000
+        # Word 4: amountIn, Word 5: amountOutMinimum, Word 6: limitSqrtPrice
+        assert int.from_bytes(body[128:160], "big") == 1_000_000
+        assert int.from_bytes(body[160:192], "big") == 1
+        assert int.from_bytes(body[192:224], "big") == 0
+
+    def test_uniswap_v3_uses_swap_router_02_selector(self) -> None:
+        """Regression: non-Algebra V3 protocols still use SwapRouter02 selector."""
+        adapter = DefaultSwapAdapter(
+            chain="arbitrum",
+            protocol="uniswap_v3",
+            pool_selection_mode="fixed",
+            fixed_fee_tier=500,
+        )
+        calldata = adapter.get_swap_calldata(
+            from_token="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            to_token="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            amount_in=1_000_000,
+            min_amount_out=1,
+            recipient="0x1234567890123456789012345678901234567890",
+            deadline=0,
+        )
+        assert calldata[:4].hex() == "04e45aaf"
+
     def test_auto_mode_uses_heuristic_without_rpc(self) -> None:
         """AUTO mode should safely fall back to heuristic when no rpc_url is provided."""
         adapter = DefaultSwapAdapter(

@@ -1399,7 +1399,13 @@ def run(
             "audit_enabled": False,
             "chains": gateway_chains,
         }
-        if session_auth_token:
+        # On test networks, force auth_token=None as an explicit kwarg so it wins
+        # over any ALMANAK_GATEWAY_AUTH_TOKEN loaded from .env. Without this, the
+        # server attaches AuthInterceptor while the client (allow_insecure=True)
+        # sends no token, producing UNAUTHENTICATED on every gRPC call (VIB-3032).
+        if is_test_network:
+            gateway_kwargs["auth_token"] = None
+        elif session_auth_token:
             gateway_kwargs["auth_token"] = session_auth_token
         if gateway_private_key:
             gateway_kwargs["private_key"] = gateway_private_key

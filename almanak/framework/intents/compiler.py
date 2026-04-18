@@ -127,6 +127,7 @@ from .compiler_constants import (  # noqa: F401
     SWAP_FEE_TIERS,
     SWAP_FEE_TIERS_CHAIN,
     SWAP_QUOTER_ADDRESSES,
+    SWAP_ROUTER_ALGEBRA_PROTOCOLS,
     SWAP_ROUTER_V1_CHAIN_OVERRIDES,
     SWAP_ROUTER_V1_PROTOCOLS,
     get_gas_estimate,
@@ -4061,169 +4062,23 @@ class IntentCompiler:
 
         Uses the pool's swapIn() function directly. Automatically discovers
         the Fluid DEX pool for the token pair and determines swap direction.
+
+        VIB-2822: All 20 Fluid DEX T1 pools on Arbitrum currently reject swaps
+        at any amount (FluidDexSwapTooSmall / FluidDexLiquidityLimit). The
+        connector fails fast here to spare strategy authors from debugging
+        protocol-level reverts. Remove this guard once pools are confirmed
+        functional again (re-check with a direct eth_call on mainnet).
         """
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
             intent_id=intent.intent_id,
+            error=(
+                "Fluid DEX connector is disabled (VIB-2822): all 20 Arbitrum T1 pools "
+                "currently reject swaps at any amount (FluidDexSwapTooSmall / "
+                "FluidDexLiquidityLimit). This is a protocol-level issue, not a "
+                "compiler bug. Use uniswap_v3, sushiswap_v3, or camelot instead."
+            ),
         )
-        transactions: list[TransactionData] = []
-
-        try:
-            from almanak.framework.connectors.fluid.sdk import FluidSDK
-
-            # Resolve tokens
-            from_token_info = self._resolve_token(intent.from_token)
-            to_token_info = self._resolve_token(intent.to_token)
-
-            if not from_token_info:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unknown token {intent.from_token} for chain {self.chain}",
-                    intent_id=intent.intent_id,
-                )
-            if not to_token_info:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unknown token {intent.to_token} for chain {self.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            # Prefer the gateway transport when a gateway client is injected
-            # AND actually connected. An injected-but-disconnected client
-            # (e.g., construction order bug in local setups) falls back to
-            # the direct RPC URL — mirrors _get_enso_route() behavior.
-            gateway_client = self._gateway_client
-            if gateway_client is not None and not gateway_client.is_connected:
-                gateway_client = None
-
-            if gateway_client is None:
-                rpc_url = self._get_chain_rpc_url()
-                if not rpc_url:
-                    raise ValueError("Connected gateway_client or RPC URL required for Fluid DEX adapter.")
-            else:
-                rpc_url = None
-
-            sdk = FluidSDK(chain=self.chain, rpc_url=rpc_url, gateway_client=gateway_client)
-
-            # Find the pool
-            pool_addr = sdk.find_dex_by_tokens(from_token_info.address, to_token_info.address)
-            if not pool_addr:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"No Fluid DEX pool found for {intent.from_token}/{intent.to_token} on {self.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            # Determine swap direction (swap0to1 = from_token is token0)
-            pool_data = sdk.get_dex_data(pool_addr)
-            from_addr_lower = from_token_info.address.lower()
-            swap0to1 = pool_data.token0.lower() == from_addr_lower
-
-            # Calculate input amount (support amount_usd, amount, and "all")
-            amount_decimal: Decimal
-            if intent.amount_usd is not None:
-                price = self._require_token_price(from_token_info.symbol)
-                amount_decimal = intent.amount_usd / price
-            elif intent.amount is not None:
-                if intent.amount == "all":
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error="amount='all' must be resolved before compilation. Use Intent.set_resolved_amount() to resolve chained amounts.",
-                        intent_id=intent.intent_id,
-                    )
-                amount_decimal = intent.amount  # type: ignore[assignment]
-            else:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="Either amount_usd or amount must be provided",
-                    intent_id=intent.intent_id,
-                )
-
-            # Convert to wei
-            amount_in_wei = int(amount_decimal * Decimal(10**from_token_info.decimals))
-
-            # Build approval TX — approve to the pool (Fluid routes through Liquidity layer)
-            if not from_token_info.is_native:
-                approve_txs = self._build_approve_tx(from_token_info.address, pool_addr, amount_in_wei)
-                transactions.extend(approve_txs)
-
-            # Calculate min output with slippage
-            # get_swap_quote uses ERC-20 state overrides so approval is not needed for eth_call.
-            slippage_bps = int((intent.max_slippage or Decimal("0.005")) * 10000)
-            try:
-                quote = sdk.get_swap_quote(pool_addr, swap0to1, amount_in_wei, self.wallet_address)
-                min_out = quote * (10000 - slippage_bps) // 10000
-            except Exception as e:
-                from almanak.framework.connectors.fluid.sdk import FluidMinAmountError
-
-                if isinstance(e, FluidMinAmountError):
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=(
-                            f"Fluid swap rejected: {amount_decimal} {intent.from_token} "
-                            f"exceeds pool capacity ({amount_in_wei} wei). "
-                            f"Fluid DEX pools have per-pool swap size limits. "
-                            f"Try a smaller amount or use protocol='uniswap_v3'. {e}"
-                        ),
-                        intent_id=intent.intent_id,
-                    )
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Fluid swap quote failed: {e}",
-                    intent_id=intent.intent_id,
-                )
-
-            # Build swap TX
-            swap_tx_data = sdk.build_swap_tx(
-                dex_address=pool_addr,
-                swap0to1=swap0to1,
-                amount_in=amount_in_wei,
-                amount_out_min=min_out,
-                to=self.wallet_address,
-            )
-
-            transactions.append(
-                TransactionData(
-                    to=swap_tx_data["to"],
-                    value=swap_tx_data["value"],
-                    data=swap_tx_data["data"],
-                    gas_estimate=swap_tx_data["gas"],
-                    description=f"Swap {amount_decimal} {intent.from_token} -> {intent.to_token} on Fluid DEX",
-                    tx_type="fluid_swap",
-                )
-            )
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.SWAP.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "from_token": from_token_info.to_dict(),
-                    "to_token": to_token_info.to_dict(),
-                    "amount_in": str(amount_in_wei),
-                    "min_amount_out": str(min_out),
-                    "pool": pool_addr,
-                    "swap0to1": swap0to1,
-                    "protocol": "fluid",
-                    "chain": self.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-
-            logger.info(
-                f"Compiled Fluid SWAP: {intent.from_token} -> {intent.to_token}, "
-                f"pool={pool_addr[:10]}..., {len(transactions)} txs, {total_gas} gas"
-            )
-
-        except Exception as e:
-            logger.exception(f"Failed to compile Fluid SWAP intent: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
 
     def _compile_swap_uniswap_v4(self, intent: SwapIntent) -> CompilationResult:
         """Compile SWAP intent for Uniswap V4.
