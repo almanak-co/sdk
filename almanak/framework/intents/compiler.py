@@ -76,6 +76,26 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# One-shot deprecation signal: the ``pancakeswap_perps`` protocol key is the
+# legacy attribution (broker_id=2) for Aster v1. New strategies should use
+# ``protocol="aster_perps"`` directly. Warn at compile time (not just at
+# module import) so strategies that import from aster_perps but keep the old
+# intent-level key still see the signal.
+_PCS_PERPS_KEY_WARNED = False
+
+
+def _warn_pcs_perps_protocol_key_once() -> None:
+    global _PCS_PERPS_KEY_WARNED
+    if _PCS_PERPS_KEY_WARNED:
+        return
+    _PCS_PERPS_KEY_WARNED = True
+    logger.warning(
+        "Intent protocol='pancakeswap_perps' is deprecated; route through "
+        "'aster_perps' (canonical, broker_id=0) unless you explicitly need "
+        "PancakeSwap attribution (broker_id=2). This compiler path will be "
+        "removed once pancakeswap_delta_neutral_lp migrates (VIB-3044 Phase 4)."
+    )
+
 
 # =============================================================================
 # Extracted modules — re-exported for backward compatibility
@@ -4389,8 +4409,18 @@ class IntentCompiler:
         protocol = self._resolve_protocol(intent.protocol)
         if protocol == "drift":
             return self._compile_drift_perp_open(intent)
+        # Aster Perps powers PancakeSwap Perps (PCS = broker id 2 on Aster).
+        # Route both protocol keys through the same compiler method, differing
+        # only in the broker_id attribution we plumb to the adapter.
         if protocol == "pancakeswap_perps":
-            return self._compile_pancakeswap_perps_perp_open(intent)
+            from ..connectors.aster_perps import PCS_BROKER_ID
+
+            _warn_pcs_perps_protocol_key_once()
+            return self._compile_aster_perps_perp_open(intent, broker_id=PCS_BROKER_ID)
+        if protocol == "aster_perps":
+            from ..connectors.aster_perps import ASTER_BROKER_RAW
+
+            return self._compile_aster_perps_perp_open(intent, broker_id=ASTER_BROKER_RAW)
 
         # Fail explicitly for unsupported perp protocols on Solana
         if self._is_solana_chain():
@@ -4408,7 +4438,7 @@ class IntentCompiler:
                 intent_id=intent.intent_id,
                 error=(
                     f"Protocol '{intent.protocol}' is not supported for PERP_OPEN on "
-                    f"{self.chain}. Supported: gmx_v2, pancakeswap_perps (bsc)."
+                    f"{self.chain}. Supported: gmx_v2, aster_perps, pancakeswap_perps (bsc)."
                 ),
             )
 
@@ -4632,8 +4662,18 @@ class IntentCompiler:
         protocol = self._resolve_protocol(intent.protocol)
         if protocol == "drift":
             return self._compile_drift_perp_close(intent)
+        # PERP_CLOSE does not attribute a broker fee (the broker_id is on the
+        # open payload only), but we plumb it through the adapter for symmetry
+        # so the same adapter instance can close positions it did not open.
         if protocol == "pancakeswap_perps":
-            return self._compile_pancakeswap_perps_perp_close(intent)
+            from ..connectors.aster_perps import PCS_BROKER_ID
+
+            _warn_pcs_perps_protocol_key_once()
+            return self._compile_aster_perps_perp_close(intent, broker_id=PCS_BROKER_ID)
+        if protocol == "aster_perps":
+            from ..connectors.aster_perps import ASTER_BROKER_RAW
+
+            return self._compile_aster_perps_perp_close(intent, broker_id=ASTER_BROKER_RAW)
 
         # Fail explicitly for unsupported perp protocols on Solana
         if self._is_solana_chain():
@@ -4651,7 +4691,7 @@ class IntentCompiler:
                 intent_id=intent.intent_id,
                 error=(
                     f"Protocol '{intent.protocol}' is not supported for PERP_CLOSE on "
-                    f"{self.chain}. Supported: gmx_v2, pancakeswap_perps (bsc)."
+                    f"{self.chain}. Supported: gmx_v2, aster_perps, pancakeswap_perps (bsc)."
                 ),
             )
 
@@ -4929,29 +4969,35 @@ class IntentCompiler:
         return compile_drift_perp_close(self, intent)
 
     # ==========================================================================
-    # PANCAKESWAP PERPS (ApolloX Diamond on BSC, broker id = 2)
+    # ASTER PERPS (Aster/ApolloX Diamond on BSC; PCS = broker id 2)
     # ==========================================================================
 
-    def _compile_pancakeswap_perps_perp_open(self, intent: PerpOpenIntent) -> CompilationResult:
-        """Compile a PERP_OPEN intent via PancakeSwap Perps (ApolloX on BSC).
+    def _compile_aster_perps_perp_open(
+        self,
+        intent: PerpOpenIntent,
+        *,
+        broker_id: int,
+    ) -> CompilationResult:
+        """Compile a PERP_OPEN intent via Aster Perps (BSC, Phase 1).
 
-        v1 limitations (see docs/internal/discussions/pancakeswap-perps-integration-20260415.md):
+        Used by both ``protocol="aster_perps"`` (broker_id=0, no attribution)
+        and ``protocol="pancakeswap_perps"`` (broker_id=2, PCS attribution).
+        See docs/internal/discussions/aster-dex-integration-20260418.md (PRD).
+
+        Phase 1 limitations:
           - chain must be 'bsc'
-          - market must be in PANCAKESWAP_PERPS_MARKETS['bsc'] (BTC/USD, ETH/USD, BNB/USD)
+          - market must be in ASTER_PERPS_MARKETS['bsc'] (BTC/USD, ETH/USD, BNB/USD)
           - native BNB margin (collateral_token='BNB') goes via openMarketTradeBNB (value-carrying)
           - ERC20 margin (USDT/USDC) goes via openMarketTrade (compiler prepends approve)
           - no SL/TP, no limit orders
         """
-        from ..connectors.pancakeswap_perps import (
-            PancakeSwapPerpsAdapter,
-            PancakeSwapPerpsConfig,
-        )
+        from ..connectors.aster_perps import AsterPerpsAdapter, AsterPerpsConfig
 
         if self.chain != "bsc":
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 intent_id=intent.intent_id,
-                error=f"PancakeSwap Perps v1 requires chain='bsc', got '{self.chain}'",
+                error=f"Aster Perps Phase 1 requires chain='bsc', got '{self.chain}'",
             )
 
         if intent.collateral_amount == "all":
@@ -4969,12 +5015,16 @@ class IntentCompiler:
         warnings: list[str] = []
 
         try:
-            adapter = PancakeSwapPerpsAdapter(
-                PancakeSwapPerpsConfig(chain=self.chain, wallet_address=self.wallet_address)
+            adapter = AsterPerpsAdapter(
+                AsterPerpsConfig(
+                    broker_id=broker_id,
+                    chain=self.chain,
+                    wallet_address=self.wallet_address,
+                )
             )
 
             # Resolve mark price for the base asset (e.g. 'BTC/USD' -> 'BTC').
-            # ApolloX trades crypto perps as synthetics; the *trading* market name
+            # Aster trades crypto perps as synthetics; the *trading* market name
             # uses canonical symbols ('BTC', 'ETH'), but on-chain price oracles
             # for BSC are keyed on the wrapped/bridged token ('WBTC' for BTCB,
             # 'WETH' for ETH-bsc, etc.). We try the bare symbol first and fall
@@ -4992,13 +5042,13 @@ class IntentCompiler:
             # Resolve collateral decimals and normalize the collateral input for the adapter.
             # Accept either symbol (case-insensitive) or a 0x-prefixed address — per the
             # PerpOpenIntent docstring both forms are supported.
-            from almanak.core.contracts import PANCAKESWAP_PERPS_TOKENS
+            from almanak.core.contracts import ASTER_PERPS_TOKENS
 
-            from ..connectors.pancakeswap_perps.sdk import NATIVE_BNB_ADDRESS
+            from ..connectors.aster_perps.sdk import NATIVE_BNB_ADDRESS
 
             raw_collateral = intent.collateral_token
             # The native sentinel (address(0) via NATIVE_BNB_ADDRESS) is only honoured by
-            # PancakeSwapPerpsAdapter.build_open() when spelled as a symbol ("BNB"/"NATIVE").
+            # AsterPerpsAdapter.build_open() when spelled as a symbol ("BNB"/"NATIVE").
             # Normalize the sentinel address *to* the "BNB" symbol so address-form callers
             # still route through openMarketTradeBNB instead of falling into the ERC-20 branch.
             if (
@@ -5015,12 +5065,12 @@ class IntentCompiler:
                 normalized_collateral = raw_collateral
                 resolver_key = raw_collateral.upper()
 
-            # Venue allowlist: PCS Perps only accepts BNB (native), WBNB, USDT, USDC as
+            # Venue allowlist: Aster Perps only accepts BNB (native), WBNB, USDT, USDC as
             # margin. Reject anything else at compile time so we never approve an unrelated
             # ERC-20 to the router or submit an openMarketTrade that will revert on-chain.
             # The native sentinel was already normalized to "BNB" above, so the address
             # allowlist intentionally only contains real ERC-20 margin tokens.
-            supported_tokens = PANCAKESWAP_PERPS_TOKENS.get(self.chain, {})
+            supported_tokens = ASTER_PERPS_TOKENS.get(self.chain, {})
             allowed_symbols = {"BNB", "NATIVE"} | set(supported_tokens.keys())
             allowed_addresses = {addr.lower() for addr in supported_tokens.values()}
             if resolver_key.startswith("0x"):
@@ -5030,7 +5080,7 @@ class IntentCompiler:
                         intent_id=intent.intent_id,
                         error=(
                             f"Collateral address '{intent.collateral_token}' is not a supported "
-                            f"PancakeSwap Perps margin token on {self.chain}. "
+                            f"Aster Perps margin token on {self.chain}. "
                             f"Allowed: BNB (native) + {sorted(supported_tokens.keys())}."
                         ),
                     )
@@ -5040,7 +5090,7 @@ class IntentCompiler:
                     intent_id=intent.intent_id,
                     error=(
                         f"Collateral symbol '{intent.collateral_token}' is not a supported "
-                        f"PancakeSwap Perps margin token on {self.chain}. "
+                        f"Aster Perps margin token on {self.chain}. "
                         f"Allowed: BNB (native) + {sorted(supported_tokens.keys())}."
                     ),
                 )
@@ -5121,27 +5171,34 @@ class IntentCompiler:
             result.total_gas_estimate = total_gas
             result.warnings = warnings
             logger.info(
-                f"Compiled PancakeSwap Perps PERP_OPEN: {'LONG' if intent.is_long else 'SHORT'} "
+                f"Compiled Aster Perps PERP_OPEN (broker_id={broker_id}): "
+                f"{'LONG' if intent.is_long else 'SHORT'} "
                 f"{intent.market} size=${intent.size_usd} margin={intent.collateral_amount} "
                 f"{intent.collateral_token} ({len(transactions)} txs, {total_gas} gas)"
             )
         except Exception as e:
-            logger.exception(f"Failed to compile PancakeSwap Perps PERP_OPEN: {e}")
+            logger.exception(f"Failed to compile Aster Perps PERP_OPEN: {e}")
             result.status = CompilationStatus.FAILED
             result.error = str(e)
 
         return result
 
-    def _compile_pancakeswap_perps_perp_close(self, intent: PerpCloseIntent) -> CompilationResult:
-        """Compile a PERP_CLOSE intent via PancakeSwap Perps (ApolloX on BSC).
+    def _compile_aster_perps_perp_close(
+        self,
+        intent: PerpCloseIntent,
+        *,
+        broker_id: int,
+    ) -> CompilationResult:
+        """Compile a PERP_CLOSE intent via Aster Perps (BSC, Phase 1).
 
+        Used by both ``protocol="aster_perps"`` and ``protocol="pancakeswap_perps"``.
         Closes the position identified by ``intent.position_id`` (a 0x-prefixed
         bytes32 ``tradeHash``). Strategies obtain the ``tradeHash`` from the
         open receipt's ``MarketPendingTrade`` event (surfaced as
         ``result.position_id`` / ``result.extracted_data['position_id']`` by
         the receipt parser + ``ResultEnricher``) and persist it across ticks.
 
-        v1 limitations:
+        Phase 1 limitations:
           - chain must be 'bsc'
           - ``closeTrade(bytes32)`` always flattens the full position; partial closes
             are NOT supported. If ``intent.size_usd`` is set, compilation fails fast
@@ -5151,16 +5208,13 @@ class IntentCompiler:
         See ``almanak/framework/intents/perp_intents.py::PerpCloseIntent.position_id``
         for the cross-venue rationale.
         """
-        from ..connectors.pancakeswap_perps import (
-            PancakeSwapPerpsAdapter,
-            PancakeSwapPerpsConfig,
-        )
+        from ..connectors.aster_perps import AsterPerpsAdapter, AsterPerpsConfig
 
         if self.chain != "bsc":
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 intent_id=intent.intent_id,
-                error=f"PancakeSwap Perps v1 requires chain='bsc', got '{self.chain}'",
+                error=f"Aster Perps Phase 1 requires chain='bsc', got '{self.chain}'",
             )
 
         position_id = intent.position_id
@@ -5169,13 +5223,13 @@ class IntentCompiler:
                 status=CompilationStatus.FAILED,
                 intent_id=intent.intent_id,
                 error=(
-                    "PancakeSwap Perps PERP_CLOSE requires intent.position_id (the bytes32 "
+                    "Aster Perps PERP_CLOSE requires intent.position_id (the bytes32 "
                     "tradeHash returned from the open). Strategies must persist the tradeHash "
                     "from on_intent_executed(result.position_id) after the open."
                 ),
             )
 
-        # Strict bytes32 validation for the PCS path: 0x + 64 hex chars = 66 chars total,
+        # Strict bytes32 validation for the Aster path: 0x + 64 hex chars = 66 chars total,
         # all characters must be valid hex. Generic vocabulary validation accepts any
         # shape; the venue compiler enforces length + hex-ness so malformed hashes fail
         # at compile time instead of surfacing as an opaque adapter/tx error later.
@@ -5185,7 +5239,7 @@ class IntentCompiler:
                 status=CompilationStatus.FAILED,
                 intent_id=intent.intent_id,
                 error=(
-                    f"PancakeSwap Perps requires a 0x-prefixed bytes32 tradeHash "
+                    f"Aster Perps requires a 0x-prefixed bytes32 tradeHash "
                     f"(66 chars total). Got: '{position_id}' (len={len(position_id)})."
                 ),
             )
@@ -5195,12 +5249,10 @@ class IntentCompiler:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 intent_id=intent.intent_id,
-                error=(
-                    f"PancakeSwap Perps requires position_id to be a valid hex bytes32 tradeHash. Got: '{position_id}'."
-                ),
+                error=(f"Aster Perps requires position_id to be a valid hex bytes32 tradeHash. Got: '{position_id}'."),
             )
 
-        # Partial closes (size_usd) are NOT representable on ApolloX's closeTrade(bytes32)
+        # Partial closes (size_usd) are NOT representable on the closeTrade(bytes32)
         # selector — it always closes 100% of the position. Reject fast so callers asking
         # for a partial close never silently execute a full close.
         if intent.size_usd is not None:
@@ -5208,19 +5260,23 @@ class IntentCompiler:
                 status=CompilationStatus.FAILED,
                 intent_id=intent.intent_id,
                 error=(
-                    "PancakeSwap Perps does not support partial PERP_CLOSE via size_usd. "
+                    "Aster Perps does not support partial PERP_CLOSE via size_usd. "
                     "Omit size_usd to close the full position identified by position_id."
                 ),
             )
         warnings: list[str] = []
 
         try:
-            adapter = PancakeSwapPerpsAdapter(
-                PancakeSwapPerpsConfig(chain=self.chain, wallet_address=self.wallet_address)
+            adapter = AsterPerpsAdapter(
+                AsterPerpsConfig(
+                    broker_id=broker_id,
+                    chain=self.chain,
+                    wallet_address=self.wallet_address,
+                )
             )
             close_tx = adapter.build_close(trade_hash=position_id)
         except Exception as e:
-            logger.exception(f"Failed to build PancakeSwap Perps close transaction: {e}")
+            logger.exception(f"Failed to build Aster Perps close transaction: {e}")
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 intent_id=intent.intent_id,
@@ -5246,6 +5302,7 @@ class IntentCompiler:
                 "max_slippage": str(intent.max_slippage),
                 "position_id": position_id,
                 "chain": self.chain,
+                "broker_id": broker_id,
             },
         )
         result = CompilationResult(status=CompilationStatus.SUCCESS, intent_id=intent.intent_id)
@@ -5254,8 +5311,8 @@ class IntentCompiler:
         result.total_gas_estimate = tx.gas_estimate
         result.warnings = warnings
         logger.info(
-            f"Compiled PancakeSwap Perps PERP_CLOSE: tradeHash={position_id[:18]}... "
-            f"market={intent.market} (1 tx, {tx.gas_estimate} gas)"
+            f"Compiled Aster Perps PERP_CLOSE (broker_id={broker_id}): "
+            f"tradeHash={position_id[:18]}... market={intent.market} (1 tx, {tx.gas_estimate} gas)"
         )
         return result
 

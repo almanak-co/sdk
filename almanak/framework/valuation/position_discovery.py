@@ -310,7 +310,7 @@ def _has_perps_protocol(protocols: list[str]) -> bool:
     venue whose synthetic intents are generated for permission discovery is
     also discovered/valued by the position-discovery flow.
     """
-    perps_protocols = {"gmx_v2", "gmx", "pancakeswap_perps"}
+    perps_protocols = {"gmx_v2", "gmx", "aster_perps", "pancakeswap_perps"}
     return bool({p.lower() for p in protocols} & perps_protocols)
 
 

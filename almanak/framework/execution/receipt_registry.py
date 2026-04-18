@@ -217,6 +217,17 @@ class ReceiptParserRegistry:
             "almanak.framework.connectors.gmx_v2.receipt_parser",
             "GMXv2ReceiptParser",
         ),
+        # Aster Perps is canonical; pancakeswap_perps is a shim that routes to
+        # the same parser class. Both keys are registered so protocol="pancakeswap_perps"
+        # legacy intents and protocol="aster_perps" new intents both resolve.
+        # The pancakeswap_perps key intentionally points at the shim submodule
+        # (which re-exports the Aster parser under the legacy class name) so
+        # the registry-completeness invariant — "every receipt_parser.py gets
+        # a matching registry entry" — still holds after the extraction.
+        "aster_perps": (
+            "almanak.framework.connectors.aster_perps.receipt_parser",
+            "AsterPerpsReceiptParser",
+        ),
         "pancakeswap_perps": (
             "almanak.framework.connectors.pancakeswap_perps.receipt_parser",
             "PancakeSwapPerpsReceiptParser",

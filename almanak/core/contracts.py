@@ -673,14 +673,17 @@ GMX_V2_TOKENS: dict[str, dict[str, str]] = {
 # =============================================================================
 # PancakeSwap Perps (ApolloX Diamond on BSC, PCS broker id = 2)
 # =============================================================================
-# Router is a Diamond proxy (EIP-2535). Key facets verified on BSCScan:
+# Aster Perps (formerly ApolloX; PancakeSwap Perps is broker id = 2 on this venue)
+# =============================================================================
+# Router is a Diamond proxy (EIP-2535) fronting the Aster perpetual platform.
+# Key facets verified on BSCScan:
 #   TradingPortalFacet (open/close):    0x5553F3B5E2fAD83edA4031a3894ee59e25ee90bF
 #   TradingReaderFacet (views):         0x28dE81Bc5B6164d8522ad32AD7D139A21fa1E3b4
 #   TradingOpenFacet (keeper settle):   0xdbe2b7e92f00dBd70478199577393bE5BBe37201
 #   TradingCloseFacet (keeper settle):  0x8ECa88449B9AFF247F775B96be6e3479bBE72a09
 #   PriceFacadeFacet  (keeper entry):   0x646CbAD1B150E5D3a019827a304717950ba6442e
 #   PairsManagerFacet (markets):        0xA32b528D70D1d5bA93a17D2697Efe5D17F1A6F8d
-PANCAKESWAP_PERPS: dict[str, dict[str, str]] = {
+ASTER_PERPS: dict[str, dict[str, str]] = {
     "bsc": {
         "router": "0x1b6F2d3844C6ae7D56ceb3C3643b9060ba28FEb0",
     },
@@ -689,7 +692,7 @@ PANCAKESWAP_PERPS: dict[str, dict[str, str]] = {
 # pairBase addresses — each market is keyed by the underlying BSC ERC20 address.
 # For crypto markets (v1 scope) these are the real BSC-pegged tokens;
 # non-crypto markets (NVDA, TSLA, ...) use synthetic ApolloX-issued contracts and are out of v1 scope.
-PANCAKESWAP_PERPS_MARKETS: dict[str, dict[str, str]] = {
+ASTER_PERPS_MARKETS: dict[str, dict[str, str]] = {
     "bsc": {
         "BTC/USD": "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c",  # BTCB
         "ETH/USD": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",  # ETH (BSC)
@@ -697,10 +700,10 @@ PANCAKESWAP_PERPS_MARKETS: dict[str, dict[str, str]] = {
     },
 }
 
-# Margin tokens supported by PancakeSwap Perps on BSC.
+# Margin tokens supported by the Aster Perps router on BSC.
 # The router accepts native BNB via openMarketTradeBNB() (auto-wraps to WBNB internally)
 # and ERC20 collateral via openMarketTrade().
-PANCAKESWAP_PERPS_TOKENS: dict[str, dict[str, str]] = {
+ASTER_PERPS_TOKENS: dict[str, dict[str, str]] = {
     "bsc": {
         "WBNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
         "USDT": "0x55d398326f99059fF775485246999027B3197955",
@@ -708,8 +711,16 @@ PANCAKESWAP_PERPS_TOKENS: dict[str, dict[str, str]] = {
     },
 }
 
-# Broker id for PancakeSwap (vs raw ApolloX = 0, other partner brokers > 0).
-PANCAKESWAP_PERPS_BROKER_ID: int = 2
+# Broker ids (attribution only — does not affect routing or fills).
+PANCAKESWAP_PERPS_BROKER_ID: int = 2  # PancakeSwap Perps attribution id.
+ASTER_PERPS_BROKER_RAW: int = 0  # Raw Aster (no broker attribution).
+
+# Backwards-compatibility aliases. Prefer the ASTER_PERPS_* names; the
+# PANCAKESWAP_PERPS_* aliases exist for the pancakeswap_perps/ shim and any
+# callers still importing the legacy names (pre-VIB-3044 rebrand extraction).
+PANCAKESWAP_PERPS: dict[str, dict[str, str]] = ASTER_PERPS
+PANCAKESWAP_PERPS_MARKETS: dict[str, dict[str, str]] = ASTER_PERPS_MARKETS
+PANCAKESWAP_PERPS_TOKENS: dict[str, dict[str, str]] = ASTER_PERPS_TOKENS
 
 # =============================================================================
 # Aerodrome

@@ -142,12 +142,13 @@ def _collect_perp_params() -> list[tuple[str, str]]:
     """Collect (protocol, chain) pairs for perp intents.
 
     Most perp protocols (gmx_v2, hyperliquid, drift, …) are arbitrum-first in the
-    current registry. ``pancakeswap_perps`` is BSC-only (ApolloX router), so it
-    gets exercised on its actual supported chain instead.
+    current registry. ``aster_perps`` and its ``pancakeswap_perps`` broker-shim
+    are BSC-only in Phase 1 (Aster Diamond), so they get exercised on BSC instead.
     """
+    _bsc_only = {"aster_perps", "pancakeswap_perps"}
     params: list[tuple[str, str]] = []
     for protocol in sorted(_PERP_PROTOCOLS):
-        if protocol == "pancakeswap_perps":
+        if protocol in _bsc_only:
             params.append((protocol, "bsc"))
         else:
             params.append((protocol, "arbitrum"))

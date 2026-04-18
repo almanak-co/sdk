@@ -356,9 +356,11 @@ class ResultEnricher:
         # Core typed fields - set directly on result
         if field == "position_id" and isinstance(value, int | str):
             if isinstance(value, str):
-                # Accept hex addresses (e.g. Curve LP token addresses) as valid position IDs
+                # Accept hex addresses (40-char, e.g. Curve LP token addresses) and bytes32
+                # hashes (64-char, e.g. Aster Perps tradeHash) as valid position IDs.
                 is_hex_address = bool(re.fullmatch(r"0x[a-fA-F0-9]{40}", value))
-                if not is_hex_address:
+                is_bytes32 = bool(re.fullmatch(r"0x[a-fA-F0-9]{64}", value))
+                if not (is_hex_address or is_bytes32):
                     try:
                         parsed = Decimal(value)
                         if not parsed.is_finite():
