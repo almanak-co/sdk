@@ -981,6 +981,140 @@ def pytest_configure(config: pytest.Config) -> None:
 # Captured once per module after funding is complete, re-armed after each revert.
 _module_baselines: dict[tuple[int, str], str] = {}
 
+# Session pristine map: chain_id -> pristine_snapshot_id
+# Captured lazily on first module's setup per chain and re-captured after each
+# revert (Anvil consumes snapshot IDs on revert). Used by `reset_fork_to_pristine`
+# to give every test module a clean fork independent of prior modules on the
+# same chain's session-scoped Anvil fork (VIB-3059).
+_session_pristine: dict[int, str] = {}
+
+
+def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
+    """Revert fork to session pristine state, then recapture pristine for next module.
+
+    On the first call for a chain: captures current fork state as the pristine
+    baseline and returns immediately (no revert — caller is expected to invoke
+    this at the start of the first module before any seeding mutates the fork).
+
+    On subsequent calls: reverts to the stored pristine snapshot and then
+    immediately recaptures a new pristine snapshot at the just-reverted state
+    so the NEXT module can revert too.
+
+    Also purges stale `_module_baselines` entries for this chain, since Anvil's
+    `evm_revert` invalidates all snapshots taken after the reverted one.
+
+    Returns:
+        True if pristine state is now active (captured for the first time, or
+        successfully reverted + recaptured). False if the fork is unhealthy
+        enough that pristine state could not be established; callers may
+        continue but cross-module isolation is degraded.
+    """
+    snap_id = _session_pristine.get(chain_id)
+
+    if snap_id is None:
+        # First time for this chain — capture current state as pristine.
+        try:
+            resp = web3_instance.provider.make_request("evm_snapshot", [])
+            new_snap = resp.get("result") if isinstance(resp, dict) else None
+        except Exception as e:
+            print(f"WARNING: could not capture initial pristine snapshot for chain {chain_id}: {e}")
+            return False
+        if new_snap is None:
+            print(f"WARNING: evm_snapshot returned no result for chain {chain_id}: {resp}")
+            return False
+        _session_pristine[chain_id] = new_snap
+        print(f"  [pristine] Captured session pristine {new_snap} for chain {chain_id}")
+        return True
+
+    # Revert to pristine. `evm_revert` consumes snap_id AND any snapshots taken
+    # after it on this fork, so stale module baselines for this chain are now
+    # invalid and must be purged regardless of revert outcome.
+    try:
+        resp = web3_instance.provider.make_request("evm_revert", [snap_id])
+        reverted = bool(resp.get("result")) if isinstance(resp, dict) else False
+    except Exception as e:
+        print(f"WARNING: pristine revert raised for chain {chain_id}: {e}")
+        reverted = False
+
+    for old_key in list(_module_baselines):
+        if old_key[0] == chain_id:
+            del _module_baselines[old_key]
+
+    if not reverted:
+        # Pristine snapshot gone (fork was restarted mid-session, or anvil_revert
+        # failed). Recapture current state so the NEXT module at least gets a
+        # stable reference; cross-module isolation for THIS module is degraded.
+        print(
+            f"WARNING: pristine snapshot {snap_id} for chain {chain_id} invalid; "
+            "recapturing current state as best-effort pristine"
+        )
+        try:
+            resp = web3_instance.provider.make_request("evm_snapshot", [])
+            new_snap = resp.get("result") if isinstance(resp, dict) else None
+        except Exception as e:
+            print(f"WARNING: could not recapture pristine after failed revert for chain {chain_id}: {e}")
+            _session_pristine.pop(chain_id, None)
+            return False
+        if new_snap is None:
+            _session_pristine.pop(chain_id, None)
+            return False
+        _session_pristine[chain_id] = new_snap
+        return False
+
+    # Recapture pristine at the just-reverted state so the next module can revert.
+    # If recapture fails, report False so callers can surface degraded isolation —
+    # the CURRENT module is fine (we already reverted), but the NEXT module would
+    # lose its pristine anchor and potentially see this module's residue.
+    try:
+        resp = web3_instance.provider.make_request("evm_snapshot", [])
+        new_snap = resp.get("result") if isinstance(resp, dict) else None
+    except Exception as e:
+        print(f"WARNING: could not recapture pristine after revert for chain {chain_id}: {e}")
+        _session_pristine.pop(chain_id, None)
+        return False
+    if new_snap is None:
+        print(f"WARNING: evm_snapshot returned no result after revert for chain {chain_id}: {resp}")
+        _session_pristine.pop(chain_id, None)
+        return False
+    _session_pristine[chain_id] = new_snap
+    print(f"  [pristine] Re-armed session pristine {new_snap} for chain {chain_id}")
+    return True
+
+
+def reset_fork_to_pristine(web3_instance: Web3, *, strict: bool = True) -> bool:
+    """Helper for per-chain `funded_wallet` fixtures: revert to session pristine.
+
+    Call this at the top of a module-scoped `funded_wallet` fixture, BEFORE
+    seeding tokens, so each module sees a clean fork independent of prior
+    modules on the same chain (VIB-3059).
+
+    On first call per chain: captures current state as pristine (no revert).
+    On subsequent calls: reverts fork to the captured pristine state and
+    recaptures pristine for the next module.
+
+    By default `strict=True`, so the function raises ``RuntimeError`` if the
+    pristine reset cannot be guaranteed — this is the intent-test convention:
+    surface infrastructure problems rather than silently running with degraded
+    isolation. Pass ``strict=False`` if the caller wants to attempt best-effort
+    seeding on a partially healthy fork (returns False on failure in that case).
+    """
+    try:
+        chain_id = int(web3_instance.eth.chain_id)
+    except Exception as e:
+        msg = f"could not determine chain_id for pristine reset: {e}"
+        print(f"WARNING: {msg}")
+        if strict:
+            raise RuntimeError(msg) from e
+        return False
+
+    ok = _ensure_pristine_and_rearm(web3_instance, chain_id)
+    if strict and not ok:
+        raise RuntimeError(
+            f"pristine reset could not be established for chain_id={chain_id}; "
+            "fork appears unhealthy and module isolation cannot be guaranteed"
+        )
+    return ok
+
 
 def _get_baseline_key(request: pytest.FixtureRequest) -> tuple[int, str]:
     """Build a baseline map key from the current test request.
