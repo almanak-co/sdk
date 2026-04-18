@@ -28,8 +28,8 @@ class TestGatewayCliAuth:
         assert settings.auth_token is not None, "Expected auto-generated auth token for mainnet"
         assert len(settings.auth_token) == 32  # uuid4().hex is 32 chars
         assert settings.allow_insecure is False
-        # Session token should be displayed in output
-        assert "GATEWAY_AUTH_TOKEN" in result.output
+        # Session token should be displayed using canonical ALMANAK_GATEWAY_AUTH_TOKEN env var (VIB-2920)
+        assert "ALMANAK_GATEWAY_AUTH_TOKEN" in result.output
 
     @patch("almanak.gateway.server.serve", new_callable=AsyncMock)
     def test_anvil_uses_allow_insecure(self, mock_serve):

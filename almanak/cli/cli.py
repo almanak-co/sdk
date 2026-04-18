@@ -800,8 +800,10 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure):
 
     if session_auth_token:
         click.echo()
-        click.echo(click.style("Session auth token (pass to clients via GATEWAY_AUTH_TOKEN env var):", fg="yellow"))
-        click.echo(f"  export GATEWAY_AUTH_TOKEN={session_auth_token}")
+        click.echo(
+            click.style("Session auth token (pass to clients via ALMANAK_GATEWAY_AUTH_TOKEN env var):", fg="yellow")
+        )
+        click.echo(f"  export ALMANAK_GATEWAY_AUTH_TOKEN={session_auth_token}")
 
     click.echo()
     click.echo("Press Ctrl+C to stop the gateway.")
