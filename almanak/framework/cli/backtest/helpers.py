@@ -281,7 +281,10 @@ def load_strategy_config(strategy_name: str, chain: str) -> dict[str, Any]:
     elif dir_name.startswith("incubating_"):
         dir_name = dir_name[len("incubating_") :]
 
-    # Look for config file in standard locations
+    # Look for config file in standard locations.
+    # Strategy-name-specific paths are checked first so that invoking
+    # `backtest pnl -s <other>` from inside strategy A's directory still finds
+    # <other>'s config file instead of A's generic `./config.json`.
     config_paths = [
         Path(f"configs/{strategy_name}.json"),
         Path(f"configs/{strategy_name}_{chain}.json"),
@@ -292,6 +295,14 @@ def load_strategy_config(strategy_name: str, chain: str) -> dict[str, Any]:
         Path(f"strategies/incubating/{dir_name}/config.json"),
         Path(f"strategies/incubating/{strategy_name}/config.json"),
     ]
+    # VIB-2917: `./config.json` is only consulted when cwd also contains
+    # `./strategy.py` (i.e. we're clearly inside a strategy directory). This
+    # matches the cwd auto-discovery flow while avoiding two footguns:
+    # picking up an unrelated `config.json` in a random directory, and
+    # overriding the requested strategy's own `configs/<name>.json` when the
+    # user backtests a different strategy from inside another's folder.
+    if Path("strategy.py").exists():
+        config_paths.append(Path("config.json"))
 
     for path in config_paths:
         if path.exists():

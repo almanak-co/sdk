@@ -102,3 +102,52 @@ class TestStrategyIdFallback:
 
         assert result["strategy_id"]  # non-empty
         assert "demo_uniswap_rsi" in result["strategy_id"]
+
+
+# ---------------------------------------------------------------------------
+# VIB-2917: cwd ./config.json is picked up only when ./strategy.py exists
+# ---------------------------------------------------------------------------
+
+
+class TestCwdConfigJsonDiscovery:
+    """Verify load_strategy_config honors ./config.json when cwd is a strategy dir."""
+
+    def test_cwd_config_loaded_when_strategy_py_present(self, tmp_path, monkeypatch):
+        """./config.json should load when ./strategy.py marks the cwd as a strategy dir."""
+        monkeypatch.chdir(tmp_path)
+
+        (tmp_path / "strategy.py").write_text("# fixture strategy module")
+        (tmp_path / "config.json").write_text(json.dumps({"source": "cwd_config"}))
+
+        result = load_strategy_config("my_strat", "arbitrum")
+
+        assert result["source"] == "cwd_config"
+
+    def test_cwd_config_ignored_without_strategy_py(self, tmp_path, monkeypatch):
+        """./config.json must NOT be loaded when ./strategy.py is absent (random cwd)."""
+        monkeypatch.chdir(tmp_path)
+
+        (tmp_path / "config.json").write_text(json.dumps({"source": "stray_config"}))
+
+        result = load_strategy_config("my_strat", "arbitrum")
+
+        # Falls through to the default dict (no "source" field).
+        assert "source" not in result
+        assert result["strategy_id"].startswith("backtest-my_strat-")
+
+    def test_strategy_specific_config_beats_cwd_config(self, tmp_path, monkeypatch):
+        """configs/<name>.json must win over ./config.json when running for a different strategy."""
+        monkeypatch.chdir(tmp_path)
+
+        # cwd looks like strategy A's dir (has strategy.py + config.json).
+        (tmp_path / "strategy.py").write_text("# strategy A fixture")
+        (tmp_path / "config.json").write_text(json.dumps({"source": "strategy_a_config"}))
+
+        # configs/strategy_b.json also exists (user is backtesting strategy B from A's dir).
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        (configs_dir / "strategy_b.json").write_text(json.dumps({"source": "strategy_b_config"}))
+
+        result = load_strategy_config("strategy_b", "arbitrum")
+
+        assert result["source"] == "strategy_b_config"

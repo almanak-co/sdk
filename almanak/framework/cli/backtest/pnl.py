@@ -276,12 +276,24 @@ def pnl_backtest(
     if not strategy:
         raise click.UsageError("Missing option '--strategy' / '-s'. Required for backtesting.")
 
-    # Validate strategy exists
+    # Validate strategy exists. The `get_strategy()` call in the backtest body below
+    # raises ValueError when the registry has no matching entry, but we surface the
+    # richer discovery guidance here so it isn't shadowed by later failure paths.
+    # VIB-2917: previously fell back to a silent mock strategy that produced fake
+    # results; now the strategy must be discoverable via `./strategy.py` in cwd or
+    # via `./strategies/<name>/strategy.py` (optionally $ALMANAK_STRATEGIES_DIR).
     available_strategies = list_strategies_fn()
-    if strategy not in available_strategies and available_strategies:
-        click.echo(f"Error: Unknown strategy '{strategy}'", err=True)
-        click.echo(f"Available strategies: {', '.join(sorted(available_strategies))}", err=True)
+    if strategy not in available_strategies:
+        click.echo(f"Error: Strategy '{strategy}' is not registered.", err=True)
+        if available_strategies:
+            click.echo(f"Available strategies: {', '.join(sorted(available_strategies))}", err=True)
         click.echo()
+        click.echo("The backtest command discovers strategies by:", err=True)
+        click.echo("  1. Importing ./strategy.py in the current working directory", err=True)
+        click.echo("  2. Scanning ./strategies/ (or $ALMANAK_STRATEGIES_DIR) for <name>/strategy.py", err=True)
+        click.echo()
+        click.echo("Either cd into the strategy directory or set ALMANAK_STRATEGIES_DIR.", err=True)
+        click.echo("See registered strategies with: almanak strat backtest pnl --list-strategies", err=True)
         click.echo("Create a new strategy with: almanak strat new --name <name>", err=True)
         raise click.Abort()
 
@@ -349,32 +361,9 @@ def pnl_backtest(
     else:
         strategy_config = load_strategy_config(strategy, chain)
 
-    # Get strategy class and create instance
-    try:
-        strategy_class = get_strategy(strategy)
-    except ValueError:
-        # If no strategies registered, create a mock strategy for demo
-        click.echo()
-        click.echo("Warning: No strategies registered in factory.", err=True)
-        click.echo("Running with mock strategy for demonstration.", err=True)
-        click.echo()
-
-        from ...strategies import MarketSnapshot
-
-        class MockPnLStrategy:
-            """Mock strategy for PnL backtesting demonstration."""
-
-            strategy_id: str = f"mock-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-
-            def __init__(self, config: dict[str, Any]) -> None:
-                self.config = config
-                self._iteration = 0
-
-            def decide(self, market: MarketSnapshot) -> dict[str, Any] | None:
-                self._iteration += 1
-                return None
-
-        strategy_class = MockPnLStrategy
+    # Resolve strategy class. The earlier validation guarantees the strategy is
+    # registered, so get_strategy() must not raise here.
+    strategy_class = get_strategy(strategy)
 
     # Create strategy instance
     strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, chain)

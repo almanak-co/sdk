@@ -180,6 +180,28 @@ def _try_import_strategy(module_name: str, file_path: Path | None = None) -> Non
         logger.warning(f"Failed to import strategy {module_name}: {e}")
 
 
+def _auto_discover_cwd_strategy() -> None:
+    """Register a strategy from `./strategy.py` in the current working directory.
+
+    Mirrors `almanak strat run`'s behavior: when invoked from inside a strategy
+    folder, the local `strategy.py` is imported, which triggers the
+    `@almanak_strategy` decorator registration. Without this, backtest CLIs
+    (`backtest pnl`, `backtest sweep`, `backtest paper`) that rely on
+    `get_strategy(name)` silently fell back to a mock strategy (VIB-2917).
+    """
+    cwd_strategy = Path.cwd() / "strategy.py"
+    if not cwd_strategy.exists():
+        return
+
+    # Include a hash of the resolved path so two cwd's with the same parent
+    # basename don't collide in sys.modules within one Python process.
+    import hashlib
+
+    digest = hashlib.sha1(str(cwd_strategy.resolve()).encode()).hexdigest()[:12]
+    module_name = f"_cwd_strategy_{cwd_strategy.parent.name}_{digest}"
+    _try_import_strategy(module_name, cwd_strategy)
+
+
 def _auto_discover_strategies() -> None:
     """Auto-discover and import strategies from the strategies/ directory.
 
@@ -190,10 +212,14 @@ def _auto_discover_strategies() -> None:
     1. ALMANAK_STRATEGIES_DIR environment variable (relative to cwd or absolute)
     2. ./strategies relative to current working directory
 
+    Also imports a local `./strategy.py` when present so CLI commands run from
+    inside a strategy folder see the strategy registered (VIB-2917).
+
     Supports both:
     - Top-level: strategies/<name>/strategy.py
     - Tiered: strategies/<tier>/<name>/strategy.py (poster_child, production, incubating, demo)
     """
+    _auto_discover_cwd_strategy()
     # Check for ALMANAK_STRATEGIES_DIR env var first
     strategies_dir_env = os.environ.get("ALMANAK_STRATEGIES_DIR")
     if strategies_dir_env:
