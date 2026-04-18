@@ -248,8 +248,10 @@ class BundleCache:
         return removed
 
     def clear(self) -> int:
-        count = len(self._memory)
+        # Count disk unlinks only. Entries can exist in both memory and on
+        # disk, so summing both layers would double-count them.
         self._memory.clear()
+        count = 0
         if self._cache_dir.is_dir():
             for path in self._cache_dir.glob("*.json"):
                 if path.name.startswith("."):

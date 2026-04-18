@@ -63,6 +63,9 @@ class TestFluidSwapDeprecationGuard:
 
         result = compiler.compile(intent)
 
+        # Tighten assertions so the test can't pass on an unrelated RPC/config
+        # failure: the VIB-2822 guard message must be present in the error,
+        # which proves the deprecation path fired before any network lookup.
         assert result.status == CompilationStatus.FAILED
         assert result.action_bundle is None
         assert result.error is not None
