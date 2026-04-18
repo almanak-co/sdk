@@ -3799,7 +3799,7 @@ class PaperTrader:
         # Net PnL
         net_pnl = total_pnl
 
-        # Total return
+        # Total return (as ratio for internal use; convert to percentage when assigning to BacktestMetrics per VIB-2915)
         total_return = Decimal("0")
         if initial_value > Decimal("0"):
             total_return = (final_value - initial_value) / initial_value
@@ -3852,7 +3852,7 @@ class PaperTrader:
             win_rate=win_rate,
             total_trades=total_trades_count,
             profit_factor=profit_factor,
-            total_return_pct=total_return,
+            total_return_pct=total_return * Decimal("100"),
             total_fees_usd=total_fees,
             total_slippage_usd=total_slippage,
             total_gas_usd=total_gas,

@@ -244,7 +244,7 @@ class CrisisBacktestResult:
             f"Description: {self.scenario.description[:100]}...\n"
             f"\n"
             f"Performance:\n"
-            f"  Total Return: {self.total_return_during_crisis * 100:.2f}%\n"
+            f"  Total Return: {self.total_return_during_crisis:.2f}%\n"
             f"  Max Drawdown: {self.max_drawdown_during_crisis * 100:.2f}%\n"
             f"  Sharpe Ratio: {self.result.metrics.sharpe_ratio:.3f}\n"
             f"  Total Trades: {self.result.metrics.total_trades}\n"
@@ -433,7 +433,7 @@ async def run_crisis_backtest(
 
     logger.info(
         f"Crisis backtest completed for '{scenario.name}': "
-        f"Return={result.metrics.total_return_pct * 100:.2f}%, "
+        f"Return={result.metrics.total_return_pct:.2f}%, "
         f"Max DD={result.metrics.max_drawdown_pct * 100:.2f}%, "
         f"Recovery={crisis_metrics_obj.recovery_pct * 100:.1f}%"
     )
@@ -815,7 +815,7 @@ async def run_multiple_crisis_backtests(
         )
 
         for result in results:
-            print(f"{result.scenario_name}: {result.total_return_during_crisis*100:.1f}%")
+            print(f"{result.scenario_name}: {result.total_return_during_crisis:.1f}%")
     """
     results: list[CrisisBacktestResult] = []
 

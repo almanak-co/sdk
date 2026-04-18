@@ -307,7 +307,7 @@ def print_crisis_backtest_results(result: CrisisBacktestResult) -> None:
         click.echo("-" * 70)
 
         return_diff = comparison.get("return_diff_pct", "0")
-        click.echo(f"  Return Difference:      {float(return_diff) * 100:+.2f}%")
+        click.echo(f"  Return Difference:      {float(return_diff):+.2f}%")
 
         vol_ratio = comparison.get("volatility_ratio", "1")
         click.echo(f"  Volatility Ratio:       {float(vol_ratio):.2f}x")

@@ -689,7 +689,7 @@
                 <div class="summary-card">
                     <div class="label">Total Return</div>
                     <div class="value {% if metrics.total_return_pct|float >= 0 %}positive{% else %}negative{% endif %}">
-                        {{ "%.2f"|format((metrics.total_return_pct|float) * 100) }}%
+                        {{ "%.2f"|format(metrics.total_return_pct|float) }}%
                     </div>
                 </div>
                 <div class="summary-card">
@@ -762,11 +762,11 @@
                     </tr>
                     <tr>
                         <td>Total Return</td>
-                        <td>{{ "%.2f"|format((metrics.total_return_pct|float) * 100) }}%</td>
+                        <td>{{ "%.2f"|format(metrics.total_return_pct|float) }}%</td>
                     </tr>
                     <tr>
                         <td>Annualized Return</td>
-                        <td>{{ "%.2f"|format((metrics.annualized_return_pct|float) * 100) }}%</td>
+                        <td>{{ "%.2f"|format(metrics.annualized_return_pct|float) }}%</td>
                     </tr>
                     <tr>
                         <td>Profit Factor</td>

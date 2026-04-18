@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.calculators.monte_carlo_runner import (
@@ -821,7 +821,7 @@ class CrisisMetrics:
             + (f" in {self.recovery_time_days} days" if self.recovery_time_days else " (not recovered)"),
             "",
             "Performance:",
-            f"  Total Return: {self.total_return_pct * 100:.2f}%",
+            f"  Total Return: {self.total_return_pct:.2f}%",
             f"  Volatility: {self.volatility * 100:.2f}%",
             f"  Sharpe Ratio: {self.sharpe_ratio:.3f}",
             "",
@@ -836,7 +836,7 @@ class CrisisMetrics:
                 [
                     "",
                     "vs Normal Period:",
-                    f"  Return Diff: {Decimal(self.normal_period_comparison.get('return_diff_pct', '0')) * 100:+.2f}%",
+                    f"  Return Diff: {Decimal(self.normal_period_comparison.get('return_diff_pct', '0')):+.2f}%",
                     f"  Volatility Ratio: {Decimal(self.normal_period_comparison.get('volatility_ratio', '1')):.2f}x",
                     f"  Drawdown Ratio: {Decimal(self.normal_period_comparison.get('drawdown_ratio', '1')):.2f}x",
                 ]
@@ -1575,8 +1575,8 @@ class BacktestMetrics:
         win_rate: Percentage of profitable trades as decimal (0.6 = 60%)
         total_trades: Total number of trades executed
         profit_factor: Ratio of gross profit to gross loss
-        total_return_pct: Total return as decimal (0.15 = 15% return)
-        annualized_return_pct: Annualized return as decimal
+        total_return_pct: Total return as a percentage (15 = 15% return). (VIB-2915)
+        annualized_return_pct: Annualized return as a percentage (15 = 15% return). (VIB-2915)
         total_fees_usd: Total protocol fees paid
         total_slippage_usd: Total slippage incurred
         total_gas_usd: Total gas costs
@@ -1679,6 +1679,8 @@ class BacktestMetrics:
     realized_pnl: Decimal = Decimal("0")
     unrealized_pnl: Decimal = Decimal("0")
 
+    SCHEMA_VERSION: ClassVar[int] = 2
+
     @property
     def total_execution_cost_usd(self) -> Decimal:
         """Get total execution costs (fees + slippage + gas)."""
@@ -1687,6 +1689,7 @@ class BacktestMetrics:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
         return {
+            "schema_version": self.SCHEMA_VERSION,
             "total_pnl_usd": str(self.total_pnl_usd),
             "net_pnl_usd": str(self.net_pnl_usd),
             "sharpe_ratio": str(self.sharpe_ratio),
@@ -2007,10 +2010,10 @@ class BacktestResult:
 
     @property
     def total_return_pct(self) -> Decimal:
-        """Get total return as a percentage."""
+        """Get total return as an actual percentage (e.g. 10 for 10%). (VIB-2915)"""
         if self.initial_capital_usd == 0:
             return Decimal("0")
-        return (self.final_capital_usd - self.initial_capital_usd) / self.initial_capital_usd
+        return (self.final_capital_usd - self.initial_capital_usd) / self.initial_capital_usd * Decimal("100")
 
     @property
     def used_any_fallback(self) -> bool:
@@ -2082,8 +2085,8 @@ class BacktestResult:
             "-" * 70,
             f"Final Capital:      ${self.final_capital_usd:,.2f}",
             f"Net PnL:            ${self.metrics.net_pnl_usd:,.2f}",
-            f"Total Return:       {self.metrics.total_return_pct * 100:.2f}%",
-            f"Annualized Return:  {self.metrics.annualized_return_pct * 100:.2f}%",
+            f"Total Return:       {self.metrics.total_return_pct:.2f}%",
+            f"Annualized Return:  {self.metrics.annualized_return_pct:.2f}%",
             f"Sharpe Ratio:       {self.metrics.sharpe_ratio:.3f}",
             f"Sortino Ratio:      {self.metrics.sortino_ratio:.3f}",
             f"Max Drawdown:       {self.metrics.max_drawdown_pct * 100:.2f}%",
@@ -2285,6 +2288,15 @@ class BacktestResult:
         """
         # Parse metrics
         metrics_data = data.get("metrics", {})
+        # VIB-2915: v1 stored total_return_pct / annualized_return_pct as ratios
+        # (0.10 for 10%); v2 stores them as whole percentages (10 for 10%).
+        # Artifacts without a schema_version are treated as v1 and migrated.
+        legacy_metrics_schema = metrics_data.get("schema_version", 1) < BacktestMetrics.SCHEMA_VERSION
+        total_return_pct = Decimal(metrics_data.get("total_return_pct", "0"))
+        annualized_return_pct = Decimal(metrics_data.get("annualized_return_pct", "0"))
+        if legacy_metrics_schema:
+            total_return_pct *= Decimal("100")
+            annualized_return_pct *= Decimal("100")
         metrics = BacktestMetrics(
             total_pnl_usd=Decimal(metrics_data.get("total_pnl_usd", "0")),
             net_pnl_usd=Decimal(metrics_data.get("net_pnl_usd", "0")),
@@ -2293,8 +2305,8 @@ class BacktestResult:
             win_rate=Decimal(metrics_data.get("win_rate", "0")),
             total_trades=metrics_data.get("total_trades", 0),
             profit_factor=Decimal(metrics_data.get("profit_factor", "0")),
-            total_return_pct=Decimal(metrics_data.get("total_return_pct", "0")),
-            annualized_return_pct=Decimal(metrics_data.get("annualized_return_pct", "0")),
+            total_return_pct=total_return_pct,
+            annualized_return_pct=annualized_return_pct,
             total_fees_usd=Decimal(metrics_data.get("total_fees_usd", "0")),
             total_slippage_usd=Decimal(metrics_data.get("total_slippage_usd", "0")),
             total_gas_usd=Decimal(metrics_data.get("total_gas_usd", "0")),

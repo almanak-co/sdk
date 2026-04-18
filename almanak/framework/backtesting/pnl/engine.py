@@ -1761,7 +1761,7 @@ class PnLBacktester:
         bt_logger.info(
             f"Backtest completed for {strategy.strategy_id}: "
             f"PnL=${metrics.net_pnl_usd:,.2f}, "
-            f"Return={metrics.total_return_pct * 100:.2f}%, "
+            f"Return={metrics.total_return_pct:.2f}%, "
             f"Sharpe={metrics.sharpe_ratio:.3f}"
         )
 

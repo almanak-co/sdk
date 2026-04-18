@@ -1154,8 +1154,11 @@ class SimulatedPortfolio:
             win_rate=win_rate,
             total_trades=len(self.trades),
             profit_factor=profit_factor,
-            total_return_pct=total_return,
-            annualized_return_pct=annualized_return,
+            # VIB-2915: `*_return_pct` fields store actual percentages (e.g. 10 for 10%),
+            # not decimal ratios. Local `total_return`/`annualized_return` stay as ratios
+            # so the calmar calculation above (which divides by `max_drawdown`, still a ratio) stays correct.
+            total_return_pct=total_return * Decimal("100"),
+            annualized_return_pct=annualized_return * Decimal("100"),
             total_fees_usd=total_fees,
             total_slippage_usd=total_slippage,
             total_gas_usd=total_gas,

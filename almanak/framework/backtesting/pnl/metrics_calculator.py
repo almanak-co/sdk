@@ -420,6 +420,10 @@ def calculate_metrics(
         losing_pnl_sum = sum((t.net_pnl_usd for t in losing_trades), Decimal("0"))
         avg_loss = losing_pnl_sum / Decimal(str(len(losing_trades)))
 
+    # VIB-2915: `total_return_pct` and `annualized_return_pct` are stored as actual
+    # percentages (e.g. 10 for 10%), not decimal ratios. Local `total_return`/`annualized_return`
+    # are kept as ratios to preserve the calmar/sharpe/sortino chain that divides by
+    # `max_drawdown_pct` (still a ratio in this module).
     return BacktestMetrics(
         total_pnl_usd=total_pnl,
         net_pnl_usd=net_pnl,
@@ -428,8 +432,8 @@ def calculate_metrics(
         win_rate=win_rate,
         total_trades=len(trades),
         profit_factor=profit_factor,
-        total_return_pct=total_return,
-        annualized_return_pct=annualized_return,
+        total_return_pct=total_return * Decimal("100"),
+        annualized_return_pct=annualized_return * Decimal("100"),
         total_fees_usd=total_fees,
         total_slippage_usd=total_slippage,
         total_gas_usd=total_gas,

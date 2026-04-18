@@ -1063,7 +1063,7 @@ results.plot()  # Matplotlib equity curve
 - **OHLCV data**: The PnL backtester uses historical close prices from CoinGecko. Indicators that require OHLCV data (ATR, Stochastic, Ichimoku) need a paid CoinGecko tier or an external data source.
 - **RPC for paper trading**: Paper trading requires an RPC endpoint. Alchemy free tier is recommended for performance; public RPCs work but are slow.
 - **No CWD auto-discovery**: Backtest CLI commands (`backtest pnl`, `backtest paper`, `backtest sweep`) require an explicit `-s strategy_name` flag. They do not auto-discover strategies from the current directory like `strat run` does.
-- **Percentage fields**: `total_return_pct` and similar `_pct` result fields are decimal fractions (0.33 = 33%), not percentages.
+- **Percentage fields**: `total_return_pct` and `annualized_return_pct` are actual percentages (33 = 33%) after VIB-2915. Other `_pct` fields like `max_drawdown_pct` and `win_rate` are still decimal fractions (0.33 = 33%).
 
 <!-- almanak-sdk-end: backtesting -->
 

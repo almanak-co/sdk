@@ -543,6 +543,8 @@ def pnl_backtest(
                     info_ratio = calculate_information_ratio(strategy_returns, benchmark_returns)
                     beta_val = calculate_beta(strategy_returns, benchmark_returns)
 
+                    # total_return_pct is a percentage (e.g. 15 for 15%); divide by 100 to
+                    # get the ratio that calculate_alpha expects (same convention as benchmark_total).
                     strategy_total = (
                         result.metrics.total_return_pct / Decimal("100")
                         if result.metrics.total_return_pct
