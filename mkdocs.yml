@@ -181,6 +181,7 @@ nav:
       - api/connectors/aave_v3.md
       - api/connectors/morpho_blue.md
       - api/connectors/gmx_v2.md
+      - api/connectors/aster_perps.md
       - api/connectors/pancakeswap_perps.md
       - api/connectors/aerodrome.md
       - api/connectors/traderjoe_v2.md

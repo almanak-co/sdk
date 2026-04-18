@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Aster Perps connector extracted from `pancakeswap_perps` into canonical `aster_perps` package with `broker_id=0` (raw Aster attribution); `pancakeswap_perps` becomes a thin compatibility shim defaulting `broker_id=2` and emitting a `DeprecationWarning` once per process (#1547)
+- `aster_perps_basic` demo strategy: 3x BNB/USD long with open + close round-trip on BNB Anvil fork (#1547)
+- `PerpCloseIntent.position_id` field: close Aster positions directly through the IntentCompiler instead of the direct-SDK workaround; bytes32 validation enforced at intent construction (#1547)
+- Aster DEX Phase 2 research artifacts: PRD, research brief, and RQ-1 Diamond-topology findings memo published to `docs/internal/discussions/` (#1552)
+- Aster Perps intent tests (4-layer): close-via-intent, keeper settlement with broker=0 attribution, and min-notional rejection failure-mode
+
 ## [2.13.0] - 2026-04-17
 
 ### Added
