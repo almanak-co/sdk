@@ -1562,12 +1562,18 @@ class IntentCompiler:
             route_data = self._get_enso_route(from_token.address, to_token.address, str(amount_in), slippage_bps)
 
             # Step 4: Build approve TX if needed (skip for native token)
+            #
+            # MAX_UINT256 matches the Enso adapter (`_build_approve_transaction`)
+            # and the deferred-refresh approval-rewrite path; downgrading to an
+            # exact amount here would diverge from the rest of the Enso code
+            # path and still wouldn't mitigate the main risk (spender change on
+            # route refresh, which deferred_refresh patches explicitly).
             router_address = route_data["to"]
             if not from_token.is_native:
                 approve_txs = self._build_approve_tx(
                     from_token.address,
                     router_address,
-                    amount_in,
+                    MAX_UINT256,
                 )
                 transactions.extend(approve_txs)
 
@@ -1581,7 +1587,7 @@ class IntentCompiler:
                 description=(
                     f"Swap via Enso: {self._format_amount(amount_in, from_token.decimals)} {from_token.symbol} -> {to_token.symbol}"
                 ),
-                tx_type="swap",
+                tx_type="swap_deferred",
             )
             transactions.append(swap_tx)
 
@@ -1603,8 +1609,16 @@ class IntentCompiler:
                     "min_amount_out": str(min_output),
                     "slippage": str(intent.max_slippage),
                     "protocol": "enso",
+                    "chain": self.chain,
                     "router": router_address,
                     "price_impact_bps": route_data.get("price_impact", 0),
+                    "deferred_swap": True,
+                    "route_params": {
+                        "token_in": from_token.address,
+                        "token_out": to_token.address,
+                        "amount_in": str(amount_in),
+                        "slippage_bps": slippage_bps,
+                    },
                 },
             )
 

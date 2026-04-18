@@ -602,7 +602,7 @@ class EnsoAdapter:
 
         token_in = route_params["token_in"]
         token_out = route_params["token_out"]
-        amount_in = route_params["amount_in"]
+        amount_in = int(route_params["amount_in"])
         slippage_bps = route_params["slippage_bps"]
 
         logger.info(

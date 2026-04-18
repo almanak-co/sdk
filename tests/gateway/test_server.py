@@ -1,7 +1,7 @@
 """Tests for gateway gRPC server."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, patch
 
 import grpc
 import pytest
@@ -9,7 +9,7 @@ import pytest_asyncio
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.server import GatewayServer, _AIOHTTP_SHUTDOWN_GRACE_SECONDS
+from almanak.gateway.server import _AIOHTTP_SHUTDOWN_GRACE_SECONDS, GatewayServer
 
 
 @pytest_asyncio.fixture
@@ -93,6 +93,55 @@ async def test_server_settings_from_environment(monkeypatch):
 
     # Clean up
     get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_allow_insecure_disables_auth_even_with_configured_token():
+    """allow_insecure=True must win for local test harnesses on test networks."""
+    settings = GatewaySettings(
+        grpc_port=50059,
+        metrics_enabled=False,
+        audit_enabled=False,
+        allow_insecure=True,
+        auth_token="ambient-token",  # noqa: S106 - test fixture, not a real credential
+        network="anvil",
+    )
+    server = GatewayServer(settings)
+
+    # Patch AuthInterceptor so we can prove it was never constructed.
+    # Health.Check is auth-exempt, so asserting the interceptor was not
+    # instantiated is the reliable way to prove auth was skipped.
+    with patch("almanak.gateway.server.AuthInterceptor") as auth_interceptor_cls:
+        await server.start()
+        await asyncio.sleep(0.1)
+        assert auth_interceptor_cls.call_count == 0, (
+            "AuthInterceptor should not be constructed when allow_insecure=True"
+        )
+
+        channel = grpc.aio.insecure_channel("localhost:50059")
+        stub = health_pb2_grpc.HealthStub(channel)
+        response = await stub.Check(health_pb2.HealthCheckRequest(service=""))
+        assert response.status == health_pb2.HealthCheckResponse.SERVING
+        await channel.close()
+
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_allow_insecure_with_auth_token_on_mainnet_is_rejected():
+    """Contradictory config on a production network must hard-fail at start()."""
+    settings = GatewaySettings(
+        grpc_port=50060,
+        metrics_enabled=False,
+        audit_enabled=False,
+        allow_insecure=True,
+        auth_token="ambient-token",  # noqa: S106 - test fixture, not a real credential
+        network="mainnet",
+    )
+    server = GatewayServer(settings)
+
+    with pytest.raises(RuntimeError, match="conflicting configuration"):
+        await server.start()
 
 
 @pytest.mark.asyncio

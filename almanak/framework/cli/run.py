@@ -1166,6 +1166,13 @@ def run(
 
     managed_gateway: ManagedGateway | None = None
     _early_strategy_class: type[IntentStrategy[Any]] | None = None
+    external_anvil_ports: dict[str, int] = {}
+
+    # Resolve network mode early because later runner setup uses the same value
+    # for both managed and pre-existing gateway flows.
+    if anvil_ports and not network and not no_gateway:
+        network = "anvil"
+    gateway_network = network or "mainnet"
 
     # --wallet isolated requires a managed gateway (derives wallet + funds Anvil fork)
     if wallet == "isolated" and no_gateway:
@@ -1227,7 +1234,6 @@ def run(
             raise click.ClickException(str(e)) from None
 
         # Parse --anvil-port values into dict
-        external_anvil_ports: dict[str, int] = {}
         for entry in anvil_ports:
             if "=" not in entry:
                 raise click.ClickException(
@@ -1246,12 +1252,6 @@ def run(
             if chain_name in external_anvil_ports:
                 raise click.ClickException(f"Duplicate --anvil-port for chain '{chain_name}'.")
             external_anvil_ports[chain_name] = port
-
-        # Resolve network for the managed gateway (CLI flag only, default mainnet)
-        # Auto-infer anvil network when --anvil-port is provided
-        if external_anvil_ports and not network:
-            network = "anvil"
-        gateway_network = network or "mainnet"
 
         if keep_anvil and gateway_network != "anvil":
             click.echo("Warning: --keep-anvil has no effect without --network anvil or --anvil-port.")

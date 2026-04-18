@@ -85,7 +85,7 @@ def _make_enso_bundle() -> ActionBundle:
         "route_params": {
             "token_in": "0xUSDC",
             "token_out": "0xWETH",
-            "amount_in": 100000000,
+            "amount_in": "100000000",
             "slippage_bps": 500,
         },
     }

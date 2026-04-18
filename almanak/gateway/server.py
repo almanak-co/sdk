@@ -274,24 +274,38 @@ class GatewayServer:
         # Create interceptors list
         # Auth interceptor runs first to reject unauthenticated requests early
         interceptors = []
-        if self.settings.auth_token:
-            interceptors.append(AuthInterceptor(self.settings.auth_token))
-            logger.info("Auth interceptor enabled - token authentication required")
-        elif self.settings.allow_insecure:
+        if self.settings.allow_insecure:
             network = self.settings.network
-            if network not in ("anvil", "sepolia"):
+            is_test_network = network in ("anvil", "sepolia")
+            if not is_test_network and self.settings.auth_token:
+                # Contradictory config on a production network: operator has
+                # explicitly configured auth AND asked to disable it. Refuse to
+                # start rather than silently serving unauthenticated RPCs.
+                raise RuntimeError(
+                    f"Gateway startup aborted: conflicting configuration on network '{network}'. "
+                    "ALMANAK_GATEWAY_ALLOW_INSECURE=true is set alongside ALMANAK_GATEWAY_AUTH_TOKEN. "
+                    "Pick one: unset ALMANAK_GATEWAY_ALLOW_INSECURE to keep auth enabled, "
+                    "or unset ALMANAK_GATEWAY_AUTH_TOKEN to run unauthenticated (NOT RECOMMENDED on mainnet)."
+                )
+            if not is_test_network:
                 logger.warning(
-                    "INSECURE MODE on network '%s': Auth interceptor disabled - no auth_token configured. "
+                    "INSECURE MODE on network '%s': Auth interceptor disabled. "
                     "Gateway authentication is DISABLED on a production network. "
-                    "Set ALMANAK_GATEWAY_AUTH_TOKEN or remove ALMANAK_GATEWAY_ALLOW_INSECURE.",
+                    "Remove ALMANAK_GATEWAY_ALLOW_INSECURE to require auth.",
                     network,
                 )
             else:
                 logger.warning(
-                    "INSECURE MODE: Auth interceptor disabled - no auth_token configured. "
-                    "This is acceptable for local development on '%s'.",
+                    "INSECURE MODE: Auth interceptor disabled. This is acceptable for local development on '%s'.",
                     network,
                 )
+            if self.settings.auth_token:
+                logger.warning(
+                    "Configured auth token ignored because allow_insecure=True on test network '%s'", network
+                )
+        elif self.settings.auth_token:
+            interceptors.append(AuthInterceptor(self.settings.auth_token))
+            logger.info("Auth interceptor enabled - token authentication required")
         else:
             raise RuntimeError(
                 "Gateway startup aborted: No auth_token configured. "
