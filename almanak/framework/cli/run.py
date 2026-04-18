@@ -324,6 +324,57 @@ def get_default_chain(strategy_class: type) -> str:
     return "arbitrum"
 
 
+def resolve_strategy_chain(
+    strategy_class: type,
+    strategy_config: dict,
+    *,
+    env_chain: str | None = None,
+    multi_chain: bool = False,
+) -> str | None:
+    """Resolve the runtime chain for a single-chain strategy.
+
+    Priority: ALMANAK_CHAIN env > config.json "chain" > decorator default.
+
+    The env override exists so the same strategy can be retargeted at a
+    different supported chain (e.g. by the multi-chain demo smoke harness)
+    without rewriting config.json. Production deployments leave the env unset
+    and config.json is the source of truth.
+
+    Args:
+        strategy_class: The strategy class (used to read decorator metadata).
+        strategy_config: The loaded config.json dict.
+        env_chain: The ALMANAK_CHAIN env value, already lowercased and trimmed
+            (None / empty = no override).
+        multi_chain: True for multi-chain strategies — they bypass single-chain
+            resolution entirely (chain comes from MultiChainRuntimeConfig).
+
+    Returns:
+        Resolved chain name (lowercased), or None for multi-chain when neither
+        env nor config supplies one.
+
+    Raises:
+        click.ClickException: If env override is set but the chain isn't in the
+            strategy's declared supported_chains.
+    """
+    env = (env_chain or "").strip().lower() or None
+    cfg_raw = strategy_config.get("chain")
+    cfg_chain = cfg_raw.strip().lower() if isinstance(cfg_raw, str) and cfg_raw.strip() else None
+
+    if env and not multi_chain:
+        supported = [c.lower() for c in get_strategy_chains(strategy_class)]
+        if supported and env not in supported:
+            raise click.ClickException(
+                f"ALMANAK_CHAIN={env} is not in this strategy's supported_chains "
+                f"({', '.join(supported)}). Update the strategy decorator or unset the env var."
+            )
+
+    resolved = env or cfg_chain
+    if not resolved and not multi_chain:
+        default = get_default_chain(strategy_class)
+        resolved = default.lower() if isinstance(default, str) else None
+    return resolved
+
+
 def create_price_oracle(
     config: LocalRuntimeConfig,
 ) -> PriceOracle:
@@ -1694,11 +1745,18 @@ def run(
     # For now, stash the cli_id for the resolver.
     _cli_id_override = provided_instance_id
 
-    # Determine chain: config.json (explicit override) > decorator default_chain > supported_chains[0]
-    # Config.json chain wins when present so users can override without editing code.
-    config_chain = strategy_config.get("chain")
-    if not config_chain and not multi_chain:
-        config_chain = get_default_chain(strategy_class)
+    # See resolve_strategy_chain(): env > config.json > decorator default.
+    env_chain = (os.environ.get("ALMANAK_CHAIN") or "").strip().lower() or None
+    config_chain = resolve_strategy_chain(
+        strategy_class,
+        strategy_config,
+        env_chain=env_chain,
+        multi_chain=multi_chain,
+    )
+    _cfg_chain_raw = strategy_config.get("chain")
+    _cfg_chain_norm = _cfg_chain_raw.strip().lower() if isinstance(_cfg_chain_raw, str) else ""
+    if env_chain and env_chain != _cfg_chain_norm:
+        click.echo(f"Chain override: ALMANAK_CHAIN={env_chain} (config.json: {_cfg_chain_raw or 'unset'})")
 
     # Determine network: CLI flag > config.json > default "mainnet"
     # Priority: --network flag (highest) > config "network" field > "mainnet" (default)
@@ -1908,13 +1966,22 @@ def run(
             click.echo("Falling back to legacy wallet resolution.", err=True)
             logger.warning("register_chains() failed: %s", e)
 
-    # Ensure chain and wallet_address are set in strategy config
+    # Ensure chain and wallet_address are set in strategy config.
+    # When ALMANAK_CHAIN env override is in play we also rewrite a pre-existing
+    # config.json chain so the strategy class itself sees the override (its
+    # MarketSnapshot, balance lookups, and on-chain queries all key off
+    # strategy_config["chain"], not runtime_config alone).
     if "chain" not in strategy_config:
         if multi_chain:
             strategy_config["chain"] = strategy_chains[0]
         else:
             assert isinstance(runtime_config, LocalRuntimeConfig | GatewayRuntimeConfig)
             strategy_config["chain"] = runtime_config.chain
+    elif env_chain and not multi_chain:
+        _existing = strategy_config.get("chain")
+        _existing_norm = _existing.strip().lower() if isinstance(_existing, str) else ""
+        if _existing_norm != env_chain:
+            strategy_config["chain"] = env_chain
     if "wallet_address" not in strategy_config:
         # Use per-chain wallet from registry if available, else fall back to runtime_config
         if chain_wallets:
