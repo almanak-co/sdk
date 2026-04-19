@@ -314,8 +314,12 @@ def test_stateful_templates_have_callbacks(template: StrategyTemplate) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_intent(intent_type_value: str):
-    """Create a minimal mock intent with intent_type.value == intent_type_value."""
+def _make_mock_intent(intent_type_value: str, **attrs):
+    """Create a minimal mock intent with intent_type.value == intent_type_value.
+
+    Extra keyword attrs (e.g. ``repay_full=True``) are attached directly to
+    the mock instance so intent-type-specific handlers can read them.
+    """
 
     class _IntentType:
         value = intent_type_value
@@ -323,11 +327,20 @@ def _make_mock_intent(intent_type_value: str):
     class _MockIntent:
         intent_type = _IntentType()
 
-    return _MockIntent()
+    m = _MockIntent()
+    for k, v in attrs.items():
+        setattr(m, k, v)
+    return m
 
 
-def _scaffold_lending_loop():
-    """Scaffold a LENDING_LOOP strategy and return a concrete subclass for testing."""
+def _scaffold_lending_loop(preserve_decide: bool = False):
+    """Scaffold a LENDING_LOOP strategy and return a concrete subclass for testing.
+
+    Args:
+        preserve_decide: If True, keep the scaffolded ``decide()`` (needed when
+            testing the HF-guard / state-machine logic in ``decide``). Default
+            False overrides ``decide`` to ``return None`` for callback tests.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         code = generate_strategy_file(
             name="Test Loop",
@@ -348,9 +361,18 @@ def _scaffold_lending_loop():
         if isinstance(v, type) and issubclass(v, _Base) and v is not _Base
     )
 
-    # Create a concrete subclass satisfying IntentStrategy's abstract interface.
-    # Only the callback/persistence methods are under test; the abstract methods
-    # are already tested by other scaffold tests.
+    if preserve_decide:
+
+        class _Concrete(base_cls):
+            def get_open_positions(self):
+                return None
+
+            def generate_teardown_intents(self, mode=None, market=None):
+                return []
+
+        return _Concrete
+
+    # Default path: stub out decide() for callback-only tests.
     class _Concrete(base_cls):
         def decide(self, market):
             return None  # Not under test
@@ -396,7 +418,11 @@ def _make_strategy():
                 "target_leverage": "2.0",
                 "borrow_ratio": "0.7",
                 "min_health_factor": "1.5",
+                "emergency_threshold": "1.2",
                 "min_collateral_usd": "100",
+                "partial_repay_pct": "0.25",
+                "lending_protocol": "aave_v3",
+                "lending_market": "",
                 "collateral_token": "WETH",
                 "borrow_token": "USDC",
             }
@@ -412,7 +438,11 @@ def _make_strategy():
     strat.target_leverage = Decimal("2.0")
     strat.borrow_ratio = Decimal("0.7")
     strat.min_health_factor = Decimal("1.5")
+    strat.emergency_threshold = Decimal("1.2")
     strat.min_collateral_usd = Decimal("100")
+    strat.partial_repay_pct = Decimal("0.25")
+    strat.lending_protocol = "aave_v3"
+    strat.lending_market = ""
     strat.collateral_token = "WETH"
     strat.borrow_token = "USDC"
     strat._loop_state = "idle"
@@ -472,6 +502,59 @@ def test_lending_loop_no_transition_on_failure() -> None:
     assert strat._loop_count == original_count
 
 
+def test_lending_loop_repay_full_resets_leverage() -> None:
+    """Successful repay_full -> leverage resets to 1.0 and state=MONITORING."""
+    from decimal import Decimal
+
+    strat = _make_strategy()
+    strat._loop_state = "monitoring"
+    strat._loop_count = 3
+    strat._current_leverage = Decimal("2.5")
+
+    strat.on_intent_executed(
+        _make_mock_intent("REPAY", repay_full=True), success=True, result=None
+    )
+    assert strat._current_leverage == Decimal("1.0")
+    assert strat._loop_state == "monitoring"
+
+
+def test_lending_loop_partial_repay_shrinks_leverage() -> None:
+    """Partial repay decrements leverage proportionally but never below 1.0."""
+    from decimal import Decimal
+
+    strat = _make_strategy()
+    strat._loop_state = "monitoring"
+    strat._current_leverage = Decimal("2.0")
+    strat.partial_repay_pct = Decimal("0.25")
+
+    strat.on_intent_executed(
+        _make_mock_intent("REPAY", repay_full=False), success=True, result=None
+    )
+    # 2.0 * (1 - 0.25) = 1.5
+    assert strat._current_leverage == Decimal("1.5")
+
+    # Idempotent floor at 1.0.
+    strat._current_leverage = Decimal("1.0")
+    strat.on_intent_executed(
+        _make_mock_intent("REPAY", repay_full=False), success=True, result=None
+    )
+    assert strat._current_leverage == Decimal("1.0")
+
+
+def test_lending_loop_monitoring_swap_does_not_advance_loop() -> None:
+    """An unwind SWAP during MONITORING (preceding a repay) must NOT increment loop_count."""
+    strat = _make_strategy()
+    strat._loop_state = "monitoring"
+    strat._loop_count = 2
+    original_leverage = strat._current_leverage
+
+    strat.on_intent_executed(_make_mock_intent("SWAP"), success=True, result=None)
+    # loop_count unchanged (otherwise unwind flow double-counts loops).
+    assert strat._loop_count == 2
+    assert strat._loop_state == "monitoring"
+    assert strat._current_leverage == original_leverage
+
+
 def test_lending_loop_persistence_round_trip() -> None:
     """get_persistent_state() / load_persistent_state() round-trips all fields."""
     from decimal import Decimal
@@ -512,6 +595,357 @@ def test_lending_loop_persistence_zero_loop_count() -> None:
     assert strat._loop_count == 0
     assert strat._loop_state == "idle"
     assert strat._current_leverage == Decimal("1.0")
+
+
+# ---------------------------------------------------------------------------
+# LENDING_LOOP: unified health-factor guard (aave_v3 / morpho_blue / compound_v3)
+# ---------------------------------------------------------------------------
+
+
+class _HFMarket:
+    """Market mock that returns a configurable health factor."""
+
+    def __init__(self, hf, borrow_balance="500", debt_usd="400"):
+        from decimal import Decimal
+
+        self._hf = Decimal(str(hf))
+        self._borrow_balance = Decimal(str(borrow_balance))
+        self._debt_usd = Decimal(str(debt_usd))
+
+    def position_health(self, protocol, market_id):
+        debt_usd = self._debt_usd
+
+        class _Health:
+            def __init__(self, hf):
+                self.health_factor = hf
+                self.debt_value_usd = debt_usd
+
+        return _Health(self._hf)
+
+    def balance(self, token):
+        from decimal import Decimal
+
+        if token == "USDC":
+            bal_amt = self._borrow_balance
+            price_usd = Decimal("1")
+        else:
+            # Default WETH balance: 2 tokens @ $2000 = $4000 (above min_collateral_usd)
+            bal_amt = Decimal("2")
+            price_usd = Decimal("2000")
+
+        bal = bal_amt
+        bal_usd_val = bal_amt * price_usd
+
+        class _B:
+            balance = bal
+            balance_usd = bal_usd_val
+
+        return _B()
+
+    def price(self, token):
+        from decimal import Decimal
+
+        return Decimal("2000") if token == "WETH" else Decimal("1")
+
+
+def _make_strategy_live_decide():
+    """Like _make_strategy but preserves the scaffolded decide() (for HF-guard tests)."""
+    cls = _scaffold_lending_loop(preserve_decide=True)
+
+    class _Cfg:
+        def get(self, key, default=None):
+            return default
+
+    from decimal import Decimal
+
+    strat = cls.__new__(cls)
+    strat.config = _Cfg()
+    strat.supply_amount = Decimal("1")
+    strat.borrow_amount = Decimal("500")
+    strat.target_leverage = Decimal("2.0")
+    strat.borrow_ratio = Decimal("0.7")
+    strat.min_health_factor = Decimal("1.5")
+    strat.emergency_threshold = Decimal("1.2")
+    strat.min_collateral_usd = Decimal("100")
+    strat.partial_repay_pct = Decimal("0.25")
+    strat.lending_protocol = "aave_v3"
+    strat.lending_market = ""
+    strat.collateral_token = "WETH"
+    strat.borrow_token = "USDC"
+    strat._loop_state = "idle"
+    strat._loop_count = 0
+    strat._current_leverage = Decimal("1.0")
+    return strat
+
+
+def test_lending_loop_emits_partial_repay_when_hf_below_min() -> None:
+    """HF dropped below min_health_factor but above emergency -> partial repay."""
+    from decimal import Decimal
+
+    strat = _make_strategy_live_decide()
+    strat._loop_state = "monitoring"
+    strat._loop_count = 2
+    # HF = 1.35 is below min_health_factor (1.5) but above emergency_threshold (1.2)
+    market = _HFMarket(hf="1.35", borrow_balance="400")
+
+    intent = strat.decide(market)
+    assert intent is not None
+    # Must be a RepayIntent (not repay_full)
+    assert intent.intent_type.value == "REPAY"
+    assert getattr(intent, "repay_full", False) is False
+    # Partial repay = 400 * 0.25 = 100 (quantized down to 0.01)
+    assert intent.amount == Decimal("100.00")
+    assert intent.token == "USDC"
+    assert intent.protocol == "aave_v3"
+
+
+def test_lending_loop_emits_full_deleverage_when_hf_below_emergency() -> None:
+    """HF dropped below emergency_threshold -> full deleverage via repay_full."""
+    strat = _make_strategy_live_decide()
+    strat._loop_state = "monitoring"
+    strat._loop_count = 2
+    market = _HFMarket(hf="1.10", borrow_balance="400")  # below emergency 1.2
+
+    intent = strat.decide(market)
+    assert intent is not None
+    assert intent.intent_type.value == "REPAY"
+    assert intent.repay_full is True
+    assert intent.token == "USDC"
+    # State advances to monitoring so subsequent iterations won't continue looping
+    assert strat._loop_state == "monitoring"
+
+
+def test_lending_loop_no_repay_when_hf_healthy() -> None:
+    """HF safely above min_health_factor -> continue loop / monitoring (no repay)."""
+    strat = _make_strategy_live_decide()
+    strat._loop_state = "monitoring"
+    strat._loop_count = 2
+    market = _HFMarket(hf="2.0", borrow_balance="400")
+
+    intent = strat.decide(market)
+    assert intent is not None
+    # Not a repay -- HOLD (monitoring) when healthy.
+    assert intent.intent_type.value == "HOLD"
+
+
+def test_lending_loop_hf_provider_failure_continues_loop() -> None:
+    """If HF call raises, strategy does not abort -- continues the loop defensively."""
+    from decimal import Decimal
+
+    class _BrokenMarket(_HFMarket):
+        def position_health(self, protocol, market_id):
+            raise RuntimeError("gateway unavailable")
+
+        def balance(self, token):
+            from decimal import Decimal
+
+            class _B:
+                balance = Decimal("2")
+                balance_usd = Decimal("4000")
+
+            return _B()
+
+    strat = _make_strategy_live_decide()
+    strat._loop_state = "idle"
+    strat._loop_count = 1  # so HF-guard branch executes
+    market = _BrokenMarket(hf="0")
+
+    intent = strat.decide(market)
+    # Should not raise -- degrades to the normal state machine.
+    assert intent is not None
+    # After loop_count>0 in 'idle' with healthy collateral, a SUPPLY intent is returned.
+    assert intent.intent_type.value == "SUPPLY"
+    # Leverage state unchanged
+    assert strat._current_leverage == Decimal("1.0")
+
+
+def test_lending_loop_hf_guard_dormant_when_no_borrows() -> None:
+    """Before any borrow has occurred, HF guard is a no-op (no position to monitor)."""
+    strat = _make_strategy_live_decide()
+    strat._loop_state = "idle"
+    strat._loop_count = 0
+    # HF would trigger emergency deleverage if the guard fired.
+    market = _HFMarket(hf="0.5", borrow_balance="0")
+
+    intent = strat.decide(market)
+    # Guard is dormant (loop_count==0 and state==idle) -- normal idle path runs.
+    assert intent is not None
+    assert intent.intent_type.value in {"SUPPLY", "HOLD"}
+
+
+def test_lending_loop_hf_uses_configured_protocol() -> None:
+    """HF guard passes self.lending_protocol / self.lending_market to market.position_health."""
+    recorded = {}
+
+    class _RecordingMarket(_HFMarket):
+        def position_health(self_inner, protocol, market_id):
+            recorded["protocol"] = protocol
+            recorded["market_id"] = market_id
+            return super().position_health(protocol, market_id)
+
+    strat = _make_strategy_live_decide()
+    strat.lending_protocol = "morpho_blue"
+    strat.lending_market = "0xdeadbeef"
+    strat._loop_state = "monitoring"
+    strat._loop_count = 2
+    market = _RecordingMarket(hf="2.0")
+
+    strat.decide(market)
+    assert recorded["protocol"] == "morpho_blue"
+    assert recorded["market_id"] == "0xdeadbeef"
+
+
+def test_lending_loop_supply_uses_configured_protocol() -> None:
+    """Supply intent must use self.lending_protocol, not hardcoded aave_v3.
+
+    Morpho Blue requires market_id for isolated markets, so we also verify
+    self.lending_market is threaded through.
+    """
+    strat = _make_strategy_live_decide()
+    strat.lending_protocol = "morpho_blue"
+    strat.lending_market = "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc"
+    strat._loop_state = "idle"
+    strat._loop_count = 0
+    market = _HFMarket(hf="2.0", borrow_balance="0")
+
+    intent = strat.decide(market)
+    assert intent is not None
+    assert intent.intent_type.value == "SUPPLY"
+    assert intent.protocol == "morpho_blue"  # not hardcoded aave_v3
+    assert intent.market_id == strat.lending_market
+
+
+def test_lending_loop_borrow_uses_configured_protocol() -> None:
+    """Borrow intent must use self.lending_protocol, not hardcoded aave_v3."""
+    strat = _make_strategy_live_decide()
+    strat.lending_protocol = "compound_v3"
+    strat.lending_market = "usdc"
+    strat._loop_state = "supplied"
+    strat._loop_count = 0
+    market = _HFMarket(hf="2.0", borrow_balance="0")
+
+    intent = strat.decide(market)
+    assert intent is not None
+    assert intent.intent_type.value == "BORROW"
+    assert intent.protocol == "compound_v3"
+
+
+def test_lending_loop_partial_repay_sized_from_debt_not_wallet() -> None:
+    """Partial repay must size from ON-CHAIN DEBT, not wallet balance.
+
+    After loops, wallet has 0 borrow_token (already swapped to collateral)
+    but debt is $400. partial_repay_pct=0.25 -> target=100 USDC. Since
+    wallet<target, strategy must swap collateral -> debt first.
+    """
+    from decimal import Decimal
+
+    strat = _make_strategy_live_decide()
+    strat._loop_state = "monitoring"
+    strat._loop_count = 2
+    # HF=1.35 triggers partial repay. Debt=$400 USDC. Wallet has 0 USDC.
+    market = _HFMarket(hf="1.35", borrow_balance="0", debt_usd="400")
+
+    intent = strat.decide(market)
+    assert intent is not None
+    # Since wallet<target (0<100), strategy must first SWAP collateral -> debt.
+    assert intent.intent_type.value == "SWAP"
+    assert intent.from_token == "WETH"
+    assert intent.to_token == "USDC"
+    # Unchanged debt amount stays
+    assert Decimal(str(strat.partial_repay_pct)) == Decimal("0.25")
+
+
+def test_lending_loop_emergency_swaps_collateral_when_wallet_empty() -> None:
+    """When HF < emergency and wallet has no debt_token, strategy MUST first swap
+    collateral -> debt token instead of emitting a repay_full that has no funds.
+    """
+    strat = _make_strategy_live_decide()
+    strat._loop_state = "monitoring"
+    strat._loop_count = 2
+    market = _HFMarket(hf="1.10", borrow_balance="0", debt_usd="400")  # wallet empty
+
+    intent = strat.decide(market)
+    assert intent is not None
+    # Must swap collateral -> debt first, not emit a dud repay_full.
+    assert intent.intent_type.value == "SWAP"
+    assert intent.from_token == "WETH"
+    assert intent.to_token == "USDC"
+    # State has advanced so the next iteration will emit repay_full.
+    assert strat._loop_state == "monitoring"
+
+
+def test_lending_loop_emergency_repay_full_when_wallet_funded() -> None:
+    """When HF < emergency AND wallet has debt_token, strategy emits repay_full directly."""
+    strat = _make_strategy_live_decide()
+    strat._loop_state = "monitoring"
+    strat._loop_count = 2
+    market = _HFMarket(hf="1.10", borrow_balance="500", debt_usd="400")
+
+    intent = strat.decide(market)
+    assert intent is not None
+    assert intent.intent_type.value == "REPAY"
+    assert intent.repay_full is True
+
+
+def test_lending_loop_emergency_from_borrowed_swaps_first_and_flags_monitoring() -> None:
+    """HF guard triggered in BORROWED state:
+    wallet empty -> strategy must swap collateral first AND flip to MONITORING
+    so on_intent_executed does not mis-count the unwind as a loop iteration.
+    """
+    strat = _make_strategy_live_decide()
+    strat._loop_state = "borrowed"
+    strat._loop_count = 1
+    market = _HFMarket(hf="1.10", borrow_balance="0", debt_usd="400")
+
+    intent = strat.decide(market)
+    assert intent is not None
+    assert intent.intent_type.value == "SWAP"
+    assert intent.from_token == "WETH"
+    assert intent.to_token == "USDC"
+    # State MUST flip to MONITORING to avoid double-counting in on_intent_executed.
+    assert strat._loop_state == "monitoring"
+
+
+def test_lending_loop_partial_repay_from_borrowed_transitions_to_monitoring() -> None:
+    """Partial-repay deleverage (HF<min but HF>=emergency) from BORROWED must also
+    transition to MONITORING so the strategy does not resume looping.
+    """
+    from decimal import Decimal
+
+    strat = _make_strategy_live_decide()
+    strat._loop_state = "borrowed"
+    strat._loop_count = 1
+    # HF=1.35 < min(1.5) but > emergency(1.2); wallet holds enough USDC for partial.
+    market = _HFMarket(hf="1.35", borrow_balance="500", debt_usd="400")
+
+    intent = strat.decide(market)
+    assert intent is not None
+    assert intent.intent_type.value == "REPAY"
+    assert getattr(intent, "repay_full", False) is False
+    assert intent.amount == Decimal("100.00")
+    # State MUST flip to MONITORING to stop further loops.
+    assert strat._loop_state == "monitoring"
+
+
+def test_lending_loop_holds_when_non_stable_debt_has_no_oracle() -> None:
+    """Non-stable debt with no oracle and no stablecoin fallback -> HOLD instead
+    of silently over-repaying.
+    """
+
+    class _NoPriceMarket(_HFMarket):
+        def price(self, token):
+            raise RuntimeError("oracle unavailable")
+
+    strat = _make_strategy_live_decide()
+    strat.borrow_token = "ARB"  # not in STABLE_DEBT_TOKENS
+    strat._loop_state = "monitoring"
+    strat._loop_count = 1
+    market = _NoPriceMarket(hf="1.35", borrow_balance="10", debt_usd="400")
+
+    intent = strat.decide(market)
+    assert intent is not None
+    # Partial repay branch must HOLD (debt_tokens is None) rather than size a repay.
+    assert intent.intent_type.value == "HOLD"
 
 
 # ---------------------------------------------------------------------------

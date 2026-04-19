@@ -455,7 +455,149 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
             # Leverage loop state machine:
             #   IDLE -> SUPPLIED -> BORROWED -> (check leverage) -> IDLE (loop) or MONITORING
             # Each loop iteration: supply collateral -> borrow -> swap back to collateral
-            # Loops until target_leverage is reached, then monitors health.
+            # Loops until target_leverage is reached, then monitors health via the unified
+            # health-factor provider (Aave V3 / Morpho Blue / Compound V3).
+
+            # ----- Health-factor guard runs EVERY iteration once borrowed -----
+            # HF < emergency_threshold -> full deleverage.
+            # HF < min_health_factor   -> partial repay (scale = partial_repay_pct of debt).
+            #
+            # Sizing rule: partial repay = partial_repay_pct * outstanding debt
+            # (NOT wallet balance -- after swapping borrowed tokens into collateral
+            # each loop, the wallet usually holds 0 borrow_token). If the wallet
+            # doesn't hold enough borrow_token to cover the repay, we first swap
+            # collateral_token -> borrow_token so the repay can actually execute.
+            if self._loop_state in (LendingLoopState.BORROWED, LendingLoopState.MONITORING) or self._loop_count > 0:
+                try:
+                    hf_health = market.position_health(
+                        protocol=self.lending_protocol,
+                        market_id=self.lending_market,
+                    )
+                    hf = hf_health.health_factor
+                    debt_usd = getattr(hf_health, "debt_value_usd", Decimal("0")) or Decimal("0")
+                    logger.info(
+                        f"Health factor check: {hf} (debt=${debt_usd}) "
+                        f"(min={self.min_health_factor}, emergency={self.emergency_threshold})"
+                    )
+
+                    # Check wallet balance of the debt token (used for both thresholds).
+                    try:
+                        borrow_wallet = market.balance(self.borrow_token).balance
+                    except Exception:
+                        borrow_wallet = Decimal("0")
+
+                    # USD-pegged stablecoins where 1 token ~ $1 is a safe fallback.
+                    STABLE_DEBT_TOKENS = {
+                        "USDC", "USDT", "DAI", "USDC.E", "USDBC", "USDS", "FRAX", "LUSD"
+                    }
+
+                    def _debt_tokens() -> Decimal | None:
+                        # Convert debt USD -> debt token amount.
+                        # 1) price oracle: preferred (works for any token)
+                        # 2) stablecoin 1:1 fallback (only for the allow-list above)
+                        # 3) None: refuse to guess; caller must not emit a sized repay
+                        try:
+                            price = market.price(self.borrow_token)
+                            if price and price > 0:
+                                return debt_usd / Decimal(str(price))
+                        except Exception:
+                            pass
+                        if self.borrow_token.upper() in STABLE_DEBT_TOKENS:
+                            return debt_usd
+                        return None
+
+                    if hf < self.emergency_threshold:
+                        logger.warning(
+                            f"Health factor {hf} < emergency_threshold "
+                            f"{self.emergency_threshold}: full deleverage."
+                        )
+                        required_tokens = _debt_tokens()
+                        # If wallet can't cover the debt (common case: loop just
+                        # swapped all borrow_token -> collateral_token), first
+                        # unwind collateral so the repay has funds to transfer.
+                        # If we cannot size required_tokens (no oracle, non-stable
+                        # debt), fall back to "wallet empty" heuristic.
+                        wallet_short = (
+                            required_tokens is not None and borrow_wallet < required_tokens
+                        ) or (required_tokens is None and borrow_wallet <= Decimal("0"))
+                        if wallet_short and debt_usd > Decimal("0"):
+                            logger.warning(
+                                f"Emergency deleverage needs {self.borrow_token} "
+                                f"(required~{required_tokens}, wallet={borrow_wallet}) "
+                                f"-- swapping {self.collateral_token} -> "
+                                f"{self.borrow_token} first."
+                            )
+                            self._loop_state = LendingLoopState.MONITORING
+                            return Intent.swap(
+                                from_token=self.collateral_token,
+                                to_token=self.borrow_token,
+                                amount="all",
+                                max_slippage=Decimal("0.02"),  # wider in emergency
+                            )
+                        self._loop_state = LendingLoopState.MONITORING
+                        repay_kwargs = {
+                            "protocol": self.lending_protocol,
+                            "token": self.borrow_token,
+                            "repay_full": True,
+                        }
+                        if self.lending_market:
+                            repay_kwargs["market_id"] = self.lending_market
+                        return Intent.repay(**repay_kwargs)
+
+                    if hf < self.min_health_factor:
+                        # Partial repay sized from DEBT (not wallet balance).
+                        debt_tokens = _debt_tokens()
+                        if debt_tokens is None:
+                            # No oracle and non-stable debt -- fall through to emergency
+                            # only if HF continues to drop; for now we HOLD and
+                            # explicitly log the reason rather than sizing a repay
+                            # with a guessed value that could over-repay drastically.
+                            return Intent.hold(
+                                reason=f"HF {hf} < min {self.min_health_factor} but "
+                                f"no oracle/stablecoin pricing for {self.borrow_token}"
+                            )
+                        target_amt = (debt_tokens * self.partial_repay_pct).quantize(
+                            Decimal("0.0001"), rounding=ROUND_DOWN
+                        )
+                        if target_amt <= Decimal("0"):
+                            return Intent.hold(
+                                reason=f"HF {hf} < min {self.min_health_factor} "
+                                f"but computed zero debt to repay"
+                            )
+                        # If wallet can't cover the target, first free up funds by
+                        # swapping collateral -> debt token. Once we start
+                        # deleveraging we transition to MONITORING so on_intent_executed
+                        # does not mis-count this swap as a normal loop iteration.
+                        if borrow_wallet < target_amt:
+                            logger.warning(
+                                f"Partial repay needs {target_amt} {self.borrow_token} "
+                                f"but wallet holds {borrow_wallet} -- swapping collateral first."
+                            )
+                            self._loop_state = LendingLoopState.MONITORING
+                            return Intent.swap(
+                                from_token=self.collateral_token,
+                                to_token=self.borrow_token,
+                                amount="all",
+                                max_slippage=Decimal("0.01"),
+                            )
+                        repay_amt = target_amt.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+                        logger.warning(
+                            f"Health factor {hf} < min_health_factor {self.min_health_factor}: "
+                            f"partial repay {repay_amt} {self.borrow_token}."
+                        )
+                        # Transition to MONITORING so subsequent iterations evaluate HF
+                        # rather than continuing to loop.
+                        self._loop_state = LendingLoopState.MONITORING
+                        partial_kwargs = {
+                            "protocol": self.lending_protocol,
+                            "token": self.borrow_token,
+                            "amount": repay_amt,
+                        }
+                        if self.lending_market:
+                            partial_kwargs["market_id"] = self.lending_market
+                        return Intent.repay(**partial_kwargs)
+                except Exception as e:
+                    logger.warning(f"Health factor unavailable, continuing loop: {e}")
 
             if self._loop_state == LendingLoopState.IDLE:
                 # Supply collateral (first loop: configured amount, subsequent: all available)
@@ -472,13 +614,19 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     return Intent.hold(reason="Insufficient collateral for next loop, entering monitoring")
 
                 amount = self.supply_amount if self._loop_count == 0 else "all"
-                logger.info(f"Loop {self._loop_count + 1}: supplying {amount} {self.collateral_token}")
-                return Intent.supply(
-                    protocol="aave_v3",
-                    token=self.collateral_token,
-                    amount=amount,
-                    use_as_collateral=True,
+                logger.info(
+                    f"Loop {self._loop_count + 1}: supplying {amount} {self.collateral_token} "
+                    f"on {self.lending_protocol}"
                 )
+                supply_kwargs = {
+                    "protocol": self.lending_protocol,
+                    "token": self.collateral_token,
+                    "amount": amount,
+                    "use_as_collateral": True,
+                }
+                if self.lending_market:
+                    supply_kwargs["market_id"] = self.lending_market
+                return Intent.supply(**supply_kwargs)
 
             elif self._loop_state == LendingLoopState.SUPPLIED:
                 # Borrow against collateral -- amount decays each loop
@@ -491,14 +639,20 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 if borrow_amount < Decimal("1"):
                     self._loop_state = LendingLoopState.MONITORING
                     return Intent.hold(reason="Borrow amount too small, entering monitoring")
-                logger.info(f"Loop {self._loop_count + 1}: borrowing {borrow_amount} {self.borrow_token}")
-                return Intent.borrow(
-                    protocol="aave_v3",
-                    collateral_token=self.collateral_token,
-                    collateral_amount=Decimal("0"),
-                    borrow_token=self.borrow_token,
-                    borrow_amount=borrow_amount,
+                logger.info(
+                    f"Loop {self._loop_count + 1}: borrowing {borrow_amount} {self.borrow_token} "
+                    f"on {self.lending_protocol}"
                 )
+                borrow_kwargs = {
+                    "protocol": self.lending_protocol,
+                    "collateral_token": self.collateral_token,
+                    "collateral_amount": Decimal("0"),
+                    "borrow_token": self.borrow_token,
+                    "borrow_amount": borrow_amount,
+                }
+                if self.lending_market:
+                    borrow_kwargs["market_id"] = self.lending_market
+                return Intent.borrow(**borrow_kwargs)
 
             elif self._loop_state == LendingLoopState.BORROWED:
                 # Swap borrowed tokens back to collateral for next loop iteration
@@ -511,9 +665,8 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 )
 
             elif self._loop_state == LendingLoopState.MONITORING:
-                # Leverage target reached -- monitor health factor
-                # In production, query on-chain health factor and repay if it drops
-                # below min_health_factor to avoid liquidation.
+                # Leverage target reached -- HF is already checked at the top of decide().
+                # If we reached here, the position is healthy.
                 logger.info(
                     f"Monitoring: leverage ~{self._current_leverage:.2f}x "
                     f"(target {self.target_leverage}x, {self._loop_count} loops, "
@@ -1115,11 +1268,12 @@ def _get_template_teardown(
                     position_type=PositionType.BORROW,
                     position_id="{strategy_name}_borrow",
                     chain=self.chain,
-                    protocol="aave_v3",
+                    protocol=self.lending_protocol,
                     value_usd=Decimal("0"),  # Will be enriched by framework
                     details={{
                         "borrow_token": self.borrow_token,
                         "loop_count": self._loop_count,
+                        "market_id": self.lending_market,
                     }},
                 )
             )
@@ -1137,11 +1291,12 @@ def _get_template_teardown(
                     position_type=PositionType.SUPPLY,
                     position_id="{strategy_name}_supply",
                     chain=self.chain,
-                    protocol="aave_v3",
+                    protocol=self.lending_protocol,
                     value_usd=Decimal("0"),  # Will be enriched by framework
                     details={{
                         "collateral_token": self.collateral_token,
                         "supply_amount": str(self.supply_amount),
+                        "market_id": self.lending_market,
                     }},
                 )
             )
@@ -1170,13 +1325,14 @@ def _get_template_teardown(
             or self._loop_count > 0
         )
         if has_borrows:
-            intents.append(
-                Intent.repay(
-                    protocol="aave_v3",
-                    token=self.borrow_token,
-                    amount="all",
-                )
-            )
+            repay_kwargs = {{
+                "protocol": self.lending_protocol,
+                "token": self.borrow_token,
+                "amount": "all",
+            }}
+            if self.lending_market:
+                repay_kwargs["market_id"] = self.lending_market
+            intents.append(Intent.repay(**repay_kwargs))
 
         # 2. Withdraw collateral (if supplied -- in any non-initial-IDLE state or after looping)
         has_supply = (
@@ -1185,13 +1341,14 @@ def _get_template_teardown(
             or self._loop_count > 0
         )
         if has_supply:
-            intents.append(
-                Intent.withdraw(
-                    protocol="aave_v3",
-                    token=self.collateral_token,
-                    amount="all",
-                )
-            )
+            withdraw_kwargs = {{
+                "protocol": self.lending_protocol,
+                "token": self.collateral_token,
+                "amount": "all",
+            }}
+            if self.lending_market:
+                withdraw_kwargs["market_id"] = self.lending_market
+            intents.append(Intent.withdraw(**withdraw_kwargs))
 
         # 3. Swap collateral back to stable if any supply/borrow existed
         if has_borrows or has_supply:
@@ -1802,8 +1959,23 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
                 f"borrow_ratio={self.borrow_ratio} >= 1.0 causes exponential borrow growth. "
                 "Set borrow_ratio to a value between 0 and 1 (e.g. 0.7) in config.json."
             )
+        # Health-factor thresholds (unified across aave_v3 / morpho_blue / compound_v3).
+        # HF < min_health_factor -> partial repay. HF < emergency_threshold -> full deleverage.
         self.min_health_factor = Decimal(str(get_config("min_health_factor", "1.5")))
+        self.emergency_threshold = Decimal(str(get_config("emergency_threshold", "1.2")))
+        if self.emergency_threshold >= self.min_health_factor:
+            raise ValueError(
+                f"emergency_threshold ({self.emergency_threshold}) must be strictly less than "
+                f"min_health_factor ({self.min_health_factor}). Example: 1.2 vs 1.5."
+            )
         self.min_collateral_usd = Decimal(str(get_config("min_collateral_usd", "100")))
+        self.partial_repay_pct = Decimal(str(get_config("partial_repay_pct", "0.25")))
+
+        # Protocol / market for health-factor dispatch.
+        # For aave_v3 market_id is informational; for morpho_blue set the bytes32 market id;
+        # for compound_v3 set the Comet market key (e.g. "usdc", "weth").
+        self.lending_protocol = get_config("lending_protocol", "aave_v3")
+        self.lending_market = get_config("lending_market", "")
 
         # Token configuration
         self.collateral_token = get_config("collateral_token", "WETH")
@@ -2005,6 +2177,11 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "            self._loop_state = LendingLoopState.BORROWED\n"
             '            logger.info(f"Borrow confirmed (loop {self._loop_count + 1}) -> borrowed")\n'
             '        elif intent_type.value == "SWAP":\n'
+            "            # In MONITORING state, a SWAP is the collateral->debt unwind that\n"
+            "            # precedes a repay; do NOT advance the loop counter or leverage.\n"
+            "            if self._loop_state == LendingLoopState.MONITORING:\n"
+            '                logger.info("Unwind swap confirmed -- awaiting repay")\n'
+            "                return\n"
             "            self._loop_count += 1\n"
             "            # Estimate leverage: geometric series 1 + r + r^2 + ... + r^n\n"
             "            # where r = borrow_ratio (approximate LTV usage)\n"
@@ -2023,6 +2200,24 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "                logger.info(\n"
             '                    f"Loop {self._loop_count} complete: leverage ~{leverage:.2f}x "\n'
             '                    f"< target {self.target_leverage}x -> continuing"\n'
+            "                )\n"
+            '        elif intent_type.value == "REPAY":\n'
+            "            # Deleverage confirmed -- refresh leverage estimate so subsequent\n"
+            "            # log lines are accurate and the monitoring path shows the new state.\n"
+            '            repay_full = bool(getattr(intent, "repay_full", False))\n'
+            "            if repay_full:\n"
+            '                self._current_leverage = Decimal("1.0")\n'
+            "                self._loop_state = LendingLoopState.MONITORING\n"
+            '                logger.info("Full repay confirmed -- leverage reset to 1.0x")\n'
+            "            else:\n"
+            "                # Partial repay: conservatively shave ~25% off the estimate\n"
+            "                # (the HF guard sizes partial repays at partial_repay_pct of debt).\n"
+            "                self._current_leverage = max(\n"
+            '                    Decimal("1.0"),\n'
+            '                    self._current_leverage * (Decimal("1") - self.partial_repay_pct),\n'
+            "                )\n"
+            "                logger.info(\n"
+            '                    f"Partial repay confirmed -- leverage ~{self._current_leverage:.2f}x"\n'
             "                )\n"
             "\n"
             "    def get_persistent_state(self):\n"
@@ -2588,6 +2783,12 @@ def generate_config_json(
                 "target_leverage": "2.0",
                 "borrow_ratio": "0.7",
                 "min_health_factor": "1.5",
+                "emergency_threshold": "1.2",
+                "partial_repay_pct": "0.25",
+                "lending_protocol": "aave_v3",
+                # Morpho Blue: set the bytes32 market id here; Compound V3: set
+                # the Comet market key (e.g. "usdc", "weth"); Aave V3: leave blank.
+                "lending_market": "",
                 "min_collateral_usd": "100",
             }
         )

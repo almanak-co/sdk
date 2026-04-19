@@ -4133,11 +4133,14 @@ class MarketSnapshot:
         """Get health factor for a lending position.
 
         Reads on-chain position data and computes health factor for
-        Morpho Blue or Aave V3 positions.
+        Aave V3, Morpho Blue, or Compound V3 positions.
 
         Args:
-            protocol: "morpho_blue" or "aave_v3"
-            market_id: Protocol-specific market identifier
+            protocol: "aave_v3", "morpho_blue", or "compound_v3"
+            market_id: Protocol-specific market identifier. For Aave V3
+                this is informational (one pool per chain). For Morpho Blue
+                this is the bytes32 market id. For Compound V3 this is the
+                Comet market key (e.g. "usdc", "weth").
             rpc_url: RPC endpoint (uses default if not provided)
             collateral_price_usd: Optional override for collateral price
             debt_price_usd: Optional override for debt token price
