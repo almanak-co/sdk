@@ -510,23 +510,43 @@ class IntentCompiler:
             return None
 
     def _validate_pool(self, result: "PoolValidationResult", intent_id: str) -> CompilationResult | None:
-        """Check pool validation result and return FAILED CompilationResult if pool doesn't exist.
+        """Check pool validation result and fail-closed on definitive/attempted-but-failed outcomes.
+
+        Fail-closed on:
+            - NOT_FOUND: factory confirmed the pool is absent.
+            - RPC_FAILED: RPC was attempted but errored — we can't trust downstream execution.
+
+        Warn-and-proceed on genuinely impossible-to-verify states (no RPC configured, unknown
+        protocol, missing factory entry, malformed response) since these are environmental
+        and refusing to compile would block legitimate flows like offline permission discovery.
+
+        Offline-only paths (placeholder-price mode, permission-discovery mode) relax the
+        RPC_FAILED fail-closed rule to a warning because those paths legitimately run against
+        unreachable RPC endpoints and only need calldata shapes, not on-chain truth.
 
         Args:
             result: Pool validation result from pool_validation module.
             intent_id: Intent ID for error reporting.
 
         Returns:
-            CompilationResult with FAILED status if pool doesn't exist, None if OK to proceed.
+            CompilationResult with FAILED status when fail-closed, None if OK to proceed.
         """
-        if result.exists is False:
+        from .pool_validation import PoolValidationReason
+
+        offline_mode = self._using_placeholders or getattr(self._config, "permission_discovery", False)
+
+        fail_closed_reasons = {PoolValidationReason.NOT_FOUND}
+        if not offline_mode:
+            fail_closed_reasons.add(PoolValidationReason.RPC_FAILED)
+
+        if result.exists is False or result.reason in fail_closed_reasons:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error=result.error or "Pool does not exist",
+                error=result.error or result.warning or f"Pool validation failed ({result.reason.value})",
                 intent_id=intent_id,
             )
         if result.warning:
-            logger.warning("Pool validation: %s", result.warning)
+            logger.warning("Pool validation: %s (reason=%s)", result.warning, result.reason.value)
         return None
 
     @property
@@ -1440,13 +1460,27 @@ class IntentCompiler:
                             f"Likely cause: pool has insufficient liquidity for {intent.from_token}->{intent.to_token}."
                         ),
                     )
-            elif quoter_amount is None and oracle_estimate > 0 and not self._using_placeholders:
-                logger.warning(
-                    "Price impact guard skipped: quoter returned None (RPC may be unavailable). "
-                    "Proceeding with oracle-only estimate for %s->%s.",
-                    intent.from_token,
-                    intent.to_token,
-                )
+            elif quoter_amount is None and oracle_estimate > 0:
+                # Fail-closed: without a quoter reading there is no pool-aware slippage basis.
+                # Proceeding with an oracle-only min_amount_out can either revert on-chain or,
+                # in the worst case, execute against a drained pool at catastrophic loss.
+                #
+                # Exempt the same offline classes that _validate_pool() exempts: placeholder-price
+                # mode (unit tests never hit a real RPC) and permission_discovery (calldata-only
+                # runs that legitimately have no RPC). Both paths already accept the trade-off
+                # that their emitted txs are not live-chain validated.
+                offline_mode = self._using_placeholders or getattr(self._config, "permission_discovery", False)
+                if not offline_mode:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=(
+                            f"Price impact guard: on-chain quoter returned no amount for "
+                            f"{intent.from_token}->{intent.to_token}. Cannot verify pool liquidity "
+                            f"or price impact. Refusing to compile a swap backed only by the oracle price. "
+                            f"Check RPC availability and that the pool has liquidity at the selected fee tier."
+                        ),
+                        intent_id=intent.intent_id,
+                    )
 
             min_output = int(Decimal(str(expected_output)) * (Decimal("1") - intent.max_slippage))
 
@@ -6738,44 +6772,65 @@ class IntentCompiler:
         token0_decimals: int = 18,
         token1_decimals: int = 18,
     ) -> int:
-        """Convert a price to a Uniswap V3 tick.
+        """Convert a price to a Uniswap V3 tick using Decimal arithmetic end-to-end.
 
-        Uniswap V3 uses tick-based pricing where:
+        Uniswap V3 uses tick-based pricing where::
+
             price = 1.0001^tick
-
-        But the price must be adjusted for token decimals first:
             adjusted_price = price / 10^(token0_decimals - token1_decimals)
-            tick = log(adjusted_price) / log(1.0001)
+            tick = floor(ln(adjusted_price) / ln(1.0001))
 
-        For example, with WETH/USDC (18/6 decimals):
-            price = 3400 USDC per WETH (nominal)
-            adjusted = 3400 / 10^(18-6) = 3400 / 10^12 = 3.4e-9
-            tick = log(3.4e-9) / log(1.0001) ≈ -194957
+        Previously this conversion cast the adjusted price through ``float`` before
+        taking ``math.log``. For decimal-asymmetric pairs like WETH/USDC the adjusted
+        value (``price / 1e12``) fell in the narrow window where float rounding made
+        the resulting ``math.floor`` non-deterministic at tick-spacing boundaries,
+        producing different ticks for mathematically equivalent Decimal inputs and
+        silently shifting multi-million-dollar LP ranges. We compute the logarithm
+        with ``Decimal.ln()`` at 50-digit precision instead.
 
         Args:
-            price: The price in nominal units (token1 per token0)
-            token0_decimals: Decimals of token0
-            token1_decimals: Decimals of token1
+            price: Price in nominal units (token1 per token0), must be positive.
+            token0_decimals: Decimals of token0.
+            token1_decimals: Decimals of token1.
 
         Returns:
-            The tick value (rounded down), bounded to valid Uniswap tick range
+            The tick value (rounded down), clamped to the Uniswap V3 valid range.
+
+        Raises:
+            ValueError: If price is zero or negative.
         """
-        import math
+        from decimal import Decimal as _Decimal
+        from decimal import localcontext
 
         if price <= 0:
             raise ValueError("Price must be positive")
 
-        # Adjust price for decimal difference
-        decimal_adjustment = 10 ** (token0_decimals - token1_decimals)
-        adjusted_price = float(price) / decimal_adjustment
+        price_dec = price if isinstance(price, _Decimal) else _Decimal(str(price))
 
-        # tick = ln(adjusted_price) / ln(1.0001)
-        tick = math.floor(math.log(adjusted_price) / math.log(1.0001))
+        # 50 digits exceeds any realistic Uniswap V3 price magnitude (|tick| <= 887272,
+        # price range >250 orders of magnitude) so floor(ln / ln(1.0001)) is invariant
+        # under further precision increases.
+        with localcontext() as ctx:
+            ctx.prec = 50
 
-        # Bound to valid tick range
+            decimal_diff = token0_decimals - token1_decimals
+            if decimal_diff >= 0:
+                adjusted_price = price_dec / (_Decimal(10) ** decimal_diff)
+            else:
+                adjusted_price = price_dec * (_Decimal(10) ** (-decimal_diff))
+
+            if adjusted_price <= 0:
+                return IntentCompiler.UNISWAP_MIN_TICK
+
+            ratio = adjusted_price.ln() / _Decimal("1.0001").ln()
+
+            # Decimal.__floor__ truncates toward negative infinity — matches math.floor semantics.
+            import math
+
+            tick = math.floor(ratio)
+
         tick = max(tick, IntentCompiler.UNISWAP_MIN_TICK)
         tick = min(tick, IntentCompiler.UNISWAP_MAX_TICK)
-
         return tick
 
     @staticmethod

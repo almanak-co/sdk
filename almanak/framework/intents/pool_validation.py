@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from enum import Enum
 
 from almanak.core.contracts import AERODROME, AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, TRADERJOE_V2, UNISWAP_V3
 from almanak.framework.data.pools.reader import GET_POOL_SELECTOR
@@ -42,18 +43,41 @@ _V3_PROTOCOL_REGISTRY: dict[str, dict[str, dict[str, str]]] = {
 _AERODROME_GET_POOL_SELECTOR = "0x79bc57d5"
 
 
+class PoolValidationReason(str, Enum):
+    """Typed reasons for a PoolValidationResult outcome.
+
+    The compiler uses this enum to decide whether to fail compilation
+    (fail-closed) or warn-and-proceed (fail-open, impossible-to-verify cases).
+    """
+
+    # Positive outcome — pool confirmed on-chain.
+    CONFIRMED = "CONFIRMED"
+
+    # Negative outcomes — callers MUST fail closed.
+    NOT_FOUND = "NOT_FOUND"  # Factory returned zero address / pool is absent
+    RPC_FAILED = "RPC_FAILED"  # RPC call was attempted but errored / bad response
+
+    # Impossible-to-verify outcomes — callers may warn and proceed.
+    RPC_UNAVAILABLE = "RPC_UNAVAILABLE"  # No RPC URL configured
+    FACTORY_MISSING = "FACTORY_MISSING"  # No factory entry for chain in registry
+    PROTOCOL_UNKNOWN = "PROTOCOL_UNKNOWN"  # Protocol not recognised by validator
+    NOT_CONFIGURED = "NOT_CONFIGURED"  # Other misconfiguration (e.g. unexpected response shape)
+
+
 @dataclass
 class PoolValidationResult:
     """Result of a pool existence check.
 
     Attributes:
         exists: True if pool exists, False if confirmed missing, None if unknown.
+        reason: Typed outcome category used by callers to decide fail-closed vs warn-and-proceed.
         pool_address: Pool address if found, None otherwise.
-        warning: Set when exists=None (couldn't verify, e.g. no RPC).
-        error: Set when exists=False (clear user-facing message).
+        warning: Set when validation could not be performed (exists=None).
+        error: Set when validation confirmed the pool is absent/broken (exists=False).
     """
 
     exists: bool | None
+    reason: PoolValidationReason
     pool_address: str | None = None
     warning: str | None = None
     error: str | None = None
@@ -131,6 +155,7 @@ def validate_v3_pool(
     if rpc_url is None:
         return PoolValidationResult(
             exists=None,
+            reason=PoolValidationReason.RPC_UNAVAILABLE,
             warning=f"No RPC URL available — cannot verify {protocol} pool existence on {chain}",
         )
 
@@ -138,6 +163,7 @@ def validate_v3_pool(
     if protocol_contracts is None:
         return PoolValidationResult(
             exists=None,
+            reason=PoolValidationReason.PROTOCOL_UNKNOWN,
             warning=f"Unknown protocol '{protocol}' — cannot verify pool existence",
         )
 
@@ -145,6 +171,7 @@ def validate_v3_pool(
     if chain_contracts is None or "factory" not in chain_contracts:
         return PoolValidationResult(
             exists=None,
+            reason=PoolValidationReason.FACTORY_MISSING,
             warning=f"No {protocol} factory address for chain '{chain}' — cannot verify pool existence",
         )
     factory = chain_contracts["factory"]
@@ -155,6 +182,7 @@ def validate_v3_pool(
     if raw is None:
         return PoolValidationResult(
             exists=None,
+            reason=PoolValidationReason.RPC_FAILED,
             warning=f"RPC call to {protocol} factory failed on {chain} — cannot verify pool existence",
         )
 
@@ -163,6 +191,7 @@ def validate_v3_pool(
     if pool_address == ZERO_ADDRESS:
         return PoolValidationResult(
             exists=False,
+            reason=PoolValidationReason.NOT_FOUND,
             error=(
                 f"No {protocol} pool found for "
                 f"{token_a[:10]}.../{token_b[:10]}... with fee tier {fee_tier} on {chain}. "
@@ -170,7 +199,7 @@ def validate_v3_pool(
             ),
         )
 
-    return PoolValidationResult(exists=True, pool_address=pool_address)
+    return PoolValidationResult(exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=pool_address)
 
 
 def validate_aerodrome_pool(
@@ -195,6 +224,7 @@ def validate_aerodrome_pool(
     if rpc_url is None:
         return PoolValidationResult(
             exists=None,
+            reason=PoolValidationReason.RPC_UNAVAILABLE,
             warning=f"No RPC URL available — cannot verify Aerodrome pool existence on {chain}",
         )
 
@@ -202,6 +232,7 @@ def validate_aerodrome_pool(
     if chain_contracts is None or "factory" not in chain_contracts:
         return PoolValidationResult(
             exists=None,
+            reason=PoolValidationReason.FACTORY_MISSING,
             warning=f"No Aerodrome factory address for chain '{chain}' — cannot verify pool existence",
         )
     factory = chain_contracts["factory"]
@@ -212,6 +243,7 @@ def validate_aerodrome_pool(
     if raw is None:
         return PoolValidationResult(
             exists=None,
+            reason=PoolValidationReason.RPC_FAILED,
             warning=f"RPC call to Aerodrome factory failed on {chain} — cannot verify pool existence",
         )
 
@@ -221,6 +253,7 @@ def validate_aerodrome_pool(
     if pool_address == ZERO_ADDRESS:
         return PoolValidationResult(
             exists=False,
+            reason=PoolValidationReason.NOT_FOUND,
             error=(
                 f"No Aerodrome {pool_type} pool found for "
                 f"{token_a[:10]}.../{token_b[:10]}... on {chain}. "
@@ -229,7 +262,7 @@ def validate_aerodrome_pool(
             ),
         )
 
-    return PoolValidationResult(exists=True, pool_address=pool_address)
+    return PoolValidationResult(exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=pool_address)
 
 
 # Aerodrome Slipstream CL getPool(address,address,int24) selector
@@ -267,6 +300,7 @@ def validate_aerodrome_cl_pool(
     if rpc_url is None:
         return PoolValidationResult(
             exists=None,
+            reason=PoolValidationReason.RPC_UNAVAILABLE,
             warning=f"No RPC URL available — cannot verify Aerodrome CL pool existence on {chain}",
         )
 
@@ -274,6 +308,7 @@ def validate_aerodrome_cl_pool(
     if chain_contracts is None or "cl_factory" not in chain_contracts:
         return PoolValidationResult(
             exists=None,
+            reason=PoolValidationReason.FACTORY_MISSING,
             warning=f"No Aerodrome CL factory address for chain '{chain}' — cannot verify pool existence",
         )
     cl_factory = chain_contracts["cl_factory"]
@@ -284,6 +319,7 @@ def validate_aerodrome_cl_pool(
     if raw is None:
         return PoolValidationResult(
             exists=None,
+            reason=PoolValidationReason.RPC_FAILED,
             warning=f"RPC call to Aerodrome CL factory failed on {chain} — cannot verify pool existence",
         )
 
@@ -292,6 +328,7 @@ def validate_aerodrome_cl_pool(
     if pool_address == ZERO_ADDRESS:
         return PoolValidationResult(
             exists=False,
+            reason=PoolValidationReason.NOT_FOUND,
             error=(
                 f"No Aerodrome CL pool found for "
                 f"{token_a[:10]}.../{token_b[:10]}... with tick spacing {tick_spacing} on {chain}. "
@@ -299,7 +336,7 @@ def validate_aerodrome_cl_pool(
             ),
         )
 
-    return PoolValidationResult(exists=True, pool_address=pool_address)
+    return PoolValidationResult(exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=pool_address)
 
 
 _SLOT0_SELECTOR = "0x3850c7bd"
@@ -370,19 +407,16 @@ def validate_traderjoe_pool(
     if rpc_url is None:
         return PoolValidationResult(
             exists=None,
+            reason=PoolValidationReason.RPC_UNAVAILABLE,
             warning=f"No RPC URL available — cannot verify TraderJoe V2 pool existence on {chain}",
         )
 
-    chain_contracts = TRADERJOE_V2.get(chain.lower())
-    if chain_contracts is None:
-        return PoolValidationResult(
-            exists=None,
-            warning=f"No TraderJoe V2 factory address for chain '{chain}' — cannot verify pool existence",
-        )
+    chain_contracts = TRADERJOE_V2.get(chain.lower()) or {}
     factory = chain_contracts.get("factory")
     if factory is None:
         return PoolValidationResult(
             exists=None,
+            reason=PoolValidationReason.FACTORY_MISSING,
             warning=f"No TraderJoe V2 factory address for chain '{chain}' — cannot verify pool existence",
         )
 
@@ -399,6 +433,7 @@ def validate_traderjoe_pool(
     if raw is None:
         return PoolValidationResult(
             exists=None,
+            reason=PoolValidationReason.RPC_FAILED,
             warning=f"RPC call to TraderJoe V2 factory failed on {chain} — cannot verify pool existence",
         )
 
@@ -407,6 +442,7 @@ def validate_traderjoe_pool(
     if len(raw) < 64:
         return PoolValidationResult(
             exists=None,
+            reason=PoolValidationReason.NOT_CONFIGURED,
             warning=f"Unexpected response from TraderJoe V2 factory on {chain}",
         )
 
@@ -415,6 +451,7 @@ def validate_traderjoe_pool(
     if pool_address == ZERO_ADDRESS:
         return PoolValidationResult(
             exists=False,
+            reason=PoolValidationReason.NOT_FOUND,
             error=(
                 f"No TraderJoe V2 pool found for "
                 f"{token_x[:10]}.../{token_y[:10]}... with bin step {bin_step} on {chain}. "
@@ -433,6 +470,7 @@ def validate_traderjoe_pool(
             if reserve_x == 0 and reserve_y == 0:
                 return PoolValidationResult(
                     exists=False,
+                    reason=PoolValidationReason.NOT_FOUND,
                     error=(
                         f"TraderJoe V2 pool exists for "
                         f"{token_x[:10]}.../{token_y[:10]}... with bin step {bin_step} on {chain}, "
@@ -440,4 +478,4 @@ def validate_traderjoe_pool(
                     ),
                 )
 
-    return PoolValidationResult(exists=True, pool_address=pool_address)
+    return PoolValidationResult(exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=pool_address)

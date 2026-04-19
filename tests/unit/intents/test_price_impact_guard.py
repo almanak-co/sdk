@@ -345,8 +345,8 @@ class TestPriceImpactGuardCompilation:
         assert result.status == CompilationStatus.SUCCESS
 
     @patch(ADAPTER_CLS)
-    def test_none_quoter_skips_guard(self, mock_adapter_cls) -> None:
-        """When quoter returns None (RPC failed), guard is skipped."""
+    def test_none_quoter_fails_closed(self, mock_adapter_cls) -> None:
+        """VIB-3160: a live swap with no quoter reading must fail, not fall back to oracle-only."""
         compiler = _make_compiler()
         intent = SwapIntent(
             from_token="USDC",
@@ -354,14 +354,16 @@ class TestPriceImpactGuardCompilation:
             amount_usd=Decimal("100"),
         )
 
-        # Quoter returns None (simulating RPC failure)
+        # Quoter returns None (simulating RPC failure or empty pool)
         mock_adapter = _make_mock_adapter(quoter_amount=None)
         mock_adapter_cls.return_value = mock_adapter
 
         result = compiler.compile(intent)
 
-        # Should succeed — guard skipped when quoter_amount is None
-        assert result.status == CompilationStatus.SUCCESS
+        assert result.status == CompilationStatus.FAILED
+        assert "on-chain quoter returned no amount" in (result.error or "").lower()
+        # Prove the failure came from the quoter path, not an unrelated early exit.
+        mock_adapter.get_quoted_amount_out.assert_called_once()
 
     @patch(ADAPTER_CLS)
     def test_placeholder_mode_skips_guard(self, mock_adapter_cls) -> None:

@@ -105,11 +105,13 @@ class TestTraderJoeV2SwapCompilation:
     ):
         """Full compilation with mocked adapter returns SUCCESS."""
         from almanak.framework.intents.compiler import TransactionData
-        from almanak.framework.intents.pool_validation import PoolValidationResult
+        from almanak.framework.intents.pool_validation import PoolValidationReason, PoolValidationResult
 
         # Setup mocks
         mock_get_rpc.return_value = "http://localhost:8545"
-        mock_validate_pool.return_value = PoolValidationResult(exists=True, pool_address="0x1234")
+        mock_validate_pool.return_value = PoolValidationResult(
+            exists=True, reason=PoolValidationReason.CONFIRMED, pool_address="0x1234"
+        )
 
         # Mock approve TX
         approve_tx = TransactionData(
@@ -236,10 +238,12 @@ class TestTraderJoeV2SwapMetadata:
     ):
         """ActionBundle metadata must include protocol and bin_step."""
         from almanak.framework.connectors.traderjoe_v2.adapter import TransactionData as TJTransactionData
-        from almanak.framework.intents.pool_validation import PoolValidationResult
+        from almanak.framework.intents.pool_validation import PoolValidationReason, PoolValidationResult
 
         mock_get_rpc.return_value = "http://localhost:8545"
-        mock_validate_pool.return_value = PoolValidationResult(exists=True, pool_address="0x1234")
+        mock_validate_pool.return_value = PoolValidationResult(
+            exists=True, reason=PoolValidationReason.CONFIRMED, pool_address="0x1234"
+        )
         mock_build_approve.return_value = []
 
         mock_adapter = MagicMock()

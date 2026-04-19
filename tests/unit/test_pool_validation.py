@@ -14,6 +14,7 @@ import pytest
 
 from almanak.framework.intents.pool_validation import (
     ZERO_ADDRESS,
+    PoolValidationReason,
     PoolValidationResult,
     _decode_address,
     _encode_get_pool_aerodrome,
@@ -29,20 +30,29 @@ class TestPoolValidationResult:
     """Test PoolValidationResult dataclass."""
 
     def test_exists_true(self):
-        result = PoolValidationResult(exists=True, pool_address="0xabc")
+        result = PoolValidationResult(
+            exists=True, reason=PoolValidationReason.CONFIRMED, pool_address="0xabc"
+        )
         assert result.exists is True
+        assert result.reason == PoolValidationReason.CONFIRMED
         assert result.pool_address == "0xabc"
         assert result.error is None
         assert result.warning is None
 
     def test_exists_false(self):
-        result = PoolValidationResult(exists=False, error="Pool not found")
+        result = PoolValidationResult(
+            exists=False, reason=PoolValidationReason.NOT_FOUND, error="Pool not found"
+        )
         assert result.exists is False
+        assert result.reason == PoolValidationReason.NOT_FOUND
         assert result.error == "Pool not found"
 
     def test_exists_none(self):
-        result = PoolValidationResult(exists=None, warning="No RPC")
+        result = PoolValidationResult(
+            exists=None, reason=PoolValidationReason.RPC_UNAVAILABLE, warning="No RPC"
+        )
         assert result.exists is None
+        assert result.reason == PoolValidationReason.RPC_UNAVAILABLE
         assert result.warning == "No RPC"
 
 
@@ -52,18 +62,21 @@ class TestV3PoolValidation:
     def test_no_rpc_url_returns_none(self):
         result = validate_v3_pool("arbitrum", "uniswap_v3", "0xabc", "0xdef", 3000, None)
         assert result.exists is None
+        assert result.reason == PoolValidationReason.RPC_UNAVAILABLE
         assert result.warning is not None
         assert "No RPC URL" in result.warning
 
     def test_unknown_protocol_returns_none(self):
         result = validate_v3_pool("arbitrum", "unknown_protocol", "0xabc", "0xdef", 3000, "http://localhost:8545")
         assert result.exists is None
+        assert result.reason == PoolValidationReason.PROTOCOL_UNKNOWN
         assert result.warning is not None
         assert "Unknown protocol" in result.warning
 
     def test_unknown_chain_returns_none(self):
         result = validate_v3_pool("unknown_chain", "uniswap_v3", "0xabc", "0xdef", 3000, "http://localhost:8545")
         assert result.exists is None
+        assert result.reason == PoolValidationReason.FACTORY_MISSING
         assert result.warning is not None
         assert "No uniswap_v3 factory" in result.warning
 
@@ -78,6 +91,7 @@ class TestV3PoolValidation:
             3000, "http://localhost:8545"
         )
         assert result.exists is False
+        assert result.reason == PoolValidationReason.NOT_FOUND
         assert result.error is not None
         assert "No uniswap_v3 pool found" in result.error
 
@@ -94,12 +108,13 @@ class TestV3PoolValidation:
             500, "http://localhost:8545"
         )
         assert result.exists is True
+        assert result.reason == PoolValidationReason.CONFIRMED
         assert result.pool_address is not None
         assert "c31e54c7" in result.pool_address.lower()
 
     @patch("almanak.framework.intents.pool_validation._eth_call")
     def test_rpc_failure_returns_none(self, mock_eth_call):
-        """When RPC call fails, return unknown."""
+        """When RPC call fails, return RPC_FAILED (compiler must fail closed on this)."""
         mock_eth_call.return_value = None
         result = validate_v3_pool(
             "arbitrum", "uniswap_v3",
@@ -108,6 +123,7 @@ class TestV3PoolValidation:
             3000, "http://localhost:8545"
         )
         assert result.exists is None
+        assert result.reason == PoolValidationReason.RPC_FAILED
         assert result.warning is not None
         assert "RPC call" in result.warning
 
