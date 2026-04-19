@@ -151,6 +151,7 @@ TEMPLATE_CONFIGS: dict[StrategyTemplate, TemplateConfig] = {
         config_params={
             "market": "ETH/USD",
             "collateral_token": "USDC",
+            "direction": "LONG",
         },
     ),
     StrategyTemplate.MULTI_STEP: TemplateConfig(
@@ -702,8 +703,9 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 if collateral_bal.balance < self.collateral_amount:
                     return Intent.hold(reason=f"Insufficient {self.collateral_token}")
 
-                # Simple momentum: open long
-                logger.info(f"Opening long {self.perp_market} at {entry_price}")
+                # Direction is config-driven (self._is_long). Update the
+                # signal logic below to match your strategy's thesis.
+                logger.info(f"Opening {self.direction} {self.perp_market} at {entry_price}")
                 # Capture price at decide time for entry_price fallback
                 # (GMX V2 two-step flow means ResultEnricher may not have entry_price)
                 self._pending_entry_price = entry_price
@@ -712,30 +714,32 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     collateral_token=self.collateral_token,
                     collateral_amount=self.collateral_amount,
                     size_usd=self.position_size_usd,
-                    is_long=True,
+                    is_long=self._is_long,
                     leverage=self.leverage,
                     protocol="gmx_v2",
                 )
 
             elif self._position_state == PerpsState.OPEN:
-                # Check TP/SL
+                # Check TP/SL. For SHORT positions, profit = price DOWN, so
+                # the raw pnl_pct is flipped to match directional exposure.
                 if self._entry_price:
-                    pnl_pct = (entry_price - self._entry_price) / self._entry_price
+                    raw_pnl_pct = (entry_price - self._entry_price) / self._entry_price
+                    pnl_pct = raw_pnl_pct if self._is_long else -raw_pnl_pct
                     if pnl_pct >= self.take_profit_pct:
-                        logger.info(f"Take profit hit: {pnl_pct:.2%}")
+                        logger.info(f"Take profit hit ({self.direction}): {pnl_pct:.2%}")
                         return Intent.perp_close(
                             market=self.perp_market,
                             collateral_token=self.collateral_token,
-                            is_long=True,
+                            is_long=self._is_long,
                             size_usd=self.position_size_usd,
                             protocol="gmx_v2",
                         )
                     elif pnl_pct <= -self.stop_loss_pct:
-                        logger.info(f"Stop loss hit: {pnl_pct:.2%}")
+                        logger.info(f"Stop loss hit ({self.direction}): {pnl_pct:.2%}")
                         return Intent.perp_close(
                             market=self.perp_market,
                             collateral_token=self.collateral_token,
-                            is_long=True,
+                            is_long=self._is_long,
                             size_usd=self.position_size_usd,
                             protocol="gmx_v2",
                         )
@@ -1517,14 +1521,15 @@ def _get_template_teardown(
             positions.append(
                 PositionInfo(
                     position_type=PositionType.PERP,
-                    position_id="{strategy_name}_perp_long",
+                    position_id=f"{strategy_name}_perp_{{self.direction.lower()}}",
                     chain=self.chain,
                     protocol="gmx_v2",
                     value_usd=self.position_size_usd,
                     details={{
                         "market": self.perp_market,
                         "collateral_token": self.collateral_token,
-                        "is_long": True,
+                        "is_long": self._is_long,
+                        "direction": self.direction,
                         "entry_price": str(self._entry_price) if self._entry_price else "unknown",
                     }},
                 )
@@ -1551,7 +1556,7 @@ def _get_template_teardown(
                 Intent.perp_close(
                     market=self.perp_market,
                     collateral_token=self.collateral_token,
-                    is_long=True,
+                    is_long=self._is_long,
                     size_usd=self.position_size_usd,
                     max_slippage=max_slippage,
                     protocol="gmx_v2",
@@ -1877,10 +1882,31 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         # Token for price checks
         self.base_token = get_config("base_token", "ETH")
 
+        # Direction: "LONG" or "SHORT". Defaults to "LONG" with a one-time
+        # warning if omitted so users notice they should set it explicitly.
+        _direction_raw = get_config("direction", None)
+        if _direction_raw is None:
+            logger.warning(
+                "'direction' not set in config -- defaulting to 'LONG'. "
+                "Set direction='LONG' or 'SHORT' explicitly in config.json."
+            )
+            _direction_raw = "LONG"
+        self.direction = str(_direction_raw).upper()
+        if self.direction not in ("LONG", "SHORT"):
+            raise ValueError(
+                f"Invalid direction {_direction_raw!r}: must be 'LONG' or 'SHORT'"
+            )
+        self._is_long = self.direction == "LONG"
+
         # Position tracking (restored via load_persistent_state)
         # State machine: IDLE -> OPEN
+        # position_is_long/position_direction pin the direction of the currently
+        # open position; they override the config-derived direction if the user
+        # changes config.json mid-position.
         self._position_state = PerpsState.IDLE
-        self._entry_price = None"""
+        self._entry_price = None
+        self._position_is_long = None
+        self._position_direction = None"""
 
     elif template == StrategyTemplate.MULTI_STEP:
         return """
@@ -2107,15 +2133,23 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "            return\n"
             '        if intent_type.value == "PERP_OPEN":\n'
             "            self._position_state = PerpsState.OPEN\n"
+            "            # Pin the direction used for this open position. The config-driven\n"
+            "            # direction could change between restarts while a position is still\n"
+            "            # on-chain -- we must close the side we actually opened, not the\n"
+            "            # newly-configured one. Source of truth for the live position.\n"
+            "            self._position_is_long = self._is_long\n"
+            "            self._position_direction = self.direction\n"
             "            # Try ResultEnricher extracted_data first, fall back to pending price\n"
             "            extracted = getattr(result, 'extracted_data', {}) or {}\n"
             "            self._entry_price = extracted.get('entry_price')\n"
             "            if self._entry_price is None:\n"
             "                self._entry_price = getattr(self, '_pending_entry_price', None)\n"
-            '            logger.info(f"Perp opened at {self._entry_price}")\n'
+            '            logger.info(f"Perp opened {self._position_direction} at {self._entry_price}")\n'
             '        elif intent_type.value == "PERP_CLOSE":\n'
             "            self._position_state = PerpsState.IDLE\n"
             "            self._entry_price = None\n"
+            "            self._position_is_long = None\n"
+            "            self._position_direction = None\n"
             '            logger.info("Perp closed -> idle")\n'
             "\n"
             "    def get_persistent_state(self):\n"
@@ -2123,15 +2157,39 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "        return {\n"
             '            "position_state": self._position_state,\n'
             '            "entry_price": str(self._entry_price) if self._entry_price else None,\n'
+            '            "position_is_long": self._position_is_long,\n'
+            '            "position_direction": self._position_direction,\n'
             "        }\n"
             "\n"
             "    def load_persistent_state(self, state):\n"
-            '        """Restore perp state (coerces persisted string back to StrEnum)."""\n'
+            '        """Restore perp state (coerces persisted string back to StrEnum).\n'
+            "\n"
+            "        When a position is open, restore the direction it was opened with\n"
+            "        (ignoring any config change) so PnL math and teardown target the\n"
+            "        correct side. When idle, use the config-driven direction.\n"
+            '        """\n'
             "        if state:\n"
             '            raw_state = state.get("position_state", PerpsState.IDLE.value)\n'
             "            self._position_state = PerpsState(raw_state)\n"
             '            ep = state.get("entry_price")\n'
             "            self._entry_price = Decimal(ep) if ep else None\n"
+            '            persisted_is_long = state.get("position_is_long")\n'
+            '            persisted_direction = state.get("position_direction")\n'
+            "            if self._position_state == PerpsState.OPEN and persisted_is_long is not None:\n"
+            "                # Persisted direction wins over config for the live position\n"
+            "                if persisted_is_long != self._is_long:\n"
+            "                    logger.warning(\n"
+            '                        f"Config direction={self.direction} differs from "\n'
+            '                        f"persisted position_direction={persisted_direction}. "\n'
+            '                        f"Using persisted direction for open position."\n'
+            "                    )\n"
+            "                self._position_is_long = persisted_is_long\n"
+            "                self._position_direction = persisted_direction\n"
+            "                self._is_long = persisted_is_long\n"
+            "                self.direction = persisted_direction or self.direction\n"
+            "            else:\n"
+            "                self._position_is_long = None\n"
+            "                self._position_direction = None\n"
             "\n"
         )
 
@@ -2576,6 +2634,7 @@ def generate_config_json(
                 "take_profit_pct": 0.05,
                 "stop_loss_pct": 0.03,
                 "base_token": "ETH",
+                "direction": "LONG",
             }
         )
     elif template == StrategyTemplate.MULTI_STEP:

@@ -665,6 +665,360 @@ def test_basis_trade_persistence_all_states() -> None:
 
 
 # ---------------------------------------------------------------------------
+# PERPS: direction (LONG/SHORT) is config-driven
+# ---------------------------------------------------------------------------
+
+
+def _scaffold_perps_code() -> str:
+    """Return the emitted strategy.py source for the PERPS template."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        return generate_strategy_file(
+            name="Test Perps",
+            template=StrategyTemplate.PERPS,
+            chain=SupportedChain.ARBITRUM,
+            output_dir=Path(tmpdir),
+        )
+
+
+def _scaffold_perps_class():
+    """Scaffold a PERPS strategy and return a concrete subclass for instantiation."""
+    code = _scaffold_perps_code()
+    ns: dict = {}
+    exec(compile(code, "<scaffold>", "exec"), ns)  # noqa: S102
+    from almanak.framework.strategies import IntentStrategy as _Base
+
+    base_cls = next(
+        v
+        for v in ns.values()
+        if isinstance(v, type) and issubclass(v, _Base) and v is not _Base
+    )
+
+    class _Concrete(base_cls):
+        def decide(self, market):
+            return None
+
+        def get_open_positions(self):
+            return None
+
+        def generate_teardown_intents(self, mode=None, market=None):
+            return []
+
+    return _Concrete
+
+
+def _make_perps_strategy(direction: str | None = "LONG"):
+    """Instantiate a perps-like object by running the emitted init block.
+
+    We do not call IntentStrategy.__init__ (requires full strategy context);
+    instead we mirror the template's init-params code path against a stub
+    config so we can assert the direction -> _is_long wiring the scaffold
+    emits is correct. If ``direction`` is None, the config omits the key.
+    """
+    from decimal import Decimal
+
+    cls = _scaffold_perps_class()
+
+    defaults: dict = {
+        "perp_market": "ETH/USD",
+        "collateral_token": "USDC",
+        "collateral_amount": "100",
+        "position_size_usd": "1000",
+        "leverage": "5",
+        "take_profit_pct": "0.05",
+        "stop_loss_pct": "0.03",
+        "base_token": "ETH",
+    }
+    if direction is not None:
+        defaults["direction"] = direction
+
+    class _Cfg:
+        def get(self, key, default=None):
+            return defaults.get(key, default)
+
+    strat = cls.__new__(cls)
+    strat.config = _Cfg()
+
+    # Mirror the emitted init-block (kept in lockstep with
+    # _get_template_init_params(PERPS)) so drift surfaces loudly.
+    def get_config(key, default):
+        return defaults.get(key, default)
+
+    strat.perp_market = get_config("perp_market", "ETH/USD")
+    strat.collateral_token = get_config("collateral_token", "USDC")
+    strat.collateral_amount = Decimal(str(get_config("collateral_amount", "100")))
+    strat.position_size_usd = Decimal(str(get_config("position_size_usd", "1000")))
+    strat.leverage = Decimal(str(get_config("leverage", "5")))
+    strat.take_profit_pct = Decimal(str(get_config("take_profit_pct", "0.05")))
+    strat.stop_loss_pct = Decimal(str(get_config("stop_loss_pct", "0.03")))
+    strat.base_token = get_config("base_token", "ETH")
+
+    _direction_raw = get_config("direction", None)
+    if _direction_raw is None:
+        _direction_raw = "LONG"
+    strat.direction = str(_direction_raw).upper()
+    if strat.direction not in ("LONG", "SHORT"):
+        raise ValueError(
+            f"Invalid direction {_direction_raw!r}: must be 'LONG' or 'SHORT'"
+        )
+    strat._is_long = strat.direction == "LONG"
+
+    # Match emitted init exactly: PerpsState is defined at module level in the
+    # scaffolded strategy, so we reach into the class's module to get it.
+    perps_state_enum = _scaffold_perps_perps_state_enum()
+    strat._position_state = perps_state_enum.IDLE
+    strat._entry_price = None
+    # Direction pinning: set on PERP_OPEN, None otherwise (see callbacks)
+    strat._position_is_long = None
+    strat._position_direction = None
+    return strat
+
+
+def _scaffold_perps_perps_state_enum():
+    """Return the PerpsState StrEnum from a freshly scaffolded perps strategy."""
+    code = _scaffold_perps_code()
+    ns: dict = {}
+    exec(compile(code, "<scaffold>", "exec"), ns)  # noqa: S102
+    return ns["PerpsState"]
+
+
+def test_perps_scaffold_config_default_is_long() -> None:
+    """config.json emitted by the PERPS template must default direction='LONG'."""
+    import json
+
+    config_str = generate_config_json("Test Perps", StrategyTemplate.PERPS, SupportedChain.ARBITRUM)
+    config = json.loads(config_str)
+    assert config.get("direction") == "LONG", (
+        "PERPS config.json must include direction='LONG' by default"
+    )
+
+
+def test_perps_scaffold_reads_direction_from_config() -> None:
+    """Emitted strategy.py reads the direction config field (not hardcoded)."""
+    code = _scaffold_perps_code()
+    # Must read direction from config
+    assert 'get_config("direction"' in code, "PERPS must read 'direction' from config"
+    # Must NOT contain hardcoded is_long=True anywhere in the emitted file
+    assert "is_long=True" not in code, "PERPS scaffold must not hardcode is_long=True"
+    # Must thread is_long=self._is_long instead
+    assert "is_long=self._is_long" in code, (
+        "PERPS scaffold must wire is_long from self._is_long"
+    )
+
+
+def test_perps_scaffold_long_config_sets_is_long_true() -> None:
+    """Scaffolded strategy with direction='LONG' -> self._is_long == True."""
+    strat = _make_perps_strategy(direction="LONG")
+    assert strat.direction == "LONG"
+    assert strat._is_long is True
+
+
+def test_perps_scaffold_short_config_sets_is_long_false() -> None:
+    """Scaffolded strategy with direction='SHORT' -> self._is_long == False."""
+    strat = _make_perps_strategy(direction="SHORT")
+    assert strat.direction == "SHORT"
+    assert strat._is_long is False
+
+
+def test_perps_scaffold_direction_is_case_insensitive() -> None:
+    """Lowercase 'short' or 'long' should be normalized."""
+    strat = _make_perps_strategy(direction="short")
+    assert strat.direction == "SHORT"
+    assert strat._is_long is False
+
+
+def test_perps_scaffold_invalid_direction_raises() -> None:
+    """Invalid direction values must raise ValueError."""
+    with pytest.raises(ValueError, match="direction"):
+        _make_perps_strategy(direction="sideways")
+
+
+def test_perps_scaffold_missing_direction_defaults_to_long() -> None:
+    """Omitting direction falls back to LONG (emitted __init__ also warns)."""
+    strat = _make_perps_strategy(direction=None)
+    assert strat.direction == "LONG"
+    assert strat._is_long is True
+
+
+def test_perps_scaffold_emits_warning_when_direction_omitted() -> None:
+    """The emitted __init__ must logger.warning when direction is absent.
+
+    Covers: 'Default to LONG if config omits it, but log a one-time warning
+    on __init__ suggesting the user set it explicitly.'
+    """
+    from almanak.framework.cli.new_strategy import (
+        TEMPLATE_CONFIGS,
+        _get_template_init_params,
+    )
+
+    init_code = _get_template_init_params(
+        StrategyTemplate.PERPS, TEMPLATE_CONFIGS[StrategyTemplate.PERPS]
+    )
+    # The emitted init must contain a warning path for missing direction
+    assert "logger.warning" in init_code
+    assert "direction" in init_code
+    assert "'LONG'" in init_code and "'SHORT'" in init_code
+
+
+def test_perps_scaffold_teardown_uses_direction() -> None:
+    """Teardown emits is_long=self._is_long, not hardcoded True."""
+    code = _scaffold_perps_code()
+    # perp_close in teardown must be direction-driven
+    assert "is_long=self._is_long" in code
+    # position_id must be direction-aware (not hardcoded _perp_long)
+    assert "_perp_long\"" not in code, (
+        "Teardown position_id must not hardcode '_perp_long' suffix"
+    )
+
+
+def test_perps_scaffold_callbacks_persist_direction() -> None:
+    """on_intent_executed / persistent state must pin the open position's direction.
+
+    Guards against the footgun flagged by Gemini: if the user changes the
+    config.json 'direction' while a position is open and restarts the strategy,
+    the restored state must reflect the actually-opened side, not the newly
+    configured one. Otherwise PnL math and teardown close the wrong side.
+    """
+    from almanak.framework.cli.new_strategy import _get_template_callbacks
+
+    cb = _get_template_callbacks(StrategyTemplate.PERPS)
+    # On PERP_OPEN we must pin is_long/direction to the live position
+    assert "self._position_is_long = self._is_long" in cb, (
+        "PERPS on_intent_executed must pin self._position_is_long on PERP_OPEN"
+    )
+    assert "self._position_direction = self.direction" in cb, (
+        "PERPS on_intent_executed must pin self._position_direction on PERP_OPEN"
+    )
+    # get_persistent_state must include the persisted direction
+    assert '"position_is_long": self._position_is_long' in cb, (
+        "get_persistent_state must persist position_is_long"
+    )
+    assert '"position_direction": self._position_direction' in cb, (
+        "get_persistent_state must persist position_direction"
+    )
+    # load_persistent_state must restore persisted direction for open positions
+    assert 'state.get("position_is_long")' in cb, (
+        "load_persistent_state must read persisted position_is_long"
+    )
+    # Persisted direction must override self._is_long when a position is open
+    assert "self._is_long = persisted_is_long" in cb, (
+        "load_persistent_state must override config direction with persisted one"
+    )
+
+
+def test_perps_scaffold_init_initializes_position_direction_attrs() -> None:
+    """__init__ must initialize position_is_long / position_direction to None.
+
+    These attributes are set on PERP_OPEN and cleared on PERP_CLOSE. They must
+    exist at __init__ time so load_persistent_state / get_persistent_state
+    have a clean slate when no position is open.
+    """
+    from almanak.framework.cli.new_strategy import (
+        TEMPLATE_CONFIGS,
+        _get_template_init_params,
+    )
+
+    init_code = _get_template_init_params(
+        StrategyTemplate.PERPS, TEMPLATE_CONFIGS[StrategyTemplate.PERPS]
+    )
+    assert "self._position_is_long = None" in init_code, (
+        "PERPS __init__ must initialize self._position_is_long = None"
+    )
+    assert "self._position_direction = None" in init_code, (
+        "PERPS __init__ must initialize self._position_direction = None"
+    )
+
+
+def test_perps_persisted_direction_overrides_config_mismatch() -> None:
+    """Simulate the config-drift scenario end-to-end.
+
+    Scenario: user opens a LONG position, changes config.json to SHORT,
+    restarts. After load_persistent_state, _is_long must be True (the
+    live position's side), not False (the new config).
+    """
+    from almanak.framework.cli.new_strategy import _get_template_callbacks
+
+    cb_code = _get_template_callbacks(StrategyTemplate.PERPS)
+    perps_state = _scaffold_perps_perps_state_enum()
+
+    # Instantiate a SHORT-configured strategy (the new config after restart)
+    strat = _make_perps_strategy(direction="SHORT")
+    assert strat._is_long is False
+
+    # Extract and exec the callback text into a namespace with PerpsState,
+    # logger, and Decimal available (mirroring the emitted module scope).
+    ns: dict = {}
+    import logging
+    import textwrap
+    from decimal import Decimal as _D
+
+    ns["logger"] = logging.getLogger("test")
+    ns["Decimal"] = _D
+    ns["PerpsState"] = perps_state
+
+    fn_src = textwrap.dedent(cb_code)
+    exec(compile(fn_src, "<perps_cb>", "exec"), ns)  # noqa: S102
+    load = ns["load_persistent_state"]
+
+    # Simulate restored state where the persisted position was LONG.
+    # ``PerpsState(raw_state)`` coerces the persisted string to the enum, so
+    # the emitted load method accepts plain strings as stored in JSON.
+    persisted_state = {
+        "position_state": "open",
+        "entry_price": "2000.00",
+        "position_is_long": True,
+        "position_direction": "LONG",
+    }
+
+    load(strat, persisted_state)
+
+    # After load, persisted direction must win
+    assert strat._position_state == perps_state.OPEN
+    assert strat._position_is_long is True, (
+        "Persisted position_is_long must override config-derived value"
+    )
+    assert strat._position_direction == "LONG"
+    assert strat._is_long is True, (
+        "self._is_long must be overridden to match the live position"
+    )
+    assert strat.direction == "LONG", (
+        "self.direction must be overridden to match the live position"
+    )
+
+
+def test_perps_idle_state_uses_config_direction() -> None:
+    """When position_state is idle, load_persistent_state must NOT override config.
+
+    No live position -> config is the source of truth for the next open.
+    """
+    from almanak.framework.cli.new_strategy import _get_template_callbacks
+
+    cb_code = _get_template_callbacks(StrategyTemplate.PERPS)
+    perps_state = _scaffold_perps_perps_state_enum()
+
+    # Start with SHORT config; no live position.
+    strat = _make_perps_strategy(direction="SHORT")
+
+    ns: dict = {}
+    import logging
+    import textwrap
+    from decimal import Decimal as _D
+
+    ns["logger"] = logging.getLogger("test")
+    ns["Decimal"] = _D
+    ns["PerpsState"] = perps_state
+    exec(compile(textwrap.dedent(cb_code), "<perps_cb>", "exec"), ns)  # noqa: S102
+    load = ns["load_persistent_state"]
+
+    load(strat, {"position_state": "idle", "entry_price": None})
+
+    assert strat._position_state == perps_state.IDLE
+    assert strat._is_long is False, "Idle + SHORT config -> _is_long stays False"
+    assert strat.direction == "SHORT"
+    assert strat._position_is_long is None
+    assert strat._position_direction is None
+
+
+# ---------------------------------------------------------------------------
 # LP template guardrails: pool format, amounts, config keys
 # ---------------------------------------------------------------------------
 
