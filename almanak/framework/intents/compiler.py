@@ -276,6 +276,9 @@ class IntentCompiler:
         self._token_resolver = token_resolver
 
         # Price oracle - use provided or fall back to placeholders (only if allowed)
+        # VIB-3136: Copy the provided dict so alias expansion below doesn't mutate
+        # the caller's dict (which may be shared across compiler instances or
+        # reused elsewhere, e.g. MarketSnapshot's internal price cache).
         self.price_oracle: dict[str, Decimal] | None
         if self._using_placeholders:
             logger.debug(
@@ -283,7 +286,14 @@ class IntentCompiler:
             )
             self.price_oracle = self._get_placeholder_prices()
         else:
-            self.price_oracle = price_oracle
+            self.price_oracle = dict(price_oracle) if price_oracle is not None else None
+        # VIB-3136: Ensure adapters that consume ``price_oracle`` directly (via
+        # ``dict.get(symbol)``) see both native and wrapped-native keys. The
+        # compiler's own ``_require_token_price`` already walks the alias map,
+        # but ``UniswapV3Adapter`` et al. treat the dict as frozen and silently
+        # fall back to $1 on miss. Expand once here so the consumed dict is
+        # bidirectionally complete.
+        self._expand_native_aliases_in_price_oracle()
         self._placeholder_warning_logged = False
 
         # Allowance cache (token -> spender -> amount)
@@ -315,14 +325,24 @@ class IntentCompiler:
         )
 
     def update_prices(self, prices: dict[str, Decimal]) -> None:
-        """Update the price oracle with real prices, clearing placeholder state."""
-        self.price_oracle = prices
+        """Update the price oracle with real prices, clearing placeholder state.
+
+        VIB-3136: Copies the incoming dict so subsequent alias expansion does
+        not mutate the caller's dict.
+        """
+        self.price_oracle = dict(prices)
         self._using_placeholders = False
+        self._expand_native_aliases_in_price_oracle()
 
     def restore_prices(self, original_oracle: dict[str, Decimal] | None, original_using_placeholders: bool) -> None:
-        """Restore prices to a previous state (used after temporary override)."""
-        self.price_oracle = original_oracle
+        """Restore prices to a previous state (used after temporary override).
+
+        VIB-3136: Copies the incoming dict so subsequent alias expansion does
+        not mutate the caller's dict.
+        """
+        self.price_oracle = dict(original_oracle) if original_oracle is not None else None
         self._using_placeholders = original_using_placeholders
+        self._expand_native_aliases_in_price_oracle()
 
     def _resolve_protocol(self, intent_protocol: str | None) -> str:
         """Resolve intent protocol to canonical key, falling back to default.
@@ -6441,6 +6461,36 @@ class IntentCompiler:
         "WMON": "MON",
         "WBERA": "BERA",
     }
+
+    def _expand_native_aliases_in_price_oracle(self) -> None:
+        """Fill missing wrapped/native counterparts in ``self.price_oracle``.
+
+        Rationale (VIB-3136): ``MarketSnapshot.get_price_oracle_dict()`` returns
+        only the symbols the strategy actually touched — typically the native
+        token (e.g. ``POL``). DEX swap adapters then ask the dict for the
+        wrapped symbol (e.g. ``WPOL``, since ``resolve_for_swap`` wraps native
+        tokens for routing) and silently fall back to ``Decimal("1")`` on miss,
+        producing broken slippage. The compiler's ``_require_token_price`` walks
+        the alias map at lookup time, but adapters that take the dict by value
+        don't share that code path — so we pre-expand the dict here.
+
+        Rule: for each ``wrapped -> native`` pair, if either side is present
+        and the other is missing (or zero), copy the known price across. Never
+        overwrite an existing non-zero entry.
+        """
+        prices = self.price_oracle
+        if not prices:
+            return
+        for wrapped, native in self._WRAPPED_TO_NATIVE.items():
+            w_price = prices.get(wrapped)
+            n_price = prices.get(native)
+            # Truthiness here intentionally treats Decimal(0) and None identically
+            # (a zero price is as useless as a missing one). Using truthiness also
+            # lets mypy narrow ``Decimal | None`` -> ``Decimal`` without ``type: ignore``.
+            if w_price and not n_price:
+                prices[native] = w_price
+            elif n_price and not w_price:
+                prices[wrapped] = n_price
 
     def _require_token_price(self, symbol: str) -> Decimal:
         """Look up a token price, failing fast on missing or zero prices.
