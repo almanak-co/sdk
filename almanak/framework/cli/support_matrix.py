@@ -21,6 +21,22 @@ ACTION_PERPS = "perps"
 ACTION_FLASH_LOAN = "flash_loan"
 ACTION_YIELD = "yield"
 ACTION_AGGREGATOR = "aggregator"
+ACTION_PREDICTION = "prediction"
+
+# Ordered list of all supported categories. Used both to emit protocols in a
+# stable order inside `_build_matrix()` and to derive the CLI --category help
+# text, so adding a new ACTION_* constant above only requires adding it here
+# once to flow through to the rendered table and CLI help.
+SUPPORTED_CATEGORIES: tuple[str, ...] = (
+    ACTION_SWAP,
+    ACTION_LP,
+    ACTION_LENDING,
+    ACTION_PERPS,
+    ACTION_YIELD,
+    ACTION_PREDICTION,
+    ACTION_FLASH_LOAN,
+    ACTION_AGGREGATOR,
+)
 
 
 def _build_matrix() -> dict:
@@ -221,13 +237,17 @@ def _build_matrix() -> dict:
     except ImportError:
         pass
 
+    # --- Prediction markets ---
+    prediction_protocols: dict[str, set[str]] = {}
+
     # Polymarket — prediction markets on Polygon (off-chain CLOB + on-chain CTF).
-    # Folded into "yield" for now; a dedicated prediction_market category is
-    # tracked under the info-matrix taxonomy follow-up.
+    # Edge/agent-side compatibility filters consult this matrix — dropping
+    # Polymarket from "yield" into a dedicated "prediction" category avoids
+    # surfacing it as a yield opportunity (VIB-3139).
     try:
         from almanak.framework.connectors.polymarket.adapter import PolymarketAdapter  # noqa: F401
 
-        yield_protocols.setdefault("polymarket", set()).add("polygon")
+        prediction_protocols.setdefault("polymarket", set()).add("polygon")
         all_chains.add("polygon")
     except ImportError:
         pass
@@ -379,6 +399,8 @@ def _build_matrix() -> dict:
         _add(name, ACTION_PERPS, chains)
     for name, chains in sorted(yield_protocols.items()):
         _add(name, ACTION_YIELD, chains)
+    for name, chains in sorted(prediction_protocols.items()):
+        _add(name, ACTION_PREDICTION, chains)
     for name, chains in sorted(flash_protocols.items()):
         _add(name, ACTION_FLASH_LOAN, chains)
     for name, chains in sorted(agg_protocols.items()):
@@ -463,7 +485,7 @@ def _render_table(data: dict) -> str:
     "-c",
     type=str,
     default=None,
-    help="Filter by category (swap, lp, lending, perps, yield, flash_loan, aggregator).",
+    help=f"Filter by category ({', '.join(SUPPORTED_CATEGORIES)}).",
 )
 @click.option("--chain", type=str, default=None, help="Filter by chain name.")
 @click.option("--protocol", "-p", type=str, default=None, help="Filter by protocol name (partial match).")

@@ -264,7 +264,7 @@ class TestPreviouslyMissingConnectors:
             ("aster_perps", "perps", {"bsc"}),
             ("pancakeswap_perps", "perps", {"bsc"}),
             ("gimo", "yield", {"zerog"}),
-            ("polymarket", "yield", {"polygon"}),
+            ("polymarket", "prediction", {"polygon"}),
             ("fluid", "swap", {"arbitrum"}),
         ],
     )
@@ -297,3 +297,63 @@ class TestPreviouslyMissingConnectors:
         entries = [p for p in matrix_data["protocols"] if p["name"] == "uniswap_v4" and p["category"] == "swap"]
         assert len(entries) == 1
         assert set(entries[0]["chains"]) == set(UNISWAP_V4.keys())
+
+
+# =============================================================================
+# Prediction-market Category Tests (VIB-3139)
+# =============================================================================
+
+
+class TestPredictionCategory:
+    """Regression guards for the prediction-market category.
+
+    Edge / agent-side compatibility filters read `almanak info matrix` to
+    decide whether a signal's protocol is supported. Polymarket must surface
+    under a dedicated `prediction` category so those filters do not drop every
+    prediction-market signal (VIB-3139).
+    """
+
+    def test_prediction_category_present(self, matrix_data: dict) -> None:
+        categories = {p["category"] for p in matrix_data["protocols"]}
+        assert "prediction" in categories
+
+    def test_polymarket_in_prediction_not_yield(self, matrix_data: dict) -> None:
+        """Polymarket belongs in `prediction`, not `yield` (VIB-3139)."""
+        prediction_entries = [
+            p for p in matrix_data["protocols"] if p["name"] == "polymarket" and p["category"] == "prediction"
+        ]
+        yield_entries = [
+            p for p in matrix_data["protocols"] if p["name"] == "polymarket" and p["category"] == "yield"
+        ]
+        assert len(prediction_entries) == 1, "polymarket must appear exactly once in prediction category"
+        assert prediction_entries[0]["chains"] == ["polygon"]
+        assert yield_entries == [], "polymarket must NOT also appear under yield"
+
+    def test_filter_by_prediction_category(self, cli_runner: CliRunner) -> None:
+        """`almanak info matrix -c prediction` should return a non-empty list including polymarket."""
+        result = cli_runner.invoke(support_matrix, ["--json", "-c", "prediction"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert len(data["protocols"]) >= 1
+        names = {p["name"] for p in data["protocols"]}
+        assert "polymarket" in names
+        for p in data["protocols"]:
+            assert p["category"] == "prediction"
+
+    def test_prediction_in_supported_categories(self) -> None:
+        """`prediction` must be registered in SUPPORTED_CATEGORIES so the CLI
+        --category help text and any future centralized category validation
+        stay in sync with `_build_matrix()`."""
+        from almanak.framework.cli.support_matrix import (
+            ACTION_PREDICTION,
+            SUPPORTED_CATEGORIES,
+        )
+
+        assert ACTION_PREDICTION == "prediction"
+        assert ACTION_PREDICTION in SUPPORTED_CATEGORIES
+
+    def test_category_help_text_includes_prediction(self) -> None:
+        """CLI --category help text must advertise the prediction category so
+        users discover the new filter via `almanak info matrix --help`."""
+        opt = next(p for p in support_matrix.params if p.name == "category")
+        assert "prediction" in (opt.help or "")
