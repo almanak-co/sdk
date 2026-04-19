@@ -1,6 +1,7 @@
 """CLI tools for Almanak Strategy Framework."""
 
 from .backtest import backtest
+from .check import check
 from .demo import demo
 from .intent_debug import inspect, intent_group, trace
 from .new_protocol import new_protocol
@@ -12,6 +13,7 @@ from .teardown import teardown
 
 __all__ = [
     "backtest",
+    "check",
     "demo",
     "list_strategies",
     "new_strategy",

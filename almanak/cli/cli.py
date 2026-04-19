@@ -18,6 +18,7 @@ from almanak.core.redaction import install_redaction
 from almanak.framework.cli import backtest as framework_backtest_group
 from almanak.framework.cli import new_strategy as framework_new_strategy_cmd
 from almanak.framework.cli.ax import ax as framework_ax_group
+from almanak.framework.cli.check import check as framework_check_cmd
 from almanak.framework.cli.demo import demo as framework_demo_cmd
 from almanak.framework.cli.export import export as framework_export_cmd
 from almanak.framework.cli.permissions import permissions as framework_permissions_cmd
@@ -160,6 +161,9 @@ strat.add_command(framework_permissions_cmd, name="permissions")
 
 # Add demo command to strat
 strat.add_command(framework_demo_cmd, name="demo")
+
+# Add check (pre-flight validation) command to strat
+strat.add_command(framework_check_cmd, name="check")
 
 # Add monitoring commands to strat
 strat.add_command(framework_export_cmd, name="export")
