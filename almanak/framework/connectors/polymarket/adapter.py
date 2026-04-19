@@ -46,7 +46,6 @@ from .exceptions import (
 from .models import (
     GammaMarket,
     LimitOrderParams,
-    MarketOrderParams,
     OrderType,
     PolymarketConfig,
 )
@@ -279,31 +278,23 @@ class PolymarketAdapter:
                     order_type = self._map_time_in_force(intent.time_in_force)
 
             else:
-                # No max_price → fall back to aggressive market sweep at 0.99.
-                # Snap the default to the market's tick grid (0.99 is a valid
-                # tick on every standard market: 0.01, 0.001, 0.0001, but a
-                # non-standard tick grid like 0.005 would otherwise reject).
-                # Warn loudly: this reserves ~size*$0.99 of USDC allowance even
-                # though the actual fill is at the orderbook's best ask.
-                price = self.clob.round_price_to_tick(Decimal("0.99"), "BUY", market=market)
-                size = self._calculate_size(intent, price)
-                logger.warning(
-                    "PredictionBuyIntent has no max_price; defaulting to market "
-                    "sweep at worst_price=%s. Nominal USDC reserve = size * worst_price "
-                    "= ~$%s — will be rejected by the CLOB if it exceeds the "
-                    "wallet's USDC balance/allowance. Set intent.max_price to a "
-                    "tick-aligned price to use a limit order instead.",
-                    price,
-                    size * price,
+                # No max_price → reject. The legacy fallback was an aggressive
+                # market sweep at 0.99 which reserved ~size*$0.99 of USDC
+                # allowance even though the actual fill landed at the order
+                # book's best ask. On cheap markets ($1 budget vs $80 nominal
+                # reserve) the CLOB rejected the order anyway, so the silent
+                # "warn and submit" path was a footgun: misleading wallet
+                # accounting AND a guaranteed CLOB rejection. Force the
+                # strategy author to anchor the buy with a tick-aligned
+                # max_price (PM Exp 14 / VIB-3131).
+                raise ValueError(
+                    "PredictionBuyIntent.max_price is required: a buy without "
+                    "an explicit anchor price would reserve ~size * $0.99 of "
+                    "USDC allowance for what may fill at a much lower price. "
+                    "Set intent.max_price (e.g. best_ask + a slippage buffer, "
+                    "snapped to the market's tick grid) so the order routes "
+                    "through the LIMIT path."
                 )
-                market_params = MarketOrderParams(
-                    token_id=token_id,
-                    side="BUY",
-                    amount=size * price,  # USDC amount
-                    worst_price=price,
-                )
-                signed_order = self.clob.create_and_sign_market_order(market_params, market=market)
-                order_type = OrderType.IOC  # Market orders use IOC
 
             # Build order payload (owner = API key, required by CLOB matcher).
             # Use get_or_create_credentials() so lazy L2 derivation works when
@@ -376,6 +367,20 @@ class PolymarketAdapter:
             ActionBundle with CLOB order action
         """
         try:
+            # Validate min_price BEFORE any market/position lookup so the new
+            # mandatory-anchor rule (PM Exp 14 / VIB-3131) fails deterministically.
+            # Otherwise an "all"-shares intent against an empty wallet would
+            # short-circuit to "No position to sell" and the missing-anchor bug
+            # would only surface once a position existed (CodeRabbit catch).
+            if intent.min_price is None:
+                raise ValueError(
+                    "PredictionSellIntent.min_price is required: a sell "
+                    "without an explicit floor would fill at any price down "
+                    "to the 0.01 tick. Set intent.min_price (e.g. best_bid "
+                    "minus a slippage buffer, snapped to the market's tick "
+                    "grid) so the order routes through the LIMIT path."
+                )
+
             # Resolve market to get token IDs
             market = self._resolve_market(intent.market_id)
             token_id = self._get_token_id(market, intent.outcome)
@@ -403,45 +408,24 @@ class PolymarketAdapter:
                     raise TypeError(f"Expected Decimal for shares, got {type(intent.shares).__name__}")
                 size = intent.shares
 
-            # Order routing: prefer LIMIT whenever the strategy gave us a price
-            # to anchor to (mirrors the BUY path). Market SELLs at the 0.01
-            # default underprice the position and risk filling at the floor.
-            if intent.min_price is not None:
-                price = self.clob.round_price_to_tick(intent.min_price, "SELL", market=market)
-                params = LimitOrderParams(
-                    token_id=token_id,
-                    side="SELL",
-                    price=price,
-                    size=size,
-                )
-                signed_order = self.clob.create_and_sign_limit_order(params, market=market)
-                # Mirror the BUY routing: when the strategy declared 'market' but
-                # we elevated to LIMIT for safety, force IOC so we don't leave a
-                # long-lived GTC order resting on the book.
-                if intent.order_type == "market":
-                    order_type = OrderType.IOC
-                else:
-                    order_type = self._map_time_in_force(intent.time_in_force)
-
+            # min_price guaranteed non-None by the upfront check; route to LIMIT.
+            # Market SELLs at the 0.01 default underprice the position and risk
+            # filling at the floor — always go through the LIMIT path.
+            price = self.clob.round_price_to_tick(intent.min_price, "SELL", market=market)
+            params = LimitOrderParams(
+                token_id=token_id,
+                side="SELL",
+                price=price,
+                size=size,
+            )
+            signed_order = self.clob.create_and_sign_limit_order(params, market=market)
+            # Mirror the BUY routing: when the strategy declared 'market' but
+            # we elevated to LIMIT for safety, force IOC so we don't leave a
+            # long-lived GTC order resting on the book.
+            if intent.order_type == "market":
+                order_type = OrderType.IOC
             else:
-                # No min_price → aggressive market sweep at the 0.01 floor.
-                # Snap to the market's tick grid for the same defensive reason
-                # as the BUY fallback (non-standard tick grids).
-                price = self.clob.round_price_to_tick(Decimal("0.01"), "SELL", market=market)
-                logger.warning(
-                    "PredictionSellIntent has no min_price; defaulting to market "
-                    "sweep at worst_price=%s (floor). Will fill at any price ≥ floor. "
-                    "Set intent.min_price to a tick-aligned price to use a limit order.",
-                    price,
-                )
-                market_params = MarketOrderParams(
-                    token_id=token_id,
-                    side="SELL",
-                    amount=size,  # Shares to sell
-                    worst_price=price,
-                )
-                signed_order = self.clob.create_and_sign_market_order(market_params, market=market)
-                order_type = OrderType.IOC  # Market orders use IOC
+                order_type = self._map_time_in_force(intent.time_in_force)
 
             # Build order payload (owner = API key, required by CLOB matcher).
             # Use get_or_create_credentials() so lazy L2 derivation works when

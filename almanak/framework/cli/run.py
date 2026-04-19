@@ -690,6 +690,64 @@ def _wire_indicators(
         click.echo("  Providers injected into strategy (RSI + full indicator suite incl. ADX/OBV/CCI/Ichimoku)")
 
 
+_POLYMARKET_REQUIRED_ENV_VARS = ("POLYMARKET_WALLET_ADDRESS", "POLYMARKET_PRIVATE_KEY")
+
+
+def _init_prediction_provider(strategy_instance: Any, chain: str | None = None) -> None:
+    """Wire the Polymarket prediction provider onto a strategy instance.
+
+    Strategies that declare ``polymarket`` in their ``supported_protocols``
+    must abort startup if the provider can't initialize — silently HOLDing
+    a polymarket-trading strategy because env vars were missing was the
+    failure mode that drove PM Exp 14 / VIB-3132. Strategies that merely
+    *might* consume prediction data (any Polygon strategy) get a WARNING
+    so the absence is visible without ``--verbose``.
+
+    The helper gates itself: it runs unconditionally for strategies that
+    declare polymarket support (any chain — multi-chain strategies that
+    target Polygon among others would otherwise bypass fail-fast), and
+    opportunistically when ``chain == "polygon"`` for non-declarers.
+    Other strategies skip the helper entirely. (Per CodeRabbit on PR #1567.)
+    """
+    strategy_metadata = getattr(strategy_instance, "STRATEGY_METADATA", None)
+    # Use getattr on supported_protocols as well: STRATEGY_METADATA is normally
+    # set by the @almanak_strategy decorator, but custom subclasses or partial
+    # mocks may construct the metadata directly without that field (Gemini).
+    supported_protocols = getattr(strategy_metadata, "supported_protocols", None) or []
+    requires_polymarket = "polymarket" in supported_protocols
+
+    # Skip entirely if the strategy neither declares polymarket nor runs on
+    # Polygon — the polymarket import is unnecessary and would otherwise
+    # warn for every non-polygon non-polymarket strategy.
+    on_polygon = chain is not None and chain.lower() == "polygon"
+    if not requires_polymarket and not on_polygon:
+        return
+
+    try:
+        from ..connectors.polymarket import ClobClient, PolymarketConfig
+        from ..data.prediction_provider import PredictionMarketDataProvider
+
+        pm_config = PolymarketConfig.from_env()
+        clob_client = ClobClient(pm_config)
+        strategy_instance._prediction_provider = PredictionMarketDataProvider(clob_client)
+        click.echo("  Prediction market provider initialized")
+    except Exception as e:
+        missing_vars = [var for var in _POLYMARKET_REQUIRED_ENV_VARS if not os.environ.get(var)]
+        env_hint = f" Missing required env vars: {', '.join(missing_vars)}." if missing_vars else ""
+        # NOTE: deliberately omit str(e) from the user-facing message — pydantic
+        # ValidationError on PolymarketConfig can echo the (partial) value of
+        # POLYMARKET_PRIVATE_KEY in its repr. The original exception is still
+        # chained via ``from e`` for stack-trace debugging.
+        err_kind = type(e).__name__
+        if requires_polymarket:
+            strategy_name = strategy_metadata.name if strategy_metadata else "<unknown>"
+            raise RuntimeError(
+                f"Polymarket strategy '{strategy_name}' requires the prediction "
+                f"market provider but initialization failed ({err_kind}).{env_hint}"
+            ) from e
+        logger.warning("Prediction market provider not available (%s).%s", err_kind, env_hint)
+
+
 def create_balance_provider(
     config: LocalRuntimeConfig,
 ) -> BalanceProviderInterface:
@@ -2487,18 +2545,12 @@ def run(
             )
             _wire_indicators(strategy_instance, ohlcv_provider, price_oracle, balance_provider)
 
-            # Initialize prediction market provider for Polygon strategies
-            if runtime_config.chain.lower() == "polygon" and hasattr(strategy_instance, "_prediction_provider"):
-                try:
-                    from ..connectors.polymarket import ClobClient, PolymarketConfig
-                    from ..data.prediction_provider import PredictionMarketDataProvider
-
-                    pm_config = PolymarketConfig.from_env()
-                    clob_client = ClobClient(pm_config)
-                    strategy_instance._prediction_provider = PredictionMarketDataProvider(clob_client)
-                    click.echo("  Prediction market provider initialized")
-                except Exception as e:
-                    logger.debug(f"Prediction market provider not available: {e}")
+            # Initialize prediction market provider — helper self-gates by
+            # strategy metadata + chain. Multi-chain strategies declaring
+            # polymarket fail-fast on any chain; non-declarers on Polygon
+            # get an opportunistic init with WARNING fallback.
+            if hasattr(strategy_instance, "_prediction_provider"):
+                _init_prediction_provider(strategy_instance, chain=runtime_config.chain)
 
             # Initialize lending rate monitor
             if hasattr(strategy_instance, "_rate_monitor"):

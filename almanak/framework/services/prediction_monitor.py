@@ -907,19 +907,25 @@ class PredictionPositionMonitor:
 
         position = result.position
 
-        # Determine min_price for the sell order based on the event type
-        min_price = None
+        # Determine min_price for the sell order based on the event type.
+        # Default to the absolute CLOB floor (0.01) so the adapter's mandatory
+        # anchor check is satisfied even when the event-specific path doesn't
+        # derive a price. Semantically a 0.01 floor is "fill at any tick".
+        min_price = Decimal("0.01")
+        order_type: Literal["market", "limit"] = "market"
 
         if result.event == PredictionEvent.STOP_LOSS_TRIGGERED:
             # For stop-loss, use the stop-loss price as a floor
             if position.exit_conditions and position.exit_conditions.stop_loss_price:
                 # Use a slightly lower price to ensure execution
                 min_price = position.exit_conditions.stop_loss_price * Decimal("0.95")
+                order_type = "limit"
 
         elif result.event == PredictionEvent.TAKE_PROFIT_TRIGGERED:
             # For take-profit, use the take-profit price as a floor
             if position.exit_conditions and position.exit_conditions.take_profit_price:
                 min_price = position.exit_conditions.take_profit_price
+                order_type = "limit"
 
         elif result.event == PredictionEvent.TRAILING_STOP_TRIGGERED:
             # For trailing stop, use the calculated stop price
@@ -927,10 +933,12 @@ class PredictionPositionMonitor:
                 trailing_price = Decimal(result.details["trailing_stop_price"])
                 # Use a slightly lower price to ensure execution
                 min_price = trailing_price * Decimal("0.95")
+                order_type = "limit"
 
-        elif result.event == PredictionEvent.RESOLUTION_APPROACHING:
-            # For pre-resolution exit, use market order (no min_price)
-            min_price = None
+        # RESOLUTION_APPROACHING falls through with min_price=0.01 and
+        # order_type="market": the adapter routes that to a LIMIT+IOC order
+        # at the floor, which fills at any available price (the original
+        # "market sell before resolution" semantic).
 
         # Determine exit size (full or partial)
         shares: Decimal | Literal["all"] = "all"
@@ -968,7 +976,7 @@ class PredictionPositionMonitor:
             outcome=position.outcome,  # type: ignore[arg-type]
             shares=shares,
             min_price=min_price,
-            order_type="market" if min_price is None else "limit",
+            order_type=order_type,
             time_in_force="IOC",  # Immediate or cancel for quick exit
             protocol="polymarket",
         )

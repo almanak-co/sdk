@@ -214,12 +214,13 @@ class TestAdapterInitialization:
 class TestBuyIntentCompilation:
     """Tests for compiling PredictionBuyIntent."""
 
-    def test_compile_buy_intent_market_order_amount_usd(self, adapter_with_mocks, test_market):
-        """Test compiling a market order with amount_usd."""
+    def test_compile_buy_intent_with_amount_usd(self, adapter_with_mocks, test_market):
+        """Test compiling a buy with amount_usd. max_price is required (VIB-3131)."""
         intent = PredictionBuyIntent(
             market_id=test_market.id,
             outcome="YES",
             amount_usd=Decimal("100"),
+            max_price=Decimal("0.65"),
         )
 
         bundle = adapter_with_mocks.compile_intent(intent)
@@ -231,12 +232,13 @@ class TestBuyIntentCompilation:
         assert bundle.metadata["protocol"] == "polymarket"
         assert "order_payload" in bundle.metadata
 
-    def test_compile_buy_intent_market_order_shares(self, adapter_with_mocks, test_market):
-        """Test compiling a market order with shares."""
+    def test_compile_buy_intent_with_shares(self, adapter_with_mocks, test_market):
+        """Test compiling a buy with shares. max_price is required (VIB-3131)."""
         intent = PredictionBuyIntent(
             market_id=test_market.id,
             outcome="YES",
             shares=Decimal("50"),
+            max_price=Decimal("0.65"),
         )
 
         bundle = adapter_with_mocks.compile_intent(intent)
@@ -282,24 +284,26 @@ class TestBuyIntentCompilation:
         adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
         assert bundle.metadata["price"] == "0.65"
 
-    def test_buy_intent_without_max_price_falls_back_to_market_with_warning(
-        self, adapter_with_mocks, test_market, caplog
-    ):
-        """Without max_price we still build a market order at worst_price=0.99,
-        but the adapter must warn — the strategy author should set max_price."""
+    def test_buy_intent_without_max_price_returns_error_bundle(self, adapter_with_mocks, test_market):
+        """A buy intent without max_price must reject — the legacy "warn and
+        sweep at 0.99" path was a footgun (PM Exp 14 / VIB-3131): it reserved
+        ~size*$0.99 of USDC allowance against fills that landed much cheaper,
+        and on cheap markets the CLOB rejected the over-allocated order anyway.
+        The compile path now raises; the surrounding handler converts that to
+        an error ActionBundle with no signed order.
+        """
         intent = PredictionBuyIntent(
             market_id=test_market.id,
             outcome="YES",
             shares=Decimal("100"),
         )
 
-        with caplog.at_level("WARNING", logger="almanak.framework.connectors.polymarket.adapter"):
-            bundle = adapter_with_mocks.compile_intent(intent)
+        bundle = adapter_with_mocks.compile_intent(intent)
 
-        adapter_with_mocks.clob.create_and_sign_market_order.assert_called_once()
+        adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
         adapter_with_mocks.clob.create_and_sign_limit_order.assert_not_called()
-        assert bundle.metadata["price"] == "0.99"
-        assert any("no max_price" in rec.message for rec in caplog.records)
+        assert "error" in bundle.metadata
+        assert "max_price is required" in bundle.metadata["error"]
 
     def test_buy_intent_market_to_limit_elevation_uses_ioc_not_gtc(self, adapter_with_mocks, test_market):
         """When the strategy declares ``order_type='market'`` (the default) but
@@ -370,11 +374,12 @@ class TestBuyIntentCompilation:
         assert bundle.metadata["price"] == "0.01"
 
     def test_compile_buy_intent_no_outcome(self, adapter_with_mocks, test_market):
-        """Test compiling buy for NO outcome."""
+        """Test compiling buy for NO outcome. max_price required (VIB-3131)."""
         intent = PredictionBuyIntent(
             market_id=test_market.id,
             outcome="NO",
             amount_usd=Decimal("100"),
+            max_price=Decimal("0.65"),
         )
 
         bundle = adapter_with_mocks.compile_intent(intent)
@@ -383,8 +388,7 @@ class TestBuyIntentCompilation:
         assert bundle.metadata["token_id"] == test_market.no_token_id
 
     def test_compile_buy_intent_with_slug(self, adapter_with_mocks, test_market):
-        """Test compiling buy intent using market slug."""
-        # Configure mock to fail on get_market but succeed on get_market_by_slug
+        """Test compiling buy intent using market slug. max_price required (VIB-3131)."""
         adapter_with_mocks.clob.get_market.side_effect = Exception("Not found")
         adapter_with_mocks.clob.get_market_by_slug.return_value = test_market
 
@@ -392,6 +396,7 @@ class TestBuyIntentCompilation:
             market_id=test_market.slug,
             outcome="YES",
             amount_usd=Decimal("100"),
+            max_price=Decimal("0.65"),
         )
 
         bundle = adapter_with_mocks.compile_intent(intent)
@@ -439,11 +444,12 @@ class TestSellIntentCompilation:
     """Tests for compiling PredictionSellIntent."""
 
     def test_compile_sell_intent_specific_shares(self, adapter_with_mocks, test_market):
-        """Test compiling sell with specific shares."""
+        """Test compiling sell with specific shares. min_price is required (VIB-3131)."""
         intent = PredictionSellIntent(
             market_id=test_market.id,
             outcome="YES",
             shares=Decimal("25"),
+            min_price=Decimal("0.50"),
         )
 
         bundle = adapter_with_mocks.compile_intent(intent)
@@ -453,8 +459,7 @@ class TestSellIntentCompilation:
         assert bundle.metadata["side"] == "SELL"
 
     def test_compile_sell_intent_all_shares(self, adapter_with_mocks, test_market):
-        """Test compiling sell with shares='all'."""
-        # Setup mock position
+        """Test compiling sell with shares='all'. min_price is required (VIB-3131)."""
         position = MagicMock()
         position.token_id = test_market.yes_token_id
         position.size = Decimal("100")
@@ -464,6 +469,7 @@ class TestSellIntentCompilation:
             market_id=test_market.id,
             outcome="YES",
             shares="all",
+            min_price=Decimal("0.50"),
         )
 
         bundle = adapter_with_mocks.compile_intent(intent)
@@ -471,14 +477,57 @@ class TestSellIntentCompilation:
         assert bundle.intent_type == IntentType.PREDICTION_SELL.value
         assert bundle.metadata["size"] == "100"
 
-    def test_compile_sell_intent_no_position(self, adapter_with_mocks, test_market):
-        """Test sell intent when no position exists."""
+    def test_sell_intent_without_min_price_returns_error_bundle(self, adapter_with_mocks, test_market):
+        """A sell intent without min_price must reject — the legacy "warn and
+        sweep at the 0.01 floor" path could fill a $0.50/share position at
+        $0.01/share. Mirror of the BUY rejection (PM Exp 14 / VIB-3131).
+        """
+        intent = PredictionSellIntent(
+            market_id=test_market.id,
+            outcome="YES",
+            shares=Decimal("25"),
+        )
+
+        bundle = adapter_with_mocks.compile_intent(intent)
+
+        adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
+        adapter_with_mocks.clob.create_and_sign_limit_order.assert_not_called()
+        assert "error" in bundle.metadata
+        assert "min_price is required" in bundle.metadata["error"]
+
+    def test_sell_intent_all_shares_without_min_price_rejects_deterministically(self, adapter_with_mocks, test_market):
+        """Regression: shares="all" without min_price must reject for the SAME
+        reason as explicit shares — not short-circuit to "No position to sell"
+        when the wallet happens to be empty (CodeRabbit catch on PR #1567).
+        Without this guard, VIB-3131 enforcement would be nondeterministic in
+        common teardown/dry-run flows where positions are not yet open.
+        """
         adapter_with_mocks.clob.get_positions.return_value = []
 
         intent = PredictionSellIntent(
             market_id=test_market.id,
             outcome="YES",
             shares="all",
+        )
+
+        bundle = adapter_with_mocks.compile_intent(intent)
+
+        adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
+        adapter_with_mocks.clob.create_and_sign_limit_order.assert_not_called()
+        # Must be the min_price error, NOT "No position to sell".
+        assert "error" in bundle.metadata
+        assert "min_price is required" in bundle.metadata["error"]
+        assert "No position to sell" not in bundle.metadata["error"]
+
+    def test_compile_sell_intent_no_position(self, adapter_with_mocks, test_market):
+        """Test sell intent with valid min_price but no position to sell."""
+        adapter_with_mocks.clob.get_positions.return_value = []
+
+        intent = PredictionSellIntent(
+            market_id=test_market.id,
+            outcome="YES",
+            shares="all",
+            min_price=Decimal("0.50"),
         )
 
         bundle = adapter_with_mocks.compile_intent(intent)
