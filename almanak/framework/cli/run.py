@@ -814,6 +814,26 @@ def create_execution_orchestrator(
     if os.environ.get("ALMANAK_MAX_SLIPPAGE_BPS") or os.environ.get("MAX_SLIPPAGE_BPS"):
         tx_risk_config.max_slippage_bps = config.max_slippage_bps
 
+    # Per-tx USD cap. The CLI path hydrates native_token_price_usd via
+    # StrategyRunner before each execute(), so it's safe to enable a default
+    # cap here. Other orchestrator callers (gateway, paper trading) leave
+    # this off — see TransactionRiskConfig docstring.
+    from decimal import Decimal as _Decimal
+    from decimal import InvalidOperation as _InvalidOperation
+
+    max_value_usd_env = os.environ.get("ALMANAK_MAX_VALUE_USD") or os.environ.get("MAX_VALUE_USD")
+    if max_value_usd_env:
+        try:
+            tx_risk_config.max_value_usd = _Decimal(max_value_usd_env)
+        except _InvalidOperation as exc:
+            raise ValueError(
+                "ALMANAK_MAX_VALUE_USD / MAX_VALUE_USD must be a plain decimal "
+                "number (no commas, no units). Got: "
+                f"{max_value_usd_env!r}"
+            ) from exc
+    else:
+        tx_risk_config.max_value_usd = _Decimal("50000")
+
     return ExecutionOrchestrator(
         signer=signer,
         submitter=submitter,

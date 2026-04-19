@@ -1776,16 +1776,26 @@ class StrategyRunner:
                             execution_result.extracted_data["order_id"] = clob_result.order_id
                         last_execution_result = execution_result
                     else:
-                        # Update native token price for USD gas guard
-                        # tx_risk_config only exists on local ExecutionOrchestrator, not GatewayExecutionOrchestrator
+                        # Update native token price for USD-denominated risk guards
+                        # (max_value_usd, max_gas_cost_usd).
+                        # tx_risk_config only exists on local ExecutionOrchestrator,
+                        # not GatewayExecutionOrchestrator. Reset BEFORE the fetch
+                        # attempt so a missed/failed oracle reliably trips fail-closed
+                        # in the validator instead of reusing the prior cycle's price.
                         tx_risk_cfg = getattr(single_chain_orch, "tx_risk_config", None)
-                        if tx_risk_cfg and tx_risk_cfg.max_gas_cost_usd > 0 and price_oracle:
-                            from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
+                        if tx_risk_cfg is not None and (
+                            tx_risk_cfg.max_gas_cost_usd > 0 or tx_risk_cfg.max_value_usd > 0
+                        ):
+                            tx_risk_cfg.native_token_price_usd = 0.0
+                            if price_oracle:
+                                from almanak.gateway.data.balance.web3_provider import (
+                                    NATIVE_TOKEN_SYMBOLS,
+                                )
 
-                            native_symbol = NATIVE_TOKEN_SYMBOLS.get(strategy.chain.lower(), "ETH")
-                            native_price = price_oracle.get(native_symbol, 0)
-                            if native_price:
-                                tx_risk_cfg.native_token_price_usd = float(native_price)
+                                native_symbol = NATIVE_TOKEN_SYMBOLS.get(strategy.chain.lower(), "ETH")
+                                native_price = price_oracle.get(native_symbol, 0)
+                                if native_price:
+                                    tx_risk_cfg.native_token_price_usd = float(native_price)
 
                         execution_result = await single_chain_orch.execute(
                             action_bundle=step_result.action_bundle,
