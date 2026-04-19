@@ -697,8 +697,15 @@ def _build_resolver_for_cli(ctx, *, use_gateway: bool):
 
 @ax.command()
 @click.argument("token")
+@click.option(
+    "--chain",
+    "-c",
+    "sub_chain",
+    default=None,
+    help="Chain to query (overrides the group-level --chain when both are set).",
+)
 @click.pass_context
-def balance(ctx, token):
+def balance(ctx, token, sub_chain):
     """Get the balance of a token in your wallet.
 
     \b
@@ -710,6 +717,19 @@ def balance(ctx, token):
     from almanak.framework.cli.ax_render import render_error, render_result
 
     json_output = ctx.obj["json_output"]
+    # Subcommand-level --chain wins over group-level when provided. This
+    # matches Click's "more specific placement wins" convention and keeps
+    # both invocation styles working:
+    #   almanak ax balance ETH --chain base        (sub)
+    #   almanak ax --chain base balance ETH        (group)
+    #
+    # We update ctx.obj["chain"] (not just the tool arg) because downstream
+    # infrastructure -- _get_executor() and _start_managed_gateway() -- reads
+    # the chain from ctx.obj to initialize the executor / gateway client /
+    # managed gateway. Passing the override only to the tool args would leave
+    # the gateway pointed at the group-level chain (or default).
+    if sub_chain is not None:
+        ctx.obj["chain"] = sub_chain
     try:
         response = _run_tool(
             ctx,
