@@ -202,7 +202,14 @@ class TestParseReceiptCache:
         assert not getattr(parser.parse_receipt, "_is_cached_wrapper", False)
 
     def test_cache_removed_even_on_exception(self) -> None:
-        """Cache should be cleaned up even if extraction raises."""
+        """Cache should be cleaned up even if extraction raises.
+
+        VIB-3159: the enricher now fails closed in live mode, so a parser
+        exception propagates as CriticalAccountingError. The finally block
+        that removes the cache must still run.
+        """
+        from almanak.framework.execution.extract_result import CriticalAccountingError
+
         class FakeParser:
             SUPPORTED_EXTRACTIONS = frozenset({"swap_amounts"})
 
@@ -224,11 +231,11 @@ class TestParseReceiptCache:
         intent = _FakeIntent(intent_type="SWAP", protocol="uniswap_v3")
         context = _FakeContext()
 
-        # enrich() should not raise (errors are caught)
         with patch.object(enricher.parser_registry, "get", return_value=parser):
-            enricher.enrich(exec_result, intent, context)
+            with pytest.raises(CriticalAccountingError):
+                enricher.enrich(exec_result, intent, context)
 
-        # Cache should still be removed
+        # Cache must still be removed even though enrich() raised.
         assert not getattr(parser.parse_receipt, "_is_cached_wrapper", False)
 
     def test_parser_without_parse_receipt_skipped(self) -> None:

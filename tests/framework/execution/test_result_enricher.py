@@ -9,6 +9,8 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import Mock
 
+import pytest
+
 from almanak.framework.execution.extracted_data import SwapAmounts
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
@@ -308,24 +310,47 @@ class TestResultEnricherPositionId:
         assert enriched.extracted_data["position_id"] == 12345
 
     def test_handles_extraction_exception(self):
-        """Extraction exceptions should be logged but not crash."""
+        """Extraction exceptions in paper mode should be logged but not crash.
+
+        VIB-3159: live mode now fail-closes and raises CriticalAccountingError.
+        Paper / backtest mode preserves the old fail-safe behavior.
+        """
         mock_parser = Mock()
         mock_parser.extract_position_id.side_effect = ValueError("Test error")
 
         mock_registry = Mock(spec=ReceiptParserRegistry)
         mock_registry.get.return_value = mock_parser
 
-        enricher = ResultEnricher(parser_registry=mock_registry)
+        enricher = ResultEnricher(parser_registry=mock_registry, live_mode=False)
         result = create_execution_result(success=True)
         intent = MockIntent()
         context = create_context()
 
         enriched = enricher.enrich(result, intent, context)
 
-        # Should have warning but not crash
+        # Paper mode: warning + counter, no crash.
         assert enriched.position_id is None
         assert len(enriched.extraction_warnings) > 0
         assert "Test error" in enriched.extraction_warnings[0]
+        assert enricher.extract_error_count == 1
+
+    def test_extraction_exception_live_mode_raises(self):
+        """VIB-3159: live mode raises CriticalAccountingError on parser failure."""
+        from almanak.framework.execution.extract_result import CriticalAccountingError
+
+        mock_parser = Mock()
+        mock_parser.extract_position_id.side_effect = ValueError("Test error")
+
+        mock_registry = Mock(spec=ReceiptParserRegistry)
+        mock_registry.get.return_value = mock_parser
+
+        enricher = ResultEnricher(parser_registry=mock_registry, live_mode=True)
+        result = create_execution_result(success=True)
+        intent = MockIntent()
+        context = create_context()
+
+        with pytest.raises(CriticalAccountingError):
+            enricher.enrich(result, intent, context)
 
 
 class TestResultEnricherSwapAmounts:

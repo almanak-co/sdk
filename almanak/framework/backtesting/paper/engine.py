@@ -2022,10 +2022,15 @@ class PaperTrader:
             # position_id / swap_amounts / extracted_data, matching StrategyRunner.
             # Without this, stateful strategies that read result.position_id in
             # their callback never advance their state machine and re-open
-            # positions every tick. enrich_result uses the singleton enricher
-            # and is fail-safe (logs internally on failure, never raises).
+            # positions every tick.
+            # VIB-3159: paper mode downgrades ExtractError to a structured
+            # warning + counter instead of raising CriticalAccountingError.
+            # Paper trading is an expected non-live surface (fork reorgs,
+            # mocked decimals) where halting the whole run on a single parse
+            # error would block research. The warning still surfaces on
+            # result.extraction_warnings for monitoring.
             if result.success:
-                result = enrich_result(result, intent, context)
+                result = enrich_result(result, intent, context, live_mode=False)
 
             # Store for on_intent_executed callback (VIB-1951)
             self._last_execution_result = result

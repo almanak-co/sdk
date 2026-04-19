@@ -12,6 +12,12 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.connectors.base import EventRegistry, HexDecoder
+from almanak.framework.execution.extract_result import (
+    ExtractError,
+    ExtractMissing,
+    ExtractOk,
+    ExtractResult,
+)
 
 if TYPE_CHECKING:
     from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
@@ -1070,6 +1076,73 @@ class AerodromeReceiptParser:
     # =============================================================================
     # Extraction Methods (for Result Enrichment)
     # =============================================================================
+
+    # ---- VIB-3159: tagged-variant wrappers ------------------------------------
+    # See uniswap_v3/receipt_parser.py for the rationale. The raw methods
+    # preserve their legacy return types so direct callers keep working.
+
+    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
+        """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
+        reports a crash. See uniswap_v3 equivalent for rationale (VIB-3159)."""
+        try:
+            parsed = self.parse_receipt(receipt)
+        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if not parsed.success:
+            return ExtractError(error=parsed.error or "parse_receipt reported failure")
+        return None
+
+    def extract_swap_amounts_result(self, receipt: dict[str, Any]) -> ExtractResult["SwapAmounts"]:
+        """Fail-closed variant of :meth:`extract_swap_amounts` — see VIB-3159."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = self.extract_swap_amounts(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no Swap event in receipt")
+        return ExtractOk(value=value)
+
+    def extract_lp_close_data_result(self, receipt: dict[str, Any]) -> ExtractResult["LPCloseData"]:
+        """Fail-closed variant of :meth:`extract_lp_close_data` — see VIB-3159."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = self.extract_lp_close_data(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no Burn event in receipt")
+        return ExtractOk(value=value)
+
+    def extract_position_id_result(self, receipt: dict[str, Any]) -> ExtractResult[str]:
+        """Fail-closed variant of :meth:`extract_position_id` — see VIB-3159."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = self.extract_position_id(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no LP position Transfer event")
+        return ExtractOk(value=value)
+
+    def extract_liquidity_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_liquidity` — see VIB-3159."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = self.extract_liquidity(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no Mint event in receipt")
+        return ExtractOk(value=value)
 
     def extract_swap_amounts(self, receipt: dict[str, Any]) -> "SwapAmounts | None":
         """Extract swap amounts from a transaction receipt.

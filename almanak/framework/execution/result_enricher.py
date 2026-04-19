@@ -23,9 +23,16 @@ from __future__ import annotations
 
 import logging
 import re
+import warnings
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
+from .extract_result import (
+    CriticalAccountingError,
+    ExtractError,
+    ExtractMissing,
+    ExtractOk,
+)
 from .extracted_data import LPCloseData, SwapAmounts
 from .receipt_registry import ReceiptParserRegistry
 
@@ -47,6 +54,33 @@ _SNAKE_TO_CAMEL = {
     "effective_gas_price": "effectiveGasPrice",
 }
 
+# One-shot deprecation tracking for un-migrated parsers. Keyed by
+# (parser_class_name, field) so we warn exactly once per (parser, field) pair
+# instead of spamming on every receipt.
+_LEGACY_WARNED: set[tuple[str, str]] = set()
+
+
+def _legacy_warn(parser: Any, field: str) -> None:
+    """Emit a one-shot DeprecationWarning for parsers that still return raw values.
+
+    VIB-3159 migrates receipt parsers to the three-variant ExtractResult
+    contract. Parsers that still return raw values / None keep working via
+    backward-compat wrapping, but callers cannot distinguish "no event" from
+    "parse error" — which is the ghost-position failure mode this ticket
+    closes. The warning identifies which parser still needs migration.
+    """
+    key = (type(parser).__name__, field)
+    if key in _LEGACY_WARNED:
+        return
+    _LEGACY_WARNED.add(key)
+    warnings.warn(
+        f"Receipt parser {type(parser).__name__}.extract_{field}() returns a raw value "
+        f"instead of ExtractOk/ExtractMissing/ExtractError (VIB-3159). Parse errors and "
+        f"missing events are indistinguishable — migrate to the tagged variant.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
 
 class ResultEnricher:
     """Enriches ExecutionResult with intent-specific extracted data.
@@ -56,10 +90,19 @@ class ResultEnricher:
     HOW to extract to protocol-specific parsers.
 
     Key Design Principles:
-    1. Fail-Safe: Extraction errors are logged but never crash execution
-    2. Type-Safe: Core fields are strongly typed
-    3. Extensible: New protocols can be added without framework changes
-    4. Zero Cognitive Load: Data "just appears" on result
+    1. Fail-Closed (live): Parse errors raise CriticalAccountingError so the
+       runner cannot proceed on a stale / ghost view of on-chain state.
+       Paper / backtest callers opt into permissive mode via live_mode=False,
+       which downgrades ExtractError to a structured warning + counter.
+       "No event of this type" results (ExtractMissing) are benign in both
+       modes and never raise.
+    2. Type-Safe: Core fields are strongly typed.
+    3. Extensible: New protocols can be added without framework changes.
+    4. Zero Cognitive Load: Data "just appears" on result.
+    5. Three-variant contract: migrated parsers return ExtractOk /
+       ExtractMissing / ExtractError so "no event" and "parse error" are
+       distinguishable. Legacy parsers keep working via backward-compat
+       wrapping (see _legacy_warn / _invoke_extract).
 
     Example:
         enricher = ResultEnricher()
@@ -135,14 +178,30 @@ class ResultEnricher:
         "HOLD": [],  # No extraction needed
     }
 
-    def __init__(self, parser_registry: ReceiptParserRegistry | None = None) -> None:
+    def __init__(
+        self,
+        parser_registry: ReceiptParserRegistry | None = None,
+        *,
+        live_mode: bool = True,
+    ) -> None:
         """Initialize the ResultEnricher.
 
         Args:
-            parser_registry: Registry for protocol parsers.
-                If not provided, uses the default global registry.
+            parser_registry: Registry for protocol parsers. If not provided,
+                uses the default global registry.
+            live_mode: When True (default), an ExtractError from a parser
+                is converted into CriticalAccountingError and raised —
+                accounting failures must not be silently treated as "no
+                event". When False (paper / backtest), the error is logged
+                and counted on result.extraction_warnings but does not halt
+                execution. Default True is a deliberate fail-closed choice —
+                paper trading entry points must opt into permissive mode.
         """
         self.parser_registry = parser_registry or ReceiptParserRegistry()
+        self.live_mode = live_mode
+        # Counter for ExtractError occurrences in non-live mode. Exposed so
+        # monitoring / paper engines can surface the total.
+        self.extract_error_count: int = 0
 
     def enrich(
         self,
@@ -155,8 +214,12 @@ class ResultEnricher:
         This method extracts relevant data from transaction receipts based
         on the intent type and attaches it to the ExecutionResult.
 
-        IMPORTANT: This method NEVER raises exceptions. All errors are
-        logged as warnings and added to result.extraction_warnings.
+        IMPORTANT (VIB-3159): In live mode this method FAILS CLOSED. Parsers
+        that return ExtractError — or raise — cause CriticalAccountingError
+        to propagate. Paper / backtest callers must construct the enricher
+        with live_mode=False to downgrade those errors to warnings + a
+        counter. Benign "no event of this type" results (ExtractMissing)
+        never raise in either mode.
 
         Args:
             result: Raw execution result from orchestrator
@@ -165,6 +228,12 @@ class ResultEnricher:
 
         Returns:
             Enriched ExecutionResult (same instance, mutated)
+
+        Raises:
+            CriticalAccountingError: when live_mode is True and a parser
+                returns ExtractError (or raises). This intentionally uses
+                BaseException as its base so generic except-Exception
+                handlers do not swallow it.
 
         Example:
             result = enricher.enrich(result, intent, context)
@@ -251,7 +320,7 @@ class ResultEnricher:
         try:
             # Extract each field in the spec
             for field in spec:
-                self._extract_field(result, parser, receipts, field, intent_type)
+                self._extract_field(result, parser, receipts, field, intent_type, protocol)
         finally:
             self._remove_parse_cache(parser)
 
@@ -284,17 +353,32 @@ class ResultEnricher:
         receipts: list[dict[str, Any]],
         field: str,
         intent_type: str,
+        protocol: str | None = None,
     ) -> None:
         """Extract a single field from receipts and attach to result.
 
-        Args:
-            result: ExecutionResult to populate
-            parser: Protocol receipt parser
-            receipts: List of transaction receipts
-            field: Field name to extract
-            intent_type: Type of intent being processed
+        Handles the three-variant ExtractResult contract (VIB-3159):
+          * ExtractOk      -> attach to result
+          * ExtractMissing -> no-op (benign "no event of this type")
+          * ExtractError   -> raise CriticalAccountingError in live mode,
+                              warn + count in paper mode
+
+        Un-migrated parsers returning raw None / value are wrapped via
+        _invoke_extract with a one-shot DeprecationWarning. This keeps
+        the remaining ~32 parsers working until they are migrated (see
+        docs/internal/vib-3159-followup.md).
+
+        A raised exception from a parser is always treated as ExtractError.
+        Under the legacy contract the error was logged and swallowed,
+        producing the ghost-position failure mode this ticket addresses.
+
+        Migrated parsers expose a second method ``extract_{field}_result``
+        that returns the tagged ``ExtractResult``. We prefer it when present
+        so existing raw-returning public methods keep their signatures for
+        the strategies / tests that call them directly.
         """
         method_name = f"extract_{field}"
+        result_method_name = f"{method_name}_result"
 
         # Check capability declaration if parser declares SUPPORTED_EXTRACTIONS
         supported = getattr(parser, "SUPPORTED_EXTRACTIONS", None)
@@ -306,34 +390,126 @@ class ResultEnricher:
             result.extraction_warnings.append(warning)
             return
 
-        # Check if parser has this extraction method
-        if not hasattr(parser, method_name):
+        # Prefer the migrated tagged-variant method when present. This lets
+        # the raw public method keep its legacy return type for existing
+        # callers (strategies, tests) while the enricher gets the richer
+        # signal. We check the *class hierarchy* (not the instance) to avoid
+        # matching auto-generated attributes on unittest.mock.Mock() which
+        # would otherwise claim every ``extract_{field}_result`` exists.
+        if self._class_has_method(parser, result_method_name):
+            extract_method = getattr(parser, result_method_name)
+        elif hasattr(parser, method_name):
+            extract_method = getattr(parser, method_name)
+        else:
             logger.debug(
                 f"Enrichment: parser {type(parser).__name__} has no method '{method_name}' "
                 f"(field={field}, intent_type={intent_type})"
             )
             return
 
-        extract_method = getattr(parser, method_name)
-
-        # Try each receipt until we find the data
+        # Iterate receipts. Remember any ExtractError and keep looking — the
+        # data might land in a later receipt (multi-tx bundle). Only escalate
+        # if no receipt produced Ok.
+        last_error: ExtractError | None = None
         for receipt in receipts:
-            try:
-                value = extract_method(receipt)
-                if value is not None:
-                    self._attach_to_result(result, field, value, intent_type)
-                    logger.debug(f"Enrichment: extracted {field}={type(value).__name__} from receipt")
-                    return  # Found it, stop looking
-            except Exception as e:
-                warning = f"Failed to extract {field}: {e}"
-                logger.info(warning)
-                result.extraction_warnings.append(warning)
+            variant = self._invoke_extract(extract_method, parser, receipt, field)
 
-        # If we get here, no receipt yielded a value
+            if isinstance(variant, ExtractOk):
+                self._attach_to_result(result, field, variant.value, intent_type)
+                logger.debug(f"Enrichment: extracted {field}={type(variant.value).__name__} from receipt")
+                return
+            if isinstance(variant, ExtractError):
+                last_error = variant
+                continue
+            # ExtractMissing — benign, continue to next receipt.
+
+        if last_error is not None:
+            self._handle_extract_error(result, last_error, field, intent_type, parser, protocol)
+            return
+
         logger.debug(
-            f"Enrichment: {field} returned None from all {len(receipts)} receipt(s) "
+            f"Enrichment: {field} missing from all {len(receipts)} receipt(s) "
             f"(parser={type(parser).__name__}, intent_type={intent_type})"
         )
+
+    @staticmethod
+    def _class_has_method(obj: Any, name: str) -> bool:
+        """Return True if ``name`` is defined on ``type(obj)`` or a base class.
+
+        Unlike ``hasattr(obj, name)`` this does not match attributes that
+        were auto-generated on the instance (``unittest.mock.Mock`` in
+        particular exposes every attribute lookup as a fresh Mock), so it
+        is safe to use for "did the parser author actually implement the
+        tagged variant?" checks.
+        """
+        return any(name in klass.__dict__ for klass in type(obj).__mro__)
+
+    def _invoke_extract(
+        self,
+        extract_method: Any,
+        parser: Any,
+        receipt: dict[str, Any],
+        field: str,
+    ) -> ExtractOk[Any] | ExtractMissing | ExtractError:
+        """Call an extract_* method and normalize the return to a variant.
+
+        Migrated parsers already return ExtractOk/Missing/Error. Legacy
+        parsers return raw None / value; we wrap those with a one-shot
+        deprecation warning. Exceptions from either kind become
+        ExtractError — a raised exception is always accounting-critical.
+        """
+        try:
+            raw = extract_method(receipt)
+        except CriticalAccountingError:
+            # Never swallow a fail-closed signal raised by a nested enricher.
+            raise
+        except Exception as exc:  # noqa: BLE001 — crash is accounting-critical
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+
+        if isinstance(raw, ExtractOk | ExtractMissing | ExtractError):
+            return raw
+
+        _legacy_warn(parser, field)
+        if raw is None:
+            return ExtractMissing(reason="legacy None return")
+        return ExtractOk(value=raw)
+
+    def _handle_extract_error(
+        self,
+        result: ExecutionResult,
+        err: ExtractError,
+        field: str,
+        intent_type: str,
+        parser: Any,
+        protocol: str | None = None,
+    ) -> None:
+        """Route an ExtractError per live/paper-mode policy.
+
+        In live mode we raise CriticalAccountingError (inherits BaseException)
+        so the runner's generic except-Exception handler cannot swallow it.
+        In paper mode we log, increment a counter, and attach a structured
+        warning so monitoring can still catch the problem.
+
+        ``protocol`` is the resolved protocol slug (from the intent/context)
+        and is what downstream consumers actually filter on; the parser class
+        name stays in the human-readable message for diagnostics.
+        """
+        parser_name = type(parser).__name__
+        message = f"Extraction failed for {field} (intent={intent_type}, parser={parser_name}): {err.error}"
+
+        if self.live_mode:
+            logger.error(message)
+            raise CriticalAccountingError(
+                message,
+                field_name=field,
+                intent_type=intent_type,
+                protocol=protocol,
+                original=err.exception,
+            )
+
+        self.extract_error_count += 1
+        logger.warning(f"{message} (paper mode — surfaced as warning, not raised)")
+        result.extraction_warnings.append(f"ExtractError[{field}]: {err.error}")
 
     def _attach_to_result(
         self,
@@ -560,6 +736,10 @@ _default_enricher: ResultEnricher | None = None
 def get_enricher() -> ResultEnricher:
     """Get the default ResultEnricher instance.
 
+    The default enricher is constructed with live_mode=True — callers that
+    need paper/backtest semantics must construct their own enricher with
+    live_mode=False (see backtesting/paper/engine.py).
+
     Returns:
         Singleton ResultEnricher instance
     """
@@ -573,24 +753,36 @@ def enrich_result(
     result: ExecutionResult,
     intent: Any,
     context: ExecutionContext,
+    *,
+    live_mode: bool | None = None,
 ) -> ExecutionResult:
     """Enrich an execution result using the default enricher.
 
-    Convenience function that uses the singleton ResultEnricher.
+    Convenience function that uses the singleton ResultEnricher when
+    live_mode is None. When live_mode is passed explicitly, a fresh
+    enricher is constructed with that mode so the caller doesn't mutate
+    the shared singleton.
 
     Args:
         result: Raw execution result from orchestrator
         intent: The intent that was executed
         context: Execution context with chain info
+        live_mode: Optional override. None = use singleton default (live).
 
     Returns:
         Enriched ExecutionResult
 
     Example:
-        result = await orchestrator.execute(bundle)
+        # live / default
         result = enrich_result(result, intent, context)
+
+        # paper / backtest
+        result = enrich_result(result, intent, context, live_mode=False)
     """
-    return get_enricher().enrich(result, intent, context)
+    if live_mode is None:
+        return get_enricher().enrich(result, intent, context)
+    enricher = ResultEnricher(live_mode=live_mode)
+    return enricher.enrich(result, intent, context)
 
 
 # =============================================================================
@@ -598,7 +790,11 @@ def enrich_result(
 # =============================================================================
 
 __all__ = [
+    "CriticalAccountingError",
+    "ExtractError",
+    "ExtractMissing",
+    "ExtractOk",
     "ResultEnricher",
-    "get_enricher",
     "enrich_result",
+    "get_enricher",
 ]

@@ -36,6 +36,12 @@ from enum import Enum
 from typing import Any
 
 from almanak.framework.connectors.base import EventRegistry, HexDecoder
+from almanak.framework.execution.extract_result import (
+    ExtractError,
+    ExtractMissing,
+    ExtractOk,
+    ExtractResult,
+)
 from almanak.framework.utils.log_formatters import format_address, format_gas_cost, format_tx_hash
 
 logger = logging.getLogger(__name__)
@@ -1407,6 +1413,63 @@ class AaveV3ReceiptParser:
     # =============================================================================
     # Extraction Methods (for Result Enrichment)
     # =============================================================================
+
+    # ---- VIB-3159: tagged-variant wrappers ------------------------------------
+    # See uniswap_v3/receipt_parser.py for rationale.
+
+    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
+        """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
+        reports a crash. See uniswap_v3 equivalent for rationale (VIB-3159)."""
+        try:
+            parsed = self.parse_receipt(receipt)
+        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if not parsed.success:
+            return ExtractError(error=parsed.error or "parse_receipt reported failure")
+        return None
+
+    def _wrap_amount(
+        self,
+        fn: Any,
+        receipt: dict[str, Any],
+        missing_reason: str,
+    ) -> ExtractResult[int]:
+        """Shared wrapper for integer-amount extract methods.
+
+        Calls ``parse_receipt`` first so actual parse crashes propagate as
+        ``ExtractError`` rather than being silently swallowed by the legacy
+        extractor's ``except Exception: return None`` (VIB-3159).
+        """
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = fn(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason=missing_reason)
+        return ExtractOk(value=value)
+
+    def extract_supply_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_supply_amount` — see VIB-3159."""
+        return self._wrap_amount(self.extract_supply_amount, receipt, "no Supply event in receipt")
+
+    def extract_withdraw_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_withdraw_amount` — see VIB-3159."""
+        return self._wrap_amount(self.extract_withdraw_amount, receipt, "no Withdraw event in receipt")
+
+    def extract_borrow_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_borrow_amount` — see VIB-3159."""
+        return self._wrap_amount(self.extract_borrow_amount, receipt, "no Borrow event in receipt")
+
+    def extract_repay_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_repay_amount` — see VIB-3159."""
+        return self._wrap_amount(self.extract_repay_amount, receipt, "no Repay event in receipt")
+
+    def extract_a_token_received_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_a_token_received` — see VIB-3159."""
+        return self._wrap_amount(self.extract_a_token_received, receipt, "no aToken Mint Transfer event")
 
     def extract_supply_amount(self, receipt: dict[str, Any]) -> int | None:
         """Extract supply amount from a transaction receipt.

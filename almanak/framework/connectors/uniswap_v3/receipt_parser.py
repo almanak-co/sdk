@@ -15,6 +15,12 @@ from typing import TYPE_CHECKING, Any
 
 from almanak.framework.connectors.base import EventRegistry, HexDecoder
 from almanak.framework.execution.events import SwapResultPayload
+from almanak.framework.execution.extract_result import (
+    ExtractError,
+    ExtractMissing,
+    ExtractOk,
+    ExtractResult,
+)
 
 if TYPE_CHECKING:
     from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
@@ -974,6 +980,89 @@ class UniswapV3ReceiptParser:
     # =============================================================================
     # Position ID Extraction
     # =============================================================================
+
+    # ---- VIB-3159: tagged-variant wrappers ------------------------------------
+    # The ``_result`` variants are the canonical entry points for the framework's
+    # ``ResultEnricher``. They distinguish "no event of this type" from "parse
+    # error", which the legacy return-``None``-for-both signature could not do.
+    # The raw public methods below preserve their legacy return types so
+    # strategies and tests that call them directly keep working.
+
+    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
+        """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
+        reports a crash.
+
+        Returns ``None`` when parsing succeeded (caller should proceed), or an
+        ``ExtractError`` variant when it did not. This is the strict
+        counterpart to the legacy ``extract_*`` methods, which silently
+        swallow exceptions and return ``None`` — making the "benign missing"
+        and "crashed parsing" cases indistinguishable (VIB-3159).
+        """
+        try:
+            parsed = self.parse_receipt(receipt)
+        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if not parsed.success:
+            return ExtractError(error=parsed.error or "parse_receipt reported failure")
+        return None
+
+    def extract_position_id_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_position_id` — see VIB-3159."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            logs = receipt.get("logs", [])
+        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if not logs:
+            return ExtractMissing(reason="no logs in receipt")
+        try:
+            value = self.extract_position_id(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no Mint Transfer event from position manager")
+        return ExtractOk(value=value)
+
+    def extract_swap_amounts_result(self, receipt: dict[str, Any]) -> ExtractResult[SwapAmounts]:
+        """Fail-closed variant of :meth:`extract_swap_amounts` — see VIB-3159."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = self.extract_swap_amounts(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no Swap event in receipt")
+        return ExtractOk(value=value)
+
+    def extract_lp_close_data_result(self, receipt: dict[str, Any]) -> ExtractResult[LPCloseData]:
+        """Fail-closed variant of :meth:`extract_lp_close_data` — see VIB-3159."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = self.extract_lp_close_data(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no Collect/Burn event in receipt")
+        return ExtractOk(value=value)
+
+    def extract_liquidity_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_liquidity` — see VIB-3159."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = self.extract_liquidity(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no Mint event in receipt")
+        return ExtractOk(value=value)
 
     def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
         """Extract LP position ID (NFT tokenId) from a transaction receipt.
