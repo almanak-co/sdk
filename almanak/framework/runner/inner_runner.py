@@ -801,6 +801,8 @@ class _MinimalIntent:
             "perp_close": IntentType.PERP_CLOSE,
             "stake": IntentType.STAKE,
             "unstake": IntentType.UNSTAKE,
+            "wrap_native": IntentType.WRAP_NATIVE,
+            "unwrap_native": IntentType.UNWRAP_NATIVE,
         }
 
         mapped = _TYPE_MAP.get(intent_type.lower())
