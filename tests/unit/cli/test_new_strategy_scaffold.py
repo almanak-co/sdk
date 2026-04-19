@@ -17,6 +17,22 @@ from almanak.framework.cli.new_strategy import (
 ALL_TEMPLATES = list(StrategyTemplate)
 
 
+def _get_strategy_class_def(tree: ast.AST) -> ast.ClassDef:
+    """Return the emitted IntentStrategy subclass definition.
+
+    Scaffolded files may contain both a ``<Template>State(StrEnum)`` and the
+    strategy class. The strategy class name always ends in ``Strategy`` and is
+    the class we want for method/teardown assertions.
+    """
+    class_defs = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+    assert class_defs, "No class definition found in generated code"
+    strategy_classes = [c for c in class_defs if c.name.endswith("Strategy")]
+    assert strategy_classes, (
+        f"No class ending in 'Strategy' found (got: {[c.name for c in class_defs]})"
+    )
+    return strategy_classes[0]
+
+
 # ---------------------------------------------------------------------------
 # pyproject.toml tests (existing)
 # ---------------------------------------------------------------------------
@@ -103,10 +119,7 @@ def test_strategy_file_has_decide_method(template: StrategyTemplate) -> None:
             output_dir=Path(tmpdir),
         )
         tree = ast.parse(code)
-        class_defs = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
-        assert len(class_defs) >= 1, "No class definition found"
-
-        strategy_class = class_defs[0]
+        strategy_class = _get_strategy_class_def(tree)
         method_names = [
             n.name for n in ast.walk(strategy_class) if isinstance(n, ast.FunctionDef)
         ]
@@ -124,8 +137,7 @@ def test_strategy_file_has_teardown_methods(template: StrategyTemplate) -> None:
             output_dir=Path(tmpdir),
         )
         tree = ast.parse(code)
-        class_defs = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
-        strategy_class = class_defs[0]
+        strategy_class = _get_strategy_class_def(tree)
         method_names = [
             n.name for n in ast.walk(strategy_class) if isinstance(n, ast.FunctionDef)
         ]
@@ -288,8 +300,7 @@ def test_stateful_templates_have_callbacks(template: StrategyTemplate) -> None:
             output_dir=Path(tmpdir),
         )
         tree = ast.parse(code)
-        class_defs = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
-        strategy_class = class_defs[0]
+        strategy_class = _get_strategy_class_def(tree)
         method_names = [
             n.name for n in ast.walk(strategy_class) if isinstance(n, ast.FunctionDef)
         ]
@@ -912,3 +923,254 @@ def test_new_strategy_no_rmtree_on_existing_dir_failure(tmp_path: Path) -> None:
     # Directory should still exist (not rmtree'd)
     assert target.exists(), "Pre-existing directory should not be deleted on scaffold failure"
     assert (target / ".almanak" / "important.json").exists(), "Dotfiles should be preserved"
+
+
+# ---------------------------------------------------------------------------
+# StrEnum state machines: emitted code + runtime behavior + persistence
+# ---------------------------------------------------------------------------
+
+# Templates that emit a StrEnum state machine. Keep in sync with
+# ``_TEMPLATE_STATE_ENUMS`` in ``almanak.framework.cli.new_strategy``.
+STATEFUL_STRENUM_TEMPLATES = {
+    StrategyTemplate.LENDING_LOOP: ("LendingLoopState", ("IDLE", "SUPPLIED", "BORROWED", "MONITORING")),
+    StrategyTemplate.BASIS_TRADE: ("BasisTradeState", ("IDLE", "SPOT_BOUGHT", "HEDGED", "UNWINDING")),
+    StrategyTemplate.VAULT_YIELD: ("VaultYieldState", ("IDLE", "DEPOSITED")),
+    StrategyTemplate.PERPS: ("PerpsState", ("IDLE", "OPEN")),
+    StrategyTemplate.STAKING: ("StakingState", ("IDLE", "STAKED")),
+}
+
+
+@pytest.mark.parametrize(
+    "template,enum_name,members",
+    [(t, name, members) for t, (name, members) in STATEFUL_STRENUM_TEMPLATES.items()],
+    ids=lambda v: v.value if isinstance(v, StrategyTemplate) else str(v),
+)
+def test_stateful_templates_emit_strenum_class(
+    template: StrategyTemplate, enum_name: str, members: tuple[str, ...]
+) -> None:
+    """Stateful scaffolds must emit a StrEnum subclass with the expected members."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        code = generate_strategy_file(
+            name="StrEnum Test",
+            template=template,
+            chain=SupportedChain.ARBITRUM,
+            output_dir=Path(tmpdir),
+        )
+    # Grep: the import must appear exactly once, at module level.
+    assert "from enum import StrEnum" in code, (
+        f"{template.value} must emit 'from enum import StrEnum' import"
+    )
+    # The class declaration must be present with ``StrEnum`` as the base.
+    assert f"class {enum_name}(StrEnum):" in code, (
+        f"{template.value} must emit 'class {enum_name}(StrEnum):' definition"
+    )
+    # Every declared member must appear. We match the form ``NAME = "value"``
+    # since that's the canonical emitted form.
+    for member in members:
+        assert f"{member} = " in code, f"{enum_name} must define member {member}"
+
+
+@pytest.mark.parametrize("template", ALL_TEMPLATES, ids=lambda t: t.value)
+def test_stateless_templates_do_not_emit_strenum_import(template: StrategyTemplate) -> None:
+    """Stateless templates (e.g. BLANK, TA_SWAP, COPY_TRADER) must NOT import StrEnum.
+
+    Adding an unused ``from enum import StrEnum`` would fail ruff F401 linting.
+    """
+    if template in STATEFUL_STRENUM_TEMPLATES:
+        return
+    with tempfile.TemporaryDirectory() as tmpdir:
+        code = generate_strategy_file(
+            name="Stateless Test",
+            template=template,
+            chain=SupportedChain.ARBITRUM,
+            output_dir=Path(tmpdir),
+        )
+    assert "from enum import StrEnum" not in code, (
+        f"{template.value} must not import StrEnum when no state machine is emitted"
+    )
+
+
+@pytest.mark.parametrize("template", list(STATEFUL_STRENUM_TEMPLATES), ids=lambda t: t.value)
+def test_stateful_templates_do_not_use_bare_state_strings(template: StrategyTemplate) -> None:
+    """Stateful scaffolds must reference state values via the StrEnum, not bare strings.
+
+    Guards against regression: it's easy to accidentally leave ``"idle"`` or
+    ``"open"`` literals in the generator. The enum class name and ``.MEMBER``
+    access pattern is the only source of truth.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        code = generate_strategy_file(
+            name="StrEnum Hygiene",
+            template=template,
+            chain=SupportedChain.ARBITRUM,
+            output_dir=Path(tmpdir),
+        )
+    enum_name, members = STATEFUL_STRENUM_TEMPLATES[template]
+    state_values_in_enum = {
+        # Recover the enum value from the ``MEMBER = "value"`` line in the
+        # emitted code. We can just lowercase the MEMBER name because that's
+        # the scheme the generator uses.
+        m.lower() for m in members
+    }
+    # Find bare string state literals that should be EnumClass.MEMBER references.
+    # Covers three usage patterns:
+    #   1. Comparisons:  `state == "idle"`  and  `state != "open"`
+    #   2. Membership:   `state in ("borrowed", "monitoring")`
+    #   3. Assignments:  `self._loop_state = "supplied"`
+    # Any literal match whose value is a declared enum value is a regression —
+    # except when the match IS the enum member definition line itself
+    # (``IDLE = "idle"``), which we whitelist below.
+    import re
+
+    bare_literal = re.compile(r'"([a-z_]+)"')
+    for match in bare_literal.finditer(code):
+        value = match.group(1)
+        if value not in state_values_in_enum:
+            continue
+        # Extract the full source line containing this literal.
+        line_start = code.rfind("\n", 0, match.start()) + 1
+        line_end = code.find("\n", match.end())
+        if line_end == -1:
+            line_end = len(code)
+        line = code[line_start:line_end]
+        # Whitelist: the enum member definition itself — ``IDLE = "idle"``.
+        if re.match(r'^\s*[A-Z_]+\s*=\s*"[a-z_]+"\s*$', line):
+            continue
+        # Whitelist: docstring/comment lines (conservative — if the value
+        # appears inside a docstring as documentation it's harmless).
+        stripped = line.lstrip()
+        if stripped.startswith(("#", '"""', "'''", "*", ">>>")):
+            continue
+        raise AssertionError(
+            f"{template.value}: bare string state value {value!r} used on line:\n"
+            f"    {line.strip()}\n"
+            f"Use {enum_name}.{value.upper()} instead."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Persistence round-trip: StrEnum <-> raw JSON <-> StrEnum
+# ---------------------------------------------------------------------------
+
+
+def test_lending_loop_state_json_round_trips_through_raw_strings() -> None:
+    """A StrEnum state persisted to JSON must load back as an equal StrEnum member.
+
+    This is the load-bearing compatibility property: old persisted state files
+    contain plain strings (``"idle"``), and new files contain StrEnum members.
+    Both MUST load cleanly, and a round-trip must preserve equality.
+    """
+    import json
+    from enum import StrEnum
+
+    strat = _make_strategy()
+    # Drive the state machine to a non-default value so we actually test
+    # something other than IDLE.
+    strat.on_intent_executed(_make_mock_intent("SUPPLY"), success=True, result=None)
+    # Now _loop_state should be the StrEnum member LendingLoopState.SUPPLIED.
+    assert isinstance(strat._loop_state, StrEnum), (
+        f"Expected StrEnum instance, got {type(strat._loop_state)}"
+    )
+    assert strat._loop_state == "supplied"  # StrEnum compares equal to its value
+
+    # Serialize through JSON (the real persistence path).
+    saved_json = json.dumps(strat.get_persistent_state())
+    # Round-trip through JSON -> dict -> load_persistent_state.
+    loaded = json.loads(saved_json)
+    assert loaded["loop_state"] == "supplied", (
+        "Raw JSON must contain the plain string value, not a repr of the enum"
+    )
+    assert isinstance(loaded["loop_state"], str), "JSON load must yield a plain str"
+
+    # Load into a fresh strategy instance.
+    strat2 = _make_strategy()
+    strat2.load_persistent_state(loaded)
+    assert strat2._loop_state == strat._loop_state, "Round-trip must preserve state"
+    assert strat2._loop_state == "supplied"
+    # After load_persistent_state, the value must be coerced back to a StrEnum.
+    assert isinstance(strat2._loop_state, StrEnum), (
+        "load_persistent_state must coerce plain strings back to StrEnum members"
+    )
+
+
+def test_lending_loop_state_loads_legacy_plain_strings() -> None:
+    """Backward compat: pre-StrEnum state files (plain strings) MUST still load.
+
+    This simulates loading a state file that was written before this migration
+    was in place. The file contains ``"supplied"`` as a plain string; after
+    ``load_persistent_state`` the in-memory value must be a StrEnum member.
+    """
+    from enum import StrEnum
+
+    strat = _make_strategy()
+    # Legacy: plain-string state file with no StrEnum awareness.
+    legacy_state = {"loop_state": "borrowed", "loop_count": 2, "current_leverage": "1.7"}
+    strat.load_persistent_state(legacy_state)
+    assert isinstance(strat._loop_state, StrEnum)
+    assert strat._loop_state == "borrowed"
+
+
+def test_basis_trade_state_json_round_trips() -> None:
+    """BasisTradeState round-trips through JSON like LendingLoopState."""
+    import json
+    from enum import StrEnum
+
+    strat = _make_basis_strategy()
+    strat.on_intent_executed(_make_mock_intent("SWAP"), success=True, result=None)
+    assert isinstance(strat._trade_state, StrEnum)
+    assert strat._trade_state == "spot_bought"
+
+    saved_json = json.dumps(strat.get_persistent_state())
+    loaded = json.loads(saved_json)
+    assert loaded["trade_state"] == "spot_bought"
+    assert isinstance(loaded["trade_state"], str)
+
+    strat2 = _make_basis_strategy()
+    strat2.load_persistent_state(loaded)
+    assert strat2._trade_state == "spot_bought"
+    assert isinstance(strat2._trade_state, StrEnum)
+
+
+def test_basis_trade_state_loads_legacy_plain_strings() -> None:
+    """BasisTradeState backward compat for pre-StrEnum state files."""
+    from enum import StrEnum
+
+    strat = _make_basis_strategy()
+    strat.load_persistent_state({"trade_state": "unwinding"})
+    assert isinstance(strat._trade_state, StrEnum)
+    assert strat._trade_state == "unwinding"
+
+
+def test_lending_loop_scaffolded_init_uses_strenum() -> None:
+    """The scaffolded ``__init__`` (as emitted source) must init state as a StrEnum.
+
+    We verify this at the generator-source level rather than by instantiating
+    the strategy because ``_make_strategy`` manually bypasses ``__init__``.
+    The AST-level check is the canonical contract: the emitted code must
+    assign ``self._loop_state = LendingLoopState.IDLE``, not a bare string.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        code = generate_strategy_file(
+            name="Init Check",
+            template=StrategyTemplate.LENDING_LOOP,
+            chain=SupportedChain.ARBITRUM,
+            output_dir=Path(tmpdir),
+        )
+    assert "self._loop_state = LendingLoopState.IDLE" in code, (
+        "Scaffolded __init__ must assign StrEnum member, not a bare string"
+    )
+    # And the bare-string form must NOT appear.
+    assert 'self._loop_state = "idle"' not in code
+
+
+def test_basis_trade_scaffolded_init_uses_strenum() -> None:
+    """BasisTrade ``__init__`` must init ``_trade_state`` via the StrEnum."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        code = generate_strategy_file(
+            name="Init Check",
+            template=StrategyTemplate.BASIS_TRADE,
+            chain=SupportedChain.ARBITRUM,
+            output_dir=Path(tmpdir),
+        )
+    assert "self._trade_state = BasisTradeState.IDLE" in code
+    assert 'self._trade_state = "idle"' not in code

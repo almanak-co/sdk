@@ -175,6 +175,100 @@ TEMPLATE_CONFIGS: dict[StrategyTemplate, TemplateConfig] = {
 }
 
 
+# -----------------------------------------------------------------------------
+# Template state machine definitions
+# -----------------------------------------------------------------------------
+# Each stateful template gets its own typed ``StrEnum`` in the scaffolded
+# strategy. Using StrEnum instead of raw string literals (``"idle"``,
+# ``"open"``) gives authors:
+#   - Editor/LSP completion and rename support
+#   - ``mypy`` / static type safety (typos are compile-time errors)
+#   - Grep-ability (``grep LendingLoopState.BORROWED`` is far more precise
+#     than grepping ``"borrowed"``)
+#
+# Backwards compatibility: ``StrEnum`` members ARE strings, so
+#   - ``json.dumps(state)`` serializes to the bare string value
+#     (old persisted state files keep working unchanged)
+#   - ``state == "idle"`` still evaluates to ``True`` for
+#     ``LendingLoopState.IDLE`` (existing tests keep working unchanged)
+#   - ``<EnumClass>(raw_string)`` coerces a plain string back to the
+#     enum member (used in ``load_persistent_state`` hooks)
+#
+# Format: (state_attribute_name, enum_class_name, [(MEMBER_NAME, value), ...])
+# -----------------------------------------------------------------------------
+_TEMPLATE_STATE_ENUMS: dict[StrategyTemplate, tuple[str, str, tuple[tuple[str, str], ...]]] = {
+    StrategyTemplate.LENDING_LOOP: (
+        "_loop_state",
+        "LendingLoopState",
+        (
+            ("IDLE", "idle"),
+            ("SUPPLIED", "supplied"),
+            ("BORROWED", "borrowed"),
+            ("MONITORING", "monitoring"),
+        ),
+    ),
+    StrategyTemplate.BASIS_TRADE: (
+        "_trade_state",
+        "BasisTradeState",
+        (
+            ("IDLE", "idle"),
+            ("SPOT_BOUGHT", "spot_bought"),
+            ("HEDGED", "hedged"),
+            ("UNWINDING", "unwinding"),
+        ),
+    ),
+    StrategyTemplate.VAULT_YIELD: (
+        "_state",
+        "VaultYieldState",
+        (
+            ("IDLE", "idle"),
+            ("DEPOSITED", "deposited"),
+        ),
+    ),
+    StrategyTemplate.PERPS: (
+        "_position_state",
+        "PerpsState",
+        (
+            ("IDLE", "idle"),
+            ("OPEN", "open"),
+        ),
+    ),
+    StrategyTemplate.STAKING: (
+        "_stake_state",
+        "StakingState",
+        (
+            ("IDLE", "idle"),
+            ("STAKED", "staked"),
+        ),
+    ),
+}
+
+
+def _generate_state_enum_definition(template: StrategyTemplate) -> str:
+    """Return the ``class <Template>State(StrEnum): ...`` source block.
+
+    Returns an empty string for templates without a state machine. The emitted
+    code lives at module level above the strategy class so external code
+    (e.g. tests or AlmanakCode generation) can import and reference it.
+    """
+    if template not in _TEMPLATE_STATE_ENUMS:
+        return ""
+    _attr, cls, members = _TEMPLATE_STATE_ENUMS[template]
+    lines = [
+        f"class {cls}(StrEnum):",
+        f'    """Typed state machine values for the {template.value} strategy template.',
+        "",
+        "    Inherits from ``StrEnum`` so persisted state files (JSON) round-trip as",
+        f"    plain strings. Use ``{cls}(raw_value)`` to coerce a loaded string back",
+        "    to the enum member (see ``load_persistent_state``).",
+        '    """',
+        "",
+    ]
+    for member_name, member_value in members:
+        lines.append(f'    {member_name} = "{member_value}"')
+    return "\n".join(lines) + "\n"
+
+
 def to_snake_case(name: str) -> str:
     """Convert a string to snake_case."""
     # Replace spaces and hyphens with underscores
@@ -358,11 +452,11 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
     elif template == StrategyTemplate.LENDING_LOOP:
         return """
             # Leverage loop state machine:
-            #   idle -> supplied -> borrowed -> (check leverage) -> idle (loop) or monitoring
+            #   IDLE -> SUPPLIED -> BORROWED -> (check leverage) -> IDLE (loop) or MONITORING
             # Each loop iteration: supply collateral -> borrow -> swap back to collateral
             # Loops until target_leverage is reached, then monitors health.
 
-            if self._loop_state == "idle":
+            if self._loop_state == LendingLoopState.IDLE:
                 # Supply collateral (first loop: configured amount, subsequent: all available)
                 try:
                     collateral_bal = market.balance(self.collateral_token)
@@ -373,7 +467,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     return Intent.hold(reason=f"Insufficient {self.collateral_token}")
                 if self._loop_count > 0 and collateral_bal.balance_usd < Decimal("10"):
                     # Dust remaining after swap -- stop looping
-                    self._loop_state = "monitoring"
+                    self._loop_state = LendingLoopState.MONITORING
                     return Intent.hold(reason="Insufficient collateral for next loop, entering monitoring")
 
                 amount = self.supply_amount if self._loop_count == 0 else "all"
@@ -385,16 +479,16 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     use_as_collateral=True,
                 )
 
-            elif self._loop_state == "supplied":
+            elif self._loop_state == LendingLoopState.SUPPLIED:
                 # Borrow against collateral -- amount decays each loop
                 # First loop: full borrow_amount. Each subsequent: scaled by borrow_ratio.
                 if self.borrow_ratio <= Decimal("0"):
-                    self._loop_state = "monitoring"
+                    self._loop_state = LendingLoopState.MONITORING
                     return Intent.hold(reason="borrow_ratio must be > 0; entering monitoring")
                 scale = self.borrow_ratio ** self._loop_count
                 borrow_amount = (self.borrow_amount * scale).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
                 if borrow_amount < Decimal("1"):
-                    self._loop_state = "monitoring"
+                    self._loop_state = LendingLoopState.MONITORING
                     return Intent.hold(reason="Borrow amount too small, entering monitoring")
                 logger.info(f"Loop {self._loop_count + 1}: borrowing {borrow_amount} {self.borrow_token}")
                 return Intent.borrow(
@@ -405,7 +499,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     borrow_amount=borrow_amount,
                 )
 
-            elif self._loop_state == "borrowed":
+            elif self._loop_state == LendingLoopState.BORROWED:
                 # Swap borrowed tokens back to collateral for next loop iteration
                 logger.info(f"Loop {self._loop_count + 1}: swapping {self.borrow_token} -> {self.collateral_token}")
                 return Intent.swap(
@@ -415,7 +509,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     max_slippage=Decimal("0.005"),
                 )
 
-            elif self._loop_state == "monitoring":
+            elif self._loop_state == LendingLoopState.MONITORING:
                 # Leverage target reached -- monitor health factor
                 # In production, query on-chain health factor and repay if it drops
                 # below min_health_factor to avoid liquidation.
@@ -435,7 +529,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
         return """
             spot_price = market.price(self.base_token)
 
-            if self._trade_state == "idle":
+            if self._trade_state == BasisTradeState.IDLE:
                 # Check funding rate before entering -- only trade when funding is attractive
                 try:
                     funding = market.funding_rate("gmx_v2", self.perp_market)
@@ -471,7 +565,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     max_slippage=Decimal("0.005"),
                 )
 
-            elif self._trade_state == "spot_bought":
+            elif self._trade_state == BasisTradeState.SPOT_BOUGHT:
                 # Hedge with short perp (second leg)
                 logger.info(f"Hedging: opening short perp on {self.perp_market}")
                 return Intent.perp_open(
@@ -484,7 +578,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     protocol="gmx_v2",
                 )
 
-            elif self._trade_state == "hedged":
+            elif self._trade_state == BasisTradeState.HEDGED:
                 # Monitor funding rate -- exit if it drops below threshold
                 try:
                     funding = market.funding_rate("gmx_v2", self.perp_market)
@@ -514,7 +608,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     f"exit_threshold={self.funding_exit_threshold})"
                 )
 
-            elif self._trade_state == "unwinding":
+            elif self._trade_state == BasisTradeState.UNWINDING:
                 # Perp closed, now sell spot to complete unwind
                 logger.info(f"Unwinding: selling {self.base_token} spot")
                 return Intent.swap(
@@ -571,7 +665,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 logger.warning(f"Could not check {self.deposit_token} balance: {e}")
                 return Intent.hold(reason=f"Balance unavailable: {e}")
 
-            if self._state == "idle":
+            if self._state == VaultYieldState.IDLE:
                 if available_usd < self.min_deposit_usd:
                     return Intent.hold(
                         reason=f"Insufficient {self.deposit_token}: ${available_usd:.2f} < ${self.min_deposit_usd}"
@@ -588,7 +682,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     chain=self.chain,
                 )
 
-            elif self._state == "deposited":
+            elif self._state == VaultYieldState.DEPOSITED:
                 # Hold position -- yield accrues passively in the vault
                 return Intent.hold(reason="Vault position active, earning yield")
 
@@ -599,7 +693,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
         return """
             entry_price = market.price(self.base_token)
 
-            if self._position_state == "idle":
+            if self._position_state == PerpsState.IDLE:
                 try:
                     collateral_bal = market.balance(self.collateral_token)
                 except ValueError:
@@ -623,7 +717,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     protocol="gmx_v2",
                 )
 
-            elif self._position_state == "open":
+            elif self._position_state == PerpsState.OPEN:
                 # Check TP/SL
                 if self._entry_price:
                     pnl_pct = (entry_price - self._entry_price) / self._entry_price
@@ -736,7 +830,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
 
     elif template == StrategyTemplate.STAKING:
         return """
-            if self._stake_state == "idle":
+            if self._stake_state == StakingState.IDLE:
                 try:
                     token_balance = market.balance(self.stake_token)
                 except ValueError:
@@ -770,7 +864,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     amount=self.stake_amount,
                 )
 
-            elif self._stake_state == "staked":
+            elif self._stake_state == StakingState.STAKED:
                 return Intent.hold(reason="Staked, earning yield")
 
             return Intent.hold(reason=f"Unknown state: {self._stake_state}")"""
@@ -1006,8 +1100,11 @@ def _get_template_teardown(
 
         positions = []
 
-        # After looping, borrows exist even in "supplied" state (from prior loops)
-        has_borrows = self._loop_state in ("borrowed", "monitoring") or self._loop_count > 0
+        # After looping, borrows exist even in SUPPLIED state (from prior loops)
+        has_borrows = (
+            self._loop_state in (LendingLoopState.BORROWED, LendingLoopState.MONITORING)
+            or self._loop_count > 0
+        )
         if has_borrows:
             positions.append(
                 PositionInfo(
@@ -1023,9 +1120,13 @@ def _get_template_teardown(
                 )
             )
 
-        # Supply is open in supplied/borrowed/monitoring states OR whenever looping
-        # (after a SWAP the state returns to idle but collateral remains on Aave)
-        has_supply = self._loop_state in ("supplied", "borrowed", "monitoring") or self._loop_count > 0
+        # Supply is open in SUPPLIED/BORROWED/MONITORING states OR whenever looping
+        # (after a SWAP the state returns to IDLE but collateral remains on Aave)
+        has_supply = (
+            self._loop_state
+            in (LendingLoopState.SUPPLIED, LendingLoopState.BORROWED, LendingLoopState.MONITORING)
+            or self._loop_count > 0
+        )
         if has_supply:
             positions.append(
                 PositionInfo(
@@ -1059,8 +1160,11 @@ def _get_template_teardown(
         intents: list[Intent] = []
         max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
 
-        # 1. Repay borrow (if active -- after looping, borrows exist in any non-idle state)
-        has_borrows = self._loop_state in ("borrowed", "monitoring") or self._loop_count > 0
+        # 1. Repay borrow (if active -- after looping, borrows exist in any non-IDLE state)
+        has_borrows = (
+            self._loop_state in (LendingLoopState.BORROWED, LendingLoopState.MONITORING)
+            or self._loop_count > 0
+        )
         if has_borrows:
             intents.append(
                 Intent.repay(
@@ -1070,8 +1174,12 @@ def _get_template_teardown(
                 )
             )
 
-        # 2. Withdraw collateral (if supplied -- in any non-initial-idle state or after looping)
-        has_supply = self._loop_state in ("supplied", "borrowed", "monitoring") or self._loop_count > 0
+        # 2. Withdraw collateral (if supplied -- in any non-initial-IDLE state or after looping)
+        has_supply = (
+            self._loop_state
+            in (LendingLoopState.SUPPLIED, LendingLoopState.BORROWED, LendingLoopState.MONITORING)
+            or self._loop_count > 0
+        )
         if has_supply:
             intents.append(
                 Intent.withdraw(
@@ -1115,7 +1223,7 @@ def _get_template_teardown(
 
         positions = []
 
-        if self._trade_state == "hedged":
+        if self._trade_state == BasisTradeState.HEDGED:
             # Report PERP first (higher priority for closing)
             positions.append(
                 PositionInfo(
@@ -1141,8 +1249,8 @@ def _get_template_teardown(
                     details={{"asset": self.base_token}},
                 )
             )
-        elif self._trade_state in ("spot_bought", "unwinding"):
-            # unwinding = perp already closed, still holding spot
+        elif self._trade_state in (BasisTradeState.SPOT_BOUGHT, BasisTradeState.UNWINDING):
+            # UNWINDING = perp already closed, still holding spot
             positions.append(
                 PositionInfo(
                     position_type=PositionType.TOKEN,
@@ -1173,7 +1281,7 @@ def _get_template_teardown(
         max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
 
         # 1. Close short perp (if hedged)
-        if self._trade_state == "hedged":
+        if self._trade_state == BasisTradeState.HEDGED:
             intents.append(
                 Intent.perp_close(
                     market=self.perp_market,
@@ -1186,7 +1294,11 @@ def _get_template_teardown(
             )
 
         # 2. Sell spot position
-        if self._trade_state in ("spot_bought", "hedged", "unwinding"):
+        if self._trade_state in (
+            BasisTradeState.SPOT_BOUGHT,
+            BasisTradeState.HEDGED,
+            BasisTradeState.UNWINDING,
+        ):
             intents.append(
                 Intent.swap(
                     from_token=self.base_token,
@@ -1219,7 +1331,7 @@ def _get_template_teardown(
 
         positions = []
 
-        if self._state == "deposited":
+        if self._state == VaultYieldState.DEPOSITED:
             positions.append(
                 PositionInfo(
                     position_type=PositionType.SUPPLY,
@@ -1247,7 +1359,7 @@ def _get_template_teardown(
         """
         intents: list[Intent] = []
 
-        if self._state == "deposited":
+        if self._state == VaultYieldState.DEPOSITED:
             intents.append(
                 Intent.vault_redeem(
                     protocol="metamorpho",
@@ -1401,7 +1513,7 @@ def _get_template_teardown(
 
         positions = []
 
-        if self._position_state == "open":
+        if self._position_state == PerpsState.OPEN:
             positions.append(
                 PositionInfo(
                     position_type=PositionType.PERP,
@@ -1433,7 +1545,7 @@ def _get_template_teardown(
 
         intents: list[Intent] = []
 
-        if self._position_state == "open":
+        if self._position_state == PerpsState.OPEN:
             max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
             intents.append(
                 Intent.perp_close(
@@ -1543,7 +1655,7 @@ def _get_template_teardown(
 
         positions = []
 
-        if self._stake_state == "staked":
+        if self._stake_state == StakingState.STAKED:
             staked_amt = self._staked_amount or self.stake_amount
             positions.append(
                 PositionInfo(
@@ -1574,7 +1686,7 @@ def _get_template_teardown(
 
         intents: list[Intent] = []
 
-        if self._stake_state == "staked":
+        if self._stake_state == StakingState.STAKED:
             intents.append(
                 Intent.unstake(
                     protocol=self.staking_protocol,
@@ -1692,13 +1804,13 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self.collateral_token = get_config("collateral_token", "WETH")
         self.borrow_token = get_config("borrow_token", "USDC")
 
-        # State machine: idle -> supplied -> borrowed -> (check leverage) -> idle or monitoring
-        self._loop_state = "idle"
+        # State machine: IDLE -> SUPPLIED -> BORROWED -> (check leverage) -> IDLE or MONITORING
+        self._loop_state = LendingLoopState.IDLE
         self._loop_count = 0
         self._current_leverage = Decimal("1.0")"""
 
     elif template == StrategyTemplate.BASIS_TRADE:
-        return '''
+        return """
         # Basis trade parameters
         self.spot_size_usd = Decimal(str(get_config("spot_size_usd", "10000")))
         self.hedge_ratio = Decimal(str(get_config("hedge_ratio", "1.0")))
@@ -1712,8 +1824,8 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self.quote_token = get_config("quote_token", "USDC")
         self.perp_market = get_config("perp_market", "ETH/USD")
 
-        # State machine: idle -> spot_bought -> hedged -> unwinding -> idle
-        self._trade_state = "idle"'''
+        # State machine: IDLE -> SPOT_BOUGHT -> HEDGED -> UNWINDING -> IDLE
+        self._trade_state = BasisTradeState.IDLE"""
 
     elif template == StrategyTemplate.COPY_TRADER:
         return """
@@ -1738,7 +1850,7 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self._open_trades = []"""
 
     elif template == StrategyTemplate.VAULT_YIELD:
-        return '''
+        return """
         # Vault parameters
         self.vault_address = get_config("vault_address", "0x0000000000000000000000000000000000000000")
         if self.vault_address == "0x0000000000000000000000000000000000000000":
@@ -1748,8 +1860,8 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self.min_deposit_usd = Decimal(str(get_config("min_deposit_usd", "100")))
         self.max_vault_allocation_pct = int(get_config("max_vault_allocation_pct", 80))
 
-        # State
-        self._state = "idle"'''
+        # State machine: IDLE -> DEPOSITED
+        self._state = VaultYieldState.IDLE"""
 
     elif template == StrategyTemplate.PERPS:
         return """
@@ -1766,7 +1878,8 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self.base_token = get_config("base_token", "ETH")
 
         # Position tracking (restored via load_persistent_state)
-        self._position_state = "idle"
+        # State machine: IDLE -> OPEN
+        self._position_state = PerpsState.IDLE
         self._entry_price = None"""
 
     elif template == StrategyTemplate.MULTI_STEP:
@@ -1799,7 +1912,8 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self.swap_before_stake = get_config("swap_before_stake", True)
 
         # State tracking (restored via load_persistent_state)
-        self._stake_state = "idle"
+        # State machine: IDLE -> STAKED
+        self._stake_state = StakingState.IDLE
         self._staked_amount = None"""
 
     else:  # BLANK template
@@ -1859,10 +1973,10 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "        if not intent_type:\n"
             "            return\n"
             '        if intent_type.value == "SUPPLY":\n'
-            '            self._loop_state = "supplied"\n'
+            "            self._loop_state = LendingLoopState.SUPPLIED\n"
             '            logger.info(f"Supply confirmed (loop {self._loop_count + 1}) -> supplied")\n'
             '        elif intent_type.value == "BORROW":\n'
-            '            self._loop_state = "borrowed"\n'
+            "            self._loop_state = LendingLoopState.BORROWED\n"
             '            logger.info(f"Borrow confirmed (loop {self._loop_count + 1}) -> borrowed")\n'
             '        elif intent_type.value == "SWAP":\n'
             "            self._loop_count += 1\n"
@@ -1873,13 +1987,13 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "            )\n"
             "            self._current_leverage = leverage\n"
             "            if leverage >= self.target_leverage:\n"
-            '                self._loop_state = "monitoring"\n'
+            "                self._loop_state = LendingLoopState.MONITORING\n"
             "                logger.info(\n"
             '                    f"Loop {self._loop_count} complete: leverage ~{leverage:.2f}x "\n'
             '                    f">= target {self.target_leverage}x -> monitoring"\n'
             "                )\n"
             "            else:\n"
-            '                self._loop_state = "idle"  # Loop again\n'
+            "                self._loop_state = LendingLoopState.IDLE  # Loop again\n"
             "                logger.info(\n"
             '                    f"Loop {self._loop_count} complete: leverage ~{leverage:.2f}x "\n'
             '                    f"< target {self.target_leverage}x -> continuing"\n'
@@ -1888,15 +2002,23 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "    def get_persistent_state(self):\n"
             '        """Save loop state and leverage tracking."""\n'
             "        return {\n"
+            "            # StrEnum members serialize to their string value in JSON,\n"
+            "            # so old persisted state files remain compatible.\n"
             '            "loop_state": self._loop_state,\n'
             '            "loop_count": self._loop_count,\n'
             '            "current_leverage": str(self._current_leverage),\n'
             "        }\n"
             "\n"
             "    def load_persistent_state(self, state):\n"
-            '        """Restore loop state and leverage tracking."""\n'
+            '        """Restore loop state and leverage tracking.\n'
+            "\n"
+            "        Coerces the persisted string value back to the StrEnum member.\n"
+            "        Pre-StrEnum state files (plain strings like 'idle') round-trip\n"
+            "        cleanly because ``StrEnum(value)`` accepts the raw string.\n"
+            '        """\n'
             "        if state:\n"
-            '            self._loop_state = state.get("loop_state", "idle")\n'
+            '            raw_state = state.get("loop_state", LendingLoopState.IDLE.value)\n'
+            "            self._loop_state = LendingLoopState(raw_state)\n"
             '            self._loop_count = state.get("loop_count", 0)\n'
             '            cl = state.get("current_leverage", "1.0")\n'
             "            self._current_leverage = Decimal(str(cl))\n"
@@ -1912,27 +2034,36 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             '        intent_type = getattr(intent, "intent_type", None)\n'
             "        if not intent_type:\n"
             "            return\n"
-            '        if intent_type.value == "SWAP" and self._trade_state == "idle":\n'
-            '            self._trade_state = "spot_bought"\n'
+            '        if intent_type.value == "SWAP" and self._trade_state == BasisTradeState.IDLE:\n'
+            "            self._trade_state = BasisTradeState.SPOT_BOUGHT\n"
             '            logger.info("Spot bought -> spot_bought")\n'
-            '        elif intent_type.value == "SWAP" and self._trade_state == "unwinding":\n'
-            '            self._trade_state = "idle"\n'
+            '        elif intent_type.value == "SWAP" and self._trade_state == BasisTradeState.UNWINDING:\n'
+            "            self._trade_state = BasisTradeState.IDLE\n"
             '            logger.info("Spot sold -> idle (unwind complete)")\n'
             '        elif intent_type.value == "PERP_OPEN":\n'
-            '            self._trade_state = "hedged"\n'
+            "            self._trade_state = BasisTradeState.HEDGED\n"
             '            logger.info("Perp opened -> hedged")\n'
             '        elif intent_type.value == "PERP_CLOSE":\n'
-            '            self._trade_state = "unwinding"\n'
+            "            self._trade_state = BasisTradeState.UNWINDING\n"
             '            logger.info("Perp closed -> unwinding")\n'
             "\n"
             "    def get_persistent_state(self):\n"
-            '        """Save trade state."""\n'
+            '        """Save trade state.\n'
+            "\n"
+            "        StrEnum members serialize to their string value in JSON, so old\n"
+            "        persisted state files remain compatible.\n"
+            '        """\n'
             '        return {"trade_state": self._trade_state}\n'
             "\n"
             "    def load_persistent_state(self, state):\n"
-            '        """Restore trade state."""\n'
+            '        """Restore trade state.\n'
+            "\n"
+            "        Coerces the persisted string back to the StrEnum member. Accepts\n"
+            "        both new (enum-backed) and legacy (plain-string) state files.\n"
+            '        """\n'
             "        if state:\n"
-            '            self._trade_state = state.get("trade_state", "idle")\n'
+            '            raw_state = state.get("trade_state", BasisTradeState.IDLE.value)\n'
+            "            self._trade_state = BasisTradeState(raw_state)\n"
             "\n"
         )
 
@@ -1944,20 +2075,24 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "            return\n"
             '        intent_type = getattr(intent, "intent_type", None)\n'
             '        if intent_type and intent_type.value == "VAULT_DEPOSIT":\n'
-            '            self._state = "deposited"\n'
+            "            self._state = VaultYieldState.DEPOSITED\n"
             '            logger.info("Vault deposit confirmed -> deposited")\n'
             '        elif intent_type and intent_type.value == "VAULT_REDEEM":\n'
-            '            self._state = "idle"\n'
+            "            self._state = VaultYieldState.IDLE\n"
             '            logger.info("Vault redeem confirmed -> idle")\n'
             "\n"
             "    def get_persistent_state(self):\n"
-            '        """Save vault state."""\n'
+            '        """Save vault state.\n'
+            "\n"
+            "        StrEnum members serialize to their string value in JSON.\n"
+            '        """\n'
             '        return {"state": self._state}\n'
             "\n"
             "    def load_persistent_state(self, state):\n"
-            '        """Restore vault state."""\n'
+            '        """Restore vault state (coerces persisted string back to StrEnum)."""\n'
             "        if state:\n"
-            '            self._state = state.get("state", "idle")\n'
+            '            raw_state = state.get("state", VaultYieldState.IDLE.value)\n'
+            "            self._state = VaultYieldState(raw_state)\n"
             "\n"
         )
 
@@ -1971,7 +2106,7 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "        if not intent_type:\n"
             "            return\n"
             '        if intent_type.value == "PERP_OPEN":\n'
-            '            self._position_state = "open"\n'
+            "            self._position_state = PerpsState.OPEN\n"
             "            # Try ResultEnricher extracted_data first, fall back to pending price\n"
             "            extracted = getattr(result, 'extracted_data', {}) or {}\n"
             "            self._entry_price = extracted.get('entry_price')\n"
@@ -1979,21 +2114,22 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "                self._entry_price = getattr(self, '_pending_entry_price', None)\n"
             '            logger.info(f"Perp opened at {self._entry_price}")\n'
             '        elif intent_type.value == "PERP_CLOSE":\n'
-            '            self._position_state = "idle"\n'
+            "            self._position_state = PerpsState.IDLE\n"
             "            self._entry_price = None\n"
             '            logger.info("Perp closed -> idle")\n'
             "\n"
             "    def get_persistent_state(self):\n"
-            '        """Save perp state."""\n'
+            '        """Save perp state (StrEnum serializes to string for JSON compat)."""\n'
             "        return {\n"
             '            "position_state": self._position_state,\n'
             '            "entry_price": str(self._entry_price) if self._entry_price else None,\n'
             "        }\n"
             "\n"
             "    def load_persistent_state(self, state):\n"
-            '        """Restore perp state."""\n'
+            '        """Restore perp state (coerces persisted string back to StrEnum)."""\n'
             "        if state:\n"
-            '            self._position_state = state.get("position_state", "idle")\n'
+            '            raw_state = state.get("position_state", PerpsState.IDLE.value)\n'
+            "            self._position_state = PerpsState(raw_state)\n"
             '            ep = state.get("entry_price")\n'
             "            self._entry_price = Decimal(ep) if ep else None\n"
             "\n"
@@ -2009,28 +2145,29 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "        if not intent_type:\n"
             "            return\n"
             '        if intent_type.value == "STAKE":\n'
-            '            self._stake_state = "staked"\n'
+            "            self._stake_state = StakingState.STAKED\n"
             "            self._staked_amount = getattr(intent, 'amount', self.stake_amount)\n"
             '            logger.info(f"Staked {self._staked_amount} {self.stake_token}")\n'
             '        elif intent_type.value == "UNSTAKE":\n'
-            '            self._stake_state = "idle"\n'
+            "            self._stake_state = StakingState.IDLE\n"
             "            self._staked_amount = None\n"
             '            logger.info("Unstaked -> idle")\n'
-            '        elif intent_type.value == "SWAP" and self._stake_state == "idle":\n'
+            '        elif intent_type.value == "SWAP" and self._stake_state == StakingState.IDLE:\n'
             "            # Track swap-before-stake output\n"
             '            logger.info("Pre-stake swap completed")\n'
             "\n"
             "    def get_persistent_state(self):\n"
-            '        """Save stake state."""\n'
+            '        """Save stake state (StrEnum serializes to string for JSON compat)."""\n'
             "        return {\n"
             '            "stake_state": self._stake_state,\n'
             '            "staked_amount": str(self._staked_amount) if self._staked_amount else None,\n'
             "        }\n"
             "\n"
             "    def load_persistent_state(self, state):\n"
-            '        """Restore stake state."""\n'
+            '        """Restore stake state (coerces persisted string back to StrEnum)."""\n'
             "        if state:\n"
-            '            self._stake_state = state.get("stake_state", "idle")\n'
+            '            raw_state = state.get("stake_state", StakingState.IDLE.value)\n'
+            "            self._stake_state = StakingState(raw_state)\n"
             '            sa = state.get("staked_amount")\n'
             "            self._staked_amount = Decimal(sa) if sa else None\n"
             "\n"
@@ -2159,6 +2296,16 @@ def _build_strategy_content(
     decide_logic = _get_template_decide_logic(template, config)
     callbacks_str = _get_template_callbacks(template)
 
+    # State machine enum (typed StrEnum; empty for stateless templates).
+    # Injected above the strategy class so authors (and tests) can import it.
+    state_enum_block = _generate_state_enum_definition(template)
+    # Only pull StrEnum into the generated file when a state machine is emitted;
+    # otherwise the import would be unused (F401 lint error).
+    strenum_import = "from enum import StrEnum\n" if state_enum_block else ""
+    # Blank line + block when we have an enum; empty string otherwise so the
+    # resulting file has no awkward trailing blank lines.
+    state_enum_section = f"\n\n{state_enum_block}" if state_enum_block else ""
+
     # Determine intent types based on template
     intent_types = {
         StrategyTemplate.BLANK: '["SWAP", "HOLD"]',
@@ -2198,7 +2345,7 @@ Strategy Pattern:
 
 import logging
 from decimal import ROUND_DOWN, Decimal  # noqa: F401 - ROUND_DOWN used by lending template only
-from typing import Any, Optional
+{strenum_import}from typing import Any, Optional
 
 # Core strategy framework imports
 from almanak.framework.intents import Intent
@@ -2209,7 +2356,7 @@ from almanak.framework.strategies import (
 )
 
 logger = logging.getLogger(__name__)
-
+{state_enum_section}
 
 @almanak_strategy(
     name="{strategy_name}",
