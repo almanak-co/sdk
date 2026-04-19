@@ -1670,6 +1670,123 @@ class MarketSnapshot:
         except Exception as e:
             raise GasUnavailableError(target_chain, f"Unexpected error: {e}") from e
 
+    def estimate_swap_gas_cost_usd(self, chain: str | None = None) -> Decimal:
+        """Estimate the USD cost of a typical DEX swap on the given chain.
+
+        Uses live gas price from ``gas_price()`` (already cached per block) and
+        scales the 21,000-gas baseline cost to the typical swap gas estimate
+        from the framework's chain-aware gas config
+        (``compiler_constants.get_gas_estimate(chain, "swap_simple")``).
+
+        This is a best-effort estimate meant for gas-worthiness gating in
+        strategy ``decide()`` methods. It is intentionally simple and does not
+        attempt per-route simulation — actual gas for a specific swap is
+        determined at compile/simulation time. For L2 chains the cost already
+        includes L1 data-posting component via ``GasPrice.estimated_cost_usd``.
+
+        Args:
+            chain: Chain identifier (e.g., "ethereum", "arbitrum"). Defaults to
+                the snapshot's primary chain.
+
+        Returns:
+            Estimated USD cost of a single typical swap as a ``Decimal``.
+            Returns ``Decimal("0")`` if the gas oracle is not configured or the
+            underlying ``estimated_cost_usd`` is zero (e.g., no price oracle
+            wired into the gas oracle).
+
+        Raises:
+            GasUnavailableError: If the gas oracle is configured but fails to
+                return a gas price for the target chain.
+
+        Example:
+            >>> snapshot.estimate_swap_gas_cost_usd("arbitrum")
+            Decimal('0.15')
+            >>> snapshot.estimate_swap_gas_cost_usd("ethereum")
+            Decimal('12.4000')
+        """
+        # Lazy import to avoid framework->intents circular dependency on cold import.
+        from almanak.framework.data.defi.gas import STANDARD_GAS_UNITS as _ERC20_TRANSFER_GAS
+        from almanak.framework.intents.compiler_constants import get_gas_estimate
+
+        target_chain = (chain or self._chain).lower()
+
+        # If the gas oracle isn't configured, signal "unknown" with 0. Callers
+        # that need a hard guarantee should use ``gas_price()`` directly.
+        if self._gas_oracle is None:
+            return Decimal("0")
+
+        gp = self.gas_price(target_chain)
+
+        # estimated_cost_usd is computed for STANDARD_GAS_UNITS (21000 -
+        # ERC-20 transfer baseline). Scale to the typical swap gas from the
+        # chain-aware config. We use "swap_simple" as the canonical
+        # single-hop swap estimate; multi-hop would be a strict upper bound.
+        baseline_gas = _ERC20_TRANSFER_GAS
+        swap_gas = get_gas_estimate(target_chain, "swap_simple")
+
+        if baseline_gas <= 0 or swap_gas <= 0 or gp.estimated_cost_usd <= 0:
+            return Decimal("0")
+
+        scale = Decimal(swap_gas) / Decimal(baseline_gas)
+        return (gp.estimated_cost_usd * scale).quantize(Decimal("0.0001"))
+
+    def is_trade_worthwhile(
+        self,
+        amount_usd: Decimal,
+        chain: str | None = None,
+        max_gas_ratio: Decimal = Decimal("0.05"),
+    ) -> bool:
+        """Check whether a trade of ``amount_usd`` is worth paying gas for.
+
+        A trade is considered worthwhile only if estimated swap gas cost is
+        below ``max_gas_ratio`` of the trade value. This gate is meant to be
+        invoked by strategy authors inside ``decide()`` BEFORE returning a
+        swap intent — it is deliberately NOT enforced in the compiler so the
+        decision remains visible to the strategy author.
+
+        Note: This method only covers the dynamic gas-ratio check. Strategies
+        that also want an absolute floor (``min_trade_value_usd``) should
+        evaluate that directly in ``decide()`` — keeping both checks on the
+        author side makes the short-circuit and ``Intent.hold()`` reason
+        explicit.
+
+        Args:
+            amount_usd: Intended trade size in USD.
+            chain: Chain identifier. Defaults to the snapshot's primary chain.
+            max_gas_ratio: Maximum tolerated ``gas_cost_usd / amount_usd``
+                ratio (default 0.05 = 5%).
+
+        Returns:
+            True if ``amount_usd > 0`` and estimated gas cost is below
+            ``max_gas_ratio`` of the trade. When a gas estimate cannot be
+            obtained — oracle missing, returns 0, or raises
+            ``GasUnavailableError`` (e.g., transient RPC failure) — returns
+            True (fail-open). Callers that need a fail-closed gate should
+            use ``estimate_swap_gas_cost_usd()`` directly and enforce locally.
+
+        Example:
+            >>> if not market.is_trade_worthwhile(Decimal("50"), "arbitrum"):
+            ...     return Intent.hold(reason="gas cost too high")
+        """
+        if amount_usd <= 0:
+            return False
+        if max_gas_ratio <= 0:
+            return False
+
+        # Fail-open on any estimation failure (missing oracle, RPC flake,
+        # zero result). Strategy authors who need a fail-closed gate should
+        # call ``estimate_swap_gas_cost_usd()`` directly and handle the
+        # ``GasUnavailableError`` themselves.
+        try:
+            gas_cost_usd = self.estimate_swap_gas_cost_usd(chain)
+        except GasUnavailableError:
+            return True
+
+        if gas_cost_usd <= 0:
+            return True
+
+        return (gas_cost_usd / amount_usd) < max_gas_ratio
+
     # =========================================================================
     # On-chain Pool Price Methods (Quant Data Layer)
     # =========================================================================

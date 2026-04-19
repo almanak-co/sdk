@@ -250,6 +250,24 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     logger.warning("Bollinger Bands unavailable in rsi_bb mode -- falling back to RSI-only signals")
 
             if buy_signal and quote_balance.balance_usd >= self.trade_size_usd:
+                # Gas-worthiness gate: don't pay $5 gas to move $1. Authors can
+                # tune via `min_trade_value_usd` (absolute floor) and
+                # `max_gas_ratio` (dynamic ratio) in config.json.
+                if self.trade_size_usd < self.min_trade_value_usd:
+                    return Intent.hold(
+                        reason=f"trade size ${self.trade_size_usd} below min_trade_value_usd "
+                        f"${self.min_trade_value_usd}"
+                    )
+                if not market.is_trade_worthwhile(
+                    amount_usd=self.trade_size_usd,
+                    chain=market.chain,
+                    max_gas_ratio=self.max_gas_ratio,
+                ):
+                    gas_cost = market.estimate_swap_gas_cost_usd(market.chain)
+                    return Intent.hold(
+                        reason=f"gas cost ${gas_cost} exceeds {self.max_gas_ratio:.2%} of trade value "
+                        f"${self.trade_size_usd}"
+                    )
                 logger.info(f"BUY: {reason}")
                 return Intent.swap(
                     from_token=self.quote_token,
@@ -261,6 +279,22 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 base_price = market.price(self.base_token)
                 min_sell = self.trade_size_usd / base_price if base_price > 0 else Decimal("0")
                 if base_balance.balance >= min_sell:
+                    # Gas-worthiness gate (same as buy branch).
+                    if self.trade_size_usd < self.min_trade_value_usd:
+                        return Intent.hold(
+                            reason=f"trade size ${self.trade_size_usd} below min_trade_value_usd "
+                            f"${self.min_trade_value_usd}"
+                        )
+                    if not market.is_trade_worthwhile(
+                        amount_usd=self.trade_size_usd,
+                        chain=market.chain,
+                        max_gas_ratio=self.max_gas_ratio,
+                    ):
+                        gas_cost = market.estimate_swap_gas_cost_usd(market.chain)
+                        return Intent.hold(
+                            reason=f"gas cost ${gas_cost} exceeds {self.max_gas_ratio:.2%} of trade value "
+                            f"${self.trade_size_usd}"
+                        )
                     logger.info(f"SELL: {reason}")
                     return Intent.swap(
                         from_token=self.base_token,
@@ -1608,6 +1642,12 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self.trade_size_usd = Decimal(str(get_config("trade_size_usd", "1000")))
         self.max_slippage_bps = int(get_config("max_slippage_bps", 50))
 
+        # Gas-worthiness gate:
+        #   min_trade_value_usd: absolute floor below which a trade is skipped
+        #   max_gas_ratio: reject trades where gas_cost > this fraction of trade value
+        self.min_trade_value_usd = Decimal(str(get_config("min_trade_value_usd", "10")))
+        self.max_gas_ratio = Decimal(str(get_config("max_gas_ratio", "0.05")))
+
         # Token configuration
         self.base_token = get_config("base_token", "WETH")
         self.quote_token = get_config("quote_token", "USDC")
@@ -2314,6 +2354,11 @@ def generate_config_json(
                 "sell_percent_b": 1.0,
                 "trade_size_usd": 1000,
                 "max_slippage_bps": 50,
+                # Gas-worthiness gate (see strategy decide()):
+                # - min_trade_value_usd: absolute floor; trade is held if trade_size < floor
+                # - max_gas_ratio: reject when estimated gas cost > ratio * trade_size
+                "min_trade_value_usd": "10",
+                "max_gas_ratio": "0.05",
             }
         )
     elif template == StrategyTemplate.DYNAMIC_LP:
