@@ -74,6 +74,29 @@ StablecoinMode = Literal["market", "pegged", "hybrid"]
 DEFAULT_STABLECOINS: frozenset[str] = frozenset({"USDC", "USDT", "DAI"})
 
 
+# =============================================================================
+# Per-protocol token variant registry (VIB-3138)
+# =============================================================================
+#
+# Some protocols only accept a specific token variant. Polymarket settles in
+# USDC.e on Polygon, NOT native USDC -- a strategy calling
+# ``market.balance("USDC")`` without protocol context returns native USDC and
+# the CLOB later rejects the order with "insufficient balance". This registry
+# lets callers disambiguate: ``market.balance("USDC", protocol="polymarket")``
+# returns the USDC.e balance on Polygon.
+#
+# Shape: ``{chain: {protocol: {generic_symbol: preferred_variant_symbol}}}``
+# Extend this when a protocol has a non-default settlement-token variant.
+# Keep the keys lowercase; inputs are normalized before lookup.
+PROTOCOL_TOKEN_VARIANTS: dict[str, dict[str, dict[str, str]]] = {
+    "polygon": {
+        "polymarket": {
+            "USDC": "USDC.e",
+        },
+    },
+}
+
+
 @dataclass
 class StablecoinConfig:
     """Configuration for stablecoin pricing behavior.
@@ -981,13 +1004,20 @@ class MarketSnapshot:
         except Exception as e:
             raise PriceUnavailableError(token, f"Unexpected error: {e}") from e
 
-    def balance(self, token: str) -> Decimal:
+    def balance(self, token: str, protocol: str | None = None) -> Decimal:
         """Get the wallet balance for a token.
 
         Queries the balance from the configured BalanceProvider.
 
         Args:
             token: Token symbol (e.g., "WETH", "USDC") or "ETH" for native
+            protocol: Optional protocol name for variant disambiguation (VIB-3138).
+                When set, resolves generic symbols through ``PROTOCOL_TOKEN_VARIANTS``
+                to the protocol's preferred variant -- e.g.,
+                ``balance("USDC", protocol="polymarket")`` on Polygon returns the
+                USDC.e balance specifically. When unset, returns the balance for
+                the symbol as given (which may or may not match what the protocol
+                actually settles in).
 
         Returns:
             Balance as a Decimal in human-readable units (not wei)
@@ -999,20 +1029,27 @@ class MarketSnapshot:
         Example:
             usdc_balance = snapshot.balance("USDC")
             # Returns: Decimal("1000.50")
+
+            polymarket_usdc = snapshot.balance("USDC", protocol="polymarket")
+            # On Polygon: returns USDC.e balance (what Polymarket actually settles in)
         """
+        # VIB-3138: If a protocol was specified, translate the symbol to the
+        # variant that protocol settles in (e.g., USDC -> USDC.e on polymarket).
+        resolved_token = self._resolve_protocol_variant(token, protocol)
+
         # Return cached value if available
-        if token in self._balance_cache:
-            return self._balance_cache[token]
+        if resolved_token in self._balance_cache:
+            return self._balance_cache[resolved_token]
 
         if self._balance_provider is None:
             raise ValueError("No balance provider configured for MarketSnapshot")
 
         try:
-            result: BalanceResult = self._run_async(self._balance_provider.get_balance(token))
+            result: BalanceResult = self._run_async(self._balance_provider.get_balance(resolved_token))
         except DataSourceError as e:
-            raise BalanceUnavailableError(token, str(e)) from e
+            raise BalanceUnavailableError(resolved_token, str(e)) from e
         except Exception as e:
-            raise BalanceUnavailableError(token, f"Unexpected error: {e}") from e
+            raise BalanceUnavailableError(resolved_token, f"Unexpected error: {e}") from e
 
         balance = result.balance
 
@@ -1020,20 +1057,58 @@ class MarketSnapshot:
         # If the gateway returns 0 for an address that isn't in the registry,
         # log a warning but return 0 -- a strategy that holds zero of an exotic
         # token should keep running, not crash.  The warning gives visibility.
-        if balance == Decimal(0) and token.startswith("0x") and len(token) == 42:
+        if balance == Decimal(0) and resolved_token.startswith("0x") and len(resolved_token) == 42:
             try:
-                get_token_resolver().resolve(token, self._chain, skip_gateway=True, log_errors=False)
+                get_token_resolver().resolve(resolved_token, self._chain, skip_gateway=True, log_errors=False)
             except TokenResolutionError:
                 logger.warning(
                     "balance_zero_unregistered_token: token %s on %s returned 0 and is not in the "
                     "SDK registry. If you expect a non-zero balance, add the token to "
                     "almanak/framework/data/tokens/defaults.py or use the token symbol.",
-                    token,
+                    resolved_token,
                     self._chain,
                 )
 
-        self._balance_cache[token] = balance
+        self._balance_cache[resolved_token] = balance
         return balance
+
+    def _resolve_protocol_variant(self, token: str, protocol: str | None) -> str:
+        """Translate a generic symbol to the protocol's preferred variant.
+
+        VIB-3138: Some protocols only accept a specific token variant (e.g.,
+        Polymarket on Polygon settles in USDC.e, not native USDC). When a
+        caller passes ``protocol=``, look up the variant in
+        ``PROTOCOL_TOKEN_VARIANTS`` and return the resolved symbol. When there
+        is no mapping, return the original symbol unchanged.
+
+        Lookups are case-insensitive on chain, protocol, and token symbol;
+        the registry stores canonical uppercase symbols.
+        """
+        if protocol is None:
+            return token
+        chain_key = (self._chain or "").lower()
+        protocol_key = protocol.lower()
+        chain_map = PROTOCOL_TOKEN_VARIANTS.get(chain_key)
+        if chain_map is None:
+            return token
+        protocol_map = chain_map.get(protocol_key)
+        if protocol_map is None:
+            return token
+        # Registry keys are canonical uppercase; normalize the caller's symbol
+        # for lookup so "usdc" and "USDC" both resolve. Preserve the original
+        # symbol when no mapping exists (passthrough contract).
+        resolved = protocol_map.get(token.upper())
+        if resolved is None:
+            return token
+        if resolved != token:
+            logger.debug(
+                "Protocol variant: %s on %s/%s -> %s",
+                token,
+                chain_key,
+                protocol_key,
+                resolved,
+            )
+        return resolved
 
     def rsi(self, token: str, period: int = 14, timeframe: str = "4h") -> "RSIData":
         """Get the RSI (Relative Strength Index) for a token.
@@ -2617,7 +2692,7 @@ class MarketSnapshot:
             overall_status=overall_status,
         )
 
-    def balance_usd(self, token: str) -> Decimal:
+    def balance_usd(self, token: str, protocol: str | None = None) -> Decimal:
         """Get the wallet balance value in USD terms.
 
         Calculates the USD value by multiplying the token balance
@@ -2625,6 +2700,10 @@ class MarketSnapshot:
 
         Args:
             token: Token symbol (e.g., "WETH", "USDC")
+            protocol: Optional protocol name for variant disambiguation (VIB-3138).
+                Forwarded to :meth:`balance` so that, e.g.,
+                ``balance_usd("USDC", protocol="polymarket")`` on Polygon is
+                computed from the USDC.e balance (what Polymarket settles in).
 
         Returns:
             Balance value in USD as a Decimal
@@ -2637,7 +2716,9 @@ class MarketSnapshot:
             eth_value = snapshot.balance_usd("WETH")
             # If balance is 2 WETH at $2500, returns: Decimal("5000.00")
         """
-        token_balance = self.balance(token)
+        token_balance = self.balance(token, protocol=protocol)
+        # Price lookups follow the generic symbol -- USDC.e and USDC share
+        # the same USD peg, so pricing on the resolved variant is unnecessary.
         token_price = self.price(token)
         return token_balance * token_price
 

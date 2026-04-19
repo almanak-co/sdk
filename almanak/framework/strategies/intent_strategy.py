@@ -1046,11 +1046,17 @@ class MarketSnapshot:
 
         raise ValueError(f"Ichimoku data not available for {token}")
 
-    def balance(self, token: str) -> TokenBalance:
+    def balance(self, token: str, protocol: str | None = None) -> TokenBalance:
         """Get wallet balance for a token.
 
         Args:
             token: Token symbol
+            protocol: Optional protocol name for variant disambiguation (VIB-3138).
+                When set, resolves generic symbols to the protocol's preferred
+                variant via ``PROTOCOL_TOKEN_VARIANTS`` (e.g.,
+                ``balance("USDC", protocol="polymarket")`` on Polygon returns
+                the USDC.e balance, which is what Polymarket actually settles
+                in). When unset, returns the balance for the symbol as given.
 
         Returns:
             TokenBalance with current balance
@@ -1058,35 +1064,74 @@ class MarketSnapshot:
         Raises:
             ValueError: If balance cannot be determined
         """
+        # VIB-3138: translate generic symbol to protocol-preferred variant.
+        resolved = self._resolve_protocol_variant(token, protocol)
+
         # Check pre-populated balances first
-        if token in self._balances:
-            return self._balances[token]
+        if resolved in self._balances:
+            return self._balances[resolved]
 
         # Check cache
-        if token in self._balance_cache:
-            return self._balance_cache[token]
+        if resolved in self._balance_cache:
+            return self._balance_cache[resolved]
 
         # Use provider if available
         if self._balance_provider:
             try:
-                balance_data = self._balance_provider(token)
-                self._balance_cache[token] = balance_data
+                balance_data = self._balance_provider(resolved)
+                self._balance_cache[resolved] = balance_data
                 return balance_data
             except Exception as e:
-                logger.warning(f"Balance provider failed for {token}: {e}")
+                logger.warning(f"Balance provider failed for {resolved}: {e}")
 
-        raise ValueError(f"Cannot determine balance for {token}")
+        raise ValueError(f"Cannot determine balance for {resolved}")
 
-    def balance_usd(self, token: str) -> Decimal:
+    def _resolve_protocol_variant(self, token: str, protocol: str | None) -> str:
+        """Translate a generic symbol to the protocol's preferred variant.
+
+        VIB-3138: Polymarket on Polygon settles in USDC.e (not native USDC),
+        so strategies calling ``market.balance("USDC", protocol="polymarket")``
+        must get the USDC.e balance. Uses ``PROTOCOL_TOKEN_VARIANTS`` keyed by
+        (chain, protocol) for the lookup; unknown mappings pass through.
+        """
+        if protocol is None:
+            return token
+        from almanak.framework.data.market_snapshot import PROTOCOL_TOKEN_VARIANTS
+
+        chain_key = (self._chain or "").lower()
+        protocol_key = protocol.lower()
+        chain_map = PROTOCOL_TOKEN_VARIANTS.get(chain_key)
+        if chain_map is None:
+            return token
+        protocol_map = chain_map.get(protocol_key)
+        if protocol_map is None:
+            return token
+        # Registry keys are canonical uppercase; normalize for lookup but keep
+        # the caller-supplied symbol on passthrough.
+        resolved = protocol_map.get(token.upper())
+        if resolved is None:
+            return token
+        if resolved != token:
+            logger.debug(
+                "Protocol variant: %s on %s/%s -> %s",
+                token,
+                chain_key,
+                protocol_key,
+                resolved,
+            )
+        return resolved
+
+    def balance_usd(self, token: str, protocol: str | None = None) -> Decimal:
         """Get wallet balance in USD terms.
 
         Args:
             token: Token symbol
+            protocol: Optional protocol for variant disambiguation (see ``balance``).
 
         Returns:
             Balance in USD
         """
-        return self.balance(token).balance_usd
+        return self.balance(token, protocol=protocol).balance_usd
 
     def collateral_value_usd(self, token: str, amount: Decimal) -> Decimal:
         """Get the USD value of a given amount of collateral.
