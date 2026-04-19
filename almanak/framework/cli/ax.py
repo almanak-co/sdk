@@ -1150,11 +1150,11 @@ def portfolio(ctx, tokens, wallet_override, pf_network):
 # ---------------------------------------------------------------------------
 
 
-_MORPHO_LIKE_PROTOCOLS = frozenset({"morpho", "morpho_blue"})
+_ISOLATED_MARKET_PROTOCOLS = frozenset({"morpho", "morpho_blue", "curvance"})
 
 
-def _is_morpho_like(protocol: str) -> bool:
-    """True if the protocol string canonicalizes to Morpho / Morpho Blue.
+def _uses_isolated_markets(protocol: str) -> bool:
+    """True if the protocol uses isolated markets (requires --market-id).
 
     Normalizes hyphens and whitespace to underscores so ``morpho-blue`` and
     ``"morpho blue"`` are accepted alongside ``morpho_blue`` — consistent with
@@ -1162,7 +1162,7 @@ def _is_morpho_like(protocol: str) -> bool:
     """
     from almanak.framework.agent_tools.schemas import _normalize_protocol_key
 
-    return _normalize_protocol_key(protocol) in _MORPHO_LIKE_PROTOCOLS
+    return _normalize_protocol_key(protocol) in _ISOLATED_MARKET_PROTOCOLS
 
 
 def _guard_market_id_flag(protocol: str, market_id: str | None) -> None:
@@ -1170,12 +1170,15 @@ def _guard_market_id_flag(protocol: str, market_id: str | None) -> None:
 
     The schema / intent layer accepts ``market_id=None`` for any protocol, so
     downstream won't complain — but an operator who typed ``--market-id`` and
-    it silently had no effect deserves a clear error. Only Morpho Blue uses
-    isolated markets today; others (Aave V3, Compound, Spark, ...) use a
-    unified pool.
+    it silently had no effect deserves a clear error. Only isolated-market
+    protocols (Morpho Blue, Curvance) accept per-market routing; others
+    (Aave V3, Compound, Spark, ...) use a unified pool.
     """
-    if market_id is not None and not _is_morpho_like(protocol):
-        raise click.UsageError(f"--market-id is only supported on Morpho Blue; got protocol={protocol}")
+    if market_id is not None and not _uses_isolated_markets(protocol):
+        raise click.UsageError(
+            f"--market-id is only supported on isolated-market protocols "
+            f"(morpho_blue, curvance); got protocol={protocol}"
+        )
 
 
 def _run_lending_tool(
@@ -1449,7 +1452,11 @@ def lending_withdraw(
     # complaint (CodeRabbit PR #1535 review), leaving the operator to wonder
     # why their --market-id or --loan-token had no effect.
     _guard_market_id_flag(protocol, market_id)
-    _is_morpho = _is_morpho_like(protocol)
+    # --loan-token remains Morpho-specific (Curvance has no analogous flag);
+    # reject it on any other isolated-market protocol too.
+    from almanak.framework.agent_tools.schemas import _normalize_protocol_key
+
+    _is_morpho = _normalize_protocol_key(protocol) in ("morpho", "morpho_blue")
     if is_loan_token and not _is_morpho:
         raise click.UsageError(f"--loan-token is only supported on Morpho Blue; got protocol={protocol}")
 

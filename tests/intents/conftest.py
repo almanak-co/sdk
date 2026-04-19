@@ -259,6 +259,31 @@ CHAIN_CONFIGS = {
             "USDT": 0,  # Bridged USDT uses slot 0
         },
     },
+    "monad": {
+        # Public Monad RPC (verified 2026-04-18 to serve historical state for Anvil forking).
+        # Alchemy Monad mainnet requires per-app enablement; use public RPC as the default
+        # to keep intent tests self-contained. User can override via MONAD_RPC_URL env var.
+        "rpc_url": "https://rpc.monad.xyz",
+        "chain_id": 143,
+        "alchemy_key": None,  # Optional — requires per-app enablement on Alchemy dashboard
+        "tokens": {
+            # Addresses match almanak/core/contracts.py (MORPHO_BLUE_TOKENS["monad"]).
+            "WMON": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
+            "WETH": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",
+            "USDC": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        },
+        "balance_slots": {
+            # WMON wraps native MON — funded via _wrap_native_token, slot unused but set
+            # for consistency with how base handles WETH.
+            "WMON": 3,
+            # WETH9-canonical layout (bridged WETH on Monad). Slot 3 per standard.
+            "WETH": 3,
+            # USDC on Monad uses OpenZeppelin upgradeable pattern. Slot 9 is Circle's
+            # standard across Arbitrum/Base/Ethereum/Polygon; assumed here, probe in
+            # fixture seeding if it fails.
+            "USDC": 9,
+        },
+    },
     "xlayer": {
         "rpc_url": "https://rpc.xlayer.tech",
         "chain_id": 196,
@@ -300,6 +325,7 @@ from tests.conftest_gateway import (
     anvil_bsc,
     anvil_ethereum,
     anvil_mantle,
+    anvil_monad,
     anvil_optimism,
     anvil_polygon,
     anvil_xlayer,
@@ -316,6 +342,7 @@ __all__ = [
     "anvil_bsc",
     "anvil_ethereum",
     "anvil_mantle",
+    "anvil_monad",
     "anvil_optimism",
     "anvil_polygon",
     "anvil_xlayer",
@@ -324,6 +351,7 @@ __all__ = [
     "price_oracle_arbitrum",
     "price_oracle_avalanche",
     "price_oracle_base",
+    "price_oracle_monad",
     "price_oracle_bsc",
     "price_oracle_bnb",
     "price_oracle_ethereum",
@@ -1537,6 +1565,7 @@ price_oracle_mantle = _create_price_oracle_fixture("mantle")
 price_oracle_optimism = _create_price_oracle_fixture("optimism")
 price_oracle_polygon = _create_price_oracle_fixture("polygon")
 price_oracle_mantle = _create_price_oracle_fixture("mantle")
+price_oracle_monad = _create_price_oracle_fixture("monad")
 price_oracle_xlayer = _create_price_oracle_fixture("xlayer")
 
 
@@ -1568,12 +1597,12 @@ def price_oracle(chain_name: str, request) -> dict[str, Decimal]:
         "base": "price_oracle_base",
         "ethereum": "price_oracle_ethereum",
         "mantle": "price_oracle_mantle",
+        "monad": "price_oracle_monad",
         "avalanche": "price_oracle_avalanche",
         "bsc": "price_oracle_bsc",
         "bnb": "price_oracle_bnb",
         "optimism": "price_oracle_optimism",
         "polygon": "price_oracle_polygon",
-        "mantle": "price_oracle_mantle",
         "xlayer": "price_oracle_xlayer",
     }
 

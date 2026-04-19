@@ -210,6 +210,23 @@ ETHEREUM_TOKEN_IDS: dict[str, str] = {
     "SUSDE": "ethena-staked-usde",
 }
 
+MONAD_TOKEN_IDS: dict[str, str] = {
+    # MON (native) / WMON (wrapped) — Monad's gas token. Curvance markets use
+    # WMON as the canonical collateral/debt asset.
+    "MON": "monad",
+    "WMON": "monad",
+    # Monad-bridged WETH / WBTC / USDC — priced at the underlying asset's CG id.
+    "WETH": "weth",
+    "USDC": "usd-coin",
+    "WBTC": "wrapped-bitcoin",
+    # LST / LRT collateral supported by Curvance markets.
+    # Keys are uppercase to match get_price()'s symbol normalization.
+    "EZETH": "renzo-restaked-eth",
+    "WSTETH": "wrapped-steth",
+    # APRMON / SHMON intentionally unmapped: their CG ids could not be verified
+    # and pinning a wrong id would suppress the address-endpoint fallback.
+}
+
 GLOBAL_TOKEN_IDS: dict[str, str] = {
     **ARBITRUM_TOKEN_IDS,
     **AVALANCHE_TOKEN_IDS,
@@ -218,6 +235,7 @@ GLOBAL_TOKEN_IDS: dict[str, str] = {
     **MANTLE_TOKEN_IDS,
     **XLAYER_TOKEN_IDS,
     **SOLANA_TOKEN_IDS,
+    **MONAD_TOKEN_IDS,
     # Ethereum last so canonical IDs (e.g. WSTETH -> wrapped-steth) win over chain variants
     **ETHEREUM_TOKEN_IDS,
 }

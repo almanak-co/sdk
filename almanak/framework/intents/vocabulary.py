@@ -94,6 +94,12 @@ PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
         "requires_market_id": True,
         "operations": ["supply", "withdraw", "borrow", "repay"],
     },
+    "curvance": {
+        "supports_interest_rate_mode": False,
+        "supports_collateral_toggle": False,  # supply path always posts as collateral in v1
+        "requires_market_id": True,  # per-market cToken / BorrowableCToken addressing
+        "operations": ["supply", "withdraw", "borrow", "repay"],
+    },
     "spark": {
         "supports_interest_rate_mode": True,
         "interest_rate_modes": ["variable"],  # stable rate deprecated on Spark (most assets disabled)

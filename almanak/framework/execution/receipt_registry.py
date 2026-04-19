@@ -188,6 +188,10 @@ class ReceiptParserRegistry:
             "almanak.framework.connectors.morpho_blue.receipt_parser",
             "MorphoBlueReceiptParser",
         ),  # Alias for morpho_blue
+        "curvance": (
+            "almanak.framework.connectors.curvance.receipt_parser",
+            "CurvanceReceiptParser",
+        ),
         "compound_v3": (
             "almanak.framework.connectors.compound_v3.receipt_parser",
             "CompoundV3ReceiptParser",

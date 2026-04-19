@@ -29,6 +29,40 @@ AAVE_VARIABLE_RATE_MODE = compiler_constants.AAVE_VARIABLE_RATE_MODE
 MAX_UINT256 = compiler_constants.MAX_UINT256
 
 
+def _validate_curvance_market_tokens(
+    curvance_adapter: Any,
+    market_id: str,
+    *,
+    expected_collateral_symbol: str | None = None,
+    expected_debt_symbol: str | None = None,
+) -> str | None:
+    """Verify the intent's tokens match the Curvance market's collateral/debt symbols.
+
+    Returns ``None`` on a clean match, otherwise a human-readable error string.
+    Compile-time check — fails fast instead of pushing the mismatch to runtime
+    where the wrong cToken would be approved/called.
+    """
+    try:
+        market = curvance_adapter.get_market(market_id)
+    except (KeyError, ValueError) as e:
+        return f"Curvance market lookup failed for market_id={market_id}: {e}"
+
+    if (
+        expected_collateral_symbol is not None
+        and market.collateral_symbol.upper() != expected_collateral_symbol.upper()
+    ):
+        return (
+            f"Curvance market {market.name} ({market_id}) has collateral '{market.collateral_symbol}' "
+            f"but intent requested '{expected_collateral_symbol}'."
+        )
+    if expected_debt_symbol is not None and market.debt_symbol.upper() != expected_debt_symbol.upper():
+        return (
+            f"Curvance market {market.name} ({market_id}) has debt asset '{market.debt_symbol}' "
+            f"but intent requested '{expected_debt_symbol}'."
+        )
+    return None
+
+
 def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
     """Compile a BORROW intent into an ActionBundle.
 
@@ -217,6 +251,127 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
 
             logger.info(
                 f"Compiled BORROW: {collateral_amount_decimal} {collateral_token.symbol} collateral -> {intent.borrow_amount} {borrow_token.symbol} on Morpho Blue"
+            )
+            return result
+
+        # =================================================================
+        # CURVANCE PATH (Monad — per-market cToken / BorrowableCToken pairs)
+        # =================================================================
+        if protocol_lower == "curvance":
+            if not intent.market_id:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error="market_id is required for Curvance borrow (MarketManager address)",
+                    intent_id=intent.intent_id,
+                )
+
+            from ..connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
+
+            curvance_adapter = CurvanceAdapter(
+                CurvanceConfig(
+                    chain=compiler.chain,
+                    wallet_address=compiler.wallet_address,
+                    gateway_client=compiler._gateway_client,
+                )
+            )
+
+            mismatch = _validate_curvance_market_tokens(
+                curvance_adapter,
+                intent.market_id,
+                expected_collateral_symbol=collateral_token.symbol,
+                expected_debt_symbol=borrow_token.symbol,
+            )
+            if mismatch:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=mismatch,
+                    intent_id=intent.intent_id,
+                )
+
+            # Step A: If collateral_amount > 0, approve + depositAsCollateral on the collateral cToken.
+            if collateral_amount_decimal > 0:
+                supply_spender = curvance_adapter.get_supply_spender(intent.market_id)
+                approve_txs = compiler._build_approve_tx(
+                    collateral_token.address,
+                    supply_spender,
+                    int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+                )
+                transactions.extend(approve_txs)
+
+                curvance_borrow_supply_result = curvance_adapter.supply_collateral(
+                    market_id=intent.market_id,
+                    amount=collateral_amount_decimal,
+                    on_behalf_of=compiler.wallet_address,
+                )
+                if not curvance_borrow_supply_result.success:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=f"Curvance supply collateral failed: {curvance_borrow_supply_result.error}",
+                        intent_id=intent.intent_id,
+                    )
+                assert curvance_borrow_supply_result.tx_data is not None
+                transactions.append(
+                    TransactionData(
+                        to=curvance_borrow_supply_result.tx_data["to"],
+                        value=curvance_borrow_supply_result.tx_data["value"],
+                        data=curvance_borrow_supply_result.tx_data["data"],
+                        gas_estimate=curvance_borrow_supply_result.gas_estimate,
+                        description=curvance_borrow_supply_result.description,
+                        tx_type="lending_supply_collateral",
+                    )
+                )
+            else:
+                warnings.append("No collateral supplied - borrowing against existing collateral")
+
+            # Step B: borrow on the BorrowableCToken.
+            curvance_borrow_result = curvance_adapter.borrow(
+                market_id=intent.market_id,
+                amount=intent.borrow_amount,
+            )
+            if not curvance_borrow_result.success:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Curvance borrow failed: {curvance_borrow_result.error}",
+                    intent_id=intent.intent_id,
+                )
+            assert curvance_borrow_result.tx_data is not None
+            transactions.append(
+                TransactionData(
+                    to=curvance_borrow_result.tx_data["to"],
+                    value=curvance_borrow_result.tx_data["value"],
+                    data=curvance_borrow_result.tx_data["data"],
+                    gas_estimate=curvance_borrow_result.gas_estimate,
+                    description=curvance_borrow_result.description,
+                    tx_type="lending_borrow",
+                )
+            )
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+            market_info = curvance_adapter.get_market(intent.market_id)
+            action_bundle = ActionBundle(
+                intent_type=IntentType.BORROW.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "protocol": "curvance",
+                    "market_id": intent.market_id,
+                    "market_name": market_info.name,
+                    "collateral_ctoken": market_info.collateral_ctoken,
+                    "borrowable_ctoken": market_info.borrowable_ctoken,
+                    "collateral_token": collateral_token.to_dict(),
+                    "borrow_token": borrow_token.to_dict(),
+                    "collateral_amount": str(collateral_amount_decimal),
+                    "borrow_amount": str(intent.borrow_amount),
+                    "chain": compiler.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+            result.warnings = warnings
+            logger.info(
+                f"Compiled BORROW: {collateral_amount_decimal} {collateral_token.symbol} collateral -> "
+                f"{intent.borrow_amount} {borrow_token.symbol} on Curvance {market_info.name}"
             )
             return result
 
@@ -1271,7 +1426,7 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
         else:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
+                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
                 intent_id=intent.intent_id,
             )
 
@@ -1450,6 +1605,100 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
             result.warnings = warnings
 
             logger.info(f"Compiled REPAY: {amount_description} {repay_token.symbol} on Morpho Blue")
+            return result
+
+        # =================================================================
+        # CURVANCE PATH (Monad — repay to BorrowableCToken)
+        # =================================================================
+        if protocol_lower == "curvance":
+            if not intent.market_id:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error="market_id is required for Curvance repay (MarketManager address)",
+                    intent_id=intent.intent_id,
+                )
+
+            from ..connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
+
+            curvance_adapter = CurvanceAdapter(
+                CurvanceConfig(
+                    chain=compiler.chain,
+                    wallet_address=compiler.wallet_address,
+                    gateway_client=compiler._gateway_client,
+                )
+            )
+
+            mismatch = _validate_curvance_market_tokens(
+                curvance_adapter,
+                intent.market_id,
+                expected_debt_symbol=repay_token.symbol,
+            )
+            if mismatch:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=mismatch,
+                    intent_id=intent.intent_id,
+                )
+
+            # Approve the BorrowableCToken to pull the repayment.
+            approve_amount = (
+                MAX_UINT256
+                if intent.repay_full or repay_amount_decimal is None
+                else int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+            )
+            approve_txs = compiler._build_approve_tx(
+                repay_token.address,
+                curvance_adapter.get_repay_spender(intent.market_id),
+                approve_amount,
+            )
+            transactions.extend(approve_txs)
+
+            # Build the repay tx.
+            curvance_repay_result = curvance_adapter.repay(
+                market_id=intent.market_id,
+                amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
+                repay_full=intent.repay_full,
+            )
+            if not curvance_repay_result.success:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Curvance repay failed: {curvance_repay_result.error}",
+                    intent_id=intent.intent_id,
+                )
+            assert curvance_repay_result.tx_data is not None
+            transactions.append(
+                TransactionData(
+                    to=curvance_repay_result.tx_data["to"],
+                    value=curvance_repay_result.tx_data["value"],
+                    data=curvance_repay_result.tx_data["data"],
+                    gas_estimate=curvance_repay_result.gas_estimate,
+                    description=curvance_repay_result.description,
+                    tx_type="lending_repay",
+                )
+            )
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+            market_info = curvance_adapter.get_market(intent.market_id)
+            action_bundle = ActionBundle(
+                intent_type=IntentType.REPAY.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "protocol": "curvance",
+                    "market_id": intent.market_id,
+                    "market_name": market_info.name,
+                    "borrowable_ctoken": market_info.borrowable_ctoken,
+                    "repay_token": repay_token.to_dict(),
+                    "repay_amount": amount_description,
+                    "repay_full": intent.repay_full,
+                    "chain": compiler.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+            result.warnings = warnings
+            logger.info(f"Compiled REPAY: {amount_description} {repay_token.symbol} on Curvance {market_info.name}")
             return result
 
         # =================================================================
@@ -2307,7 +2556,7 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
         else:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
+                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
                 intent_id=intent.intent_id,
             )
 
@@ -2484,6 +2733,105 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:
             logger.info(
                 f"Compiled SUPPLY: {amount_decimal} {supply_token.symbol} to Morpho Blue market {intent.market_id[:16]}..."
             )
+            return result
+
+        # =================================================================
+        # CURVANCE PATH (Monad — supply to collateral cToken)
+        # =================================================================
+        if protocol_lower == "curvance":
+            if not intent.market_id:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error="market_id is required for Curvance supply (MarketManager address)",
+                    intent_id=intent.intent_id,
+                )
+
+            from ..connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
+
+            curvance_adapter = CurvanceAdapter(
+                CurvanceConfig(
+                    chain=compiler.chain,
+                    wallet_address=compiler.wallet_address,
+                    gateway_client=compiler._gateway_client,
+                )
+            )
+
+            mismatch = _validate_curvance_market_tokens(
+                curvance_adapter,
+                intent.market_id,
+                expected_collateral_symbol=supply_token.symbol,
+            )
+            if mismatch:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=mismatch,
+                    intent_id=intent.intent_id,
+                )
+
+            # Curvance's depositAsCollateral is the primary supply path. Plain
+            # deposit() (lend-only, no collateral posting) is not wired yet, so
+            # honor the intent rather than silently routing through the
+            # collateral path.
+            if not intent.use_as_collateral:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        "Curvance supply with use_as_collateral=False is not implemented. "
+                        "Lend-only deposit() is not wired yet — set use_as_collateral=True "
+                        "or use a different protocol."
+                    ),
+                    intent_id=intent.intent_id,
+                )
+
+            supply_spender = curvance_adapter.get_supply_spender(intent.market_id)
+            supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
+            approve_txs = compiler._build_approve_tx(supply_token.address, supply_spender, supply_amount_wei)
+            transactions.extend(approve_txs)
+
+            curvance_supply_result = curvance_adapter.supply_collateral(
+                market_id=intent.market_id,
+                amount=amount_decimal,
+                on_behalf_of=compiler.wallet_address,
+            )
+            if not curvance_supply_result.success:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Curvance supply failed: {curvance_supply_result.error}",
+                    intent_id=intent.intent_id,
+                )
+            assert curvance_supply_result.tx_data is not None
+            transactions.append(
+                TransactionData(
+                    to=curvance_supply_result.tx_data["to"],
+                    value=curvance_supply_result.tx_data["value"],
+                    data=curvance_supply_result.tx_data["data"],
+                    gas_estimate=curvance_supply_result.gas_estimate,
+                    description=curvance_supply_result.description,
+                    tx_type="lending_supply_collateral",
+                )
+            )
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+            market_info = curvance_adapter.get_market(intent.market_id)
+            action_bundle = ActionBundle(
+                intent_type=IntentType.SUPPLY.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "protocol": "curvance",
+                    "market_id": intent.market_id,
+                    "market_name": market_info.name,
+                    "collateral_ctoken": market_info.collateral_ctoken,
+                    "supply_token": supply_token.to_dict(),
+                    "supply_amount": str(amount_decimal),
+                    "chain": compiler.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+            result.warnings = warnings
+            logger.info(f"Compiled SUPPLY: {amount_decimal} {supply_token.symbol} to Curvance {market_info.name}")
             return result
 
         # =================================================================
@@ -3299,7 +3647,7 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:
         else:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
+                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
                 intent_id=intent.intent_id,
             )
 
@@ -3481,6 +3829,115 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
             result.warnings = warnings
 
             logger.info(f"Compiled WITHDRAW: {amount_display} {withdraw_token.symbol} from Morpho Blue")
+            return result
+
+        # =================================================================
+        # CURVANCE PATH (Monad — withdraw from collateral cToken)
+        # =================================================================
+        if protocol_lower == "curvance":
+            if not intent.market_id:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error="market_id is required for Curvance withdraw (MarketManager address)",
+                    intent_id=intent.intent_id,
+                )
+
+            from ..connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
+
+            curvance_adapter = CurvanceAdapter(
+                CurvanceConfig(
+                    chain=compiler.chain,
+                    wallet_address=compiler.wallet_address,
+                    gateway_client=compiler._gateway_client,
+                )
+            )
+
+            mismatch = _validate_curvance_market_tokens(
+                curvance_adapter,
+                intent.market_id,
+                expected_collateral_symbol=withdraw_token.symbol,
+            )
+            if mismatch:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=mismatch,
+                    intent_id=intent.intent_id,
+                )
+
+            # Curvance-side asset amount. ChainedAmount (``"all"``) is already
+            # rejected upstream for lending intents; the else-branch is therefore
+            # a concrete Decimal.
+            market_info = curvance_adapter.get_market(intent.market_id)
+            share_balance: int | None = None
+            if intent.withdraw_all:
+                curvance_withdraw_amount = Decimal("0")
+                # withdraw_all calls redeemCollateral(shares, receiver, owner)
+                # which has no MAX_UINT256 sentinel — we MUST read the cToken
+                # share balance and pass it explicitly or the adapter raises.
+                share_balance = compiler._query_erc20_balance(
+                    market_info.collateral_ctoken,
+                    compiler.wallet_address,
+                )
+                if share_balance is None or share_balance <= 0:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=(
+                            "Curvance withdraw_all requires reading the cToken share balance "
+                            f"({market_info.collateral_ctoken}) for {compiler.wallet_address}; "
+                            "balance query returned no value or zero."
+                        ),
+                        intent_id=intent.intent_id,
+                    )
+            else:
+                assert isinstance(intent.amount, Decimal), "amount must be Decimal at this point"
+                curvance_withdraw_amount = intent.amount
+            amount_display = "all" if intent.withdraw_all else str(curvance_withdraw_amount)
+            curvance_withdraw_result = curvance_adapter.withdraw_collateral(
+                market_id=intent.market_id,
+                amount=curvance_withdraw_amount,
+                withdraw_all=intent.withdraw_all,
+                receiver=compiler.wallet_address,
+                share_balance=share_balance,
+            )
+            if not curvance_withdraw_result.success:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Curvance withdraw failed: {curvance_withdraw_result.error}",
+                    intent_id=intent.intent_id,
+                )
+            assert curvance_withdraw_result.tx_data is not None
+            transactions.append(
+                TransactionData(
+                    to=curvance_withdraw_result.tx_data["to"],
+                    value=curvance_withdraw_result.tx_data["value"],
+                    data=curvance_withdraw_result.tx_data["data"],
+                    gas_estimate=curvance_withdraw_result.gas_estimate,
+                    description=curvance_withdraw_result.description,
+                    tx_type="lending_withdraw",
+                )
+            )
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+            action_bundle = ActionBundle(
+                intent_type=IntentType.WITHDRAW.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "protocol": "curvance",
+                    "market_id": intent.market_id,
+                    "market_name": market_info.name,
+                    "collateral_ctoken": market_info.collateral_ctoken,
+                    "withdraw_token": withdraw_token.to_dict(),
+                    "withdraw_amount": amount_display,
+                    "withdraw_all": intent.withdraw_all,
+                    "chain": compiler.chain,
+                },
+            )
+
+            result.action_bundle = action_bundle
+            result.transactions = transactions
+            result.total_gas_estimate = total_gas
+            result.warnings = warnings
+            logger.info(f"Compiled WITHDRAW: {amount_display} {withdraw_token.symbol} from Curvance {market_info.name}")
             return result
 
         # =================================================================
@@ -4184,7 +4641,7 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
         else:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, spark, pendle, compound_v3, benqi, joelend, euler_v2, silo_v2",
+                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, pendle, compound_v3, benqi, joelend, euler_v2, silo_v2",
                 intent_id=intent.intent_id,
             )
 

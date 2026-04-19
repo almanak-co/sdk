@@ -10,6 +10,7 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [Uniswap V4](uniswap_v4.md) | DEX | Ethereum, Arbitrum, Base | `uniswap_v4` |
 | [Aave V3](aave_v3.md) | Lending | Ethereum, Arbitrum, Optimism, Base, Avalanche | `aave_v3` |
 | [Morpho Blue](morpho_blue.md) | Lending | Ethereum, Base, Arbitrum, Monad | `morpho_blue` |
+| [Curvance](curvance.md) | Lending (isolated markets) | Monad | `curvance` |
 | [GMX V2](gmx_v2.md) | Perpetuals | Arbitrum, Avalanche | `gmx_v2` |
 | [Aster Perps](aster_perps.md) | Perpetuals | BSC | `aster_perps` (broker=0) |
 | [PancakeSwap Perps](pancakeswap_perps.md) | Perpetuals | BSC | `pancakeswap_perps` (broker=2, shim over `aster_perps`) |

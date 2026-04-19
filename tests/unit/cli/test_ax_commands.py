@@ -886,7 +886,7 @@ class TestAxLending:
             ],
         )
         assert result.exit_code != 0
-        assert "--market-id is only supported on Morpho Blue" in result.output
+        assert "--market-id is only supported on isolated-market protocols" in result.output
 
     def test_lending_supply_market_id_rejected_on_non_morpho(self):
         """--market-id on non-Morpho supply must raise UsageError for parity."""
@@ -906,7 +906,7 @@ class TestAxLending:
             ],
         )
         assert result.exit_code != 0
-        assert "--market-id is only supported on Morpho Blue" in result.output
+        assert "--market-id is only supported on isolated-market protocols" in result.output
 
     @patch("almanak.framework.cli.ax._get_executor")
     def test_lending_withdraw_loan_token_on_morpho_sets_is_collateral_false(self, mock_get_exec):
