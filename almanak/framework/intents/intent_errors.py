@@ -92,3 +92,45 @@ class ProtocolRequiredError(ValueError):
         super().__init__(
             f"Protocol must be specified for '{operation}' operation. Available protocols: {protocols_str}"
         )
+
+
+class InvalidCollateralForMarketError(ValueError):
+    """Raised when a perp intent specifies a collateral that is invalid for the market.
+
+    Perpetuals protocols like GMX V2 bind each market to a fixed pair of
+    collateral tokens (the market's ``longToken`` and ``shortToken``). Orders
+    opened with any other collateral are silently cancelled by keepers and the
+    keeper execution fee is burned. We validate this pair at compile time so
+    that strategies fail fast with a clear error instead of burning fees on a
+    cancelled order.
+
+    Attributes:
+        market: The market identifier (e.g. ``"SOL/USD"``).
+        collateral: The invalid collateral token that was supplied.
+        allowed_collaterals: Collateral token symbols that the market actually
+            accepts (usually the ``longToken`` and ``shortToken``).
+        chain: Optional chain the market lives on (``"arbitrum"``, ``"avalanche"``).
+        protocol: Optional protocol identifier (defaults to ``"gmx_v2"``).
+    """
+
+    def __init__(
+        self,
+        market: str,
+        collateral: str,
+        allowed_collaterals: list[str],
+        chain: str | None = None,
+        protocol: str | None = None,
+    ) -> None:
+        self.market = market
+        self.collateral = collateral
+        self.allowed_collaterals = list(allowed_collaterals)
+        self.chain = chain
+        self.protocol = protocol
+        allowed_str = ", ".join(self.allowed_collaterals) if self.allowed_collaterals else "(none)"
+        proto_str = f"{protocol} " if protocol else ""
+        chain_str = f" on {chain}" if chain else ""
+        super().__init__(
+            f"Invalid collateral '{collateral}' for {proto_str}market '{market}'{chain_str}. "
+            f"Allowed collaterals: {allowed_str}. "
+            f"Orders with invalid collateral are cancelled by keepers and the execution fee is burned."
+        )

@@ -44,6 +44,7 @@ from almanak.framework.services.prediction_monitor import PredictionExitConditio
 from .intent_errors import (  # noqa: E402, F401
     InvalidAmountError,
     InvalidChainError,
+    InvalidCollateralForMarketError,
     InvalidProtocolParameterError,
     InvalidSequenceError,
     ProtocolRequiredError,

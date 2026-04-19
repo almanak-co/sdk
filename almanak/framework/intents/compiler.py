@@ -39,6 +39,7 @@ from ..utils.log_formatters import (
     format_slippage_bps,
     format_token_amount,
 )
+from .intent_errors import InvalidCollateralForMarketError
 from .vocabulary import (
     AnyIntent,
     BorrowIntent,
@@ -4477,6 +4478,26 @@ class IntentCompiler:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
                     error=f"GMX v2 not supported on chain: {self.chain}",
+                    intent_id=intent.intent_id,
+                )
+
+            # Step 1.5: Validate the (market, collateral_token) pair BEFORE
+            # emitting any transactions. GMX V2 silently burns keeper fees when
+            # orders are submitted with collateral that is not the market's
+            # longToken/shortToken. See almanak.framework.connectors.gmx_v2.market_rules
+            # for the authoritative rule table.
+            from ..connectors.gmx_v2.market_rules import validate_collateral as _validate_gmx_collateral
+
+            try:
+                _validate_gmx_collateral(
+                    chain=self.chain,
+                    market=intent.market,
+                    collateral_token=intent.collateral_token,
+                )
+            except InvalidCollateralForMarketError as exc:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=str(exc),
                     intent_id=intent.intent_id,
                 )
 
