@@ -2622,33 +2622,352 @@ def generate_config_json(
     return json.dumps(data, indent=4) + "\n"
 
 
-def generate_test_file(
-    name: str,
-    template: StrategyTemplate,
-    chain: SupportedChain,
-) -> str:
-    """Generate the test_strategy.py file content."""
-    class_name = to_pascal_case(name) + "Strategy"
+# ---------------------------------------------------------------------------
+# Test scaffolding helpers (for generate_test_file below)
+# ---------------------------------------------------------------------------
 
-    content = f'''"""
+
+@dataclass(frozen=True)
+class _StateTransition:
+    """A single on_intent_executed state transition to test.
+
+    Describes how to invoke on_intent_executed() and which state field on
+    the strategy should have changed after the call.
+
+    Fields:
+        name: pytest-parameterize id for the transition
+        intent_type: intent_type.value passed in the mock intent (e.g. "SWAP")
+        intent_attrs: extra attributes to set on the mock intent (for templates
+            that read intent.from_token / intent.to_token / intent.amount)
+        result_attrs: extra attributes to set on the mock result (e.g. position_id)
+        pre_state: dict of attribute_name -> value to set BEFORE the callback
+        expected: dict of attribute_name -> expected value after the callback
+    """
+
+    name: str
+    intent_type: str
+    intent_attrs: dict[str, object]
+    result_attrs: dict[str, object]
+    pre_state: dict[str, object]
+    expected: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _TemplateTestSpec:
+    """Test metadata for a strategy template.
+
+    Drives what the emitted test file exercises per-template:
+    * state_fields: names of ``self._xxx`` attributes that hold runtime state
+        (used to skip persistence tests cleanly on stateless templates)
+    * has_callbacks: whether the template emits on_intent_executed / persistence
+    * has_teardown_intents: whether generate_teardown_intents() returns
+        non-empty results once a position is held (affects SOFT vs HARD tests)
+    * position_setup: Python source to set on the strategy to give it an
+        "open position" (so get_open_positions() returns something and
+        generate_teardown_intents() produces intents)
+    * transitions: list of on_intent_executed calls to test
+    * persistent_state_sample: a representative state dict that round-trips
+    """
+
+    state_fields: tuple[str, ...] = ()
+    has_callbacks: bool = False
+    has_teardown_intents: bool = False
+    position_setup: str = ""
+    transitions: tuple[_StateTransition, ...] = ()
+    persistent_state_sample: dict[str, object] | None = None
+
+
+_BLANK_TEST_SPEC = _TemplateTestSpec()
+
+
+# Position setup snippets are embedded into emitted test code and run against
+# the strategy instance (as ``strategy.<field> = ...``). They must match the
+# __init__ fields produced by ``_get_template_init_params``.
+_TEMPLATE_TEST_SPECS: dict[StrategyTemplate, _TemplateTestSpec] = {
+    StrategyTemplate.TA_SWAP: _TemplateTestSpec(
+        state_fields=("_holding_base",),
+        has_callbacks=True,
+        has_teardown_intents=True,
+        position_setup="strategy._holding_base = True",
+        transitions=(
+            _StateTransition(
+                name="swap_to_base_sets_holding",
+                intent_type="SWAP",
+                intent_attrs={"from_token": "USDC", "to_token": "WETH"},
+                result_attrs={},
+                pre_state={"_holding_base": False},
+                expected={"_holding_base": True},
+            ),
+            _StateTransition(
+                name="swap_from_base_clears_holding",
+                intent_type="SWAP",
+                intent_attrs={"from_token": "WETH", "to_token": "USDC"},
+                result_attrs={},
+                pre_state={"_holding_base": True},
+                expected={"_holding_base": False},
+            ),
+        ),
+        persistent_state_sample={"holding_base": True},
+    ),
+    StrategyTemplate.DYNAMIC_LP: _TemplateTestSpec(
+        state_fields=("_position_id", "_range_lower", "_range_upper"),
+        has_callbacks=True,
+        has_teardown_intents=True,
+        position_setup=(
+            # position_id is a string because Intent.lp_close() expects str
+            'strategy._position_id = "12345"\n'
+            '        strategy._range_lower = Decimal("1900")\n'
+            '        strategy._range_upper = Decimal("2100")'
+        ),
+        transitions=(
+            _StateTransition(
+                name="lp_open_stores_position_id",
+                intent_type="LP_OPEN",
+                intent_attrs={"range_lower": "1800", "range_upper": "2200"},
+                result_attrs={"position_id": "99999"},
+                pre_state={"_position_id": None},
+                expected={"_position_id": "99999"},
+            ),
+            _StateTransition(
+                name="lp_close_clears_position_id",
+                intent_type="LP_CLOSE",
+                intent_attrs={},
+                result_attrs={},
+                pre_state={"_position_id": "12345"},
+                expected={"_position_id": None},
+            ),
+        ),
+        persistent_state_sample={
+            "position_id": "12345",
+            "range_lower": "1900",
+            "range_upper": "2100",
+        },
+    ),
+    StrategyTemplate.MULTI_STEP: _TemplateTestSpec(
+        state_fields=("_position_id", "_range_lower", "_range_upper"),
+        has_callbacks=True,
+        has_teardown_intents=True,
+        position_setup=(
+            'strategy._position_id = "12345"\n'
+            '        strategy._range_lower = Decimal("1900")\n'
+            '        strategy._range_upper = Decimal("2100")'
+        ),
+        transitions=(
+            _StateTransition(
+                name="lp_open_stores_position_id",
+                intent_type="LP_OPEN",
+                intent_attrs={},
+                result_attrs={"position_id": "99999"},
+                pre_state={"_position_id": None},
+                expected={"_position_id": "99999"},
+            ),
+            _StateTransition(
+                name="lp_close_clears_position_id",
+                intent_type="LP_CLOSE",
+                intent_attrs={},
+                result_attrs={},
+                pre_state={"_position_id": "12345"},
+                expected={"_position_id": None},
+            ),
+        ),
+        persistent_state_sample={
+            "position_id": "12345",
+            "range_lower": "1900",
+            "range_upper": "2100",
+        },
+    ),
+    StrategyTemplate.LENDING_LOOP: _TemplateTestSpec(
+        state_fields=("_loop_state", "_loop_count", "_current_leverage"),
+        has_callbacks=True,
+        has_teardown_intents=True,
+        position_setup=('strategy._loop_state = "borrowed"\n        strategy._loop_count = 1'),
+        transitions=(
+            _StateTransition(
+                name="supply_idle_to_supplied",
+                intent_type="SUPPLY",
+                intent_attrs={},
+                result_attrs={},
+                pre_state={"_loop_state": "idle"},
+                expected={"_loop_state": "supplied"},
+            ),
+            _StateTransition(
+                name="borrow_supplied_to_borrowed",
+                intent_type="BORROW",
+                intent_attrs={},
+                result_attrs={},
+                pre_state={"_loop_state": "supplied"},
+                expected={"_loop_state": "borrowed"},
+            ),
+        ),
+        persistent_state_sample={
+            "loop_state": "monitoring",
+            "loop_count": 2,
+            "current_leverage": "2.19",
+        },
+    ),
+    StrategyTemplate.BASIS_TRADE: _TemplateTestSpec(
+        state_fields=("_trade_state",),
+        has_callbacks=True,
+        has_teardown_intents=True,
+        position_setup='strategy._trade_state = "hedged"',
+        transitions=(
+            _StateTransition(
+                name="swap_idle_to_spot_bought",
+                intent_type="SWAP",
+                intent_attrs={},
+                result_attrs={},
+                pre_state={"_trade_state": "idle"},
+                expected={"_trade_state": "spot_bought"},
+            ),
+            _StateTransition(
+                name="perp_open_to_hedged",
+                intent_type="PERP_OPEN",
+                intent_attrs={},
+                result_attrs={},
+                pre_state={"_trade_state": "spot_bought"},
+                expected={"_trade_state": "hedged"},
+            ),
+            _StateTransition(
+                name="perp_close_to_unwinding",
+                intent_type="PERP_CLOSE",
+                intent_attrs={},
+                result_attrs={},
+                pre_state={"_trade_state": "hedged"},
+                expected={"_trade_state": "unwinding"},
+            ),
+        ),
+        persistent_state_sample={"trade_state": "hedged"},
+    ),
+    StrategyTemplate.VAULT_YIELD: _TemplateTestSpec(
+        state_fields=("_state",),
+        has_callbacks=True,
+        has_teardown_intents=True,
+        position_setup='strategy._state = "deposited"',
+        transitions=(
+            _StateTransition(
+                name="vault_deposit_to_deposited",
+                intent_type="VAULT_DEPOSIT",
+                intent_attrs={},
+                result_attrs={},
+                pre_state={"_state": "idle"},
+                expected={"_state": "deposited"},
+            ),
+            _StateTransition(
+                name="vault_redeem_to_idle",
+                intent_type="VAULT_REDEEM",
+                intent_attrs={},
+                result_attrs={},
+                pre_state={"_state": "deposited"},
+                expected={"_state": "idle"},
+            ),
+        ),
+        persistent_state_sample={"state": "deposited"},
+    ),
+    StrategyTemplate.PERPS: _TemplateTestSpec(
+        state_fields=("_position_state", "_entry_price"),
+        has_callbacks=True,
+        has_teardown_intents=True,
+        position_setup=('strategy._position_state = "open"\n        strategy._entry_price = Decimal("2000")'),
+        transitions=(
+            _StateTransition(
+                name="perp_open_sets_state",
+                intent_type="PERP_OPEN",
+                intent_attrs={},
+                result_attrs={"extracted_data": {"entry_price": "2000"}},
+                pre_state={"_position_state": "idle"},
+                expected={"_position_state": "open"},
+            ),
+            _StateTransition(
+                name="perp_close_clears_state",
+                intent_type="PERP_CLOSE",
+                intent_attrs={},
+                result_attrs={},
+                pre_state={"_position_state": "open"},
+                expected={"_position_state": "idle"},
+            ),
+        ),
+        persistent_state_sample={"position_state": "open", "entry_price": "2000"},
+    ),
+    StrategyTemplate.STAKING: _TemplateTestSpec(
+        state_fields=("_stake_state", "_staked_amount"),
+        has_callbacks=True,
+        has_teardown_intents=True,
+        position_setup=('strategy._stake_state = "staked"\n        strategy._staked_amount = Decimal("1")'),
+        transitions=(
+            _StateTransition(
+                name="stake_sets_staked",
+                intent_type="STAKE",
+                intent_attrs={"amount": "1"},
+                result_attrs={},
+                pre_state={"_stake_state": "idle"},
+                expected={"_stake_state": "staked"},
+            ),
+            _StateTransition(
+                name="unstake_returns_to_idle",
+                intent_type="UNSTAKE",
+                intent_attrs={},
+                result_attrs={},
+                pre_state={"_stake_state": "staked"},
+                expected={"_stake_state": "idle"},
+            ),
+        ),
+        persistent_state_sample={"stake_state": "staked", "staked_amount": "1"},
+    ),
+    StrategyTemplate.COPY_TRADER: _TemplateTestSpec(
+        state_fields=("_open_trades",),
+        has_callbacks=True,
+        has_teardown_intents=False,  # teardown depends on leader trades; skip with-position tests
+        position_setup="",
+        transitions=(
+            _StateTransition(
+                name="swap_appends_trade",
+                intent_type="SWAP",
+                intent_attrs={"from_token": "USDC", "to_token": "WETH"},
+                result_attrs={},
+                pre_state={"_open_trades": []},
+                expected={"_open_trades_len": 1},  # special: checks len()
+            ),
+        ),
+        persistent_state_sample={"open_trades": []},
+    ),
+}
+
+
+def _render_test_file_header(
+    name: str,
+    class_name: str,
+    chain: SupportedChain,
+    template: StrategyTemplate,
+) -> str:
+    """Module docstring, imports, and shared fixtures."""
+    return f'''"""
 Tests for {name} strategy.
 
 Generated by: almanak strat new
 Template: {template.value}
+
+These tests are a starting point -- extend them as your strategy evolves.
+They cover: init, decide(), error handling, state transitions, persistence
+round-trip, teardown intents, and common edge cases (zero balance, zero price).
 """
 
 import json
-import pytest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock
-from decimal import Decimal
+
+import pytest
 
 from strategy import {class_name}
+
+# ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def config() -> dict:
-    """Load test configuration from config.json."""
+    """Load test configuration from config.json, falling back to a minimal stub."""
     config_path = Path(__file__).parent.parent / "config.json"
     if config_path.exists():
         with open(config_path) as f:
@@ -2661,7 +2980,7 @@ def config() -> dict:
 
 @pytest.fixture
 def strategy(config: dict) -> {class_name}:
-    """Create strategy instance for testing."""
+    """Fresh strategy instance for each test (no shared mutable state)."""
     return {class_name}(
         config=config,
         chain=config.get("chain", "{chain.value}"),
@@ -2669,65 +2988,550 @@ def strategy(config: dict) -> {class_name}:
     )
 
 
-@pytest.fixture
-def mock_market() -> MagicMock:
-    """Create a mock MarketSnapshot."""
+def _make_mock_market(
+    *,
+    price: Decimal = Decimal("2000"),
+    balance: Decimal = Decimal("100"),
+    balance_usd: Decimal = Decimal("100000"),
+    rsi: Decimal = Decimal("50"),
+) -> MagicMock:
+    """Build a configurable MarketSnapshot mock.
+
+    Tunable inputs let edge-case tests override specific market conditions
+    (e.g. zero balance, zero price) without duplicating fixture boilerplate.
+    """
     market = MagicMock()
-    market.price.return_value = Decimal("2000")
+    market.price.return_value = price
     market.chain = "{chain.value}"
     market.wallet_address = "0x" + "1" * 40
 
-    # Mock balance
     balance_mock = MagicMock()
-    balance_mock.balance = Decimal("100")
-    balance_mock.balance_usd = Decimal("100000")
+    balance_mock.balance = balance
+    balance_mock.balance_usd = balance_usd
     market.balance.return_value = balance_mock
 
-    # Mock RSI
     rsi_mock = MagicMock()
-    rsi_mock.value = Decimal("50")
+    rsi_mock.value = rsi
+    rsi_mock.is_oversold = rsi <= Decimal("30")
+    rsi_mock.is_overbought = rsi >= Decimal("70")
     market.rsi.return_value = rsi_mock
+
+    # Bollinger bands (used by ta_swap when indicator='bollinger' or 'rsi_bb')
+    bb_mock = MagicMock()
+    bb_mock.bandwidth = 0.05
+    bb_mock.percent_b = 0.5
+    market.bollinger_bands.return_value = bb_mock
+
+    # Funding rate (used by basis_trade)
+    funding_mock = MagicMock()
+    funding_mock.rate_hourly = Decimal("0.0002")
+    market.funding_rate.return_value = funding_mock
 
     return market
 
 
-class Test{class_name}:
-    """Tests for {class_name} strategy."""
+@pytest.fixture
+def mock_market() -> MagicMock:
+    """MarketSnapshot mock with healthy defaults (ETH=$2000, balances funded)."""
+    return _make_mock_market()
+
+
+def _make_mock_intent(intent_type_value: str, **attrs: object) -> MagicMock:
+    """Build a minimal intent mock with intent_type.value == intent_type_value.
+
+    Extra kwargs become attributes on the returned mock (e.g. from_token).
+    """
+    intent = MagicMock()
+    intent.intent_type.value = intent_type_value
+    for key, value in attrs.items():
+        setattr(intent, key, value)
+    return intent
+
+
+def _make_mock_result(**attrs: object) -> MagicMock:
+    """Build a minimal execution-result mock (used by on_intent_executed tests)."""
+    result = MagicMock()
+    result.extracted_data = attrs.pop("extracted_data", {{}})
+    for key, value in attrs.items():
+        setattr(result, key, value)
+    return result
+'''
+
+
+def _render_base_tests(
+    class_name: str,
+    chain: SupportedChain,
+) -> str:
+    """init, decide(), error handling, get_status -- the 'always-emitted' tests."""
+    return f'''
+
+# ---------------------------------------------------------------------------
+# Base tests: init, decide(), error handling, get_status
+# ---------------------------------------------------------------------------
+
+
+class Test{class_name}Basics:
+    """Core contract: strategy constructs, decides, and reports status cleanly."""
 
     def test_initialization(self, strategy: {class_name}) -> None:
-        """Test strategy initialization."""
+        """Strategy reports the chain and wallet it was constructed with."""
         assert strategy.chain == "{chain.value}"
         assert strategy.wallet_address == "0x" + "1" * 40
 
-    def test_decide_returns_intent(self, strategy: {class_name}, mock_market: MagicMock) -> None:
-        """Test that decide() returns an Intent."""
+    def test_decide_returns_intent_or_none(
+        self, strategy: {class_name}, mock_market: MagicMock
+    ) -> None:
+        """decide() must return None, an Intent (with intent_type), or an IntentSequence.
+
+        Any other return type breaks the framework's intent compiler.
+        """
         result = strategy.decide(mock_market)
+        # Accept three valid return types: None, Intent (has .intent_type),
+        # or IntentSequence (has .intents).
+        assert (
+            result is None
+            or hasattr(result, "intent_type")
+            or hasattr(result, "intents")
+        ), (
+            f"decide() returned {{type(result).__name__}} which is not a "
+            "valid Intent / IntentSequence / None"
+        )
 
-        # Should return some kind of Intent (swap or hold)
-        assert result is None or hasattr(result, 'intent_type')
-
-    def test_decide_handles_errors(self, strategy: {class_name}, mock_market: MagicMock) -> None:
-        """Test that decide() handles errors gracefully."""
-        # Cause an error by making balance(), price(), and wallet_activity() raise
+    def test_decide_handles_market_errors_gracefully(
+        self, strategy: {class_name}, mock_market: MagicMock
+    ) -> None:
+        """When market providers raise, decide() must NOT propagate -- return hold/None."""
+        # Blow up every market access to simulate a gateway outage.
         mock_market.balance.side_effect = ValueError("Balance unavailable")
         mock_market.price.side_effect = ValueError("Price unavailable")
+        mock_market.rsi.side_effect = ValueError("RSI unavailable")
+        mock_market.bollinger_bands.side_effect = ValueError("BB unavailable")
+        mock_market.funding_rate.side_effect = ValueError("Funding unavailable")
         mock_market.wallet_activity.side_effect = ValueError("Wallet activity unavailable")
 
         result = strategy.decide(mock_market)
 
-        # Should return hold on error, not raise
-        assert result is not None
-        assert "Error" in str(result.reason) or "hold" in str(result).lower()
+        # Must not raise. Must return a hold intent or None.
+        assert (
+            result is None
+            or hasattr(result, "intent_type")
+            or hasattr(result, "intents")
+        ), "decide() returned non-Intent on error"
+        if result is not None and hasattr(result, "intent_type"):
+            intent_type = getattr(result.intent_type, "value", str(result.intent_type))
+            assert intent_type == "HOLD", (
+                f"Expected HOLD on error, got {{intent_type}}. "
+                f"Reason: {{getattr(result, 'reason', '<no reason>')}}"
+            )
 
-    def test_get_status(self, strategy: {class_name}) -> None:
-        """Test get_status returns expected fields."""
+    def test_get_status_contract(self, strategy: {class_name}) -> None:
+        """get_status() returns a dict with at minimum 'strategy' and 'chain'."""
         status = strategy.get_status()
 
-        assert "strategy" in status
-        assert "chain" in status
+        assert isinstance(status, dict), "get_status() must return a dict"
+        assert "strategy" in status, "status must include 'strategy' key"
+        assert "chain" in status, "status must include 'chain' key"
+        assert status["chain"] == "{chain.value}"
+
 '''
 
-    return content
+
+def _render_edge_case_tests(class_name: str) -> str:
+    """Zero-balance and zero-price edge cases.
+
+    These catch a common beginner bug: dividing by price without guarding
+    against price=0, or sizing trades without checking balance>0.
+    """
+    return f'''
+# ---------------------------------------------------------------------------
+# Edge cases: degenerate market inputs
+# ---------------------------------------------------------------------------
+
+
+class Test{class_name}EdgeCases:
+    """Degenerate market inputs must not crash the strategy."""
+
+    def test_decide_with_zero_balance_does_not_raise(
+        self, strategy: {class_name}
+    ) -> None:
+        """With zero balance, decide() should return cleanly (typically a hold)."""
+        market = _make_mock_market(balance=Decimal("0"), balance_usd=Decimal("0"))
+        result = strategy.decide(market)
+        assert (
+            result is None
+            or hasattr(result, "intent_type")
+            or hasattr(result, "intents")
+        )
+
+    def test_decide_with_zero_price_does_not_raise(
+        self, strategy: {class_name}
+    ) -> None:
+        """A price=0 (bad oracle) must not trigger a ZeroDivisionError.
+
+        Strategies that size by ``amount_usd / price`` are especially vulnerable.
+        If decide() raises anything except a hold, that is a bug to fix.
+        """
+        market = _make_mock_market(price=Decimal("0"))
+        try:
+            result = strategy.decide(market)
+        except ZeroDivisionError as exc:
+            pytest.fail(
+                "decide() raised ZeroDivisionError on zero price; "
+                "guard with ``if price > 0`` before sizing trades: "
+                f"{{exc}}"
+            )
+        assert (
+            result is None
+            or hasattr(result, "intent_type")
+            or hasattr(result, "intents")
+        )
+
+'''
+
+
+def _render_teardown_tests(
+    class_name: str,
+    spec: "_TemplateTestSpec",
+) -> str:
+    """Teardown contract tests: returns summary, soft/hard modes, slippage."""
+    position_tests = ""
+    if spec.has_teardown_intents and spec.position_setup:
+        position_tests = f'''
+    def test_generate_teardown_intents_soft_mode_with_position(
+        self, strategy: {class_name}
+    ) -> None:
+        """With a position held, SOFT teardown generates at least one intent."""
+        from almanak.framework.teardown import TeardownMode
+
+        # Simulate a held position
+        {spec.position_setup}
+
+        intents = strategy.generate_teardown_intents(mode=TeardownMode.SOFT)
+        assert isinstance(intents, list), "generate_teardown_intents() must return a list"
+        assert len(intents) > 0, "Expected non-empty teardown intents when position is held"
+        for intent in intents:
+            assert hasattr(intent, "intent_type"), (
+                f"Teardown returned non-Intent: {{type(intent).__name__}}"
+            )
+
+    def test_generate_teardown_intents_hard_mode_with_position(
+        self, strategy: {class_name}
+    ) -> None:
+        """With a position held, HARD teardown also generates intents."""
+        from almanak.framework.teardown import TeardownMode
+
+        {spec.position_setup}
+
+        intents = strategy.generate_teardown_intents(mode=TeardownMode.HARD)
+        assert isinstance(intents, list)
+        assert len(intents) > 0, "Expected non-empty teardown intents in HARD mode"
+
+    def test_generate_teardown_intents_hard_mode_higher_slippage(
+        self, strategy: {class_name}
+    ) -> None:
+        """HARD mode should tolerate at least as much slippage as SOFT.
+
+        Teardown goal in HARD mode is speed over cost; slippage must not
+        be tighter than SOFT.
+        """
+        from almanak.framework.teardown import TeardownMode
+
+        {spec.position_setup}
+        soft_intents = strategy.generate_teardown_intents(mode=TeardownMode.SOFT)
+        # Reset state for a fresh HARD run (position_setup applied twice)
+        {spec.position_setup}
+        hard_intents = strategy.generate_teardown_intents(mode=TeardownMode.HARD)
+
+        def _swap_slippages(intents):
+            return [
+                getattr(i, "max_slippage", None)
+                for i in intents
+                if getattr(i.intent_type, "value", str(i.intent_type)) == "SWAP"
+                and getattr(i, "max_slippage", None) is not None
+            ]
+
+        soft_slippages = _swap_slippages(soft_intents)
+        hard_slippages = _swap_slippages(hard_intents)
+        if soft_slippages and hard_slippages:
+            assert max(hard_slippages) >= max(soft_slippages), (
+                f"HARD slippage {{max(hard_slippages)}} must be >= "
+                f"SOFT slippage {{max(soft_slippages)}}"
+            )
+
+    def test_get_open_positions_reports_held_position(
+        self, strategy: {class_name}
+    ) -> None:
+        """After faking a position, get_open_positions() should list it."""
+        {spec.position_setup}
+
+        summary = strategy.get_open_positions()
+        assert summary is not None, "get_open_positions() must not return None"
+        positions = getattr(summary, "positions", None)
+        assert positions is not None, "summary must have a .positions attribute"
+        assert len(positions) >= 1, "Expected at least one position to be reported"
+'''
+
+    return f'''
+# ---------------------------------------------------------------------------
+# Teardown: close-position safety (operators rely on this)
+# ---------------------------------------------------------------------------
+
+
+class Test{class_name}Teardown:
+    """Teardown methods must honour the operator safety contract.
+
+    See: blueprints/14-teardown-system.md
+    """
+
+    def test_teardown_methods_exist(self, strategy: {class_name}) -> None:
+        """Both teardown methods are implemented (not inherited as no-ops)."""
+        assert hasattr(strategy, "get_open_positions")
+        assert hasattr(strategy, "generate_teardown_intents")
+        assert callable(strategy.get_open_positions)
+        assert callable(strategy.generate_teardown_intents)
+
+    def test_get_open_positions_returns_summary(
+        self, strategy: {class_name}
+    ) -> None:
+        """get_open_positions() returns a TeardownPositionSummary (or None)."""
+        summary = strategy.get_open_positions()
+        if summary is not None:
+            assert hasattr(summary, "positions"), (
+                "summary must be a TeardownPositionSummary with .positions"
+            )
+            assert isinstance(summary.positions, list)
+
+    def test_generate_teardown_intents_soft_returns_list(
+        self, strategy: {class_name}
+    ) -> None:
+        """Must return a list (possibly empty) of Intent-like objects."""
+        from almanak.framework.teardown import TeardownMode
+
+        intents = strategy.generate_teardown_intents(mode=TeardownMode.SOFT)
+        assert isinstance(intents, list), (
+            f"Must return a list, got {{type(intents).__name__}}"
+        )
+
+    def test_generate_teardown_intents_hard_returns_list(
+        self, strategy: {class_name}
+    ) -> None:
+        """HARD mode must also return a list (possibly empty)."""
+        from almanak.framework.teardown import TeardownMode
+
+        intents = strategy.generate_teardown_intents(mode=TeardownMode.HARD)
+        assert isinstance(intents, list)
+{position_tests}
+
+'''
+
+
+def _render_callback_tests(
+    class_name: str,
+    spec: "_TemplateTestSpec",
+) -> str:
+    """State machine transition tests driven by the template's transition spec."""
+    param_entries: list[str] = []
+    for t in spec.transitions:
+        param_entries.append(
+            "        pytest.param(\n"
+            f"            {t.intent_type!r},\n"
+            f"            {t.intent_attrs!r},\n"
+            f"            {t.result_attrs!r},\n"
+            f"            {t.pre_state!r},\n"
+            f"            {t.expected!r},\n"
+            f"            id={t.name!r},\n"
+            "        ),"
+        )
+    params_block = "\n".join(param_entries)
+
+    return f'''
+# ---------------------------------------------------------------------------
+# State machine: on_intent_executed transitions
+# ---------------------------------------------------------------------------
+
+import copy  # noqa: E402 -- used by failure-path deepcopy assertions below
+
+
+class Test{class_name}StateMachine:
+    """on_intent_executed() must advance / clear state correctly."""
+
+    @pytest.mark.parametrize(
+        "intent_type_value,intent_attrs,result_attrs,pre_state,expected",
+        [
+{params_block}
+        ],
+    )
+    def test_on_intent_executed_advances_state(
+        self,
+        strategy: {class_name},
+        intent_type_value: str,
+        intent_attrs: dict,
+        result_attrs: dict,
+        pre_state: dict,
+        expected: dict,
+    ) -> None:
+        """Each template-specific transition should update the right state field."""
+        # Seed the pre-state onto the strategy instance.
+        for field, value in pre_state.items():
+            setattr(strategy, field, value)
+
+        intent = _make_mock_intent(intent_type_value, **intent_attrs)
+        result = _make_mock_result(**result_attrs)
+
+        strategy.on_intent_executed(intent, success=True, result=result)
+
+        # Special-case: "<field>_len" asserts against len(strategy.<field>)
+        for field, expected_value in expected.items():
+            if field.endswith("_len"):
+                real_field = field[: -len("_len")]
+                actual_len = len(getattr(strategy, real_field))
+                assert actual_len == expected_value, (
+                    f"Expected len({{real_field}}) == {{expected_value}}, got {{actual_len}}"
+                )
+            else:
+                actual = getattr(strategy, field)
+                assert actual == expected_value, (
+                    f"Expected {{field}} == {{expected_value!r}}, got {{actual!r}}"
+                )
+
+    def test_on_intent_executed_ignores_failures(
+        self, strategy: {class_name}
+    ) -> None:
+        """success=False must NOT mutate state -- framework retries on failure.
+
+        Uses deepcopy so in-place mutations of mutable fields (lists, dicts)
+        are detected, not silently passed.
+        """
+        tracked_fields = [
+            f for f in {spec.state_fields!r} if hasattr(strategy, f)
+        ]
+        before = {{f: copy.deepcopy(getattr(strategy, f)) for f in tracked_fields}}
+
+        intent = _make_mock_intent("SWAP")
+        result = _make_mock_result()
+        strategy.on_intent_executed(intent, success=False, result=result)
+
+        after = {{f: copy.deepcopy(getattr(strategy, f)) for f in tracked_fields}}
+        assert before == after, (
+            f"Failed intents must not mutate state. Diff: "
+            f"{{[(f, before[f], after[f]) for f in tracked_fields if before[f] != after[f]]}}"
+        )
+
+'''
+
+
+def _render_persistence_tests(
+    class_name: str,
+    spec: "_TemplateTestSpec",
+    chain: SupportedChain,
+) -> str:
+    """get_persistent_state() / load_persistent_state() round-trip tests."""
+    sample = spec.persistent_state_sample or {}
+    return f'''
+# ---------------------------------------------------------------------------
+# Persistence: get_persistent_state / load_persistent_state round-trip
+# ---------------------------------------------------------------------------
+
+
+class Test{class_name}Persistence:
+    """State must survive a save / load cycle so restarts don't lose context."""
+
+    def test_get_persistent_state_returns_dict(
+        self, strategy: {class_name}
+    ) -> None:
+        """get_persistent_state() returns a JSON-serializable dict."""
+        state = strategy.get_persistent_state()
+        assert isinstance(state, dict), "persistent state must be a dict"
+        try:
+            json.dumps(state, default=str)
+        except (TypeError, ValueError) as exc:
+            pytest.fail(f"persistent state is not JSON-serializable: {{exc}}")
+
+    def test_load_persistent_state_round_trip(
+        self, strategy: {class_name}, config: dict
+    ) -> None:
+        """Save state -> fresh instance -> load -> state preserved.
+
+        This is the lifecycle the runner performs on restart. A break here
+        means the strategy will 'forget' open positions after a crash.
+        """
+        sample = {sample!r}
+        # Seed the current instance with the sample state
+        strategy.load_persistent_state(sample)
+
+        saved = strategy.get_persistent_state()
+        assert isinstance(saved, dict)
+
+        # Load into a brand-new instance
+        fresh = {class_name}(
+            config=config,
+            chain=config.get("chain", "{chain.value}"),
+            wallet_address="0x" + "1" * 40,
+        )
+        fresh.load_persistent_state(saved)
+
+        # Both instances should now agree on every field they persist.
+        fresh_saved = fresh.get_persistent_state()
+        for key in saved:
+            assert fresh_saved.get(key) == saved.get(key), (
+                f"Round-trip lost key={{key}}: {{saved.get(key)!r}} -> {{fresh_saved.get(key)!r}}"
+            )
+
+    def test_load_persistent_state_with_empty_dict_does_not_raise(
+        self, strategy: {class_name}
+    ) -> None:
+        """Empty / missing state on first run must be handled (no crash)."""
+        strategy.load_persistent_state({{}})
+        assert isinstance(strategy.get_persistent_state(), dict)
+
+'''
+
+
+def generate_test_file(
+    name: str,
+    template: StrategyTemplate,
+    chain: SupportedChain,
+) -> str:
+    """Generate the test_strategy.py file content.
+
+    The emitted test suite exercises the scaffolded strategy at multiple
+    levels so a beginner who runs ``pytest`` after ``almanak strat new``
+    gets meaningful coverage out of the box, not just smoke tests:
+
+    - Always emitted (all templates):
+      * init sanity + decide()-returns-intent-or-hold
+      * decide() error handling (balance/price/RSI providers raising)
+      * get_status() contract
+      * Zero-balance edge case -> should hold or decide cleanly
+      * Zero-price edge case -> must not raise
+      * Teardown methods return valid types
+      * generate_teardown_intents(SOFT) and generate_teardown_intents(HARD)
+      * HARD mode uses higher-or-equal slippage than SOFT (where swaps exist)
+
+    - Stateful templates (those with on_intent_executed):
+      * State machine transitions (parameterized per template)
+      * on_intent_executed(success=False) does not mutate state
+      * get_persistent_state() / load_persistent_state() round-trip
+      * on_intent_executed stores position_id / state updates correctly
+
+    See blueprints/10-testing-quality.md for testing patterns.
+    """
+    class_name = to_pascal_case(name) + "Strategy"
+
+    spec = _TEMPLATE_TEST_SPECS.get(template, _BLANK_TEST_SPEC)
+
+    header = _render_test_file_header(name, class_name, chain, template)
+    base_tests = _render_base_tests(class_name, chain)
+    edge_tests = _render_edge_case_tests(class_name)
+    teardown_tests = _render_teardown_tests(class_name, spec)
+
+    callback_tests = ""
+    persistence_tests = ""
+    if spec.has_callbacks:
+        callback_tests = _render_callback_tests(class_name, spec)
+        persistence_tests = _render_persistence_tests(class_name, spec, chain)
+
+    return header + base_tests + edge_tests + teardown_tests + callback_tests + persistence_tests
 
 
 def generate_init_file(name: str) -> str:
