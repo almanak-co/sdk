@@ -12,6 +12,7 @@ Important: Each strategy uses exactly one gateway and vice versa.
 No two strategies share a gateway.
 """
 
+import copy
 import hashlib
 import json
 import logging
@@ -381,7 +382,9 @@ class HotCache:
     def get(self, strategy_id: str) -> StateData | None:
         """Get state from cache.
 
-        Returns None if not found or expired.
+        Returns None if not found or expired. Returns a deep copy so callers
+        cannot mutate the cached StateData; a failed CAS save must leave the
+        cache on its prior value.
         """
         entry = self._cache.get(strategy_id)
         if entry is None:
@@ -395,18 +398,20 @@ class HotCache:
                 del self._cache[strategy_id]
                 return None
 
-        return data
+        return copy.deepcopy(data)
 
     def set(self, state: StateData) -> None:
         """Store state in cache.
 
-        Evicts oldest entry if cache is full.
+        Evicts oldest entry if cache is full. Stores a deep copy so subsequent
+        caller mutation of the passed-in object cannot retroactively alter
+        cached state.
         """
         # Evict oldest if at capacity
         if len(self._cache) >= self._max_size and state.strategy_id not in self._cache:
             self._evict_oldest()
 
-        self._cache[state.strategy_id] = (state, time.time())
+        self._cache[state.strategy_id] = (copy.deepcopy(state), time.time())
 
     def delete(self, strategy_id: str) -> bool:
         """Delete state from cache.

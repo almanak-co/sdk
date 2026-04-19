@@ -19,6 +19,7 @@ import pytest_asyncio
 
 from ..backends.sqlite import SQLiteConfig, SQLiteStore
 from ..state_manager import (
+    HotCache,
     SQLiteConfigLight,
     StateConflictError,
     StateData,
@@ -382,6 +383,147 @@ class TestTieredStorage:
         state_manager.invalidate_hot_cache()
         loaded = await state_manager.load_state("inv-2")
         assert loaded.loaded_from == StateTier.WARM
+
+
+# =============================================================================
+# HOT CACHE MUTATION GUARD TESTS (VIB-3155)
+# =============================================================================
+
+
+class TestHotCacheMutationGuard:
+    """Guards against callers mutating cached StateData by reference.
+
+    Prior to VIB-3155, HotCache.get()/set() stored and returned the caller's
+    StateData by reference. Any in-memory mutation would corrupt the cache
+    before a CAS save succeeded — and a failed CAS would leave the corrupted
+    value in memory while WARM retained the prior truth.
+    """
+
+    def test_hotcache_get_returns_independent_copy(self) -> None:
+        """HotCache.get() must return a deep copy, not the cached reference."""
+        cache = HotCache()
+        original = StateData(
+            strategy_id="copy-get",
+            version=1,
+            state={"counter": 1, "nested": {"k": "v"}},
+        )
+        cache.set(original)
+
+        first = cache.get("copy-get")
+        assert first is not None
+        first.state["counter"] = 999
+        first.state["injected"] = "bad"
+        first.state["nested"]["k"] = "tampered"
+
+        second = cache.get("copy-get")
+        assert second is not None
+        assert second.state["counter"] == 1
+        assert "injected" not in second.state
+        assert second.state["nested"]["k"] == "v"
+
+    def test_hotcache_set_isolates_from_caller_mutation(self) -> None:
+        """HotCache.set() must deep-copy so later caller mutation is isolated."""
+        cache = HotCache()
+        state = StateData(
+            strategy_id="copy-set",
+            version=1,
+            state={"counter": 1, "nested": {"k": "v"}},
+        )
+        cache.set(state)
+
+        # Caller keeps a reference and mutates AFTER set() returns.
+        state.state["counter"] = 999
+        state.state["injected"] = "bad"
+        state.state["nested"]["k"] = "tampered"
+
+        loaded = cache.get("copy-set")
+        assert loaded is not None
+        assert loaded.state["counter"] == 1
+        assert "injected" not in loaded.state
+        assert loaded.state["nested"]["k"] == "v"
+
+    @pytest.mark.asyncio
+    async def test_failed_cas_leaves_hot_cache_on_prior_value(self, state_manager):
+        """A CAS conflict must not pollute the HOT cache with the failed write.
+
+        Composite guarantee: load returns a copy, save only populates HOT
+        after WARM succeeds, so a conflict leaves the cache on the prior
+        durably-committed value.
+        """
+        initial = StateData(
+            strategy_id="cas-hot",
+            version=1,
+            state={"v": 1},
+        )
+        await state_manager.save_state(initial)
+
+        # Load then mutate — simulating the runner building an update.
+        loaded = await state_manager.load_state("cas-hot")
+        assert loaded.loaded_from == StateTier.HOT
+        loaded.state["v"] = 2
+        loaded.version = 2
+
+        # Force CAS conflict by claiming a non-existent expected_version.
+        with pytest.raises(StateConflictError):
+            await state_manager.save_state(loaded, expected_version=99)
+
+        # HOT cache must still return the pre-conflict value.
+        recovered = await state_manager.load_state("cas-hot")
+        assert recovered.loaded_from == StateTier.HOT
+        assert recovered.state["v"] == 1
+        assert recovered.version == 1
+
+    def test_hotcache_ttl_expiry_does_not_leak_reference(self) -> None:
+        """After TTL expiry, re-set + get returns the new value (no ghost copy)."""
+        import time as _time
+
+        cache = HotCache(ttl_seconds=1)
+        first = StateData(strategy_id="ttl-x", version=1, state={"v": 1})
+        cache.set(first)
+
+        # Sleep past TTL, then first.get() evicts the expired entry.
+        _time.sleep(1.1)
+        assert cache.get("ttl-x") is None
+
+        # Mutating the original after expiry must not resurrect stale state.
+        first.state["v"] = 999
+
+        replacement = StateData(strategy_id="ttl-x", version=2, state={"v": 42})
+        cache.set(replacement)
+
+        # Caller mutating the replacement after set() also must not leak.
+        replacement.state["v"] = 777
+
+        loaded = cache.get("ttl-x")
+        assert loaded is not None
+        assert loaded.state["v"] == 42
+        assert loaded.version == 2
+
+    def test_hotcache_eviction_does_not_cross_talk(self) -> None:
+        """Evicting the oldest entry must not expose its reference elsewhere."""
+        cache = HotCache(max_size=2)
+        a = StateData(strategy_id="a", version=1, state={"who": "a"})
+        b = StateData(strategy_id="b", version=1, state={"who": "b"})
+        c = StateData(strategy_id="c", version=1, state={"who": "c"})
+
+        # Ensure strictly monotonic timestamps so eviction is deterministic.
+        import time as _time
+
+        cache.set(a)
+        _time.sleep(0.01)
+        cache.set(b)
+        _time.sleep(0.01)
+        cache.set(c)  # Evicts 'a' (oldest)
+
+        assert cache.get("a") is None
+
+        # Mutating the evicted caller-side object must not affect remaining entries.
+        a.state["who"] = "tampered"
+
+        remaining_b = cache.get("b")
+        remaining_c = cache.get("c")
+        assert remaining_b is not None and remaining_b.state["who"] == "b"
+        assert remaining_c is not None and remaining_c.state["who"] == "c"
 
 
 # =============================================================================
