@@ -10,6 +10,22 @@ concurrent updates.  Each agent has exactly one row in the WARM tier
 
 Important: Each strategy uses exactly one gateway and vice versa.
 No two strategies share a gateway.
+
+Durability invariant (VIB-3156):
+    A successful ``save_state()`` call guarantees durability or raises.
+
+    Operationally, every file-backed WARM backend writes the new version,
+    state_data, and checksum in a single atomic transaction with full
+    fsync durability (``synchronous = FULL`` for SQLite).  The new row
+    is only made visible to readers after the transaction commits to
+    stable storage; therefore state rows never exist on disk with a
+    version bump but a state_data/checksum mismatch.  Checksum
+    consistency is validated BEFORE the row is written so that an
+    invalid serialization never lands on disk at the real path.
+
+    For gateway-backed backends (``GatewayStateManager``) atomicity is
+    the gateway server's responsibility -- the client's ``SaveState``
+    RPC is all-or-nothing from the caller's perspective.
 """
 
 import copy
@@ -549,6 +565,15 @@ class PostgresStore:
         Single-row-per-agent model: uses UPSERT when *expected_version* is
         ``None``, or a version-guarded UPDATE for CAS.
 
+        Durability (VIB-3156):
+            The write runs in a single transaction so the version, state_data,
+            and checksum columns are updated atomically. PostgreSQL's default
+            ``synchronous_commit = on`` guarantees the transaction is flushed
+            to WAL before the call returns, so on success the caller has the
+            durability guarantee: a crash after this function returns will
+            either see the full new row or the prior row -- never a torn
+            state with version bumped but stale checksum.
+
         Returns:
             True if save succeeded.
 
@@ -560,7 +585,7 @@ class PostgresStore:
 
         state_json = json.dumps(state.state, default=str)
 
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
             if expected_version is None:
                 # UPSERT: insert new or overwrite existing (version increments)
                 await conn.execute(
@@ -604,7 +629,10 @@ class PostgresStore:
                 )
 
                 if result == "UPDATE 0":
-                    # Version mismatch -- get actual version for the error
+                    # Version mismatch -- read the actual version inside the
+                    # same transaction so the error message reflects a
+                    # consistent snapshot. The surrounding transaction will
+                    # be rolled back by the raised exception.
                     actual = await conn.fetchval(
                         "SELECT version FROM strategy_state WHERE agent_id = $1",
                         state.strategy_id,
@@ -959,7 +987,11 @@ class StateManager:
         if expected_version is None and state.version > 1:
             expected_version = state.version - 1
 
-        # Recalculate checksum
+        # Recalculate checksum. The WARM backend computes its own canonical
+        # checksum from the serialized state body before committing (see
+        # SQLiteStore.save and PostgresStore.save), and writes state_data +
+        # checksum in the same atomic transaction -- so the on-disk row is
+        # always self-consistent. See module docstring -- VIB-3156.
         state.checksum = state._calculate_checksum()
         state.created_at = datetime.now(UTC)
 

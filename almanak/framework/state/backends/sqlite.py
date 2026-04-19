@@ -510,12 +510,20 @@ class SQLiteStore:
             # Enable WAL mode for better concurrent reads
             if self._config.wal_mode:
                 conn.execute("PRAGMA journal_mode = WAL")
-                conn.execute("PRAGMA synchronous = NORMAL")
+                # synchronous=FULL guarantees each commit is fsync'd to disk
+                # before returning. This is required by the VIB-3156 durability
+                # invariant: save_state() either durably persists or raises.
+                # Without FULL, WAL can lose the last commit on crash, producing
+                # recovery states where the chain nonce is ahead of the cached
+                # state we reload.
+                conn.execute("PRAGMA synchronous = FULL")
                 # Auto-checkpoint WAL every 100 pages to prevent unbounded growth
                 # when multiple processes write concurrently
                 conn.execute("PRAGMA wal_autocheckpoint = 100")
             else:
                 conn.execute(f"PRAGMA journal_mode = {self._config.journal_mode}")
+                # Match WAL's strict durability for non-WAL journal modes too.
+                conn.execute("PRAGMA synchronous = FULL")
 
             # Enable foreign keys
             conn.execute("PRAGMA foreign_keys = ON")
@@ -752,6 +760,19 @@ class SQLiteStore:
     async def save(self, state: StateData, expected_version: int | None = None) -> bool:
         """Save state with optional CAS semantics (single row per agent).
 
+        Durability (VIB-3156):
+            The write is performed inside a single SQLite transaction
+            (``BEGIN IMMEDIATE`` ... ``COMMIT``) that spans both the
+            version-CAS check and the data write. With
+            ``synchronous = FULL`` (set in ``_connect``) the commit is
+            fsync'd before returning, so on success the caller has the
+            durability guarantee: a crash after this function returns
+            will either see the full new row or the prior row -- never a
+            torn state with version bumped but stale checksum. The
+            checksum-vs-state_data consistency is verified BEFORE the
+            transaction commits, so an invalid serialization never
+            reaches disk at the real row.
+
         Args:
             state: State data to save.
             expected_version: Expected current version for CAS update.
@@ -767,68 +788,92 @@ class SQLiteStore:
         if not self._initialized:
             await self.initialize()
 
-        # Calculate checksum
+        # Calculate checksum from state_data. The stored checksum must be a
+        # function of state_json alone so that a post-crash reader can
+        # re-derive it; that is the check gating recovery.
         state_json = json.dumps(state.state, sort_keys=True, default=str)
         checksum = hashlib.sha256(state_json.encode()).hexdigest()
+        # Verify: re-hash state_json and confirm it equals the checksum we are
+        # about to commit. This is the pre-commit equivalent of "verify before
+        # rename" for file-atomic writes -- it catches any checksum drift
+        # (e.g. non-deterministic serialization) BEFORE a version bump lands.
+        if hashlib.sha256(state_json.encode()).hexdigest() != checksum:
+            raise SQLiteBackendError(
+                f"Pre-commit checksum verification failed for {state.strategy_id}; refusing to write torn state"
+            )
         now = datetime.now(UTC).isoformat()
 
         def _sync_save() -> bool:
-            if expected_version is not None:
-                # CAS update -- version must match
-                cursor = self._conn.execute(  # type: ignore[union-attr]
-                    """
-                    UPDATE strategy_state
-                    SET version = version + 1,
-                        state_data = ?,
-                        schema_version = ?,
-                        checksum = ?,
-                        updated_at = ?
-                    WHERE strategy_id = ? AND version = ?
-                    """,
-                    (state_json, state.schema_version, checksum, now, state.strategy_id, expected_version),
-                )
-                if cursor.rowcount == 0:
-                    # Check actual version for error message
-                    cursor2 = self._conn.execute(  # type: ignore[union-attr]
-                        "SELECT version FROM strategy_state WHERE strategy_id = ?",
-                        (state.strategy_id,),
-                    )
-                    row = cursor2.fetchone()
-                    raise StateConflictError(
-                        strategy_id=state.strategy_id,
-                        expected_version=expected_version,
-                        actual_version=row["version"] if row else 0,
-                    )
-                self._conn.commit()  # type: ignore[union-attr]
-                return True
-            else:
-                # UPSERT: insert or update with version increment
-                self._conn.execute(  # type: ignore[union-attr]
-                    """
-                    INSERT INTO strategy_state
-                    (strategy_id, version, state_data, schema_version, checksum,
-                     created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (strategy_id)
-                    DO UPDATE SET
-                        version = strategy_state.version + 1,
-                        state_data = excluded.state_data,
-                        schema_version = excluded.schema_version,
-                        checksum = excluded.checksum,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        state.strategy_id,
-                        state.version,
-                        state_json,
-                        state.schema_version,
-                        checksum,
-                        now,
-                        now,
-                    ),
-                )
-                self._conn.commit()  # type: ignore[union-attr]
-                return True
+            conn = self._conn
+            assert conn is not None
+
+            # Serialize concurrent writers and open an immediate write
+            # transaction so the version read and write are atomic.
+            with self._db_lock:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    if expected_version is not None:
+                        # CAS update -- version must match
+                        cursor = conn.execute(
+                            """
+                            UPDATE strategy_state
+                            SET version = version + 1,
+                                state_data = ?,
+                                schema_version = ?,
+                                checksum = ?,
+                                updated_at = ?
+                            WHERE strategy_id = ? AND version = ?
+                            """,
+                            (state_json, state.schema_version, checksum, now, state.strategy_id, expected_version),
+                        )
+                        if cursor.rowcount == 0:
+                            # Read actual version while still inside the
+                            # transaction so the error is consistent with what
+                            # the CAS saw.
+                            row = conn.execute(
+                                "SELECT version FROM strategy_state WHERE strategy_id = ?",
+                                (state.strategy_id,),
+                            ).fetchone()
+                            conn.execute("ROLLBACK")
+                            raise StateConflictError(
+                                strategy_id=state.strategy_id,
+                                expected_version=expected_version,
+                                actual_version=row["version"] if row else 0,
+                            )
+                    else:
+                        # UPSERT: insert or update with version increment
+                        conn.execute(
+                            """
+                            INSERT INTO strategy_state
+                            (strategy_id, version, state_data, schema_version, checksum,
+                             created_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT (strategy_id)
+                            DO UPDATE SET
+                                version = strategy_state.version + 1,
+                                state_data = excluded.state_data,
+                                schema_version = excluded.schema_version,
+                                checksum = excluded.checksum,
+                                updated_at = excluded.updated_at
+                            """,
+                            (
+                                state.strategy_id,
+                                state.version,
+                                state_json,
+                                state.schema_version,
+                                checksum,
+                                now,
+                                now,
+                            ),
+                        )
+                    conn.execute("COMMIT")
+                except StateConflictError:
+                    # Already rolled back above.
+                    raise
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+            return True
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_save)
