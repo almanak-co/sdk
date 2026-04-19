@@ -23,6 +23,7 @@ Example:
 import base64
 import hashlib
 import hmac
+import math
 import random
 import secrets
 import time
@@ -940,6 +941,108 @@ class ClobClient:
         scaled = amount * self.DECIMAL_SCALE
         return int(scaled.quantize(Decimal("1"), rounding=ROUND_DOWN))
 
+    # CLOB API precision caps (expressed in 6-decimal token units):
+    #   USDC amounts  → 5 decimals  (multiples of 10)
+    #   Shares amounts → 2 decimals (multiples of 10_000)
+    _USDC_STEP = 10
+    _SHARES_STEP = 10_000
+
+    @classmethod
+    def _build_amounts_at_price(
+        cls,
+        side: str,
+        price: Decimal,
+        shares_tokens_desired: int,
+    ) -> tuple[int, int]:
+        """Compute (maker_tokens, taker_tokens) so the integer ratio equals ``price`` exactly.
+
+        The Polymarket CLOB rejects any order whose implied price (maker/taker for
+        BUY, taker/maker for SELL) is not a multiple of the market's tick size —
+        e.g. ``order ... breaks minimum tick size rule: 0.001``. Quantizing the
+        two legs independently (USDC to 5 decimals, shares to 2 decimals) satisfies
+        the per-leg precision caps but lets the ratio drift off-tick.
+
+        This helper picks the largest ``shares_tokens ≤ shares_tokens_desired`` such
+        that both legs are on their precision step AND the integer ratio
+        ``usdc_tokens / shares_tokens`` is exactly ``price`` — guaranteeing the
+        CLOB will accept the order at any tick size the price resolves to.
+
+        Algorithm:
+          1. Express ``price = p / q`` as an exact integer ratio (``price`` is always
+             a finite Decimal with at most 4 fractional digits — Polymarket's tick
+             sizes are 0.0001…0.1 — so ``q`` is bounded).
+          2. For shares_tokens on the shares step, usdc_tokens must be
+             ``shares_tokens * p / q``. Require ``q | shares_tokens`` for the
+             division to be exact ⇒ shares_tokens must be a multiple of
+             ``lcm(shares_step, q)``.
+          3. usdc_tokens must additionally be a multiple of usdc_step. Reduce
+             shares_tokens in whole ``lcm`` steps until that holds (always
+             terminates in ``usdc_step / gcd(M, usdc_step)`` iterations, where
+             ``M = lcm_step * p / q``).
+        """
+        if shares_tokens_desired <= 0:
+            return (0, 0)
+
+        # Exact integer ratio — Decimal("0.99").as_integer_ratio() -> (99, 100) etc.
+        p_num, p_den = price.as_integer_ratio()
+        if p_num <= 0 or p_den <= 0:
+            raise ValueError(f"price must be positive, got {price!r}")
+
+        # Polymarket tick sizes top out at 0.0001 ⇒ a tick-aligned price always has
+        # p_den ≤ 10_000. A larger denominator means the caller passed a price with
+        # too much precision (e.g. ``Decimal(0.7)`` from a Python float, whose
+        # ``as_integer_ratio`` returns p_den = 4_503_599_627_370_496). Without this
+        # guard, ``combined_step`` blows up to trillions of share-tokens and any
+        # realistic order silently snaps to ``(0, 0)`` — a garbage submission. Snap
+        # the price to the tick grid (or quantize the Decimal) before calling.
+        if p_den > 10_000:
+            raise ValueError(
+                f"price has too much precision (denominator {p_den} > 10_000); "
+                f"snap to a tick-aligned Decimal before calling. price={price!r}"
+            )
+
+        # Smallest shares-token granularity that yields an integer usdc-token count.
+        lcm_step = cls._SHARES_STEP * p_den // math.gcd(cls._SHARES_STEP, p_den)
+        # usdc-token count per ``lcm_step`` of shares tokens (integer by construction).
+        usdc_per_step = lcm_step * p_num // p_den
+        # How many lcm_steps to lift usdc_per_step * k onto the usdc_step grid.
+        g = math.gcd(usdc_per_step, cls._USDC_STEP)
+        k_multiple = cls._USDC_STEP // g  # typically 1 for tick ≥ 0.001
+        combined_step = lcm_step * k_multiple
+
+        shares_tokens = (shares_tokens_desired // combined_step) * combined_step
+        usdc_tokens = shares_tokens * p_num // p_den
+
+        if side == "BUY":
+            # maker = USDC out, taker = shares in
+            return usdc_tokens, shares_tokens
+        # SELL: maker = shares out, taker = USDC in
+        return shares_tokens, usdc_tokens
+
+    def _validate_quantized_amounts(
+        self,
+        side: str,
+        maker_amount: int,
+        taker_amount: int,
+        market: GammaMarket | None = None,
+    ) -> None:
+        """Re-run share-min and BUY $1-floor checks against post-snap amounts.
+
+        ``_build_amounts_at_price`` floors shares to a precision step that can
+        push the executable order below the per-market shares minimum or
+        Polymarket's $1 BUY floor — even when the requested values passed the
+        pre-snap checks. Example: market BUY ``amount=$1, worst_price=0.99``
+        passes ``_validate_order_value_usd($1)`` but snaps to ``maker=$0.9999``,
+        which the CLOB rejects with ``min size: $1``. This helper closes that
+        gap by re-validating after the snap.
+        """
+        shares_units = taker_amount if side == "BUY" else maker_amount
+        shares = Decimal(shares_units) / Decimal(self.DECIMAL_SCALE)
+        self._validate_size(shares, market=market)
+        if side == "BUY":
+            usdc = Decimal(maker_amount) / Decimal(self.DECIMAL_SCALE)
+            self._validate_order_value_usd(usdc)
+
     def _validate_price(self, price: Decimal) -> None:
         """Validate price is within allowed range.
 
@@ -1213,23 +1316,14 @@ class ClobClient:
         wallet = self.config.wallet_address
         sig_type = self.config.signature_type.value
 
-        # Calculate amounts based on side
-        # BUY: pay USDC, receive shares
-        # SELL: pay shares, receive USDC
-        if params.side == "BUY":
-            # maker pays: size * price in USDC
-            # taker receives: size in shares
-            usdc_amount = params.size * params.price
-            maker_amount = self._to_token_units(usdc_amount)
-            taker_amount = self._to_token_units(params.size)
-            side = OrderSide.BUY.value
-        else:  # SELL
-            # maker pays: size in shares
-            # taker receives: size * price in USDC
-            usdc_amount = params.size * params.price
-            maker_amount = self._to_token_units(params.size)
-            taker_amount = self._to_token_units(usdc_amount)
-            side = OrderSide.SELL.value
+        # Derive maker/taker so that the integer ratio == params.price exactly.
+        # BUY: maker = USDC, taker = shares. SELL: maker = shares, taker = USDC.
+        shares_tokens_desired = self._to_token_units(params.size)
+        side = OrderSide.BUY.value if params.side == "BUY" else OrderSide.SELL.value
+        maker_amount, taker_amount = self._build_amounts_at_price(params.side, params.price, shares_tokens_desired)
+        # Re-validate AFTER snap — flooring can drop us below the per-market
+        # shares minimum or Polymarket's $1 BUY floor.
+        self._validate_quantized_amounts(params.side, maker_amount, taker_amount, market=market)
 
         # Build the order struct
         return UnsignedOrder(
@@ -1306,23 +1400,22 @@ class ClobClient:
         sig_type = self.config.signature_type.value
 
         if params.side == "BUY":
-            # For market BUY: amount is USDC to spend
-            # Calculate expected shares at worst price
+            # For market BUY: amount is USDC to spend; shares = amount / price.
             expected_shares = params.amount / price
             self._validate_size(expected_shares, market=market)
             self._validate_order_value_usd(params.amount)
-
-            maker_amount = self._to_token_units(params.amount)
-            taker_amount = self._to_token_units(expected_shares)
+            shares_tokens_desired = self._to_token_units(expected_shares)
             side = OrderSide.BUY.value
         else:  # SELL
-            # For market SELL: amount is shares to sell
+            # For market SELL: amount is shares to sell.
             self._validate_size(params.amount, market=market)
-
-            expected_usdc = params.amount * price
-            maker_amount = self._to_token_units(params.amount)
-            taker_amount = self._to_token_units(expected_usdc)
+            shares_tokens_desired = self._to_token_units(params.amount)
             side = OrderSide.SELL.value
+
+        maker_amount, taker_amount = self._build_amounts_at_price(params.side, price, shares_tokens_desired)
+        # Re-validate AFTER snap — flooring can drop us below the per-market
+        # shares minimum or Polymarket's $1 BUY floor.
+        self._validate_quantized_amounts(params.side, maker_amount, taker_amount, market=market)
 
         return UnsignedOrder(
             salt=self._generate_salt(),

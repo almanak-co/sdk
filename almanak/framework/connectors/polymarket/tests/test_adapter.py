@@ -127,6 +127,10 @@ def mock_clob_client(test_market):
     mock.create_and_sign_limit_order.return_value = MockSignedOrder()
     mock.create_and_sign_market_order.return_value = MockSignedOrder()
     mock.close.return_value = None
+    # round_price_to_tick is called by the adapter to snap user-supplied prices
+    # onto the market's tick grid. Tests pin pre-aligned prices so the identity
+    # passthrough is correct.
+    mock.round_price_to_tick.side_effect = lambda price, side, market=None, tick_size=None: price
     # Adapter reads clob.credentials.api_key to build the order `owner` field
     mock.credentials.api_key = "test-api-key"
     return mock
@@ -255,6 +259,115 @@ class TestBuyIntentCompilation:
         assert bundle.intent_type == IntentType.PREDICTION_BUY.value
         assert bundle.metadata["price"] == "0.65"
         assert bundle.metadata["order_type"] == "GTC"
+
+    def test_buy_intent_with_max_price_routes_to_limit_even_if_default_market(self, adapter_with_mocks, test_market):
+        """When max_price is set we route to LIMIT regardless of intent.order_type.
+
+        Pre-fix the adapter required BOTH ``order_type=='limit'`` AND ``max_price``;
+        otherwise it fell back to market sweep at worst_price=0.99 — which on
+        cheap markets reserves an $80 nominal against a $1 wallet and gets
+        rejected by the CLOB. See PM incident 2026-04-19, market 556063.
+        """
+        intent = PredictionBuyIntent(
+            market_id=test_market.id,
+            outcome="YES",
+            shares=Decimal("100"),
+            max_price=Decimal("0.65"),
+            # order_type left at its "market" default
+        )
+
+        bundle = adapter_with_mocks.compile_intent(intent)
+
+        adapter_with_mocks.clob.create_and_sign_limit_order.assert_called_once()
+        adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
+        assert bundle.metadata["price"] == "0.65"
+
+    def test_buy_intent_without_max_price_falls_back_to_market_with_warning(
+        self, adapter_with_mocks, test_market, caplog
+    ):
+        """Without max_price we still build a market order at worst_price=0.99,
+        but the adapter must warn — the strategy author should set max_price."""
+        intent = PredictionBuyIntent(
+            market_id=test_market.id,
+            outcome="YES",
+            shares=Decimal("100"),
+        )
+
+        with caplog.at_level("WARNING", logger="almanak.framework.connectors.polymarket.adapter"):
+            bundle = adapter_with_mocks.compile_intent(intent)
+
+        adapter_with_mocks.clob.create_and_sign_market_order.assert_called_once()
+        adapter_with_mocks.clob.create_and_sign_limit_order.assert_not_called()
+        assert bundle.metadata["price"] == "0.99"
+        assert any("no max_price" in rec.message for rec in caplog.records)
+
+    def test_buy_intent_market_to_limit_elevation_uses_ioc_not_gtc(self, adapter_with_mocks, test_market):
+        """When the strategy declares ``order_type='market'`` (the default) but
+        we elevate to LIMIT for safety, force IOC so we don't silently leave a
+        long-lived GTC order resting on the book.
+
+        Auditor finding: the previous market path was IOC; routing to LIMIT
+        with ``_map_time_in_force(intent.time_in_force)`` defaulted to GTC,
+        silently changing the order's lifecycle.
+        """
+        intent = PredictionBuyIntent(
+            market_id=test_market.id,
+            outcome="YES",
+            shares=Decimal("100"),
+            max_price=Decimal("0.65"),
+            # order_type left at its "market" default
+        )
+
+        bundle = adapter_with_mocks.compile_intent(intent)
+
+        # Elevated market→limit must use IOC, not GTC
+        assert bundle.metadata["order_type"] == "IOC"
+
+    def test_buy_intent_explicit_limit_keeps_declared_tif(self, adapter_with_mocks, test_market):
+        """An explicit ``order_type='limit'`` must respect the user's TIF."""
+        intent = PredictionBuyIntent(
+            market_id=test_market.id,
+            outcome="YES",
+            shares=Decimal("100"),
+            max_price=Decimal("0.65"),
+            order_type="limit",
+            time_in_force="GTC",
+        )
+
+        bundle = adapter_with_mocks.compile_intent(intent)
+        assert bundle.metadata["order_type"] == "GTC"
+
+    def test_buy_intent_size_uses_pre_snap_max_price(self, adapter_with_mocks, test_market):
+        """When max_price doesn't lie on the tick grid, size must come from the
+        user-supplied price (preserving sizing intent), not the snapped price.
+
+        Auditor finding: amount_usd=$10 with max_price=0.0135 on a 0.01-tick
+        market would otherwise snap price → 0.01 → size = 10/0.01 = 1000 shares
+        (vs. user-intended 10/0.0135 ≈ 740). The snap should only affect the
+        submission price, not the share count.
+        """
+        # Configure round_price_to_tick to actually snap (mock returns floor-to-0.01)
+        adapter_with_mocks.clob.round_price_to_tick.side_effect = (
+            lambda price, side, market=None, tick_size=None: Decimal("0.01")
+        )
+
+        intent = PredictionBuyIntent(
+            market_id=test_market.id,
+            outcome="YES",
+            amount_usd=Decimal("10.00"),
+            max_price=Decimal("0.0135"),
+        )
+
+        bundle = adapter_with_mocks.compile_intent(intent)
+
+        # size = amount_usd / pre-snap max_price = 10 / 0.0135 ≈ 740.74
+        # (NOT 10 / 0.01 = 1000 which would silently inflate the position 35%)
+        size_str = bundle.metadata["size"]
+        size = Decimal(size_str)
+        expected = Decimal("10") / Decimal("0.0135")
+        assert size == expected, f"size {size} != pre-snap-derived {expected}"
+        # Snapped price went into submission
+        assert bundle.metadata["price"] == "0.01"
 
     def test_compile_buy_intent_no_outcome(self, adapter_with_mocks, test_market):
         """Test compiling buy for NO outcome."""
@@ -387,6 +500,48 @@ class TestSellIntentCompilation:
 
         assert bundle.metadata["price"] == "0.70"
         assert bundle.metadata["order_type"] == "GTC"
+
+    def test_sell_intent_with_min_price_routes_to_limit_even_if_default_market(self, adapter_with_mocks, test_market):
+        """Mirror of the BUY routing test on the SELL side: presence of
+        ``min_price`` elevates SELL to LIMIT regardless of declared order_type.
+        Pre-fix the SELL path mirrored the BUY footgun."""
+        intent = PredictionSellIntent(
+            market_id=test_market.id,
+            outcome="YES",
+            shares=Decimal("50"),
+            min_price=Decimal("0.70"),
+            # order_type left at its "market" default
+        )
+
+        bundle = adapter_with_mocks.compile_intent(intent)
+
+        adapter_with_mocks.clob.create_and_sign_limit_order.assert_called_once()
+        adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
+        # Elevation must use IOC, not GTC, to preserve fail-fast immediacy
+        assert bundle.metadata["order_type"] == "IOC"
+        assert bundle.metadata["price"] == "0.70"
+
+    def test_sell_intent_off_tick_min_price_is_snapped(self, adapter_with_mocks, test_market):
+        """Off-tick ``min_price`` (e.g. 0.7035 on a 0.01-tick market) must be
+        snapped via ``round_price_to_tick`` before submission. Mirror of the
+        BUY off-tick test on the SELL side."""
+        # SELL rounds UP (ceiling) — mock the snap to return the next tick up
+        adapter_with_mocks.clob.round_price_to_tick.side_effect = (
+            lambda price, side, market=None, tick_size=None: Decimal("0.71")
+        )
+
+        intent = PredictionSellIntent(
+            market_id=test_market.id,
+            outcome="YES",
+            shares=Decimal("50"),
+            min_price=Decimal("0.7035"),  # off-tick on a 0.01-tick market
+        )
+
+        bundle = adapter_with_mocks.compile_intent(intent)
+
+        adapter_with_mocks.clob.round_price_to_tick.assert_called()
+        # Submitted at the snapped price
+        assert bundle.metadata["price"] == "0.71"
 
 
 # =============================================================================

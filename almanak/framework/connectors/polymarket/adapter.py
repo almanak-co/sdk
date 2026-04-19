@@ -245,12 +245,22 @@ class PolymarketAdapter:
             market = self._resolve_market(intent.market_id)
             token_id = self._get_token_id(market, intent.outcome)
 
-            # Determine order parameters
-            if intent.order_type == "limit" and intent.max_price is not None:
-                # Limit order with specified price
-                price = intent.max_price
-                size = self._calculate_size(intent, price)
-
+            # Order routing: prefer LIMIT whenever the strategy gave us a price
+            # to anchor to. Market BUYs at the 0.99 default reserve a full
+            # ~size*$0.99 nominal against the wallet's USDC allowance, which
+            # the CLOB rejects on cheap markets ($1 budget vs $80 nominal). A
+            # tick-aligned limit at max_price has nominal = size*max_price and
+            # avoids the footgun entirely. See Portfolio Manager incident
+            # 2026-04-19 (market 556063).
+            if intent.max_price is not None:
+                # Compute size from the user-supplied max_price (preserve sizing
+                # intent), then snap the submission price to the tick grid. If we
+                # used the snapped price for sizing, an off-tick max_price would
+                # silently inflate the share count: e.g. amount_usd=$1 with
+                # max_price=0.0135 on a 0.01-tick market would snap price → 0.01
+                # and sizing → 100 shares (vs. the user-intended ~74).
+                size = self._calculate_size(intent, intent.max_price)
+                price = self.clob.round_price_to_tick(intent.max_price, "BUY", market=market)
                 params = LimitOrderParams(
                     token_id=token_id,
                     side="BUY",
@@ -258,23 +268,40 @@ class PolymarketAdapter:
                     size=size,
                     expiration=self._calculate_expiration(intent.expiration_hours),
                 )
-                # Pass market metadata for market-specific minimum validation
                 signed_order = self.clob.create_and_sign_limit_order(params, market=market)
-                order_type = self._map_time_in_force(intent.time_in_force)
+                # If the strategy declared order_type='market' (the default), it
+                # expected fail-fast immediacy. Routing to LIMIT for safety must
+                # NOT silently downgrade that to a long-lived GTC order resting
+                # on the book — force IOC so the order either fills or cancels.
+                if intent.order_type == "market":
+                    order_type = OrderType.IOC
+                else:
+                    order_type = self._map_time_in_force(intent.time_in_force)
 
             else:
-                # Market order - use aggressive price
-                # For BUY, use 0.99 (max) to ensure fill
-                price = intent.max_price or Decimal("0.99")
+                # No max_price → fall back to aggressive market sweep at 0.99.
+                # Snap the default to the market's tick grid (0.99 is a valid
+                # tick on every standard market: 0.01, 0.001, 0.0001, but a
+                # non-standard tick grid like 0.005 would otherwise reject).
+                # Warn loudly: this reserves ~size*$0.99 of USDC allowance even
+                # though the actual fill is at the orderbook's best ask.
+                price = self.clob.round_price_to_tick(Decimal("0.99"), "BUY", market=market)
                 size = self._calculate_size(intent, price)
-
+                logger.warning(
+                    "PredictionBuyIntent has no max_price; defaulting to market "
+                    "sweep at worst_price=%s. Nominal USDC reserve = size * worst_price "
+                    "= ~$%s — will be rejected by the CLOB if it exceeds the "
+                    "wallet's USDC balance/allowance. Set intent.max_price to a "
+                    "tick-aligned price to use a limit order instead.",
+                    price,
+                    size * price,
+                )
                 market_params = MarketOrderParams(
                     token_id=token_id,
                     side="BUY",
                     amount=size * price,  # USDC amount
                     worst_price=price,
                 )
-                # Pass market metadata for market-specific minimum validation
                 signed_order = self.clob.create_and_sign_market_order(market_params, market=market)
                 order_type = OrderType.IOC  # Market orders use IOC
 
@@ -376,33 +403,43 @@ class PolymarketAdapter:
                     raise TypeError(f"Expected Decimal for shares, got {type(intent.shares).__name__}")
                 size = intent.shares
 
-            # Determine order parameters
-            if intent.order_type == "limit" and intent.min_price is not None:
-                # Limit order with specified minimum price
-                price = intent.min_price
-
+            # Order routing: prefer LIMIT whenever the strategy gave us a price
+            # to anchor to (mirrors the BUY path). Market SELLs at the 0.01
+            # default underprice the position and risk filling at the floor.
+            if intent.min_price is not None:
+                price = self.clob.round_price_to_tick(intent.min_price, "SELL", market=market)
                 params = LimitOrderParams(
                     token_id=token_id,
                     side="SELL",
                     price=price,
                     size=size,
                 )
-                # Pass market metadata for market-specific minimum validation
                 signed_order = self.clob.create_and_sign_limit_order(params, market=market)
-                order_type = self._map_time_in_force(intent.time_in_force)
+                # Mirror the BUY routing: when the strategy declared 'market' but
+                # we elevated to LIMIT for safety, force IOC so we don't leave a
+                # long-lived GTC order resting on the book.
+                if intent.order_type == "market":
+                    order_type = OrderType.IOC
+                else:
+                    order_type = self._map_time_in_force(intent.time_in_force)
 
             else:
-                # Market order - use aggressive price
-                # For SELL, use 0.01 (min) to ensure fill
-                price = intent.min_price or Decimal("0.01")
-
+                # No min_price → aggressive market sweep at the 0.01 floor.
+                # Snap to the market's tick grid for the same defensive reason
+                # as the BUY fallback (non-standard tick grids).
+                price = self.clob.round_price_to_tick(Decimal("0.01"), "SELL", market=market)
+                logger.warning(
+                    "PredictionSellIntent has no min_price; defaulting to market "
+                    "sweep at worst_price=%s (floor). Will fill at any price ≥ floor. "
+                    "Set intent.min_price to a tick-aligned price to use a limit order.",
+                    price,
+                )
                 market_params = MarketOrderParams(
                     token_id=token_id,
                     side="SELL",
                     amount=size,  # Shares to sell
                     worst_price=price,
                 )
-                # Pass market metadata for market-specific minimum validation
                 signed_order = self.clob.create_and_sign_market_order(market_params, market=market)
                 order_type = OrderType.IOC  # Market orders use IOC
 

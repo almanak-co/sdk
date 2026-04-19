@@ -1127,14 +1127,13 @@ class TestOrderBuilding:
         order = client.build_market_order(params)
 
         assert order.side == 0  # BUY
-        # BUY 100 USDC at worst price 0.70 = ~142.85 shares
-        # maker_amount = USDC to spend = 100 * 10^6
-        assert order.maker_amount == 100_000_000
-
-        # taker_amount = expected shares = 100 / 0.70 * 10^6 ≈ 142857142
-        # (rounded down)
-        expected_shares = Decimal("100") / Decimal("0.70")
-        assert order.taker_amount == int(expected_shares * 10**6)
+        # 100 USDC / 0.70 = 142.857142... shares → snap down to the shares step
+        # (multiple of 10_000 in 6-decimal units = 2-decimal share precision) → 142.85 shares.
+        # maker is derived from the snapped taker at exactly 0.70 so the CLOB
+        # sees an on-tick implied price.
+        assert order.taker_amount == 142_850_000  # 142.85 shares
+        assert order.maker_amount == 99_995_000  # 142.85 * 0.70 USDC
+        assert Decimal(order.maker_amount) / Decimal(order.taker_amount) == Decimal("0.70")
 
     def test_build_market_order_sell(self, config_with_credentials):
         """Should build a valid SELL market order."""
@@ -2533,6 +2532,196 @@ class TestTickSizeValidation:
 
         with pytest.raises(PolymarketInvalidTickSizeError):
             client._validate_tick_size(Decimal("0.50015"), market=market)
+
+
+class TestRatioPreservation:
+    """The CLOB validates that (maker/taker for BUY, taker/maker for SELL) is a
+    multiple of the market's tick size. Quantizing the two legs independently to
+    their precision caps (5 decimals USDC, 2 decimals shares) lets that ratio
+    drift off-tick — e.g. 80_666_190 / 81_480_000 = 0.98992... on a 0.001 tick
+    market, which the API rejects with ``breaks minimum tick size rule``.
+
+    These tests pin the fix: amounts must be derived from a single tick-aligned
+    price so the integer ratio is exactly that price.
+    """
+
+    @staticmethod
+    def _market(tick_size: str = "0.001") -> GammaMarket:
+        return GammaMarket(
+            id="test_market_123",
+            condition_id="0xabc",
+            question="Test market?",
+            slug="test-market",
+            outcomes=["Yes", "No"],
+            outcome_prices=[Decimal("0.50"), Decimal("0.50")],
+            clob_token_ids=["token_yes", "token_no"],
+            volume=Decimal("10000"),
+            liquidity=Decimal("5000"),
+            active=True,
+            closed=False,
+            enable_order_book=True,
+            order_min_size=Decimal("5"),
+            order_price_min_tick_size=Decimal(tick_size),
+        )
+
+    @pytest.mark.parametrize(
+        "price, tick",
+        [
+            (Decimal("0.015"), "0.001"),  # cheap market (PM repro: market 556063 regime)
+            (Decimal("0.5"), "0.01"),
+            (Decimal("0.65"), "0.01"),
+            (Decimal("0.70"), "0.01"),
+            (Decimal("0.989"), "0.001"),  # 3-decimal tick
+            (Decimal("0.99"), "0.01"),  # MAX_PRICE default
+        ],
+    )
+    def test_market_buy_ratio_equals_tick_aligned_price(self, config_with_credentials, price, tick):
+        """BUY market order: maker/taker must equal ``price`` exactly."""
+        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+
+        client = ClobClient(config_with_credentials)
+        market = self._market(tick_size=tick)
+        # Use a taker size that does NOT divide cleanly by the shares_step so we
+        # exercise the snap-down path. 81.481 shares → 81.48 after snap.
+        params = MarketOrderParams(
+            token_id="123",
+            side="BUY",
+            amount=Decimal("81.481") * price,
+            worst_price=price,
+        )
+
+        order = client.build_market_order(params, market=market)
+
+        assert order.taker_amount > 0
+        assert order.taker_amount % ClobClient._SHARES_STEP == 0
+        assert order.maker_amount % ClobClient._USDC_STEP == 0
+        # Ratio must be exactly the requested tick-aligned price.
+        assert Decimal(order.maker_amount) / Decimal(order.taker_amount) == price
+
+    def test_market_buy_on_tick_0001_regression(self, config_with_credentials):
+        """Regression for the Portfolio Manager report (market 556063, tick 0.001,
+        81.481 shares at worst_price=0.99). Pre-fix: ratio 0.98992403 → 400
+        ``breaks minimum tick size rule: 0.001``."""
+        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+
+        client = ClobClient(config_with_credentials)
+        market = self._market(tick_size="0.001")
+        params = MarketOrderParams(
+            token_id="123",
+            side="BUY",
+            amount=Decimal("80.66619"),  # 81.481 * 0.99
+            worst_price=Decimal("0.99"),
+        )
+
+        order = client.build_market_order(params, market=market)
+
+        ratio = Decimal(order.maker_amount) / Decimal(order.taker_amount)
+        # Must land on the 0.001 tick (and any coarser tick that divides 0.001).
+        assert ratio == Decimal("0.99")
+        assert ratio % Decimal("0.001") == 0
+
+    @pytest.mark.parametrize(
+        "price, tick",
+        [(Decimal("0.015"), "0.001"), (Decimal("0.50"), "0.01"), (Decimal("0.989"), "0.001")],
+    )
+    def test_limit_order_ratio_equals_price(self, config_with_credentials, price, tick):
+        """Limit BUY/SELL: ratio must equal the specified price exactly, regardless
+        of whether the share size aligns to the shares precision step."""
+        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+
+        client = ClobClient(config_with_credentials)
+        market = self._market(tick_size=tick)
+        for side in ("BUY", "SELL"):
+            params = LimitOrderParams(
+                token_id="123",
+                side=side,
+                price=price,
+                size=Decimal("81.481"),
+            )
+            order = client.build_limit_order(params, market=market)
+
+            if side == "BUY":
+                ratio = Decimal(order.maker_amount) / Decimal(order.taker_amount)
+            else:
+                ratio = Decimal(order.taker_amount) / Decimal(order.maker_amount)
+            assert ratio == price, f"{side} ratio {ratio} != price {price}"
+
+    def test_market_sell_ratio_equals_price(self, config_with_credentials):
+        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+
+        client = ClobClient(config_with_credentials)
+        market = self._market(tick_size="0.001")
+        params = MarketOrderParams(
+            token_id="123",
+            side="SELL",
+            amount=Decimal("81.481"),
+            worst_price=Decimal("0.015"),
+        )
+
+        order = client.build_market_order(params, market=market)
+        ratio = Decimal(order.taker_amount) / Decimal(order.maker_amount)
+        assert ratio == Decimal("0.015")
+
+    # ------------------------------------------------------------------
+    # Auditor-driven safety regression tests
+    # ------------------------------------------------------------------
+
+    def test_post_snap_revalidation_rejects_sub_dollar_buy(self, config_with_credentials):
+        """Pre-snap notional passes the $1 floor but the snap-down drops it below.
+
+        Regression for the Codex/CodeRabbit converged finding: a market BUY of
+        $1.00 at worst_price=0.99 passes ``_validate_order_value_usd($1)``,
+        snaps to ``maker=999_900`` token-units = $0.9999, which the CLOB rejects
+        with ``min size: $1``. The post-snap revalidation must catch this
+        locally before submission.
+        """
+        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+
+        client = ClobClient(config_with_credentials)
+        market = self._market(tick_size="0.01")
+        params = MarketOrderParams(
+            token_id="123",
+            side="BUY",
+            amount=Decimal("1.00"),
+            worst_price=Decimal("0.99"),
+        )
+
+        with pytest.raises(PolymarketMinimumOrderError):
+            client.build_market_order(params, market=market)
+
+    def test_build_amounts_at_price_rejects_float_derived_decimal(self):
+        """Guard against ``Decimal(0.7)``-style prices whose huge denominators
+        blow up ``combined_step`` and silently snap any reasonable order to
+        ``(0, 0)``. Snap to the tick grid (or quantize) before calling.
+        """
+        with pytest.raises(ValueError, match="too much precision"):
+            ClobClient._build_amounts_at_price("BUY", Decimal(0.7), 100_000_000)
+
+    def test_buy_at_dollar_floor_with_low_min_size_rejected_post_snap(self, config_with_credentials):
+        """CodeRabbit-suggested regression: with order_min_size=0.1 the per-market
+        minimum allows tiny orders, so it doesn't catch the snap-down. The post-snap
+        $1 USD floor must still reject ``BUY amount=$1.00 worst_price=0.70``,
+        which snaps to ``maker=$0.994`` (5 / 0.70 = 7.142… shares → 7.14 shares
+        → 7.14 * 0.70 = $4.998 ❌ wait recalculate). Concretely: 1.0/0.70 ≈
+        1.4286 shares → snap to 1.42 shares (multiple of 0.01) → 1.42 * 0.70 =
+        $0.994 ⇒ rejected by the $1 floor.
+        """
+        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
+        from almanak.framework.connectors.polymarket.models import MarketOrderParams
+
+        client = ClobClient(config_with_credentials)
+        market = self._market(tick_size="0.01")
+        market.order_min_size = Decimal("0.1")  # low per-market minimum
+        params = MarketOrderParams(
+            token_id="123",
+            side="BUY",
+            amount=Decimal("1.00"),
+            worst_price=Decimal("0.70"),
+        )
+
+        with pytest.raises(PolymarketMinimumOrderError):
+            client.build_market_order(params, market=market)
 
 
 # =============================================================================
