@@ -245,3 +245,55 @@ class TestCompoundV3MatrixEntry:
         assert actual_chains == expected_chains, (
             f"Matrix has {actual_chains} but adapter has {expected_chains}"
         )
+
+
+# =============================================================================
+# Previously-missing connector coverage
+# =============================================================================
+
+
+class TestPreviouslyMissingConnectors:
+    """Guards against regressions where real connectors drop out of the matrix."""
+
+    @pytest.mark.parametrize(
+        ("name", "category", "expected_chains"),
+        [
+            ("silo_v2", "lending", {"avalanche"}),
+            ("joelend", "lending", {"avalanche"}),
+            ("jupiter_lend", "lending", {"solana"}),
+            ("aster_perps", "perps", {"bsc"}),
+            ("pancakeswap_perps", "perps", {"bsc"}),
+            ("gimo", "yield", {"zerog"}),
+            ("polymarket", "yield", {"polygon"}),
+            ("fluid", "swap", {"arbitrum"}),
+        ],
+    )
+    def test_connector_present(
+        self, matrix_data: dict, name: str, category: str, expected_chains: set[str]
+    ) -> None:
+        entries = [p for p in matrix_data["protocols"] if p["name"] == name and p["category"] == category]
+        assert len(entries) == 1, f"{name} ({category}) should appear exactly once"
+        assert set(entries[0]["chains"]) == expected_chains
+
+    def test_euler_v2_chains_match_adapter(self, matrix_data: dict) -> None:
+        from almanak.framework.connectors.euler_v2.adapter import CHAIN_ADDRESSES
+
+        entries = [p for p in matrix_data["protocols"] if p["name"] == "euler_v2" and p["category"] == "lending"]
+        assert len(entries) == 1
+        assert set(entries[0]["chains"]) == set(CHAIN_ADDRESSES.keys())
+
+    def test_traderjoe_v2_swap_entry(self, matrix_data: dict) -> None:
+        """TraderJoe V2 has a dedicated swap compilation path (VIB-1928); matrix must expose it."""
+        from almanak.core.contracts import TRADERJOE_V2
+
+        entries = [p for p in matrix_data["protocols"] if p["name"] == "traderjoe_v2" and p["category"] == "swap"]
+        assert len(entries) == 1
+        assert set(entries[0]["chains"]) == set(TRADERJOE_V2.keys())
+
+    def test_uniswap_v4_swap_entry(self, matrix_data: dict) -> None:
+        """Uniswap V4 swaps through the Universal Router are supported on every V4 chain."""
+        from almanak.core.contracts import UNISWAP_V4
+
+        entries = [p for p in matrix_data["protocols"] if p["name"] == "uniswap_v4" and p["category"] == "swap"]
+        assert len(entries) == 1
+        assert set(entries[0]["chains"]) == set(UNISWAP_V4.keys())
