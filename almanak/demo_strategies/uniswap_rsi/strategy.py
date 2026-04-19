@@ -70,6 +70,7 @@ from almanak.framework.intents import Intent
 
 # Core strategy framework imports
 from almanak.framework.strategies import (
+    ConfigValidationError,  # Raised by validate_config() on invalid config
     IntentStrategy,  # Base class for all strategies
     MarketSnapshot,  # Contains market data (prices, RSI, balances)
     almanak_strategy,  # Decorator for strategy registration
@@ -220,6 +221,35 @@ class UniswapRSIStrategy(IntentStrategy):
             f"overbought={self.rsi_overbought}, "
             f"pair={self.base_token}/{self.quote_token}"
         )
+
+    # =========================================================================
+    # CONFIG VALIDATION (preflight hook)
+    # =========================================================================
+    #
+    # validate_config() is called from IntentStrategy.__init__ AFTER the config
+    # is loaded and BEFORE any other setup. Override it to enforce invariants
+    # on your config so tooling like the Portfolio Manager's `strat check`
+    # preflight can catch misconfigurations at construction time — not at the
+    # first decide() call in production.
+    #
+    # Raise ConfigValidationError(message, field=...) on failure. ``field``
+    # should be the offending config key when applicable; omit it for
+    # cross-field invariants.
+
+    def validate_config(self) -> None:
+        """Enforce RSI strategy config invariants.
+
+        Raises:
+            ConfigValidationError: If RSI thresholds are invalid. In particular,
+                ``rsi_oversold`` must be strictly less than ``rsi_overbought``.
+        """
+        oversold = Decimal(str(self.get_config("rsi_oversold", "30")))
+        overbought = Decimal(str(self.get_config("rsi_overbought", "70")))
+        if oversold >= overbought:
+            raise ConfigValidationError(
+                f"rsi_oversold ({oversold}) must be strictly less than rsi_overbought ({overbought})",
+                field="rsi_oversold",
+            )
 
     # =========================================================================
     # MAIN DECISION LOGIC

@@ -47,6 +47,7 @@ from .base import (
     RiskGuardResult,
     StrategyBase,
 )
+from .exceptions import ConfigValidationError
 from .intent_strategy import (
     AaveAvailableBorrowProvider,
     # Protocol Health Metric Providers
@@ -359,6 +360,7 @@ __all__ = [
     "RiskGuardGuidance",
     "RiskGuardResult",
     "ConfigSnapshot",
+    "ConfigValidationError",
     "NotificationCallback",
     # Intent Strategy
     "IntentStrategy",

@@ -71,6 +71,7 @@ from .base import (
     RiskGuardConfig,
     StrategyBase,
 )
+from .exceptions import ConfigValidationError  # noqa: F401  (re-exported for backward compatibility)
 
 # ---------------------------------------------------------------------------
 # Re-exports from extracted modules
@@ -1695,11 +1696,32 @@ class IntentStrategy(StrategyBase[ConfigT]):
         """
         super().__init__(config, risk_guard_config, notification_callback)
 
+        # Wire identity / chain context BEFORE the validation hook so that
+        # subclass overrides can validate chain-dependent invariants
+        # (supported pairs, per-chain limits, etc.). StrategyBase seeds
+        # self._chain from ``config.chain`` which is "unknown" for plain-dict
+        # configs, so we overwrite it here with the constructor-passed value
+        # before any user code observes self.chain / self.chains.
         self._chain = chain
         self._wallet_address = wallet_address
         self._rpc_url = rpc_url
         self._chains = chains or [chain]
         self._chain_wallets = {k.lower(): v for k, v in chain_wallets.items()} if chain_wallets else None
+
+        # Strategy-defined config validation hook.
+        # Called AFTER config load (super().__init__) AND chain/wallet wiring,
+        # but BEFORE any compiler/provider/state setup that depends on config.
+        # Subclasses may override validate_config() to enforce preconditions
+        # (e.g. required fields, value ranges, cross-field invariants) and
+        # raise ConfigValidationError when validation fails. Default
+        # implementation is a no-op so existing strategies are unaffected.
+        #
+        # Note on super().__init__ ordering: if a subclass calls super().__init__
+        # late in its own __init__, validate_config() only runs once this line
+        # executes. Subclasses that need their own attributes populated before
+        # validation should either (a) populate them before calling super(), or
+        # (b) perform those checks in their own __init__ after super() returns.
+        self.validate_config()
 
         # Store compiler if provided (runner creates its own with real prices)
         # Do NOT auto-create - that would require placeholder prices which is unsafe
@@ -1799,6 +1821,62 @@ class IntentStrategy(StrategyBase[ConfigT]):
     def current_state_machine(self) -> IntentStateMachine | None:
         """Get the current state machine."""
         return self._current_state_machine
+
+    # =========================================================================
+    # Configuration Validation
+    # =========================================================================
+
+    def validate_config(self) -> None:
+        """Validate the strategy's configuration.
+
+        Lifecycle hook invoked automatically from :py:meth:`__init__` AFTER the
+        config has been loaded (via ``super().__init__``) and BEFORE any other
+        setup that depends on config (chain wiring, providers, state machine,
+        etc.).
+
+        Subclasses override this method to enforce preconditions on their
+        configuration — required fields, value ranges, cross-field invariants,
+        or any other invariant that must hold before the strategy is usable.
+        On failure, raise :py:class:`ConfigValidationError` with a clear
+        message and the offending ``field`` when applicable.
+
+        This hook exists so tooling like the Portfolio Manager's ``strat check``
+        preflight can catch misconfigurations at construction time rather than
+        at the first ``decide()`` call in production.
+
+        The default implementation is a no-op, so existing strategies require
+        no changes.
+
+        Raises:
+            ConfigValidationError: If the configuration is invalid. The error's
+                ``field`` attribute identifies the offending field when
+                applicable; otherwise ``None`` for cross-field errors.
+
+        Example:
+            from decimal import Decimal
+            from almanak.framework.strategies.exceptions import ConfigValidationError
+
+            class MyStrategy(IntentStrategy):
+                def validate_config(self) -> None:
+                    # NOTE: configs loaded from JSON / env come back as strings.
+                    # Always coerce numerics through Decimal(str(...)) so that
+                    # comparisons are numeric, not lexicographic (e.g. "9" >= "10"
+                    # is True as strings but False as numbers).
+                    size = Decimal(str(self.get_config("trade_size_usd", "0")))
+                    if size <= 0:
+                        raise ConfigValidationError(
+                            "trade_size_usd must be > 0",
+                            field="trade_size_usd",
+                        )
+                    oversold = Decimal(str(self.get_config("rsi_oversold", "30")))
+                    overbought = Decimal(str(self.get_config("rsi_overbought", "70")))
+                    if oversold >= overbought:
+                        raise ConfigValidationError(
+                            "rsi_oversold must be < rsi_overbought",
+                            field="rsi_oversold",
+                        )
+        """
+        return None
 
     # =========================================================================
     # State Persistence
