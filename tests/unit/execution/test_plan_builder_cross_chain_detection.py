@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 from almanak.framework.execution.plan import RemediationAction
 from almanak.framework.execution.plan_builder import (
+    get_intent_destination_chain,
+    get_intent_destination_token,
     get_remediation_action,
     is_cross_chain_intent,
 )
@@ -50,3 +52,50 @@ def test_swap_cross_chain_remediation_remains_bridge_back() -> None:
         destination_chain="arbitrum",
     )
     assert get_remediation_action(intent) == RemediationAction.BRIDGE_BACK
+
+
+# -----------------------------------------------------------------------------
+# Destination-chain / destination-token helpers (VIB-3223)
+#
+# Regression guard for a runner bug where the bridge-wait path read
+# ``destination_chain``/``to_token`` on every cross-chain intent, which
+# silently skipped waiting for native BridgeIntent (whose fields are
+# ``to_chain``/``token``).
+# -----------------------------------------------------------------------------
+
+
+def test_destination_chain_for_bridge_intent_reads_to_chain() -> None:
+    intent = BridgeIntent(token="USDC", amount=1, from_chain="base", to_chain="arbitrum")
+    assert get_intent_destination_chain(intent) == "arbitrum"
+
+
+def test_destination_token_for_bridge_intent_reads_token() -> None:
+    intent = BridgeIntent(token="USDC", amount=1, from_chain="base", to_chain="arbitrum")
+    assert get_intent_destination_token(intent) == "USDC"
+
+
+def test_destination_chain_for_swap_intent_reads_destination_chain() -> None:
+    intent = Intent.swap(
+        from_token="USDC",
+        to_token="ETH",
+        amount=1,
+        chain="base",
+        destination_chain="arbitrum",
+    )
+    assert get_intent_destination_chain(intent) == "arbitrum"
+
+
+def test_destination_token_for_swap_intent_reads_to_token() -> None:
+    intent = Intent.swap(
+        from_token="USDC",
+        to_token="ETH",
+        amount=1,
+        chain="base",
+        destination_chain="arbitrum",
+    )
+    assert get_intent_destination_token(intent) == "ETH"
+
+
+def test_destination_chain_none_for_same_chain_swap() -> None:
+    intent = Intent.swap(from_token="USDC", to_token="ETH", amount=1, chain="base")
+    assert get_intent_destination_chain(intent) is None

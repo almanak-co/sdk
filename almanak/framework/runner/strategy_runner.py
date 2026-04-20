@@ -64,6 +64,8 @@ from ..execution.orchestrator import (
     TransactionResult,
 )
 from ..execution.plan_builder import (
+    get_intent_destination_chain,
+    get_intent_destination_token,
     is_cross_chain_intent,
 )
 from ..execution.result_enricher import ResultEnricher
@@ -2516,7 +2518,7 @@ class StrategyRunner:
         for intent in intents:
             chain = getattr(intent, "chain", None) or orchestrator.primary_chain
             chains_involved.add(chain)
-            dest_chain = getattr(intent, "destination_chain", None)
+            dest_chain = get_intent_destination_chain(intent)
             if dest_chain:
                 chains_involved.add(dest_chain)
             if is_cross_chain_intent(intent):
@@ -2760,8 +2762,23 @@ class StrategyRunner:
             dest_chain: str | None = None
 
             if is_cross_chain:
-                dest_chain = getattr(intent, "destination_chain", None)
-                token_symbol = getattr(intent, "to_token", None)
+                dest_chain = get_intent_destination_chain(intent)
+                token_symbol = get_intent_destination_token(intent)
+                # Defense-in-depth (VIB-3223): a cross-chain intent with no
+                # resolvable destination chain/token is the exact failure mode
+                # VIB-3223 fixed — fail loudly instead of silently skipping.
+                if not dest_chain or not token_symbol:
+                    logger.error(
+                        f"Step {step_num}: cross-chain intent missing destination fields "
+                        f"(dest_chain={dest_chain!r}, token_symbol={token_symbol!r}). "
+                        f"Cannot track bridge completion."
+                    )
+                    failed_step = f"step-{step_num}"
+                    error_message = (
+                        "Cross-chain intent missing destination_chain/to_chain or "
+                        "to_token/token field; cannot wait for bridge completion."
+                    )
+                    break
                 # Set expected_amount=0 to accept ANY balance increase as completion
                 # The actual received amount will be tracked and used for chaining
                 expected_amount = 0

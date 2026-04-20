@@ -73,6 +73,31 @@ def get_intent_chain(intent: AnyIntent, default_chain: str = "arbitrum") -> str:
     return getattr(intent, "chain", None) or default_chain
 
 
+def get_intent_destination_chain(intent: AnyIntent) -> str | None:
+    """Return the destination chain for a cross-chain intent.
+
+    Normalises across BridgeIntent (``to_chain``) and cross-chain SwapIntent
+    (``destination_chain``) so callers don't have to special-case each shape.
+    """
+    intent_type = getattr(intent, "intent_type", None)
+    if intent_type == IntentType.BRIDGE:
+        return getattr(intent, "to_chain", None)
+    return getattr(intent, "destination_chain", None)
+
+
+def get_intent_destination_token(intent: AnyIntent) -> str | None:
+    """Return the token symbol expected on the destination chain.
+
+    BridgeIntent transfers the same token across chains and stores it under
+    ``token``; SwapIntent stores the output under ``to_token``. This helper
+    returns the correct field regardless of intent shape.
+    """
+    intent_type = getattr(intent, "intent_type", None)
+    if intent_type == IntentType.BRIDGE:
+        return getattr(intent, "token", None)
+    return getattr(intent, "to_token", None)
+
+
 def get_remediation_action(intent: AnyIntent) -> RemediationAction:
     """Determine appropriate remediation action for an intent.
 
@@ -351,7 +376,7 @@ class PlanBuilder:
         intent_types = []
         for intent in intents:
             chains.add(get_intent_chain(intent, self._default_chain))
-            dest = getattr(intent, "destination_chain", None)
+            dest = get_intent_destination_chain(intent)
             if dest:
                 chains.add(dest)
             intent_types.append(intent.intent_type.value)
@@ -427,6 +452,8 @@ __all__ = [
     "build_plan_from_decide_result",
     "is_cross_chain_intent",
     "get_intent_chain",
+    "get_intent_destination_chain",
+    "get_intent_destination_token",
     "get_remediation_action",
     "intent_to_dict",
     "get_step_description",

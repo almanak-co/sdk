@@ -507,19 +507,10 @@ class EnsoStateProvider:
             await asyncio.sleep(poll_interval_seconds)
 
 
-def is_cross_chain_intent(intent: Any) -> bool:
-    """Check if an intent involves cross-chain bridging.
-
-    Args:
-        intent: Intent object to check
-
-    Returns:
-        True if intent has destination_chain different from source chain
-    """
-    dest_chain = getattr(intent, "destination_chain", None)
-    src_chain = getattr(intent, "chain", None)
-    return dest_chain is not None and dest_chain != src_chain
-
+# Re-exported from plan_builder so callers can keep importing from this module
+# without drifting out of sync with the single canonical implementation —
+# the duplicate here silently missed BridgeIntent (VIB-3223 bug class).
+from almanak.framework.execution.plan_builder import is_cross_chain_intent  # noqa: E402
 
 __all__ = [
     "EnsoStateProvider",
