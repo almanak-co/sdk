@@ -36,6 +36,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+from enum import StrEnum
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -81,6 +82,7 @@ from ..intents.vocabulary import AnyIntent, HoldIntent, Intent, IntentSequence, 
 from ..models.actions import AvailableAction, SuggestedAction
 from ..models.operator_card import EventType, OperatorCard, PositionSummary, Severity
 from ..models.stuck_reason import StuckReason
+from ..state.exceptions import AccountingPersistenceError
 from ..state.state_manager import StateManager
 from ..utils.log_formatters import (
     _emojis_enabled,
@@ -102,6 +104,53 @@ from .runner_models import (  # noqa: F401
 )
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Mode derivation (VIB-3157)
+# =============================================================================
+
+
+class ExecutionMode(StrEnum):
+    """Tri-state execution mode for accounting stamping.
+
+    Single source of truth for the runner-mode label written onto ledger
+    entries, portfolio snapshots, and portfolio metrics. Using an enum
+    (instead of bare strings) catches typos and makes downstream
+    comparisons typo-safe — a misspelled ``"liev"`` would silently store
+    a bad row otherwise.
+    """
+
+    DRY_RUN = "dry_run"
+    PAPER = "paper"
+    LIVE = "live"
+
+
+def derive_execution_mode_from_config(config: Any) -> ExecutionMode:
+    """Return the canonical execution-mode label for a runner config.
+
+    The accounting layer needs a single, authoritative mapping from runner
+    state to the tri-state label stamped on ledger entries, portfolio
+    snapshots, and portfolio metrics. Keeping the branch logic here means
+    :meth:`StrategyRunner._is_live_mode`, ``_write_ledger_entry`` and
+    ``runner_state._build_metrics_for_snapshot`` cannot drift apart the
+    next time a new mode is introduced.
+
+    Args:
+        config: A ``RunnerConfig`` (or subclass) object.
+
+    Returns:
+        ``ExecutionMode.DRY_RUN`` when ``config.dry_run`` is set,
+        ``ExecutionMode.PAPER`` when ``config.paper_mode`` is truthy,
+        otherwise ``ExecutionMode.LIVE``. The returned value is a
+        ``StrEnum`` so it serialises as the bare label (``"dry_run"`` etc.)
+        for ledger / snapshot persistence.
+    """
+    if getattr(config, "dry_run", False):
+        return ExecutionMode.DRY_RUN
+    if getattr(config, "paper_mode", False):
+        return ExecutionMode.PAPER
+    return ExecutionMode.LIVE
 
 
 # =============================================================================
@@ -886,6 +935,25 @@ class StrategyRunner:
                 return intent_result  # type: ignore[return-value]
 
         except Exception as e:
+            # VIB-3157: accounting persistence failure -- on-chain execution may
+            # have succeeded but the durable record is missing. Halt the
+            # iteration with ACCOUNTING_FAILED so run_loop's consecutive-error
+            # handler kicks in, and alert the operator before books drift.
+            from ..state.exceptions import AccountingPersistenceError
+
+            if isinstance(e, AccountingPersistenceError):
+                logger.exception(
+                    "Accounting persistence failed in live mode for %s (write_kind=%s)",
+                    strategy_id,
+                    e.write_kind,
+                )
+                await self._alert_accounting_failure(strategy, e)
+                return self._create_error_result(
+                    strategy_id,
+                    IterationStatus.ACCOUNTING_FAILED,
+                    f"Accounting persistence failed ({e.write_kind}): {e}",
+                    start_time,
+                )
             logger.exception(f"Unexpected error in iteration for {strategy_id}: {e}")
             return self._create_error_result(
                 strategy_id,
@@ -1030,13 +1098,51 @@ class StrategyRunner:
                 # Capture portfolio snapshot for dashboard/PnL tracking.
                 # Always capture regardless of iteration success — failed iterations
                 # don't change the portfolio, but we need continuity in the equity curve.
-                # _capture_portfolio_snapshot handles errors gracefully and persists
-                # UNAVAILABLE snapshots when valuation fails.
+                # _capture_portfolio_snapshot handles valuation failures gracefully
+                # (persists UNAVAILABLE snapshots), but real persistence failures
+                # propagate as AccountingPersistenceError (VIB-3157). Catch those
+                # here so snapshot/metrics failures take the same ACCOUNTING_FAILED
+                # path as ledger failures inside run_iteration.
                 if self.config.enable_state_persistence:
-                    await self._capture_portfolio_snapshot(
-                        strategy=strategy,
-                        iteration_number=self._total_iterations,
-                    )
+                    snapshot_start = datetime.now(UTC)
+                    try:
+                        await self._capture_portfolio_snapshot(
+                            strategy=strategy,
+                            iteration_number=self._total_iterations,
+                        )
+                    except AccountingPersistenceError as acc_err:
+                        # Mode-aware: only escalate to ACCOUNTING_FAILED in
+                        # live mode, matching the contract used by
+                        # _write_ledger_entry (live raises, paper/dry-run
+                        # logs). In non-live modes, swallow + ERROR-log so
+                        # pre-prod drift is visible without halting the loop.
+                        if self._is_live_mode():
+                            logger.exception(
+                                "Accounting persistence failed in live mode for %s (write_kind=%s)",
+                                strategy_id,
+                                acc_err.write_kind,
+                            )
+                            await self._alert_accounting_failure(strategy, acc_err)
+                            # Build IterationResult directly instead of via
+                            # _create_error_result, which mutates
+                            # _consecutive_errors. The outer run_loop failure
+                            # handler (~line 1150) increments that counter
+                            # for any non-success result; using the helper
+                            # here would double-count the snapshot error.
+                            result = IterationResult(
+                                status=IterationStatus.ACCOUNTING_FAILED,
+                                error=f"Accounting persistence failed ({acc_err.write_kind}): {acc_err}",
+                                strategy_id=strategy_id,
+                                duration_ms=self._calculate_duration_ms(snapshot_start),
+                            )
+                        else:
+                            logger.error(
+                                "Snapshot accounting persistence failed in non-live mode for %s "
+                                "(write_kind=%s, continuing; pre-prod drift): %s",
+                                strategy_id,
+                                acc_err.write_kind,
+                                acc_err,
+                            )
 
                 # Call callback if provided
                 if iteration_callback:
@@ -1293,6 +1399,31 @@ class StrategyRunner:
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Failed to emit execution timeline event: {e}")
 
+    def _is_live_mode(self) -> bool:
+        """Return True when ledger/snapshot/metrics writes are mandatory.
+
+        Live mode = real execution against a real chain. Dry-run and paper
+        modes may drop writes on failure, but they still log at ERROR so the
+        drift is visible before it reaches production.
+
+        Paper-trading runners are subclasses that set ``config.paper_mode =
+        True`` (checked via ``getattr`` so the base ``RunnerConfig`` doesn't
+        need to know about paper trading). Backtest runners bypass the
+        StrategyRunner entirely.
+        """
+        return derive_execution_mode_from_config(self.config) is ExecutionMode.LIVE
+
+    def _derive_execution_mode(self) -> ExecutionMode:
+        """Tri-state mode label for accounting rows (dry_run / live / paper).
+
+        Centralised so ledger entries, portfolio snapshots, and portfolio
+        metrics all stamp the same value and the runner's mode semantics
+        cannot drift across these surfaces. Returns a ``StrEnum`` so callers
+        that stringify it (e.g. ``entry.execution_mode = mode``) get the
+        bare label back for persistence.
+        """
+        return derive_execution_mode_from_config(self.config)
+
     async def _write_ledger_entry(
         self,
         strategy: StrategyProtocol,
@@ -1301,7 +1432,15 @@ class StrategyRunner:
         success: bool,
         error: str = "",
     ) -> None:
-        """Write a structured trade record to the transaction ledger."""
+        """Write a structured trade record to the transaction ledger.
+
+        VIB-3157: in live mode a persistence failure raises
+        ``AccountingPersistenceError`` so the caller (run_iteration) can halt
+        the cycle and alert the operator. In paper/dry-run mode we log ERROR
+        and continue -- the drift is visible but does not block the loop.
+        """
+        from ..state.exceptions import AccountingPersistenceError
+
         try:
             from ..observability.context import get_cycle_id
             from ..observability.ledger import build_ledger_entry
@@ -1318,14 +1457,61 @@ class StrategyRunner:
                 error=error,
             )
 
-            # Phase 4: stamp deployment_id and execution_mode onto the entry (VIB-2835/2837)
+            # Phase 4: stamp deployment_id and execution_mode onto the entry (VIB-2835/2837).
+            # VIB-3157: tri-state (dry_run / live / paper) via the shared
+            # ``derive_execution_mode_from_config`` helper so ledger,
+            # snapshot, and metrics stamping stay in lockstep.
             deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
-            execution_mode = "dry_run" if self.config.dry_run else "live"
+            execution_mode = self._derive_execution_mode()
             entry.deployment_id = deployment_id
             entry.execution_mode = execution_mode
 
-            if self.state_manager:
-                await self.state_manager.save_ledger_entry(entry)
+            # VIB-3157: fail-closed live path. A missing state manager or a
+            # state manager without ledger support in live mode is a
+            # misconfiguration that would let trades land with no durable
+            # accounting record -- exactly the footgun VIB-3157 is closing.
+            # In paper/dry-run we log at ERROR and continue so pre-prod drift
+            # is visible but the loop keeps moving.
+            if not self.state_manager or not hasattr(self.state_manager, "save_ledger_entry"):
+                if self._is_live_mode():
+                    raise AccountingPersistenceError(
+                        write_kind="ledger",
+                        strategy_id=strategy.strategy_id,
+                        message="State manager does not provide save_ledger_entry",
+                    )
+                logger.error(
+                    "Ledger write unavailable in non-live mode for %s "
+                    "(continuing, pre-prod drift; fix before promoting to live)",
+                    strategy.strategy_id,
+                )
+            else:
+                try:
+                    await self.state_manager.save_ledger_entry(entry)
+                except NotImplementedError as nie:
+                    # VIB-3157 known gap (tracked in
+                    # docs/internal/vib-3157-gateway-ledger-followup.md): the
+                    # gateway state manager does not yet implement a
+                    # SaveLedgerEntry RPC. Tighten the swallow to ONLY the
+                    # GatewayStateManager case so unrelated NotImplementedError
+                    # bugs from other backends still escalate as accounting
+                    # failures.
+                    from ..state.gateway_state_manager import GatewayStateManager
+
+                    if isinstance(self.state_manager, GatewayStateManager):
+                        logger.critical(
+                            "KNOWN GAP: ledger write skipped for %s — %s",
+                            strategy.strategy_id,
+                            nie,
+                        )
+                    else:
+                        raise AccountingPersistenceError(
+                            write_kind="ledger",
+                            strategy_id=strategy.strategy_id,
+                            cause=nie,
+                            message=(
+                                "Backend save_ledger_entry raised NotImplementedError outside the known gateway gap"
+                            ),
+                        ) from nie
 
             # Emit position event for LP/perp intents (Phase 2, VIB-2775)
             if success and self.state_manager and hasattr(self.state_manager, "save_position_event"):
@@ -1364,8 +1550,27 @@ class StrategyRunner:
             # Signal that this iteration executed a trade — forces snapshot
             if success:
                 self._iteration_had_trade = True
+        except AccountingPersistenceError:
+            # Live mode: propagate so run_iteration halts the cycle and alerts.
+            # Paper/dry-run: swallow but log ERROR (not debug) so drift is visible.
+            if self._is_live_mode():
+                raise
+            logger.error(
+                "Ledger write failed in non-live mode for %s (continuing, pre-prod drift): "
+                "fix before promoting to live",
+                strategy.strategy_id,
+            )
         except Exception as e:  # noqa: BLE001
-            logger.debug(f"Failed to write ledger entry: {e}")
+            # Unexpected failure outside the persistence path (build_ledger_entry
+            # raised, position_event emission re-raised, etc.). Live mode still
+            # escalates -- a trade happened with no durable record.
+            if self._is_live_mode():
+                raise AccountingPersistenceError(
+                    write_kind="ledger",
+                    strategy_id=strategy.strategy_id,
+                    cause=e,
+                ) from e
+            logger.error(f"Failed to write ledger entry (non-live): {e}")
 
     def request_shutdown(self) -> None:
         """Request graceful shutdown of the run loop.
@@ -3161,6 +3366,58 @@ class StrategyRunner:
 
         except Exception as e:
             logger.error(f"Failed to send execution error alert: {e}")
+
+    async def _alert_accounting_failure(
+        self,
+        strategy: StrategyProtocol,
+        error: Exception,
+    ) -> None:
+        """Send a CRITICAL operator alert for accounting persistence failure.
+
+        The on-chain state changed but the durable accounting write did not
+        succeed. This is a book-keeping emergency -- paused strategy and
+        manual reconciliation are required before resuming. Severity is
+        CRITICAL rather than HIGH because silent accounting loss is
+        irrecoverable once alerting is missed.
+        """
+        if not self.config.enable_alerting or not self.alert_manager:
+            return
+
+        try:
+            total_value, available = self._query_portfolio_value(strategy)
+            write_kind = getattr(error, "write_kind", "unknown")
+            card = OperatorCard(
+                strategy_id=strategy.strategy_id,
+                timestamp=datetime.now(UTC),
+                event_type=EventType.ERROR,
+                reason=StuckReason.UNKNOWN,
+                context={
+                    "accounting_write_kind": write_kind,
+                    "error": str(error),
+                },
+                severity=Severity.CRITICAL,
+                position_summary=PositionSummary(
+                    total_value_usd=total_value,
+                    available_balance_usd=available,
+                ),
+                risk_description=(
+                    f"Accounting persistence failed ({write_kind}). On-chain state may have "
+                    "changed without a durable ledger/snapshot/metrics record. Manual "
+                    "reconciliation required before resuming."
+                ),
+                suggested_actions=[
+                    SuggestedAction(
+                        action=AvailableAction.PAUSE,
+                        description="Pause strategy and investigate accounting backend",
+                        priority=1,
+                        is_recommended=True,
+                    ),
+                ],
+                available_actions=[AvailableAction.PAUSE, AvailableAction.RESUME],
+            )
+            await self.alert_manager.send_alert(card)
+        except Exception as alert_err:  # noqa: BLE001
+            logger.error("Failed to send accounting failure alert: %s", alert_err)
 
     async def _alert_consecutive_errors(
         self,

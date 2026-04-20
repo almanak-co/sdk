@@ -17,10 +17,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from almanak.framework.gateway_client import GatewayClient
+from almanak.framework.state.exceptions import AccountingPersistenceError, AccountingWriteKind
 from almanak.framework.state.state_manager import StateData
 from almanak.gateway.proto import gateway_pb2
 
 if TYPE_CHECKING:
+    from almanak.framework.observability.ledger import LedgerEntry
     from almanak.framework.portfolio.models import PortfolioMetrics
     from almanak.framework.state.portfolio import PortfolioSnapshot
 
@@ -247,8 +249,15 @@ class GatewayStateManager:
             response = self._client.state.SavePortfolioSnapshot(request, timeout=self._timeout)
 
             if not response.success:
+                # VIB-3157: treat gateway-side write failure as a first-class accounting
+                # error. The previous "return 0" path caused silent accounting loss --
+                # on-chain trades with no durable snapshot.
                 logger.error("SavePortfolioSnapshot failed: %s", response.error)
-                return 0
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.SNAPSHOT,
+                    strategy_id=snapshot.strategy_id,
+                    message=f"SavePortfolioSnapshot failed: {response.error}",
+                )
 
             logger.debug(
                 "Portfolio snapshot saved via gateway: strategy=%s, value=$%.2f, confidence=%s",
@@ -257,9 +266,15 @@ class GatewayStateManager:
                 snapshot.value_confidence.value,
             )
             return response.snapshot_id
-        except Exception:
+        except AccountingPersistenceError:
+            raise
+        except Exception as e:
             logger.exception("Failed to save portfolio snapshot via gateway")
-            return 0
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.SNAPSHOT,
+                strategy_id=getattr(snapshot, "strategy_id", "") or "",
+                cause=e,
+            ) from e
 
     async def get_latest_snapshot(self, strategy_id: str) -> "PortfolioSnapshot | None":
         """Get most recent portfolio snapshot via gateway gRPC."""
@@ -292,6 +307,27 @@ class GatewayStateManager:
             logger.debug("Failed to get snapshots via gateway: %s", e)
             return []
 
+    async def save_ledger_entry(self, entry: "LedgerEntry") -> None:
+        """Save a transaction ledger entry via the gateway.
+
+        VIB-3157 known gap (tracked in follow-up): the gateway service does
+        not yet expose a ``SaveLedgerEntry`` RPC. The gateway's
+        ``transaction_ledger`` table has a read handler (``GetLedgerEntries``
+        via ``dashboard_service``) but no writer. Until the write RPC lands,
+        this method signals the gap explicitly with ``NotImplementedError``
+        rather than silently returning. ``StrategyRunner._write_ledger_entry``
+        catches ``NotImplementedError`` as a KNOWN GAP: it CRITICAL-logs but
+        does not halt the live iteration, so gateway-backed deployments keep
+        running while the ops team prioritises the write path.
+
+        See ``docs/internal/vib-3157-gateway-ledger-followup.md``.
+        """
+        raise NotImplementedError(
+            "Gateway-backed deployments do not yet support ledger writes. "
+            "Follow-up tracked in docs/internal/vib-3157-gateway-ledger-followup.md "
+            "— implement SaveLedgerEntry RPC to close the silent-accounting gap."
+        )
+
     async def save_portfolio_metrics(self, metrics: "PortfolioMetrics") -> bool:
         """Save portfolio metrics via gateway gRPC.
 
@@ -318,14 +354,26 @@ class GatewayStateManager:
             response = self._client.state.SavePortfolioMetrics(request, timeout=self._timeout)
 
             if not response.success:
+                # VIB-3157: mirror save_portfolio_snapshot -- silent False returns caused
+                # baseline drift between ledger and metrics tables.
                 logger.error("SavePortfolioMetrics failed: %s", response.error)
-                return False
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.METRICS,
+                    strategy_id=metrics.strategy_id,
+                    message=f"SavePortfolioMetrics failed: {response.error}",
+                )
 
             logger.debug("Portfolio metrics saved via gateway for strategy=%s", metrics.strategy_id)
             return True
-        except Exception:
+        except AccountingPersistenceError:
+            raise
+        except Exception as e:
             logger.exception("Failed to save portfolio metrics via gateway")
-            return False
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=getattr(metrics, "strategy_id", "") or "",
+                cause=e,
+            ) from e
 
     async def get_portfolio_metrics(self, strategy_id: str) -> "PortfolioMetrics | None":
         """Get portfolio metrics via gateway gRPC.

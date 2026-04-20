@@ -287,8 +287,17 @@ class TestGatewayStateManagerMetrics:
 
     @pytest.mark.asyncio
     async def test_save_metrics_gateway_failure(self):
-        """GatewayStateManager.save_portfolio_metrics handles gRPC failures."""
+        """GatewayStateManager.save_portfolio_metrics raises on gRPC failures.
+
+        VIB-3157: the legacy ``return False`` swallow-on-failure contract was
+        a silent accounting-loss footgun. Failures now propagate so the
+        runner can halt the cycle and alert the operator.
+
+        Exercises the transport-exception branch *and* asserts the typed
+        ``write_kind`` / ``strategy_id`` metadata on the raised exception.
+        """
         from almanak.framework.portfolio.models import PortfolioMetrics
+        from almanak.framework.state.exceptions import AccountingPersistenceError
         from almanak.framework.state.gateway_state_manager import GatewayStateManager
 
         mock_client = MagicMock()
@@ -304,5 +313,45 @@ class TestGatewayStateManagerMetrics:
             initial_value_usd=Decimal("10000"),
         )
 
-        result = await gsm.save_portfolio_metrics(metrics)
-        assert result is False
+        with pytest.raises(AccountingPersistenceError) as excinfo:
+            await gsm.save_portfolio_metrics(metrics)
+
+        # Use public ``cause`` attribute, not ``__cause__`` dunder — public API
+        # is part of AccountingPersistenceError's contract; __cause__ couples
+        # the test to Python's ``raise X from Y`` implementation detail.
+        assert "gRPC unavailable" in str(excinfo.value) or excinfo.value.cause is not None
+        assert excinfo.value.write_kind == "metrics"
+        assert excinfo.value.strategy_id == "test"
+
+    @pytest.mark.asyncio
+    async def test_save_metrics_response_failure(self):
+        """GatewayStateManager.save_portfolio_metrics raises on response.success=False.
+
+        Complements ``test_save_metrics_gateway_failure``: covers the
+        gateway-returned-failure branch (no transport exception) that the
+        earlier "returns False" contract used to hide.
+        """
+        from almanak.framework.portfolio.models import PortfolioMetrics
+        from almanak.framework.state.exceptions import AccountingPersistenceError
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        mock_client = MagicMock()
+        mock_state_stub = MagicMock()
+        mock_response = gateway_pb2.SaveMetricsResponse(success=False, error="backend rejected metrics")
+        mock_state_stub.SavePortfolioMetrics.return_value = mock_response
+        mock_client.state = mock_state_stub
+
+        gsm = GatewayStateManager(mock_client)
+        metrics = PortfolioMetrics(
+            strategy_id="test",
+            timestamp=datetime.now(UTC),
+            total_value_usd=Decimal("0"),
+            initial_value_usd=Decimal("10000"),
+        )
+
+        with pytest.raises(AccountingPersistenceError) as excinfo:
+            await gsm.save_portfolio_metrics(metrics)
+
+        assert excinfo.value.write_kind == "metrics"
+        assert excinfo.value.strategy_id == "test"
+        assert "backend rejected metrics" in str(excinfo.value)

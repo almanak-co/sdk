@@ -295,10 +295,18 @@ class TestGatewayStateManagerSnapshots:
         assert payload["positions"][0]["protocol"] == "traderjoe_v2"
         assert payload["metadata"]["valuation_source"] == "reconciled_external"
 
-    def test_save_portfolio_snapshot_failure_returns_zero(self, mock_client, sample_snapshot):
-        """save_portfolio_snapshot returns 0 on gRPC failure."""
+    def test_save_portfolio_snapshot_failure_raises(self, mock_client, sample_snapshot):
+        """save_portfolio_snapshot raises AccountingPersistenceError on gRPC failure.
+
+        VIB-3157: the legacy ``return 0`` swallow-on-failure contract was a
+        silent accounting-loss footgun. Failures now propagate so the runner
+        can halt the cycle and alert the operator. Also asserts the typed
+        ``write_kind`` / ``strategy_id`` metadata so a regression to a
+        different accounting-error shape would be caught.
+        """
         import asyncio
 
+        from almanak.framework.state.exceptions import AccountingPersistenceError
         from almanak.framework.state.gateway_state_manager import GatewayStateManager
 
         manager = GatewayStateManager(mock_client)
@@ -306,22 +314,32 @@ class TestGatewayStateManagerSnapshots:
         mock_response = gateway_pb2.SaveSnapshotResponse(success=False, error="internal error")
         mock_client.state.SavePortfolioSnapshot.return_value = mock_response
 
-        result = asyncio.run(manager.save_portfolio_snapshot(sample_snapshot))
+        with pytest.raises(AccountingPersistenceError) as excinfo:
+            asyncio.run(manager.save_portfolio_snapshot(sample_snapshot))
 
-        assert result == 0
+        assert "internal error" in str(excinfo.value)
+        assert excinfo.value.write_kind == "snapshot"
+        assert excinfo.value.strategy_id == sample_snapshot.strategy_id
 
-    def test_save_portfolio_snapshot_exception_returns_zero(self, mock_client, sample_snapshot):
-        """save_portfolio_snapshot returns 0 on gRPC exception."""
+    def test_save_portfolio_snapshot_exception_raises(self, mock_client, sample_snapshot):
+        """save_portfolio_snapshot raises AccountingPersistenceError on gRPC exception."""
         import asyncio
 
+        from almanak.framework.state.exceptions import AccountingPersistenceError
         from almanak.framework.state.gateway_state_manager import GatewayStateManager
 
         manager = GatewayStateManager(mock_client)
         mock_client.state.SavePortfolioSnapshot.side_effect = RuntimeError("gRPC failed")
 
-        result = asyncio.run(manager.save_portfolio_snapshot(sample_snapshot))
+        with pytest.raises(AccountingPersistenceError) as excinfo:
+            asyncio.run(manager.save_portfolio_snapshot(sample_snapshot))
 
-        assert result == 0
+        # Public ``cause`` attribute, not ``__cause__`` dunder — see
+        # test_portfolio_metrics_rpc for rationale. Asserting write_kind AND
+        # strategy_id locks the runner's accounting-failure dispatch contract.
+        assert "gRPC failed" in str(excinfo.value) or excinfo.value.cause is not None
+        assert excinfo.value.write_kind == "snapshot"
+        assert excinfo.value.strategy_id == sample_snapshot.strategy_id
 
     def test_get_latest_snapshot_success(self, mock_client):
         """get_latest_snapshot returns snapshot from gRPC response."""

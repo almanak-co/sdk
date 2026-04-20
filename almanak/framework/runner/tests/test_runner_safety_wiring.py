@@ -121,8 +121,15 @@ class MockExecutionOrchestrator:
 
 
 class MockStateManager:
+    """VIB-3157: stubs accounting-persistence surface so live-mode tests
+    don't trip the new fail-closed contract (save_ledger_entry /
+    save_portfolio_snapshot / save_portfolio_metrics)."""
+
     def __init__(self) -> None:
         self._states: dict[str, StateData] = {}
+        self._ledger_entries: list[Any] = []
+        self._snapshots: list[Any] = []
+        self._metrics: dict[str, Any] = {}
         self.initialized = False
 
     async def initialize(self) -> None:
@@ -140,6 +147,20 @@ class MockStateManager:
         state.version += 1
         self._states[state.strategy_id] = state
         return state
+
+    async def save_ledger_entry(self, entry: Any) -> None:
+        self._ledger_entries.append(entry)
+
+    async def save_portfolio_snapshot(self, snapshot: Any) -> int:
+        self._snapshots.append(snapshot)
+        return len(self._snapshots)
+
+    async def save_portfolio_metrics(self, metrics: Any) -> bool:
+        self._metrics[getattr(metrics, "strategy_id", "")] = metrics
+        return True
+
+    async def get_portfolio_metrics(self, strategy_id: str) -> Any:
+        return self._metrics.get(strategy_id)
 
 
 class MockAlertManager:

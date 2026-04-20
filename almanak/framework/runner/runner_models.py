@@ -258,6 +258,10 @@ class IterationStatus(StrEnum):
     STRATEGY_TIMEOUT = "STRATEGY_TIMEOUT"  # strategy.decide() exceeded time limit
     DATA_ERROR = "DATA_ERROR"
     CIRCUIT_BREAKER_OPEN = "CIRCUIT_BREAKER_OPEN"  # Circuit breaker blocked execution
+    # VIB-3157: on-chain execution succeeded but the durable accounting write
+    # (ledger / snapshot / metrics) failed. Runner halts the iteration and
+    # alerts the operator so the books are reconciled before resuming.
+    ACCOUNTING_FAILED = "ACCOUNTING_FAILED"
 
 
 @dataclass

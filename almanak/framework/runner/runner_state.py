@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..intents.vocabulary import AnyIntent, HoldIntent
 from ..portfolio import PortfolioMetrics, PortfolioSnapshot, ValueConfidence
+from ..state.exceptions import AccountingPersistenceError
 from ..state.state_manager import StateData, StateNotFoundError
 
 if TYPE_CHECKING:
@@ -284,6 +285,12 @@ async def capture_portfolio_snapshot(
 
         return snapshot
 
+    except AccountingPersistenceError:
+        # VIB-3157: snapshot/metrics backend write failed. Surface to the
+        # runner so it can halt with ACCOUNTING_FAILED in live mode -- the
+        # mode-aware decision (paper/dry-run may continue) lives upstream so
+        # this layer never silently drops the failure.
+        raise
     except Exception as e:
         logger.warning(f"Failed to capture portfolio snapshot: {e}")
         # Failure contract: persist UNAVAILABLE snapshot rather than skipping
@@ -304,6 +311,8 @@ async def capture_portfolio_snapshot(
             )
             await runner.state_manager.save_portfolio_snapshot(unavailable_snapshot)
             runner._last_snapshot_time = now
+        except AccountingPersistenceError:
+            raise
         except Exception as persist_err:
             logger.warning("Failed to persist UNAVAILABLE snapshot: %s", persist_err)
         return None
@@ -331,8 +340,12 @@ async def _build_metrics_for_snapshot(
             logger.info(f"Skipping portfolio metrics for {strategy_id}: snapshot unavailable")
             return None
 
-        # Phase 4: derive deployment_id, execution_mode, and cycle_id from runner context
-        execution_mode = "dry_run" if runner.config.dry_run else "live"
+        # Phase 4: derive deployment_id, execution_mode, and cycle_id from runner context.
+        # VIB-3157: shared helper keeps the tri-state mapping aligned with
+        # ledger entries (``StrategyRunner._derive_execution_mode``).
+        from almanak.framework.runner.strategy_runner import derive_execution_mode_from_config
+
+        execution_mode = derive_execution_mode_from_config(runner.config)
 
         # Get cycle_id: prefer runner._last_cycle_id (survives clear_cycle_id in finally block)
         # Fall back to observability context for non-runner callers
@@ -392,6 +405,9 @@ async def update_portfolio_metrics(
     if metrics is not None:
         try:
             await runner.state_manager.save_portfolio_metrics(metrics)
+        except AccountingPersistenceError:
+            # VIB-3157: propagate so the runner's ACCOUNTING_FAILED path fires.
+            raise
         except Exception as e:
             logger.warning(f"Failed to save portfolio metrics: {e}")
 

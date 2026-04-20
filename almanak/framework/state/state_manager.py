@@ -45,6 +45,11 @@ if TYPE_CHECKING:
     from almanak.framework.observability.ledger import LedgerEntry
     from almanak.framework.portfolio import PortfolioMetrics, PortfolioSnapshot
 
+from .exceptions import (  # noqa: E402 (re-exported for callers)
+    AccountingPersistenceError,
+    AccountingWriteKind,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -1336,18 +1341,31 @@ class StateManager:
             snapshot: PortfolioSnapshot to persist.
 
         Returns:
-            Snapshot ID if save succeeded, 0 if no WARM backend or error.
+            Snapshot ID on success. Raises :class:`AccountingPersistenceError`
+            on backend write failure, missing WARM backend, or unsupported
+            backend so the runner can halt the cycle in live mode (VIB-3157).
+            Paper/dry-run suppression is handled upstream by the runner.
         """
         if not self._initialized:
             await self.initialize()
 
+        strategy_id = getattr(snapshot, "strategy_id", "") or ""
+
         if not self._warm:
-            logger.warning("Cannot save portfolio snapshot: no WARM backend configured")
-            return 0
+            logger.error("Cannot save portfolio snapshot: no WARM backend configured")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.SNAPSHOT,
+                strategy_id=strategy_id,
+                message="No WARM backend configured for portfolio snapshot",
+            )
 
         if not hasattr(self._warm, "save_portfolio_snapshot"):
-            logger.warning("WARM backend does not support portfolio snapshot storage")
-            return 0
+            logger.error("WARM backend does not support portfolio snapshot storage")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.SNAPSHOT,
+                strategy_id=strategy_id,
+                message="WARM backend does not support portfolio snapshot storage",
+            )
 
         start = time.perf_counter()
         try:
@@ -1355,11 +1373,22 @@ class StateManager:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "save_portfolio_snapshot", latency, True)
             return result
+        except AccountingPersistenceError:
+            # Backend already raised a typed accounting error -- don't double-wrap.
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(
+                StateTier.WARM, "save_portfolio_snapshot", latency, False, "AccountingPersistenceError"
+            )
+            raise
         except Exception as e:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "save_portfolio_snapshot", latency, False, str(e))
             logger.error(f"Failed to save portfolio snapshot: {e}")
-            return 0
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.SNAPSHOT,
+                strategy_id=strategy_id,
+                cause=e,
+            ) from e
 
     async def get_latest_snapshot(self, strategy_id: str) -> "PortfolioSnapshot | None":
         """Get most recent portfolio snapshot for a strategy.
@@ -1479,30 +1508,80 @@ class StateManager:
             metrics: PortfolioMetrics to persist.
 
         Returns:
-            True if save succeeded, False if no WARM backend or error.
+            ``True`` on success. Raises :class:`AccountingPersistenceError`
+            on backend write failure, missing WARM backend, or unsupported
+            backend so the runner can halt the cycle in live mode (VIB-3157).
+            Paper/dry-run suppression is handled upstream by the runner.
         """
         if not self._initialized:
             await self.initialize()
 
+        strategy_id = getattr(metrics, "strategy_id", "") or ""
+
         if not self._warm:
-            logger.warning("Cannot save portfolio metrics: no WARM backend configured")
-            return False
+            logger.error("Cannot save portfolio metrics: no WARM backend configured")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=strategy_id,
+                message="No WARM backend configured for portfolio metrics",
+            )
 
         if not hasattr(self._warm, "save_portfolio_metrics"):
-            logger.warning("WARM backend does not support portfolio metrics storage")
-            return False
+            logger.error("WARM backend does not support portfolio metrics storage")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=strategy_id,
+                message="WARM backend does not support portfolio metrics storage",
+            )
 
         start = time.perf_counter()
         try:
             result = await self._warm.save_portfolio_metrics(metrics)  # type: ignore[attr-defined]
+        except AccountingPersistenceError:
+            # Backend already raised a typed accounting error -- don't
+            # double-wrap, but still record the failure in tier metrics so
+            # observability matches save_ledger_entry / save_portfolio_snapshot.
             latency = (time.perf_counter() - start) * 1000
-            self._record_metrics(StateTier.WARM, "save_portfolio_metrics", latency, True)
-            return result
+            self._record_metrics(
+                StateTier.WARM,
+                "save_portfolio_metrics",
+                latency,
+                False,
+                "AccountingPersistenceError",
+            )
+            raise
         except Exception as e:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "save_portfolio_metrics", latency, False, str(e))
             logger.error(f"Failed to save portfolio metrics: {e}")
-            return False
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=strategy_id,
+                cause=e,
+            ) from e
+
+        # VIB-3157: a ``False`` return from the backend is a write failure.
+        # Done OUTSIDE the try-except so the raise here doesn't get caught
+        # by the AccountingPersistenceError passthrough above (which would
+        # double-record the failure metric). The old path returned the raw
+        # bool; downstream (runner_state) only escalates typed accounting
+        # errors, so a silent False would have slipped through.
+        latency = (time.perf_counter() - start) * 1000
+        if not result:
+            self._record_metrics(
+                StateTier.WARM,
+                "save_portfolio_metrics",
+                latency,
+                False,
+                "backend_returned_false",
+            )
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=strategy_id,
+                message="WARM backend save_portfolio_metrics returned False",
+            )
+        self._record_metrics(StateTier.WARM, "save_portfolio_metrics", latency, True)
+        return True
 
     async def get_portfolio_metrics(self, strategy_id: str) -> "PortfolioMetrics | None":
         """Get portfolio metrics for a strategy.
@@ -1575,29 +1654,57 @@ class StateManager:
     async def save_ledger_entry(self, entry: "LedgerEntry") -> None:
         """Save a transaction ledger entry to the WARM backend.
 
+        Raises :class:`AccountingPersistenceError` on backend write failure,
+        missing WARM backend, or unsupported backend so the runner can halt
+        the cycle in live mode (VIB-3157). Paper/dry-run suppression is
+        handled upstream by the runner.
+
         Args:
             entry: LedgerEntry to persist.
         """
         if not self._initialized:
             await self.initialize()
 
+        strategy_id = getattr(entry, "strategy_id", "") or ""
+
         if not self._warm:
-            logger.debug("Cannot save ledger entry: no WARM backend configured")
-            return
+            logger.error("Cannot save ledger entry: no WARM backend configured")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.LEDGER,
+                strategy_id=strategy_id,
+                message="No WARM backend configured for transaction ledger",
+            )
 
         if not hasattr(self._warm, "save_ledger_entry"):
-            logger.debug("WARM backend does not support transaction ledger")
-            return
+            logger.error("WARM backend does not support transaction ledger")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.LEDGER,
+                strategy_id=strategy_id,
+                message="WARM backend does not support transaction ledger",
+            )
 
         start = time.perf_counter()
         try:
             await self._warm.save_ledger_entry(entry)  # type: ignore[attr-defined]
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "save_ledger_entry", latency, True)
+        except AccountingPersistenceError:
+            # Backend already raised a typed accounting error -- don't double-wrap.
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "save_ledger_entry", latency, False, "AccountingPersistenceError")
+            raise
         except Exception as e:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "save_ledger_entry", latency, False, str(e))
-            logger.warning(f"Failed to save ledger entry: {e}")
+            # VIB-3157: surface as typed error so the runner can halt the cycle in live
+            # mode. Mode-aware suppression (paper/dry-run) happens upstream, never here
+            # -- the backend write either completed or it didn't.
+            logger.error("Failed to save ledger entry for %s: %s", strategy_id, e)
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.LEDGER,
+                strategy_id=strategy_id,
+                cause=e,
+            ) from e
 
     async def get_ledger_entries(
         self,

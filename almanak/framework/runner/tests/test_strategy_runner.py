@@ -176,10 +176,19 @@ class MockExecutionOrchestrator:
 
 
 class MockStateManager:
-    """Mock state manager for testing."""
+    """Mock state manager for testing.
+
+    Provides in-memory stubs for the accounting-persistence surface
+    (VIB-3157): ``save_ledger_entry``, ``save_portfolio_snapshot``,
+    ``save_portfolio_metrics``. Without these, live-mode writes now
+    raise :class:`AccountingPersistenceError` by contract.
+    """
 
     def __init__(self) -> None:
         self._states: dict[str, StateData] = {}
+        self._ledger_entries: list[Any] = []
+        self._snapshots: list[Any] = []
+        self._metrics: dict[str, Any] = {}
         self.initialized = False
         self.closed = False
 
@@ -212,6 +221,20 @@ class MockStateManager:
             del self._states[strategy_id]
             return True
         return False
+
+    async def save_ledger_entry(self, entry: Any) -> None:
+        self._ledger_entries.append(entry)
+
+    async def save_portfolio_snapshot(self, snapshot: Any) -> int:
+        self._snapshots.append(snapshot)
+        return len(self._snapshots)
+
+    async def save_portfolio_metrics(self, metrics: Any) -> bool:
+        self._metrics[getattr(metrics, "strategy_id", "")] = metrics
+        return True
+
+    async def get_portfolio_metrics(self, strategy_id: str) -> Any:
+        return self._metrics.get(strategy_id)
 
 
 class MockAlertManager:
