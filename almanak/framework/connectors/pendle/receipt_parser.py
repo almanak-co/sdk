@@ -858,12 +858,25 @@ class PendleReceiptParser:
     # Extraction Methods (for Result Enrichment)
     # =========================================================================
 
-    def extract_swap_amounts(self, receipt: dict[str, Any]) -> SwapAmounts | None:
+    def extract_swap_amounts(
+        self,
+        receipt: dict[str, Any],
+        *,
+        expected_out: Decimal | None = None,
+    ) -> SwapAmounts | None:
         """
         Extract swap amounts from receipt for Result Enrichment.
 
         Called by the framework after SWAP execution to populate
         ExecutionResult.swap_amounts.
+
+        Args:
+            receipt: Transaction receipt dict.
+            expected_out: VIB-3203 — pre-slippage-discount quote in human
+                (Decimal) units from the compiler's ActionBundle metadata.
+                Overrides the parser's internal ``slippage_bps``, which is
+                ``None`` on the enrichment path because constructor
+                ``quoted_price`` isn't available there.
 
         Returns:
             SwapAmounts dataclass or None if not found
@@ -874,13 +887,21 @@ class PendleReceiptParser:
                 return None
 
             sr = result.swap_result
+
+            # VIB-3203: compute realized slippage from framework-supplied quote.
+            slippage_bps = sr.slippage_bps
+            if expected_out is not None and expected_out > 0 and sr.amount_out_decimal > 0:
+                realized_slippage = (expected_out - sr.amount_out_decimal) / expected_out
+                slippage_bps = int(realized_slippage * Decimal(10_000))
+
             return SwapAmounts(
                 amount_in=sr.amount_in,
                 amount_out=sr.amount_out,
                 amount_in_decimal=sr.amount_in_decimal,
                 amount_out_decimal=sr.amount_out_decimal,
                 effective_price=sr.effective_price,
-                slippage_bps=sr.slippage_bps,
+                slippage_bps=slippage_bps,
+                expected_out_decimal=expected_out,
                 token_in=sr.token_in,
                 token_out=sr.token_out,
             )

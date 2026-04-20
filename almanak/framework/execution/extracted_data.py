@@ -34,6 +34,12 @@ class SwapAmounts:
         amount_out_decimal: Human-readable output amount
         effective_price: Actual execution price (out/in)
         slippage_bps: Actual slippage in basis points (None if unknown)
+        expected_out_decimal: Pre-slippage-discount expected output in human
+            units, sourced from the compiler's ActionBundle metadata
+            (VIB-3203). Persisting this alongside ``slippage_bps`` gives
+            downstream consumers the source-of-truth used to compute the
+            realized slippage. ``None`` when the compile path did not supply
+            a quote.
         token_in: Input token address or symbol
         token_out: Output token address or symbol
 
@@ -49,6 +55,7 @@ class SwapAmounts:
     amount_out_decimal: Decimal
     effective_price: Decimal | None = None
     slippage_bps: int | None = None
+    expected_out_decimal: Decimal | None = None
     token_in: str | None = None
     token_out: str | None = None
 
@@ -70,6 +77,7 @@ class SwapAmounts:
             "amount_out_decimal": str(self.amount_out_decimal),
             "effective_price": str(self.effective_price) if self.effective_price is not None else None,
             "slippage_bps": self.slippage_bps,
+            "expected_out_decimal": str(self.expected_out_decimal) if self.expected_out_decimal is not None else None,
             "token_in": self.token_in,
             "token_out": self.token_out,
         }

@@ -1022,7 +1022,12 @@ class SushiSwapV3ReceiptParser:
     # Swap Amounts Extraction (for Result Enrichment)
     # =============================================================================
 
-    def extract_swap_amounts(self, receipt: dict[str, Any]) -> SwapAmounts | None:
+    def extract_swap_amounts(
+        self,
+        receipt: dict[str, Any],
+        *,
+        expected_out: Decimal | None = None,
+    ) -> SwapAmounts | None:
         """Extract swap amounts from a transaction receipt.
 
         This method is called by the ResultEnricher to automatically populate
@@ -1034,6 +1039,10 @@ class SushiSwapV3ReceiptParser:
 
         Args:
             receipt: Transaction receipt dict with 'logs' and 'from' fields
+            expected_out: VIB-3203 — pre-slippage-discount quote in human
+                (Decimal) units from ``ActionBundle.metadata["expected_output_human"]``.
+                When provided, realized ``slippage_bps`` is computed as
+                ``(expected_out - amount_out_decimal) / expected_out * 10_000``.
 
         Returns:
             SwapAmounts dataclass if swap event found, None otherwise
@@ -1089,6 +1098,13 @@ class SushiSwapV3ReceiptParser:
             amount_out_decimal = Decimal(str(raw_out)) / Decimal(10**out_decimals)
             effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal("0")
 
+            # VIB-3203: compute realized slippage from the compiler-supplied
+            # pre-slippage-discount quote. Overrides parser-side slippage,
+            # which is None on the enrichment path.
+            if expected_out is not None and expected_out > 0 and amount_out_decimal > 0:
+                realized_slippage = (expected_out - amount_out_decimal) / expected_out
+                slippage_bps = int(realized_slippage * Decimal(10_000))
+
             return SwapAmounts(
                 amount_in=raw_in,
                 amount_out=raw_out,
@@ -1096,6 +1112,7 @@ class SushiSwapV3ReceiptParser:
                 amount_out_decimal=amount_out_decimal,
                 effective_price=effective_price,
                 slippage_bps=slippage_bps,
+                expected_out_decimal=expected_out,
                 token_in=token_in_symbol or token_in_addr or token_in_hint,
                 token_out=token_out_symbol or token_out_addr or token_out_hint,
             )

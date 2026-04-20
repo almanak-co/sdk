@@ -208,6 +208,8 @@ class ResultEnricher:
         result: ExecutionResult,
         intent: Any,
         context: ExecutionContext,
+        *,
+        bundle_metadata: dict[str, Any] | None = None,
     ) -> ExecutionResult:
         """Enrich execution result with intent-specific extracted data.
 
@@ -225,6 +227,10 @@ class ResultEnricher:
             result: Raw execution result from orchestrator
             intent: The intent that was executed
             context: Execution context with chain info
+            bundle_metadata: Optional ActionBundle.metadata dict from the
+                compiler. Used to thread compiler-side quote data (e.g.,
+                ``expected_output_human`` for VIB-3203 realized-slippage
+                calculation) through to the extract_* methods.
 
         Returns:
             Enriched ExecutionResult (same instance, mutated)
@@ -320,7 +326,9 @@ class ResultEnricher:
         try:
             # Extract each field in the spec
             for field in spec:
-                self._extract_field(result, parser, receipts, field, intent_type, protocol)
+                self._extract_field(
+                    result, parser, receipts, field, intent_type, protocol, bundle_metadata=bundle_metadata
+                )
         finally:
             self._remove_parse_cache(parser)
 
@@ -354,6 +362,8 @@ class ResultEnricher:
         field: str,
         intent_type: str,
         protocol: str | None = None,
+        *,
+        bundle_metadata: dict[str, Any] | None = None,
     ) -> None:
         """Extract a single field from receipts and attach to result.
 
@@ -407,12 +417,20 @@ class ResultEnricher:
             )
             return
 
+        # Build field-specific extraction kwargs. VIB-3203: thread
+        # ``expected_out`` (human Decimal) from the compiler's ActionBundle
+        # metadata to swap_amounts extractors so parsers can compute realized
+        # slippage_bps. Parsers that do not accept the kwarg degrade to the
+        # legacy behavior (slippage_bps=None) via the TypeError fallback in
+        # _invoke_extract.
+        extract_kwargs = self._build_extract_kwargs(field, bundle_metadata)
+
         # Iterate receipts. Remember any ExtractError and keep looking — the
         # data might land in a later receipt (multi-tx bundle). Only escalate
         # if no receipt produced Ok.
         last_error: ExtractError | None = None
         for receipt in receipts:
-            variant = self._invoke_extract(extract_method, parser, receipt, field)
+            variant = self._invoke_extract(extract_method, parser, receipt, field, extract_kwargs)
 
             if isinstance(variant, ExtractOk):
                 self._attach_to_result(result, field, variant.value, intent_type)
@@ -444,12 +462,45 @@ class ResultEnricher:
         """
         return any(name in klass.__dict__ for klass in type(obj).__mro__)
 
+    @staticmethod
+    def _build_extract_kwargs(
+        field: str,
+        bundle_metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Compute per-field extra kwargs for ``extract_<field>`` methods.
+
+        VIB-3203 — swap_amounts extractors can consume an ``expected_out``
+        Decimal (human units) to compute realized ``slippage_bps`` from
+        ``(expected_out - actual_out) / expected_out``. The value comes from
+        the compiler's ``ActionBundle.metadata["expected_output_human"]``.
+
+        Returns a mapping that can be passed directly as ``**kwargs`` to
+        the extract method. Parsers that do not accept the kwarg fall back
+        to positional-only invocation via :meth:`_invoke_extract`.
+        """
+        if not bundle_metadata:
+            return {}
+        if field != "swap_amounts":
+            return {}
+        raw = bundle_metadata.get("expected_output_human")
+        if raw is None:
+            return {}
+        try:
+            expected_out = Decimal(str(raw))
+        except (InvalidOperation, TypeError, ValueError):
+            logger.debug("Could not coerce expected_output_human=%r to Decimal; skipping", raw)
+            return {}
+        if not expected_out.is_finite() or expected_out <= 0:
+            return {}
+        return {"expected_out": expected_out}
+
     def _invoke_extract(
         self,
         extract_method: Any,
         parser: Any,
         receipt: dict[str, Any],
         field: str,
+        extract_kwargs: dict[str, Any] | None = None,
     ) -> ExtractOk[Any] | ExtractMissing | ExtractError:
         """Call an extract_* method and normalize the return to a variant.
 
@@ -457,9 +508,29 @@ class ResultEnricher:
         parsers return raw None / value; we wrap those with a one-shot
         deprecation warning. Exceptions from either kind become
         ExtractError — a raised exception is always accounting-critical.
+
+        ``extract_kwargs`` carry optional field-specific hints (e.g.,
+        ``expected_out`` for swap_amounts — VIB-3203). Parsers that do not
+        accept a given kwarg degrade to the legacy no-kwarg call via the
+        TypeError fallback.
         """
+        kwargs = extract_kwargs or {}
         try:
-            raw = extract_method(receipt)
+            if kwargs:
+                try:
+                    raw = extract_method(receipt, **kwargs)
+                except TypeError as exc:
+                    # Parser signature doesn't accept the kwarg (yet). This is an
+                    # expected back-compat path — the ticket only wires 5 of the
+                    # swap parsers in Phase A; the rest keep the legacy
+                    # "slippage_bps=None" behavior. Distinguish this from a real
+                    # crash by checking the exception message mentions the kwarg.
+                    if any(k in str(exc) for k in kwargs):
+                        raw = extract_method(receipt)
+                    else:
+                        raise
+            else:
+                raw = extract_method(receipt)
         except CriticalAccountingError:
             # Never swallow a fail-closed signal raised by a nested enricher.
             raise
@@ -755,6 +826,7 @@ def enrich_result(
     context: ExecutionContext,
     *,
     live_mode: bool | None = None,
+    bundle_metadata: dict[str, Any] | None = None,
 ) -> ExecutionResult:
     """Enrich an execution result using the default enricher.
 
@@ -768,6 +840,9 @@ def enrich_result(
         intent: The intent that was executed
         context: Execution context with chain info
         live_mode: Optional override. None = use singleton default (live).
+        bundle_metadata: Optional ActionBundle.metadata dict from the
+            compiler. VIB-3203: carries ``expected_output_human`` so
+            swap_amounts extractors can compute realized ``slippage_bps``.
 
     Returns:
         Enriched ExecutionResult
@@ -780,9 +855,9 @@ def enrich_result(
         result = enrich_result(result, intent, context, live_mode=False)
     """
     if live_mode is None:
-        return get_enricher().enrich(result, intent, context)
+        return get_enricher().enrich(result, intent, context, bundle_metadata=bundle_metadata)
     enricher = ResultEnricher(live_mode=live_mode)
-    return enricher.enrich(result, intent, context)
+    return enricher.enrich(result, intent, context, bundle_metadata=bundle_metadata)
 
 
 # =============================================================================

@@ -1838,6 +1838,12 @@ class StrategyRunner:
         last_execution_result: ExecutionResult | None = None
         last_execution_context: ExecutionContext | None = None
 
+        # VIB-3203: Capture the ActionBundle metadata from the step that actually
+        # carried a bundle, not from whichever step_result happens to be terminal.
+        # The terminal step may be an idle/no-op tick that lacks action_bundle, in
+        # which case the realized-slippage plumbing would silently degrade.
+        last_bundle_metadata: dict[str, Any] | None = None
+
         # Execute through state machine loop
         while not state_machine.is_complete:
             step_result = state_machine.step()
@@ -1853,6 +1859,11 @@ class StrategyRunner:
 
             # If we need to execute an action bundle
             if step_result.needs_execution and step_result.action_bundle:
+                # VIB-3203: Persist this step's metadata at the moment of
+                # execution so enrichment below can access
+                # ``expected_output_human`` even if a later no-op step is
+                # terminal.
+                last_bundle_metadata = getattr(step_result.action_bundle, "metadata", None)
                 # Dry run mode - skip actual execution
                 if self.config.dry_run:
                     logger.info(
@@ -2107,7 +2118,18 @@ class StrategyRunner:
             if last_execution_result and last_execution_context:
                 try:
                     enricher = ResultEnricher()
-                    last_execution_result = enricher.enrich(last_execution_result, intent, last_execution_context)
+                    # VIB-3203: thread compiler bundle metadata so swap_amounts
+                    # extractors can compute realized slippage_bps from the
+                    # persisted expected_output_human quote. We use the
+                    # metadata snapshot captured inside the state-machine loop
+                    # at execution time, not the terminal step_result (which
+                    # may be a COMPLETE state with no action_bundle).
+                    last_execution_result = enricher.enrich(
+                        last_execution_result,
+                        intent,
+                        last_execution_context,
+                        bundle_metadata=last_bundle_metadata,
+                    )
                 except Exception as e:
                     logger.warning(f"Result enrichment failed: {e}")
 

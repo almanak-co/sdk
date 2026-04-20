@@ -1467,6 +1467,12 @@ class IntentCompiler:
             # both quoter overestimates and stale oracle prices.
             oracle_estimate = expected_output
             quoter_amount = adapter.get_quoted_amount_out()
+            # VIB-3203: the best pre-execution quote (used for realized-slippage
+            # metrics) is the quoter when available, otherwise the oracle estimate.
+            # This must NOT be lowered by the execution-safety min() below, or the
+            # realized slippage calculation is biased whenever the quoter beats
+            # the oracle.
+            quoted_output_for_metrics = quoter_amount if quoter_amount is not None else oracle_estimate
             if quoter_amount is not None and quoter_amount < expected_output:
                 logger.info(
                     "Quoter amount (%s) is lower than price oracle estimate (%s) — "
@@ -1522,6 +1528,15 @@ class IntentCompiler:
 
             min_output = int(Decimal(str(expected_output)) * (Decimal("1") - intent.max_slippage))
 
+            # VIB-3203: Human-readable expected output for the realized slippage calculation
+            # performed by ResultEnricher after execution. Use the un-clamped quote
+            # (``quoted_output_for_metrics``) here so the metric reflects the pool's
+            # best pre-execution estimate, not the safety-lowered value used for
+            # on-chain ``min_amount_out``. If we used the clamped ``expected_output``
+            # the realized slippage would be biased toward zero whenever the
+            # quoter's number beat the oracle's.
+            expected_output_human = Decimal(str(quoted_output_for_metrics)) / Decimal(10**to_token.decimals)
+
             # Generate swap calldata (uses cached fee tier from select_fee_tier above)
             swap_calldata = adapter.get_swap_calldata(
                 from_token=actual_from_token,
@@ -1570,6 +1585,10 @@ class IntentCompiler:
                     "to_token": to_token.to_dict(),
                     "amount_in": str(amount_in),
                     "min_amount_out": str(min_output),
+                    # VIB-3203: Pre-slippage-discount quote (human-readable Decimal string).
+                    # Threaded through ResultEnricher to extract_swap_amounts() for realized
+                    # slippage_bps computation on the resulting on-chain receipt.
+                    "expected_output_human": str(expected_output_human),
                     "slippage": str(intent.max_slippage),
                     "protocol": protocol,
                     "router": router_address,
@@ -1711,6 +1730,10 @@ class IntentCompiler:
             # Calculate minimum output with slippage
             min_output = int(Decimal(str(amount_out)) * (Decimal("1") - intent.max_slippage))
 
+            # VIB-3203: Record pre-slippage-discount quote in human units so ResultEnricher
+            # can compute realized slippage_bps from the on-chain receipt.
+            expected_output_human = Decimal(str(amount_out)) / Decimal(10**to_token.decimals) if amount_out else None
+
             action_bundle = ActionBundle(
                 intent_type=IntentType.SWAP.value,
                 transactions=[tx.to_dict() for tx in transactions],
@@ -1720,6 +1743,7 @@ class IntentCompiler:
                     "amount_in": str(amount_in),
                     "amount_out": str(amount_out),
                     "min_amount_out": str(min_output),
+                    "expected_output_human": str(expected_output_human) if expected_output_human else None,
                     "slippage": str(intent.max_slippage),
                     "protocol": "enso",
                     "chain": self.chain,
@@ -2106,6 +2130,15 @@ class IntentCompiler:
             amount_out = quote.get_to_amount()
             amount_out_min = quote.get_to_amount_min()
 
+            # VIB-3203: Human-readable quote for realized slippage computation.
+            try:
+                amount_out_int = int(amount_out) if amount_out else 0
+            except (TypeError, ValueError):
+                amount_out_int = 0
+            expected_output_human = (
+                Decimal(str(amount_out_int)) / Decimal(10**to_token.decimals) if amount_out_int else None
+            )
+
             action_bundle = ActionBundle(
                 intent_type=IntentType.SWAP.value,
                 transactions=[tx.to_dict() for tx in transactions],
@@ -2115,6 +2148,7 @@ class IntentCompiler:
                     "amount_in": str(amount_in),
                     "amount_out": str(amount_out),
                     "min_amount_out": str(amount_out_min),
+                    "expected_output_human": str(expected_output_human) if expected_output_human else None,
                     "slippage": str(intent.max_slippage),
                     "protocol": "lifi",
                     "tool": quote.tool,
@@ -2289,6 +2323,9 @@ class IntentCompiler:
             bridge_fee = route_data.get("bridge_fee")
             estimated_time = route_data.get("estimated_time")
 
+            # VIB-3203: Pre-slippage-discount quote in human units for realized slippage math.
+            expected_output_human = Decimal(str(amount_out)) / Decimal(10**to_token.decimals) if amount_out else None
+
             action_bundle = ActionBundle(
                 intent_type=IntentType.SWAP.value,
                 transactions=[tx.to_dict() for tx in transactions],
@@ -2297,6 +2334,7 @@ class IntentCompiler:
                     "to_token": to_token.to_dict(),
                     "amount_in": str(amount_in),
                     "amount_out": str(amount_out),
+                    "expected_output_human": str(expected_output_human) if expected_output_human else None,
                     "slippage": str(intent.max_slippage),
                     "protocol": "enso",
                     "router": router_address,

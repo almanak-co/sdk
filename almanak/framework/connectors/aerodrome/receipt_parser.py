@@ -1092,13 +1092,22 @@ class AerodromeReceiptParser:
             return ExtractError(error=parsed.error or "parse_receipt reported failure")
         return None
 
-    def extract_swap_amounts_result(self, receipt: dict[str, Any]) -> ExtractResult["SwapAmounts"]:
-        """Fail-closed variant of :meth:`extract_swap_amounts` — see VIB-3159."""
+    def extract_swap_amounts_result(
+        self,
+        receipt: dict[str, Any],
+        *,
+        expected_out: Decimal | None = None,
+    ) -> ExtractResult["SwapAmounts"]:
+        """Fail-closed variant of :meth:`extract_swap_amounts` — see VIB-3159.
+
+        VIB-3203: ``expected_out`` is forwarded to :meth:`extract_swap_amounts`
+        for realized slippage_bps computation.
+        """
         err = self._strict_parse(receipt)
         if err is not None:
             return err
         try:
-            value = self.extract_swap_amounts(receipt)
+            value = self.extract_swap_amounts(receipt, expected_out=expected_out)
         except Exception as exc:  # noqa: BLE001
             return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
         if value is None:
@@ -1144,7 +1153,12 @@ class AerodromeReceiptParser:
             return ExtractMissing(reason="no Mint event in receipt")
         return ExtractOk(value=value)
 
-    def extract_swap_amounts(self, receipt: dict[str, Any]) -> "SwapAmounts | None":
+    def extract_swap_amounts(
+        self,
+        receipt: dict[str, Any],
+        *,
+        expected_out: Decimal | None = None,
+    ) -> "SwapAmounts | None":
         """Extract swap amounts from a transaction receipt.
 
         Resolves token decimals independently from ERC-20 Transfer events in the
@@ -1153,6 +1167,10 @@ class AerodromeReceiptParser:
 
         Args:
             receipt: Transaction receipt dict with 'logs' and 'from' fields
+            expected_out: VIB-3203 — pre-slippage-discount quote in human
+                (Decimal) units from ``ActionBundle.metadata["expected_output_human"]``.
+                When provided, realized ``slippage_bps`` is computed as
+                ``(expected_out - amount_out_decimal) / expected_out * 10_000``.
 
         Returns:
             SwapAmounts dataclass if swap event found, None otherwise
@@ -1220,6 +1238,15 @@ class AerodromeReceiptParser:
             amount_out_decimal = Decimal(str(raw_out)) / Decimal(10**out_decimals)
             effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal("0")
 
+            # VIB-3203: compute realized slippage when the framework supplies the
+            # compiler's pre-slippage-discount quote. This overrides any
+            # parser-side slippage value, which is generally None on the
+            # enrichment path since constructor-supplied ``quoted_price``
+            # isn't set when ReceiptParserRegistry builds the parser.
+            if expected_out is not None and expected_out > 0 and amount_out_decimal > 0:
+                realized_slippage = (expected_out - amount_out_decimal) / expected_out
+                slippage_bps = int(realized_slippage * Decimal(10_000))
+
             return SwapAmounts(
                 amount_in=raw_in,
                 amount_out=raw_out,
@@ -1227,6 +1254,7 @@ class AerodromeReceiptParser:
                 amount_out_decimal=amount_out_decimal,
                 effective_price=effective_price,
                 slippage_bps=slippage_bps,
+                expected_out_decimal=expected_out,
                 token_in=token_in_symbol or token_in_addr or token_in_hint,
                 token_out=token_out_symbol or token_out_addr or token_out_hint,
             )

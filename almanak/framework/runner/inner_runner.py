@@ -400,7 +400,15 @@ class IntentExecutionService:
 
                 # Step 3: Enrich result
                 if exec_resp.success and not dry_run:
-                    self._enrich_result(result, intent_type, intent_params, effective_chain, effective_wallet, protocol)
+                    self._enrich_result(
+                        result,
+                        intent_type,
+                        intent_params,
+                        effective_chain,
+                        effective_wallet,
+                        protocol,
+                        compile_resp=compile_resp,
+                    )
                 elif dry_run and intent_type.lower() == "swap":
                     self._enrich_dry_run_swap(result, compile_resp, intent_params)
 
@@ -499,6 +507,32 @@ class IntentExecutionService:
         except Exception as e:
             logger.debug("Sadflow callback failed (non-fatal): %s", e)
 
+    @staticmethod
+    def _decode_bundle_metadata(compile_resp: Any) -> dict[str, Any] | None:
+        """Decode the serialized ActionBundle's metadata dict (VIB-3203).
+
+        The gateway returns ``action_bundle`` as JSON bytes. We only need the
+        ``metadata`` dict for enrichment, so we skip the rest. Returns ``None``
+        on any parse failure — enrichment degrades gracefully to legacy
+        behavior (no ``expected_out`` threaded to swap parsers).
+        """
+        if compile_resp is None:
+            return None
+        bundle_bytes = getattr(compile_resp, "action_bundle", None)
+        if not bundle_bytes:
+            return None
+        try:
+            if isinstance(bundle_bytes, bytes):
+                bundle_data = json.loads(bundle_bytes.decode("utf-8"))
+            elif isinstance(bundle_bytes, str):
+                bundle_data = json.loads(bundle_bytes)
+            else:
+                return None
+            metadata = bundle_data.get("metadata")
+            return metadata if isinstance(metadata, dict) else None
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return None
+
     def _enrich_result(
         self,
         result: EnrichedExecutionResult,
@@ -507,6 +541,8 @@ class IntentExecutionService:
         chain: str,
         wallet_address: str,
         protocol: str | None,
+        *,
+        compile_resp: Any = None,
     ) -> None:
         """Run ResultEnricher on the execution result.
 
@@ -515,6 +551,10 @@ class IntentExecutionService:
 
         This is the same enrichment that StrategyRunner applies in
         _execute_single_chain(), now available to ToolExecutor.
+
+        VIB-3203: ``compile_resp`` carries the serialized ActionBundle whose
+        metadata is threaded into the enricher so swap parsers can compute
+        realized ``slippage_bps`` against the pre-slippage-discount quote.
         """
         try:
             from almanak.framework.execution.orchestrator import (
@@ -566,9 +606,12 @@ class IntentExecutionService:
             # Build a minimal intent-like object for the enricher
             intent_obj = _MinimalIntent(intent_type, intent_params)
 
+            # VIB-3203: extract compiler bundle metadata for realized slippage math.
+            bundle_metadata = self._decode_bundle_metadata(compile_resp)
+
             # Run enrichment
             enricher = ResultEnricher()
-            enriched = enricher.enrich(exec_result, intent_obj, context)
+            enriched = enricher.enrich(exec_result, intent_obj, context, bundle_metadata=bundle_metadata)
 
             # Transfer enriched data to our result
             result.position_id = enriched.position_id

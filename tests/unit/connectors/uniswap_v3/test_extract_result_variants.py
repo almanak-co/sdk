@@ -66,7 +66,8 @@ def test_extract_swap_amounts_result_empty_is_missing(parser: UniswapV3ReceiptPa
 
 
 def test_extract_swap_amounts_result_crash_is_error(parser: UniswapV3ReceiptParser) -> None:
-    def boom(_receipt: dict[str, Any]) -> Any:
+    def boom(_receipt: dict[str, Any], **_kwargs: Any) -> Any:
+        # Accept the VIB-3203 ``expected_out`` kwarg forwarded by the wrapper.
         raise ValueError("induced swap crash")
 
     parser.extract_swap_amounts = boom  # type: ignore[method-assign]

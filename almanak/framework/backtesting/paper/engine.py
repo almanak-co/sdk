@@ -2030,7 +2030,9 @@ class PaperTrader:
             # error would block research. The warning still surfaces on
             # result.extraction_warnings for monitoring.
             if result.success:
-                result = enrich_result(result, intent, context, live_mode=False)
+                # VIB-3203: pass compiler bundle metadata for realized slippage math.
+                bundle_meta = getattr(action_bundle, "metadata", None) if action_bundle else None
+                result = enrich_result(result, intent, context, live_mode=False, bundle_metadata=bundle_meta)
 
             # Store for on_intent_executed callback (VIB-1951)
             self._last_execution_result = result

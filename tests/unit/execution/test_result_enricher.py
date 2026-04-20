@@ -640,3 +640,173 @@ class TestSolanaLendingEnrichment:
         supply = enriched.extracted_data["supply_amounts"]
         assert supply is not None
         assert supply.amount == Decimal("50")
+
+
+# ===========================================================================
+# VIB-3203: expected_out threading from bundle metadata -> swap extractor
+# ===========================================================================
+
+
+class TestExpectedOutPlumbing:
+    """Verify ``bundle_metadata["expected_output_human"]`` is threaded
+    through :meth:`ResultEnricher.enrich` to the parser's ``extract_swap_amounts``
+    as the ``expected_out`` kwarg — enabling realized slippage_bps computation
+    (VIB-3203 Phase A)."""
+
+    def test_expected_out_threaded_to_parser(self):
+        """Enricher passes expected_out kwarg sourced from bundle metadata."""
+        captured_kwargs: dict[str, Any] = {}
+
+        class _SpyParser:
+            """Minimal parser that records the kwargs it was called with."""
+
+            def __init__(self, **_kwargs):  # accept (chain=...) from registry
+                pass
+
+            def parse_receipt(self, receipt):  # noqa: ARG002
+                class _Ok:
+                    success = True
+                    error = None
+
+                return _Ok()
+
+            def extract_swap_amounts(
+                self,
+                receipt,  # noqa: ARG002
+                *,
+                expected_out: Decimal | None = None,
+            ) -> SwapAmounts:
+                captured_kwargs["expected_out"] = expected_out
+                return SwapAmounts(
+                    amount_in=100,
+                    amount_out=95,
+                    amount_in_decimal=Decimal("100"),
+                    amount_out_decimal=Decimal("95"),
+                    effective_price=Decimal("0.95"),
+                    slippage_bps=(
+                        int(((expected_out - Decimal("95")) / expected_out) * Decimal(10_000))
+                        if expected_out and expected_out > 0
+                        else None
+                    ),
+                    expected_out_decimal=expected_out,
+                    token_in="USDC",
+                    token_out="ETH",
+                )
+
+        tx_result = _FakeTxResult(success=True, receipt=_FakeReceipt(logs=[{}]))
+        result = _FakeExecResult(transaction_results=[tx_result])
+        intent = _FakeIntent(intent_type="SWAP", protocol="spy")
+        context = _FakeContext(chain="arbitrum", protocol="spy")
+
+        enricher = ResultEnricher(live_mode=False)
+        # Inject the spy via custom registration so the registry hands it back.
+        enricher.parser_registry.register("spy", _SpyParser)
+
+        enriched = enricher.enrich(
+            result,
+            intent,
+            context,
+            bundle_metadata={"expected_output_human": "100"},
+        )
+
+        assert captured_kwargs["expected_out"] == Decimal("100")
+        assert enriched.swap_amounts is not None
+        # (100 - 95) / 100 * 10_000 = 500 bps
+        assert enriched.swap_amounts.slippage_bps == 500
+        assert enriched.swap_amounts.expected_out_decimal == Decimal("100")
+
+    def test_missing_expected_output_leaves_slippage_none(self):
+        """When bundle metadata has no expected_output_human, kwarg is not set."""
+        captured_kwargs: dict[str, Any] = {}
+
+        class _SpyParser:
+            def __init__(self, **_kwargs):  # accept (chain=...) from registry
+                pass
+
+            def parse_receipt(self, receipt):  # noqa: ARG002
+                class _Ok:
+                    success = True
+                    error = None
+
+                return _Ok()
+
+            def extract_swap_amounts(
+                self,
+                receipt,  # noqa: ARG002
+                *,
+                expected_out: Decimal | None = None,
+            ) -> SwapAmounts:
+                captured_kwargs["expected_out"] = expected_out
+                return SwapAmounts(
+                    amount_in=100,
+                    amount_out=95,
+                    amount_in_decimal=Decimal("100"),
+                    amount_out_decimal=Decimal("95"),
+                    effective_price=Decimal("0.95"),
+                    slippage_bps=None,
+                    expected_out_decimal=None,
+                    token_in="USDC",
+                    token_out="ETH",
+                )
+
+        tx_result = _FakeTxResult(success=True, receipt=_FakeReceipt(logs=[{}]))
+        result = _FakeExecResult(transaction_results=[tx_result])
+        intent = _FakeIntent(intent_type="SWAP", protocol="spy2")
+        context = _FakeContext(chain="arbitrum", protocol="spy2")
+
+        enricher = ResultEnricher(live_mode=False)
+        enricher.parser_registry.register("spy2", _SpyParser)
+
+        # Both absent-metadata and metadata-without-the-key should leave
+        # expected_out at default (None).
+        enricher.enrich(result, intent, context)
+        assert captured_kwargs["expected_out"] is None
+
+        enricher.enrich(result, intent, context, bundle_metadata={"other_key": "123"})
+        assert captured_kwargs["expected_out"] is None
+
+    def test_legacy_parser_without_kwarg_degrades_gracefully(self):
+        """Parsers without expected_out kwarg keep working (back-compat)."""
+
+        class _LegacyParser:
+            """Mimics the pre-VIB-3203 signature: no expected_out kwarg."""
+
+            def __init__(self, **_kwargs):  # accept (chain=...) from registry
+                pass
+
+            def parse_receipt(self, receipt):  # noqa: ARG002
+                class _Ok:
+                    success = True
+                    error = None
+
+                return _Ok()
+
+            def extract_swap_amounts(self, receipt):  # noqa: ARG002
+                return SwapAmounts(
+                    amount_in=1,
+                    amount_out=1,
+                    amount_in_decimal=Decimal("1"),
+                    amount_out_decimal=Decimal("1"),
+                    effective_price=Decimal("1"),
+                    slippage_bps=None,
+                    token_in="USDC",
+                    token_out="ETH",
+                )
+
+        tx_result = _FakeTxResult(success=True, receipt=_FakeReceipt(logs=[{}]))
+        result = _FakeExecResult(transaction_results=[tx_result])
+        intent = _FakeIntent(intent_type="SWAP", protocol="legacy")
+        context = _FakeContext(chain="arbitrum", protocol="legacy")
+
+        enricher = ResultEnricher(live_mode=False)
+        enricher.parser_registry.register("legacy", _LegacyParser)
+
+        # Pass bundle_metadata with expected_output_human — parser should NOT crash.
+        enriched = enricher.enrich(
+            result,
+            intent,
+            context,
+            bundle_metadata={"expected_output_human": "100"},
+        )
+        assert enriched.swap_amounts is not None
+        assert enriched.swap_amounts.slippage_bps is None

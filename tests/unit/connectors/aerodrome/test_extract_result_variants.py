@@ -35,7 +35,8 @@ def test_liquidity_result_empty_is_missing(parser: AerodromeReceiptParser) -> No
 
 
 def test_swap_amounts_result_crash_is_error(parser: AerodromeReceiptParser) -> None:
-    def boom(_receipt: dict[str, Any]) -> Any:
+    def boom(_receipt: dict[str, Any], **_kwargs: Any) -> Any:
+        # Accept the VIB-3203 ``expected_out`` kwarg so the wrapper can forward it.
         raise RuntimeError("aerodrome parse failure")
 
     parser.extract_swap_amounts = boom  # type: ignore[method-assign]

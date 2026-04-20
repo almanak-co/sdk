@@ -536,16 +536,30 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:
 
         total_gas = sum(tx.gas_estimate for tx in transactions)
 
+        # VIB-3203: Pre-slippage-discount quote in human units for realized slippage
+        # computation by ResultEnricher after execution.
+        expected_output_human: Decimal | None = None
+        try:
+            quoted_amount_out = getattr(swap_result.quote, "amount_out", None) if swap_result.quote else None
+            if quoted_amount_out:
+                expected_output_human = Decimal(str(quoted_amount_out)) / Decimal(10**to_token.decimals)
+        except (TypeError, ValueError, AttributeError):
+            expected_output_human = None
+
+        metadata: dict[str, Any] = {
+            "from_token": from_token.to_dict(),
+            "to_token": to_token.to_dict(),
+            "amount_in": str(amount_decimal),
+            "routing": routing,
+            "protocol": "aerodrome",
+        }
+        if expected_output_human is not None:
+            metadata["expected_output_human"] = str(expected_output_human)
+
         action_bundle = ActionBundle(
             intent_type=IntentType.SWAP.value,
             transactions=[tx.to_dict() for tx in transactions],
-            metadata={
-                "from_token": from_token.to_dict(),
-                "to_token": to_token.to_dict(),
-                "amount_in": str(amount_decimal),
-                "routing": routing,
-                "protocol": "aerodrome",
-            },
+            metadata=metadata,
         )
 
         result.action_bundle = action_bundle

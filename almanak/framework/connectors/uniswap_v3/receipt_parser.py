@@ -1025,13 +1025,22 @@ class UniswapV3ReceiptParser:
             return ExtractMissing(reason="no Mint Transfer event from position manager")
         return ExtractOk(value=value)
 
-    def extract_swap_amounts_result(self, receipt: dict[str, Any]) -> ExtractResult[SwapAmounts]:
-        """Fail-closed variant of :meth:`extract_swap_amounts` — see VIB-3159."""
+    def extract_swap_amounts_result(
+        self,
+        receipt: dict[str, Any],
+        *,
+        expected_out: Decimal | None = None,
+    ) -> ExtractResult[SwapAmounts]:
+        """Fail-closed variant of :meth:`extract_swap_amounts` — see VIB-3159.
+
+        VIB-3203: forwards ``expected_out`` so realized slippage is populated
+        when the framework supplies the compiler's pre-slippage quote.
+        """
         err = self._strict_parse(receipt)
         if err is not None:
             return err
         try:
-            value = self.extract_swap_amounts(receipt)
+            value = self.extract_swap_amounts(receipt, expected_out=expected_out)
         except Exception as exc:  # noqa: BLE001
             return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
         if value is None:
@@ -1193,7 +1202,12 @@ class UniswapV3ReceiptParser:
     # Swap Amounts Extraction (for Result Enrichment)
     # =============================================================================
 
-    def extract_swap_amounts(self, receipt: dict[str, Any]) -> SwapAmounts | None:
+    def extract_swap_amounts(
+        self,
+        receipt: dict[str, Any],
+        *,
+        expected_out: Decimal | None = None,
+    ) -> SwapAmounts | None:
         """Extract swap amounts from a transaction receipt.
 
         This method is called by the ResultEnricher to automatically populate
@@ -1201,6 +1215,11 @@ class UniswapV3ReceiptParser:
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
+            expected_out: VIB-3203 — pre-slippage-discount quote in human
+                (Decimal) units, sourced from ``ActionBundle.metadata["expected_output_human"]``.
+                When provided, realized ``slippage_bps`` is computed as
+                ``(expected_out - amount_out_decimal) / expected_out * 10_000``.
+                When absent, ``slippage_bps`` stays ``None`` (legacy behavior).
 
         Returns:
             SwapAmounts dataclass if swap event found, None otherwise
@@ -1228,13 +1247,24 @@ class UniswapV3ReceiptParser:
                 return None
 
             sr = parse_result.swap_result
+
+            # VIB-3203: prefer the enricher-supplied ``expected_out`` (human
+            # Decimal) over the parser-constructor ``quoted_price``. Receipt
+            # parsers built by the ReceiptParserRegistry do not receive
+            # quoted_price, so without this kwarg slippage_bps was always None.
+            slippage_bps = sr.slippage_bps if sr.slippage_bps else None
+            if expected_out is not None and expected_out > 0 and sr.amount_out_decimal > 0:
+                realized_slippage = (expected_out - sr.amount_out_decimal) / expected_out
+                slippage_bps = int(realized_slippage * Decimal(10_000))
+
             return SwapAmounts(
                 amount_in=sr.amount_in,
                 amount_out=sr.amount_out,
                 amount_in_decimal=sr.amount_in_decimal,
                 amount_out_decimal=sr.amount_out_decimal,
                 effective_price=sr.effective_price,
-                slippage_bps=sr.slippage_bps if sr.slippage_bps else None,
+                slippage_bps=slippage_bps,
+                expected_out_decimal=expected_out,
                 token_in=sr.token_in_symbol or sr.token_in,
                 token_out=sr.token_out_symbol or sr.token_out,
             )

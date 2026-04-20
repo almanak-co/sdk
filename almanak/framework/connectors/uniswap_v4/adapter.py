@@ -234,6 +234,7 @@ class UniswapV4Adapter:
             transactions=transactions,
             amount_in=amount_in_raw,
             amount_out_minimum=amount_out_minimum,
+            amount_out_quoted=quote.amount_out,
             gas_estimate=sum(tx.gas_estimate for tx in transactions),
         )
 
@@ -339,22 +340,32 @@ class UniswapV4Adapter:
             "is_native": _check_native(intent.to_token),
         }
 
+        # VIB-3203: Human-readable pre-slippage quote so ResultEnricher can compute
+        # realized slippage_bps from on-chain amounts.
+        expected_output_human: str | None = None
+        if result.amount_out_quoted and to_dec is not None:
+            expected_output_human = str(Decimal(str(result.amount_out_quoted)) / Decimal(10**to_dec))
+
+        metadata: dict[str, Any] = {
+            "intent_id": intent.intent_id,
+            "from_token": from_token_dict,
+            "to_token": to_token_dict,
+            "amount_in": str(result.amount_in),
+            "amount_out_minimum": str(result.amount_out_minimum),
+            "slippage_bps": slippage_bps,
+            "chain": self.chain,
+            "router": self.addresses["universal_router"],
+            "pool_manager": self.addresses["pool_manager"],
+            "gas_estimate": result.gas_estimate,
+            "protocol_version": "v4",
+        }
+        if expected_output_human is not None:
+            metadata["expected_output_human"] = expected_output_human
+
         return ActionBundle(
             intent_type=IntentType.SWAP.value,
             transactions=[tx_to_dict(tx) for tx in result.transactions],
-            metadata={
-                "intent_id": intent.intent_id,
-                "from_token": from_token_dict,
-                "to_token": to_token_dict,
-                "amount_in": str(result.amount_in),
-                "amount_out_minimum": str(result.amount_out_minimum),
-                "slippage_bps": slippage_bps,
-                "chain": self.chain,
-                "router": self.addresses["universal_router"],
-                "pool_manager": self.addresses["pool_manager"],
-                "gas_estimate": result.gas_estimate,
-                "protocol_version": "v4",
-            },
+            metadata=metadata,
         )
 
     def compile_lp_open_intent(
@@ -828,6 +839,10 @@ class SwapResult:
     transactions: list[SwapTransaction]
     amount_in: int = 0
     amount_out_minimum: int = 0
+    # VIB-3203: pre-slippage-discount expected output amount (raw units).
+    # Used by IntentCompiler to persist `expected_output_human` in ActionBundle.metadata
+    # so ResultEnricher can compute realized slippage_bps.
+    amount_out_quoted: int = 0
     gas_estimate: int = 0
     error: str | None = None
 

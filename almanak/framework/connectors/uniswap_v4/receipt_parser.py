@@ -240,11 +240,21 @@ class UniswapV4ReceiptParser:
 
         return result
 
-    def extract_swap_amounts(self, receipt: dict[str, Any]) -> SwapAmounts | None:
+    def extract_swap_amounts(
+        self,
+        receipt: dict[str, Any],
+        *,
+        expected_out: Decimal | None = None,
+    ) -> SwapAmounts | None:
         """Extract swap amounts for ResultEnricher integration.
 
         Args:
             receipt: Transaction receipt dict.
+            expected_out: VIB-3203 — pre-slippage-discount quote in human
+                (Decimal) units from the compiler's ActionBundle metadata.
+                Overrides the parser's internal ``slippage_bps`` when provided,
+                since the enrichment path does not supply constructor-level
+                quote data.
 
         Returns:
             SwapAmounts or None if no swap event found.
@@ -257,13 +267,20 @@ class UniswapV4ReceiptParser:
 
         sr = parsed.swap_result
 
+        # VIB-3203: prefer the framework-supplied ``expected_out`` quote.
+        slippage_bps = sr.slippage_bps
+        if expected_out is not None and expected_out > 0 and sr.amount_out_decimal > 0:
+            realized_slippage = (expected_out - sr.amount_out_decimal) / expected_out
+            slippage_bps = int(realized_slippage * Decimal(10_000))
+
         return SwapAmounts(
             amount_in=sr.amount_in,
             amount_out=sr.amount_out,
             amount_in_decimal=sr.amount_in_decimal,
             amount_out_decimal=sr.amount_out_decimal,
             effective_price=sr.effective_price or Decimal(0),
-            slippage_bps=sr.slippage_bps,
+            slippage_bps=slippage_bps,
+            expected_out_decimal=expected_out,
             token_in=sr.token_in,
             token_out=sr.token_out,
         )
