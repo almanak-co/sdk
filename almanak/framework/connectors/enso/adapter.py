@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 
 from eth_abi import decode, encode
 
+from ...data.market_snapshot import PriceUnavailableError
 from ...data.tokens.exceptions import TokenResolutionError
 from ...intents.vocabulary import IntentType, SwapIntent
 from ...models.reproduction_bundle import ActionBundle
@@ -184,14 +185,16 @@ class EnsoAdapter:
 
             self._token_resolver = get_token_resolver()
 
-        # Price provider - use provided or fall back to placeholders (only if allowed)
+        # Price provider - use provided or empty dict (only if allowed for testing).
+        # When empty, amount_usd swaps will raise PriceUnavailableError instead of
+        # silently falling back to a fake price.
         if self._using_placeholders:
             logger.warning(
-                "EnsoAdapter using PLACEHOLDER PRICES. "
-                "Slippage calculations will be INCORRECT. "
+                "EnsoAdapter initialized without price_provider. "
+                "amount_usd swaps will raise PriceUnavailableError. "
                 "This is only acceptable for unit tests."
             )
-            self._price_provider = self._get_placeholder_prices()
+            self._price_provider = {}
         else:
             self._price_provider = price_provider or {}
 
@@ -294,10 +297,13 @@ class EnsoAdapter:
                 # Convert USD to token amount
                 from_price = price_oracle.get(intent.from_token.upper())
                 if not from_price:
-                    return self._error_bundle(
-                        intent,
-                        f"Price unavailable for '{intent.from_token}' -- cannot convert amount_usd "
-                        "to token amount. Ensure the price oracle includes this token.",
+                    raise PriceUnavailableError(
+                        token=intent.from_token,
+                        reason=(
+                            f"[EnsoAdapter chain={self.chain}] Price oracle returned "
+                            f"no price for '{intent.from_token}'; cannot convert amount_usd "
+                            "to token amount. Ensure the price oracle includes this token."
+                        ),
                     )
                 token_amount = intent.amount_usd / from_price
                 decimals = self.get_token_decimals(intent.from_token)
@@ -389,6 +395,10 @@ class EnsoAdapter:
                 },
             )
 
+        except PriceUnavailableError:
+            # Safety: never fall through to a live tx with a fake/missing price.
+            # Let the compiler see the typed error and abort the swap.
+            raise
         except Exception as e:
             logger.exception(f"Failed to compile swap intent: {e}")
             return self._error_bundle(intent, str(e))
@@ -492,35 +502,6 @@ class EnsoAdapter:
                 "intent_id": intent.intent_id,
             },
         )
-
-    def _get_placeholder_prices(self) -> dict[str, Decimal]:
-        """Get placeholder price data for testing only.
-
-        WARNING: These prices are HARDCODED and OUTDATED.
-        DO NOT USE IN PRODUCTION - they will cause:
-        - Incorrect slippage calculations
-        - Swap reverts (amountOutMinimum too high)
-
-        Real prices as of 2026-01: ETH ~$3400, BTC ~$105,000
-        These placeholders show ETH at $2000, BTC at $45,000 - 40-60% wrong!
-        """
-        logger.warning(
-            "PLACEHOLDER PRICES being used - NOT SAFE FOR PRODUCTION. "
-            "ETH=$2000 (real ~$3400), BTC=$45000 (real ~$105000)"
-        )
-        return {
-            "ETH": Decimal("2000"),
-            "WETH": Decimal("2000"),
-            "USDC": Decimal("1"),
-            "USDC.e": Decimal("1"),
-            "USDT": Decimal("1"),
-            "DAI": Decimal("1"),
-            "WBTC": Decimal("45000"),
-            "ARB": Decimal("1.20"),
-            "OP": Decimal("2.50"),
-            "MATIC": Decimal("0.80"),
-            "WMATIC": Decimal("0.80"),
-        }
 
     def _get_default_price_oracle(self) -> dict[str, Decimal]:
         """Get price oracle data (uses instance price provider).

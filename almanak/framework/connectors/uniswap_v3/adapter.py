@@ -24,6 +24,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.contracts import UNISWAP_V3 as UNISWAP_V3_ADDRESSES
+from almanak.framework.data.market_snapshot import PriceUnavailableError
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 from ...intents.compiler_constants import (
@@ -332,15 +333,17 @@ class UniswapV3Adapter:
 
             self._token_resolver = get_token_resolver()
 
-        # Price provider - use provided or fall back to placeholders (only if allowed)
+        # Price provider - use provided or empty dict (only if allowed for testing).
+        # When empty, amount_usd swaps will raise PriceUnavailableError instead of
+        # silently falling back to a fake price.
         self._using_placeholders = config.price_provider is None
         if self._using_placeholders:
             logger.warning(
-                "UniswapV3Adapter using PLACEHOLDER PRICES. "
-                "Slippage calculations will be INCORRECT. "
+                "UniswapV3Adapter initialized without price_provider. "
+                "amount_usd swaps will raise PriceUnavailableError. "
                 "This is only acceptable for unit tests."
             )
-            self._price_provider = self._get_placeholder_prices()
+            self._price_provider = {}
         else:
             self._price_provider = config.price_provider if config.price_provider is not None else {}
 
@@ -628,9 +631,13 @@ class UniswapV3Adapter:
             # Convert USD to token amount
             from_price = price_oracle.get(intent.from_token.upper())
             if not from_price:
-                raise ValueError(
-                    f"Price unavailable for '{intent.from_token}' -- cannot convert amount_usd "
-                    "to token amount. Ensure the price oracle includes this token."
+                raise PriceUnavailableError(
+                    token=intent.from_token,
+                    reason=(
+                        f"[UniswapV3Adapter chain={self.chain}] Price oracle returned "
+                        f"no price for '{intent.from_token}'; cannot convert amount_usd "
+                        "to token amount. Ensure the price oracle includes this token."
+                    ),
                 )
             amount_in = intent.amount_usd / from_price
         else:
@@ -1049,45 +1056,6 @@ class UniswapV3Adapter:
         if token.lower() == native_placeholder:
             return True
         return False
-
-    def _get_placeholder_prices(self) -> dict[str, Decimal]:
-        """Get placeholder price data for testing only.
-
-        WARNING: These prices are HARDCODED and OUTDATED.
-        DO NOT USE IN PRODUCTION - they will cause:
-        - Incorrect slippage calculations
-        - Swap reverts (amountOutMinimum too high)
-
-        Real prices as of 2026-01: ETH ~$3400, BTC ~$105,000
-        These placeholders show ETH at $2000, BTC at $45,000 - 40-60% wrong!
-        """
-        logger.warning(
-            "PLACEHOLDER PRICES being used - NOT SAFE FOR PRODUCTION. "
-            "ETH=$2000 (real ~$3400), BTC=$45000 (real ~$105000)"
-        )
-        return {
-            "ETH": Decimal("2000"),
-            "WETH": Decimal("2000"),
-            "WETH.e": Decimal("2000"),
-            "USDC": Decimal("1"),
-            "USDC.e": Decimal("1"),
-            "USDT": Decimal("1"),
-            "DAI": Decimal("1"),
-            "DAI.e": Decimal("1"),
-            "WBTC": Decimal("45000"),
-            "WBTC.e": Decimal("45000"),
-            "BTCB": Decimal("45000"),
-            "ARB": Decimal("1.20"),
-            "OP": Decimal("2.50"),
-            "MATIC": Decimal("0.80"),
-            "WMATIC": Decimal("0.80"),
-            "AVAX": Decimal("35"),
-            "WAVAX": Decimal("35"),
-            "BNB": Decimal("300"),
-            "WBNB": Decimal("300"),
-            "MNT": Decimal("1"),
-            "WMNT": Decimal("1"),
-        }
 
     def _get_default_price_oracle(self) -> dict[str, Decimal]:
         """Get price oracle data (uses instance price provider).
