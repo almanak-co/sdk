@@ -685,17 +685,6 @@ class TestResolveForSwap:
         assert token.chain == Chain.BSC
         assert token.address.lower() == "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"
 
-    def test_s_resolves_to_ws_for_swap(self, temp_cache_file):
-        """Test S resolves to WS (wrapped Sonic) on Sonic for swap."""
-        resolver = TokenResolver(cache_file=temp_cache_file)
-        token = resolver.resolve_for_swap("S", "sonic")
-
-        assert token.symbol == "WS"
-        assert token.decimals == 18
-        assert token.is_wrapped_native is True
-        assert token.chain == Chain.SONIC
-        assert token.address.lower() == "0x039e2fb66102314ce7b64ce5ce3e5183bc94ad38"
-
     def test_non_native_token_unchanged(self, temp_cache_file):
         """Test non-native tokens are returned unchanged for swap."""
         resolver = TokenResolver(cache_file=temp_cache_file)
@@ -989,7 +978,7 @@ class TestBridgedTokenAliases:
         assert token.symbol == "BTC.B"
         assert token.decimals == 8
         assert token.chain == Chain.AVALANCHE
-        assert token.address.lower() == "0x152b9d0fdc40c096757f570a51e494bd4b943e50"
+        assert token.address.lower() == "0x152b9d0fdc40c096de20232db1e35ae6a57fa6c0"
 
     def test_btcb_alias_resolves_on_avalanche(self, temp_cache_file):
         """Test BTCB alias resolves to BTC.b on Avalanche (VIB-1362)."""
@@ -999,7 +988,7 @@ class TestBridgedTokenAliases:
         assert token.symbol == "BTC.B"
         assert token.decimals == 8
         assert token.chain == Chain.AVALANCHE
-        assert token.address.lower() == "0x152b9d0fdc40c096757f570a51e494bd4b943e50"
+        assert token.address.lower() == "0x152b9d0fdc40c096de20232db1e35ae6a57fa6c0"
 
     def test_savax_resolves_on_avalanche(self, temp_cache_file):
         """Test sAVAX resolves to BENQI staked AVAX on Avalanche (VIB-1362)."""
@@ -1138,30 +1127,6 @@ class TestResolveForSwapBalanceQueries:
         # resolve_for_swap
         swap_token = resolver.resolve_for_swap("BNB", "bsc")
         assert swap_token.symbol == "WBNB"
-
-
-    def test_s_stays_native_for_balance(self, temp_cache_file):
-        """Test S stays S for balance queries."""
-        resolver = TokenResolver(cache_file=temp_cache_file)
-
-        # Regular resolve
-        token = resolver.resolve("S", "sonic")
-        assert token.symbol == "S"
-        assert token.is_native is True
-
-        # resolve_for_swap
-        swap_token = resolver.resolve_for_swap("S", "sonic")
-        assert swap_token.symbol == "WS"
-
-    def test_ws_resolves_directly(self, temp_cache_file):
-        """Test wS resolves directly by symbol on Sonic (case-insensitive)."""
-        resolver = TokenResolver(cache_file=temp_cache_file)
-        token = resolver.resolve("wS", "sonic")
-
-        assert token.symbol == "WS"
-        assert token.decimals == 18
-        assert token.address.lower() == "0x039e2fb66102314ce7b64ce5ce3e5183bc94ad38"
-        assert token.chain == Chain.SONIC
 
 
 class TestGatewayConnection:
@@ -1885,67 +1850,3 @@ class TestGatewayIntegrityCheck:
         )
         assert result is not None
         assert result.symbol == "TEST"
-
-
-class TestPendleYTTokenResolution:
-    """Tests for Pendle YT token resolution (VIB-1590).
-
-    The pendle_yt_yield strategy uses YT-wstETH-25JUN2026 as a symbol.
-    This token must be resolvable by both full symbol and short alias.
-    """
-
-    def test_yt_wsteth_resolves_by_full_symbol(self):
-        """YT-wstETH-25JUN2026 should resolve on Arbitrum."""
-        resolver = TokenResolver()
-        result = resolver.resolve("YT-wstETH-25JUN2026", "arbitrum")
-        assert result is not None
-        assert result.address == "0x25bda1edd6af17c61399aa0eb84b93daa3069764"
-        assert result.decimals == 18
-        assert result.symbol == "YT-WSTETH-25JUN2026"
-
-    def test_yt_wsteth_resolves_by_short_alias(self):
-        """YT-wstETH (short symbol) should resolve via SYMBOL_ALIASES."""
-        resolver = TokenResolver()
-        result = resolver.resolve("YT-wstETH", "arbitrum")
-        assert result is not None
-        assert result.address == "0x25bda1edd6af17c61399aa0eb84b93daa3069764"
-
-    def test_yt_wsteth_resolves_by_address(self):
-        """YT token should resolve by address on Arbitrum."""
-        resolver = TokenResolver()
-        result = resolver.resolve("0x25BdA1EDd6aF17C61399aA0eb84b93dAA3069764", "arbitrum")
-        assert result is not None
-        assert result.decimals == 18
-
-    def test_yt_wsteth_not_on_other_chains(self):
-        """YT-wstETH-25JUN2026 should not resolve on non-Arbitrum chains."""
-        resolver = TokenResolver()
-        with pytest.raises(TokenResolutionError):
-            resolver.resolve("YT-wstETH-25JUN2026", "ethereum")
-
-
-class TestCurveNGLPTokenResolution:
-    """Test that Curve NG pool LP tokens resolve by address without gateway.
-
-    NG pools use LP token == pool address. Registering these in defaults.py
-    prevents a ~30s gateway timeout during LP_CLOSE compilation.
-    """
-
-    @pytest.mark.parametrize(
-        "address,chain,expected_decimals",
-        [
-            # Optimism 3pool NG
-            ("0x1337BedC9D22ecbe766dF105c9623922A27963EC", "optimism", 18),
-            # Optimism crvUSD/USDC NG
-            ("0x03771e24b7C9172d163Bf447490B142a15be3485", "optimism", 18),
-            # Base 4pool NG
-            ("0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f", "base", 18),
-        ],
-    )
-    def test_ng_lp_token_resolves_by_address(self, address, chain, expected_decimals):
-        """NG pool LP token should resolve by address from static registry."""
-        resolver = TokenResolver()
-        result = resolver.resolve(address, chain)
-        assert result is not None
-        assert result.decimals == expected_decimals
-        assert result.address == address.lower()

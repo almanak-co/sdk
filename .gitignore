@@ -21,8 +21,6 @@ venv/
 almanak_state.db
 almanak_state.db-shm
 almanak_state.db-wal
-almanak_copy_ledger.db
-.almanak/sdk.json
 scripts/contracts.db
 almanak/.dashboard_events.json
 probe/
@@ -59,17 +57,6 @@ test-ledger/
 
 # Local Claude artifacts
 .claude/worktrees/
-.claude/projects/
-
-# Video build output
-videos/out/
-
-# Nightly test output
-tests/visual/nightly/output/
-
-# Stray uv.lock files in strategy subdirectories (not part of the SDK package)
-strategies/incubating/*/uv.lock
-strategies/demo/*/uv.lock
 
 # KitchenLoop runtime artifacts
 .kitchenloop/

@@ -144,20 +144,12 @@ class EscalatingSlippageManager:
         teardown_id: str = "",
         strategy_id: str = "",
         is_auto_mode: bool = False,
-        intent_slippage: Decimal | None = None,
     ) -> ExecutionResult:
         """Execute an intent with escalating slippage.
 
         Tries execution at increasing slippage levels. For auto-approve
         levels, retries automatically. For approval-required levels,
         pauses and requests human approval.
-
-        When ``intent_slippage`` is provided (from the strategy's teardown
-        intent), the manager uses it as a ceiling for auto-approval: all
-        escalation levels at or below ``intent_slippage`` are auto-approved,
-        and a new level is injected at ``intent_slippage`` if one doesn't
-        already exist.  The ladder is then sorted to ensure monotonic
-        escalation.
 
         Args:
             intent: The intent to execute
@@ -167,7 +159,6 @@ class EscalatingSlippageManager:
             teardown_id: ID of the teardown operation
             strategy_id: ID of the strategy
             is_auto_mode: Whether this is an auto-protect triggered exit
-            intent_slippage: Strategy-configured slippage ceiling for auto-approval
 
         Returns:
             ExecutionResult with outcome and details
@@ -175,88 +166,22 @@ class EscalatingSlippageManager:
         attempts: list[ExecutionAttempt] = []
         max_loss_percent = calculate_max_acceptable_loss(position_value)
 
-        # Build effective levels: if intent_slippage is provided, ensure all
-        # levels up to that slippage are auto-approved and the ladder remains
-        # monotonically increasing.  Deep-copy to avoid mutating self.levels.
-        effective_levels = [
-            EscalationConfig(
-                level=lc.level,
-                slippage=lc.slippage,
-                auto_approve=lc.auto_approve,
-                retries=lc.retries,
-            )
-            for lc in self.levels
-        ]
-        if intent_slippage is not None and intent_slippage > Decimal("0"):
-            # Clamp to absolute_max_slippage to prevent misconfigured strategies
-            # from auto-approving arbitrarily high slippage.
-            if intent_slippage > self.config.absolute_max_slippage:
-                logger.warning(
-                    "Intent slippage %.1f%% exceeds absolute max %.1f%%, clamping.",
-                    float(intent_slippage * 100),
-                    float(self.config.absolute_max_slippage * 100),
-                )
-                intent_slippage = self.config.absolute_max_slippage
-
-            # Inject a level at intent_slippage if one doesn't already exist
-            if not any(lc.slippage == intent_slippage for lc in effective_levels):
-                injected_level = self.get_level_for_slippage(intent_slippage) or EscalationLevel.LEVEL_4
-                logger.info(
-                    "Injecting auto-approve level at %.1f%% from strategy teardown config.",
-                    float(intent_slippage * 100),
-                )
-                effective_levels.append(
-                    EscalationConfig(
-                        level=injected_level,
-                        slippage=intent_slippage,
-                        auto_approve=True,
-                        retries=1,
-                    ),
-                )
-
-            # Auto-approve all levels at or below intent_slippage
-            for level in effective_levels:
-                if level.slippage <= intent_slippage and not level.auto_approve:
-                    logger.info(
-                        "Overriding level at %.1f%% to auto-approve (at or below intent slippage %.1f%%).",
-                        float(level.slippage * 100),
-                        float(intent_slippage * 100),
-                    )
-                    level.auto_approve = True
-
-            # Sort by slippage to maintain monotonic escalation
-            effective_levels.sort(key=lambda lc: lc.slippage)
-
-        # When the strategy explicitly requests higher slippage (e.g. Pendle YT
-        # with thin AMM liquidity), raise the auto-mode cap so the escalation
-        # ladder can reach the strategy-configured level.  Still bounded by the
-        # absolute max for safety.
-        effective_auto_max = self.config.auto_max_slippage
-        if intent_slippage is not None and intent_slippage > effective_auto_max:
-            effective_auto_max = min(intent_slippage, self.config.absolute_max_slippage)
-            logger.info(
-                "Raising auto-mode slippage cap from %.1f%% to %.1f%% (intent_slippage=%.1f%%).",
-                float(self.config.auto_max_slippage * 100),
-                float(effective_auto_max * 100),
-                float(intent_slippage * 100),
-            )
-
-        for level_config in effective_levels:
+        for level_config in self.levels:
             slippage = level_config.slippage
 
-            # In auto mode, don't exceed effective max
-            if is_auto_mode and slippage > effective_auto_max:
+            # In auto mode, don't exceed configured max
+            if is_auto_mode and slippage > self.config.auto_max_slippage:
                 logger.info(
-                    f"Auto mode: stopping at {effective_auto_max:.1%} "
+                    f"Auto mode: stopping at {self.config.auto_max_slippage:.1%} "
                     f"(level {level_config.level.value} requires {slippage:.1%})"
                 )
                 return ExecutionResult(
                     success=False,
-                    final_slippage=effective_auto_max,
+                    final_slippage=self.config.auto_max_slippage,
                     status="paused_auto_limit_reached",
                     attempts=attempts,
                     current_level=level_config.level,
-                    message=f"Auto-exit paused. Market requires {slippage:.1%} slippage but auto limit is {effective_auto_max:.1%}. Manual intervention needed.",
+                    message=f"Auto-exit paused. Market requires {slippage:.1%} slippage but auto limit is {self.config.auto_max_slippage:.1%}. Manual intervention needed.",
                 )
 
             # Check if approval is needed
@@ -298,19 +223,11 @@ class EscalatingSlippageManager:
                     approval_response = await on_approval_needed(approval_request)
 
                     if not approval_response.approved:
-                        if approval_response.action == "wait_and_escalate":
-                            # Operator declined the current level. Sleep briefly
-                            # to let market conditions settle, then advance to
-                            # the next (higher-slippage) level. The CURRENT
-                            # level is not retried — the operator already
-                            # declined it. The outer for loop's next iteration
-                            # is the next escalation level.
-                            logger.info(
-                                "Operator declined level %s; sleeping %.1fs then escalating to next level",
-                                level_config.level,
-                                self.config.retry_delay_seconds * 2,
-                            )
+                        if approval_response.action == "wait_and_retry":
+                            # Wait and retry at same level
+                            logger.info("User chose to wait and retry")
                             await asyncio.sleep(self.config.retry_delay_seconds * 2)
+                            # Will continue to next iteration
                             continue
                         else:
                             # User cancelled or chose different action
@@ -368,7 +285,7 @@ class EscalatingSlippageManager:
         # All levels exhausted
         return ExecutionResult(
             success=False,
-            final_slippage=effective_levels[-1].slippage,
+            final_slippage=self.levels[-1].slippage,
             status="failed_manual_intervention_required",
             attempts=attempts,
             current_level=EscalationLevel.LEVEL_5,
@@ -454,7 +371,7 @@ class EscalatingSlippageManager:
             estimated_loss_usd=estimated_loss,
             position_value_usd=position_value,
             reason=reason,
-            options=["Accept cost", "Wait & Escalate to next level", "Cancel"],
+            options=["Accept cost", "Wait & Retry", "Cancel"],
             requested_at=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=30),
         )

@@ -153,7 +153,6 @@ class TestPrewarmChainsWalletResolution:
         from almanak.gateway.server import GatewayServer
 
         server = GatewayServer(settings)
-        server._wallet_registry = None  # No multi-wallet registry, use legacy path
         mock_exec = MagicMock()
         mock_exec._get_orchestrator = AsyncMock()
         mock_exec._get_compiler = MagicMock()
@@ -179,7 +178,6 @@ class TestPrewarmChainsWalletResolution:
         from almanak.gateway.server import GatewayServer
 
         server = GatewayServer(settings)
-        server._wallet_registry = None  # No multi-wallet registry, use legacy path
         mock_exec = MagicMock()
         mock_exec._get_orchestrator = AsyncMock()
         mock_exec._get_compiler = MagicMock()

@@ -40,15 +40,13 @@ class TestGetFallbackTeardownPrices:
         market.price.side_effect = lambda sym: {
             "ETH": Decimal("3500"),
             "WETH": Decimal("3500"),
+            "WBTC": Decimal("95000"),
         }.get(sym, None)
 
         result = StrategyRunner._get_fallback_teardown_prices(market)
         assert result["ETH"] == Decimal("3500")
         assert result["WETH"] == Decimal("3500")
-        # WBTC is NOT in the unconditional fetch list — only native/wrapped tokens
-        assert "WBTC" not in result
-        called_symbols = [call.args[0] for call in market.price.call_args_list]
-        assert "WBTC" not in called_symbols
+        assert result["WBTC"] == Decimal("95000")
         # Stablecoins still present
         assert result["USDC"] == Decimal("1")
 

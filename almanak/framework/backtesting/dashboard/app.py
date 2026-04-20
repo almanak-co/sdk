@@ -217,7 +217,7 @@ def render_comparison_metrics(results: dict[str, BacktestResult], selected_resul
             {
                 "Backtest": result_name,
                 "Net PnL": format_currency(metrics.net_pnl_usd),
-                "Return": f"{float(metrics.total_return_pct):.2f}%" if metrics.total_return_pct else "-",
+                "Return": format_percentage(metrics.total_return_pct),
                 "Sharpe": f"{float(metrics.sharpe_ratio):.3f}" if metrics.sharpe_ratio else "-",
                 "Sortino": f"{float(metrics.sortino_ratio):.3f}" if metrics.sortino_ratio else "-",
                 "Max DD": format_percentage(metrics.max_drawdown_pct),
@@ -247,18 +247,13 @@ def render_summary_metrics(result: BacktestResult) -> None:
     # Row 1: Key performance metrics
     col1, col2, col3, col4 = st.columns(4)
 
-    # VIB-2915: total_return_pct is already a percentage (e.g. 10 for 10%), not a
-    # decimal ratio. Format inline instead of via format_percentage() (which multiplies
-    # by 100 for ratio inputs used by max_drawdown_pct/win_rate/etc.).
-    total_return_display = f"{float(metrics.total_return_pct):.2f}%" if metrics.total_return_pct else "-"
-
     with col1:
         pnl_value = float(metrics.net_pnl_usd) if metrics.net_pnl_usd else 0
         delta_color: Literal["normal", "inverse"] = "normal" if pnl_value >= 0 else "inverse"
         st.metric(
             label="Net PnL",
             value=format_currency(metrics.net_pnl_usd),
-            delta=total_return_display,
+            delta=format_percentage(metrics.total_return_pct),
             delta_color=delta_color,
         )
 
@@ -266,8 +261,8 @@ def render_summary_metrics(result: BacktestResult) -> None:
         return_pct = float(metrics.total_return_pct) if metrics.total_return_pct else 0
         st.metric(
             label="Total Return",
-            value=total_return_display,
-            delta=f"{return_pct:.1f}% total" if return_pct else None,
+            value=format_percentage(metrics.total_return_pct),
+            delta=f"{return_pct * 100:.1f}% total" if return_pct else None,
             delta_color="normal" if return_pct >= 0 else "inverse",
         )
 
@@ -699,9 +694,8 @@ def render_enhanced_metrics_comparison(
                 {
                     "Backtest": result_name,
                     "Net PnL": format_currency(m.net_pnl_usd),
-                    # VIB-2915: already-percentage values (not decimal ratios)
-                    "Total Return": f"{float(m.total_return_pct):.2f}%" if m.total_return_pct else "-",
-                    "Annualized Return": f"{float(m.annualized_return_pct):.2f}%" if m.annualized_return_pct else "-",
+                    "Total Return": format_percentage(m.total_return_pct),
+                    "Annualized Return": format_percentage(m.annualized_return_pct),
                     "Initial Capital": format_currency(result.initial_capital_usd),
                     "Final Capital": format_currency(result.final_capital_usd),
                 }
@@ -792,8 +786,7 @@ def render_enhanced_metrics_comparison(
 
         # Normalize values to 0-1 scale for radar chart
         values = [
-            # VIB-2915: total_return_pct is a percentage (e.g. 20 for 20%); divide by 20 to map [-20%, 20%] -> [-1, 1].
-            min(1, max(-1, float(m.total_return_pct) / 20)),  # -20% to 20% scaled
+            min(1, max(-1, float(m.total_return_pct) * 5)),  # -20% to 20% scaled
             min(1, max(0, float(m.sharpe_ratio) / 3)),  # 0-3 scaled
             float(m.win_rate),  # 0-1 already
             min(1, max(0, float(m.profit_factor) / 3)),  # 0-3 scaled
@@ -1041,7 +1034,7 @@ def main() -> None:
     "final_capital_usd": "10500",
     "metrics": {
         "net_pnl_usd": "500",
-        "total_return_pct": "5.0",
+        "total_return_pct": "0.05",
         "sharpe_ratio": "1.5",
         "max_drawdown_pct": "0.03",
         ...

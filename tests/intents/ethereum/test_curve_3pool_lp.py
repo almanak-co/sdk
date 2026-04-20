@@ -151,7 +151,7 @@ class TestCurve3poolLPOpen:
         # --- Layer 3: Receipt Parsing ---
         parser = CurveReceiptParser(chain=CHAIN_NAME)
         lp_open_receipt_parsed = False
-        lp_tokens_from_receipt: Decimal | None = None
+        lp_tokens_from_receipt: int | None = None
 
         for tx_result in execution_result.transaction_results:
             if not tx_result.receipt:
@@ -169,7 +169,6 @@ class TestCurve3poolLPOpen:
                     )
 
             # Try to extract LP tokens from Transfer (mint) event
-            # Returns human-readable Decimal after PR #999
             lp_minted = parser.extract_lp_tokens_received(receipt_dict)
             if lp_minted is not None and lp_minted > 0:
                 lp_tokens_from_receipt = lp_minted
@@ -203,16 +202,13 @@ class TestCurve3poolLPOpen:
             f"Expected: {expected_usdc_spent}, Got: {usdc_spent}"
         )
         assert lp_received > 0, "Must receive LP tokens after adding liquidity"
-        # extract_lp_tokens_received() returns human-readable Decimal (PR #999),
-        # so convert raw wei balance delta to match
-        lp_received_decimal = Decimal(lp_received) / Decimal(10**18)
-        assert lp_received_decimal == lp_tokens_from_receipt, (
-            f"LP tokens from receipt ({lp_tokens_from_receipt}) must match balance delta ({lp_received_decimal})"
+        assert lp_received == lp_tokens_from_receipt, (
+            f"LP tokens from receipt ({lp_tokens_from_receipt}) must match balance delta ({lp_received})"
         )
 
         logger.info(
             f"LP_OPEN success: spent {LP_AMOUNT_DAI} DAI + {LP_AMOUNT_USDC} USDC, "
-            f"received {lp_received_decimal} 3Crv LP tokens"
+            f"received {lp_received / 1e18:.6f} 3Crv LP tokens"
         )
 
 
@@ -291,7 +287,7 @@ class TestCurve3poolLPLifecycle:
         # Layer 3: Parse LP_OPEN receipt
         parser = CurveReceiptParser(chain=CHAIN_NAME)
         add_liquidity_found = False
-        lp_tokens_received: Decimal = Decimal(0)
+        lp_tokens_received: int = 0
 
         for tx_result in open_exec.transaction_results:
             if not tx_result.receipt:
@@ -315,16 +311,13 @@ class TestCurve3poolLPLifecycle:
         lp_after_open = _get_lp_token_balance(web3, funded_wallet)
         lp_delta_open = lp_after_open - lp_before_open
         assert lp_delta_open > 0, "LP token balance must increase after LP_OPEN"
-        # extract_lp_tokens_received() returns human-readable Decimal (PR #999),
-        # so convert raw wei balance delta to match
-        lp_delta_open_decimal = Decimal(lp_delta_open) / Decimal(10**18)
-        assert lp_delta_open_decimal == lp_tokens_received, (
-            f"LP token delta ({lp_delta_open_decimal}) must match receipt extraction ({lp_tokens_received})"
+        assert lp_delta_open == lp_tokens_received, (
+            f"LP token delta ({lp_delta_open}) must match receipt extraction ({lp_tokens_received})"
         )
 
         # ==================== CLOSE ====================
-        # extract_lp_tokens_received() already returns human-readable Decimal (PR #999)
-        lp_amount_str = str(lp_tokens_received)
+        # Use LP token balance (in raw wei) as position_id for Curve LP_CLOSE
+        lp_amount_str = str(Decimal(lp_tokens_received) / Decimal(10**18))
 
         dai_before_close = get_token_balance(web3, DAI_ADDRESS, funded_wallet)
         usdc_before_close = get_token_balance(web3, usdc_addr, funded_wallet)

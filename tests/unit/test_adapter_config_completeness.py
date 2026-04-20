@@ -62,9 +62,6 @@ _SWAP_ROUTER_KNOWN_GAPS: set[tuple[str, str]] = {
     ("traderjoe_v2", "arbitrum"),
     ("traderjoe_v2", "bsc"),
     ("traderjoe_v2", "ethereum"),
-    # SushiSwap V3 removed from Polygon/Avalanche: zero usable liquidity (VIB-2069)
-    ("sushiswap_v3", "polygon"),
-    ("sushiswap_v3", "avalanche"),
 }
 
 
@@ -112,9 +109,6 @@ _LP_MANAGER_KNOWN_GAPS: set[tuple[str, str]] = {
     ("uniswap_v3", "monad"),
     # Aerodrome on Optimism uses Velodrome alias
     ("aerodrome", "optimism"),
-    # SushiSwap V3 removed from Polygon/Avalanche: zero usable liquidity (VIB-2069)
-    ("sushiswap_v3", "polygon"),
-    ("sushiswap_v3", "avalanche"),
 }
 
 
@@ -159,9 +153,6 @@ _QUOTER_KNOWN_GAPS: set[tuple[str, str]] = {
     ("uniswap_v3", "monad"),
     # SushiSwap V3 quoter not yet configured for all chains
     ("sushiswap_v3", "optimism"),
-    # SushiSwap V3 removed from Polygon/Avalanche: zero usable liquidity (VIB-2069)
-    ("sushiswap_v3", "polygon"),
-    ("sushiswap_v3", "avalanche"),
 }
 
 

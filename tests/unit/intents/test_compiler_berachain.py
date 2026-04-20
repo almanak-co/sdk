@@ -103,14 +103,6 @@ class TestBerachainEnsoSwapCompilation:
         assert result.status == CompilationStatus.SUCCESS, f"Compilation failed: {result.error}"
         assert result.action_bundle is not None
         assert len(result.action_bundle.transactions) >= 1
-        assert result.action_bundle.metadata["deferred_swap"] is True
-        assert result.action_bundle.metadata["route_params"]["token_in"].lower().startswith("0x")
-        route_amount_in = result.action_bundle.metadata["route_params"]["amount_in"]
-        assert isinstance(route_amount_in, str)
-        assert int(route_amount_in) > 0
-        assert result.action_bundle.transactions[-1]["tx_type"] == "swap_deferred"
-        assert result.action_bundle.transactions[0]["tx_type"] == "approve"
-        assert result.action_bundle.transactions[0]["data"].endswith("f" * 64)
         mock_enso_class.assert_called_once()
         mock_client.get_route.assert_called_once()
 

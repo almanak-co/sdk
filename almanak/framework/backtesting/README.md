@@ -464,7 +464,7 @@ almanak/framework/backtesting/
 
 ## Related Documentation
 
-- [CLI documentation](https://sdk.docs.almanak.co/cli/) - CLI command reference
+- [CLI documentation](https://docs.almanak.co/cli/) - CLI command reference
 - `examples/README.md` - Working examples documentation
 - `docs/ACCURACY_LIMITATIONS.md` - Accuracy documentation
 - `MIGRATION.md` - Legacy engine migration guide

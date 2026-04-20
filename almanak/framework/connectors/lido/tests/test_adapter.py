@@ -876,8 +876,8 @@ class TestCompileStakeIntent:
         )
         bundle = adapter.compile_stake_intent(intent)
 
-        # Should have 3 transactions: stake + approve + wrap
-        assert len(bundle.transactions) == 3
+        # Should have 2 transactions: stake + wrap
+        assert len(bundle.transactions) == 2
         assert bundle.intent_type == "STAKE"
 
         # First transaction should be stake
@@ -887,14 +887,8 @@ class TestCompileStakeIntent:
         assert stake_tx["value"] == 10**18  # 1 ETH in wei
         assert stake_tx["data"].startswith(LIDO_STAKE_SELECTOR)
 
-        # Second transaction should be approve
-        approve_tx = bundle.transactions[1]
-        assert approve_tx["action_type"] == "approve"
-        assert approve_tx["to"] == LIDO_ADDRESSES["ethereum"]["steth"]
-        assert approve_tx["value"] == 0
-
-        # Third transaction should be wrap
-        wrap_tx = bundle.transactions[2]
+        # Second transaction should be wrap
+        wrap_tx = bundle.transactions[1]
         assert wrap_tx["action_type"] == "wrap"
         assert wrap_tx["to"] == LIDO_ADDRESSES["ethereum"]["wsteth"]
         assert wrap_tx["value"] == 0
@@ -904,10 +898,8 @@ class TestCompileStakeIntent:
         assert bundle.metadata["protocol"] == "lido"
         assert bundle.metadata["output_token"] == "wstETH"
         assert bundle.metadata["receive_wrapped"] is True
-        assert bundle.metadata["num_transactions"] == 3
-        assert bundle.metadata["total_gas_estimate"] == (
-            DEFAULT_GAS_ESTIMATES["stake"] + 80000 + DEFAULT_GAS_ESTIMATES["wrap"]
-        )
+        assert bundle.metadata["num_transactions"] == 2
+        assert bundle.metadata["total_gas_estimate"] == (DEFAULT_GAS_ESTIMATES["stake"] + DEFAULT_GAS_ESTIMATES["wrap"])
 
     def test_compile_stake_intent_unwrapped(self, adapter: LidoAdapter) -> None:
         """Test compiling a StakeIntent with receive_wrapped=False."""
@@ -986,7 +978,7 @@ class TestCompileStakeIntent:
         )
         bundle = adapter.compile_stake_intent(intent)
 
-        assert len(bundle.transactions) == 3  # stake + approve + wrap
+        assert len(bundle.transactions) == 2
         assert bundle.transactions[0]["value"] == 10**15  # 0.001 ETH in wei
         assert bundle.metadata["amount"] == "0.001"
 
@@ -1044,8 +1036,7 @@ class TestCompileStakeIntent:
             chain="ethereum",
         )
         bundle_wrapped = adapter.compile_stake_intent(intent_wrapped)
-        # Wrapped: stake + approve (80K) + wrap
-        expected_gas_wrapped = DEFAULT_GAS_ESTIMATES["stake"] + 80000 + DEFAULT_GAS_ESTIMATES["wrap"]
+        expected_gas_wrapped = DEFAULT_GAS_ESTIMATES["stake"] + DEFAULT_GAS_ESTIMATES["wrap"]
         assert bundle_wrapped.metadata["total_gas_estimate"] == expected_gas_wrapped
 
         # Test unwrapped (stake only)

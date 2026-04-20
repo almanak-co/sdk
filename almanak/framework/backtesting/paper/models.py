@@ -301,63 +301,6 @@ class PaperTradeError:
 
 
 @dataclass
-class PnLBreakdown:
-    """Breakdown of PnL by source for yield-aware paper trading.
-
-    Separates yield income from trading PnL and costs so quants
-    can understand WHERE their returns come from.
-    """
-
-    interest_earned: Decimal = Decimal("0")
-    """Yield from lending supply (aToken balance accrual)."""
-
-    interest_paid: Decimal = Decimal("0")
-    """Cost of borrowing (debt token accrual)."""
-
-    trading_pnl: Decimal = Decimal("0")
-    """PnL from swaps and trades (buy low, sell high)."""
-
-    gas_costs: Decimal = Decimal("0")
-    """Total gas spent across all transactions."""
-
-    fees_included: bool = False
-    """Whether LP fees are included. False in V1 (lending only)."""
-
-    @property
-    def total_pnl(self) -> Decimal:
-        """Net PnL across all sources."""
-        return self.interest_earned - self.interest_paid + self.trading_pnl - self.gas_costs
-
-    @property
-    def net_yield(self) -> Decimal:
-        """Net yield income (earned minus paid)."""
-        return self.interest_earned - self.interest_paid
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
-        return {
-            "interest_earned": str(self.interest_earned),
-            "interest_paid": str(self.interest_paid),
-            "trading_pnl": str(self.trading_pnl),
-            "gas_costs": str(self.gas_costs),
-            "fees_included": self.fees_included,
-            "total_pnl": str(self.total_pnl),
-            "net_yield": str(self.net_yield),
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "PnLBreakdown":
-        """Deserialize from dictionary."""
-        return cls(
-            interest_earned=Decimal(data.get("interest_earned", "0")),
-            interest_paid=Decimal(data.get("interest_paid", "0")),
-            trading_pnl=Decimal(data.get("trading_pnl", "0")),
-            gas_costs=Decimal(data.get("gas_costs", "0")),
-            fees_included=data.get("fees_included", False),
-        )
-
-
-@dataclass
 class PaperTradingSummary:
     """Summary of a paper trading session.
 
@@ -395,8 +338,6 @@ class PaperTradingSummary:
     total_gas_used: int = 0
     total_gas_cost_usd: Decimal = Decimal("0")
     pnl_usd: Decimal | None = None
-    pnl_breakdown: PnLBreakdown | None = None
-    valuation_source: str = "simple"
     error_summary: dict[str, int] = field(default_factory=dict)
     trades: list[PaperTrade] = field(default_factory=list)
     errors: list[PaperTradeError] = field(default_factory=list)
@@ -487,23 +428,6 @@ class PaperTradingSummary:
                 ]
             )
 
-        if self.pnl_breakdown is not None:
-            b = self.pnl_breakdown
-            fee_label = "" if b.fees_included else " (ex-LP-fees)"
-            lines.extend(
-                [
-                    "",
-                    f"PnL BREAKDOWN{fee_label}",
-                    "-" * 70,
-                    f"  Interest Earned:  ${b.interest_earned:,.4f}",
-                    f"  Interest Paid:    ${b.interest_paid:,.4f}",
-                    f"  Net Yield:        ${b.net_yield:,.4f}",
-                    f"  Trading PnL:      ${b.trading_pnl:,.4f}",
-                    f"  Gas Costs:        ${b.gas_costs:,.4f}",
-                    f"  Total PnL:        ${b.total_pnl:,.4f}",
-                ]
-            )
-
         if self.initial_balances:
             lines.extend(
                 [
@@ -558,8 +482,6 @@ class PaperTradingSummary:
             "total_gas_used": self.total_gas_used,
             "total_gas_cost_usd": str(self.total_gas_cost_usd),
             "pnl_usd": str(self.pnl_usd) if self.pnl_usd is not None else None,
-            "pnl_breakdown": self.pnl_breakdown.to_dict() if self.pnl_breakdown else None,
-            "valuation_source": self.valuation_source,
             "error_summary": self.error_summary,
             "trades": [t.to_dict() for t in self.trades],
             "errors": [e.to_dict() for e in self.errors],
@@ -596,8 +518,6 @@ class PaperTradingSummary:
             total_gas_used=data.get("total_gas_used", 0),
             total_gas_cost_usd=Decimal(data.get("total_gas_cost_usd", "0")),
             pnl_usd=Decimal(data["pnl_usd"]) if data.get("pnl_usd") is not None else None,
-            pnl_breakdown=PnLBreakdown.from_dict(data["pnl_breakdown"]) if data.get("pnl_breakdown") else None,
-            valuation_source=data.get("valuation_source", "simple"),
             error_summary=data.get("error_summary", {}),
             trades=trades,
             errors=errors,
@@ -605,7 +525,6 @@ class PaperTradingSummary:
 
 
 __all__ = [
-    "PnLBreakdown",
     "PaperTradeErrorType",
     "PaperTrade",
     "PaperTradeError",

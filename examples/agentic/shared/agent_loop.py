@@ -78,7 +78,6 @@ async def run_agent_loop(
     *,
     max_rounds: int = 10,
     trace_sink: TraceSink | None = None,
-    strategy_id: str = "",
 ) -> str:
     """Run one iteration of the agent loop.
 
@@ -92,7 +91,6 @@ async def run_agent_loop(
         trace_sink: Optional callback for decision tracing / audit logging.
             Receives a structured dict for every tool call, tool result,
             and loop end. See module docstring for event schema.
-        strategy_id: Strategy identifier for telemetry logging.
 
     Returns:
         The LLM's final text response (after all tool calls complete).
@@ -102,34 +100,15 @@ async def run_agent_loop(
         {"role": "user", "content": user_prompt},
     ]
 
-    # Token usage telemetry accumulators
-    total_input_tokens = 0
-    total_output_tokens = 0
-    total_tool_calls = 0
-
     for round_num in range(max_rounds):
         response = await llm_client.chat(messages, tools=tools_openai)
         choice = response["choices"][0]["message"]
         tool_calls = choice.get("tool_calls", [])
 
-        # Accumulate token usage from API response
-        usage = response.get("usage", {})
-        total_input_tokens += usage.get("prompt_tokens", 0)
-        total_output_tokens += usage.get("completion_tokens", 0)
-
         if not tool_calls:
             # LLM is done -- return final text
             content = choice.get("content", "")
             logger.info("Agent finished in %d rounds", round_num + 1)
-            _emit_telemetry(trace_sink, {
-                "strategy_id": strategy_id,
-                "rounds": round_num + 1,
-                "total_input_tokens": total_input_tokens,
-                "total_output_tokens": total_output_tokens,
-                "total_tool_calls": total_tool_calls,
-                "tools_available": len(tools_openai),
-                "decision": _extract_decision(content),
-            })
             _emit_trace(trace_sink, {
                 "type": "loop_end",
                 "round": round_num + 1,
@@ -140,7 +119,6 @@ async def run_agent_loop(
 
         # Append assistant message with tool calls
         messages.append(choice)
-        total_tool_calls += len(tool_calls)
 
         # Execute each tool call and append results
         for tc in tool_calls:
@@ -227,15 +205,6 @@ async def run_agent_loop(
             })
 
     logger.warning("Agent hit max_rounds=%d, forcing hold", max_rounds)
-    _emit_telemetry(trace_sink, {
-        "strategy_id": strategy_id,
-        "rounds": max_rounds,
-        "total_input_tokens": total_input_tokens,
-        "total_output_tokens": total_output_tokens,
-        "total_tool_calls": total_tool_calls,
-        "tools_available": len(tools_openai),
-        "decision": "hold_max_rounds",
-    })
     _emit_trace(trace_sink, {
         "type": "loop_end",
         "round": max_rounds,
@@ -243,37 +212,6 @@ async def run_agent_loop(
         "total_rounds": max_rounds,
     })
     return '{"action": "hold", "reason": "max tool rounds exceeded"}'
-
-
-def _extract_decision(content: str) -> str:
-    """Extract a short decision label from the LLM's final text response."""
-    lower = content.lower()
-    for keyword in ("hold", "rebalance", "open", "close", "supply", "borrow", "repay", "swap", "deleverage"):
-        if keyword in lower:
-            return keyword
-    return "unknown"
-
-
-def _emit_telemetry(sink: TraceSink | None, telemetry: dict[str, Any]) -> None:
-    """Emit a structured telemetry summary for the completed iteration."""
-    telemetry["timestamp"] = time.time()
-    telemetry["type"] = "iteration_telemetry"
-    # Always log telemetry (even without a sink) for operational visibility
-    logger.info(
-        "Telemetry: strategy=%s rounds=%d input_tokens=%d output_tokens=%d tool_calls=%d tools=%d decision=%s",
-        telemetry.get("strategy_id", ""),
-        telemetry.get("rounds", 0),
-        telemetry.get("total_input_tokens", 0),
-        telemetry.get("total_output_tokens", 0),
-        telemetry.get("total_tool_calls", 0),
-        telemetry.get("tools_available", 0),
-        telemetry.get("decision", ""),
-    )
-    if sink is not None:
-        try:
-            sink(telemetry)
-        except Exception:
-            logger.debug("Telemetry sink error (non-fatal)", exc_info=True)
 
 
 def _emit_trace(sink: TraceSink | None, event: dict[str, Any]) -> None:

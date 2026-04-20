@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 from almanak.framework.data.models import DataClassification, DataEnvelope, DataMeta
 
 if TYPE_CHECKING:
-    from almanak.framework.data.ohlcv.gateway_provider import GatewayGeckoTerminalOHLCVProvider, GatewayOHLCVProvider
+    from almanak.framework.data.ohlcv.gateway_provider import GatewayOHLCVProvider
 
 logger = logging.getLogger(__name__)
 
@@ -115,72 +115,4 @@ class GatewayOHLCVDataProvider:
         return self._provider.get_health_metrics()
 
 
-class GeckoTerminalGatewayDataProvider:
-    """Adapts GatewayGeckoTerminalOHLCVProvider to the DataProvider protocol.
-
-    Properties:
-        name: Returns ``"geckoterminal"`` to match the router's provider chain key.
-        data_class: INFORMATIONAL -- OHLCV is never execution-grade.
-    """
-
-    def __init__(self, gateway_provider: GatewayGeckoTerminalOHLCVProvider) -> None:
-        self._provider = gateway_provider
-
-    @property
-    def name(self) -> str:
-        return "geckoterminal"
-
-    @property
-    def data_class(self) -> DataClassification:
-        return DataClassification.INFORMATIONAL
-
-    def fetch(self, **kwargs: object) -> DataEnvelope:
-        """Synchronous DataProvider entry point for GeckoTerminal OHLCV."""
-        token = str(kwargs.get("token", ""))
-        if not token:
-            raise ValueError("`token` is a required argument and cannot be empty.")
-        quote = str(kwargs.get("quote", "USD"))
-        timeframe = str(kwargs.get("timeframe", "1h"))
-        limit = int(kwargs.get("limit", 100))  # type: ignore[call-overload]
-        chain_raw = kwargs.get("chain")
-        chain = str(chain_raw).strip() if chain_raw is not None else None
-        pool_address_raw = kwargs.get("pool_address")
-        pool_address = str(pool_address_raw).strip() if pool_address_raw is not None else None
-
-        start = time.monotonic()
-
-        coro = self._provider.get_ohlcv(
-            token=token,
-            quote=quote,
-            timeframe=timeframe,
-            limit=limit,
-            chain=chain,
-            pool_address=pool_address,
-        )
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                with concurrent.futures.ThreadPoolExecutor() as pool_exec:
-                    candles = pool_exec.submit(asyncio.run, coro).result()
-            else:
-                candles = loop.run_until_complete(coro)
-        except RuntimeError:
-            candles = asyncio.run(coro)
-
-        latency_ms = int((time.monotonic() - start) * 1000)
-        meta = DataMeta(
-            source=self.name,
-            observed_at=datetime.now(UTC),
-            finality="off_chain",
-            staleness_ms=0,
-            latency_ms=latency_ms,
-            confidence=1.0,
-            cache_hit=False,
-        )
-        return DataEnvelope(value=candles, meta=meta)
-
-    def health(self) -> dict[str, object]:
-        return self._provider.get_health_metrics()
-
-
-__all__ = ["GatewayOHLCVDataProvider", "GeckoTerminalGatewayDataProvider"]
+__all__ = ["GatewayOHLCVDataProvider"]

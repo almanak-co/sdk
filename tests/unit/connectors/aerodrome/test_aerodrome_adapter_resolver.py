@@ -63,15 +63,11 @@ class TestAerodromeAdapterResolverInit:
         assert adapter._token_resolver is not None
 
     def test_rpc_url_passed_to_sdk(self, config):
-        """Test AerodromeAdapter passes optional RPC URL and gateway_client to SDK."""
+        """Test AerodromeAdapter passes optional RPC URL to SDK."""
         with patch("almanak.framework.connectors.aerodrome.adapter.AerodromeSDK") as mock_sdk:
             config.rpc_url = "https://base-mainnet.example"
             AerodromeAdapter(config)
-            mock_sdk.assert_called_once_with(
-                chain="base",
-                rpc_url="https://base-mainnet.example",
-                gateway_client=None,
-            )
+            mock_sdk.assert_called_once_with(chain="base", rpc_url="https://base-mainnet.example")
 
 
 class TestAerodromeAdapterResolveToken:

@@ -117,19 +117,15 @@ class TestL1Authentication:
         assert headers["POLY_ADDRESS"] == config.wallet_address
 
     def test_build_l1_headers_signature_is_hex(self, config):
-        """L1 signature should be a valid hex string with the 0x prefix.
-
-        Regression: VIB-3013. Polymarket's GET /auth/derive-api-key rejects
-        signatures without the `0x` prefix with `400 "Could not derive api key!"`.
-        """
+        """L1 signature should be a valid hex string."""
         client = ClobClient(config)
         headers = client._build_l1_headers()
 
         signature = headers["POLY_SIGNATURE"]
-        assert signature.startswith("0x")
-        # 65-byte signature = 130 hex chars + "0x" = 132 total
-        assert len(signature) == 132
-        assert all(c in "0123456789abcdef" for c in signature[2:])
+        # Should be hex without 0x prefix (from .hex())
+        assert all(c in "0123456789abcdef" for c in signature)
+        # EIP-712 signatures are 65 bytes = 130 hex chars
+        assert len(signature) == 130
 
     def test_build_l1_headers_timestamp_is_recent(self, config):
         """L1 timestamp should be recent."""
@@ -187,8 +183,7 @@ class TestL1Authentication:
         }
 
         signable = encode_typed_data(full_message=typed_data)
-        sig_bytes = bytes.fromhex(signature_hex[2:] if signature_hex.startswith("0x") else signature_hex)
-        recovered = Account.recover_message(signable, signature=sig_bytes)
+        recovered = Account.recover_message(signable, signature=bytes.fromhex(signature_hex))
 
         assert recovered == test_account.address
 
@@ -227,21 +222,18 @@ class TestL2Authentication:
         assert headers["POLY_PASSPHRASE"] == "test_passphrase"
 
     def test_build_l2_signature_format(self, config_with_credentials):
-        """L2 signature should be URL-safe base64 encoded (32 bytes HMAC-SHA256).
-
-        Polymarket API secrets are URL-safe base64 (`-` / `_`) and the server
-        verifies URL-safe encoding on the signature too.
-        """
+        """L2 signature should be base64 encoded."""
         client = ClobClient(config_with_credentials)
         headers = client._build_l2_headers("GET", "/test")
 
         signature = headers["POLY_SIGNATURE"]
+        # Should be valid base64
         try:
-            decoded = base64.urlsafe_b64decode(signature)
+            decoded = base64.b64decode(signature)
             # SHA256 produces 32 bytes
             assert len(decoded) == 32
         except Exception:
-            pytest.fail("Signature is not valid URL-safe base64")
+            pytest.fail("Signature is not valid base64")
 
     def test_build_l2_signature_reproducible(self, config_with_credentials):
         """L2 signature should be reproducible with same inputs."""
@@ -276,15 +268,15 @@ class TestL2Authentication:
         with patch("time.time", return_value=int(timestamp)):
             headers = client._build_l2_headers(method, path, body)
 
-        # Manually compute expected signature (URL-safe base64, matches CLOB server)
+        # Manually compute expected signature
         secret = credentials.secret.get_secret_value()
         message = f"{timestamp}{method}{path}{body}"
         expected_sig = hmac.new(
-            base64.urlsafe_b64decode(secret),
+            base64.b64decode(secret),
             message.encode("utf-8"),
             hashlib.sha256,
         ).digest()
-        expected_b64 = base64.urlsafe_b64encode(expected_sig).decode("utf-8")
+        expected_b64 = base64.b64encode(expected_sig).decode("utf-8")
 
         assert headers["POLY_SIGNATURE"] == expected_b64
 
@@ -494,9 +486,8 @@ class TestSignatureTypes:
         client = ClobClient(config)
         headers = client._build_l1_headers()
 
-        # Should still produce valid signature ("0x" + 65-byte hex = 132 chars)
-        assert headers["POLY_SIGNATURE"].startswith("0x")
-        assert len(headers["POLY_SIGNATURE"]) == 132
+        # Should still produce valid signature
+        assert len(headers["POLY_SIGNATURE"]) == 130
 
     def test_signature_type_values(self):
         """Signature types should have correct integer values."""
@@ -1127,13 +1118,14 @@ class TestOrderBuilding:
         order = client.build_market_order(params)
 
         assert order.side == 0  # BUY
-        # 100 USDC / 0.70 = 142.857142... shares → snap down to the shares step
-        # (multiple of 10_000 in 6-decimal units = 2-decimal share precision) → 142.85 shares.
-        # maker is derived from the snapped taker at exactly 0.70 so the CLOB
-        # sees an on-tick implied price.
-        assert order.taker_amount == 142_850_000  # 142.85 shares
-        assert order.maker_amount == 99_995_000  # 142.85 * 0.70 USDC
-        assert Decimal(order.maker_amount) / Decimal(order.taker_amount) == Decimal("0.70")
+        # BUY 100 USDC at worst price 0.70 = ~142.85 shares
+        # maker_amount = USDC to spend = 100 * 10^6
+        assert order.maker_amount == 100_000_000
+
+        # taker_amount = expected shares = 100 / 0.70 * 10^6 ≈ 142857142
+        # (rounded down)
+        expected_shares = Decimal("100") / Decimal("0.70")
+        assert order.taker_amount == int(expected_shares * 10**6)
 
     def test_build_market_order_sell(self, config_with_credentials):
         """Should build a valid SELL market order."""
@@ -1226,10 +1218,9 @@ class TestOrderSigning:
         unsigned = client.build_limit_order(params)
         signed = client.sign_order(unsigned)
 
-        # Signature: "0x" + 65-byte hex = 132 chars (VIB-3013 regression)
-        assert signed.signature.startswith("0x")
-        assert len(signed.signature) == 132
-        assert all(c in "0123456789abcdef" for c in signed.signature[2:])
+        # Signature should be hex string (65 bytes = 130 hex chars)
+        assert len(signed.signature) == 130
+        assert all(c in "0123456789abcdef" for c in signed.signature)
 
         # Order should be preserved
         assert signed.order == unsigned
@@ -1272,8 +1263,7 @@ class TestOrderSigning:
         }
 
         signable = encode_typed_data_local(full_message=typed_data)
-        sig_hex = signed.signature.removeprefix("0x")
-        recovered = Account.recover_message(signable, signature=bytes.fromhex(sig_hex))
+        recovered = Account.recover_message(signable, signature=bytes.fromhex(signed.signature))
 
         assert recovered == test_account.address
 
@@ -1292,8 +1282,7 @@ class TestOrderSigning:
         signed = client.create_and_sign_limit_order(params)
 
         assert signed.order is not None
-        assert signed.signature.startswith("0x")
-        assert len(signed.signature) == 132
+        assert len(signed.signature) == 130
 
     def test_create_and_sign_market_order(self, config_with_credentials):
         """Convenience method should build and sign market order in one call."""
@@ -1311,8 +1300,7 @@ class TestOrderSigning:
 
         assert signed.order is not None
         assert signed.order.side == 1  # SELL
-        assert signed.signature.startswith("0x")
-        assert len(signed.signature) == 132
+        assert len(signed.signature) == 130
 
 
 class TestOrderSubmission:
@@ -1528,13 +1516,7 @@ class TestOrderPayload:
         assert struct["signatureType"] == 0  # EOA
 
     def test_signed_order_to_api_payload(self, config_with_credentials):
-        """SignedOrder.to_api_payload() should produce canonical CLOB structure.
-
-        Regression: VIB-3012. The prior payload shape was rejected by Polymarket
-        with `400 "Invalid order payload"`. This test pins the canonical shape:
-        signature INSIDE the order dict with `0x` prefix, side as the string
-        "BUY"/"SELL", and `owner` + `orderType` at the top level.
-        """
+        """SignedOrder.to_api_payload() should produce correct API structure."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
         client = ClobClient(config_with_credentials)
@@ -1546,70 +1528,22 @@ class TestOrderPayload:
         )
 
         signed = client.create_and_sign_limit_order(params)
-        payload = signed.to_api_payload(owner="test_api_key", order_type="GTC")
+        payload = signed.to_api_payload()
 
-        # Top-level shape: order + owner + orderType
-        assert set(payload.keys()) == {"order", "owner", "orderType"}
-        assert payload["owner"] == "test_api_key"
-        assert payload["orderType"] == "GTC"
+        assert "order" in payload
+        assert "signature" in payload
 
         order = payload["order"]
         assert order["salt"] == signed.order.salt
         assert order["maker"] == config_with_credentials.wallet_address
         assert order["tokenId"] == "12345"  # API expects string
-        assert order["makerAmount"] == str(signed.order.maker_amount)
+        assert order["makerAmount"] == str(signed.order.maker_amount)  # API expects string
         assert order["takerAmount"] == str(signed.order.taker_amount)
-        assert order["side"] == "SELL"  # canonical: string, not int
+        assert order["side"] == 1  # SELL
         assert order["signatureType"] == 0  # EOA
 
-        # Signature must live INSIDE the order and carry the 0x prefix
-        assert "signature" not in payload  # not at top level
-        assert order["signature"].startswith("0x")
-        # 65-byte sig: "0x" + 130 hex chars = 132
-        assert len(order["signature"]) == 132
-
-    def test_signed_order_to_api_payload_buy_side_is_string(self, config_with_credentials):
-        """BUY intent must serialize to `"side": "BUY"`, not 0.
-
-        Regression: VIB-3012.
-        """
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
-
-        client = ClobClient(config_with_credentials)
-        params = LimitOrderParams(
-            token_id="12345",
-            side="BUY",
-            price=Decimal("0.50"),
-            size=Decimal("10"),
-        )
-        signed = client.create_and_sign_limit_order(params)
-        payload = signed.to_api_payload(owner="test_api_key")
-
-        assert payload["order"]["side"] == "BUY"
-        assert payload["orderType"] == "GTC"  # default
-
-    def test_signed_order_payload_repairs_missing_0x(self, config_with_credentials):
-        """Even if an upstream signer returns hex without `0x`, the payload
-        must still emit `0x`-prefixed signature. Defense-in-depth check.
-        """
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams, SignedOrder
-
-        client = ClobClient(config_with_credentials)
-        params = LimitOrderParams(
-            token_id="12345",
-            side="BUY",
-            price=Decimal("0.50"),
-            size=Decimal("10"),
-        )
-        signed = client.create_and_sign_limit_order(params)
-
-        # Synthesize an "old-style" signature without 0x prefix
-        raw_signed = SignedOrder(
-            order=signed.order,
-            signature=signed.signature.removeprefix("0x"),
-        )
-        payload = raw_signed.to_api_payload(owner="test_api_key")
-        assert payload["order"]["signature"].startswith("0x")
+        # Signature should be hex string without 0x prefix
+        assert len(payload["signature"]) == 130
 
 
 # =============================================================================
@@ -2178,96 +2112,6 @@ class TestMarketSpecificMinimumOrderSize:
         assert "42.5" in str(exc_info.value)
         assert exc_info.value.minimum == "42.5"
 
-    # -------------------------------------------------------------------------
-    # VIB-3014: $1 USD minimum makerAmount for BUY orders
-    # -------------------------------------------------------------------------
-
-    def test_validate_order_value_usd_below_floor(self, config_with_credentials):
-        """_validate_order_value_usd should reject BUYs below $1 notional.
-
-        Regression: VIB-3014. Polymarket CLOB rejects BUY orders with
-        makerAmount < $1 with `400 "invalid amount for a marketable BUY order ($X)"`.
-        The `$` prefix on both fields distinguishes this from a share-count floor.
-        """
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-
-        client = ClobClient(config_with_credentials)
-
-        with pytest.raises(PolymarketMinimumOrderError) as exc_info:
-            client._validate_order_value_usd(Decimal("0.30"))
-
-        assert exc_info.value.size == "$0.30"
-        assert exc_info.value.minimum == "$1"
-
-    def test_validate_order_value_usd_at_floor(self, config_with_credentials):
-        """_validate_order_value_usd should pass at exactly $1."""
-        client = ClobClient(config_with_credentials)
-        # Must not raise
-        client._validate_order_value_usd(Decimal("1.00"))
-        client._validate_order_value_usd(Decimal("1.01"))
-
-    def test_build_limit_order_buy_rejects_sub_dollar_notional(self, config_with_credentials):
-        """VIB-3014 repro: 5 shares × $0.06 = $0.30 passes share check but fails USD check.
-
-        This is the exact shape that leaked to the CLOB and triggered
-        `min size: $1` before the fix.
-        """
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
-
-        client = ClobClient(config_with_credentials)
-        market = self._create_market(order_min_size="5")
-
-        params = LimitOrderParams(
-            token_id="123",
-            side="BUY",
-            price=Decimal("0.06"),
-            size=Decimal("5"),  # share count OK (>= 5), value only $0.30
-        )
-
-        with pytest.raises(PolymarketMinimumOrderError) as exc_info:
-            client.build_limit_order(params, market=market)
-
-        # Must be the USD-floor error, not the share-count error
-        assert exc_info.value.minimum == "$1"
-
-    def test_build_limit_order_sell_not_subject_to_usd_floor(self, config_with_credentials):
-        """SELL makerAmount is shares, not USD. $1 floor should NOT apply."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
-
-        client = ClobClient(config_with_credentials)
-        market = self._create_market(order_min_size="5")
-
-        params = LimitOrderParams(
-            token_id="123",
-            side="SELL",
-            price=Decimal("0.06"),
-            size=Decimal("5"),  # $0.30 notional
-        )
-
-        # Must not raise — SELL is not bounded by the BUY-side USD floor
-        client.build_limit_order(params, market=market)
-
-    def test_build_market_order_buy_rejects_sub_dollar_amount(self, config_with_credentials):
-        """Market BUY with <$1 amount should fail at validation, not wire."""
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
-
-        client = ClobClient(config_with_credentials)
-        market = self._create_market(order_min_size="5")
-
-        params = MarketOrderParams(
-            token_id="123",
-            side="BUY",
-            amount=Decimal("0.50"),  # sub-dollar USDC to spend
-            worst_price=Decimal("0.10"),  # 5 shares, passes share floor
-        )
-
-        with pytest.raises(PolymarketMinimumOrderError) as exc_info:
-            client.build_market_order(params, market=market)
-
-        assert exc_info.value.minimum == "$1"
-
 
 class TestTickSizeValidation:
     """Tests for market-specific tick size validation."""
@@ -2532,196 +2376,6 @@ class TestTickSizeValidation:
 
         with pytest.raises(PolymarketInvalidTickSizeError):
             client._validate_tick_size(Decimal("0.50015"), market=market)
-
-
-class TestRatioPreservation:
-    """The CLOB validates that (maker/taker for BUY, taker/maker for SELL) is a
-    multiple of the market's tick size. Quantizing the two legs independently to
-    their precision caps (5 decimals USDC, 2 decimals shares) lets that ratio
-    drift off-tick — e.g. 80_666_190 / 81_480_000 = 0.98992... on a 0.001 tick
-    market, which the API rejects with ``breaks minimum tick size rule``.
-
-    These tests pin the fix: amounts must be derived from a single tick-aligned
-    price so the integer ratio is exactly that price.
-    """
-
-    @staticmethod
-    def _market(tick_size: str = "0.001") -> GammaMarket:
-        return GammaMarket(
-            id="test_market_123",
-            condition_id="0xabc",
-            question="Test market?",
-            slug="test-market",
-            outcomes=["Yes", "No"],
-            outcome_prices=[Decimal("0.50"), Decimal("0.50")],
-            clob_token_ids=["token_yes", "token_no"],
-            volume=Decimal("10000"),
-            liquidity=Decimal("5000"),
-            active=True,
-            closed=False,
-            enable_order_book=True,
-            order_min_size=Decimal("5"),
-            order_price_min_tick_size=Decimal(tick_size),
-        )
-
-    @pytest.mark.parametrize(
-        "price, tick",
-        [
-            (Decimal("0.015"), "0.001"),  # cheap market (PM repro: market 556063 regime)
-            (Decimal("0.5"), "0.01"),
-            (Decimal("0.65"), "0.01"),
-            (Decimal("0.70"), "0.01"),
-            (Decimal("0.989"), "0.001"),  # 3-decimal tick
-            (Decimal("0.99"), "0.01"),  # MAX_PRICE default
-        ],
-    )
-    def test_market_buy_ratio_equals_tick_aligned_price(self, config_with_credentials, price, tick):
-        """BUY market order: maker/taker must equal ``price`` exactly."""
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
-
-        client = ClobClient(config_with_credentials)
-        market = self._market(tick_size=tick)
-        # Use a taker size that does NOT divide cleanly by the shares_step so we
-        # exercise the snap-down path. 81.481 shares → 81.48 after snap.
-        params = MarketOrderParams(
-            token_id="123",
-            side="BUY",
-            amount=Decimal("81.481") * price,
-            worst_price=price,
-        )
-
-        order = client.build_market_order(params, market=market)
-
-        assert order.taker_amount > 0
-        assert order.taker_amount % ClobClient._SHARES_STEP == 0
-        assert order.maker_amount % ClobClient._USDC_STEP == 0
-        # Ratio must be exactly the requested tick-aligned price.
-        assert Decimal(order.maker_amount) / Decimal(order.taker_amount) == price
-
-    def test_market_buy_on_tick_0001_regression(self, config_with_credentials):
-        """Regression for the Portfolio Manager report (market 556063, tick 0.001,
-        81.481 shares at worst_price=0.99). Pre-fix: ratio 0.98992403 → 400
-        ``breaks minimum tick size rule: 0.001``."""
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
-
-        client = ClobClient(config_with_credentials)
-        market = self._market(tick_size="0.001")
-        params = MarketOrderParams(
-            token_id="123",
-            side="BUY",
-            amount=Decimal("80.66619"),  # 81.481 * 0.99
-            worst_price=Decimal("0.99"),
-        )
-
-        order = client.build_market_order(params, market=market)
-
-        ratio = Decimal(order.maker_amount) / Decimal(order.taker_amount)
-        # Must land on the 0.001 tick (and any coarser tick that divides 0.001).
-        assert ratio == Decimal("0.99")
-        assert ratio % Decimal("0.001") == 0
-
-    @pytest.mark.parametrize(
-        "price, tick",
-        [(Decimal("0.015"), "0.001"), (Decimal("0.50"), "0.01"), (Decimal("0.989"), "0.001")],
-    )
-    def test_limit_order_ratio_equals_price(self, config_with_credentials, price, tick):
-        """Limit BUY/SELL: ratio must equal the specified price exactly, regardless
-        of whether the share size aligns to the shares precision step."""
-        from almanak.framework.connectors.polymarket.models import LimitOrderParams
-
-        client = ClobClient(config_with_credentials)
-        market = self._market(tick_size=tick)
-        for side in ("BUY", "SELL"):
-            params = LimitOrderParams(
-                token_id="123",
-                side=side,
-                price=price,
-                size=Decimal("81.481"),
-            )
-            order = client.build_limit_order(params, market=market)
-
-            if side == "BUY":
-                ratio = Decimal(order.maker_amount) / Decimal(order.taker_amount)
-            else:
-                ratio = Decimal(order.taker_amount) / Decimal(order.maker_amount)
-            assert ratio == price, f"{side} ratio {ratio} != price {price}"
-
-    def test_market_sell_ratio_equals_price(self, config_with_credentials):
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
-
-        client = ClobClient(config_with_credentials)
-        market = self._market(tick_size="0.001")
-        params = MarketOrderParams(
-            token_id="123",
-            side="SELL",
-            amount=Decimal("81.481"),
-            worst_price=Decimal("0.015"),
-        )
-
-        order = client.build_market_order(params, market=market)
-        ratio = Decimal(order.taker_amount) / Decimal(order.maker_amount)
-        assert ratio == Decimal("0.015")
-
-    # ------------------------------------------------------------------
-    # Auditor-driven safety regression tests
-    # ------------------------------------------------------------------
-
-    def test_post_snap_revalidation_rejects_sub_dollar_buy(self, config_with_credentials):
-        """Pre-snap notional passes the $1 floor but the snap-down drops it below.
-
-        Regression for the Codex/CodeRabbit converged finding: a market BUY of
-        $1.00 at worst_price=0.99 passes ``_validate_order_value_usd($1)``,
-        snaps to ``maker=999_900`` token-units = $0.9999, which the CLOB rejects
-        with ``min size: $1``. The post-snap revalidation must catch this
-        locally before submission.
-        """
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
-
-        client = ClobClient(config_with_credentials)
-        market = self._market(tick_size="0.01")
-        params = MarketOrderParams(
-            token_id="123",
-            side="BUY",
-            amount=Decimal("1.00"),
-            worst_price=Decimal("0.99"),
-        )
-
-        with pytest.raises(PolymarketMinimumOrderError):
-            client.build_market_order(params, market=market)
-
-    def test_build_amounts_at_price_rejects_float_derived_decimal(self):
-        """Guard against ``Decimal(0.7)``-style prices whose huge denominators
-        blow up ``combined_step`` and silently snap any reasonable order to
-        ``(0, 0)``. Snap to the tick grid (or quantize) before calling.
-        """
-        with pytest.raises(ValueError, match="too much precision"):
-            ClobClient._build_amounts_at_price("BUY", Decimal(0.7), 100_000_000)
-
-    def test_buy_at_dollar_floor_with_low_min_size_rejected_post_snap(self, config_with_credentials):
-        """CodeRabbit-suggested regression: with order_min_size=0.1 the per-market
-        minimum allows tiny orders, so it doesn't catch the snap-down. The post-snap
-        $1 USD floor must still reject ``BUY amount=$1.00 worst_price=0.70``,
-        which snaps to ``maker=$0.994`` (5 / 0.70 = 7.142… shares → 7.14 shares
-        → 7.14 * 0.70 = $4.998 ❌ wait recalculate). Concretely: 1.0/0.70 ≈
-        1.4286 shares → snap to 1.42 shares (multiple of 0.01) → 1.42 * 0.70 =
-        $0.994 ⇒ rejected by the $1 floor.
-        """
-        from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
-        from almanak.framework.connectors.polymarket.models import MarketOrderParams
-
-        client = ClobClient(config_with_credentials)
-        market = self._market(tick_size="0.01")
-        market.order_min_size = Decimal("0.1")  # low per-market minimum
-        params = MarketOrderParams(
-            token_id="123",
-            side="BUY",
-            amount=Decimal("1.00"),
-            worst_price=Decimal("0.70"),
-        )
-
-        with pytest.raises(PolymarketMinimumOrderError):
-            client.build_market_order(params, market=market)
 
 
 # =============================================================================

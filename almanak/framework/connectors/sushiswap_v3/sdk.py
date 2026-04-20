@@ -48,10 +48,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from almanak.framework.gateway_client import GatewayClient
+from typing import Any
 
 from eth_hash.auto import keccak as keccak256
 
@@ -724,16 +721,13 @@ class SushiSwapV3SDK:
         chain: str,
         rpc_url: str | None = None,
         web3: Any | None = None,
-        gateway_client: "GatewayClient | None" = None,
     ) -> None:
         """Initialize the SDK.
 
         Args:
             chain: Target blockchain (ethereum, arbitrum, base, polygon, avalanche, bsc, optimism)
-            rpc_url: DEPRECATED — direct RPC URL. Prefer gateway_client.
+            rpc_url: RPC URL for on-chain queries (optional)
             web3: Existing Web3 instance (optional)
-            gateway_client: Gateway client for routing async eth_call through
-                the gateway's RpcService. Preferred over rpc_url.
 
         Raises:
             ValueError: If chain is not supported
@@ -744,7 +738,6 @@ class SushiSwapV3SDK:
         self.chain = chain
         self.rpc_url = rpc_url
         self._web3 = web3
-        self._gateway_client = gateway_client
 
         # Contract addresses for this chain
         self.factory_address = FACTORY_ADDRESSES[chain]
@@ -840,7 +833,7 @@ class SushiSwapV3SDK:
         if fee_tier not in FEE_TIERS:
             raise InvalidFeeError(fee_tier)
 
-        if self._web3 is None and self.rpc_url is None and self._gateway_client is None:
+        if self._web3 is None and self.rpc_url is None:
             # Fall back to local estimation
             return self.get_quote_local(token_in, token_out, amount_in, fee_tier)
 
@@ -1372,36 +1365,20 @@ class SushiSwapV3SDK:
     # =========================================================================
 
     async def _get_web3(self) -> Any:
-        """Get or create Web3 instance.
-
-        Routes through the gateway when a gateway_client is set; falls back
-        to direct AsyncHTTPProvider for ad-hoc script usage (deprecated).
-        """
+        """Get or create Web3 instance."""
         if self._web3 is not None:
             return self._web3
 
+        if self.rpc_url is None:
+            raise SushiSwapV3SDKError("No RPC URL or Web3 instance provided")
+
         # Import here to avoid requiring web3 for offline operations
         try:
-            from web3 import AsyncWeb3
+            from web3 import AsyncHTTPProvider, AsyncWeb3
         except ImportError as e:
             raise SushiSwapV3SDKError("web3 package required for RPC operations") from e
 
-        if self._gateway_client is not None:
-            from almanak.framework.web3.gateway_provider import AsyncGatewayWeb3Provider
-
-            self._web3 = AsyncWeb3(AsyncGatewayWeb3Provider(self._gateway_client, chain=self.chain))
-            return self._web3
-
-        if self.rpc_url is None:
-            raise SushiSwapV3SDKError("No gateway_client, RPC URL, or Web3 instance provided")
-
-        from web3 import AsyncHTTPProvider
-
-        from almanak.gateway.utils.ssl_context import build_ssl_context
-
-        self._web3 = AsyncWeb3(  # vib-2986-exempt: gateway-internal fallback
-            AsyncHTTPProvider(self.rpc_url, request_kwargs={"ssl": build_ssl_context()})
-        )
+        self._web3 = AsyncWeb3(AsyncHTTPProvider(self.rpc_url))
         return self._web3
 
 

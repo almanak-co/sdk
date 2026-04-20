@@ -457,16 +457,6 @@ class GammaMarket(BaseModel):
     enable_order_book: bool = Field(description="CLOB enabled")
     order_price_min_tick_size: Decimal = Field(default=Decimal("0.01"), description="Minimum tick size")
     order_min_size: Decimal = Field(default=Decimal("5"), description="Minimum order size")
-    maker_base_fee_bps: int = Field(
-        default=0,
-        description=(
-            "Market's maker fee in basis points. Must be signed into the order's "
-            "feeRateBps — the CLOB validator rejects GTC orders whose fee does not "
-            "match the current market fee with `invalid fee rate (0), current "
-            "market's maker fee: N`."
-        ),
-    )
-    taker_base_fee_bps: int = Field(default=0, description="Market's taker fee in basis points.")
     best_bid: Decimal | None = Field(default=None, description="Current best bid")
     best_ask: Decimal | None = Field(default=None, description="Current best ask")
     last_trade_price: Decimal | None = Field(default=None, description="Last execution price")
@@ -521,8 +511,6 @@ class GammaMarket(BaseModel):
             enable_order_book=data.get("enableOrderBook", False),
             order_price_min_tick_size=Decimal(str(data.get("orderPriceMinTickSize", "0.01"))),
             order_min_size=Decimal(str(data.get("orderMinSize", "5"))),
-            maker_base_fee_bps=int(data.get("makerBaseFee") or 0),
-            taker_base_fee_bps=int(data.get("takerBaseFee") or 0),
             best_bid=Decimal(str(data["bestBid"])) if data.get("bestBid") else None,
             best_ask=Decimal(str(data["bestAsk"])) if data.get("bestAsk") else None,
             last_trade_price=(Decimal(str(data["lastTradePrice"])) if data.get("lastTradePrice") else None),
@@ -688,21 +676,8 @@ class SignedOrder:
     order: UnsignedOrder
     signature: str
 
-    def to_api_payload(self, owner: str, order_type: str = "GTC") -> dict:
-        """Convert to Polymarket CLOB `/order` submission payload.
-
-        Args:
-            owner: Polymarket API key (UUID) that owns the credential used
-                to authenticate the request. Required by the API matcher.
-            order_type: One of "GTC", "GTD", "FOK", "FAK".
-
-        Payload shape matches py-clob-client's canonical format — signature
-        lives **inside** the `order` object (with an `0x` prefix), `side` is
-        the string `"BUY"` / `"SELL"`, and the api-key owner is a top-level
-        field alongside `orderType`.
-        """
-        signature = self.signature if self.signature.startswith("0x") else f"0x{self.signature}"
-        side_str = "BUY" if self.order.side == OrderSide.BUY.value else "SELL"
+    def to_api_payload(self) -> dict:
+        """Convert to API submission payload."""
         return {
             "order": {
                 "salt": self.order.salt,
@@ -715,12 +690,10 @@ class SignedOrder:
                 "expiration": str(self.order.expiration),
                 "nonce": str(self.order.nonce),
                 "feeRateBps": str(self.order.fee_rate_bps),
-                "side": side_str,
+                "side": self.order.side,
                 "signatureType": self.order.signature_type,
-                "signature": signature,
             },
-            "owner": owner,
-            "orderType": order_type,
+            "signature": self.signature,
         }
 
 
@@ -747,11 +720,8 @@ class OrderResponse(BaseModel):
                 pass
 
         return cls(
-            # Gamma responses alternate between `orderID` and `orderId`.
-            order_id=data.get("orderID") or data.get("orderId", ""),
-            # CLOB returns lowercase status strings ("live", "matched", …); our
-            # enum is uppercase. Normalize to match.
-            status=OrderStatus(str(data.get("status", "LIVE")).upper()),
+            order_id=data.get("orderID", ""),
+            status=OrderStatus(data.get("status", "LIVE")),
             market=data.get("market", ""),
             side=data.get("side", "BUY"),
             price=Decimal(str(data.get("price", "0"))),

@@ -16,7 +16,7 @@ import pytest
 
 @pytest.fixture
 def strategy():
-    from almanak.demo_strategies.aerodrome_rsi.strategy import AerodromeRSIStrategy
+    from strategies.demo.aerodrome_rsi.strategy import AerodromeRSIStrategy
 
     strat = AerodromeRSIStrategy.__new__(AerodromeRSIStrategy)
     strat.config = {}
@@ -190,25 +190,7 @@ class TestTeardown:
         assert intents[0].max_slippage == Decimal("0.01")  # 100 bps
 
     def test_get_open_positions(self, strategy):
-        mock_market = MagicMock()
-        balance_obj = MagicMock()
-        balance_obj.balance = Decimal("0.5")
-        balance_obj.balance_usd = Decimal("1700")
-        mock_market.balance.return_value = balance_obj
-        strategy.create_market_snapshot = MagicMock(return_value=mock_market)
-
         summary = strategy.get_open_positions()
         assert len(summary.positions) == 1
         assert summary.positions[0].protocol == "aerodrome"
         assert summary.positions[0].chain == "base"
-
-    def test_get_open_positions_no_balance(self, strategy):
-        mock_market = MagicMock()
-        balance_obj = MagicMock()
-        balance_obj.balance = Decimal("0")
-        balance_obj.balance_usd = Decimal("0")
-        mock_market.balance.return_value = balance_obj
-        strategy.create_market_snapshot = MagicMock(return_value=mock_market)
-
-        summary = strategy.get_open_positions()
-        assert len(summary.positions) == 0

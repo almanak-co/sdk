@@ -17,87 +17,21 @@ This decoupled design allows multiple triggers:
 - Risk Guards: Auto-protect triggers when health factor drops
 """
 
-import asyncio
 import json
 import logging
-import os
-import random
 import sqlite3
-import time
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from almanak.framework.teardown.models import (
-    EscalationLevel,
     TeardownAssetPolicy,
     TeardownMode,
     TeardownPhase,
     TeardownRequest,
-    TeardownState,
     TeardownStatus,
 )
 
 logger = logging.getLogger(__name__)
-
-# Env var overrides the default SQLite path — ensures runner and API processes
-# agree on the file they share for teardown state + approval channel.
-_DB_PATH_ENV_VAR = "ALMANAK_STATE_DB"
-
-# SQLite connection settings. WAL enables concurrent readers during writes;
-# busy_timeout lets writers wait out contention instead of failing immediately.
-_SQLITE_BUSY_TIMEOUT_MS = 30_000
-_SQLITE_CONNECT_TIMEOUT_S = 30.0
-
-# Retry policy for OperationalError (e.g., transient locks beyond busy_timeout).
-_SQLITE_RETRY_ATTEMPTS = 5
-_SQLITE_RETRY_BASE_DELAY_S = 0.05  # 50ms base, exponential backoff + jitter
-
-
-def _open_connection(db_path: str | Path) -> sqlite3.Connection:
-    """Open a SQLite connection with WAL + busy_timeout pragmas applied.
-
-    WAL journal mode allows concurrent readers while a writer commits, which
-    matters when the runner poll loop and the API approval writer hit the same
-    database. busy_timeout lets a blocked writer wait instead of raising
-    immediately.
-    """
-    conn = sqlite3.connect(str(db_path), timeout=_SQLITE_CONNECT_TIMEOUT_S)
-    conn.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
-    return conn
-
-
-def _with_retry[T](operation: Callable[[], T], *, description: str) -> T:
-    """Run a synchronous SQLite operation with retry on OperationalError.
-
-    WAL + busy_timeout should handle most contention. This wraps the rare cases
-    where busy_timeout is exhausted (e.g., sustained concurrent writers). Retries
-    with exponential backoff + jitter to avoid thundering herd.
-    """
-    last_err: Exception | None = None
-    for attempt in range(_SQLITE_RETRY_ATTEMPTS):
-        try:
-            return operation()
-        except sqlite3.OperationalError as e:
-            last_err = e
-            if attempt == _SQLITE_RETRY_ATTEMPTS - 1:
-                break
-            delay = _SQLITE_RETRY_BASE_DELAY_S * (2**attempt) + random.uniform(0, 0.05)
-            logger.warning(
-                "SQLite %s attempt %d/%d failed (%s); retrying in %.3fs",
-                description,
-                attempt + 1,
-                _SQLITE_RETRY_ATTEMPTS,
-                e,
-                delay,
-            )
-            time.sleep(delay)
-    assert last_err is not None
-    logger.error("SQLite %s exhausted retries: %s", description, last_err)
-    raise last_err
 
 
 class TeardownStateManager:
@@ -122,46 +56,21 @@ class TeardownStateManager:
 
     @staticmethod
     def _resolve_db_path(db_path: str | Path | None) -> Path:
-        """Resolve database path, converging runner and API on the same file.
-
-        Precedence:
-        1. Explicit ``db_path`` argument
-        2. ``ALMANAK_STATE_DB`` environment variable — the recommended way to
-           make the path explicit in production deployments
-        3. ``$XDG_DATA_HOME/almanak/almanak_state.db`` when XDG is set (Linux)
-        4. ``~/.almanak/almanak_state.db`` — stable per-user default that
-           converges regardless of cwd (runner launched from a strategy dir,
-           API launched from repo root, CLI from anywhere)
-        5. ``/tmp/almanak_state.db`` as last resort when home is not writable
-
-        **Never CWD-relative.** Runner is documented to be launched from a
-        strategy directory, while API/CLI processes are often started from
-        the repo root — a CWD-relative default silently opens different SQLite
-        files per process, which breaks the approval channel entirely.
-        """
+        """Resolve database path, falling back to /tmp if cwd is not writable."""
         if db_path is not None:
             return Path(db_path)
 
-        env_path = os.environ.get(_DB_PATH_ENV_VAR)
-        if env_path:
-            return Path(env_path)
-
-        xdg_data_home = os.environ.get("XDG_DATA_HOME")
-        if xdg_data_home:
-            candidate = Path(xdg_data_home) / "almanak" / "almanak_state.db"
-        else:
-            candidate = Path.home() / ".almanak" / "almanak_state.db"
-
+        primary = Path("almanak_state.db")
         try:
-            candidate.parent.mkdir(parents=True, exist_ok=True)
-            candidate.touch(exist_ok=True)
-            return candidate
+            # Test if we can write to the current directory
+            primary.touch(exist_ok=True)
+            return primary
         except OSError:
             return Path("/tmp/almanak_state.db")
 
     def _init_db(self) -> None:
         """Initialize the database schema."""
-        with _open_connection(self.db_path) as conn:
+        with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS teardown_requests (
                     strategy_id TEXT PRIMARY KEY,
@@ -198,7 +107,7 @@ class TeardownStateManager:
         Args:
             request: The teardown request to persist
         """
-        with _open_connection(self.db_path) as conn:
+        with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO teardown_requests (
@@ -246,7 +155,7 @@ class TeardownStateManager:
         Returns:
             TeardownRequest if one exists, None otherwise
         """
-        with _open_connection(self.db_path) as conn:
+        with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
                 "SELECT * FROM teardown_requests WHERE strategy_id = ?",
@@ -279,7 +188,7 @@ class TeardownStateManager:
         Returns:
             List of teardown requests with status=PENDING
         """
-        with _open_connection(self.db_path) as conn:
+        with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
                 "SELECT * FROM teardown_requests WHERE status = ?",
@@ -300,7 +209,7 @@ class TeardownStateManager:
         ]
         placeholders = ",".join("?" * len(terminal_statuses))
 
-        with _open_connection(self.db_path) as conn:
+        with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
                 f"SELECT * FROM teardown_requests WHERE status NOT IN ({placeholders})",
@@ -314,7 +223,7 @@ class TeardownStateManager:
         Returns:
             List of all teardown requests regardless of status
         """
-        with _open_connection(self.db_path) as conn:
+        with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("SELECT * FROM teardown_requests ORDER BY requested_at DESC")
             return [self._row_to_request(row) for row in cursor.fetchall()]
@@ -325,7 +234,7 @@ class TeardownStateManager:
         Args:
             request: The updated teardown request
         """
-        with _open_connection(self.db_path) as conn:
+        with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 """
                 UPDATE teardown_requests SET
@@ -455,7 +364,7 @@ class TeardownStateManager:
         request.completed_at = datetime.now(UTC)
 
         if result:
-            with _open_connection(self.db_path) as conn:
+            with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
                     "UPDATE teardown_requests SET result_json = ? WHERE strategy_id = ?",
                     (json.dumps(result), strategy_id),
@@ -487,7 +396,7 @@ class TeardownStateManager:
         request.status = TeardownStatus.FAILED
         request.completed_at = datetime.now(UTC)
 
-        with _open_connection(self.db_path) as conn:
+        with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 "UPDATE teardown_requests SET error_message = ? WHERE strategy_id = ?",
                 (error, strategy_id),
@@ -553,7 +462,7 @@ class TeardownStateManager:
         Returns:
             True if deleted, False if not found
         """
-        with _open_connection(self.db_path) as conn:
+        with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
                 "DELETE FROM teardown_requests WHERE strategy_id = ?",
                 (strategy_id,),
@@ -605,445 +514,3 @@ def get_teardown_state_manager(db_path: str | None = None) -> TeardownStateManag
     if _default_manager is None:
         _default_manager = TeardownStateManager(db_path)
     return _default_manager
-
-
-class TeardownStateAdapter:
-    """SQLite-backed persistence for TeardownManager state and approval channel.
-
-    Implements the ``StateManager`` protocol expected by ``TeardownManager.__init__``
-    (``save_teardown_state`` / ``get_teardown_state`` / ``delete_teardown_state``) and
-    provides the cross-process approval channel used by the runner's approval
-    callback and the teardown API endpoints.
-
-    **Schema**
-
-    - ``teardown_execution_state``: one row per teardown, keyed by ``teardown_id``.
-      Persisted so a restarted runner can resume a mid-flight teardown.
-    - ``teardown_approvals``: one row per (teardown_id, level) escalation, so each
-      level's request/response is preserved independently — a response to level 2
-      cannot be clobbered by an INSERT for level 3 (VIB-2927 fix).
-
-    **Cross-process coordination**
-
-    Runner and API/CLI must resolve the same SQLite file, otherwise operator
-    approvals written by the API never reach the runner's poll loop. Set the
-    ``ALMANAK_STATE_DB`` environment variable in production to make the path
-    explicit. The adapter's ``_resolve_db_path`` honours that variable.
-
-    **Concurrency**
-
-    All synchronous SQLite work uses WAL journal mode + busy_timeout, and
-    retries on ``OperationalError`` with jittered backoff. Async methods wrap
-    the sync I/O in ``asyncio.to_thread`` so the event loop is never blocked.
-    """
-
-    def __init__(self, db_path: str | Path | None = None):
-        # Fail loudly on invalid types — this path is cross-process state; silently
-        # defaulting to CWD on a misconfigured caller would lead to diverging DBs.
-        if db_path is not None and not isinstance(db_path, str | Path):
-            raise TypeError(f"TeardownStateAdapter db_path must be str, Path, or None; got {type(db_path).__name__}")
-        self.db_path = TeardownStateManager._resolve_db_path(db_path)
-        self._init_tables()
-
-    # ------------------------------------------------------------------
-    # Schema + internal helpers
-    # ------------------------------------------------------------------
-
-    def _init_tables(self) -> None:
-        def _op():
-            with _open_connection(self.db_path) as conn:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS teardown_execution_state (
-                        teardown_id TEXT PRIMARY KEY,
-                        strategy_id TEXT NOT NULL,
-                        mode TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        total_intents INTEGER NOT NULL,
-                        completed_intents INTEGER NOT NULL,
-                        current_intent_index INTEGER NOT NULL,
-                        started_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        completed_at TEXT,
-                        pending_intents_json TEXT,
-                        intent_results_json TEXT,
-                        cancel_window_until TEXT,
-                        config_json TEXT
-                    )
-                """)
-                # Approval requests table for slippage escalation (VIB-2927).
-                # Compound PK (teardown_id, level) so each escalation level has its
-                # own request/response slot and later levels can't clobber earlier
-                # operator responses.
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS teardown_approvals (
-                        teardown_id TEXT NOT NULL,
-                        level TEXT NOT NULL,
-                        strategy_id TEXT NOT NULL,
-                        request_json TEXT NOT NULL,
-                        response_json TEXT,
-                        created_at TEXT NOT NULL,
-                        responded_at TEXT,
-                        expires_at TEXT NOT NULL,
-                        PRIMARY KEY (teardown_id, level)
-                    )
-                """)
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_approvals_strategy_pending "
-                    "ON teardown_approvals(strategy_id, responded_at)"
-                )
-                conn.commit()
-
-            # Handle pre-release schema drift: the earlier schema had
-            # teardown_id as the sole PRIMARY KEY with no ``level`` column.
-            # If we detect that, drop and recreate — this feature is unreleased
-            # so there is no production data to preserve.
-            self._migrate_legacy_approvals_schema()
-
-        _with_retry(_op, description="init_tables")
-
-    def _migrate_legacy_approvals_schema(self) -> None:
-        """Drop + recreate teardown_approvals if it predates the compound PK.
-
-        The pre-release schema used teardown_id as the sole primary key. Rows
-        from that schema cannot answer "which escalation level did the operator
-        respond to?" and must be migrated. Since this feature has not shipped,
-        the migration is a simple drop/recreate rather than a data migration.
-        """
-
-        def _op():
-            with _open_connection(self.db_path) as conn:
-                cursor = conn.execute("PRAGMA table_info(teardown_approvals)")
-                columns = {row[1] for row in cursor.fetchall()}
-                if "level" in columns:
-                    return
-                logger.warning(
-                    "teardown_approvals table predates compound PK; dropping and recreating "
-                    "(pre-release feature, no data loss). Path: %s",
-                    self.db_path,
-                )
-                conn.execute("DROP TABLE IF EXISTS teardown_approvals")
-                conn.execute("""
-                    CREATE TABLE teardown_approvals (
-                        teardown_id TEXT NOT NULL,
-                        level TEXT NOT NULL,
-                        strategy_id TEXT NOT NULL,
-                        request_json TEXT NOT NULL,
-                        response_json TEXT,
-                        created_at TEXT NOT NULL,
-                        responded_at TEXT,
-                        expires_at TEXT NOT NULL,
-                        PRIMARY KEY (teardown_id, level)
-                    )
-                """)
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_approvals_strategy_pending "
-                    "ON teardown_approvals(strategy_id, responded_at)"
-                )
-                conn.commit()
-
-        _with_retry(_op, description="migrate_approvals_schema")
-
-    @staticmethod
-    def _level_key(level: EscalationLevel | str) -> str:
-        """Serialize an escalation level for DB storage."""
-        if isinstance(level, EscalationLevel):
-            return level.value
-        return str(level)
-
-    # ------------------------------------------------------------------
-    # TeardownManager StateManager protocol (async)
-    # ------------------------------------------------------------------
-
-    async def save_teardown_state(self, state: TeardownState) -> None:
-        """Persist TeardownState to SQLite."""
-        await asyncio.to_thread(self._save_teardown_state_sync, state)
-        logger.debug("Saved teardown execution state: %s (%s)", state.teardown_id, state.status.value)
-
-    def _save_teardown_state_sync(self, state: TeardownState) -> None:
-        def _op():
-            with _open_connection(self.db_path) as conn:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO teardown_execution_state (
-                        teardown_id, strategy_id, mode, status,
-                        total_intents, completed_intents, current_intent_index,
-                        started_at, updated_at, completed_at,
-                        pending_intents_json, intent_results_json,
-                        cancel_window_until, config_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        state.teardown_id,
-                        state.strategy_id,
-                        state.mode.value,
-                        state.status.value,
-                        state.total_intents,
-                        state.completed_intents,
-                        state.current_intent_index,
-                        state.started_at.isoformat(),
-                        state.updated_at.isoformat(),
-                        state.completed_at.isoformat() if state.completed_at else None,
-                        state.pending_intents_json,
-                        json.dumps(state.intent_results),
-                        state.cancel_window_until.isoformat() if state.cancel_window_until else None,
-                        state.config_json,
-                    ),
-                )
-                conn.commit()
-
-        _with_retry(_op, description="save_teardown_state")
-
-    async def get_teardown_state(self, strategy_id: str) -> TeardownState | None:
-        """Load TeardownState from SQLite by strategy_id."""
-        return await asyncio.to_thread(self._get_teardown_state_sync, strategy_id)
-
-    def _get_teardown_state_sync(self, strategy_id: str) -> TeardownState | None:
-        def _op() -> TeardownState | None:
-            with _open_connection(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                row = conn.execute(
-                    "SELECT * FROM teardown_execution_state WHERE strategy_id = ? ORDER BY updated_at DESC LIMIT 1",
-                    (strategy_id,),
-                ).fetchone()
-
-            if not row:
-                return None
-
-            # Defensive parse: a corrupted intent_results_json blob must not
-            # prevent resumption of an in-flight teardown. Log and fall back
-            # to an empty list so the state loads and the runner can retry.
-            intent_results: list[Any] = []
-            raw_intent_results = row["intent_results_json"]
-            if raw_intent_results:
-                try:
-                    parsed = json.loads(raw_intent_results)
-                    if isinstance(parsed, list):
-                        intent_results = parsed
-                    else:
-                        logger.warning(
-                            "teardown_execution_state intent_results_json for %s is not a list (%s); "
-                            "falling back to empty",
-                            row["teardown_id"],
-                            type(parsed).__name__,
-                        )
-                except json.JSONDecodeError:
-                    logger.error(
-                        "Corrupted intent_results_json for teardown %s — falling back to empty list",
-                        row["teardown_id"],
-                        exc_info=True,
-                    )
-
-            return TeardownState(
-                teardown_id=row["teardown_id"],
-                strategy_id=row["strategy_id"],
-                mode=TeardownMode(row["mode"]),
-                status=TeardownStatus(row["status"]),
-                total_intents=row["total_intents"],
-                completed_intents=row["completed_intents"],
-                current_intent_index=row["current_intent_index"],
-                started_at=datetime.fromisoformat(row["started_at"]),
-                updated_at=datetime.fromisoformat(row["updated_at"]),
-                completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
-                pending_intents_json=row["pending_intents_json"] or "",
-                intent_results=intent_results,
-                cancel_window_until=(
-                    datetime.fromisoformat(row["cancel_window_until"]) if row["cancel_window_until"] else None
-                ),
-                config_json=row["config_json"] or "",
-            )
-
-        return _with_retry(_op, description="get_teardown_state")
-
-    async def delete_teardown_state(self, teardown_id: str) -> None:
-        """Remove TeardownState from SQLite."""
-        await asyncio.to_thread(self._delete_teardown_state_sync, teardown_id)
-        logger.debug("Deleted teardown execution state: %s", teardown_id)
-
-    def _delete_teardown_state_sync(self, teardown_id: str) -> None:
-        def _op():
-            with _open_connection(self.db_path) as conn:
-                conn.execute("DELETE FROM teardown_execution_state WHERE teardown_id = ?", (teardown_id,))
-                conn.commit()
-
-        _with_retry(_op, description="delete_teardown_state")
-
-    # ------------------------------------------------------------------
-    # Approval mechanism (VIB-2927) — unified channel across runner + API
-    # ------------------------------------------------------------------
-
-    def create_approval_request(
-        self,
-        teardown_id: str,
-        strategy_id: str,
-        level: EscalationLevel | str,
-        request_json: str,
-        expires_at: str,
-    ) -> None:
-        """Write an approval request keyed by (teardown_id, level).
-
-        Each escalation level writes its own row, so a stale response from a
-        previous level cannot satisfy the poller waiting for the current level.
-
-        Uses ``INSERT ... ON CONFLICT DO UPDATE ... WHERE response_json IS NULL``
-        rather than ``INSERT OR REPLACE`` so an existing operator response is
-        preserved. Runner restarts or retry loops that re-emit the same
-        ``(teardown_id, level)`` must not wipe an already-landed approval.
-        """
-        level_key = self._level_key(level)
-
-        def _op():
-            with _open_connection(self.db_path) as conn:
-                conn.execute(
-                    """
-                    INSERT INTO teardown_approvals
-                        (teardown_id, level, strategy_id, request_json,
-                         response_json, created_at, responded_at, expires_at)
-                    VALUES (?, ?, ?, ?, NULL, ?, NULL, ?)
-                    ON CONFLICT(teardown_id, level) DO UPDATE SET
-                        request_json = excluded.request_json,
-                        strategy_id = excluded.strategy_id,
-                        created_at = excluded.created_at,
-                        expires_at = excluded.expires_at
-                    WHERE teardown_approvals.response_json IS NULL
-                    """,
-                    (
-                        teardown_id,
-                        level_key,
-                        strategy_id,
-                        request_json,
-                        datetime.now(UTC).isoformat(),
-                        expires_at,
-                    ),
-                )
-                conn.commit()
-
-        _with_retry(_op, description="create_approval_request")
-        logger.info("Created approval request for teardown %s (level %s)", teardown_id, level_key)
-
-    def get_approval_response(
-        self,
-        teardown_id: str,
-        level: EscalationLevel | str,
-    ) -> str | None:
-        """Return the response JSON for the (teardown_id, level) request, or None."""
-        level_key = self._level_key(level)
-
-        def _op() -> str | None:
-            with _open_connection(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                row = conn.execute(
-                    "SELECT response_json FROM teardown_approvals WHERE teardown_id = ? AND level = ?",
-                    (teardown_id, level_key),
-                ).fetchone()
-            if row and row["response_json"]:
-                return row["response_json"]
-            return None
-
-        return _with_retry(_op, description="get_approval_response")
-
-    def write_approval_response(
-        self,
-        teardown_id: str,
-        level: EscalationLevel | str,
-        response_json: str,
-    ) -> bool:
-        """Write the operator's response for a specific (teardown_id, level) request.
-
-        Returns True if a matching pending request existed; False otherwise.
-        """
-        level_key = self._level_key(level)
-
-        def _op() -> int:
-            with _open_connection(self.db_path) as conn:
-                # `response_json IS NULL` ensures only the first responder wins.
-                # Two near-simultaneous operators can both hit approve_escalation;
-                # the second caller's UPDATE matches zero rows and the API surfaces
-                # that as a 409 instead of silently overwriting the first response.
-                cursor = conn.execute(
-                    """
-                    UPDATE teardown_approvals
-                    SET response_json = ?, responded_at = ?
-                    WHERE teardown_id = ? AND level = ? AND response_json IS NULL
-                    """,
-                    (
-                        response_json,
-                        datetime.now(UTC).isoformat(),
-                        teardown_id,
-                        level_key,
-                    ),
-                )
-                conn.commit()
-                return cursor.rowcount
-
-        rowcount = _with_retry(_op, description="write_approval_response")
-        if rowcount > 0:
-            logger.info("Wrote approval response for teardown %s (level %s)", teardown_id, level_key)
-            return True
-        logger.warning(
-            "No pending approval request found for teardown %s (level %s) — already responded or missing",
-            teardown_id,
-            level_key,
-        )
-        return False
-
-    def get_latest_pending_approval(self, strategy_id: str) -> dict[str, Any] | None:
-        """Return the oldest unresponded, non-expired approval request for a strategy.
-
-        Used by API/CLI endpoints that only know the strategy_id — they look up
-        the currently-pending approval, then write the response keyed by
-        (teardown_id, level). Oldest-first so operators respond to the request
-        that triggered the alert, even if the escalation loop has advanced.
-
-        Expired rows are excluded even when their response_json is still NULL.
-        The runner's approval callback writes a synthetic timeout response on
-        expiry, but if a crash or race leaves a row in an expired-unresponded
-        state, the API must not treat it as the live pending request.
-        """
-        now_iso = datetime.now(UTC).isoformat()
-
-        def _op() -> dict[str, Any] | None:
-            with _open_connection(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                row = conn.execute(
-                    """
-                    SELECT teardown_id, level, strategy_id, request_json, created_at, expires_at
-                    FROM teardown_approvals
-                    WHERE strategy_id = ?
-                      AND response_json IS NULL
-                      AND expires_at > ?
-                    ORDER BY created_at ASC LIMIT 1
-                    """,
-                    (strategy_id, now_iso),
-                ).fetchone()
-            if not row:
-                return None
-            return {
-                "teardown_id": row["teardown_id"],
-                "level": row["level"],
-                "strategy_id": row["strategy_id"],
-                "request_json": row["request_json"],
-                "created_at": row["created_at"],
-                "expires_at": row["expires_at"],
-            }
-
-        return _with_retry(_op, description="get_latest_pending_approval")
-
-    def write_approval_response_by_strategy(
-        self,
-        strategy_id: str,
-        response_json: str,
-    ) -> bool:
-        """Write an approval response by strategy_id (convenience for API callers).
-
-        Looks up the oldest pending approval for the strategy and writes to it.
-        Returns False if no pending approval exists.
-        """
-        pending = self.get_latest_pending_approval(strategy_id)
-        if pending is None:
-            logger.warning("No pending approval for strategy %s", strategy_id)
-            return False
-        return self.write_approval_response(
-            teardown_id=pending["teardown_id"],
-            level=pending["level"],
-            response_json=response_json,
-        )

@@ -66,7 +66,6 @@ _PROTOCOL_TO_LLAMA: dict[str, str] = {
     "sanctum": "sanctum-infinity",
     "kamino": "kamino-lending",
     "raydium": "raydium",
-    "fluid": "fluid-dex",
 }
 
 # DeFi Llama project slug -> our yield type classification
@@ -87,7 +86,6 @@ _PROJECT_TYPE: dict[str, str] = {
     "sanctum-infinity": "staking",
     "kamino-lending": "lending",
     "raydium": "lp",
-    "fluid-dex": "lp",
 }
 
 

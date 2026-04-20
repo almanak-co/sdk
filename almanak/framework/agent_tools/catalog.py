@@ -136,25 +136,13 @@ class ToolCatalog:
             logger.warning("Overwriting existing tool registration: %s", tool.name)
         self._tools[tool.name] = tool
 
-    def to_mcp_tools(self, *, allowed: set[str] | None = None) -> list[dict]:
-        """Generate MCP tools/list payload.
+    def to_mcp_tools(self) -> list[dict]:
+        """Generate MCP tools/list payload."""
+        return [t.to_mcp_schema() for t in self._tools.values()]
 
-        Args:
-            allowed: If provided, only include tools whose names are in this set.
-                     If None, all tools are included (backwards-compatible default).
-        """
-        tools = self._tools.values() if allowed is None else (t for t in self._tools.values() if t.name in allowed)
-        return [t.to_mcp_schema() for t in tools]
-
-    def to_openai_tools(self, *, allowed: set[str] | None = None) -> list[dict]:
-        """Generate OpenAI-compatible function tool list.
-
-        Args:
-            allowed: If provided, only include tools whose names are in this set.
-                     If None, all tools are included (backwards-compatible default).
-        """
-        tools = self._tools.values() if allowed is None else (t for t in self._tools.values() if t.name in allowed)
-        return [t.to_openai_schema() for t in tools]
+    def to_openai_tools(self) -> list[dict]:
+        """Generate OpenAI-compatible function tool list."""
+        return [t.to_openai_schema() for t in self._tools.values()]
 
     def __len__(self) -> int:
         return len(self._tools)
@@ -229,33 +217,6 @@ _BUILTIN_TOOLS: list[ToolDefinition] = [
         request_schema=schemas.GetLPPositionRequest,
         response_schema=schemas.GetLPPositionResponse,
         latency_class=LatencyClass.MEDIUM,
-    ),
-    ToolDefinition(
-        name="list_lp_positions",
-        description="List all Uniswap V3-style LP positions owned by a wallet (compact summary per position).",
-        category=ToolCategory.DATA,
-        risk_tier=RiskTier.NONE,
-        request_schema=schemas.ListLPPositionsRequest,
-        response_schema=schemas.ListLPPositionsResponse,
-        latency_class=LatencyClass.SLOW,
-    ),
-    ToolDefinition(
-        name="list_lending_positions",
-        description="List a wallet's lending positions with account-level totals and health factor (Aave V3).",
-        category=ToolCategory.DATA,
-        risk_tier=RiskTier.NONE,
-        request_schema=schemas.ListLendingPositionsRequest,
-        response_schema=schemas.ListLendingPositionsResponse,
-        latency_class=LatencyClass.MEDIUM,
-    ),
-    ToolDefinition(
-        name="get_portfolio",
-        description="Aggregate a wallet's on-chain state: native + ERC20 balances, LP positions, lending.",
-        category=ToolCategory.DATA,
-        risk_tier=RiskTier.NONE,
-        request_schema=schemas.GetPortfolioRequest,
-        response_schema=schemas.GetPortfolioResponse,
-        latency_class=LatencyClass.SLOW,
     ),
     ToolDefinition(
         name="resolve_token",
@@ -385,16 +346,6 @@ _BUILTIN_TOOLS: list[ToolDefinition] = [
         latency_class=LatencyClass.SLOW,
     ),
     ToolDefinition(
-        name="withdraw_lending",
-        description="Withdraw supplied tokens from a lending protocol (full or partial). Supports dry_run.",
-        category=ToolCategory.ACTION,
-        risk_tier=RiskTier.MEDIUM,
-        request_schema=schemas.WithdrawLendingRequest,
-        response_schema=schemas.WithdrawLendingResponse,
-        idempotent=False,
-        latency_class=LatencyClass.SLOW,
-    ),
-    ToolDefinition(
         name="bridge_tokens",
         description="Bridge tokens from one chain to another. Uses Across or Stargate bridges. Supports dry_run.",
         category=ToolCategory.ACTION,
@@ -484,34 +435,6 @@ _BUILTIN_TOOLS: list[ToolDefinition] = [
         response_schema=schemas.TeardownVaultResponse,
         idempotent=False,
         latency_class=LatencyClass.SLOW,
-    ),
-    ToolDefinition(
-        name="wrap_native",
-        description="Wrap native tokens to their ERC-20 equivalent (e.g. ETH -> WETH, MATIC -> WMATIC). Required before LP operations when wallet holds native tokens. Supports dry_run.",
-        category=ToolCategory.ACTION,
-        risk_tier=RiskTier.MEDIUM,
-        request_schema=schemas.WrapNativeRequest,
-        response_schema=schemas.WrapNativeResponse,
-        idempotent=False,
-        latency_class=LatencyClass.MEDIUM,
-    ),
-    ToolDefinition(
-        name="get_wallet_overview",
-        description="Get a complete wallet balance overview in a single call. Automatically queries common tokens for the chain, filters dust, and returns total USD value. Use instead of multiple get_balance calls.",
-        category=ToolCategory.DATA,
-        risk_tier=RiskTier.NONE,
-        request_schema=schemas.GetWalletOverviewRequest,
-        response_schema=schemas.GetWalletOverviewResponse,
-        latency_class=LatencyClass.FAST,
-    ),
-    ToolDefinition(
-        name="check_protocol_support",
-        description="Check whether the SDK supports a given protocol on a given chain. Returns supported actions, recommended strategy template, and chain availability. No network calls — uses static registry.",
-        category=ToolCategory.DATA,
-        risk_tier=RiskTier.NONE,
-        request_schema=schemas.CheckProtocolSupportRequest,
-        response_schema=schemas.CheckProtocolSupportResponse,
-        latency_class=LatencyClass.FAST,
     ),
     # ── STATE TOOLS ─────────────────────────────────────────────────────
     ToolDefinition(

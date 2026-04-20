@@ -8,7 +8,6 @@ Fixes VIB-784: balancer_flash_arb compilation_error on arbitrum.
 """
 
 from decimal import Decimal
-from unittest.mock import patch
 
 import pytest
 
@@ -22,16 +21,9 @@ from almanak.framework.intents.compiler import (
 
 @pytest.fixture
 def compiler():
-    """Create a compiler with placeholder prices enabled (no RPC needed).
-
-    Patches _is_wallet_contract to return True (contract wallet) so that
-    the EOA guard in _compile_flash_loan does not block compilation.
-    These tests exercise callback amount resolution, not wallet type checks.
-    """
+    """Create a compiler with placeholder prices enabled (no RPC needed)."""
     config = IntentCompilerConfig(allow_placeholder_prices=True)
-    c = IntentCompiler(chain="arbitrum", config=config)
-    with patch.object(c, "_is_wallet_contract", return_value=True):
-        yield c
+    return IntentCompiler(chain="arbitrum", config=config)
 
 
 class TestFlashLoanCallbackAmountAll:

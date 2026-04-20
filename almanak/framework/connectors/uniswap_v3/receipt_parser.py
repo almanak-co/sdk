@@ -15,12 +15,6 @@ from typing import TYPE_CHECKING, Any
 
 from almanak.framework.connectors.base import EventRegistry, HexDecoder
 from almanak.framework.execution.events import SwapResultPayload
-from almanak.framework.execution.extract_result import (
-    ExtractError,
-    ExtractMissing,
-    ExtractOk,
-    ExtractResult,
-)
 
 if TYPE_CHECKING:
     from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
@@ -59,8 +53,6 @@ POSITION_MANAGER_ADDRESSES: dict[str, str] = {
     "bsc": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
     "mantle": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni Finance fork
     "monad": "0x7197E214c0b767cFB76Fb734ab638E2c192F4E53",
-    "xlayer": "0x315e413A11AB0df498eF83873012430ca36638Ae",  # Non-canonical (Governance Proposal 67)
-    "zerog": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72",  # JAINE DEX NPM (Uniswap V3 fork)
 }
 
 # Zero address for detecting mints
@@ -419,9 +411,7 @@ class UniswapV3ReceiptParser:
             if decimals is not None:
                 self.token1_decimals = decimals
 
-        # Track whether decimals are resolved or defaulted (18 is unreliable for non-ETH tokens)
-        self._token0_decimals_resolved = self.token0_decimals is not None
-        self._token1_decimals_resolved = self.token1_decimals is not None
+        # Default to 18 decimals if still unresolved (needed for amount calculations)
         if self.token0_decimals is None:
             self.token0_decimals = 18
         if self.token1_decimals is None:
@@ -770,111 +760,6 @@ class UniswapV3ReceiptParser:
             logger.warning(f"Failed to parse TransferEventData: {e}")
             return None
 
-    def _resolve_tokens_from_transfers(
-        self,
-        transfer_events: list[TransferEventData],
-        swap_event: SwapEventData,
-    ) -> dict[str, Any]:
-        """Resolve token addresses and decimals from Transfer events.
-
-        When the parser was constructed without token info (e.g., by the ResultEnricher),
-        decimals default to 18 which is wrong for tokens like USDC (6 decimals).
-        This method extracts token addresses from the Transfer events in the swap
-        transaction and resolves their actual decimals via the TokenResolver.
-
-        Returns a dict of per-receipt overrides (token0_address, token0_decimals, etc.)
-        without mutating parser state, so cached parser instances stay clean across receipts.
-        Branch 1 (addresses pre-set, just need decimals) writes to self because the correct
-        decimals for those addresses are stable. Branch 2 (addresses inferred) only returns
-        local overrides.
-
-        The Uniswap V3 Swap event emits amount0/amount1 where positive = sent to pool
-        (input) and negative = received from pool (output). The corresponding ERC-20
-        Transfer events carry the actual token contract addresses.
-        """
-        overrides: dict[str, Any] = {}
-        if not transfer_events:
-            return overrides
-
-        # Only resolve if we have unresolved decimals
-        needs_token0 = not self._token0_decimals_resolved
-        needs_token1 = not self._token1_decimals_resolved
-        if not needs_token0 and not needs_token1:
-            return overrides
-
-        pool_address = swap_event.pool_address.lower() if swap_event.pool_address else ""
-        if not pool_address:
-            return overrides
-
-        # Classify transfers by direction relative to pool.
-        # In Uniswap V3: amount0 > 0 means token0 was sent TO the pool (input),
-        # amount1 < 0 means token1 was received FROM the pool (output), and vice versa.
-        input_token_addrs: list[str] = []
-        output_token_addrs: list[str] = []
-        for transfer in transfer_events:
-            addr = transfer.token_address.lower() if transfer.token_address else ""
-            if not addr:
-                continue
-            if transfer.to_addr.lower() == pool_address:
-                input_token_addrs.append(addr)
-            elif transfer.from_addr.lower() == pool_address:
-                output_token_addrs.append(addr)
-
-        # Build a deduplicated mapping: address -> (symbol, decimals)
-        all_addrs = set(input_token_addrs + output_token_addrs)
-        resolved: dict[str, tuple[str, int]] = {}
-        for addr in all_addrs:
-            symbol, decimals = self._resolve_token_info(addr)
-            if decimals is not None:
-                resolved[addr] = (symbol, decimals)
-
-        # --- Branch 1: addresses already known, just need decimals ---
-        # Safe to write to self because the token addresses are pre-set and stable.
-        for addr, (symbol, decimals) in resolved.items():
-            if needs_token0 and self.token0_address and self.token0_address.lower() == addr:
-                self.token0_decimals = decimals
-                self._token0_decimals_resolved = True
-                if symbol and not self.token0_symbol:
-                    self.token0_symbol = symbol
-                logger.debug(f"Resolved token0 decimals from Transfer: {symbol} = {decimals}")
-                needs_token0 = False
-            elif needs_token1 and self.token1_address and self.token1_address.lower() == addr:
-                self.token1_decimals = decimals
-                self._token1_decimals_resolved = True
-                if symbol and not self.token1_symbol:
-                    self.token1_symbol = symbol
-                logger.debug(f"Resolved token1 decimals from Transfer: {symbol} = {decimals}")
-                needs_token1 = False
-
-        # --- Branch 2: addresses unknown — infer from transfer direction + swap event ---
-        # Returns local overrides instead of mutating self, so cached parsers stay clean.
-        # Uses swap_event.token0_is_input to determine which transfer direction maps to token0.
-        if needs_token0 and not self.token0_address:
-            candidates = input_token_addrs if swap_event.token0_is_input else output_token_addrs
-            for addr in candidates:
-                if addr in resolved:
-                    symbol, decimals = resolved[addr]
-                    overrides["token0_address"] = addr
-                    overrides["token0_decimals"] = decimals
-                    overrides["token0_symbol"] = symbol or ""
-                    logger.debug(f"Inferred token0 from Transfer: {symbol} ({addr}) = {decimals}")
-                    needs_token0 = False
-                    break
-
-        if needs_token1 and not self.token1_address:
-            candidates = output_token_addrs if swap_event.token0_is_input else input_token_addrs
-            for addr in candidates:
-                if addr in resolved:
-                    symbol, decimals = resolved[addr]
-                    overrides["token1_address"] = addr
-                    overrides["token1_decimals"] = decimals
-                    overrides["token1_symbol"] = symbol or ""
-                    logger.debug(f"Inferred token1 from Transfer: {symbol} ({addr}) = {decimals}")
-                    needs_token1 = False
-                    break
-
-        return overrides
-
     def _build_swap_result(
         self,
         swap_event: SwapEventData,
@@ -891,49 +776,21 @@ class UniswapV3ReceiptParser:
         Returns:
             ParsedSwapResult with full swap details
         """
-        # Try to resolve token addresses and decimals from Transfer events when not
-        # provided at construction time. This fixes wrong decimals (e.g., USDC treated
-        # as 18 decimals instead of 6) when the parser is used via the ResultEnricher
-        # without token context.
-        overrides = self._resolve_tokens_from_transfers(transfer_events, swap_event)
-
-        # Apply per-receipt overrides (from inferred addresses) on top of self values.
-        # These are local to this receipt and don't persist on the parser instance.
-        t0_addr = overrides.get("token0_address", self.token0_address) or ""
-        t0_symbol = overrides.get("token0_symbol", self.token0_symbol) or ""
-        t0_decimals = overrides.get("token0_decimals", self.token0_decimals)
-        t1_addr = overrides.get("token1_address", self.token1_address) or ""
-        t1_symbol = overrides.get("token1_symbol", self.token1_symbol) or ""
-        t1_decimals = overrides.get("token1_decimals", self.token1_decimals)
-
-        # Track whether decimals are resolved or still at the 18-default (VIB-592).
-        # Branch 1 of _resolve_tokens_from_transfers sets self._token*_decimals_resolved.
-        # Branch 2 provides decimals via overrides dict without setting the flag.
-        t0_unresolved = not self._token0_decimals_resolved and "token0_decimals" not in overrides
-        t1_unresolved = not self._token1_decimals_resolved and "token1_decimals" not in overrides
-        if t0_unresolved or t1_unresolved:
-            logger.warning(
-                f"Token decimals unresolved after Transfer analysis "
-                f"(token0={'unresolved' if t0_unresolved else 'ok'}, "
-                f"token1={'unresolved' if t1_unresolved else 'ok'}). "
-                f"Decimal amounts may be incorrect for non-18-decimal tokens."
-            )
-
         # Determine which token is in/out
         if swap_event.token0_is_input:
-            token_in = t0_addr
-            token_out = t1_addr
-            token_in_symbol = t0_symbol
-            token_out_symbol = t1_symbol
-            token_in_decimals = t0_decimals
-            token_out_decimals = t1_decimals
+            token_in = self.token0_address or ""
+            token_out = self.token1_address or ""
+            token_in_symbol = self.token0_symbol or ""
+            token_out_symbol = self.token1_symbol or ""
+            token_in_decimals = self.token0_decimals
+            token_out_decimals = self.token1_decimals
         else:
-            token_in = t1_addr
-            token_out = t0_addr
-            token_in_symbol = t1_symbol
-            token_out_symbol = t0_symbol
-            token_in_decimals = t1_decimals
-            token_out_decimals = t0_decimals
+            token_in = self.token1_address or ""
+            token_out = self.token0_address or ""
+            token_in_symbol = self.token1_symbol or ""
+            token_out_symbol = self.token0_symbol or ""
+            token_in_decimals = self.token1_decimals
+            token_out_decimals = self.token0_decimals
 
         amount_in = swap_event.amount_in
         amount_out = swap_event.amount_out
@@ -980,89 +837,6 @@ class UniswapV3ReceiptParser:
     # =============================================================================
     # Position ID Extraction
     # =============================================================================
-
-    # ---- VIB-3159: tagged-variant wrappers ------------------------------------
-    # The ``_result`` variants are the canonical entry points for the framework's
-    # ``ResultEnricher``. They distinguish "no event of this type" from "parse
-    # error", which the legacy return-``None``-for-both signature could not do.
-    # The raw public methods below preserve their legacy return types so
-    # strategies and tests that call them directly keep working.
-
-    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
-        """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
-        reports a crash.
-
-        Returns ``None`` when parsing succeeded (caller should proceed), or an
-        ``ExtractError`` variant when it did not. This is the strict
-        counterpart to the legacy ``extract_*`` methods, which silently
-        swallow exceptions and return ``None`` — making the "benign missing"
-        and "crashed parsing" cases indistinguishable (VIB-3159).
-        """
-        try:
-            parsed = self.parse_receipt(receipt)
-        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if not parsed.success:
-            return ExtractError(error=parsed.error or "parse_receipt reported failure")
-        return None
-
-    def extract_position_id_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
-        """Fail-closed variant of :meth:`extract_position_id` — see VIB-3159."""
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            logs = receipt.get("logs", [])
-        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if not logs:
-            return ExtractMissing(reason="no logs in receipt")
-        try:
-            value = self.extract_position_id(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no Mint Transfer event from position manager")
-        return ExtractOk(value=value)
-
-    def extract_swap_amounts_result(self, receipt: dict[str, Any]) -> ExtractResult[SwapAmounts]:
-        """Fail-closed variant of :meth:`extract_swap_amounts` — see VIB-3159."""
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = self.extract_swap_amounts(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no Swap event in receipt")
-        return ExtractOk(value=value)
-
-    def extract_lp_close_data_result(self, receipt: dict[str, Any]) -> ExtractResult[LPCloseData]:
-        """Fail-closed variant of :meth:`extract_lp_close_data` — see VIB-3159."""
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = self.extract_lp_close_data(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no Collect/Burn event in receipt")
-        return ExtractOk(value=value)
-
-    def extract_liquidity_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
-        """Fail-closed variant of :meth:`extract_liquidity` — see VIB-3159."""
-        err = self._strict_parse(receipt)
-        if err is not None:
-            return err
-        try:
-            value = self.extract_liquidity(receipt)
-        except Exception as exc:  # noqa: BLE001
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if value is None:
-            return ExtractMissing(reason="no Mint event in receipt")
-        return ExtractOk(value=value)
 
     def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
         """Extract LP position ID (NFT tokenId) from a transaction receipt.
@@ -1218,13 +992,6 @@ class UniswapV3ReceiptParser:
             parse_result = self.parse_receipt(receipt)
 
             if not parse_result.swap_result:
-                # Log diagnostic info to help debug enrichment failures (VIB-1653)
-                num_events = len(parse_result.events)
-                swap_count = len(parse_result.swap_events)
-                logger.debug(
-                    f"extract_swap_amounts: no swap_result (events={num_events}, "
-                    f"swap_events={swap_count}, chain={self.chain})"
-                )
                 return None
 
             sr = parse_result.swap_result

@@ -292,36 +292,6 @@ from .ethena import (
 from .ethena import (
     UnstakeEventData as EthenaUnstakeEventData,
 )
-from .gimo import (
-    DEFAULT_GAS_ESTIMATES as GIMO_DEFAULT_GAS_ESTIMATES,
-)
-from .gimo import (
-    EVENT_TOPICS as GIMO_EVENT_TOPICS,
-)
-from .gimo import (
-    GIMO_ADDRESSES,
-    GIMO_STAKE_SELECTOR,
-    GIMO_UNSTAKE_SELECTOR,
-    GimoAdapter,
-    GimoConfig,
-    GimoEventType,
-    GimoReceiptParser,
-)
-from .gimo import (
-    TOPIC_TO_EVENT as GIMO_TOPIC_TO_EVENT,
-)
-from .gimo import (
-    ParseResult as GimoParseResult,
-)
-from .gimo import (
-    StakeEventData as GimoStakeEventData,
-)
-from .gimo import (
-    TransactionResult as GimoTransactionResult,
-)
-from .gimo import (
-    UnstakeEventData as GimoUnstakeEventData,
-)
 from .gmx_v2 import (
     DEFAULT_EXECUTION_FEE,
     # Constants
@@ -975,23 +945,6 @@ __all__ = [
     "LIDO_DEFAULT_GAS_ESTIMATES",
     "LIDO_EVENT_TOPICS",
     "LIDO_TOPIC_TO_EVENT",
-    # Gimo Adapter
-    "GimoAdapter",
-    "GimoConfig",
-    "GimoTransactionResult",
-    # Gimo Receipt Parser
-    "GimoReceiptParser",
-    "GimoEventType",
-    "GimoStakeEventData",
-    "GimoUnstakeEventData",
-    "GimoParseResult",
-    # Gimo Constants
-    "GIMO_ADDRESSES",
-    "GIMO_STAKE_SELECTOR",
-    "GIMO_UNSTAKE_SELECTOR",
-    "GIMO_DEFAULT_GAS_ESTIMATES",
-    "GIMO_EVENT_TOPICS",
-    "GIMO_TOPIC_TO_EVENT",
     # Ethena Adapter
     "EthenaAdapter",
     "EthenaConfig",

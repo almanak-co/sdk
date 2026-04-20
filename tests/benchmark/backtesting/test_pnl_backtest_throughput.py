@@ -582,26 +582,25 @@ class TestParameterSweepThroughput:
                 successful += 1
                 execution_times.append(elapsed)
 
-        # Calculate statistics — discard first run (warm-up: JIT, caches, imports)
-        warm_times = execution_times[1:] if len(execution_times) > 1 else execution_times
+        # Calculate statistics
         total_time = sum(execution_times)
         avg_time = total_time / len(execution_times) if execution_times else 0
-        min_time = min(warm_times) if warm_times else 0
-        max_time = max(warm_times) if warm_times else 0
+        min_time = min(execution_times) if execution_times else 0
+        max_time = max(execution_times) if execution_times else 0
 
         print("\n--- Sequential Sweep Efficiency ---")
         print(f"Total time: {total_time:.2f}s")
         print(f"Average per backtest: {avg_time:.4f}s")
-        print(f"Min: {min_time:.4f}s, Max: {max_time:.4f}s (excluding warm-up)")
+        print(f"Min: {min_time:.4f}s, Max: {max_time:.4f}s")
         print(f"Successful: {successful}/{len(configs)}")
 
         # All should succeed
         assert successful == len(configs), f"Only {successful}/{len(configs)} backtests succeeded"
 
-        # Warm runs should be consistent (max no more than 5x min to tolerate CI runner jitter)
+        # Average time should be consistent (max no more than 3x min)
         if min_time > 0:
             variance_ratio = max_time / min_time
-            assert variance_ratio < 5.0, (
+            assert variance_ratio < 3.0, (
                 f"Execution time variance too high: min={min_time:.4f}s, max={max_time:.4f}s"
             )
 

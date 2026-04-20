@@ -11,6 +11,7 @@ API key is held in gateway, keeping credentials secure.
 
 import json
 import logging
+import os
 from typing import Any
 
 import aiohttp
@@ -21,23 +22,6 @@ from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 
 logger = logging.getLogger(__name__)
-
-
-def _decode_bundle_arg(value: str) -> Any:
-    """Decode a bundle arg value back to its native JSON type.
-
-    The Enso client JSON-encodes every bundle arg before stuffing it into
-    the proto ``map<string,string>`` so native types (bools, numbers, lists,
-    dicts, strings) survive the round-trip to the Enso API unchanged. On
-    parse failure — e.g., a hand-rolled client that sent a raw string — we
-    fall back to the raw value so we don't break loose payloads.
-    """
-    if not value:
-        return value
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return value
 
 
 # =============================================================================
@@ -144,8 +128,8 @@ class EnsoServiceServicer(gateway_pb2_grpc.EnsoServiceServicer):
         self.settings = settings
         self._http_session: aiohttp.ClientSession | None = None
 
-        # Load API key from settings (includes env fallback via _fallback_env_vars)
-        self._api_key = settings.enso_api_key
+        # Load API key from settings or environment
+        self._api_key = getattr(settings, "enso_api_key", None) or os.environ.get("ENSO_API_KEY")
 
         self._available = bool(self._api_key)
 
@@ -424,16 +408,13 @@ class EnsoServiceServicer(gateway_pb2_grpc.EnsoServiceServicer):
         if request.skip_quote:
             params["skipQuote"] = True
 
-        # Convert actions to API format. The client JSON-encodes every arg
-        # value (see ``_decode_bundle_arg``); reverse that here so Enso
-        # receives native JSON types.
+        # Convert actions to API format
         actions = []
         for action in request.actions:
-            args: dict[str, Any] = {key: _decode_bundle_arg(raw) for key, raw in dict(action.args).items()}
             action_data = {
                 "protocol": action.protocol,
                 "action": action.action,
-                "args": args,
+                "args": dict(action.args),
             }
             actions.append(action_data)
 

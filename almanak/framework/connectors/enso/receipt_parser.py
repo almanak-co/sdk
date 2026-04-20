@@ -250,12 +250,12 @@ class EnsoReceiptParser:
         - amount_out: last Transfer TO the wallet (final output after routing)
 
         Args:
-            receipt: Transaction receipt dict with 'logs' and sender fields
+            receipt: Transaction receipt dict with 'logs' and 'from' fields
 
         Returns:
             SwapAmounts if swap transfers found, None otherwise
         """
-        wallet = self._normalize_address(receipt.get("from") or receipt.get("from_address") or "")
+        wallet = self._normalize_address(receipt.get("from", ""))
         if not wallet:
             return None
 

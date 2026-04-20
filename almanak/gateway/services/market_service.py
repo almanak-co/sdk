@@ -7,7 +7,6 @@ gateway; strategy containers only see the results.
 
 import asyncio
 import logging
-import re
 import time
 from typing import Any
 
@@ -22,28 +21,7 @@ from almanak.gateway.validation import (
     validate_chain,
 )
 
-# Pattern for detecting EVM contract addresses in price requests.
-_EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
-
-# Timeout for gateway-local on-chain ERC20 metadata lookups driven by GetPrice.
-# Mirrors TokenService's DEFAULT_ONCHAIN_TIMEOUT so both code paths bound slow
-# RPCs the same way.
-_ONCHAIN_LOOKUP_TIMEOUT_SECONDS: float = 10.0
-
 logger = logging.getLogger(__name__)
-
-# Native-to-wrapped token price aliases.
-# When a price lookup for the native token fails, retry with the wrapped equivalent.
-# This handles chains where the native token (e.g. MNT) has poor exchange coverage
-# but the wrapped version (e.g. WMNT) is listed on major exchanges.
-NATIVE_PRICE_ALIASES: dict[str, str] = {
-    "MNT": "WMNT",
-    "MATIC": "WMATIC",
-    "AVAX": "WAVAX",
-    "FTM": "WFTM",
-    "BNB": "WBNB",
-    "S": "WS",  # Sonic
-}
 
 
 class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
@@ -63,18 +41,8 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         """
         self.settings = settings
         self._price_aggregator: Any = None
-        # Last-resort price fallback (populated by _do_initialize). Consulted
-        # by GetPrice only when the primary aggregator raises AllDataSourcesFailed.
-        self._manual_price_override: Any = None
         self._balance_providers: dict[str, object] = {}
-        # Per-chain OnChainLookup for address-based price resolution. Lets an
-        # unknown contract address in a GetPrice request be resolved on-chain
-        # (symbol/decimals) without going through gRPC to our own TokenService.
-        self._onchain_lookups: dict[str, Any] = {}
-        self._onchain_lookups_lock = asyncio.Lock()
         self._initialized = False
-        self._init_lock = asyncio.Lock()
-        self.wallet_registry: object | None = None
 
     async def close(self) -> None:
         """Close resources held by MarketService (HTTP sessions, etc.)."""
@@ -84,41 +52,15 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             if hasattr(provider, "close"):
                 await provider.close()
         self._balance_providers.clear()
-        # Dispose per-chain OnChainLookup instances. Snapshot under the lock,
-        # then close outside it so one blocking close can't hold the lock and
-        # starve anything else that acquires it. Each close is bounded by a
-        # short timeout so a hung RPC client can't wedge shutdown.
-        async with self._onchain_lookups_lock:
-            lookups = list(self._onchain_lookups.items())
-            self._onchain_lookups.clear()
-        for chain, lookup in lookups:
-            if not hasattr(lookup, "close"):
-                continue
-            try:
-                await asyncio.wait_for(lookup.close(), timeout=2.0)
-            except TimeoutError:
-                logger.warning("Timed out closing OnChainLookup for %s; continuing shutdown", chain)
-            except Exception as e:
-                logger.warning("Error closing OnChainLookup for %s: %s", chain, e)
 
     async def _ensure_initialized(self) -> None:
         """Lazy initialization of data providers."""
         if self._initialized:
             return
-        async with self._init_lock:
-            if self._initialized:
-                return
-            self._do_initialize()
 
-    def _do_initialize(self) -> None:
-        """Build price sources and aggregator based on current settings.chains.
-
-        Must be called while holding self._init_lock.
-        """
         from almanak.framework.data.interfaces import BasePriceSource
         from almanak.gateway.data.price.aggregator import PriceAggregator
         from almanak.gateway.data.price.coingecko import CoinGeckoPriceSource
-        from almanak.gateway.data.price.manual_override import ManualPriceOverrideSource
         from almanak.gateway.data.price.onchain import OnChainPriceSource
         from almanak.gateway.validation import is_solana_chain
 
@@ -140,8 +82,8 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             sources = [cg_source]
             logger.warning(
                 "MarketService: No chain configured -- on-chain (Chainlink) pricing DISABLED. "
-                "Only CoinGecko is available. Pass --chains to the gateway or set "
-                "ALMANAK_GATEWAY_CHAINS for accurate on-chain pricing."
+                "Only CoinGecko is available. Pass --chains to the gateway or set ALMANAK_GATEWAY_CHAINS "
+                "for accurate on-chain pricing."
             )
         elif is_solana_chain(chain):
             # Solana: Pyth (primary) + DexScreener (secondary) + CoinGecko (fallback)
@@ -177,84 +119,8 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             )
 
         self._price_aggregator = PriceAggregator(sources=sources)
-        # Last-resort manual override source — reads ALMANAK_PRICE_OVERRIDE_<TOKEN>
-        # env vars. Kept OUT of the aggregator's median vote because
-        # PriceAggregator computes a plain median without weighting by
-        # confidence (a live $0.20 + override $0.12 would yield a corrupt
-        # $0.16). Consulted only in GetPrice when the aggregator raises
-        # AllDataSourcesFailed. Added for Bug 3 of the 0G DogFooding report
-        # (2026-04-16). Off by default — a mis-set env var could corrupt
-        # teardown/slippage decisions, so operators must explicitly opt in.
-        if getattr(self.settings, "enable_manual_price_overrides", False):
-            self._manual_price_override = ManualPriceOverrideSource()
-            logger.info(
-                "MarketService: manual price override fallback ENABLED. "
-                "ALMANAK_PRICE_OVERRIDE_<TOKEN> env vars will be consulted "
-                "if every primary oracle source fails for a given token."
-            )
-        else:
-            self._manual_price_override = None
 
         self._initialized = True
-
-    async def reinitialize(self, chain: str) -> None:
-        """Re-initialize price sources with full pricing stack for the given chain.
-
-        Called by RegisterChains when chain info becomes available after startup.
-        Upgrades from CoinGecko-only to the full 4-source stack.
-        """
-        async with self._init_lock:
-            if self._price_aggregator is not None and hasattr(self._price_aggregator, "close"):
-                try:
-                    await self._price_aggregator.close()
-                except Exception as e:
-                    logger.warning("Error closing old price aggregator during reinit: %s", e)
-                self._price_aggregator = None
-
-            if not self.settings.chains:
-                self.settings.chains = [chain]
-            else:
-                # Always ensure the requested chain is at index 0 (primary),
-                # since _do_initialize uses chains[0] for on-chain pricing.
-                if chain in self.settings.chains:
-                    self.settings.chains.remove(chain)
-                self.settings.chains.insert(0, chain)
-
-            self._initialized = False
-            self._do_initialize()
-
-        logger.info("MarketService re-initialized with chain=%s", chain)
-
-    async def warmup(self, wallet_address: str | None = None) -> None:
-        """Pre-warm price caches and balance providers to avoid first-call delays.
-
-        Fetches a common price (ETH/USD) to warm all HTTP connections and caches
-        in the price sources. Optionally pre-warms the balance provider for the
-        configured chain/wallet.
-
-        Args:
-            wallet_address: Optional wallet address to pre-warm balance provider.
-        """
-        await self._ensure_initialized()
-
-        # Warm price sources by fetching a common token price.
-        # This forces HTTP connection setup, API auth, and cache population
-        # so the first strategy price() call doesn't block for 30s+.
-        if self._price_aggregator is not None:
-            try:
-                await self._price_aggregator.get_aggregated_price("ETH", "USD")
-                logger.info("Price cache pre-warmed (ETH/USD fetched)")
-            except Exception as e:
-                logger.warning("Price cache warmup failed (will retry on first call): %s", e)
-
-        # Pre-warm balance provider for the configured chain if a wallet is available
-        chain = self.settings.chains[0] if self.settings.chains else None
-        if chain and wallet_address:
-            try:
-                await self._get_balance_provider(chain, wallet_address)
-                logger.info("Balance provider pre-warmed for chain=%s", chain)
-            except Exception as e:
-                logger.warning("Balance provider warmup failed for chain=%s: %s", chain, e)
 
     async def _get_balance_provider(self, chain: str, wallet_address: str):
         """Get or create balance provider for a chain.
@@ -292,139 +158,6 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
 
         return self._balance_providers[cache_key]
 
-    async def _get_onchain_lookup(self, chain: str) -> Any:
-        """Get or create an OnChainLookup for a chain (gateway-internal).
-
-        Mirrors the pattern in TokenService but kept local so GetPrice can
-        resolve addresses without making a cross-service gRPC call.
-        """
-        from almanak.gateway.services.onchain_lookup import OnChainLookup
-        from almanak.gateway.utils import get_rpc_url
-
-        async with self._onchain_lookups_lock:
-            if chain not in self._onchain_lookups:
-                rpc_url = get_rpc_url(chain, network=self.settings.network)
-                self._onchain_lookups[chain] = OnChainLookup(rpc_url=rpc_url)
-            return self._onchain_lookups[chain]
-
-    async def _resolve_token_for_pricing(
-        self,
-        token: str,
-        requested_chain: str,
-    ) -> Any | None:
-        """Resolve a token input (symbol or address) into a ResolvedToken.
-
-        Only resolves EVM contract addresses via on-chain ERC20 metadata.
-        Returns None when the input is a symbol, chain is unknown, or the
-        on-chain lookup fails — callers then fall through to the normal
-        symbol-based aggregator path.
-
-        The returned ResolvedToken carries the chain and address needed by
-        price sources that support address-based lookups (e.g. CoinGecko's
-        /simple/token_price/{platform} endpoint).
-        """
-        if not _EVM_ADDRESS_RE.match(token):
-            return None
-
-        chain = (requested_chain or "").lower()
-        if not chain:
-            # No explicit chain. Only infer from settings if it is UNAMBIGUOUS —
-            # exactly one configured chain. A multi-chain gateway with no hint
-            # would otherwise silently query the wrong RPC for a token that
-            # lives on a secondary chain, returning either "not a contract" or
-            # (worse) a price from a same-address token on the wrong chain.
-            configured = [c for c in (self.settings.chains or []) if c]
-            if len(configured) == 1:
-                chain = configured[0].lower()
-            else:
-                if len(configured) > 1:
-                    logger.warning(
-                        "Address price lookup for %s skipped: gateway serves "
-                        "multiple chains (%s) and request did not specify one. "
-                        "Set PriceRequest.chain to enable address resolution.",
-                        token,
-                        configured,
-                    )
-                return None
-
-        # Enforce the gateway's chain allowlist. Without this, a caller could
-        # pass any enum-valid chain name (e.g. a dev chain the operator never
-        # wired up) and make the gateway dial an RPC it wasn't meant to —
-        # crossing the trust boundary `GetBalance` already protects.
-        try:
-            chain = validate_chain(chain)
-        except ValidationError as e:
-            logger.info(
-                "Address price lookup for %s skipped: chain %r not allowed (%s)",
-                token,
-                requested_chain or chain,
-                e,
-            )
-            return None
-
-        # Require the chain to be one this gateway is configured for. A chain
-        # can be in ALLOWED_CHAINS but not in this gateway's settings.chains,
-        # which would still let a caller force an on-chain lookup on a chain
-        # the operator never opted into.
-        configured_chains = {c.lower() for c in (self.settings.chains or []) if c}
-        if configured_chains and chain not in configured_chains:
-            logger.info(
-                "Address price lookup for %s on %s skipped: chain not in gateway's configured chains %s",
-                token,
-                chain,
-                sorted(configured_chains),
-            )
-            return None
-
-        if is_solana_chain(chain):
-            return None
-
-        try:
-            from almanak.core.enums import Chain
-            from almanak.framework.data.tokens import ResolvedToken
-            from almanak.framework.data.tokens.models import CHAIN_ID_MAP
-
-            # Chain enum values are uppercased (e.g. Chain("BASE")); config
-            # usually surfaces them lowercased. Try uppercase first, fall
-            # back to the raw string so callers using either form work.
-            try:
-                chain_enum = Chain(chain.upper())
-            except ValueError:
-                chain_enum = Chain(chain)
-        except (ImportError, ValueError) as e:
-            logger.debug("Cannot map %s to Chain enum for address resolution: %s", chain, e)
-            return None
-
-        try:
-            lookup = await self._get_onchain_lookup(chain)
-            metadata = await asyncio.wait_for(
-                lookup.lookup(chain, token),
-                timeout=_ONCHAIN_LOOKUP_TIMEOUT_SECONDS,
-            )
-        except Exception as e:
-            logger.info("On-chain metadata lookup failed for %s on %s: %s", token, chain, e)
-            return None
-
-        if metadata is None:
-            return None
-
-        chain_id = CHAIN_ID_MAP.get(chain_enum, 0)
-
-        try:
-            return ResolvedToken(
-                symbol=metadata.symbol,
-                address=metadata.address,
-                decimals=metadata.decimals,
-                chain=chain_enum,
-                chain_id=chain_id,
-                name=metadata.name,
-                source="on_chain",
-                is_verified=False,
-            )
-        except Exception as e:  # Defensive: ResolvedToken.__post_init__ validates inputs
-            logger.warning("Failed to build ResolvedToken from on-chain metadata for %s: %s", token, e)
-            return None
-
     async def GetPrice(
         self,
         request: gateway_pb2.PriceRequest,
@@ -433,7 +166,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         """Get token price from aggregated sources.
 
         Args:
-            request: Price request with token, quote currency, and optional chain hint
+            request: Price request with token and quote currency
             context: gRPC context
 
         Returns:
@@ -444,27 +177,8 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         token = request.token
         quote = request.quote or "USD"
 
-        # Validate the optional chain hint up front. Empty is fine — the
-        # address resolver falls back to settings.chains when unambiguous.
-        # But a non-empty, bad chain is caller error; mirror GetBalance /
-        # RpcService / ExecutionService and surface INVALID_ARGUMENT rather
-        # than silently letting it slip through.
-        requested_chain = ""
-        if request.chain:
-            try:
-                requested_chain = validate_chain(request.chain)
-            except ValidationError as e:
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details(str(e))
-                return gateway_pb2.PriceResponse()
-
-        # If the caller sent a contract address, resolve it on-chain so every
-        # downstream price source can use address-based endpoints. This is
-        # what unlocks pricing for tokens absent from our hardcoded registry.
-        resolved_token = await self._resolve_token_for_pricing(token, requested_chain)
-
         try:
-            result = await self._price_aggregator.get_aggregated_price(token, quote, resolved_token=resolved_token)
+            result = await self._price_aggregator.get_aggregated_price(token, quote)
             details = self._price_aggregator.get_last_details(token, quote)
 
             response = gateway_pb2.PriceResponse(
@@ -481,68 +195,8 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 response.outliers.extend(details.get("outliers", []))
             return response
         except Exception as e:
-            # Try native->wrapped alias fallback (e.g., MNT->WMNT).
-            # The alias is a symbol, so any address-based resolved_token no
-            # longer applies — forward None so the alias is priced by symbol.
-            alias = NATIVE_PRICE_ALIASES.get(token.upper())
-            if alias:
-                try:
-                    result = await self._price_aggregator.get_aggregated_price(alias, quote, resolved_token=None)
-                    logger.info(f"GetPrice: {token} resolved via alias {alias}")
-                    response = gateway_pb2.PriceResponse(
-                        price=str(result.price),
-                        timestamp=int(result.timestamp.timestamp()),
-                        source=result.source,
-                        confidence=result.confidence,
-                        stale=result.stale,
-                    )
-                    details = self._price_aggregator.get_last_details(alias, quote)
-                    if details:
-                        response.sources_ok.extend(details.get("sources_ok", []))
-                        for k, v in details.get("sources_failed", {}).items():
-                            response.sources_failed[k] = v
-                        response.outliers.extend(details.get("outliers", []))
-                    return response
-                except Exception as alias_err:
-                    logger.debug(f"GetPrice: alias {alias} also failed for {token}/{quote}: {alias_err}")
-
-            from almanak.framework.data.interfaces import (
-                AllDataSourcesFailed,
-                DataSourceUnavailable,
-            )
+            from almanak.framework.data.interfaces import AllDataSourcesFailed
             from almanak.gateway.data.price.aggregator import _is_known_unpriceable
-
-            # Last-resort fallback: consult the manual override source if all
-            # real oracle sources failed. Kept out of the aggregator's median
-            # vote so a low-confidence override never corrupts a live price;
-            # only activates when no real source produced a result. Logged
-            # at WARNING so audit trails always show when a price came from
-            # an operator-supplied env var instead of a real oracle.
-            # ``getattr`` tolerates ``__new__``-constructed test doubles that
-            # bypass ``__init__``.
-            manual_override = getattr(self, "_manual_price_override", None)
-            if isinstance(e, AllDataSourcesFailed) and manual_override is not None:
-                try:
-                    override_result = await manual_override.get_price(token, quote)
-                    logger.warning(
-                        "GetPrice: %s/%s unresolved by every primary oracle source; "
-                        "returning MANUAL OVERRIDE price=%s confidence=%s. "
-                        "This value came from an ALMANAK_PRICE_OVERRIDE_* env var, "
-                        "not a real oracle — confirm it is current before acting on it.",
-                        token,
-                        quote,
-                        override_result.price,
-                        override_result.confidence,
-                    )
-                    return gateway_pb2.PriceResponse(
-                        price=str(override_result.price),
-                        timestamp=int(override_result.timestamp.timestamp()),
-                        source=override_result.source,
-                        confidence=override_result.confidence,
-                        stale=override_result.stale,
-                    )
-                except DataSourceUnavailable:
-                    pass  # No override configured — fall through to the normal error path
 
             # Only downgrade to WARNING for known-unpriceable tokens when the failure
             # is "all sources failed" (expected). Keep ERROR for infra/unexpected failures.
@@ -570,15 +224,6 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         """
         await self._ensure_initialized()
 
-        # If we initialized with CoinGecko-only (no chain at startup) and
-        # now have a chain from the request, upgrade to full pricing stack.
-        if request.chain and not self.settings.chains:
-            try:
-                chain = validate_chain(request.chain)
-                await self.reinitialize(chain)
-            except Exception as e:
-                logger.warning("MarketService auto-reinit failed for chain %s: %s", request.chain, e)
-
         token = request.token
 
         # Validate chain
@@ -600,7 +245,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         try:
             provider = await self._get_balance_provider(chain, wallet_address)
 
-            if token.upper() in ("ETH", "AVAX", "MATIC", "SOL", "MNT"):
+            if token.upper() in ("ETH", "AVAX", "MATIC", "SOL"):
                 result = await provider.get_native_balance()
             else:
                 result = await provider.get_balance(token)
@@ -623,11 +268,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 stale=result.stale,
             )
         except Exception as e:
-            # VIB-2580: In single-chain Anvil mode, balance queries for non-running
-            # chains are expected failures. Downgrade to WARNING to avoid noise.
-            is_connection_error = "Cannot connect to host" in str(e)
-            log_fn = logger.warning if is_connection_error else logger.error
-            log_fn(f"GetBalance failed for {token} on {chain}: {e}")
+            logger.error(f"GetBalance failed for {token} on {chain}: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return gateway_pb2.BalanceResponse()
@@ -667,7 +308,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             try:
                 provider = await self._get_balance_provider(chain, wallet_address)
 
-                if token.upper() in ("ETH", "AVAX", "MATIC", "SOL", "MNT"):
+                if token.upper() in ("ETH", "AVAX", "MATIC", "SOL"):
                     result = await provider.get_native_balance()
                 else:
                     result = await provider.get_balance(token)
@@ -689,9 +330,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                     stale=result.stale,
                 )
             except Exception as e:
-                # Log at DEBUG for batch context — individual token failures (e.g. USDT not
-                # existing on Base) are expected and should not spam user-facing logs.
-                logger.debug("BatchGetBalances: skipped %s on %s: %s", token, chain, e)
+                logger.warning(f"BatchGetBalances: failed for {token} on {chain}: {e}")
                 return gateway_pb2.BalanceResponse(error=str(e))
 
         tasks = [_get_single_balance(req) for req in request.requests]
@@ -725,8 +364,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 period = int(params.get("period", "14"))
                 timeframe = params.get("timeframe", "1h")
 
-                api_key = self.settings.coingecko_api_key if self.settings.coingecko_api_key is not None else ""
-                async with CoinGeckoOHLCVProvider(api_key=api_key) as ohlcv_provider:
+                async with CoinGeckoOHLCVProvider() as ohlcv_provider:
                     indicator = RSICalculator(ohlcv_provider=ohlcv_provider, default_period=period)
                     value = await indicator.calculate_rsi(token, period=period, timeframe=timeframe)
 

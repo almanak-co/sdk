@@ -42,7 +42,7 @@ Définissez-les selon les protocoles et fonctionnalités utilisés par votre str
 |----------|-------------|-----------|
 | `ENSO_API_KEY` | Routage de swaps via l'agrégateur Enso Finance | [enso.finance](https://enso.finance/) |
 | `COINGECKO_API_KEY` | Améliore les limites de débit pour les données de prix (fonctionne sans clé) | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
-| `ALMANAK_API_KEY` | Authentification de la plateforme Almanak | [app.almanak.co](https://app.almanak.co/) |
+| `ALMANAK_API_KEY` | Fonctionnalités de la plateforme : `strat push`, `strat pull`, déploiement | [app.almanak.co](https://app.almanak.co/) |
 | `THEGRAPH_API_KEY` | Backtesting avec données de subgraphs (volumes DEX, APYs de prêt) | [thegraph.com/studio](https://thegraph.com/studio/) |
 
 ---

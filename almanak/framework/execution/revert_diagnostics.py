@@ -33,24 +33,6 @@ from ..intents.vocabulary import (
 
 logger = logging.getLogger(__name__)
 
-
-def _get_weth_address(chain: str) -> str | None:
-    """Get the WETH address for a given chain using the token resolver.
-
-    Returns None if resolution fails — callers must handle this and emit a generic
-    message rather than falling back to a wrong-chain address.
-    """
-    try:
-        from almanak.framework.data.tokens import get_token_resolver
-
-        resolver = get_token_resolver()
-        token = resolver.resolve_for_swap("ETH", chain)
-        return token.address
-    except Exception:
-        logger.debug("Could not resolve WETH address for chain=%s", chain)
-        return None
-
-
 # Protocol-specific execution fees (native token, in ETH)
 # These are estimates - actual fees vary with gas prices
 PROTOCOL_EXECUTION_FEES: dict[str, Decimal] = {
@@ -580,15 +562,9 @@ def determine_likely_cause(
             # Handle shortfall that might be a string (e.g., "all") or Decimal
             shortfall_str = f"{check.shortfall:.6f}" if isinstance(check.shortfall, Decimal) else str(check.shortfall)
             if check.symbol == "WETH":
-                weth_address = _get_weth_address(chain)
-                if weth_address:
-                    suggestions.append(
-                        f"Wrap ETH to WETH: cast send {weth_address} 'deposit()' --value {shortfall_str}ether --rpc-url <RPC> --private-key <KEY>"
-                    )
-                else:
-                    suggestions.append(
-                        f"Wrap {shortfall_str} ETH to WETH on {chain} (use your chain's WETH deposit() function)"
-                    )
+                suggestions.append(
+                    f"Wrap ETH to WETH: cast send 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1 'deposit()' --value {shortfall_str}ether --rpc-url <RPC> --private-key <KEY>"
+                )
             elif check.symbol in ("USDC", "USDC.e", "USDT"):
                 suggestions.append(f"Acquire {shortfall_str} {check.symbol} via swap or bridge")
             else:

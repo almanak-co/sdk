@@ -1,7 +1,6 @@
 """Tests for gateway gRPC server."""
 
 import asyncio
-from unittest.mock import AsyncMock, patch
 
 import grpc
 import pytest
@@ -9,7 +8,7 @@ import pytest_asyncio
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.server import _AIOHTTP_SHUTDOWN_GRACE_SECONDS, GatewayServer
+from almanak.gateway.server import GatewayServer
 
 
 @pytest_asyncio.fixture
@@ -96,55 +95,6 @@ async def test_server_settings_from_environment(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_allow_insecure_disables_auth_even_with_configured_token():
-    """allow_insecure=True must win for local test harnesses on test networks."""
-    settings = GatewaySettings(
-        grpc_port=50059,
-        metrics_enabled=False,
-        audit_enabled=False,
-        allow_insecure=True,
-        auth_token="ambient-token",  # noqa: S106 - test fixture, not a real credential
-        network="anvil",
-    )
-    server = GatewayServer(settings)
-
-    # Patch AuthInterceptor so we can prove it was never constructed.
-    # Health.Check is auth-exempt, so asserting the interceptor was not
-    # instantiated is the reliable way to prove auth was skipped.
-    with patch("almanak.gateway.server.AuthInterceptor") as auth_interceptor_cls:
-        await server.start()
-        await asyncio.sleep(0.1)
-        assert auth_interceptor_cls.call_count == 0, (
-            "AuthInterceptor should not be constructed when allow_insecure=True"
-        )
-
-        channel = grpc.aio.insecure_channel("localhost:50059")
-        stub = health_pb2_grpc.HealthStub(channel)
-        response = await stub.Check(health_pb2.HealthCheckRequest(service=""))
-        assert response.status == health_pb2.HealthCheckResponse.SERVING
-        await channel.close()
-
-    await server.stop()
-
-
-@pytest.mark.asyncio
-async def test_allow_insecure_with_auth_token_on_mainnet_is_rejected():
-    """Contradictory config on a production network must hard-fail at start()."""
-    settings = GatewaySettings(
-        grpc_port=50060,
-        metrics_enabled=False,
-        audit_enabled=False,
-        allow_insecure=True,
-        auth_token="ambient-token",  # noqa: S106 - test fixture, not a real credential
-        network="mainnet",
-    )
-    server = GatewayServer(settings)
-
-    with pytest.raises(RuntimeError, match="conflicting configuration"):
-        await server.start()
-
-
-@pytest.mark.asyncio
 async def test_heartbeat_ttl_task_lifecycle():
     """GatewayServer starts the heartbeat TTL task on start() and cancels it on stop() (VIB-1280)."""
     settings = GatewaySettings(grpc_port=50056, metrics_enabled=False, audit_enabled=False, allow_insecure=True)
@@ -158,92 +108,3 @@ async def test_heartbeat_ttl_task_lifecycle():
 
     await server.stop()
     assert server._heartbeat_ttl_task.done()
-
-
-@pytest.mark.asyncio
-async def test_stop_awaits_aiohttp_grace_period():
-    """stop() sleeps for _AIOHTTP_SHUTDOWN_GRACE_SECONDS to let aiohttp connectors drain (VIB-1832)."""
-    settings = GatewaySettings(grpc_port=50057, metrics_enabled=False, audit_enabled=False, allow_insecure=True)
-    server = GatewayServer(settings)
-    await server.start()
-
-    original_sleep = asyncio.sleep
-    sleep_calls: list[float] = []
-
-    async def tracking_sleep(delay, *args, **kwargs):
-        sleep_calls.append(delay)
-        await original_sleep(delay, *args, **kwargs)
-
-    with patch("almanak.gateway.server.asyncio.sleep", side_effect=tracking_sleep):
-        await server.stop()
-
-    assert _AIOHTTP_SHUTDOWN_GRACE_SECONDS in sleep_calls, (
-        f"Expected asyncio.sleep({_AIOHTTP_SHUTDOWN_GRACE_SECONDS}) during stop(), got calls: {sleep_calls}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_serving_deferred_until_after_warmup():
-    """SERVING health status is set only AFTER warmup completes (VIB-2413).
-
-    Previously, the gateway marked itself SERVING before warmup, causing
-    clients to call balance/price endpoints before providers were initialized.
-    """
-    settings = GatewaySettings(
-        grpc_port=50058,
-        metrics_enabled=False,
-        audit_enabled=False,
-        allow_insecure=True,
-        chains=["arbitrum"],
-    )
-    server = GatewayServer(settings)
-
-    # Track the order of operations: warmup vs SERVING
-    call_order: list[str] = []
-
-    original_set = server._health_servicer.set
-
-    async def tracking_health_set(service, status):
-        if status == health_pb2.HealthCheckResponse.NOT_SERVING:
-            call_order.append("NOT_SERVING")
-        elif status == health_pb2.HealthCheckResponse.SERVING:
-            call_order.append("SERVING")
-        await original_set(service, status)
-
-    async def tracking_warmup(*args, **kwargs):
-        call_order.append("warmup_start")
-        call_order.append("warmup_end")
-
-    async def tracking_prewarm(*args, **kwargs):
-        call_order.append("prewarm_start")
-        call_order.append("prewarm_end")
-
-    server._health_servicer.set = tracking_health_set
-
-    with (
-        patch(
-            "almanak.gateway.services.market_service.MarketServiceServicer.warmup",
-            new=AsyncMock(side_effect=tracking_warmup),
-        ),
-        patch.object(server, "_prewarm_chains", side_effect=tracking_prewarm),
-    ):
-        await server.start()
-
-    # NOT_SERVING must be set before warmup; SERVING must come after
-    assert "NOT_SERVING" in call_order, f"NOT_SERVING was never set: {call_order}"
-    assert "SERVING" in call_order, f"SERVING was never set: {call_order}"
-    serving_idx = call_order.index("SERVING")
-    not_serving_idx = call_order.index("NOT_SERVING")
-    assert not_serving_idx < serving_idx, (
-        f"NOT_SERVING must precede SERVING: {call_order}"
-    )
-    assert "warmup_end" in call_order, f"Warmup was not executed: {call_order}"
-    assert "prewarm_end" in call_order, f"Prewarm was not executed: {call_order}"
-    assert call_order.index("warmup_end") < serving_idx, (
-        f"SERVING set before warmup completed: {call_order}"
-    )
-    assert call_order.index("prewarm_end") < serving_idx, (
-        f"SERVING set before prewarm completed: {call_order}"
-    )
-
-    await server.stop()

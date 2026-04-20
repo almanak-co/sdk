@@ -32,7 +32,6 @@ from web3.contract import Contract
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
-    from almanak.framework.gateway_client import GatewayClient
 
 from almanak.core.contracts import PENDLE as _PENDLE_REGISTRY
 from almanak.core.contracts import PENDLE_TOKENS as _PENDLE_TOKENS
@@ -81,9 +80,6 @@ MARKET_BY_PT_TOKEN: dict[str, dict[str, str]] = {
         "PT-wstETH-25JUN2026": "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B",
         "PT-WSTETH": "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B",
         "PT-wstETH": "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B",  # Case-insensitive support
-        # PT-sUSDai-15OCT2026 (Pendle PT dislocation, Exp8)
-        "PT-SUSDAI-15OCT2026": "0xcbf629c8d396b1261f81f55175afa010e94787d8",
-        "PT-sUSDai-15OCT2026": "0xcbf629c8d396b1261f81f55175afa010e94787d8",
     },
     "ethereum": {
         # PT-sUSDe-7MAY2026 (active, 91.5% LLTV on Morpho when market available)
@@ -96,11 +92,6 @@ MARKET_BY_PT_TOKEN: dict[str, dict[str, str]] = {
         "PT-SUSDE-5FEB2026": "0xed81f8bA2941C3979de2265C295748a6b6956567",  # Fully uppercase for compiler lookup
         "PT-sUSDE-5FEB2026": "0xed81f8bA2941C3979de2265C295748a6b6956567",
         "PT-sUSDe-5FEB2026": "0xed81f8bA2941C3979de2265C295748a6b6956567",
-        # PT-USDG-28MAY2026 (Pendle PT dislocation, Exp8)
-        "PT-USDG-28MAY2026": "0xc5b32dba5f29f8395fb9591e1a15f23a75214f33",
-        # PT-aPYUSD-28MAY2026 (Pendle PT dislocation, Exp8)
-        "PT-APYUSD-28MAY2026": "0x5d88790d68c45d2cec4b7b1ad842587e1c51188a",
-        "PT-aPYUSD-28MAY2026": "0x5d88790d68c45d2cec4b7b1ad842587e1c51188a",
     },
 }
 
@@ -118,9 +109,6 @@ PT_TOKEN_INFO: dict[str, dict[str, tuple[str, int]]] = {
         "PT-wstETH-25JUN2026": ("0x71fBF40651E9D4278a74586AfC99F307f369Ce9A", 18),
         "PT-WSTETH": ("0x71fBF40651E9D4278a74586AfC99F307f369Ce9A", 18),
         "PT-wstETH": ("0x71fBF40651E9D4278a74586AfC99F307f369Ce9A", 18),
-        # PT-sUSDai-15OCT2026: (address, decimals) - Pendle PT dislocation, Exp8
-        "PT-SUSDAI-15OCT2026": ("0xb459db106f645d698e74027eef6019a26a0675cc", 18),
-        "PT-sUSDai-15OCT2026": ("0xb459db106f645d698e74027eef6019a26a0675cc", 18),
     },
     "ethereum": {
         # PT-sUSDe-7MAY2026: (address, decimals) - active sUSDe PT
@@ -133,11 +121,6 @@ PT_TOKEN_INFO: dict[str, dict[str, tuple[str, int]]] = {
         "PT-SUSDE-5FEB2026": ("0xE8483517077afa11A9B07f849cee2552f040d7b2", 18),  # Fully uppercase for compiler
         "PT-sUSDE-5FEB2026": ("0xE8483517077afa11A9B07f849cee2552f040d7b2", 18),
         "PT-sUSDe-5FEB2026": ("0xE8483517077afa11A9B07f849cee2552f040d7b2", 18),
-        # PT-USDG-28MAY2026: Pendle PT dislocation, Exp8
-        "PT-USDG-28MAY2026": ("0x9db38d74a0d29380899ad354121dfb521adb0548", 18),
-        # PT-aPYUSD-28MAY2026: Pendle PT dislocation, Exp8
-        "PT-APYUSD-28MAY2026": ("0x790cd0b90a73a506106dc184be478041547fe00f", 18),
-        "PT-aPYUSD-28MAY2026": ("0x790cd0b90a73a506106dc184be478041547fe00f", 18),
     },
 }
 
@@ -198,18 +181,12 @@ MARKET_TOKEN_MINT_SY: dict[str, dict[str, str]] = {
     "arbitrum": {
         # wstETH market - SY is minted from wstETH directly
         "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b": "0x5979D7b546E38E414F7E9822514be443A4800529",  # wstETH
-        # sUSDai-15OCT2026 market - SY is minted from sUSDai (VIB-2534, Exp8)
-        "0xcbf629c8d396b1261f81f55175afa010e94787d8": "0x0b2b2b2076d95dda7817e785989fe353fe955ef9",  # sUSDai
     },
     "ethereum": {
         # sUSDe-7MAY2026 market - SY is minted from sUSDe
         "0x8dae8ece668cf80d348873f23d456448e8694883": "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497",  # sUSDe
         # sUSDe-5FEB2026 market (expired) - SY is minted from sUSDe
         "0xed81f8ba2941c3979de2265c295748a6b6956567": "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497",  # sUSDe
-        # USDG-28MAY2026 market - SY is minted from USDG (VIB-2534, Exp8)
-        "0xc5b32dba5f29f8395fb9591e1a15f23a75214f33": "0xe343167631d89b6ffc58b88d6b7fb0228795491d",  # USDG
-        # aPYUSD-28MAY2026 market - SY is minted from aEthPYUSD (VIB-2534, Exp8)
-        "0x5d88790d68c45d2cec4b7b1ad842587e1c51188a": "0x0c0d01abf3e6adfca0989ebba9d6e85dd58eab1e",  # aEthPYUSD
     },
 }
 
@@ -383,35 +360,19 @@ class PendleSDK:
         )
     """
 
-    def __init__(
-        self,
-        rpc_url: str | None = None,
-        chain: str = "arbitrum",
-        token_resolver: "TokenResolverType | None" = None,
-        gateway_client: "GatewayClient | None" = None,
-    ):
+    def __init__(self, rpc_url: str, chain: str = "arbitrum", token_resolver: "TokenResolverType | None" = None):
         """
         Initialize Pendle SDK.
 
         Args:
-            rpc_url: DEPRECATED — direct RPC URL. Prefer gateway_client for
-                any code path running in a strategy container.
+            rpc_url: RPC endpoint URL
             chain: Target chain (arbitrum, ethereum)
             token_resolver: Optional TokenResolver instance. If None, uses singleton.
-            gateway_client: Gateway client for routing eth_call through the
-                gateway's RpcService. Preferred over rpc_url.
         """
         if chain not in PENDLE_ADDRESSES:
             raise ValueError(f"Unsupported chain: {chain}. Supported: {list(PENDLE_ADDRESSES.keys())}")
-        if rpc_url is None and gateway_client is None:
-            raise ValueError("PendleSDK requires either rpc_url (deprecated) or gateway_client")
 
-        if gateway_client is not None:
-            from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
-
-            self.web3 = Web3(GatewayWeb3Provider(gateway_client, chain=chain))
-        else:
-            self.web3 = Web3(Web3.HTTPProvider(rpc_url))  # vib-2986-exempt: gateway-internal fallback
+        self.web3 = Web3(Web3.HTTPProvider(rpc_url))
         self.chain = chain
         self.addresses = PENDLE_ADDRESSES[chain]
         self.router_address = self.addresses["ROUTER"]
@@ -1231,13 +1192,9 @@ class PendleSDK:
 # =============================================================================
 
 
-def get_pendle_sdk(
-    rpc_url: str | None = None,
-    chain: str = "arbitrum",
-    gateway_client: "GatewayClient | None" = None,
-) -> PendleSDK:
+def get_pendle_sdk(rpc_url: str, chain: str = "arbitrum") -> PendleSDK:
     """Factory function to create a PendleSDK instance."""
-    return PendleSDK(rpc_url=rpc_url, chain=chain, gateway_client=gateway_client)
+    return PendleSDK(rpc_url, chain)
 
 
 __all__ = [

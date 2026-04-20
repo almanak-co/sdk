@@ -1,0 +1,19 @@
+{
+    "strategy_id": "demo_aave_paper_lending",
+    "strategy_name": "demo_aave_paper_lending",
+    "description": "Aave V3 lending strategy for paper trading on Arbitrum",
+    "supply_token": "WETH",
+    "borrow_token": "USDC",
+    "supply_amount": "0.01",
+    "ltv_target": "0.4",
+    "price_drop_threshold": "0.02",
+    "price_rise_threshold": "0.03",
+    "max_borrow_cycles": 3,
+    "chain": "arbitrum",
+    "network": "mainnet",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 2,
+        "USDC": 10000
+    }
+}

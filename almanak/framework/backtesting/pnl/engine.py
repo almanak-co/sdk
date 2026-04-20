@@ -60,7 +60,7 @@ Examples:
 
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Note: There's a naming conflict between fee_models.py (module) and fee_models/ (package)
 # Python prefers the package, so we need to use an alternative import approach
@@ -83,6 +83,7 @@ from almanak.framework.backtesting.models import (
     BacktestEngine,
     BacktestMetrics,
     BacktestResult,
+    DataQualityReport,
     GasPriceRecord,
     GasPriceSummary,
     IntentType,
@@ -99,7 +100,6 @@ from almanak.framework.backtesting.pnl.data_provider import (
     HistoricalDataProvider,
     MarketState,
 )
-from almanak.framework.backtesting.pnl.data_quality import DataQualityTracker
 from almanak.framework.backtesting.pnl.error_handling import (
     BacktestErrorConfig,
     BacktestErrorHandler,
@@ -116,10 +116,6 @@ from almanak.framework.backtesting.pnl.mev_simulator import (
 )
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio, SimulatedPosition
 from almanak.framework.backtesting.pnl.providers.gas import GasPrice, GasPriceProvider
-from almanak.framework.backtesting.pnl.simulated_result import (
-    SimulatedExecutionResult,
-    build_simulated_result,
-)
 
 # Import strategy-related types
 from almanak.framework.strategies.intent_strategy import MarketSnapshot
@@ -490,7 +486,178 @@ def create_market_snapshot_from_state(
 # =============================================================================
 
 
-# DataQualityTracker extracted to data_quality.py (imported at top of file)
+@dataclass
+class DataQualityTracker:
+    """Tracks data quality metrics during backtest execution.
+
+    This class accumulates statistics about price lookups and data quality
+    throughout the backtest, which are then used to populate the
+    DataQualityReport in the BacktestResult.
+
+    Attributes:
+        total_price_lookups: Total number of price lookup attempts
+        successful_lookups: Number of successful price lookups
+        failed_lookups: Number of failed price lookups (KeyError)
+        source_counts: Count of price lookups by provider/source name
+        stale_data_count: Number of prices marked as stale
+        interpolation_count: Number of interpolated/estimated data points
+        staleness_threshold_seconds: Threshold for marking data as stale
+        unresolved_token_count: Number of token addresses that could not be resolved
+        missing_price_count: Number of unique tokens with missing prices during valuation
+    """
+
+    total_price_lookups: int = 0
+    successful_lookups: int = 0
+    failed_lookups: int = 0
+    source_counts: dict[str, int] = field(default_factory=dict)
+    stale_data_count: int = 0
+    interpolation_count: int = 0
+    staleness_threshold_seconds: int = 3600
+    unresolved_token_count: int = 0
+    _unresolved_tokens: set[str] = field(default_factory=set)
+    gas_price_source_counts: dict[str, int] = field(default_factory=dict)
+    missing_price_count: int = 0
+    _missing_price_tokens: set[str] = field(default_factory=set)
+
+    def record_lookup(
+        self,
+        success: bool,
+        source: str = "unknown",
+        is_stale: bool = False,
+        is_interpolated: bool = False,
+    ) -> None:
+        """Record a price lookup attempt.
+
+        Args:
+            success: Whether the lookup was successful
+            source: Name of the data source/provider
+            is_stale: Whether the data was older than staleness threshold
+            is_interpolated: Whether the data was interpolated/estimated
+        """
+        self.total_price_lookups += 1
+
+        if success:
+            self.successful_lookups += 1
+            # Track source breakdown for successful lookups
+            self.source_counts[source] = self.source_counts.get(source, 0) + 1
+
+            if is_stale:
+                self.stale_data_count += 1
+
+            if is_interpolated:
+                self.interpolation_count += 1
+        else:
+            self.failed_lookups += 1
+
+    def record_successful_tick(self, source: str, token_count: int = 1) -> None:
+        """Record a successful tick with prices from a source.
+
+        Args:
+            source: Name of the data source/provider
+            token_count: Number of tokens with prices in this tick
+        """
+        for _ in range(token_count):
+            self.record_lookup(success=True, source=source)
+
+    def record_failed_tick(self, token_count: int = 1) -> None:
+        """Record a failed tick (no price data available).
+
+        Args:
+            token_count: Number of tokens expected but missing
+        """
+        for _ in range(token_count):
+            self.record_lookup(success=False)
+
+    def record_unresolved_token(self, token_key: str, chain_id: int | None = None) -> None:
+        """Record a token address that could not be resolved to a symbol.
+
+        Tracks unique unresolved tokens to avoid counting the same token multiple times.
+
+        Args:
+            token_key: The token address or key that could not be resolved
+            chain_id: Optional chain ID for context (included in tracking key)
+        """
+        # Create a unique key combining chain and token
+        tracking_key = f"{chain_id or 'unknown'}:{token_key.lower()}"
+        if tracking_key not in self._unresolved_tokens:
+            self._unresolved_tokens.add(tracking_key)
+            self.unresolved_token_count += 1
+
+    def record_gas_price_source(self, source: str) -> None:
+        """Record the source used for gas ETH price in a trade.
+
+        Args:
+            source: The gas price source used. Valid values:
+                - "override": User-provided gas_eth_price_override value
+                - "historical": Historical ETH price from data provider
+                - "market": Current market ETH price from market state
+        """
+        self.gas_price_source_counts[source] = self.gas_price_source_counts.get(source, 0) + 1
+
+    def record_missing_price(
+        self,
+        token: str,
+        timestamp: datetime | None = None,
+        chain_id: int | None = None,
+    ) -> None:
+        """Record a missing price lookup during portfolio valuation.
+
+        Tracks unique (token, chain) pairs to avoid counting the same token multiple times.
+        Increments both failed_lookups and the missing_price_tokens set.
+
+        Args:
+            token: The token symbol or address for which price was not found
+            timestamp: Optional timestamp when the price lookup was attempted
+            chain_id: Optional chain ID for context
+        """
+        # Record as failed lookup
+        self.record_lookup(success=False, source="missing")
+
+        # Track unique missing tokens
+        tracking_key = f"{chain_id or 'unknown'}:{token.lower()}"
+        if tracking_key not in self._missing_price_tokens:
+            self._missing_price_tokens.add(tracking_key)
+            self.missing_price_count += 1
+
+    @property
+    def missing_price_tokens(self) -> list[str]:
+        """Get list of unique tokens with missing prices.
+
+        Returns:
+            List of unique tokens (as chain_id:token strings) that had missing prices
+        """
+        return list(self._missing_price_tokens)
+
+    @property
+    def coverage_ratio(self) -> Decimal:
+        """Calculate the price data coverage ratio.
+
+        Returns:
+            Ratio of successful lookups to total lookups (0.0 to 1.0)
+        """
+        if self.total_price_lookups == 0:
+            return Decimal("1.0")  # No lookups means perfect coverage
+
+        return Decimal(str(self.successful_lookups)) / Decimal(str(self.total_price_lookups))
+
+    def to_data_quality_report(self) -> DataQualityReport:
+        """Convert tracker statistics to a DataQualityReport.
+
+        Returns:
+            DataQualityReport with coverage_ratio, source_breakdown,
+            stale_data_count, interpolation_count, unresolved_token_count,
+            gas_price_source_counts, missing_price_count, and missing_price_tokens populated
+        """
+        return DataQualityReport(
+            coverage_ratio=self.coverage_ratio,
+            source_breakdown=dict(self.source_counts),
+            stale_data_count=self.stale_data_count,
+            interpolation_count=self.interpolation_count,
+            unresolved_token_count=self.unresolved_token_count,
+            gas_price_source_counts=dict(self.gas_price_source_counts),
+            missing_price_count=self.missing_price_count,
+            missing_price_tokens=self.missing_price_tokens,
+        )
 
 
 # =============================================================================
@@ -670,28 +837,6 @@ class PnLBacktester:
             self._fallback_usage[fallback_type] += 1
         else:
             self._fallback_usage[fallback_type] = 1
-
-    def _build_callback_result(
-        self,
-        intent: Any,
-        trade_record: TradeRecord | None,
-        success: bool,
-        error: str | None = None,
-    ) -> SimulatedExecutionResult:
-        """Build the result object passed to ``strategy.on_intent_executed``.
-
-        VIB-2916: For LP_OPEN intents the real ``SimulatedPosition.position_id``
-        is read from the trade record (populated by
-        ``SimulatedFill.to_trade_record``) so a later
-        ``Intent.lp_close(position_id=self._position_id)`` resolves against
-        the open position the engine actually tracks.
-        """
-        return build_simulated_result(
-            intent=intent,
-            trade_record=trade_record,
-            success=success,
-            error=error,
-        )
 
     def _create_parameter_source_tracker(
         self,
@@ -1662,18 +1807,14 @@ class PnLBacktester:
                             # Notify strategy of successful execution
                             if hasattr(strategy, "on_intent_executed"):
                                 try:
-                                    callback_result = self._build_callback_result(intent, trade_record, success=True)
-                                    strategy.on_intent_executed(intent, True, callback_result)
+                                    strategy.on_intent_executed(intent, True, trade_record)
                                 except Exception as notify_err:
                                     bt_logger.debug(f"on_intent_executed raised: {notify_err}")
                         except Exception as e:
                             # Notify strategy of execution failure
                             if hasattr(strategy, "on_intent_executed"):
                                 try:
-                                    callback_result = self._build_callback_result(
-                                        intent, None, success=False, error=str(e)
-                                    )
-                                    strategy.on_intent_executed(intent, False, callback_result)
+                                    strategy.on_intent_executed(intent, False, str(e))
                                 except Exception as notify_err:
                                     bt_logger.debug(f"on_intent_executed (failure) raised: {notify_err}")
                             # Use error handler for intent execution errors
@@ -1791,7 +1932,7 @@ class PnLBacktester:
         bt_logger.info(
             f"Backtest completed for {strategy.strategy_id}: "
             f"PnL=${metrics.net_pnl_usd:,.2f}, "
-            f"Return={metrics.total_return_pct:.2f}%, "
+            f"Return={metrics.total_return_pct * 100:.2f}%, "
             f"Sharpe={metrics.sharpe_ratio:.3f}"
         )
 
@@ -1866,16 +2007,62 @@ class PnLBacktester:
         )
 
     def _extract_intent(self, decide_result: Any) -> Any:
-        """Extract the intent from a decide() result. Delegates to intent_extraction module."""
-        from .intent_extraction import extract_intent
+        """Extract the intent from a decide() result.
 
-        return extract_intent(decide_result)
+        The decide() method can return various types:
+        - An Intent object directly
+        - None (equivalent to HOLD)
+        - A DecideResult with .intent attribute
+        - A HoldIntent
+
+        Args:
+            decide_result: Raw result from strategy.decide()
+
+        Returns:
+            The intent object, or None if no action
+        """
+        if decide_result is None:
+            return None
+
+        # Check if it's a DecideResult with an intent attribute
+        if hasattr(decide_result, "intent"):
+            return decide_result.intent
+
+        # Check if it's a DecideResult tuple-like (intent, context)
+        if isinstance(decide_result, tuple) and len(decide_result) >= 1:
+            return decide_result[0]
+
+        # Otherwise, assume it's an intent directly
+        return decide_result
 
     def _is_hold_intent(self, intent: Any) -> bool:
-        """Check if an intent is a HOLD intent. Delegates to intent_extraction module."""
-        from .intent_extraction import is_hold_intent
+        """Check if an intent is a HOLD intent.
 
-        return is_hold_intent(intent)
+        Args:
+            intent: Intent to check
+
+        Returns:
+            True if this is a hold/no-action intent
+        """
+        if intent is None:
+            return True
+
+        # Check intent_type attribute
+        if hasattr(intent, "intent_type"):
+            intent_type = intent.intent_type
+            if hasattr(intent_type, "value"):
+                is_hold: bool = intent_type.value == "HOLD"
+                return is_hold
+            is_hold_str: bool = str(intent_type) == "HOLD"
+            return is_hold_str
+
+        # Check if it's a HoldIntent class
+        if hasattr(intent, "__class__"):
+            class_name: str = intent.__class__.__name__
+            if class_name == "HoldIntent":
+                return True
+
+        return False
 
     def _update_positions_via_adapter(
         self,
@@ -1987,16 +2174,14 @@ class PnLBacktester:
                     # Notify strategy of successful execution so state machines can advance
                     if strategy is not None and hasattr(strategy, "on_intent_executed"):
                         try:
-                            callback_result = self._build_callback_result(intent, trade_record, success=True)
-                            strategy.on_intent_executed(intent, True, callback_result)
+                            strategy.on_intent_executed(intent, True, trade_record)
                         except Exception as notify_err:
                             logger.debug(f"on_intent_executed raised: {notify_err}")
                 except Exception as e:
                     # Notify strategy of execution failure
                     if strategy is not None and hasattr(strategy, "on_intent_executed"):
                         try:
-                            callback_result = self._build_callback_result(intent, None, success=False, error=str(e))
-                            strategy.on_intent_executed(intent, False, callback_result)
+                            strategy.on_intent_executed(intent, False, str(e))
                         except Exception as notify_err:
                             logger.debug(f"on_intent_executed (failure) raised: {notify_err}")
                     # Use error handler for intent execution errors
@@ -2417,22 +2602,133 @@ class PnLBacktester:
         return fill.to_trade_record(pnl_usd=Decimal("0"))
 
     def _get_intent_type(self, intent: Any) -> IntentType:
-        """Extract the IntentType from an intent object. Delegates to intent_extraction module."""
-        from .intent_extraction import get_intent_type
+        """Extract the IntentType from an intent object.
 
-        return get_intent_type(intent)
+        Args:
+            intent: Intent object
+
+        Returns:
+            IntentType enum value
+        """
+        # Check for intent_type attribute
+        if hasattr(intent, "intent_type"):
+            intent_type_value = intent.intent_type
+            # If it's already an IntentType, return it
+            if isinstance(intent_type_value, IntentType):
+                return intent_type_value
+            # If it has a value attribute (enum from another module)
+            if hasattr(intent_type_value, "value"):
+                try:
+                    return IntentType(intent_type_value.value)
+                except ValueError:
+                    pass
+            # Try direct conversion
+            try:
+                return IntentType(str(intent_type_value))
+            except ValueError:
+                pass
+
+        # Check class name for common intent types
+        class_name = intent.__class__.__name__.upper()
+        if "SWAP" in class_name:
+            return IntentType.SWAP
+        if "LP_OPEN" in class_name or "LPOPEN" in class_name:
+            return IntentType.LP_OPEN
+        if "LP_CLOSE" in class_name or "LPCLOSE" in class_name:
+            return IntentType.LP_CLOSE
+        if "PERP_OPEN" in class_name or "PERPOPEN" in class_name:
+            return IntentType.PERP_OPEN
+        if "PERP_CLOSE" in class_name or "PERPCLOSE" in class_name:
+            return IntentType.PERP_CLOSE
+        if "SUPPLY" in class_name:
+            return IntentType.SUPPLY
+        if "WITHDRAW" in class_name:
+            return IntentType.WITHDRAW
+        if "BORROW" in class_name:
+            return IntentType.BORROW
+        if "REPAY" in class_name:
+            return IntentType.REPAY
+        if "BRIDGE" in class_name:
+            return IntentType.BRIDGE
+        if "VAULTDEPOSIT" in class_name or "VAULT_DEPOSIT" in class_name:
+            return IntentType.VAULT_DEPOSIT
+        if "VAULTREDEEM" in class_name or "VAULT_REDEEM" in class_name:
+            return IntentType.VAULT_REDEEM
+        if "HOLD" in class_name:
+            return IntentType.HOLD
+
+        return IntentType.UNKNOWN
 
     def _get_intent_protocol(self, intent: Any) -> str:
-        """Extract the protocol from an intent object. Delegates to intent_extraction module."""
-        from .intent_extraction import get_intent_protocol
+        """Extract the protocol from an intent object.
 
-        return get_intent_protocol(intent)
+        Args:
+            intent: Intent object
+
+        Returns:
+            Protocol name string
+        """
+        # Common attribute names for protocol
+        for attr in ["protocol", "protocol_name", "connector", "adapter"]:
+            if hasattr(intent, attr):
+                value = getattr(intent, attr)
+                if value and isinstance(value, str):
+                    protocol_str: str = value.lower()
+                    return protocol_str
+
+        # Infer from class name
+        class_name = intent.__class__.__name__.lower()
+        if "uniswap" in class_name:
+            return "uniswap_v3"
+        if "gmx" in class_name:
+            return "gmx"
+        if "aave" in class_name:
+            return "aave_v3"
+        if "hyperliquid" in class_name:
+            return "hyperliquid"
+        if "across" in class_name or "stargate" in class_name:
+            return "bridge"
+
+        return "default"
 
     def _get_intent_tokens(self, intent: Any) -> list[str]:
-        """Extract the tokens involved in an intent. Delegates to intent_extraction module."""
-        from .intent_extraction import get_intent_tokens
+        """Extract the tokens involved in an intent.
 
-        return get_intent_tokens(intent)
+        Args:
+            intent: Intent object
+
+        Returns:
+            List of token symbols
+        """
+        tokens: list[str] = []
+
+        # Common attribute names for tokens
+        for attr in [
+            "token",
+            "from_token",
+            "to_token",
+            "token0",
+            "token1",
+            "asset",
+            "collateral",
+            "borrow_token",
+            "supply_token",
+            "deposit_token",
+        ]:
+            if hasattr(intent, attr):
+                value = getattr(intent, attr)
+                if value and isinstance(value, str) and value not in tokens:
+                    tokens.append(value.upper())
+
+        # Check for tokens list attribute
+        if hasattr(intent, "tokens"):
+            intent_tokens = intent.tokens
+            if isinstance(intent_tokens, list):
+                for t in intent_tokens:
+                    if isinstance(t, str) and t.upper() not in tokens:
+                        tokens.append(t.upper())
+
+        return tokens if tokens else ["UNKNOWN"]
 
     def _get_intent_amount_usd(
         self,
@@ -2440,21 +2736,134 @@ class PnLBacktester:
         market_state: MarketState,
         strict_reproducibility: bool = False,
     ) -> Decimal:
-        """Extract or calculate the USD amount for an intent. Delegates to intent_extraction module."""
-        from .intent_extraction import get_intent_amount_usd
+        """Extract or calculate the USD amount for an intent.
 
-        return get_intent_amount_usd(
-            intent,
-            market_state,
-            strict_reproducibility=strict_reproducibility,
-            track_fallback=self._track_fallback,
+        Args:
+            intent: Intent object
+            market_state: Market state for price lookups
+            strict_reproducibility: If True, raise ValueError when USD amount cannot
+                be determined. If False, log warning and return raw amount or zero.
+
+        Returns:
+            Amount in USD
+
+        Raises:
+            ValueError: If strict_reproducibility is True and USD amount cannot be
+                determined (no USD field, no price available, or no amount field).
+        """
+        # Check for direct USD amount
+        for attr in ["amount_usd", "notional_usd", "value_usd", "collateral_usd"]:
+            if hasattr(intent, attr):
+                value = getattr(intent, attr)
+                if value is not None:
+                    return Decimal(str(value))
+
+        # Check for amount + token (need to convert to USD)
+        amount: Decimal | None = None
+        token: str | None = None
+
+        for amount_attr in ["amount", "amount_in", "amount_out", "collateral", "size", "shares"]:
+            if hasattr(intent, amount_attr):
+                value = getattr(intent, amount_attr)
+                if value is not None:
+                    str_value = str(value)
+                    if str_value.lower() == "all":
+                        continue
+                    try:
+                        amount = Decimal(str_value)
+                    except Exception:
+                        continue
+                    break
+
+        for token_attr in ["token", "from_token", "asset", "collateral_token", "deposit_token"]:
+            if hasattr(intent, token_attr):
+                value = getattr(intent, token_attr)
+                if value and isinstance(value, str):
+                    token = value.upper()
+                    break
+
+        if amount is not None and token:
+            try:
+                price = market_state.get_price(token)
+                return amount * price
+            except KeyError as err:
+                # Can't convert to USD without price - handle based on strict mode
+                if strict_reproducibility:
+                    msg = (
+                        f"Cannot determine USD amount for intent: found amount={amount} for token '{token}' "
+                        "but no price available. Set strict_reproducibility=False to use zero as fallback."
+                    )
+                    raise ValueError(msg) from err
+                logger.warning(
+                    f"No price available for token '{token}' to convert amount {amount} to USD. "
+                    "Using zero as fallback to avoid misinterpreting token amount as USD."
+                )
+                self._track_fallback("default_usd_amount")
+                return Decimal("0")
+
+        # Could not determine USD amount - handle based on strict mode
+        if amount is not None:
+            # Have raw amount but no token for price lookup
+            if strict_reproducibility:
+                msg = (
+                    f"Cannot determine USD amount for intent: found amount={amount} but no token "
+                    "for price lookup. Set strict_reproducibility=False to use zero as fallback."
+                )
+                raise ValueError(msg)
+            logger.warning(
+                f"Intent has amount={amount} but no token for USD conversion. "
+                "Using zero as fallback to avoid misinterpreting token amount as USD."
+            )
+            self._track_fallback("default_usd_amount")
+            return Decimal("0")
+
+        # No amount found at all
+        if strict_reproducibility:
+            msg = (
+                "Cannot determine USD amount for intent: no USD amount field and no "
+                "token amount found. Set strict_reproducibility=False to use zero as fallback."
+            )
+            raise ValueError(msg)
+        logger.warning(
+            "Intent has no USD amount or token amount field. Using zero as fallback to avoid arbitrary values."
         )
+        self._track_fallback("default_usd_amount")
+        return Decimal("0")
 
     def _estimate_gas_for_intent(self, intent_type: IntentType) -> int:
-        """Estimate gas usage for an intent type. Delegates to intent_extraction module."""
-        from .intent_extraction import estimate_gas_for_intent
+        """Estimate gas usage for an intent type.
 
-        return estimate_gas_for_intent(intent_type)
+        Args:
+            intent_type: Type of intent
+
+        Returns:
+            Estimated gas units
+        """
+        # Gas estimates based on typical transaction costs across protocols.
+        # These are conservative estimates for gas cost calculations in backtests.
+        # Actual gas usage varies by protocol, chain, and execution conditions.
+        #
+        # Uniswap V3 swaps: ~130k-180k (depends on pools in route)
+        # Aave V3 supply/withdraw: ~200k-250k
+        # GMX V2 market orders: ~300k-500k
+        # LP operations: ~250k-400k
+        gas_estimates: dict[IntentType, int] = {
+            IntentType.SWAP: 180000,  # Conservative for multi-hop swaps
+            IntentType.LP_OPEN: 400000,  # NFT mint + liquidity add
+            IntentType.LP_CLOSE: 300000,  # NFT burn + liquidity remove
+            IntentType.SUPPLY: 220000,  # Aave/Compound supply
+            IntentType.WITHDRAW: 220000,  # Aave/Compound withdraw
+            IntentType.BORROW: 280000,  # Includes collateral checks
+            IntentType.REPAY: 220000,  # Aave/Compound repay
+            IntentType.PERP_OPEN: 450000,  # GMX V2 market increase
+            IntentType.PERP_CLOSE: 350000,  # GMX V2 market decrease
+            IntentType.BRIDGE: 200000,  # Cross-chain bridge
+            IntentType.VAULT_DEPOSIT: 250000,  # ERC-4626 deposit (approve + deposit)
+            IntentType.VAULT_REDEEM: 200000,  # ERC-4626 redeem
+            IntentType.HOLD: 0,  # No execution
+            IntentType.UNKNOWN: 200000,  # Conservative default
+        }
+        return gas_estimates.get(intent_type, 200000)
 
     def _get_executed_price(
         self,
@@ -2463,10 +2872,45 @@ class PnLBacktester:
         slippage_pct: Decimal,
         intent_type: IntentType,
     ) -> Decimal:
-        """Get the executed price for an intent after slippage. Delegates to intent_extraction module."""
-        from .intent_extraction import get_executed_price
+        """Get the executed price for an intent after applying slippage.
 
-        return get_executed_price(intent, market_state, slippage_pct, intent_type)
+        For swaps and perps, the executed price is the market price adjusted
+        for slippage. For other intent types, we use the market price directly.
+
+        Args:
+            intent: Intent object
+            market_state: Market state for price lookups
+            slippage_pct: Slippage percentage as decimal
+            intent_type: Type of intent
+
+        Returns:
+            Executed price after slippage
+        """
+        # Get the primary token for price lookup
+        tokens = self._get_intent_tokens(intent)
+        primary_token = tokens[0] if tokens else "WETH"
+
+        # Get market price
+        try:
+            market_price = market_state.get_price(primary_token)
+        except KeyError:
+            market_price = Decimal("1")
+
+        # Apply slippage for market orders
+        if intent_type in (IntentType.SWAP, IntentType.PERP_OPEN, IntentType.PERP_CLOSE):
+            # Slippage is adverse: buying gets a higher price, selling gets a lower price.
+            # primary_token = tokens[0], which for swaps is from_token (the token being sold).
+            # Determine direction by checking to_token: if the intent has a to_token that
+            # matches primary_token, we're BUYING it (pay more). Otherwise we're selling it
+            # (receive less).
+            to_token = getattr(intent, "to_token", None)
+            if to_token and to_token.upper() == primary_token.upper():
+                # Buying primary_token: adverse slippage means higher price
+                return market_price * (Decimal("1") + slippage_pct)
+            # Selling primary_token (or no to_token): adverse slippage means lower price
+            return market_price * (Decimal("1") - slippage_pct)
+
+        return market_price
 
     def _calculate_token_flows(
         self,
@@ -2884,35 +3328,288 @@ class PnLBacktester:
         trades: list[TradeRecord],
         config: PnLBacktestConfig,
     ) -> BacktestMetrics:
-        """Calculate comprehensive backtest metrics. Delegates to metrics_calculator module."""
-        from .metrics_calculator import calculate_metrics
+        """Calculate comprehensive backtest metrics from portfolio and trades.
 
-        return calculate_metrics(portfolio, trades, config)
+        This method consolidates metric calculations from the portfolio's equity
+        curve and trade records, applying configuration settings such as:
+        - Risk-free rate for Sharpe ratio calculation
+        - Trading days per year for annualization
+
+        The metrics calculated include:
+        - PnL metrics: total_pnl_usd, net_pnl_usd, total_return_pct, annualized_return_pct
+        - Risk metrics: sharpe_ratio, sortino_ratio, max_drawdown_pct, volatility, calmar_ratio
+        - Trade metrics: win_rate, profit_factor, total_trades, winning_trades, losing_trades
+        - Cost metrics: total_fees_usd, total_slippage_usd, total_gas_usd
+        - Trade stats: avg_trade_pnl_usd, largest_win_usd, largest_loss_usd, avg_win_usd, avg_loss_usd
+
+        Args:
+            portfolio: SimulatedPortfolio with equity curve and trades
+            trades: List of TradeRecord from the backtest
+            config: PnLBacktestConfig with risk_free_rate and trading_days_per_year
+
+        Returns:
+            BacktestMetrics with all calculated performance metrics
+        """
+        if not portfolio.equity_curve:
+            return BacktestMetrics()
+
+        # Extract values for calculations
+        equity_values = [p.value_usd for p in portfolio.equity_curve]
+        timestamps = [p.timestamp for p in portfolio.equity_curve]
+
+        # Initial and final values
+        initial_value = equity_values[0] if equity_values else config.initial_capital_usd
+        final_value = equity_values[-1] if equity_values else config.initial_capital_usd
+
+        # Total PnL (before costs - costs are tracked separately)
+        total_pnl = final_value - initial_value
+
+        # Execution costs from trades
+        total_fees = sum((t.fee_usd for t in trades), Decimal("0"))
+        total_slippage = sum((t.slippage_usd for t in trades), Decimal("0"))
+        total_gas = sum((t.gas_cost_usd for t in trades), Decimal("0"))
+
+        # MEV costs from trades (only non-None values)
+        total_mev = sum(
+            (t.estimated_mev_cost_usd for t in trades if t.estimated_mev_cost_usd is not None),
+            Decimal("0"),
+        )
+
+        # Gas price statistics from trades
+        gas_prices = [t.gas_price_gwei for t in trades if t.gas_price_gwei is not None]
+        avg_gas_price = Decimal("0")
+        max_gas_price = Decimal("0")
+        if gas_prices:
+            avg_gas_price = sum(gas_prices, Decimal("0")) / Decimal(str(len(gas_prices)))
+            max_gas_price = max(gas_prices)
+
+        # Net PnL (same as total since costs are already reflected in equity)
+        # The equity curve already accounts for costs deducted during execution
+        net_pnl = total_pnl
+
+        # Total return percentage
+        total_return = Decimal("0")
+        if initial_value > Decimal("0"):
+            total_return = (final_value - initial_value) / initial_value
+
+        # Calculate annualized return
+        annualized_return = Decimal("0")
+        if len(timestamps) >= 2:
+            duration_days = (timestamps[-1] - timestamps[0]).total_seconds() / (24 * 3600)
+            if duration_days > 0:
+                years = Decimal(str(duration_days)) / Decimal("365")
+                if years > 0:
+                    # Compound annual growth rate (CAGR)
+                    # (1 + total_return) ^ (1/years) - 1
+                    if total_return <= Decimal("-1"):
+                        # Portfolio lost >= 100% (e.g. gas costs exceed principal).
+                        # The base (1 + total_return) is <= 0, so exponentiation is
+                        # undefined for non-integer exponents. Cap at -100%.
+                        annualized_return = Decimal("-1")
+                    else:
+                        annualized_return = (Decimal("1") + total_return) ** (Decimal("1") / years) - Decimal("1")
+
+        # Calculate returns series for risk metrics
+        returns = self._calculate_returns(equity_values)
+
+        # Trading days per year from config (crypto = 365, stocks = 252)
+        trading_days = Decimal(str(config.trading_days_per_year))
+
+        # Volatility (annualized standard deviation of returns)
+        volatility = self._calculate_volatility(returns, trading_days)
+
+        # Sharpe ratio with risk-free rate from config
+        sharpe = self._calculate_sharpe_ratio(
+            returns=returns,
+            volatility=volatility,
+            risk_free_rate=config.risk_free_rate,
+            trading_days=trading_days,
+        )
+
+        # Sortino ratio (downside risk-adjusted return)
+        sortino = self._calculate_sortino_ratio(
+            returns=returns,
+            risk_free_rate=config.risk_free_rate,
+            trading_days=trading_days,
+        )
+
+        # Maximum drawdown
+        max_drawdown = self._calculate_max_drawdown(equity_values)
+
+        # Calmar ratio (annualized return / max drawdown)
+        calmar = Decimal("0")
+        if max_drawdown > Decimal("0"):
+            calmar = annualized_return / max_drawdown
+
+        # Trade statistics
+        winning_trades = [t for t in trades if t.net_pnl_usd > Decimal("0")]
+        losing_trades = [t for t in trades if t.net_pnl_usd <= Decimal("0")]
+
+        # Win rate
+        win_rate = Decimal("0")
+        if trades:
+            win_rate = Decimal(str(len(winning_trades))) / Decimal(str(len(trades)))
+
+        # Profit factor (gross profit / gross loss)
+        gross_profit = sum((t.net_pnl_usd for t in winning_trades), Decimal("0"))
+        gross_loss_sum = sum((t.net_pnl_usd for t in losing_trades), Decimal("0"))
+        gross_loss = abs(gross_loss_sum)
+        profit_factor = Decimal("0")
+        if gross_loss > Decimal("0"):
+            profit_factor = gross_profit / gross_loss
+
+        # Average trade PnL
+        avg_trade_pnl = Decimal("0")
+        if trades:
+            total_trade_pnl = sum((t.net_pnl_usd for t in trades), Decimal("0"))
+            avg_trade_pnl = total_trade_pnl / Decimal(str(len(trades)))
+
+        # Largest win and loss
+        trade_pnls = [t.net_pnl_usd for t in trades]
+        largest_win = max(trade_pnls, default=Decimal("0"))
+        largest_loss = min(trade_pnls, default=Decimal("0"))
+
+        # Average win and loss
+        avg_win = Decimal("0")
+        if winning_trades:
+            winning_pnl_sum = sum((t.net_pnl_usd for t in winning_trades), Decimal("0"))
+            avg_win = winning_pnl_sum / Decimal(str(len(winning_trades)))
+
+        avg_loss = Decimal("0")
+        if losing_trades:
+            losing_pnl_sum = sum((t.net_pnl_usd for t in losing_trades), Decimal("0"))
+            avg_loss = losing_pnl_sum / Decimal(str(len(losing_trades)))
+
+        return BacktestMetrics(
+            total_pnl_usd=total_pnl,
+            net_pnl_usd=net_pnl,
+            sharpe_ratio=sharpe,
+            max_drawdown_pct=max_drawdown,
+            win_rate=win_rate,
+            total_trades=len(trades),
+            profit_factor=profit_factor,
+            total_return_pct=total_return,
+            annualized_return_pct=annualized_return,
+            total_fees_usd=total_fees,
+            total_slippage_usd=total_slippage,
+            total_gas_usd=total_gas,
+            winning_trades=len(winning_trades),
+            losing_trades=len(losing_trades),
+            avg_trade_pnl_usd=avg_trade_pnl,
+            largest_win_usd=largest_win,
+            largest_loss_usd=largest_loss,
+            avg_win_usd=avg_win,
+            avg_loss_usd=avg_loss,
+            volatility=volatility,
+            sortino_ratio=sortino,
+            calmar_ratio=calmar,
+            avg_gas_price_gwei=avg_gas_price,
+            max_gas_price_gwei=max_gas_price,
+            total_gas_cost_usd=total_gas,
+            total_mev_cost_usd=total_mev,
+        )
 
     def _calculate_returns(self, values: list[Decimal]) -> list[Decimal]:
-        """Calculate period-over-period returns. Delegates to metrics_calculator module."""
-        from .metrics_calculator import calculate_returns
+        """Calculate period-over-period returns from equity values.
 
-        return calculate_returns(values)
+        Args:
+            values: List of equity values over time
+
+        Returns:
+            List of returns where returns[i] = (values[i+1] - values[i]) / values[i]
+        """
+        if len(values) < 2:
+            return []
+
+        returns: list[Decimal] = []
+        for i in range(1, len(values)):
+            if values[i - 1] > Decimal("0"):
+                ret = (values[i] - values[i - 1]) / values[i - 1]
+                returns.append(ret)
+        return returns
 
     def _create_gas_price_summary(
         self,
         trades: list[TradeRecord],
     ) -> GasPriceSummary | None:
-        """Create gas price summary from trade records. Delegates to metrics_calculator module."""
-        from .metrics_calculator import create_gas_price_summary
+        """Create gas price summary from trade records.
 
-        return create_gas_price_summary(trades)
+        Calculates summary statistics for gas prices used during the backtest.
+        This method uses the gas_price_gwei values from trades, which are
+        always populated regardless of the track_gas_prices config setting.
+
+        Args:
+            trades: List of trade records from the backtest
+
+        Returns:
+            GasPriceSummary with min, max, mean, std of gas prices, or None if no trades
+        """
+        gas_prices = [t.gas_price_gwei for t in trades if t.gas_price_gwei is not None]
+        if not gas_prices:
+            return None
+
+        # Calculate statistics
+        min_gwei = min(gas_prices)
+        max_gwei = max(gas_prices)
+        mean_gwei = sum(gas_prices, Decimal("0")) / Decimal(len(gas_prices))
+
+        # Calculate standard deviation
+        if len(gas_prices) > 1:
+            variance = sum((g - mean_gwei) ** 2 for g in gas_prices) / Decimal(len(gas_prices))
+            std_gwei = self._decimal_sqrt(variance)
+        else:
+            std_gwei = Decimal("0")
+
+        # Build source breakdown from trade metadata
+        source_counts: dict[str, int] = {}
+        for t in trades:
+            if t.gas_price_gwei is not None:
+                # Get source from metadata if available
+                source = t.metadata.get("gas_price_source", "unknown") if t.metadata else "unknown"
+                source_counts[source] = source_counts.get(source, 0) + 1
+
+        return GasPriceSummary(
+            min_gwei=min_gwei,
+            max_gwei=max_gwei,
+            mean_gwei=mean_gwei,
+            std_gwei=std_gwei,
+            source_breakdown=source_counts,
+            total_records=len(gas_prices),
+        )
 
     def _calculate_volatility(
         self,
         returns: list[Decimal],
         trading_days: Decimal,
     ) -> Decimal:
-        """Calculate annualized volatility. Delegates to metrics_calculator module."""
-        from .metrics_calculator import calculate_volatility
+        """Calculate annualized volatility from returns.
 
-        return calculate_volatility(returns, trading_days)
+        Volatility is the annualized standard deviation of returns:
+        volatility = std_dev(returns) * sqrt(trading_days)
+
+        Args:
+            returns: List of period returns
+            trading_days: Number of trading days per year (365 for crypto, 252 for stocks)
+
+        Returns:
+            Annualized volatility as a decimal (0.2 = 20%)
+        """
+        if len(returns) < 2:
+            return Decimal("0")
+
+        # Calculate mean
+        n = Decimal(str(len(returns)))
+        mean = sum(returns, Decimal("0")) / n
+
+        # Calculate variance (sample variance with n-1)
+        squared_diffs = sum((r - mean) ** 2 for r in returns)
+        variance = squared_diffs / (n - Decimal("1"))
+
+        # Standard deviation
+        std_dev = self._decimal_sqrt(variance)
+
+        # Annualize
+        return std_dev * self._decimal_sqrt(trading_days)
 
     def _calculate_sharpe_ratio(
         self,
@@ -2921,10 +3618,29 @@ class PnLBacktester:
         risk_free_rate: Decimal,
         trading_days: Decimal,
     ) -> Decimal:
-        """Calculate the Sharpe ratio. Delegates to metrics_calculator module."""
-        from .metrics_calculator import calculate_sharpe_ratio
+        """Calculate the Sharpe ratio.
 
-        return calculate_sharpe_ratio(returns, volatility, risk_free_rate, trading_days)
+        Sharpe ratio = (annualized_return - risk_free_rate) / volatility
+
+        Args:
+            returns: List of period returns
+            volatility: Annualized volatility
+            risk_free_rate: Annual risk-free rate from config
+            trading_days: Number of trading days per year
+
+        Returns:
+            Sharpe ratio (risk-adjusted return)
+        """
+        if volatility == Decimal("0") or not returns:
+            return Decimal("0")
+
+        # Calculate annualized mean return
+        n = Decimal(str(len(returns)))
+        mean_return = sum(returns, Decimal("0")) / n
+        annualized_return = mean_return * trading_days
+
+        # Sharpe = (return - risk_free_rate) / volatility
+        return (annualized_return - risk_free_rate) / volatility
 
     def _calculate_sortino_ratio(
         self,
@@ -2932,27 +3648,109 @@ class PnLBacktester:
         risk_free_rate: Decimal,
         trading_days: Decimal,
     ) -> Decimal:
-        """Calculate the Sortino ratio. Delegates to metrics_calculator module."""
-        from .metrics_calculator import calculate_sortino_ratio
+        """Calculate the Sortino ratio (downside deviation based).
 
-        return calculate_sortino_ratio(returns, risk_free_rate, trading_days)
+        Sortino ratio uses only negative returns for the denominator,
+        penalizing only downside volatility rather than all volatility.
+
+        Sortino = (annualized_return - risk_free_rate) / downside_deviation
+
+        Args:
+            returns: List of period returns
+            risk_free_rate: Annual risk-free rate
+            trading_days: Number of trading days per year
+
+        Returns:
+            Sortino ratio
+        """
+        if len(returns) < 2:
+            return Decimal("0")
+
+        # Get negative returns for downside deviation
+        negative_returns = [r for r in returns if r < Decimal("0")]
+        if not negative_returns:
+            # No negative returns means infinite Sortino (capped at 0 for safety)
+            return Decimal("0")
+
+        # Calculate downside deviation
+        # Using the semi-deviation: sqrt(sum(min(r, 0)^2) / n)
+        n = Decimal(str(len(returns)))
+        downside_variance = sum(r**2 for r in negative_returns) / n
+        downside_dev = self._decimal_sqrt(downside_variance)
+
+        if downside_dev == Decimal("0"):
+            return Decimal("0")
+
+        # Annualize
+        annualized_downside = downside_dev * self._decimal_sqrt(trading_days)
+
+        # Calculate annualized return
+        mean_return = sum(returns, Decimal("0")) / n
+        annualized_return = mean_return * trading_days
+
+        return (annualized_return - risk_free_rate) / annualized_downside
 
     def _calculate_max_drawdown(self, values: list[Decimal]) -> Decimal:
-        """Calculate maximum drawdown. Delegates to metrics_calculator module."""
-        from .metrics_calculator import calculate_max_drawdown
+        """Calculate maximum drawdown from an equity curve.
 
-        return calculate_max_drawdown(values)
+        Maximum drawdown is the largest peak-to-trough decline:
+        max_dd = max((peak - trough) / peak) for all peaks and subsequent troughs
+
+        Args:
+            values: List of equity values over time
+
+        Returns:
+            Maximum drawdown as a decimal (0.1 = 10% drawdown)
+        """
+        if len(values) < 2:
+            return Decimal("0")
+
+        max_drawdown = Decimal("0")
+        peak = values[0]
+
+        for value in values:
+            if value > peak:
+                peak = value
+            elif peak > Decimal("0"):
+                drawdown = (peak - value) / peak
+                if drawdown > max_drawdown:
+                    max_drawdown = drawdown
+
+        return max_drawdown
 
     def _decimal_sqrt(self, n: Decimal) -> Decimal:
-        """Calculate square root of a Decimal. Delegates to metrics_calculator module."""
-        from .metrics_calculator import decimal_sqrt
+        """Calculate square root of a Decimal using Newton's method.
 
-        return decimal_sqrt(n)
+        Standard library math.sqrt doesn't support Decimal, so we use
+        Newton's iterative method for arbitrary precision.
+
+        Args:
+            n: Non-negative Decimal value
+
+        Returns:
+            Square root approximation
+
+        Raises:
+            ValueError: If n is negative
+        """
+        if n < Decimal("0"):
+            raise ValueError("Cannot compute sqrt of negative number")
+        if n == Decimal("0"):
+            return Decimal("0")
+
+        # Initial guess
+        x = n
+        # Newton's method: x_new = (x + n/x) / 2
+        for _ in range(50):  # Max iterations
+            x_new = (x + n / x) / Decimal("2")
+            if abs(x_new - x) < Decimal("1e-28"):
+                break
+            x = x_new
+        return x
 
 
 __all__ = [
     "PnLBacktester",
     "BacktestableStrategy",
-    "DataQualityTracker",
     "create_market_snapshot_from_state",
 ]

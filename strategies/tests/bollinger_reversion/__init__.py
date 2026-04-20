@@ -1,5 +1,5 @@
 """Bollinger Bands Reversion Strategy."""
 
-from .strategy import BollingerReversionStrategy
+from strategies.tests.bollinger_reversion.strategy import BollingerReversionStrategy
 
 __all__ = ["BollingerReversionStrategy"]

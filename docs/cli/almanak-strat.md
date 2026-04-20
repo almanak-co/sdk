@@ -31,7 +31,11 @@ Options:
 Commands:
   backtest  Backtesting commands (pnl, sweep, paper, etc.)
   demo      Browse and copy a demo strategy to get started quickly.
+  describe  Retrieve the details of a strategy.
+  list      List all available strategies on the Almanak platform.
   new       Create a new v2 IntentStrategy from template.
+  pull      Downloads your strategy.
+  push      Push a new version of your strategy.
   run       Run a strategy from its working directory.
   teardown  Manage strategy teardowns (close all positions safely).
 ```

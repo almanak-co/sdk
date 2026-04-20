@@ -34,6 +34,7 @@ from .bridge import (
     InvalidBridgeError,
 )
 from .compiler import (
+    AAVE_STABLE_RATE_MODE,
     AAVE_VARIABLE_RATE_MODE,
     DEFAULT_GAS_ESTIMATES,
     LENDING_POOL_ADDRESSES,
@@ -82,14 +83,6 @@ from .state_machine import (
     is_sadflow_state,
     is_validating_state,
 )
-from .tick_utils import (
-    get_max_tick,
-    get_min_tick,
-    get_tick_spacing,
-    price_to_tick,
-    snap_to_tick_spacing,
-    tick_to_price,
-)
 from .vocabulary import (
     PROTOCOL_CAPABILITIES,
     BorrowIntent,
@@ -104,7 +97,6 @@ from .vocabulary import (
     InterestRateMode,
     InvalidAmountError,
     InvalidChainError,
-    InvalidCollateralForMarketError,
     InvalidProtocolParameterError,
     InvalidSequenceError,
     LPCloseIntent,
@@ -129,7 +121,6 @@ from .vocabulary import (
     VaultDepositIntent,
     VaultRedeemIntent,
     WithdrawIntent,
-    WrapNativeIntent,
 )
 
 __all__ = [
@@ -139,7 +130,6 @@ __all__ = [
     "InvalidChainError",
     "InvalidSequenceError",
     "InvalidAmountError",
-    "InvalidCollateralForMarketError",
     "InvalidProtocolParameterError",
     "ProtocolRequiredError",
     "ChainedAmount",
@@ -173,8 +163,7 @@ __all__ = [
     "PredictionTimeInForce",
     "PredictionShareAmount",
     "PredictionExitConditions",
-    # Wrap/Unwrap Native Intents
-    "WrapNativeIntent",
+    # Unwrap Native Intent
     "UnwrapNativeIntent",
     # Bridge Intent
     "BridgeIntent",
@@ -204,6 +193,7 @@ __all__ = [
     "LP_POSITION_MANAGERS",
     "LENDING_POOL_ADDRESSES",
     "AAVE_VARIABLE_RATE_MODE",
+    "AAVE_STABLE_RATE_MODE",
     # State Machine
     "IntentState",
     "IntentStateMachine",
@@ -222,13 +212,6 @@ __all__ = [
     "is_sadflow_state",
     "get_metrics",
     "clear_metrics",
-    # Tick/Price Utilities
-    "price_to_tick",
-    "tick_to_price",
-    "get_tick_spacing",
-    "snap_to_tick_spacing",
-    "get_min_tick",
-    "get_max_tick",
     # Sadflow hooks
     "SadflowActionType",
     "SadflowAction",

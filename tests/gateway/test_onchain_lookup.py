@@ -435,28 +435,3 @@ class TestConstants:
             assert "name" in info, f"{chain} missing name"
             assert "decimals" in info, f"{chain} missing decimals"
             assert info["decimals"] == 18, f"{chain} should have 18 decimals"
-
-
-class TestSSLContextInitialization:
-    """Verify SSL context wiring in OnChainLookup.__init__."""
-
-    def test_init_uses_build_ssl_context(self):
-        """OnChainLookup initializes AsyncHTTPProvider with SSL context from build_ssl_context."""
-        import ssl
-        from unittest.mock import MagicMock, call, patch
-
-        fake_ctx = MagicMock(spec=ssl.SSLContext)
-
-        with patch(
-            "almanak.gateway.utils.ssl_context.build_ssl_context",
-            return_value=fake_ctx,
-        ) as mock_build:
-            with patch("almanak.gateway.services.onchain_lookup.AsyncHTTPProvider") as mock_provider:
-                with patch("almanak.gateway.services.onchain_lookup.AsyncWeb3"):
-                    OnChainLookup(rpc_url="https://test.rpc.example.com")
-
-            mock_build.assert_called_once()
-            mock_provider.assert_called_once_with(
-                "https://test.rpc.example.com",
-                request_kwargs={"ssl": fake_ctx},
-            )

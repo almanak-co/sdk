@@ -15,10 +15,8 @@ Key Features:
 
 import asyncio
 import logging
-import re
 import time
 from typing import Any
-from urllib.parse import quote as _url_quote
 
 import grpc
 
@@ -29,41 +27,13 @@ from almanak.framework.data.tokens import (
     TokenResolutionError,
     get_token_resolver,
 )
-from almanak.framework.data.tokens.exceptions import AmbiguousTokenError
 from almanak.gateway.core.settings import GatewaySettings
-
-# Single source of truth for chain -> CoinGecko platform IDs lives alongside
-# the price source so both search/resolver paths and the contract-address
-# price endpoint use the same mapping.
-from almanak.gateway.data.price.coingecko import COINGECKO_PLATFORM_IDS
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
-from almanak.gateway.services.dexscreener_lookup import (
-    DexScreenerError,
-    chain_slug_for,
-)
-from almanak.gateway.services.dexscreener_lookup import (
-    find_token_address as dexscreener_find_token_address,
-)
 from almanak.gateway.services.onchain_lookup import OnChainLookup, TokenMetadata
-from almanak.gateway.services.spl_mint_lookup import SplMintInfo, SplMintLookup
 from almanak.gateway.utils import get_rpc_url
-from almanak.gateway.validation import (
-    ValidationError,
-    validate_address_for_chain,
-    validate_batch_size,
-    validate_chain,
-)
+from almanak.gateway.validation import ValidationError, validate_address, validate_batch_size, validate_chain
 
 logger = logging.getLogger(__name__)
-
-# EVM address pattern
-_EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
-
-# Solana base58 mint address pattern (32-44 chars; base58 excludes 0, O, I, l)
-_SOLANA_MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
-
-# CoinGecko free-tier search endpoint
-COINGECKO_SEARCH_URL = "https://api.coingecko.com/api/v3/search?query={symbol}"
 
 
 # =============================================================================
@@ -75,13 +45,6 @@ DEFAULT_ONCHAIN_TIMEOUT = 10.0
 
 # Rate limiting: max on-chain lookups per second
 DEFAULT_RATE_LIMIT = 10  # lookups per second
-
-# Marker prefix for ambiguous-symbol errors returned via gRPC NOT_FOUND.
-# The resolver looks for this prefix in the error details string to
-# distinguish ambiguity (which should raise AmbiguousTokenError client-side
-# with the candidate list) from a genuine "not found" (which is safe to
-# negative-cache for 5 minutes).
-AMBIGUOUS_SYMBOL_MARKER = "AMBIGUOUS_SYMBOL"
 
 
 # =============================================================================
@@ -182,17 +145,6 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         # Get the shared TokenResolver instance (no gateway client for circular ref)
         self._resolver = get_token_resolver()
 
-        # Jupiter token lookup (Solana dynamic resolution) -- loaded lazily on first use
-        self._jupiter: Any = None  # JupiterTokenLookup, typed as Any to avoid import cycle
-        self._jupiter_lock = asyncio.Lock()
-
-        # SPL mint RPC lookup (Solana on-chain fallback for any valid mint,
-        # including long-tail tokens Jupiter's curated list doesn't cover).
-        # Lazy-initialised because the Solana RPC URL isn't needed until a
-        # Solana resolution request lands.
-        self._spl_lookup: SplMintLookup | None = None
-        self._spl_lookup_lock = asyncio.Lock()
-
         logger.debug(
             "TokenService initialized",
             extra={
@@ -254,8 +206,6 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         metadata: TokenMetadata,
         success: bool = True,
         error: str = "",
-        *,
-        source: str = "on_chain",
     ) -> gateway_pb2.TokenMetadataResponse:
         """Convert TokenMetadata to gRPC response.
 
@@ -263,10 +213,6 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             metadata: On-chain token metadata
             success: Whether lookup succeeded
             error: Error message if failed
-            source: Provenance of the metadata ("on_chain", "coingecko_dynamic",
-                "dexscreener_dynamic"). The resolver persists this on the
-                ResolvedToken so observability can distinguish dynamic lookups
-                from address-only on-chain queries.
 
         Returns:
             TokenMetadataResponse protobuf message
@@ -278,8 +224,8 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             address=metadata.address,
             decimals=metadata.decimals,
             name=metadata.name or "",
-            is_verified=False,  # Dynamic lookups are not verified
-            source=source,
+            is_verified=False,  # On-chain lookups are not verified
+            source="on_chain",
         )
 
     def _error_response(self, error: str) -> gateway_pb2.TokenMetadataResponse:
@@ -302,427 +248,6 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             source="",
         )
 
-    async def _get_jupiter(self) -> Any:
-        """Get (or lazily load) the JupiterTokenLookup singleton."""
-        if self._jupiter is not None:
-            return self._jupiter
-        async with self._jupiter_lock:
-            if self._jupiter is None:
-                from almanak.gateway.services.jupiter_token_lookup import get_jupiter_lookup
-
-                self._jupiter = await get_jupiter_lookup()
-            return self._jupiter
-
-    async def _get_spl_lookup(self) -> SplMintLookup:
-        """Get (or lazily create) the SplMintLookup for Solana.
-
-        Reuses the gateway's standard RPC configuration via ``get_rpc_url`` —
-        same URL the ExecutionService already uses for signing and submission,
-        so there's no new config surface.
-        """
-        if self._spl_lookup is not None:
-            return self._spl_lookup
-        async with self._spl_lookup_lock:
-            if self._spl_lookup is None:
-                rpc_url = get_rpc_url("solana", network=self.settings.network)
-                self._spl_lookup = SplMintLookup(rpc_url=rpc_url, timeout=self._onchain_timeout)
-            return self._spl_lookup
-
-    def _build_resolved_from_spl(self, info: SplMintInfo) -> ResolvedToken:
-        """Build a ResolvedToken from on-chain SPL mint metadata.
-
-        Symbol and name are not stored in the mint account itself — those live
-        in off-chain registries or (sometimes) Metaplex metadata. We use the
-        mint address as the canonical symbol: unique, unambiguous, and honest
-        about what we know. Consumers that need a human-readable symbol should
-        pass it in via ``register_token()`` alongside the Edge-provided address.
-        """
-        from datetime import UTC, datetime
-
-        from almanak.core.enums import Chain
-        from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
-
-        chain_enum = Chain.SOLANA
-        return ResolvedToken(
-            symbol=info.address,  # mint address as stable identifier
-            address=info.address,
-            decimals=info.decimals,
-            chain=chain_enum,
-            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
-            name=None,
-            coingecko_id=None,
-            is_stablecoin=False,
-            is_native=False,
-            is_wrapped_native=False,
-            canonical_symbol=info.address,
-            bridge_type=BridgeType.NATIVE,
-            source="spl_onchain",
-            is_verified=False,  # on-chain read, no off-chain attestation
-            resolved_at=datetime.now(UTC),
-        )
-
-    async def _try_spl_mint_rpc_lookup(self, mint: str) -> gateway_pb2.TokenMetadataResponse | None:
-        """Resolve a Solana mint via direct SPL mint account RPC read.
-
-        This is the last-resort fallback after Jupiter. Works for any valid
-        SPL/Token-2022 mint, regardless of whether it's in Jupiter's curated
-        list.
-
-        Returns:
-            ``TokenMetadataResponse`` on success, ``None`` on a definitive
-            miss (account does not exist, wrong owner, malformed data,
-            uninitialized mint, decimals out of range).
-
-        Raises:
-            TimeoutError: SPL RPC call timed out.
-            SolanaRpcError: SPL RPC returned an error.
-            Exception: Other network / transport failures.
-
-        Transient errors propagate so the caller can emit the appropriate
-        gRPC status and avoid negative-caching a mint that is actually
-        valid but temporarily unreachable.
-        """
-        lookup = await self._get_spl_lookup()
-        info = await lookup.lookup(mint)
-        if info is None:
-            return None
-
-        # Route through _cache_discovered_token so the first-write-wins
-        # provenance guard applies: an existing higher-ranked entry
-        # (static=100, coingecko_dynamic=60, on_chain=50, jupiter=30) is
-        # preserved, while unranked or lower-ranked entries are replaced.
-        # Without this, a later SPL fallback for a mint that was already
-        # resolved via Jupiter would silently replace a real symbol with
-        # the mint address.
-        metadata = TokenMetadata(
-            symbol=info.address,  # mint address as stable identifier
-            name=None,
-            decimals=info.decimals,
-            address=info.address,
-            is_native=False,
-        )
-        self._cache_discovered_token(metadata, "solana", source="spl_onchain")
-
-        logger.info(
-            "token_onchain_resolved_solana_mint mint=%s decimals=%d owner=%s",
-            mint,
-            info.decimals,
-            info.owner_program,
-        )
-        resolved = self._build_resolved_from_spl(info)
-        return self._resolved_to_response(resolved)
-
-    async def _try_solana_symbol_lookup(self, symbol: str) -> gateway_pb2.TokenMetadataResponse | None:
-        """Try to resolve a Solana token by symbol via Jupiter token list.
-
-        Returns a TokenMetadataResponse on success, None if not found.
-        """
-        try:
-            jupiter = await self._get_jupiter()
-            meta = jupiter.lookup_by_symbol(symbol)
-            if meta is None:
-                return None
-
-            resolved = self._build_resolved_from_jupiter(meta)
-            self._resolver.register(resolved)
-            logger.info(
-                "token_dynamic_resolved_solana: symbol=%s mint=%s decimals=%d",
-                symbol,
-                meta.address,
-                meta.decimals,
-            )
-            return self._resolved_to_response(resolved)
-        except Exception as exc:
-            logger.warning("Jupiter symbol lookup failed for %s: %s", symbol, exc)
-            return None
-
-    async def _try_solana_mint_lookup(self, mint: str) -> gateway_pb2.TokenMetadataResponse | None:
-        """Resolve a Solana mint address with a two-stage fallback.
-
-        Stage 1: Jupiter token list — preferred when present because it gives
-            us a human-readable symbol and name.
-        Stage 2: Direct SPL mint account RPC read — the safety net that
-            guarantees any valid mint resolves with correct decimals, even if
-            Jupiter's curated list doesn't know about it. This is what lets
-            long-tail tokens (new launches, meme coins) work E2E.
-
-        Returns a TokenMetadataResponse on success, None if both stages miss
-        (truly invalid mint) or the RPC is unreachable.
-        """
-        # Stage 1: Jupiter
-        try:
-            jupiter = await self._get_jupiter()
-            meta = jupiter.lookup_by_mint(mint)
-            if meta is not None:
-                resolved = self._build_resolved_from_jupiter(meta)
-                self._resolver.register(resolved)
-                logger.info(
-                    "token_dynamic_resolved_solana_mint: mint=%s symbol=%s decimals=%d",
-                    mint,
-                    meta.symbol,
-                    meta.decimals,
-                )
-                return self._resolved_to_response(resolved)
-        except Exception as exc:
-            logger.warning("Jupiter mint lookup failed for %s: %s", mint, exc)
-            # Fall through to SPL RPC — a Jupiter failure must not block the
-            # on-chain fallback.
-
-        # Stage 2: SPL mint account RPC read
-        return await self._try_spl_mint_rpc_lookup(mint)
-
-    def _build_resolved_from_jupiter(self, meta: Any) -> ResolvedToken:
-        """Build a ResolvedToken from JupiterTokenMetadata."""
-        from datetime import datetime
-
-        from almanak.core.enums import Chain
-        from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
-
-        chain_enum = Chain.SOLANA
-        return ResolvedToken(
-            symbol=meta.symbol,
-            address=meta.address,
-            decimals=meta.decimals,
-            chain=chain_enum,
-            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
-            name=meta.name or None,
-            coingecko_id=None,
-            is_stablecoin=False,
-            is_native=False,
-            is_wrapped_native=False,
-            canonical_symbol=meta.symbol,
-            bridge_type=BridgeType.NATIVE,
-            source="jupiter",
-            is_verified=True,  # Jupiter is a trusted source
-            resolved_at=datetime.now(),
-        )
-
-    async def _try_evm_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
-        """Try to resolve an EVM token by symbol via CoinGecko, then DexScreener.
-
-        Resolution tiers:
-        1. CoinGecko free-tier search (established tokens with broad listings)
-        2. DexScreener symbol search with 4-gate scam-resistance policy
-           (new launches and chains CoinGecko does not index)
-
-        For any positive result, an on-chain ERC20 lookup confirms decimals and
-        name before the address is returned and cached.
-
-        Returns:
-            TokenMetadataResponse on success, None if neither source produced
-            a confirmable address.
-
-        Raises:
-            AmbiguousTokenError: DexScreener found multiple liquid contracts
-                claiming ``symbol`` on ``chain`` with no dominant leader. The
-                caller should surface the message so strategy authors can
-                disambiguate with an explicit address.
-        """
-        # Tier 1: CoinGecko (if the chain is listed)
-        platform = COINGECKO_PLATFORM_IDS.get(chain.lower())
-        if platform:
-            try:
-                cg_address = await self._coingecko_find_address(symbol, platform)
-                if cg_address:
-                    cg_metadata = await self._confirm_address_on_chain(
-                        cg_address,
-                        chain,
-                        expected_symbol=symbol,
-                    )
-                    if cg_metadata is not None:
-                        self._cache_discovered_token(cg_metadata, chain, source="coingecko_dynamic")
-                        logger.info(
-                            "token_dynamic_resolved_evm symbol=%s chain=%s address=%s decimals=%d source=coingecko",
-                            symbol,
-                            chain,
-                            cg_address,
-                            cg_metadata.decimals,
-                        )
-                        return self._metadata_to_response(cg_metadata, source="coingecko_dynamic")
-            except Exception as exc:
-                logger.warning("CoinGecko symbol lookup failed for %s on %s: %s", symbol, chain, exc)
-
-        # Tier 2: DexScreener (primary source on non-CoinGecko chains and new launches)
-        if chain_slug_for(chain) is None:
-            return None
-
-        try:
-            ds_result = await dexscreener_find_token_address(symbol, chain)
-        except AmbiguousTokenError:
-            # Propagate so ResolveToken can surface the candidate list.
-            raise
-        except DexScreenerError as exc:
-            logger.warning("DexScreener API error for %s on %s: %s", symbol, chain, exc)
-            return None
-        except Exception as exc:
-            logger.warning("DexScreener lookup failed for %s on %s: %s", symbol, chain, exc)
-            return None
-
-        if ds_result is None:
-            return None
-
-        ds_metadata = await self._confirm_address_on_chain(
-            ds_result.address,
-            chain,
-            expected_symbol=symbol,
-        )
-        if ds_metadata is None:
-            logger.warning(
-                "dexscreener_onchain_confirm_failed symbol=%s chain=%s address=%s",
-                symbol,
-                chain,
-                ds_result.address,
-            )
-            return None
-
-        self._cache_discovered_token(ds_metadata, chain, source="dexscreener_dynamic")
-        logger.info(
-            "token_dynamic_resolved_evm symbol=%s chain=%s address=%s decimals=%d source=dexscreener liq=%.0f vol24h=%.0f pair_url=%s",
-            symbol,
-            chain,
-            ds_result.address,
-            ds_metadata.decimals,
-            ds_result.liquidity_usd,
-            ds_result.volume_24h_usd,
-            ds_result.pair_url or "",
-        )
-        return self._metadata_to_response(ds_metadata, source="dexscreener_dynamic")
-
-    async def _confirm_address_on_chain(
-        self,
-        address: str,
-        chain: str,
-        *,
-        expected_symbol: str | None = None,
-    ) -> TokenMetadata | None:
-        """Confirm a dynamically-discovered address via on-chain ERC20 lookup.
-
-        Every dynamic-path lookup also passes through the shared RPC rate
-        limiter so a burst of unknown-symbol queries cannot exhaust the
-        Alchemy budget or push the provider into 429s.
-
-        Args:
-            address: EVM contract address to confirm.
-            chain: Chain name.
-            expected_symbol: If provided, the on-chain ``symbol()`` reading
-                must case-insensitively match this value. A mismatch
-                indicates the external data source (DexScreener or
-                CoinGecko) returned a contract whose on-chain identity
-                does not match the requested symbol — treat as untrusted
-                and return ``None``. This is the integrity check that
-                prevents a scam contract reporting ``symbol() = "USDC"``
-                on chain from being silently accepted when a different
-                symbol was requested.
-
-        Returns:
-            TokenMetadata if confirmation succeeds, None otherwise.
-        """
-        # Gate on the same RPC rate limiter used by GetTokenMetadata. Bursts
-        # of unknown-symbol resolves must not bypass the budget.
-        if not await self._rate_limiter.wait_and_acquire(timeout=2.0):
-            logger.warning(
-                "onchain_confirm_rate_limited address=%s chain=%s",
-                address,
-                chain,
-            )
-            return None
-
-        try:
-            lookup = await self._get_onchain_lookup(chain)
-            metadata = await asyncio.wait_for(
-                lookup.lookup(chain, address),
-                timeout=self._onchain_timeout,
-            )
-        except Exception as exc:
-            logger.warning("On-chain confirm failed for %s on %s: %s", address, chain, exc)
-            return None
-
-        if metadata is None:
-            return None
-
-        # Identity check: protect against dynamic sources returning a contract
-        # whose on-chain ``symbol()`` does not match the requested symbol.
-        # Without this, a scam contract that reports ``symbol() = "USDC"`` on
-        # a chain with no static USDC entry would silently resolve to the
-        # attacker address for any ``resolve("USDC", chain)`` call.
-        if expected_symbol is not None:
-            expected = expected_symbol.strip().casefold()
-            got = (metadata.symbol or "").strip().casefold()
-            if expected != got:
-                logger.warning(
-                    "onchain_symbol_mismatch requested=%s got=%s address=%s chain=%s",
-                    expected_symbol,
-                    metadata.symbol,
-                    address,
-                    chain,
-                )
-                return None
-
-        return metadata
-
-    async def _coingecko_find_address(self, symbol: str, platform: str) -> str | None:
-        """Search CoinGecko for a token symbol and return its address on the given platform.
-
-        Uses the free-tier /search endpoint.  Rate limit is ~30 req/min; callers
-        rely on the static-registry cache to avoid repeated calls for the same token.
-        """
-        try:
-            import aiohttp
-
-            url = COINGECKO_SEARCH_URL.format(symbol=_url_quote(symbol, safe=""))
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status != 200:
-                        logger.debug("CoinGecko search HTTP %d for symbol=%s", resp.status, symbol)
-                        return None
-                    data = await resp.json(content_type=None)
-
-            coins = data.get("coins", [])
-            symbol_upper = symbol.upper()
-
-            # Walk candidates in market-cap-rank order (best match first)
-            for coin in coins:
-                if coin.get("symbol", "").upper() != symbol_upper:
-                    continue
-
-                # Fetch the coin details to get platform addresses
-                coin_id = coin.get("id")
-                if not coin_id:
-                    continue
-
-                address = await self._coingecko_get_platform_address(coin_id, platform)
-                if address:
-                    return address
-
-            return None
-
-        except Exception as exc:
-            logger.warning("CoinGecko search error for %s: %s", symbol, exc)
-            return None
-
-    async def _coingecko_get_platform_address(self, coin_id: str, platform: str) -> str | None:
-        """Fetch the contract address for a coin on a specific platform from CoinGecko."""
-        try:
-            import aiohttp
-
-            url = f"https://api.coingecko.com/api/v3/coins/{coin_id}?localization=false&tickers=false&market_data=false&community_data=false&developer_data=false"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status != 200:
-                        return None
-                    data = await resp.json(content_type=None)
-
-            platforms = data.get("platforms", {})
-            raw_address = platforms.get(platform, "")
-            if raw_address and _EVM_ADDRESS_RE.match(raw_address):
-                return raw_address.lower()
-
-            return None
-
-        except Exception as exc:
-            logger.debug("CoinGecko platform address lookup failed for %s/%s: %s", coin_id, platform, exc)
-            return None
-
     async def ResolveToken(
         self,
         request: gateway_pb2.ResolveTokenRequest,
@@ -730,10 +255,8 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
     ) -> gateway_pb2.TokenMetadataResponse:
         """Resolve a token by symbol or address.
 
-        Resolution order:
-        1. Static registry + caches (fast path via TokenResolver)
-        2. For Solana symbols/mints not in registry: Jupiter token list
-        3. For EVM symbols not in registry: CoinGecko search + on-chain confirm
+        Checks: memory cache -> disk cache -> static registry.
+        For addresses not in registry, use GetTokenMetadata for on-chain lookup.
 
         Args:
             request: ResolveTokenRequest with token and chain
@@ -767,8 +290,10 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             context.set_details(str(e))
             return self._error_response(str(e))
 
-        except TokenNotFoundError:
-            pass  # Fall through to dynamic resolution
+        except TokenNotFoundError as e:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(str(e))
+            return self._error_response(str(e))
 
         except TokenResolutionError as e:
             context.set_code(grpc.StatusCode.INTERNAL)
@@ -776,82 +301,10 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             return self._error_response(str(e))
 
         except Exception as e:
-            logger.error("ResolveToken failed for %s on %s: %s", token, chain, e)
+            logger.error(f"ResolveToken failed for {token} on {chain}: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return self._error_response(str(e))
-
-        # Dynamic resolution fallback
-        is_solana = chain.lower() == "solana"
-        # EVM address: 0x-prefixed 42-char hex
-        is_evm_address = bool(_EVM_ADDRESS_RE.match(token))
-        # Solana mint: base58, 32-44 chars (no 0, O, I, l) -- use strict base58 pattern to
-        # avoid false-positives from long symbol names
-        is_solana_mint = is_solana and not is_evm_address and bool(_SOLANA_MINT_RE.match(token))
-
-        if is_solana:
-            if is_solana_mint:
-                # Rate-limit the Solana mint path the same way
-                # GetTokenMetadata does. Without this guard, ResolveToken is
-                # a second unthrottled entry point into the Solana RPC — a
-                # stream of unique base58 mints would sidestep the EVM-side
-                # 10/sec budget entirely.
-                if not await self._rate_limiter.wait_and_acquire(timeout=2.0):
-                    error_msg = "Rate limit exceeded for on-chain lookups"
-                    context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
-                    context.set_details(error_msg)
-                    logger.warning("Rate limited Solana mint lookup for %s", token)
-                    return self._error_response(error_msg)
-                # Catch transient RPC failures so they surface with a
-                # retryable gRPC status instead of escaping as an
-                # uncategorized INTERNAL and poisoning the client-side
-                # negative cache. Mirrors GetTokenMetadata exactly.
-                try:
-                    result = await self._try_solana_mint_lookup(token)
-                except TimeoutError:
-                    error_msg = f"SPL mint RPC lookup timed out for {token}"
-                    context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
-                    context.set_details(error_msg)
-                    logger.warning(error_msg)
-                    return self._error_response(error_msg)
-                except Exception as exc:
-                    error_msg = f"SPL mint RPC lookup failed for {token}: {exc}"
-                    context.set_code(grpc.StatusCode.UNAVAILABLE)
-                    context.set_details(error_msg)
-                    logger.warning(error_msg)
-                    return self._error_response(error_msg)
-            else:
-                # Try Jupiter by symbol
-                result = await self._try_solana_symbol_lookup(token)
-
-            if result is not None:
-                return result
-        else:
-            # EVM: dynamic symbol lookup via CoinGecko -> DexScreener.
-            # Address lookups go through GetTokenMetadata / on-chain ERC20 instead.
-            if not is_evm_address:
-                try:
-                    result = await self._try_evm_symbol_lookup(token, chain)
-                except AmbiguousTokenError as exc:
-                    # DexScreener found multiple liquid contracts with no
-                    # dominant leader -- surface the candidate list so the
-                    # resolver can raise AmbiguousTokenError with the
-                    # addresses on the client side. The error payload is
-                    # prefixed with AMBIGUOUS_SYMBOL_MARKER so the resolver
-                    # can distinguish ambiguity from a plain NOT_FOUND and
-                    # avoid poisoning its negative cache on this path.
-                    candidates = ",".join(exc.matching_addresses)
-                    marker_error = f"{AMBIGUOUS_SYMBOL_MARKER}|addresses={candidates}|{exc}"
-                    context.set_code(grpc.StatusCode.NOT_FOUND)
-                    context.set_details(marker_error)
-                    return self._error_response(marker_error)
-                if result is not None:
-                    return result
-
-        error_msg = f"Token '{token}' not found on {chain} (checked static registry and dynamic resolution)"
-        context.set_code(grpc.StatusCode.NOT_FOUND)
-        context.set_details(error_msg)
-        return self._error_response(error_msg)
 
     async def GetTokenMetadata(
         self,
@@ -881,46 +334,15 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             context.set_details(str(e))
             return self._error_response(str(e))
 
-        # Validate address (chain-aware: accepts EVM hex or Solana base58 based on chain).
-        # Using the plain EVM validator here would reject all SPL mints before
-        # they ever reach the Solana branch below.
+        # Validate address
         try:
-            address = validate_address_for_chain(address, chain, "address")
+            address = validate_address(address, "address")
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return self._error_response(str(e))
 
-        # Fast path: static registry / memory cache / disk cache. Applies
-        # uniformly to EVM and Solana so that pre-registered mints
-        # (``register_token()``) or previously discovered tokens are served
-        # without issuing any external RPC.  ``skip_gateway=True`` keeps the
-        # resolution local — the gateway process must not recurse through
-        # itself for a cache check.
-        try:
-            resolved = self._resolver.resolve(address, chain, skip_gateway=True)
-            return self._resolved_to_response(resolved)
-        except TokenNotFoundError:
-            pass  # Fall through to dynamic lookup
-        except TokenResolutionError as exc:
-            # Ambiguous / invalid-address / resolver-internal failure. Surface
-            # explicitly rather than silently falling through to the RPC
-            # path — the resolver already evaluated the input and the answer
-            # is "can't resolve locally for a non-missing reason".
-            logger.warning(
-                "token_fastpath_resolver_error address=%s chain=%s error=%s",
-                address,
-                chain,
-                exc,
-            )
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(exc))
-            return self._error_response(str(exc))
-
-        # Rate limit the on-chain / dynamic path. Applies to BOTH the EVM
-        # ERC-20 branch and the Solana Jupiter+SPL branch so a strategy that
-        # issues a stream of unique unknown addresses cannot bypass the
-        # service's 10/sec bucket by simply targeting solana.
+        # Check rate limit
         if not await self._rate_limiter.wait_and_acquire(timeout=2.0):
             context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
             error_msg = "Rate limit exceeded for on-chain lookups"
@@ -928,44 +350,15 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             logger.warning(f"Rate limited on-chain lookup for {address} on {chain}")
             return self._error_response(error_msg)
 
-        # Solana: route through the Solana-specific lookup chain (Jupiter,
-        # then direct SPL mint account RPC read). ERC-20 ABI queries are
-        # EVM-only and would just time out against an SPL mint account
-        # layout.
-        if chain.lower() == "solana":
-            try:
-                result = await self._try_solana_mint_lookup(address)
-            except TimeoutError:
-                # Transient: caller must NOT negative-cache.
-                context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
-                error_msg = f"SPL mint RPC lookup timed out for {address}"
-                context.set_details(error_msg)
-                logger.warning(error_msg)
-                return self._error_response(error_msg)
-            except Exception as exc:  # SolanaRpcError + network/transport
-                # Transient: caller must NOT negative-cache. UNAVAILABLE
-                # signals "try again" to the resolver's error handling.
-                context.set_code(grpc.StatusCode.UNAVAILABLE)
-                error_msg = f"SPL mint RPC lookup failed for {address}: {exc}"
-                context.set_details(error_msg)
-                logger.warning(error_msg)
-                return self._error_response(error_msg)
-
-            if result is not None:
-                return result
-            # Definitive miss: Jupiter did not know the mint and the SPL
-            # mint account either does not exist, has the wrong owner, or
-            # fails integrity checks. Safe to negative-cache.
-            error_msg = (
-                f"Could not resolve Solana mint {address}: not in Jupiter token list "
-                f"and the on-chain account is not a valid SPL mint."
-            )
-            context.set_code(grpc.StatusCode.NOT_FOUND)
-            context.set_details(error_msg)
-            return self._error_response(error_msg)
-
         try:
-            # On-chain lookup (EVM)
+            # First try static resolution (fast path)
+            try:
+                resolved = self._resolver.resolve(address, chain)
+                return self._resolved_to_response(resolved)
+            except TokenNotFoundError:
+                pass  # Fall through to on-chain lookup
+
+            # On-chain lookup
             lookup = await self._get_onchain_lookup(chain)
             metadata = await asyncio.wait_for(
                 lookup.lookup(chain, address),
@@ -996,38 +389,12 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             context.set_details(str(e))
             return self._error_response(str(e))
 
-    # Provenance hierarchy: a higher-ranked existing cache entry must never
-    # be overwritten by a newly-discovered (lower-ranked) one. This is the
-    # first-write-wins invariant extended from the static JSON registry into
-    # the in-memory/disk cache.
-    _SOURCE_RANK: dict[str, int] = {
-        "static": 100,
-        "coingecko_dynamic": 60,
-        "on_chain": 50,
-        "dexscreener_dynamic": 40,
-        "jupiter": 30,
-        # SPL on-chain fallback has the correct decimals but no off-chain
-        # symbol/name (we store the mint address as a stand-in). It ranks
-        # below Jupiter so a later Jupiter hit with real metadata can
-        # replace an SPL entry. Do not drop it to 0 / unranked — that
-        # would block ANY future overwrite and pin the low-quality entry.
-        "spl_onchain": 20,
-    }
-
-    def _cache_discovered_token(self, metadata: TokenMetadata, chain: str, *, source: str = "on_chain") -> None:
+    def _cache_discovered_token(self, metadata: TokenMetadata, chain: str) -> None:
         """Cache a discovered token in the resolver.
-
-        Refuses to overwrite an existing cached entry whose source is ranked
-        higher than the incoming one (see ``_SOURCE_RANK``). This prevents
-        a later ``dexscreener_dynamic`` lookup from clobbering a prior
-        ``coingecko_dynamic`` or ``static`` entry for the same address or
-        symbol, which would corrupt long-running gateway state.
 
         Args:
             metadata: On-chain token metadata
             chain: Chain name
-            source: Provenance tag stored on the ResolvedToken (e.g.
-                ``"on_chain"``, ``"dexscreener_dynamic"``, ``"coingecko_dynamic"``).
         """
         try:
             from datetime import datetime
@@ -1046,42 +413,6 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
                 logger.warning(f"Unknown chain {chain} - not caching discovered token")
                 return
 
-            incoming_rank = self._SOURCE_RANK.get(source, 0)
-
-            # Check for an existing cache entry under either the address key
-            # or the symbol key. Using the resolver's own cache guarantees we
-            # see both memory and disk layers. ``skip_gateway=True`` keeps the
-            # lookup local (the gateway process must not recurse through
-            # itself for a cache existence check).
-            def _existing_rank(token: str | None) -> int:
-                if not token:
-                    return -1
-                try:
-                    existing = self._resolver.resolve(token, chain, skip_gateway=True)
-                except TokenResolutionError:
-                    return -1
-                existing_source = getattr(existing, "source", "") or ""
-                return self._SOURCE_RANK.get(existing_source, 0)
-
-            best_existing = max(_existing_rank(metadata.address), _existing_rank(metadata.symbol))
-            # First-write-wins: block BOTH higher-ranked and equal-ranked
-            # overwrites. Two dexscreener_dynamic lookups resolving the same
-            # symbol to different answers must not silently replace each
-            # other — the first one is treated as authoritative for the
-            # session; subsequent conflicting results are logged and dropped.
-            if best_existing >= incoming_rank and best_existing >= 0:
-                logger.info(
-                    "token_dynamic_overwrite_blocked symbol=%s address=%s chain=%s "
-                    "incoming_source=%s incoming_rank=%d existing_rank=%d",
-                    metadata.symbol,
-                    metadata.address,
-                    chain,
-                    source,
-                    incoming_rank,
-                    best_existing,
-                )
-                return
-
             # Create ResolvedToken for caching
             resolved = ResolvedToken(
                 symbol=metadata.symbol,
@@ -1096,7 +427,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
                 is_wrapped_native=False,
                 canonical_symbol=metadata.symbol,
                 bridge_type=BridgeType.NATIVE,
-                source=source,
+                source="on_chain",
                 is_verified=False,
                 resolved_at=datetime.now(),
             )
@@ -1220,9 +551,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
 
         for token in tokens:
             try:
-                # Suppress per-token resolution warnings in batch context to avoid
-                # noisy logs for tokens that don't exist on a chain (e.g. USDT on Base)
-                resolved = self._resolver.resolve(token, chain, log_errors=False)
+                resolved = self._resolver.resolve(token, chain)
                 results.append(self._resolved_to_response(resolved))
 
             except TokenResolutionError as e:
@@ -1279,10 +608,6 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             for lookup in self._onchain_lookups.values():
                 await lookup.close()
             self._onchain_lookups.clear()
-        async with self._spl_lookup_lock:
-            if self._spl_lookup is not None:
-                await self._spl_lookup.close()
-                self._spl_lookup = None
         logger.info("TokenService closed")
 
 

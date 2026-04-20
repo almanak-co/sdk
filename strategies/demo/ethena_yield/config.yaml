@@ -1,0 +1,40 @@
+# Ethena Yield Strategy Configuration
+# ====================================
+#
+# This configuration defines the parameters for the Ethena yield strategy.
+#
+# Configuration Options:
+# ----------------------
+# min_stake_amount: Minimum USDe balance to trigger staking (default: 100 USDe)
+# swap_usdc_to_usde: Enable USDC -> USDe swap via Enso before staking (default: false)
+# min_usdc_amount: Minimum USDC balance to trigger swap (default: 100)
+# max_slippage_pct: Maximum slippage for USDC -> USDe swap (default: 0.5%)
+# force_action: Force a specific action for testing ("stake", "swap", or "")
+
+# Minimum USDe balance required to trigger staking
+# Set this based on gas costs - staking small amounts may not be worth the gas
+min_stake_amount: "5"
+
+# =============================================================================
+# OPTIONAL: USDC -> USDe Swap via Enso
+# =============================================================================
+# If you have USDC instead of USDe, enable this to automatically swap
+# USDC to USDe via Enso aggregator before staking.
+
+# Enable USDC -> USDe swap (set to true if you want to start with USDC)
+swap_usdc_to_usde: false
+
+# Minimum USDC balance required to trigger the swap
+min_usdc_amount: "5"
+
+# Maximum slippage for the USDC -> USDe swap (as percentage)
+# 0.5 = 0.5% slippage tolerance
+max_slippage_pct: 0.5
+
+# =============================================================================
+# Testing
+# =============================================================================
+
+# Force action for testing (leave empty for normal operation)
+# Options: "stake", "swap", ""
+force_action: ""

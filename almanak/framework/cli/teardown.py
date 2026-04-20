@@ -1,5 +1,3 @@
-# MULTI-WALLET: Teardown currently uses a single wallet address. When multi-wallet
-# support is enabled, teardown must iterate per-chain wallets to close all positions.
 """CLI command for managing strategy teardowns.
 
 Usage:
@@ -22,8 +20,8 @@ Usage:
 
 Examples:
     # Direct execution (recommended)
-    almanak strat teardown -d almanak/demo_strategies/aerodrome_lp --preview
-    almanak strat teardown -d almanak/demo_strategies/aave_borrow --mode graceful
+    almanak strat teardown -d strategies/demo/aerodrome_lp --preview
+    almanak strat teardown -d strategies/demo/aave_borrow --mode graceful
 
     # Async request (picked up by strategy runner)
     almanak strat teardown request --strategy uniswap_lp --mode graceful
@@ -48,7 +46,6 @@ import click
 logger = logging.getLogger(__name__)
 
 from ..teardown import (
-    PositionType,
     TeardownAssetPolicy,
     TeardownMode,
     TeardownRequest,
@@ -142,27 +139,15 @@ def load_strategy_from_file(file_path: Path) -> tuple[type | None, str | None]:
         finally:
             sys.path.remove(strategy_dir)
 
-        # Find concrete IntentStrategy subclasses (skip abstract base classes
-        # like StatelessStrategy that may be imported but not instantiable).
+        # Find IntentStrategy subclasses
         strategy_classes = []
         for name in dir(module):
             obj = getattr(module, name)
-            if (
-                isinstance(obj, type)
-                and obj is not IntentStrategy
-                and issubclass(obj, IntentStrategy)
-                and not getattr(obj, "__abstractmethods__", frozenset())
-            ):
+            if isinstance(obj, type) and obj is not IntentStrategy and issubclass(obj, IntentStrategy):
                 strategy_classes.append(obj)
 
         if not strategy_classes:
-            return None, "No concrete IntentStrategy subclass found in file"
-
-        # Prefer the most-derived class (defined in this file, not just imported)
-        if len(strategy_classes) > 1:
-            local_classes = [c for c in strategy_classes if c.__module__ == module.__name__]
-            if local_classes:
-                strategy_classes = local_classes
+            return None, "No IntentStrategy subclass found in file"
 
         return strategy_classes[0], None
 
@@ -206,7 +191,7 @@ def _restore_strategy_state_for_teardown(
     gateway_client: Any,
 ) -> None:
     """Restore strategy state before computing teardown positions."""
-    if not hasattr(strategy, "set_state_manager"):
+    if not hasattr(strategy, "set_state_manager") or not hasattr(strategy, "load_state"):
         logger.debug("Strategy %s does not expose state persistence hooks", strategy_class.__name__)
         return
 
@@ -227,14 +212,7 @@ def _restore_strategy_state_for_teardown(
             continue
 
         try:
-            if hasattr(strategy, "load_state_async"):
-                loaded = asyncio.run(strategy.load_state_async())
-            elif hasattr(strategy, "load_state"):
-                loaded = strategy.load_state()
-            else:
-                loaded = False
-
-            if loaded:
+            if strategy.load_state():
                 logger.info("Restored strategy state for teardown (strategy_id=%s)", strategy_id)
                 return
             logger.info("No persisted strategy state for strategy_id=%s", strategy_id)
@@ -358,27 +336,6 @@ def teardown():
     default=False,
     help="Do not auto-start a gateway; connect to an existing one.",
 )
-@click.option(
-    "--discover",
-    "discover",
-    is_flag=True,
-    default=False,
-    help=(
-        "Discover LP positions on-chain instead of relying on the strategy's "
-        "local state. Use this when the gateway was restarted, when local "
-        "state is lost, or when closing orphaned positions from a prior run."
-    ),
-)
-@click.option(
-    "--include-empty",
-    is_flag=True,
-    default=False,
-    help=(
-        "When used with --discover, also surface zero-liquidity NFT positions "
-        "(already withdrawn but not burned). Useful for cleaning up residual "
-        "NFTs."
-    ),
-)
 def execute_teardown(
     working_dir: str,
     config_file: str | None,
@@ -388,8 +345,6 @@ def execute_teardown(
     gateway_host: str,
     gateway_port: int,
     no_gateway: bool,
-    discover: bool,
-    include_empty: bool,
 ):
     """Execute teardown directly from a strategy working directory.
 
@@ -401,19 +356,19 @@ def execute_teardown(
     Examples:
 
         # Preview what will be closed (auto-starts gateway)
-        almanak strat teardown execute -d almanak/demo_strategies/aerodrome_lp --preview
+        almanak strat teardown execute -d strategies/demo/aerodrome_lp --preview
 
         # Execute graceful teardown
-        almanak strat teardown execute -d almanak/demo_strategies/aerodrome_lp
+        almanak strat teardown execute -d strategies/demo/aerodrome_lp
 
         # Emergency teardown (faster, accepts higher slippage)
-        almanak strat teardown execute -d almanak/demo_strategies/aave_borrow --mode emergency
+        almanak strat teardown execute -d strategies/demo/aave_borrow --mode emergency
 
         # Connect to an existing gateway instead of auto-starting
-        almanak strat teardown execute -d almanak/demo_strategies/uniswap_lp --no-gateway
+        almanak strat teardown execute -d strategies/demo/uniswap_lp --no-gateway
 
         # Skip confirmation
-        almanak strat teardown execute -d almanak/demo_strategies/uniswap_lp --force
+        almanak strat teardown execute -d strategies/demo/uniswap_lp --force
     """
     import os
 
@@ -620,87 +575,28 @@ def execute_teardown(
         click.echo(f"Mode: {mode}")
         click.echo("-" * 60)
 
-        # Get positions. --discover bypasses the strategy's local state and
-        # reads NPM contracts directly via the gateway, so orphaned positions
-        # (e.g. after a gateway restart lost the in-memory tracking) remain
-        # recoverable. Without --discover, the strategy's own tracking is
-        # authoritative — it knows value_usd, health factors, and
-        # non-LP positions the on-chain scan wouldn't surface.
-        if discover:
-            from ..teardown.discovery import discover_lp_positions, to_teardown_summary
-
-            click.echo("\nDiscovering LP positions on-chain...")
-
-            async def _do_discover():
-                return await discover_lp_positions(
-                    client=gateway_client,
-                    chain=chain,
-                    wallet=wallet_address,
-                    include_zero_liquidity=include_empty,
-                )
-
-            try:
-                discovered = asyncio.run(_do_discover())
-            except Exception as e:
-                raise click.ClickException(f"On-chain discovery failed: {e}") from None
-
-            positions = to_teardown_summary(
-                strategy_id=getattr(strategy, "strategy_id", strategy_class.__name__),
-                chain=chain,
-                positions=discovered,
-            )
-            click.echo(f"  Found {len(discovered)} on-chain LP position(s).")
-        else:
-            try:
-                positions = strategy.get_open_positions()
-            except Exception as e:
-                raise click.ClickException(f"Failed to get positions: {e}") from None
+        # Get positions
+        try:
+            positions = strategy.get_open_positions()
+        except Exception as e:
+            raise click.ClickException(f"Failed to get positions: {e}") from None
 
         if not positions.positions:
             click.echo("\nNo open positions found. Nothing to teardown.")
-            if not discover:
-                click.echo(
-                    "Tip: if positions were opened by a previous gateway instance, "
-                    "rerun with --discover to scan NPM contracts on-chain."
-                )
             return
 
         # Display positions
         click.echo(f"\nOpen Positions ({len(positions.positions)}):")
         total_value = Decimal("0")
-        unknown_value_count = 0
         for i, pos in enumerate(positions.positions, 1):
             click.echo(f"  {i}. [{pos.position_type.value}] {pos.protocol} on {pos.chain}")
             click.echo(f"     Position ID: {pos.position_id}")
-            # Some test doubles don't expose `details` — tolerate that while
-            # still checking the flag on real PositionInfo instances.
-            pos_details = getattr(pos, "details", None) or {}
-            if pos_details.get("value_usd_unknown"):
-                click.echo("     Value: unknown (discovered on-chain, not priced)")
-                unknown_value_count += 1
-            else:
-                click.echo(f"     Value: ${pos.value_usd:,.2f}")
+            click.echo(f"     Value: ${pos.value_usd:,.2f}")
             if pos.health_factor:
                 click.echo(f"     Health Factor: {pos.health_factor:.2f}")
             total_value += pos.value_usd
 
         click.echo(f"\nTotal Value: ${total_value:,.2f}")
-
-        # Loud warning when --discover couldn't price positions. SafetyGuard
-        # uses total_value_usd to pick the loss cap, and $0 maps to the
-        # *most permissive* 3% tier (calculate_max_acceptable_loss). A
-        # mispriced $1M LP would otherwise get the same cap as a $100
-        # position. Flag this so the operator knows to double-check
-        # (CodeRabbit major, PR #1522).
-        if unknown_value_count > 0:
-            click.echo()
-            click.secho(
-                f"WARNING: {unknown_value_count} position(s) discovered without USD pricing. "
-                "Teardown safety caps will be computed as if total value = $0, which uses the "
-                "MOST PERMISSIVE loss tier. Review the tick ranges above before executing.",
-                fg="yellow",
-                bold=True,
-            )
 
         # Create market snapshot early so the preview intents match what will execute
         market = None
@@ -716,41 +612,18 @@ def execute_teardown(
         except Exception as e:
             click.echo(f"\n  Warning: Could not get market prices ({e}), using placeholders")
 
-        # Generate teardown intents with market so preview matches execution.
-        # In --discover mode the strategy has no record of the discovered
-        # positions, so we synthesize LPCloseIntents directly from the NPM
-        # data instead of calling strategy.generate_teardown_intents().
+        # Generate teardown intents with market so preview matches execution
         internal_mode = TeardownMode.SOFT if mode == "graceful" else TeardownMode.HARD
-        if discover:
-            from ..intents.vocabulary import LPCloseIntent
-
-            # Graceful teardowns collect fees (extra tx per position, but
-            # captures accrued yield). Emergency teardowns skip fee collection
-            # to minimise wall-clock time and gas — the operator has already
-            # signalled "close fast, accept worst case" by picking emergency
-            # mode, so the extra collect() call is not worth the delay.
-            collect_fees_default = internal_mode == TeardownMode.SOFT
-            intents = [
-                LPCloseIntent(
-                    position_id=pos.position_id,
-                    protocol=pos.protocol,
-                    chain=pos.chain,
-                    collect_fees=collect_fees_default,
-                )
-                for pos in positions.positions
-                if pos.position_type == PositionType.LP
-            ]
-        else:
+        try:
             try:
-                try:
-                    intents = strategy.generate_teardown_intents(internal_mode, market=market)
-                except TypeError as exc:
-                    if "market" in str(exc):
-                        intents = strategy.generate_teardown_intents(internal_mode)
-                    else:
-                        raise
-            except Exception as e:
-                raise click.ClickException(f"Failed to generate teardown intents: {e}") from None
+                intents = strategy.generate_teardown_intents(internal_mode, market=market)
+            except TypeError as exc:
+                if "market" in str(exc):
+                    intents = strategy.generate_teardown_intents(internal_mode)
+                else:
+                    raise
+        except Exception as e:
+            raise click.ClickException(f"Failed to generate teardown intents: {e}") from None
 
         click.echo(f"\nTeardown Steps ({len(intents)}):")
         for i, intent in enumerate(intents, 1):
@@ -795,35 +668,23 @@ def execute_teardown(
             config=compiler_config,
         )
 
-        # Create teardown manager with state persistence (VIB-2924)
-        from almanak.framework.teardown.state_manager import TeardownStateAdapter
-
-        teardown_state_adapter = TeardownStateAdapter()
+        # Create teardown manager
         teardown_manager = TeardownManager(
             orchestrator=orchestrator,  # type: ignore[arg-type]  # duck-typed orchestrator
             compiler=compiler,
-            state_manager=teardown_state_adapter,
         )
 
-        # Execute with progress callback. When --discover is active the
-        # strategy has no knowledge of the on-chain-discovered positions, so
-        # pass the already-built summary and intents straight through;
-        # otherwise let the manager derive them from the strategy as normal.
+        # Execute with progress callback
         async def run_teardown():
             async def on_progress(pct: int, msg: str):
                 click.echo(f"  [{pct}%] {msg}")
 
-            kwargs = {
-                "strategy": strategy,
-                "mode": mode,
-                "on_progress": on_progress,
-                "market": market,
-            }
-            if discover:
-                kwargs["precomputed_positions"] = positions
-                kwargs["precomputed_intents"] = intents
-
-            result = await teardown_manager.execute(**kwargs)
+            result = await teardown_manager.execute(
+                strategy=strategy,
+                mode=mode,
+                on_progress=on_progress,
+                market=market,
+            )
             return result
 
         try:

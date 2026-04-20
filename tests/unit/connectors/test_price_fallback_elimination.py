@@ -17,7 +17,6 @@ from almanak.framework.connectors.enso.client import EnsoConfig
 from almanak.framework.connectors.lifi.adapter import LiFiAdapter
 from almanak.framework.connectors.lifi.client import LiFiConfig
 from almanak.framework.connectors.uniswap_v3.adapter import UniswapV3Adapter, UniswapV3Config
-from almanak.framework.data import PriceUnavailableError
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.intents.vocabulary import SwapIntent
 
@@ -87,7 +86,7 @@ def _make_swap_intent_amount(from_token="USDC", to_token="WETH", amount=1000):
 
 
 class TestLiFiPriceFallback:
-    """LiFi adapter: _resolve_amount must raise PriceUnavailableError when price is missing."""
+    """LiFi adapter: _resolve_amount must return None when price is missing."""
 
     @pytest.fixture
     def adapter(self):
@@ -107,25 +106,19 @@ class TestLiFiPriceFallback:
             token_resolver=_mock_token_resolver(),
         )
 
-    def test_missing_price_raises(self, adapter):
-        """amount_usd with missing ETH price must raise PriceUnavailableError."""
+    def test_missing_price_returns_none(self, adapter):
+        """amount_usd with missing ETH price must return None, not use $1."""
         intent = _make_swap_intent_usd(from_token="ETH", amount_usd=1000)
         price_oracle = {"USDC": Decimal("1")}  # No ETH price
-        with pytest.raises(PriceUnavailableError, match="ETH"):
-            adapter._resolve_amount(intent, price_oracle)
+        result = adapter._resolve_amount(intent, price_oracle)
+        assert result is None
 
-    def test_zero_price_raises(self, adapter):
-        """amount_usd with zero price must raise PriceUnavailableError."""
+    def test_zero_price_returns_none(self, adapter):
+        """amount_usd with zero price must return None."""
         intent = _make_swap_intent_usd(from_token="ETH", amount_usd=1000)
         price_oracle = {"ETH": Decimal("0"), "USDC": Decimal("1")}
-        with pytest.raises(PriceUnavailableError, match="ETH"):
-            adapter._resolve_amount(intent, price_oracle)
-
-    def test_missing_price_propagates_through_compile(self, adapter):
-        """compile_swap_intent must re-raise PriceUnavailableError, not swallow it."""
-        intent = _make_swap_intent_usd(from_token="ETH", amount_usd=1000)
-        with pytest.raises(PriceUnavailableError, match="ETH"):
-            adapter.compile_swap_intent(intent, price_oracle={"USDC": Decimal("1")})
+        result = adapter._resolve_amount(intent, price_oracle)
+        assert result is None
 
     def test_valid_price_works(self, adapter_with_prices):
         """amount_usd with valid price returns correct amount."""
@@ -148,7 +141,7 @@ class TestLiFiPriceFallback:
 
 
 class TestEnsoPriceFallback:
-    """Enso adapter: compile_swap_intent must raise PriceUnavailableError when price missing."""
+    """Enso adapter: compile_swap_intent must return error bundle when price missing."""
 
     @pytest.fixture
     def adapter(self):
@@ -169,19 +162,24 @@ class TestEnsoPriceFallback:
             adapter._price_provider = {"USDC": Decimal("1")}  # No ETH
             return adapter
 
-    def test_missing_price_raises(self, adapter):
-        """amount_usd with missing ETH price must raise PriceUnavailableError."""
+    def test_missing_price_returns_error_bundle(self, adapter):
+        """amount_usd with missing ETH price must return error bundle."""
         intent = _make_swap_intent_usd(from_token="ETH", amount_usd=1000)
         price_oracle = {"USDC": Decimal("1")}  # No ETH
-        with pytest.raises(PriceUnavailableError, match="ETH"):
-            adapter.compile_swap_intent(intent, price_oracle=price_oracle)
+        bundle = adapter.compile_swap_intent(intent, price_oracle=price_oracle)
+        assert len(bundle.transactions) == 0
+        assert "error" in bundle.metadata
+        assert "Price unavailable" in bundle.metadata["error"]
+        assert "ETH" in bundle.metadata["error"]
 
-    def test_zero_price_raises(self, adapter):
-        """amount_usd with zero price must raise PriceUnavailableError."""
+    def test_zero_price_returns_error_bundle(self, adapter):
+        """amount_usd with zero price must return error bundle."""
         intent = _make_swap_intent_usd(from_token="ETH", amount_usd=1000)
         price_oracle = {"ETH": Decimal("0"), "USDC": Decimal("1")}
-        with pytest.raises(PriceUnavailableError, match="ETH"):
-            adapter.compile_swap_intent(intent, price_oracle=price_oracle)
+        bundle = adapter.compile_swap_intent(intent, price_oracle=price_oracle)
+        assert len(bundle.transactions) == 0
+        assert "error" in bundle.metadata
+        assert "Price unavailable" in bundle.metadata["error"]
 
 
 # =============================================================================
@@ -190,7 +188,7 @@ class TestEnsoPriceFallback:
 
 
 class TestUniswapV3PriceFallback:
-    """Uniswap V3 adapter: compile_swap_intent must raise PriceUnavailableError when price missing."""
+    """Uniswap V3 adapter: compile_swap_intent must raise ValueError when price missing."""
 
     @pytest.fixture
     def adapter(self):
@@ -201,33 +199,31 @@ class TestUniswapV3PriceFallback:
         )
         return UniswapV3Adapter(config, token_resolver=_mock_token_resolver())
 
-    def test_missing_price_raises(self, adapter):
-        """amount_usd with missing ETH price must raise PriceUnavailableError."""
+    def test_missing_price_raises_valueerror(self, adapter):
+        """amount_usd with missing ETH price must raise ValueError."""
         intent = _make_swap_intent_usd(from_token="ETH", amount_usd=1000)
         price_oracle = {"USDC": Decimal("1")}
-        with pytest.raises(PriceUnavailableError, match="ETH"):
+        with pytest.raises(ValueError, match="Price unavailable.*ETH"):
             adapter.compile_swap_intent(intent, price_oracle=price_oracle)
 
-    def test_zero_price_raises(self, adapter):
-        """amount_usd with zero price must raise PriceUnavailableError."""
+    def test_zero_price_raises_valueerror(self, adapter):
+        """amount_usd with zero price must raise ValueError."""
         intent = _make_swap_intent_usd(from_token="ETH", amount_usd=1000)
         price_oracle = {"ETH": Decimal("0"), "USDC": Decimal("1")}
-        with pytest.raises(PriceUnavailableError, match="ETH"):
+        with pytest.raises(ValueError, match="Price unavailable.*ETH"):
             adapter.compile_swap_intent(intent, price_oracle=price_oracle)
 
-    def test_valid_price_does_not_raise_priceerror(self, adapter):
-        """amount_usd with valid price should not raise PriceUnavailableError."""
+    def test_valid_price_does_not_raise(self, adapter):
+        """amount_usd with valid price should not raise."""
         intent = _make_swap_intent_usd(from_token="USDC", to_token="WETH", amount_usd=1000)
         price_oracle = {"USDC": Decimal("1"), "WETH": Decimal("3400")}
-        # Should not raise PriceUnavailableError -- may fail downstream
-        # (swap_exact_input mocked) but the price resolution path should succeed.
+        # Should not raise -- may fail downstream (swap_exact_input mocked) but
+        # the price resolution path should succeed
         try:
             adapter.compile_swap_intent(intent, price_oracle=price_oracle)
-        except PriceUnavailableError:
-            raise
-        except Exception:
-            # Downstream failures (e.g. no pool) are fine for this test.
-            pass
+        except ValueError as e:
+            # Only fail if the error is about price -- other ValueError is fine
+            assert "Price unavailable" not in str(e)
 
 
 # =============================================================================

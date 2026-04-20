@@ -79,8 +79,8 @@ LIDO_CLAIM_WITHDRAWALS_SELECTOR = "0x85e8362f"
 # Gas estimates for Lido operations
 DEFAULT_GAS_ESTIMATES: dict[str, int] = {
     "stake": 100000,
-    "wrap": 200000,  # wstETH.wrap() calls stETH.transferFrom() via proxy -- needs >80K
-    "unwrap": 200000,  # wstETH.unwrap() similarly calls stETH.transfer() via proxy
+    "wrap": 80000,
+    "unwrap": 80000,
     "request_withdrawal": 150000,  # Base gas, add ~30k per additional request
     "claim_withdrawal": 100000,  # Base gas, add ~20k per additional request
 }
@@ -560,16 +560,13 @@ class LidoAdapter:
                     },
                 )
 
-            # Approve wstETH contract to spend stETH using MAX_UINT256.
+            # Approve wstETH contract to spend stETH
             # stETH uses a proxy contract with rebasing share-based logic,
             # requiring higher gas than standard ERC-20 approve (~46K on mainnet).
             # 80K provides safe headroom for proxy overhead.
-            # MAX_UINT256 is the standard approval pattern for rebasing tokens:
-            # exact-amount approvals can fail because stETH share-based math may
-            # yield 1-2 wei less than the approved amount on the next block.
             steth_approve_gas = 80000
-            _MAX_UINT256 = 2**256 - 1
-            approve_data = "0x095ea7b3" + self._pad_address(self.wsteth_address) + self._pad_uint256(_MAX_UINT256)
+            amount_wei = int(amount * Decimal(10**18))
+            approve_data = "0x095ea7b3" + self._pad_address(self.wsteth_address) + self._pad_uint256(amount_wei)
             transactions.append(
                 {
                     "to": self.steth_address,
@@ -582,13 +579,7 @@ class LidoAdapter:
             )
             total_gas += steth_approve_gas
 
-            # Subtract a small fixed wei buffer to account for stETH rebasing share
-            # rounding: staking X ETH may yield 1-2 wei less than X stETH.
-            # The rounding error is constant in wei, not proportional to amount.
-            rounding_buffer_wei = 2
-            wrap_amount_wei = int(amount * Decimal(10**18)) - rounding_buffer_wei
-            wrap_amount = Decimal(wrap_amount_wei) / Decimal(10**18)
-            wrap_result = self.wrap(wrap_amount)
+            wrap_result = self.wrap(amount)
             if not wrap_result.success or wrap_result.tx_data is None:
                 return ActionBundle(
                     intent_type="STAKE",

@@ -992,7 +992,7 @@ class TestRSIBacktestVisual:
         print(f"  Sell signals (RSI>70): {len(sell_signals)}")
         print(f"Total trades: {result.metrics.total_trades}")
         print(f"Final portfolio value: ${result.final_capital_usd:.2f}")
-        print(f"Total return: {result.metrics.total_return_pct:.2f}%")
+        print(f"Total return: {result.metrics.total_return_pct * 100:.2f}%")
 
         # Generate visualization
         output_path = OUTPUT_DIR / "rsi_backtest.png"
@@ -1090,7 +1090,7 @@ class TestRSIBacktestVisual:
         print(f"  Sell signals (RSI>70): {len(sell_signals)}")
         print(f"Total trades: {result.metrics.total_trades}")
         print(f"Final portfolio value: ${result.final_capital_usd:.2f}")
-        print(f"Total return: {result.metrics.total_return_pct:.2f}%")
+        print(f"Total return: {result.metrics.total_return_pct * 100:.2f}%")
 
         # Calculate equity curve for additional statistics
         equity_curve = calculate_equity_curve(

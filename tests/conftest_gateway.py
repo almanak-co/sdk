@@ -325,19 +325,8 @@ class AnvilFixture:
         asyncio.set_event_loop(self._loop)
 
         try:
-            # RollingForkManager uses canonical chain names (bsc, not bnb). The
-            # older "bnb" alias was removed from fork_manager's chain registry —
-            # passing "bnb" now raises "Unsupported chain 'bnb'". Keep the chain
-            # key as-is; the rpc_provider still accepts "bnb" for env-var lookup.
-            chain_for_manager = self.chain
-
-            # Allow pinning the fork block via env var to maximise --cache-path hit rate.
-            # Use chain-specific var first (e.g. ANVIL_FORK_BLOCK_ARBITRUM), then generic.
-            fork_block_env = (
-                os.environ.get(f"ANVIL_FORK_BLOCK_{chain_for_manager.upper()}")
-                or os.environ.get("ANVIL_FORK_BLOCK")
-            )
-            fork_block_number = int(fork_block_env) if fork_block_env else None
+            # Map bsc -> bnb for RollingForkManager (which uses bnb internally)
+            chain_for_manager = "bnb" if self.chain == "bsc" else self.chain
 
             self._manager = RollingForkManager(
                 rpc_url=self.fork_rpc_url,
@@ -345,7 +334,6 @@ class AnvilFixture:
                 anvil_port=self.port,
                 auto_impersonate=True,
                 startup_timeout_seconds=60.0,  # Match AnvilFixture.start() timeout
-                fork_block_number=fork_block_number,
             )
 
             # Start Anvil
@@ -458,14 +446,11 @@ class GatewayServerThread:
 # =============================================================================
 
 
-def _create_anvil_fixture(chain: str, public_rpc_fallback: str | None = None):
+def _create_anvil_fixture(chain: str):
     """Factory function to create Anvil fixtures for each chain.
 
     Args:
         chain: Chain name (e.g., "arbitrum", "base")
-        public_rpc_fallback: Optional public RPC URL to use if the chain is not
-            yet enabled on the user's Alchemy app. Seeded into ``<CHAIN>_RPC_URL``
-            env var so ``get_rpc_url`` picks it up via the chain-specific override.
 
     Returns:
         A pytest fixture function
@@ -477,45 +462,23 @@ def _create_anvil_fixture(chain: str, public_rpc_fallback: str | None = None):
     @pytest.fixture(scope="session")
     def anvil_fixture() -> Generator[AnvilFixture, None, None]:
         """Start Anvil fork (auto-started, dynamic port)."""
-        # Seed chain-specific RPC override for chains with gated Alchemy access
-        # (e.g., Monad — mainnet access requires per-app enablement on Alchemy).
-        # The seeded env var must be restored on EVERY exit path (including
-        # pre-yield skips/failures) to prevent session-wide leakage.
-        env_var = f"{chain.upper()}_RPC_URL"
-        restore_env: str | None = os.environ.get(env_var)
-        set_env = False
-        anvil: AnvilFixture | None = None
+        try:
+            # Get mainnet RPC URL to fork from
+            fork_rpc_url = get_rpc_url(rpc_chain_name, network="mainnet")
+        except ValueError as e:
+            pytest.skip(f"Cannot start Anvil for {chain}: {e}")
+            return
 
-        if public_rpc_fallback and not restore_env:
-            os.environ[env_var] = public_rpc_fallback
-            set_env = True
+        anvil = AnvilFixture(chain=chain, fork_rpc_url=fork_rpc_url)
 
         try:
-            try:
-                # Get mainnet RPC URL to fork from
-                fork_rpc_url = get_rpc_url(rpc_chain_name, network="mainnet")
-            except ValueError as e:
-                pytest.skip(f"Cannot start Anvil for {chain}: {e}")
-                return
+            anvil.start()
+        except RuntimeError as e:
+            pytest.skip(f"Failed to start Anvil for {chain}: {e}")
+            return
 
-            anvil = AnvilFixture(chain=chain, fork_rpc_url=fork_rpc_url)
-
-            try:
-                anvil.start()
-            except RuntimeError as e:
-                pytest.skip(f"Failed to start Anvil for {chain}: {e}")
-                return
-
-            try:
-                yield anvil
-            finally:
-                anvil.stop()
-        finally:
-            if set_env:
-                if restore_env is None:
-                    os.environ.pop(env_var, None)
-                else:
-                    os.environ[env_var] = restore_env
+        yield anvil
+        anvil.stop()
 
     return anvil_fixture
 
@@ -529,11 +492,6 @@ anvil_bsc = _create_anvil_fixture("bsc")
 anvil_optimism = _create_anvil_fixture("optimism")
 anvil_polygon = _create_anvil_fixture("polygon")
 anvil_mantle = _create_anvil_fixture("mantle")
-# Monad: Alchemy mainnet is gated per-app; default to public RPC which has been
-# verified (2026-04-18) to serve historical state sufficient for Anvil forking.
-anvil_monad = _create_anvil_fixture("monad", public_rpc_fallback="https://rpc.monad.xyz")
-anvil_xlayer = _create_anvil_fixture("xlayer")
-anvil_zerog = _create_anvil_fixture("zerog")
 
 
 # =============================================================================
@@ -687,8 +645,6 @@ CHAIN_ANVIL_PORTS = {
     "optimism": 8550,
     "polygon": 8551,
     "mantle": 8556,
-    "monad": 8555,  # Matches anvil_port in almanak/gateway/utils/rpc_provider.py
-    "zerog": 8558,
 }
 # Alias for internal use
 _DEFAULT_ANVIL_PORTS = CHAIN_ANVIL_PORTS

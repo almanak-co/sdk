@@ -173,7 +173,7 @@ class TestMonteCarloDryRun:
 
     def test_dry_run_shows_configuration(self, cli_runner: CliRunner) -> None:
         """Test that dry run shows configuration without running."""
-        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
+        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test"]):
             result = cli_runner.invoke(backtest, [
                 "monte-carlo",
                 "--strategy", "test",
@@ -189,7 +189,7 @@ class TestMonteCarloDryRun:
 
     def test_dry_run_shows_n_paths(self, cli_runner: CliRunner) -> None:
         """Test that dry run shows number of paths."""
-        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
+        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test"]):
             result = cli_runner.invoke(backtest, [
                 "monte-carlo",
                 "--strategy", "test",
@@ -203,7 +203,7 @@ class TestMonteCarloDryRun:
 
     def test_dry_run_shows_method(self, cli_runner: CliRunner) -> None:
         """Test that dry run shows generation method."""
-        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
+        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test"]):
             result = cli_runner.invoke(backtest, [
                 "monte-carlo",
                 "--strategy", "test",
@@ -217,7 +217,7 @@ class TestMonteCarloDryRun:
 
     def test_dry_run_shows_seed(self, cli_runner: CliRunner) -> None:
         """Test that dry run shows seed when specified."""
-        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
+        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test"]):
             result = cli_runner.invoke(backtest, [
                 "monte-carlo",
                 "--strategy", "test",
@@ -364,7 +364,7 @@ class TestMonteCarloErrorHandling:
 
     def test_unknown_strategy_shows_error(self, cli_runner: CliRunner) -> None:
         """Test that unknown strategy shows helpful error."""
-        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["real_strategy"]):
+        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["real_strategy"]):
             result = cli_runner.invoke(backtest, [
                 "monte-carlo",
                 "--strategy", "unknown_strategy",

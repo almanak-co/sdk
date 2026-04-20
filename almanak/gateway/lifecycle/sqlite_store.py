@@ -1,6 +1,6 @@
 """SQLite-backed lifecycle store for local development and self-hosted setups.
 
-Creates agent_command and agent_state tables in a local .db file.
+Creates v2_agent_command and v2_agent_state tables in a local .db file.
 Single-tenant: one DB file per strategy run.
 
 Follows the same pattern as InstanceRegistry and TimelineStore:
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 LIFECYCLE_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS agent_state (
+CREATE TABLE IF NOT EXISTS v2_agent_state (
     agent_id          TEXT PRIMARY KEY,
     state             TEXT NOT NULL,
     state_changed_at  TEXT NOT NULL DEFAULT (datetime('now')),
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS agent_state (
     source            TEXT NOT NULL DEFAULT 'gateway'
 );
 
-CREATE TABLE IF NOT EXISTS agent_command (
+CREATE TABLE IF NOT EXISTS v2_agent_command (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id      TEXT NOT NULL,
     command       TEXT NOT NULL,
@@ -41,8 +41,8 @@ CREATE TABLE IF NOT EXISTS agent_command (
     processed_at  TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_agent_command_pending
-    ON agent_command (agent_id, id DESC)
+CREATE INDEX IF NOT EXISTS idx_v2_agent_command_pending
+    ON v2_agent_command (agent_id, id DESC)
     WHERE processed_at IS NULL;
 """
 
@@ -50,7 +50,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_command_pending
 class SQLiteLifecycleStore:
     """SQLite-backed lifecycle store for local development and self-hosted setups.
 
-    Creates agent_command and agent_state tables in a local .db file.
+    Creates v2_agent_command and v2_agent_state tables in a local .db file.
     Single-tenant: one DB file per strategy run.
 
     Follows the same pattern as InstanceRegistry and TimelineStore:
@@ -74,7 +74,7 @@ class SQLiteLifecycleStore:
                 conn.executescript(LIFECYCLE_SCHEMA_SQL)
                 # Migration: add source column to existing databases
                 try:
-                    conn.execute("ALTER TABLE agent_state ADD COLUMN source TEXT NOT NULL DEFAULT 'gateway'")
+                    conn.execute("ALTER TABLE v2_agent_state ADD COLUMN source TEXT NOT NULL DEFAULT 'gateway'")
                 except sqlite3.OperationalError:
                     pass  # Column already exists
                 conn.commit()
@@ -98,7 +98,7 @@ class SQLiteLifecycleStore:
             with sqlite3.connect(str(self._db_path)) as conn:
                 conn.execute(
                     """
-                    INSERT INTO agent_state
+                    INSERT INTO v2_agent_state
                         (agent_id, state, state_changed_at, last_heartbeat_at, error_message, source)
                     VALUES (?, ?, ?, ?, ?, 'gateway')
                     ON CONFLICT (agent_id) DO UPDATE SET
@@ -119,7 +119,7 @@ class SQLiteLifecycleStore:
             with sqlite3.connect(str(self._db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
-                    "SELECT * FROM agent_state WHERE agent_id = ?",
+                    "SELECT * FROM v2_agent_state WHERE agent_id = ?",
                     (agent_id,),
                 )
                 row = cursor.fetchone()
@@ -145,7 +145,7 @@ class SQLiteLifecycleStore:
             with sqlite3.connect(str(self._db_path)) as conn:
                 conn.execute(
                     """
-                    UPDATE agent_state
+                    UPDATE v2_agent_state
                     SET last_heartbeat_at = ?, iteration_count = iteration_count + 1
                     WHERE agent_id = ?
                     """,
@@ -162,7 +162,7 @@ class SQLiteLifecycleStore:
                 cursor = conn.execute(
                     """
                     SELECT id, agent_id, command, issued_at, issued_by, processed_at
-                    FROM agent_command
+                    FROM v2_agent_command
                     WHERE agent_id = ? AND processed_at IS NULL
                     ORDER BY id DESC
                     LIMIT 1
@@ -188,7 +188,7 @@ class SQLiteLifecycleStore:
         with self._lock:
             with sqlite3.connect(str(self._db_path)) as conn:
                 conn.execute(
-                    "UPDATE agent_command SET processed_at = ? WHERE id = ?",
+                    "UPDATE v2_agent_command SET processed_at = ? WHERE id = ?",
                     (now, command_id),
                 )
                 conn.commit()
@@ -201,7 +201,7 @@ class SQLiteLifecycleStore:
             with sqlite3.connect(str(self._db_path)) as conn:
                 conn.execute(
                     """
-                    INSERT INTO agent_command (agent_id, command, issued_at, issued_by)
+                    INSERT INTO v2_agent_command (agent_id, command, issued_at, issued_by)
                     VALUES (?, ?, ?, ?)
                     """,
                     (agent_id, command, now, issued_by),

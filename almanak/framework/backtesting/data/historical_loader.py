@@ -442,9 +442,7 @@ class HistoricalDataLoader:
             ) from e
 
         # Create async web3 instance
-        from almanak.gateway.utils.ssl_context import build_ssl_context
-
-        web3 = AsyncWeb3(AsyncHTTPProvider(self.rpc_url, request_kwargs={"ssl": build_ssl_context()}))
+        web3 = AsyncWeb3(AsyncHTTPProvider(self.rpc_url))
         feed_checksum = web3.to_checksum_address(feed_address)
 
         # First, get the latest round data to know where to start

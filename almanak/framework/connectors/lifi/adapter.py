@@ -33,7 +33,6 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from ...data.market_snapshot import PriceUnavailableError
 from ...data.tokens.exceptions import TokenResolutionError
 from ...intents.vocabulary import IntentType, SwapIntent
 from ...models.reproduction_bundle import ActionBundle
@@ -170,15 +169,12 @@ class LiFiAdapter:
 
         # Price provider
         if self._using_placeholders:
-            # No oracle supplied. We keep the adapter constructible for unit tests
-            # (allow_placeholder_prices=True), but amount_usd swaps will abort with
-            # PriceUnavailableError instead of silently using a fake price.
             logger.warning(
-                "LiFiAdapter initialized without price_provider. "
-                "amount_usd swaps will raise PriceUnavailableError. "
+                "LiFiAdapter using PLACEHOLDER PRICES. "
+                "Slippage calculations will be INCORRECT. "
                 "This is only acceptable for unit tests."
             )
-            self._price_provider = {}
+            self._price_provider = self._get_placeholder_prices()
         else:
             self._price_provider = price_provider or {}
 
@@ -368,10 +364,6 @@ class LiFiAdapter:
                 },
             )
 
-        except PriceUnavailableError:
-            # Safety: never fall through to a live tx with a fake/missing price.
-            # Let the compiler see the typed error and abort the swap.
-            raise
         except Exception as e:
             logger.exception(f"Failed to compile swap intent via LiFi: {e}")
             return self._error_bundle(intent, str(e))
@@ -414,18 +406,15 @@ class LiFiAdapter:
         )
 
         # Fetch fresh quote from LiFi API
-        quote_kwargs: dict[str, Any] = {
-            "from_chain_id": route_params["from_chain_id"],
-            "to_chain_id": route_params["to_chain_id"],
-            "from_token": route_params["from_token"],
-            "to_token": route_params["to_token"],
-            "from_amount": route_params["from_amount"],
-            "from_address": route_params["from_address"],
-            "slippage": route_params["slippage"],
-        }
-        if route_params.get("to_address"):
-            quote_kwargs["to_address"] = route_params["to_address"]
-        quote = self.client.get_quote(**quote_kwargs)
+        quote = self.client.get_quote(
+            from_chain_id=route_params["from_chain_id"],
+            to_chain_id=route_params["to_chain_id"],
+            from_token=route_params["from_token"],
+            to_token=route_params["to_token"],
+            from_amount=route_params["from_amount"],
+            from_address=route_params["from_address"],
+            slippage=route_params["slippage"],
+        )
 
         tx_request = quote.transaction_request
         gas_estimate = self._get_gas_estimate(quote)
@@ -473,14 +462,12 @@ class LiFiAdapter:
         elif intent.amount_usd is not None:
             from_price = price_oracle.get(intent.from_token.upper())
             if not from_price:
-                raise PriceUnavailableError(
-                    token=intent.from_token,
-                    reason=(
-                        f"[LiFiAdapter chain_id={self.chain_id}] Price oracle returned "
-                        f"no price for '{intent.from_token}'; cannot convert amount_usd "
-                        "to token amount. Ensure the price oracle includes this token."
-                    ),
+                logger.error(
+                    "Price unavailable for '%s' -- cannot convert amount_usd to token amount. "
+                    "Ensure the price oracle includes this token.",
+                    intent.from_token,
                 )
+                return None
             token_amount = intent.amount_usd / from_price
             decimals = self.get_token_decimals(intent.from_token)
             return int(token_amount * Decimal(10**decimals))
@@ -578,6 +565,20 @@ class LiFiAdapter:
                 "intent_id": intent.intent_id,
             },
         )
+
+    @staticmethod
+    def _get_placeholder_prices() -> dict[str, Decimal]:
+        """Get placeholder price data for testing only."""
+        return {
+            "ETH": Decimal("2000"),
+            "WETH": Decimal("2000"),
+            "USDC": Decimal("1"),
+            "USDC.e": Decimal("1"),
+            "USDT": Decimal("1"),
+            "DAI": Decimal("1"),
+            "WBTC": Decimal("45000"),
+            "ARB": Decimal("1.20"),
+        }
 
     @staticmethod
     def _pad_address(addr: str) -> str:

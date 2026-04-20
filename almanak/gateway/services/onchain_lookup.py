@@ -180,9 +180,7 @@ class OnChainLookup:
         self._backoff_factor = backoff_factor
 
         # Initialize Web3 with async HTTP provider
-        from almanak.gateway.utils.ssl_context import build_ssl_context
-
-        self._w3 = AsyncWeb3(AsyncHTTPProvider(rpc_url, request_kwargs={"ssl": build_ssl_context()}))
+        self._w3 = AsyncWeb3(AsyncHTTPProvider(rpc_url))
 
         logger.info(
             "Initialized OnChainLookup",

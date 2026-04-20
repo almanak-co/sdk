@@ -16,8 +16,6 @@ Known gaps are documented in _KNOWN_GAPS - when a gap is fixed, the
 test will start asserting permissions are produced, catching the fix.
 """
 
-from unittest.mock import patch
-
 import pytest
 
 from almanak.framework.intents.compiler import (
@@ -64,13 +62,6 @@ _KNOWN_GAPS: set[tuple[str, str, str]] = {
     ("aave_v3", "SUPPLY", "mantle"),
     # Aave V3 on plasma: lending pool address added but permission hints not yet implemented
     ("aave_v3", "SUPPLY", "plasma"),
-    # X-Layer chain: addresses added in VIB-2252 but permission hints not yet implemented
-    ("uniswap_v3", "SWAP", "xlayer"),
-    ("uniswap_v3", "LP_OPEN", "xlayer"),
-    ("aave_v3", "SUPPLY", "xlayer"),
-    # 0G Chain: JAINE DEX addresses added but permission hints not yet implemented
-    ("uniswap_v3", "SWAP", "zerog"),
-    ("uniswap_v3", "LP_OPEN", "zerog"),
 }
 
 
@@ -139,20 +130,8 @@ def _collect_lending_params() -> list[tuple[str, str]]:
 
 
 def _collect_perp_params() -> list[tuple[str, str]]:
-    """Collect (protocol, chain) pairs for perp intents.
-
-    Most perp protocols (gmx_v2, hyperliquid, drift, …) are arbitrum-first in the
-    current registry. ``aster_perps`` and its ``pancakeswap_perps`` broker-shim
-    are BSC-only in Phase 1 (Aster Diamond), so they get exercised on BSC instead.
-    """
-    _bsc_only = {"aster_perps", "pancakeswap_perps"}
-    params: list[tuple[str, str]] = []
-    for protocol in sorted(_PERP_PROTOCOLS):
-        if protocol in _bsc_only:
-            params.append((protocol, "bsc"))
-        else:
-            params.append((protocol, "arbitrum"))
-    return params
+    """Collect (protocol, chain) pairs for perp intents."""
+    return [(p, "arbitrum") for p in sorted(_PERP_PROTOCOLS)]
 
 
 def _collect_flash_loan_params() -> list[tuple[str, str]]:
@@ -312,10 +291,7 @@ class TestFlashLoanCompatibility:
 
     @pytest.mark.parametrize("protocol,chain", _collect_flash_loan_params(), ids=[_id(p) for p in _collect_flash_loan_params()])
     def test_flash_loan_discovers_permissions(self, protocol: str, chain: str):
-        # Patch _is_wallet_contract to return True (contract wallet) so the EOA guard
-        # does not block compilation. These tests exercise permission discovery, not wallet checks.
-        with patch("almanak.framework.intents.compiler.IntentCompiler._is_wallet_contract", return_value=True):
-            permissions, warnings = discover_permissions(chain, [protocol], ["FLASH_LOAN"])
+        permissions, warnings = discover_permissions(chain, [protocol], ["FLASH_LOAN"])
         _assert_permissions_or_known_gap(protocol, "FLASH_LOAN", chain, permissions, warnings)
 
 

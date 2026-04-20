@@ -83,32 +83,12 @@ UNISWAP_V3: dict[str, dict[str, str]] = {
         "quoter_v2": "0x6Cdcd65e03c1CEc3730AeeCd45bc140D57A25C77",
     },
     "monad": {
-        # Verified mainnet (chain 143) — https://docs.uniswap.org/contracts/v3/reference/deployments/monad-deployments
+        # Provisional — Monad testnet (chain 143) addresses; verify before mainnet launch
         "swap_router": "0xfE31F71C1b106EAc32F1A19239c9a9A72ddfb900",  # SwapRouter02
         "swap_router_02": "0xfE31F71C1b106EAc32F1A19239c9a9A72ddfb900",
         "factory": "0x204FAca1764B154221e35c0d20aBb3c525710498",
         "position_manager": "0x7197E214c0b767cFB76Fb734ab638E2c192F4E53",
         "quoter_v2": "0x661E93cca42AfacB172121EF892830cA3b70F08d",
-    },
-    "xlayer": {
-        # Non-canonical deployment via Uniswap Governance Proposal 67
-        # Source: https://github.com/Uniswap/sdks (XLAYER_ADDRESSES)
-        "swap_router": "0x4f0C28f5926AFDA16bf2506D5D9e57Ea190f9bcA",  # SwapRouter02
-        "swap_router_02": "0x4f0C28f5926AFDA16bf2506D5D9e57Ea190f9bcA",
-        "factory": "0x4B2ab38DBF28D31D467aA8993f6c2585981D6804",
-        "position_manager": "0x315e413A11AB0df498eF83873012430ca36638Ae",
-        "quoter_v2": "0x976183AC3d09840D243A88c0268BADb3B3e3259f",
-    },
-    "zerog": {
-        # JAINE DEX (Uniswap V3 fork) on 0G Chain.
-        # Verified on-chain 2026-04-17: NPM.name() = "Jaine V3 Positions NFT",
-        # and Router/NPM/Quoter all return factory() = 0x9bdcA5...7ef4 and WETH9() = W0G.
-        # Source: Jaine UI JS bundle (jaine.app) + on-chain verification via 0G RPC.
-        "swap_router": "0x8B598A7C136215A95ba0282b4d832B9f9801f2e2",
-        "swap_router_02": "0x8B598A7C136215A95ba0282b4d832B9f9801f2e2",
-        "factory": "0x9bdcA5798E52e592A08e3b34d3F18EeF76Af7ef4",
-        "position_manager": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72",
-        "quoter_v2": "0xd00883722cECAD3A1c60bCA611f09e1851a0bE02",
     },
 }
 
@@ -189,32 +169,18 @@ UNISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
     "mantle": {
         "MNT": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
         "WMNT": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
-        "WETH": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",  # Canonical Mantle Bridged WETH (deterministic bridge address, not a placeholder)
+        "WETH": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",
         "USDC": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",
         "USDT": "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE",
     },
     "monad": {
-        # Verified mainnet (chain 143) — https://docs.monad.xyz/developer-essentials/network-information/tokens-and-bridges
+        # Provisional — Monad testnet (chain 143) token addresses; verify before mainnet launch
         "MON": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
         "WMON": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
         "WETH": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",  # WETH on Monad
         "USDC": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
         "USDT0": "0xe7cd86e13AC4309349F30B3435a9d337750fC82D",
         "WBTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
-    },
-    "xlayer": {
-        # Source: https://web3.okx.com/xlayer/docs/developer/build-on-xlayer/contracts
-        "OKB": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
-        "WOKB": "0xe538905cf8410324e03A5A23C1c177a474D59b2b",
-        "WETH": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",
-        "USDC": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
-        "USDT": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USD₮0 (Aave V3.6 reserve)
-        "WBTC": "0xEA034fb02eB1808C2cc3adbC15f447B93CbE08e1",
-    },
-    "zerog": {
-        # 0G Chain tokens (verified on-chain)
-        "A0GI": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
-        "W0G": "0x1Cd0690fF9a693f5EF2dD976660a8dAFc81A109c",
     },
 }
 
@@ -236,60 +202,65 @@ AGNI_FINANCE: dict[str, dict[str, str]] = {
 # Uniswap V4
 # =============================================================================
 
-# Uniswap V4 deployment registry.
-# Contract addresses are chain-specific; always read them from the per-chain mapping below.
-# OFFICIAL source: https://docs.uniswap.org/contracts/v4/deployments
-# CRITICAL: Addresses are DIFFERENT per chain. Do NOT copy-paste across chains.
-# Swaps route through UniversalRouter (command 0x10). LP via PositionManager.
+# Uniswap V4 uses a singleton PoolManager deployed via CREATE2 (same address across chains).
+# The Universal Router V2 supports both V3 and V4 swaps.
+# V4SwapRouter is the dedicated V4 swap router.
 UNISWAP_V4: dict[str, dict[str, str]] = {
     "ethereum": {
         "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
-        "position_manager": "0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e",
+        "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
         "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+        "v4_swap_router": "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
         "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
-        "state_view": "0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227",
-    },
-    "base": {
-        "pool_manager": "0x498581fF718922c3f8e6A244956aF099B2652b2b",
-        "position_manager": "0x7C5f5A4bBd8fD63184577525326123B519429bDc",
-        "universal_router": "0x6fF5693b99212Da76ad316178A184AB56D299b43",
-        "quoter": "0x0d5e0F971ED27FBfF6c2837bf31316121532048D",
-        "state_view": "0xA3c0c9b65baD0b08107Aa264b0f3dB444b867A71",
+        "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
     },
     "arbitrum": {
-        "pool_manager": "0x360E68faCcca8cA495c1B759Fd9EEe466db9FB32",
-        "position_manager": "0xd88F38F930b7952f2DB2432Cb002E7abbF3dD869",
-        "universal_router": "0xA51afAFe0263b40EdaEf0Df8781eA9aa03E381a3",
-        "quoter": "0x3972C00f7ed4885e145823eb7C655375d275A1C5",
-        "state_view": "0x76Fd297e2D437cd7f76d50F01AfE6160f86e9990",
+        "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
+        "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+        "v4_swap_router": "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
+    },
+    "base": {
+        "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
+        "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+        "v4_swap_router": "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
     },
     "optimism": {
-        "pool_manager": "0x9a13F98Cb987694C9F086b1F5eB990EeA8264Ec3",
-        "position_manager": "0x3C3Ea4B57a46241e54610e5f022E5c45859A1017",
-        "universal_router": "0x851116D9223fabED8E56C0E6b8Ad0c31d98B3507",
-        "quoter": "0x1f3131A13296FB91C90870043742C3CDBFF1A8d7",
-        "state_view": "0xc18a3169788F4F75A170290584ECA6395C75Ecdb",
+        "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
+        "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+        "v4_swap_router": "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
     },
     "polygon": {
-        "pool_manager": "0x67366782805870060151383F4BbFF9daB53e5cD6",
-        "position_manager": "0x1Ec2eBf4F37E7363FDfe3551602425af0B3ceef9",
-        "universal_router": "0x1095692A6237d83C6a72F3F5eFEdb9A670C49223",
-        "quoter": "0xb3d5c3Dfc3a7aEbFF71895A7191796BFFc2c81b9",
-        "state_view": "0x5eA1bD7974c8A611cBAB0bDCAFcB1D9CC9b3BA5a",
+        "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
+        "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+        "v4_swap_router": "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
     },
     "avalanche": {
-        "pool_manager": "0x06380C0e0912312B5150364B9DC4542BA0DbBc85",
-        "position_manager": "0xB74b1F14d2754AcfcbBe1a221023a5cf50Ab8ACD",
-        "universal_router": "0x94b75331AE8d42C1b61065089B7d48FE14aA73b7",
-        "quoter": "0xbE40675BB704506a3c2Ccfb762DCFd1e979845C2",
-        "state_view": "0xc3c9e198C735a4b97e3e683f391cCBDD60B69286",
+        "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
+        "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+        "v4_swap_router": "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
     },
     "bsc": {
-        "pool_manager": "0x28e2Ea090877bF75740558f6BFB36A5ffeE9e9dF",
-        "position_manager": "0x7A4a5c919aE2541AeD11041A1AEeE68f1287f95b",
-        "universal_router": "0x1906c1d672b88cD1B9aC7593301cA990F94Eae07",
-        "quoter": "0x9F75dD27D6664c475B90e105573E550ff69437B0",
-        "state_view": "0xd13Dd3D6E93f276FAfc9Db9E6BB47C1180aeE0c4",
+        "pool_manager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "position_manager": "0xBd216513D74C8cf14cF4747E6AaE6fDf64e83b24",
+        "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+        "v4_swap_router": "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+        "quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+        "state_view": "0x7ffA62d1F57a97A4A4A35c6dDF1f9e36bCBBbE8a",
     },
 }
 
@@ -393,13 +364,13 @@ AAVE_V3: dict[str, dict[str, str]] = {
     },
     "bsc": {
         "pool": "0x6807dc923806fE8Fd134338EABCA509979a7e0cB",
-        "pool_data_provider": "0xc90Df74A7c16245c5F5C5870327Ceb38Fe5d5328",
+        "pool_data_provider": "0x41585C50524fb8c3899B43D7D797d9486AAc94DB",
         "oracle": "0x39bc1bfDa2130d6Bb6DBEfd366939b4c7aa7C697",
     },
     "linea": {
         "pool": "0xc47b8C00b0f69a36fa203Ffeac0334874574a8Ac",
-        "pool_data_provider": "0x47cd4b507B81cB831669c71c7077f4daF6762FF4",
-        "oracle": "0xCFDAdA7DCd2e785cF706BaDBC2B8Af5084d595e9",
+        "pool_data_provider": "0x2D97F8FA96886Fd923c065F5457F9DDd494e3877",
+        "oracle": "0x3c6Cd9Cc7c7a4c2Cf5a82734CD249D7D593354dA",
     },
     "plasma": {
         "pool": "0x925a2A7214Ed92428B5b1B090F80b25700095e12",
@@ -415,13 +386,6 @@ AAVE_V3: dict[str, dict[str, str]] = {
         "pool": "0x458F293454fE0d67EC0655f3672301301DD51422",
         "pool_data_provider": "0x487c5c669D9eee6057C44973207101276cf73b68",
         "oracle": "0x47a063CfDa980532267970d478EC340C0F80E8df",
-    },
-    "xlayer": {
-        # Aave V3.6 — Governance Proposal #460
-        # Source: https://github.com/aave-dao/aave-address-book/blob/main/src/AaveV3XLayer.sol
-        "pool": "0xE3F3Caefdd7180F884c01E57f65Df979Af84f116",
-        "pool_data_provider": "0x6C505C31714f14e8af2A03633EB2Cdfb4959138F",
-        "oracle": "0x91FC11136d5615575a0fC5981Ab5C0C54418E2C6",
     },
 }
 
@@ -512,20 +476,11 @@ AAVE_V3_TOKENS: dict[str, dict[str, str]] = {
     },
     "mantle": {
         "WMNT": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
-        "WETH": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",  # Canonical Mantle Bridged WETH (deterministic bridge address, not a placeholder)
+        "WETH": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",
         "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
         "USDC": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",
         "USDe": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
         "GHO": "0xfc421aD3C883Bf9E7C4f42dE845C4e4405799e73",
-    },
-    "xlayer": {
-        # Aave V3.6 reserves on X-Layer (verified on-chain via getReservesList)
-        "WOKB": "0xe538905cf8410324e03A5A23C1c177a474D59b2b",
-        "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USD₮0 (LayerZero bridged USDT)
-        "xETH": "0xE7B000003A45145decf8a28FC755aD5eC5EA025A",
-        "xBTC": "0xb7C00000bcDEeF966b20B3D884B98E64d2b06b4f",
-        "GHO": "0xDe6539018B095353A40753Dc54C91C68c9487D4E",
-        "USDG": "0x4ae46a509F6b1D9056937BA4500cb143933D2dc8",  # Gravity USD (Aave borrow reserve)
     },
 }
 
@@ -671,58 +626,6 @@ GMX_V2_TOKENS: dict[str, dict[str, str]] = {
 }
 
 # =============================================================================
-# PancakeSwap Perps (ApolloX Diamond on BSC, PCS broker id = 2)
-# =============================================================================
-# Aster Perps (formerly ApolloX; PancakeSwap Perps is broker id = 2 on this venue)
-# =============================================================================
-# Router is a Diamond proxy (EIP-2535) fronting the Aster perpetual platform.
-# Key facets verified on BSCScan:
-#   TradingPortalFacet (open/close):    0x5553F3B5E2fAD83edA4031a3894ee59e25ee90bF
-#   TradingReaderFacet (views):         0x28dE81Bc5B6164d8522ad32AD7D139A21fa1E3b4
-#   TradingOpenFacet (keeper settle):   0xdbe2b7e92f00dBd70478199577393bE5BBe37201
-#   TradingCloseFacet (keeper settle):  0x8ECa88449B9AFF247F775B96be6e3479bBE72a09
-#   PriceFacadeFacet  (keeper entry):   0x646CbAD1B150E5D3a019827a304717950ba6442e
-#   PairsManagerFacet (markets):        0xA32b528D70D1d5bA93a17D2697Efe5D17F1A6F8d
-ASTER_PERPS: dict[str, dict[str, str]] = {
-    "bsc": {
-        "router": "0x1b6F2d3844C6ae7D56ceb3C3643b9060ba28FEb0",
-    },
-}
-
-# pairBase addresses — each market is keyed by the underlying BSC ERC20 address.
-# For crypto markets (v1 scope) these are the real BSC-pegged tokens;
-# non-crypto markets (NVDA, TSLA, ...) use synthetic ApolloX-issued contracts and are out of v1 scope.
-ASTER_PERPS_MARKETS: dict[str, dict[str, str]] = {
-    "bsc": {
-        "BTC/USD": "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c",  # BTCB
-        "ETH/USD": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",  # ETH (BSC)
-        "BNB/USD": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
-    },
-}
-
-# Margin tokens supported by the Aster Perps router on BSC.
-# The router accepts native BNB via openMarketTradeBNB() (auto-wraps to WBNB internally)
-# and ERC20 collateral via openMarketTrade().
-ASTER_PERPS_TOKENS: dict[str, dict[str, str]] = {
-    "bsc": {
-        "WBNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
-        "USDT": "0x55d398326f99059fF775485246999027B3197955",
-        "USDC": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
-    },
-}
-
-# Broker ids (attribution only — does not affect routing or fills).
-PANCAKESWAP_PERPS_BROKER_ID: int = 2  # PancakeSwap Perps attribution id.
-ASTER_PERPS_BROKER_RAW: int = 0  # Raw Aster (no broker attribution).
-
-# Backwards-compatibility aliases. Prefer the ASTER_PERPS_* names; the
-# PANCAKESWAP_PERPS_* aliases exist for the pancakeswap_perps/ shim and any
-# callers still importing the legacy names (pre-VIB-3044 rebrand extraction).
-PANCAKESWAP_PERPS: dict[str, dict[str, str]] = ASTER_PERPS
-PANCAKESWAP_PERPS_MARKETS: dict[str, dict[str, str]] = ASTER_PERPS_MARKETS
-PANCAKESWAP_PERPS_TOKENS: dict[str, dict[str, str]] = ASTER_PERPS_TOKENS
-
-# =============================================================================
 # Aerodrome
 # =============================================================================
 
@@ -813,10 +716,7 @@ TRADERJOE_V2_TOKENS: dict[str, dict[str, str]] = {
 # Morpho Blue
 # =============================================================================
 
-# Default Morpho Blue deployment address, used on chains where Morpho deployed via the
-# vanity-address factory. Not universal: Monad deployed at a distinct address. Always
-# look the per-chain address up in MORPHO_BLUE[chain]["morpho"] rather than relying on
-# this constant directly.
+# Morpho Blue singleton contract address (same on all supported chains)
 MORPHO_BLUE_ADDRESS = "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb"
 
 MORPHO_BLUE: dict[str, dict[str, str]] = {
@@ -827,37 +727,6 @@ MORPHO_BLUE: dict[str, dict[str, str]] = {
     "base": {
         "morpho": MORPHO_BLUE_ADDRESS,
         "bundler": "0x23055618898e202386e6c13955a58D3C68200BFB",
-    },
-    "arbitrum": {
-        # Arbitrum deployed via a distinct factory — the universal
-        # 0xBBBB...FFCb address has 0 bytes of code here. Registry fixed 2026-04-17
-        # after on-chain verification (prior value was the non-deployed vanity address
-        # and caused every Morpho Blue compile call to fail with "Unknown market").
-        # Source: Morpho's GraphQL API (blue-api.morpho.org) + on-chain eth_getCode.
-        "morpho": "0x6c247b1F6182318877311737BaC0844bAa518F5e",
-        # Bundler address listed for future multicall integration. Not used by any
-        # current supply/borrow/repay/withdraw path — verify live selectors before
-        # wiring it into execution (tracked as a follow-up in VIB-2967 epic).
-        "bundler": "0x1FA4431bC113D308beE1d46B0e98Cb805FB48C13",
-    },
-    "polygon": {
-        # Polygon uses a chain-specific deployment; the universal 0xBBBB...FFCb
-        # vanity address has 0 bytes of code here (verified 2026-04-17 via Morpho
-        # GraphQL blue-api.morpho.org and on-chain eth_getCode). Contract creation
-        # block is 66,931,042. Same Arbitrum-style pattern: the dispatch address
-        # reported by Morpho's own API is the one the factory actually deployed to.
-        "morpho": "0x1bF0c2541F820E775182832f06c0B7Fc27A25f67",
-        # Bundler3 (Morpho multicall router on Polygon). Sourced from Morpho's
-        # official blue-sdk addresses.ts and verified on-chain (1,547 bytes).
-        # Listed for future multicall integration — not used by any current
-        # supply/borrow/repay/withdraw path.
-        "bundler": "0x2d9C3A9E67c966C711208cc78b34fB9E9f8db589",
-    },
-    "monad": {
-        # Monad uses a distinct deployment (chain-specific deployer pattern, block 31,907,457).
-        # Bundler3 variant — equivalent to the universal Bundler on other chains.
-        "morpho": "0xD5D960E8C380B724a48AC59E2DfF1b2CB4a1eAee",
-        "bundler": "0x82b684483e844422FD339df0b67b3B111F02c66E",
     },
 }
 
@@ -883,39 +752,6 @@ MORPHO_BLUE_TOKENS: dict[str, dict[str, str]] = {
         "USDbC": "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
         "cbETH": "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
         "wstETH": "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452",
-    },
-    "arbitrum": {
-        "WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-        "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-        "USDC.e": "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",
-        "WBTC": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
-        "wstETH": "0x5979D7b546E38E414F7E9822514be443A4800529",
-        "weETH": "0x35751007a407ca6FEFfE80b3cB397736D2cf4dbe",
-    },
-    "polygon": {
-        # Tokens used in live Polygon Morpho Blue markets. USDC here is the
-        # native Circle USDC (NOT the bridged USDC.e at 0x2791...) — markets
-        # created after Circle's native launch quote prices against this one.
-        "USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
-        "USDC.e": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
-        "WETH": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
-        "WBTC": "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",
-        "WPOL": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
-        "wstETH": "0x03b54A6e9a984069379fae1a4fC4dBAE93B3bCCD",
-        "USDT": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
-    },
-    "monad": {
-        # Tokens used in live Monad Morpho Blue markets (sourced from
-        # morpho-org/morpho-blue-api-metadata `tokens.json` and verified on-chain).
-        "WETH": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",
-        "WMON": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
-        "USDC": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
-        "USDT0": "0xe7cd86e13AC4309349F30B3435a9d337750fC82D",
-        "WBTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
-        "cbBTC": "0xd18B7EC58Cdf4876f6AFebd3Ed1730e4Ce10414b",
-        "wstETH": "0x10Aeaf63194db8d453d4D85a06E5eFE1dd0b5417",
-        "weETH": "0xA3D68b74bF0528fdD07263c60d6488749044914b",
-        "AUSD": "0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a",
     },
 }
 
@@ -1006,7 +842,7 @@ PENDLE_TOKENS: dict[str, dict[str, str]] = {
     },
     "mantle": {
         "WMNT": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
-        "WETH": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",  # Canonical Mantle Bridged WETH (deterministic bridge address, not a placeholder)
+        "WETH": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111",
         "USDC": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",
     },
     "bsc": {

@@ -313,8 +313,6 @@ class TestOnRateLimitResponseReducesRate:
 class TestExponentialBackoffTiming:
     """Tests for exponential backoff timing in retry_with_backoff."""
 
-    _SLEEP_PATCH_TARGET = "almanak.framework.backtesting.pnl.providers.rate_limiter.asyncio.sleep"
-
     @pytest.mark.asyncio
     async def test_successful_request_no_retry(self):
         """Test that successful request returns immediately without retry."""
@@ -388,10 +386,7 @@ class TestExponentialBackoffTiming:
             raise ValueError("Fail")
 
         try:
-            with patch(
-                self._SLEEP_PATCH_TARGET,
-                new_callable=AsyncMock,
-            ) as mock_sleep:
+            with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 await limiter.retry_with_backoff(
                     track_timing,
                     max_retries=3,
@@ -423,10 +418,7 @@ class TestExponentialBackoffTiming:
             raise ValueError("Fail")
 
         try:
-            with patch(
-                self._SLEEP_PATCH_TARGET,
-                new_callable=AsyncMock,
-            ) as mock_sleep:
+            with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 await limiter.retry_with_backoff(
                     always_fail,
                     max_retries=5,

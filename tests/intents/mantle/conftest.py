@@ -23,7 +23,6 @@ from tests.intents.conftest import (
     fund_native_token,
     get_token_decimals,
     make_intent_test_web3,
-    reset_fork_to_pristine,
     seed_wallet_state_with_recovery,
 )
 
@@ -87,12 +86,7 @@ def test_private_key() -> str:
 
 @pytest.fixture(scope="module")
 def funded_wallet(web3: Web3, anvil_rpc_url: str, anvil_instance: AnvilFixture) -> str:
-    """Fund the test wallet with native token and common ERC20s.
-
-    Reverts the fork to session pristine state first so each test module gets a
-    clean slate independent of prior modules on the same chain (VIB-3059).
-    """
-    reset_fork_to_pristine(web3)
+    """Fund the test wallet with native token and common ERC20s."""
     return seed_wallet_state_with_recovery(
         seed_wallet_state=_seed_wallet_state,
         web3=web3,

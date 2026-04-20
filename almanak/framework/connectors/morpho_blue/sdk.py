@@ -27,18 +27,14 @@ Example:
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from web3 import Web3
 from web3.exceptions import ContractLogicError
 from web3.types import HexStr
 
-from almanak.core.contracts import MORPHO_BLUE as _MORPHO_BLUE_REGISTRY
 from almanak.core.contracts import MORPHO_BLUE_ADDRESS
 from almanak.framework.utils.rpc_provider import get_rpc_url, is_poa_chain
-
-if TYPE_CHECKING:
-    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +44,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 # Supported chains
-SUPPORTED_CHAINS = {"ethereum", "base", "arbitrum", "polygon", "monad"}
+SUPPORTED_CHAINS = {"ethereum", "base"}
 
 # Morpho Blue function selectors for view functions
 # position(bytes32 id, address user) -> (uint256 supplyShares, uint128 borrowShares, uint128 collateral)
@@ -67,9 +63,6 @@ CREATE_MARKET_EVENT_TOPIC = HexStr("0xac4b2400f169220b0c0afdde7a0b32e775ba727ea1
 MORPHO_DEPLOYMENT_BLOCKS: dict[str, int] = {
     "ethereum": 18883124,  # Dec 2023
     "base": 18883124,  # Approximate
-    "arbitrum": 296000000,  # Morpho Blue Arbitrum (0x6c24...) deployed ~block 296.3M (verified on-chain 2026-04-17)
-    "polygon": 66931042,  # Morpho Blue Polygon (0x1bF0...) creation block (Morpho GraphQL, 2026-04-17)
-    "monad": 31907457,  # Monad mainnet deployment
 }
 
 # Max uint values
@@ -333,18 +326,12 @@ class MorphoBlueSDK:
         self,
         chain: str = "ethereum",
         rpc_url: str | None = None,
-        gateway_client: "GatewayClient | None" = None,
     ) -> None:
         """Initialize the SDK.
 
         Args:
-            chain: Chain name (ethereum, base, arbitrum, polygon, monad)
-            rpc_url: DEPRECATED — direct RPC URL. Prefer gateway_client for
-                any code path running in a strategy container. If None and
-                gateway_client is None, falls back to ALCHEMY_API_KEY via
-                get_rpc_url(chain).
-            gateway_client: Gateway client for routing eth_call through the
-                gateway's RpcService. Preferred over rpc_url.
+            chain: Chain name (ethereum, base)
+            rpc_url: Optional RPC URL. If not provided, uses ALCHEMY_API_KEY.
 
         Raises:
             UnsupportedChainError: If chain is not supported
@@ -353,39 +340,13 @@ class MorphoBlueSDK:
             raise UnsupportedChainError(chain)
 
         self.chain = chain.lower()
-        self._gateway_client = gateway_client
-        self.rpc_url = rpc_url
-        if self._gateway_client is None:
-            self.rpc_url = self.rpc_url or get_rpc_url(self.chain)
-        # Resolve Morpho Blue address per chain. Most chains share the universal address,
-        # but some (e.g., Monad) use a chain-specific deployment. Fail fast if the chain
-        # is in SUPPORTED_CHAINS but the address registry was missed — silent fallback to
-        # the universal address on an unregistered chain would route txs to an EOA on
-        # chains like Monad.
-        chain_entry = _MORPHO_BLUE_REGISTRY.get(self.chain)
-        if chain_entry is None:
-            # Chain is in SUPPORTED_CHAINS but missing from the address registry —
-            # a configuration mismatch, not an unsupported-chain input error. Using
-            # MorphoBlueSDKError avoids stuffing the full message into
-            # UnsupportedChainError.chain (which is expected to hold just the name).
-            raise MorphoBlueSDKError(
-                f"Morpho Blue address registry has no entry for supported chain '{self.chain}'. "
-                "Add it to MORPHO_BLUE in almanak/core/contracts.py."
-            )
-        self.morpho_address = Web3.to_checksum_address(chain_entry["morpho"])
+        self.rpc_url = rpc_url or get_rpc_url(self.chain)
+        self.morpho_address = Web3.to_checksum_address(MORPHO_BLUE_ADDRESS)
 
-        # Initialize Web3 — route through the gateway if a client was supplied;
-        # otherwise construct a direct provider (deprecated, ad-hoc script use).
-        if gateway_client is not None:
-            from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+        # Initialize Web3
+        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
 
-            self.w3 = Web3(GatewayWeb3Provider(gateway_client, chain=self.chain))
-        else:
-            self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))  # vib-2986-exempt: gateway-internal fallback
-
-        # Add POA middleware if needed (for chains like Avalanche, BSC).
-        # The gateway provider forwards raw JSON-RPC, so POA middleware
-        # remains a client-side concern regardless of transport.
+        # Add POA middleware if needed (for chains like Avalanche, BSC)
         if is_poa_chain(self.chain):
             try:
                 from web3.middleware import ExtraDataToPOAMiddleware as poa_middleware
@@ -394,14 +355,11 @@ class MorphoBlueSDK:
 
             self.w3.middleware_onion.inject(poa_middleware, layer=0)
 
-        # Connection preflight only makes sense for direct RPC. For the gateway
-        # path, the gateway sidecar is always on the same host and is_connected
-        # would just add a redundant round-trip.
-        if gateway_client is None and not self.w3.is_connected():
+        # Verify connection
+        if not self.w3.is_connected():
             raise RPCError("Failed to connect to RPC", "init")
 
-        transport = "gateway" if gateway_client is not None else ("custom" if rpc_url else "alchemy")
-        logger.info(f"MorphoBlueSDK initialized for chain={self.chain}, rpc={transport}")
+        logger.info(f"MorphoBlueSDK initialized for chain={self.chain}, rpc={'custom' if rpc_url else 'alchemy'}")
 
     # =========================================================================
     # Position Reading

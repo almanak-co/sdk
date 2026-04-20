@@ -51,8 +51,8 @@ _SWAP_PROTOCOLS = {
     "traderjoe_v2",
     "pendle",
     "curve",
-    # Note: Enso is excluded - its Router address is per-chain and added
-    # statically by the generator (not via synthetic intent compilation).
+    # Note: Enso is excluded - it uses DELEGATECALL via the Enso delegate
+    # contract, which is added statically by the generator (not via compilation).
 }
 _LP_PROTOCOLS = {
     "uniswap_v3",
@@ -61,8 +61,8 @@ _LP_PROTOCOLS = {
     "aerodrome",
     "traderjoe_v2",
 }
-_LENDING_PROTOCOLS = {"aave_v3", "morpho_blue", "spark", "compound_v3", "radiant_v2"}
-_PERP_PROTOCOLS = {"gmx_v2", "aster_perps", "pancakeswap_perps"}
+_LENDING_PROTOCOLS = {"aave_v3", "morpho_blue", "spark", "compound_v3"}
+_PERP_PROTOCOLS = {"gmx_v2"}
 _FLASH_LOAN_PROVIDERS = {"aave", "balancer"}
 
 

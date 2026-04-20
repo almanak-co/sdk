@@ -2,35 +2,6 @@ from almanak import Chain
 
 ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
-# Known stablecoins pegged to ~$1 USD.
-# Single source of truth for stablecoin identification across the SDK.
-# Used by: IntentCompiler (price fallback), backtesting (price fallback),
-# CoinGecko provider (unlisted token fallback), token defaults.
-STABLECOINS: frozenset[str] = frozenset(
-    {
-        "USDC",
-        "USDT",
-        "DAI",
-        "USDC.E",
-        "USDBC",
-        "USDT.E",
-        "USDE",
-        "SUSDE",
-        "SDAI",
-        "FRAX",
-        "LUSD",
-        "TUSD",
-        "BUSD",
-        "CRVUSD",
-        "PYUSD",
-        "GHO",
-        "FUSDT0",
-        "USDP",
-        "USDT0",
-        "USDG",
-    }
-)
-
 # Numeric chain IDs for each chain (EIP-155)
 CHAIN_IDS: dict[Chain, int] = {
     Chain.ETHEREUM: 1,
@@ -43,12 +14,9 @@ CHAIN_IDS: dict[Chain, int] = {
     Chain.SONIC: 146,
     Chain.PLASMA: 9745,
     Chain.BLAST: 81457,
-    Chain.LINEA: 59144,
     Chain.MANTLE: 5000,
     Chain.BERACHAIN: 80094,
     Chain.MONAD: 143,
-    Chain.XLAYER: 196,
-    Chain.ZEROG: 16661,
     Chain.SOLANA: 0,  # Non-EVM chain, no EIP-155 chain ID
 }
 
@@ -72,16 +40,10 @@ _CHAIN_ALIASES: dict[str, Chain] = {
     "sonic": Chain.SONIC,
     "plasma": Chain.PLASMA,
     "blast": Chain.BLAST,
-    "linea": Chain.LINEA,
     "mantle": Chain.MANTLE,
     "berachain": Chain.BERACHAIN,
     "bera": Chain.BERACHAIN,
     "monad": Chain.MONAD,
-    "xlayer": Chain.XLAYER,
-    "zerog": Chain.ZEROG,
-    "0g": Chain.ZEROG,
-    "solana": Chain.SOLANA,
-    "sol": Chain.SOLANA,
 }
 
 

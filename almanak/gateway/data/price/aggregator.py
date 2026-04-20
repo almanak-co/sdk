@@ -341,16 +341,12 @@ class PriceAggregator:
             len(results.outliers),
         )
 
-        # Log outliers with structured fields for alerting.
-        # Extreme deviations (>100%) are logged at DEBUG — they're almost certainly
-        # bad upstream data (e.g. DexScreener stablecoin mispricing) and create
-        # noise at WARNING level.  Moderate deviations stay at WARNING.
+        # Log outliers with structured fields for alerting
         if results.outliers:
             for outlier in results.outliers:
                 median = results.price
                 deviation_pct = abs(outlier.price - median) / median * 100 if median else 0
-                log_fn = logger.debug if deviation_pct > 100 else logger.warning
-                log_fn(
+                logger.warning(
                     "Outlier detected from %s: %s (median: %s, deviation: %.1f%%)",
                     outlier.source,
                     outlier.price,

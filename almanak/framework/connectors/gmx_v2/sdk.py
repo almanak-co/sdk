@@ -20,53 +20,15 @@ This SDK is ported from src-v0 and simplified for the new intent-based architect
 """
 
 import json
-import logging
 import os
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from web3 import Web3
 from web3.contract import Contract
 
-logger = logging.getLogger(__name__)
-
 from almanak.core.contracts import GMX_V2, GMX_V2_TOKENS
-
-if TYPE_CHECKING:
-    from almanak.framework.gateway_client import GatewayClient
-
-
-class PositionQueryError(Exception):
-    """Raised when all position query methods fail.
-
-    Distinguishes "unable to query positions" from "no positions exist."
-    Callers must handle this to avoid mistaking a query failure for zero positions.
-    """
-
-
-# GMX V2 REST API base URLs — same data source as the GMX frontend.
-# Used as fallback when on-chain Reader contract calls revert.
-GMX_API_URLS: dict[str, str] = {
-    "arbitrum": "https://arbitrum-api.gmxinfra.io",
-    "avalanche": "https://avalanche-api.gmxinfra.io",
-}
-
-# Timeout for GMX REST API requests (seconds)
-GMX_API_TIMEOUT = 10
-
-# Minimal ABI for DataStore.getBytes32Count — used by the position count fallback
-_DATASTORE_GETBYTES32COUNT_ABI = [
-    {
-        "inputs": [{"internalType": "bytes32", "name": "setKey", "type": "bytes32"}],
-        "name": "getBytes32Count",
-        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
-        "stateMutability": "view",
-        "type": "function",
-    }
-]
 
 
 class OrderType(IntEnum):
@@ -167,33 +129,18 @@ class GMXV2SDK:
 
     GAS_BUFFER = 0.3
 
-    def __init__(
-        self,
-        rpc_url: str | None = None,
-        chain: str = "arbitrum",
-        gateway_client: "GatewayClient | None" = None,
-    ):
+    def __init__(self, rpc_url: str, chain: str = "arbitrum"):
         """
         Initialize GMX V2 SDK.
 
         Args:
-            rpc_url: DEPRECATED — direct RPC URL. Prefer gateway_client for
-                any code path running in a strategy container.
+            rpc_url: RPC endpoint URL
             chain: Target chain (only 'arbitrum' supported currently)
-            gateway_client: Gateway client for routing eth_call through the
-                gateway. Preferred over rpc_url.
         """
         if chain != "arbitrum":
             raise ValueError(f"GMX V2 SDK only supports Arbitrum, got {chain}")
-        if rpc_url is None and gateway_client is None:
-            raise ValueError("GMXV2SDK requires either rpc_url (deprecated) or gateway_client")
 
-        if gateway_client is not None:
-            from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
-
-            self.web3 = Web3(GatewayWeb3Provider(gateway_client, chain=chain))
-        else:
-            self.web3 = Web3(Web3.HTTPProvider(rpc_url))  # vib-2986-exempt: gateway-internal fallback
+        self.web3 = Web3(Web3.HTTPProvider(rpc_url))
         self.chain = chain
 
         # Get contract addresses
@@ -210,11 +157,6 @@ class GMXV2SDK:
         self.exchange_router = self._load_contract("exchange_router", self.EXCHANGE_ROUTER_ADDRESS)
         self.erc20_abi = self._load_abi("erc20")
 
-        # Reader contract for on-chain position queries
-        self.READER_ADDRESS = self.addresses["READER"]
-        self.DATA_STORE_ADDRESS = self.addresses["DATA_STORE"]
-        self.reader = self._load_contract("reader", self.READER_ADDRESS)
-
     def _load_abi(self, name: str) -> list[dict]:
         """Load ABI from file."""
         abi_path = os.path.join(self.abi_dir, f"{name}.json")
@@ -225,282 +167,6 @@ class GMXV2SDK:
         """Load contract with ABI."""
         abi = self._load_abi(abi_name)
         return self.web3.eth.contract(address=self.web3.to_checksum_address(address), abi=abi)
-
-    # Maximum positions to fetch in a single range query. GMX V2 Reader handles
-    # ranges gracefully — returns only existing positions within [start, end).
-    MAX_POSITION_RANGE = 100
-
-    def get_account_position_count(self, account: str) -> int:
-        """Get the number of open positions for an account.
-
-        Tries SyntheticsReader.getAccountPositionCount first. If it reverts
-        (e.g. after a GMX contract upgrade removed the function), falls back
-        to a DataStore getBytes32Count query using the account position list key.
-
-        Args:
-            account: Wallet address to query
-
-        Returns:
-            Number of open positions (0 if both methods fail)
-        """
-        account_cs = self.web3.to_checksum_address(account)
-        data_store_cs = self.web3.to_checksum_address(self.DATA_STORE_ADDRESS)
-
-        # Primary: Reader.getAccountPositionCount
-        try:
-            return self.reader.functions.getAccountPositionCount(data_store_cs, account_cs).call()
-        except Exception as e:
-            logger.warning("Reader.getAccountPositionCount reverted: %s. Trying DataStore fallback.", e)
-
-        # Fallback: DataStore.getBytes32Count with account position list key
-        try:
-            return self._get_position_count_from_datastore(account_cs, data_store_cs)
-        except Exception as e:
-            logger.warning("DataStore position count fallback also failed: %s", e)
-            return 0
-
-    def _get_position_count_from_datastore(self, account_cs: str, data_store_cs: str) -> int:
-        """Query DataStore directly for position count using the account position list key.
-
-        GMX V2 key derivation: keccak256(abi.encode(keccak256("ACCOUNT_POSITION_LIST"), account))
-        """
-        from eth_abi import encode
-
-        # Compute key: keccak256(abi.encode(keccak256("ACCOUNT_POSITION_LIST"), account))
-        list_key_hash = Web3.keccak(text="ACCOUNT_POSITION_LIST")
-        position_list_key = Web3.keccak(encode(["bytes32", "address"], [list_key_hash, account_cs]))
-
-        datastore = self.web3.eth.contract(
-            address=self.web3.to_checksum_address(data_store_cs), abi=_DATASTORE_GETBYTES32COUNT_ABI
-        )
-        return datastore.functions.getBytes32Count(position_list_key).call()
-
-    def get_account_positions(self, account: str) -> list[dict]:
-        """Read all open positions for an account.
-
-        Tries on-chain Reader contract first, then falls back to GMX REST API
-        when Reader calls revert (common after GMX contract upgrades).
-
-        Args:
-            account: Wallet address to query
-
-        Returns:
-            List of position dicts with keys: account, market, collateral_token,
-            size_in_usd, size_in_tokens, collateral_amount, borrowing_factor,
-            funding_fee_amount_per_size, is_long, increased_at_time, decreased_at_time
-        """
-        # Try on-chain Reader first
-        positions = self._get_positions_via_reader(account)
-        if positions is not None:
-            return positions
-
-        # Fallback to REST API
-        logger.info("All on-chain position queries failed, trying GMX REST API fallback")
-        try:
-            return self._get_positions_via_api(account)
-        except PositionQueryError:
-            raise
-        except Exception as e:
-            raise PositionQueryError(f"All position query methods failed for {account} on {self.chain}: {e}") from e
-
-    def _get_positions_via_reader(self, account: str) -> list[dict] | None:
-        """Try to read positions from on-chain Reader contract.
-
-        Returns:
-            List of position dicts, or None if all on-chain methods failed.
-        """
-        account_cs = self.web3.to_checksum_address(account)
-        data_store_cs = self.web3.to_checksum_address(self.DATA_STORE_ADDRESS)
-
-        # Try to get exact count first (uses fallbacks internally)
-        count = self.get_account_position_count(account)
-        if count == 0:
-            # Count methods might have failed (returned 0 as fallback).
-            # Try a direct range query as last resort — Reader.getAccountPositions
-            # handles ranges gracefully and returns only existing positions.
-            try:
-                raw_positions = self.reader.functions.getAccountPositions(
-                    data_store_cs, account_cs, 0, self.MAX_POSITION_RANGE
-                ).call()
-                if not raw_positions:
-                    # Genuinely no positions — return empty (not None)
-                    return []
-                logger.info(
-                    "Count was 0 but range query found %d positions (count method may be broken)",
-                    len(raw_positions),
-                )
-            except Exception as e:
-                logger.warning("Reader.getAccountPositions range query failed: %s", e)
-                return None  # Signal that on-chain failed entirely
-        else:
-            # Fetch exact range
-            try:
-                raw_positions = self.reader.functions.getAccountPositions(data_store_cs, account_cs, 0, count).call()
-            except Exception as e:
-                logger.error("Reader.getAccountPositions failed for count=%d: %s", count, e)
-                return None  # Signal that on-chain failed entirely
-
-        return self._parse_raw_positions(raw_positions)
-
-    def _get_positions_via_api(self, account: str) -> list[dict]:
-        """Read positions from GMX REST API (fallback, local/dev only).
-
-        # GATEWAY_VIOLATION: Direct outbound HTTP call to GMX REST API.
-        # Reason: On-chain Reader contract reverts after GMX contract upgrades,
-        # and there is no gateway service for GMX position queries yet.
-        # Ticket: VIB-1947 (add proper gateway support for GMX position queries).
-        # In production containers where outbound HTTP is blocked, this raises
-        # PositionQueryError so callers know the query failed (not "no positions").
-
-        Fallback when the on-chain Reader contract reverts (stale ABI/address).
-        The GMX REST API is the same data source the GMX frontend uses.
-
-        Args:
-            account: Wallet address to query
-
-        Returns:
-            List of position dicts in the same format as _parse_raw_positions().
-
-        Raises:
-            PositionQueryError: If the API request fails (network, timeout, parse error).
-        """
-        base_url = GMX_API_URLS.get(self.chain)
-        if not base_url:
-            raise PositionQueryError(f"No GMX REST API URL configured for chain: {self.chain}")
-
-        # Use account-specific endpoint to avoid downloading all global positions
-        account_lower = account.lower()
-        url = f"{base_url}/positions/{account_lower}"
-
-        try:
-            req = urllib.request.Request(url, headers={"Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=GMX_API_TIMEOUT) as resp:
-                data = json.loads(resp.read().decode())
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
-            raise PositionQueryError(f"GMX REST API request to {url} failed: {e}") from e
-
-        # API may return a list directly or nested under "positions"
-        if isinstance(data, list):
-            account_positions = data
-        else:
-            account_positions = data.get("positions", [])
-
-        if not account_positions:
-            return []
-
-        logger.info("GMX REST API returned %d positions for %s", len(account_positions), account)
-        return self._parse_api_positions(account_positions)
-
-    @staticmethod
-    def _safe_int(value: Any, field: str) -> int:
-        """Safely convert an API value to int, handling string/float/None.
-
-        Uses Decimal for string conversion to preserve precision for large
-        GMX position values (e.g. sizeInUsd with 30+ digits).
-        """
-        from decimal import Decimal, InvalidOperation
-
-        if value is None:
-            return 0
-        try:
-            if isinstance(value, str):
-                return int(Decimal(value))
-            return int(value)
-        except (ValueError, TypeError, OverflowError, InvalidOperation):
-            logger.warning("GMX REST API: could not parse field %s value %r as int, defaulting to 0", field, value)
-            return 0
-
-    @staticmethod
-    def _parse_api_positions(api_positions: list[dict]) -> list[dict]:
-        """Convert GMX REST API position format to SDK position dict format.
-
-        The API returns positions with string field names and numeric values as strings.
-        This method normalizes them to match the format returned by _parse_raw_positions().
-
-        Args:
-            api_positions: List of position dicts from the GMX REST API
-
-        Returns:
-            List of position dicts matching the on-chain Reader format
-        """
-        positions = []
-        for p in api_positions:
-            try:
-                _si = GMXV2SDK._safe_int
-                positions.append(
-                    {
-                        "account": p.get("account", ""),
-                        "market": p.get("market", ""),
-                        "collateral_token": p.get("collateralToken", ""),
-                        "size_in_usd": _si(p.get("sizeInUsd", 0), "sizeInUsd"),
-                        "size_in_tokens": _si(p.get("sizeInTokens", 0), "sizeInTokens"),
-                        "collateral_amount": _si(p.get("collateralAmount", 0), "collateralAmount"),
-                        "borrowing_factor": _si(p.get("borrowingFactor", 0), "borrowingFactor"),
-                        "funding_fee_amount_per_size": _si(
-                            p.get("fundingFeeAmountPerSize", 0), "fundingFeeAmountPerSize"
-                        ),
-                        "long_token_claimable_funding_per_size": _si(
-                            p.get("longTokenClaimableFundingAmountPerSize", 0), "longTokenClaimableFundingAmountPerSize"
-                        ),
-                        "short_token_claimable_funding_per_size": _si(
-                            p.get("shortTokenClaimableFundingAmountPerSize", 0),
-                            "shortTokenClaimableFundingAmountPerSize",
-                        ),
-                        "increased_at_block": _si(p.get("increasedAtBlock", 0), "increasedAtBlock"),
-                        "decreased_at_block": _si(p.get("decreasedAtBlock", 0), "decreasedAtBlock"),
-                        "increased_at_time": _si(p.get("increasedAtTime", 0), "increasedAtTime"),
-                        "decreased_at_time": _si(p.get("decreasedAtTime", 0), "decreasedAtTime"),
-                        "is_long": bool(p.get("isLong", False)),
-                    }
-                )
-            except Exception as e:
-                logger.warning("GMX REST API: skipping malformed position %r: %s", p.get("market", "?"), e)
-        return positions
-
-    @staticmethod
-    def _parse_raw_positions(raw_positions: list) -> list[dict]:
-        """Parse raw position tuples from the Reader contract into dicts.
-
-        Args:
-            raw_positions: List of (addresses, numbers, flags) tuples
-
-        Returns:
-            List of position dicts
-        """
-        positions = []
-        for raw in raw_positions:
-            # raw is a tuple: (addresses, numbers, flags)
-            # addresses: (account, market, collateralToken)
-            # numbers: (sizeInUsd, sizeInTokens, collateralAmount, borrowingFactor,
-            #           fundingFeeAmountPerSize, longTokenClaimableFundingAmountPerSize,
-            #           shortTokenClaimableFundingAmountPerSize, increasedAtBlock,
-            #           decreasedAtBlock, increasedAtTime, decreasedAtTime)
-            # flags: (isLong,)
-            addresses = raw[0]
-            numbers = raw[1]
-            flags = raw[2]
-
-            positions.append(
-                {
-                    "account": addresses[0],
-                    "market": addresses[1],
-                    "collateral_token": addresses[2],
-                    "size_in_usd": numbers[0],  # 30 decimals
-                    "size_in_tokens": numbers[1],  # token decimals
-                    "collateral_amount": numbers[2],  # token decimals
-                    "borrowing_factor": numbers[3],
-                    "funding_fee_amount_per_size": numbers[4],
-                    "long_token_claimable_funding_per_size": numbers[5],
-                    "short_token_claimable_funding_per_size": numbers[6],
-                    "increased_at_block": numbers[7],
-                    "decreased_at_block": numbers[8],
-                    "increased_at_time": numbers[9],
-                    "decreased_at_time": numbers[10],
-                    "is_long": flags[0],
-                }
-            )
-
-        return positions
 
     def get_market_address(self, index_token_symbol: str) -> str:
         """
@@ -749,10 +415,6 @@ class GMXV2SDK:
         )
 
 
-def get_gmx_v2_sdk(
-    rpc_url: str | None = None,
-    chain: str = "arbitrum",
-    gateway_client: "GatewayClient | None" = None,
-) -> GMXV2SDK:
+def get_gmx_v2_sdk(rpc_url: str, chain: str = "arbitrum") -> GMXV2SDK:
     """Factory function to create a GMX V2 SDK instance."""
-    return GMXV2SDK(rpc_url=rpc_url, chain=chain, gateway_client=gateway_client)
+    return GMXV2SDK(rpc_url, chain)

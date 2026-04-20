@@ -49,7 +49,6 @@ from .sdk import (
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
-    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +121,7 @@ class AerodromeConfig:
     deadline_seconds: int = DEFAULT_DEADLINE_SECONDS
     price_provider: dict[str, Decimal] | None = None
     allow_placeholder_prices: bool = False
-    rpc_url: str | None = None  # DEPRECATED — use gateway_client
-    gateway_client: "GatewayClient | None" = field(default=None, repr=False, compare=False)
+    rpc_url: str | None = None  # Optional RPC override for SDK on-chain queries
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -358,11 +356,7 @@ class AerodromeAdapter:
         self.wallet_address = config.wallet_address
 
         # Initialize SDK (includes optional RPC override for pool lookups/quotes)
-        self.sdk = AerodromeSDK(
-            chain=self.chain,
-            rpc_url=config.rpc_url,
-            gateway_client=config.gateway_client,
-        )
+        self.sdk = AerodromeSDK(chain=self.chain, rpc_url=config.rpc_url)
         self._web3: Any = None
 
         # Load contract addresses
@@ -656,7 +650,6 @@ class AerodromeAdapter:
         stable: bool = False,
         slippage_bps: int | None = None,
         recipient: str | None = None,
-        pool_address: str | None = None,
     ) -> LiquidityResult:
         """Build a remove liquidity transaction.
 
@@ -667,9 +660,6 @@ class AerodromeAdapter:
             stable: Pool type
             slippage_bps: Slippage tolerance in basis points
             recipient: Address to receive tokens
-            pool_address: Pre-resolved pool address. If provided, skips the
-                direct RPC lookup (required for deployed mode where the strategy
-                container has no outbound network access).
 
         Returns:
             LiquidityResult with transaction data
@@ -699,8 +689,7 @@ class AerodromeAdapter:
 
             # Get pool address for LP token approval
             # The pool contract IS the LP token (ERC-20)
-            if pool_address is None:
-                pool_address = self.sdk.get_pool_address(token_a_address, token_b_address, stable)
+            pool_address = self.sdk.get_pool_address(token_a_address, token_b_address, stable)
             if pool_address:
                 # Approve router to spend LP tokens
                 approve_tx = self._build_approve_tx(
@@ -1142,24 +1131,16 @@ class AerodromeAdapter:
     ) -> int | None:
         """Best-effort on-chain quote for amount out via router.getAmountsOut().
 
-        Routes through the gateway when gateway_client is configured. Falls
-        back to direct RPC (rpc_url) only for ad-hoc script usage. Returns
-        None if neither is available or the quote cannot be fetched.
+        Returns None when rpc_url is not configured or when the quote cannot be fetched.
         """
+        if not self.config.rpc_url:
+            return None
+
         try:
             from web3 import Web3
 
             if self._web3 is None:
-                if self.config.gateway_client is not None:
-                    from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
-
-                    self._web3 = Web3(GatewayWeb3Provider(self.config.gateway_client, chain=self.chain))
-                elif self.config.rpc_url:
-                    self._web3 = Web3(  # vib-2986-exempt: gateway-internal fallback
-                        Web3.HTTPProvider(self.config.rpc_url, request_kwargs={"timeout": 15})
-                    )
-                else:
-                    return None
+                self._web3 = Web3(Web3.HTTPProvider(self.config.rpc_url, request_kwargs={"timeout": 15}))
 
             from .sdk import SwapRoute
 

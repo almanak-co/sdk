@@ -501,10 +501,7 @@ class ApprovalResponse:
     approved: bool
     teardown_id: str
     approved_slippage: Decimal | None = None  # New max slippage if approved
-    # "approve"/"continue" = accept current level; "wait_and_escalate" = pause
-    # then advance to the next higher slippage level (current level is not
-    # retried); "cancel" = abort the teardown.
-    action: str = "continue"
+    action: str = "continue"  # "continue", "wait_and_retry", "cancel"
 
     def __post_init__(self) -> None:
         """Convert numeric fields."""

@@ -116,29 +116,6 @@ POLYGON_PRICE_FEEDS: dict[str, str] = {
     "WSTETH/USD": "0x10f964234cae09cB6a9854B56FF7D4F38Cda5E6a",
 }
 
-# Sonic price feeds (Chain ID: 146)
-# Reference: https://bgd-labs.github.io/aave-address-book/AaveV3Sonic.html
-# Feed addresses sourced from Aave V3 Sonic deployment (bgd-labs/aave-address-book)
-SONIC_PRICE_FEEDS: dict[str, str] = {
-    "ETH/USD": "0x824364077993847f71293B24ccA8567c00c2de11",
-    "USDC/USD": "0x7A8443a2a5D772db7f1E40DeFe32db485108F128",
-    "S/USD": "0xc76dFb89fF298145b417d221B2c747d84952e01d",
-}
-
-# BNB Smart Chain price feeds (Chain ID: 56)
-# Reference: https://docs.chain.link/data-feeds/price-feeds/addresses?network=bnb-chain
-BSC_PRICE_FEEDS: dict[str, str] = {
-    "BNB/USD": "0x0567F2323251f0Aab15c8dFb1967E4e8A7D42aeE",
-    "BTC/USD": "0x264990fbd0A4796A3E3d8E37C4d5F87a3aCa5Ebf",
-    "ETH/USD": "0x9ef1B8c0E4F7dc8bF5719Ea496883DC6401d5b2e",
-    "USDC/USD": "0x51597f405303c4377E36123CbF172bc359765377",
-    "USDT/USD": "0xB97Ad0E74fa7d920791E90258A6E2085088b4320",
-    "DAI/USD": "0x132d3C0B1D2cEa0BC552588063bdBb210FDeecfA",
-    "LINK/USD": "0xca236E327F629f9Fc2c30A4E95775EbF0B89fac8",
-    "CAKE/USD": "0xb6064eD41d4F67e353768AA239CA98F9c422E159",
-    "AAVE/USD": "0xA8357BF572460fC40f4B0aCacbB2a6A61c89f475",
-}
-
 # Avalanche C-Chain price feeds (Chain ID: 43114)
 # Reference: https://docs.chain.link/data-feeds/price-feeds/addresses?network=avalanche
 AVALANCHE_PRICE_FEEDS: dict[str, str] = {
@@ -161,9 +138,7 @@ CHAINLINK_PRICE_FEEDS: dict[str, dict[str, str]] = {
     "base": BASE_PRICE_FEEDS,
     "optimism": OPTIMISM_PRICE_FEEDS,
     "polygon": POLYGON_PRICE_FEEDS,
-    "bsc": BSC_PRICE_FEEDS,
     "avalanche": AVALANCHE_PRICE_FEEDS,
-    "sonic": SONIC_PRICE_FEEDS,
 }
 
 # Token symbol to pair mapping (for convenience)
@@ -200,11 +175,6 @@ TOKEN_TO_PAIR: dict[str, str] = {
     "MAGIC": "MAGIC/USD",
     "WOO": "WOO/USD",
     "JOE": "JOE/USD",
-    "CAKE": "CAKE/USD",
-    "BNB": "BNB/USD",
-    "WBNB": "BNB/USD",
-    "S": "S/USD",
-    "WS": "S/USD",  # Wrapped Sonic (wS) uses same S/USD feed
 }
 
 # Chainlink heartbeat intervals (seconds) for staleness checks
@@ -238,9 +208,7 @@ CHAINLINK_CHAIN_IDS: dict[str, int] = {
     "base": 8453,
     "optimism": 10,
     "polygon": 137,
-    "bsc": 56,
     "avalanche": 43114,
-    "sonic": 146,
 }
 
 # =============================================================================

@@ -981,9 +981,7 @@ async def get_token_symbol_with_fallback(
         try:
             from web3 import AsyncHTTPProvider, AsyncWeb3
 
-            from almanak.gateway.utils.ssl_context import build_ssl_context
-
-            web3 = AsyncWeb3(AsyncHTTPProvider(rpc_url, request_kwargs={"ssl": build_ssl_context()}))
+            web3 = AsyncWeb3(AsyncHTTPProvider(rpc_url))
             checksum_address = web3.to_checksum_address(address)
 
             symbol = await _query_symbol_onchain(web3, checksum_address)

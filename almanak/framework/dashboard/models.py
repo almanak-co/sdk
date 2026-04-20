@@ -4,7 +4,7 @@ Contains all dataclasses and enums used across the dashboard.
 """
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
@@ -20,7 +20,6 @@ class StrategyStatus(StrEnum):
     INACTIVE = "INACTIVE"
     STALE = "STALE"
     ARCHIVED = "ARCHIVED"
-    PAPER_TRADING = "PAPER_TRADING"
 
 
 class TimelineEventType(StrEnum):
@@ -248,87 +247,6 @@ class OperatorCard:
 
 
 @dataclass
-class EquityCurvePoint:
-    """A single point on the equity curve."""
-
-    timestamp: datetime
-    value_usd: Decimal
-
-
-@dataclass
-class PaperMetrics:
-    """Metrics for a paper trading session.
-
-    Populated from the paper trading engine's state files
-    (~/.almanak/paper/{id}.state.json) via the gateway.
-    """
-
-    tick_count: int = 0
-    success_count: int = 0
-    hold_count: int = 0
-    error_count: int = 0
-    simulated_pnl_usd: Decimal = Decimal("0")
-    total_gas_cost_usd: Decimal = Decimal("0")
-    last_trade_at: datetime | None = None
-    session_start: datetime | None = None
-    trades_per_hour: Decimal = Decimal("0")
-    equity_curve: list[EquityCurvePoint] = field(default_factory=list)
-    error_breakdown: dict[str, int] = field(default_factory=dict)
-    # Health telemetry from BackgroundPaperTrader
-    ticks_with_fork: int = 0
-    ticks_with_indicators: int = 0
-    ticks_with_action: int = 0
-    # Pre-flight anvil test result
-    anvil_result: str | None = None
-
-    @property
-    def total_decisions(self) -> int:
-        """Total decisions (trades + errors), excluding holds."""
-        return self.success_count + self.error_count
-
-    @property
-    def success_rate(self) -> Decimal:
-        """Success rate as decimal 0.0 to 1.0 (only over trades + errors, not holds)."""
-        if self.total_decisions == 0:
-            return Decimal("0")
-        return Decimal(self.success_count) / Decimal(self.total_decisions)
-
-    @property
-    def error_rate(self) -> Decimal:
-        """Error rate as decimal 0.0 to 1.0."""
-        if self.total_decisions == 0:
-            return Decimal("0")
-        return Decimal(self.error_count) / Decimal(self.total_decisions)
-
-    @property
-    def session_age_hours(self) -> Decimal:
-        """Session age in hours, or 0 if no start time."""
-        if self.session_start is None:
-            return Decimal("0")
-        delta = datetime.now(tz=UTC) - self.session_start
-        return Decimal(str(delta.total_seconds())) / Decimal("3600")
-
-    @property
-    def is_promotion_ready(self) -> bool:
-        """Whether the paper session meets readiness thresholds for deployment.
-
-        Criteria (all must pass):
-        - tick_count >= 50
-        - At least 1 successful trade (not all holds)
-        - success_rate >= 0.80 (over trades+errors, not holds)
-        - error_rate < 0.05
-        - session_age > 1 hour
-        """
-        return (
-            self.tick_count >= 50
-            and self.success_count >= 1
-            and self.success_rate >= Decimal("0.80")
-            and self.error_rate < Decimal("0.05")
-            and self.session_age_hours > Decimal("1")
-        )
-
-
-@dataclass
 class Strategy:
     """Strategy data for dashboard display."""
 
@@ -359,9 +277,6 @@ class Strategy:
     config_path: str | None = None
     # Value confidence indicator (HIGH, ESTIMATED, STALE, UNAVAILABLE)
     value_confidence: str | None = None
-    # Paper trading support
-    execution_mode: str = "live"  # "live" or "paper"
-    paper_metrics: PaperMetrics | None = None
 
 
 @dataclass

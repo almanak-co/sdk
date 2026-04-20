@@ -179,8 +179,6 @@ class ManagedGateway:
         self._started = threading.Event()
         self._stop_requested = threading.Event()
         self._startup_error: BaseException | None = None
-        # Chains currently undergoing an intentional reset (watchdog must skip these)
-        self._resetting_chains: set[str] = set()
 
     @property
     def host(self) -> str:
@@ -268,46 +266,14 @@ class ManagedGateway:
                 # Managed Anvil: start a new fork
                 port = find_free_port()
                 fork_url = get_rpc_url(chain, network="mainnet")
-                # Use pinned fork block if available (set by CI or nightly entrypoint)
-                # to maximise Foundry RPC cache hits across strategy runs.
-                fork_block_env = os.environ.get(f"ANVIL_FORK_BLOCK_{chain.upper()}")
-                fork_block = int(fork_block_env) if fork_block_env else None
-                if fork_block:
-                    logger.info("Anvil fork for %s pinned to block %d", chain, fork_block)
                 manager = RollingForkManager(
                     rpc_url=fork_url,
                     chain=chain,
                     anvil_port=port,
-                    fork_block_number=fork_block,
                 )
                 ok = await manager.start()
                 if not ok:
-                    # If the primary RPC failed (e.g. Alchemy 403 — chain not enabled on this app),
-                    # attempt a fallback to the public RPC endpoint for this chain.
-                    from almanak.gateway.utils.rpc_provider import PUBLIC_RPC_URLS
-
-                    public_url = PUBLIC_RPC_URLS.get(chain)
-                    if public_url and public_url != fork_url:
-                        from almanak.framework.anvil.fork_manager import ForkManagerConfig
-
-                        logger.warning(
-                            "Primary RPC failed for %s (url=%s). Retrying with public fallback: %s",
-                            chain,
-                            ForkManagerConfig._mask_url(fork_url),
-                            public_url,
-                        )
-                        port = find_free_port()
-                        manager = RollingForkManager(
-                            rpc_url=public_url,
-                            chain=chain,
-                            anvil_port=port,
-                            fork_block_number=fork_block,
-                        )
-                        ok = await manager.start()
-                        if ok:
-                            fork_url = public_url
-                    if not ok:
-                        raise RuntimeError(f"Failed to start Anvil fork for {chain} on port {port}")
+                    raise RuntimeError(f"Failed to start Anvil fork for {chain} on port {port}")
                 self._anvil_managers[chain] = manager
                 # Set env var so gateway RPC provider routes to this Anvil
                 self._original_env[env_var] = os.environ.get(env_var)
@@ -330,7 +296,7 @@ class ManagedGateway:
             raise
 
     # Native gas tokens that are funded via anvil_setBalance (not ERC-20 transfer)
-    NATIVE_TOKEN_SYMBOLS = frozenset({"ETH", "AVAX", "MATIC", "BNB", "S", "POL", "MNT", "BERA", "MON", "OKB", "XPL"})
+    NATIVE_TOKEN_SYMBOLS = frozenset({"ETH", "AVAX", "MATIC", "BNB", "S", "POL", "MNT", "MON"})
     CHAIN_NATIVE_SYMBOL: dict[str, str] = {
         "ethereum": "ETH",
         "arbitrum": "ETH",
@@ -340,17 +306,12 @@ class ManagedGateway:
         "avalanche": "AVAX",
         "bsc": "BNB",
         "sonic": "S",
-        "blast": "ETH",
-        "linea": "ETH",
-        "plasma": "XPL",
+        "plasma": "ETH",
         "mantle": "MNT",
-        "berachain": "BERA",
         "monad": "MON",
-        "xlayer": "OKB",
-        "zerog": "A0GI",
     }
 
-    async def _fund_anvil_wallets(self, chains: list[str] | None = None) -> None:
+    async def _fund_anvil_wallets(self) -> None:
         """Fund the wallet on each Anvil fork using the anvil_funding config.
 
         Reads token amounts from self._anvil_funding (set from config.json).
@@ -358,12 +319,6 @@ class ManagedGateway:
         ERC-20 tokens are funded via storage slot manipulation.
         If anvil_funding is empty, no funding is performed.
         Errors are logged but do not prevent gateway startup.
-
-        Args:
-            chains: If provided, only fund wallets on these chains. If None,
-                    fund all managed chains. Pass a single-chain list when
-                    re-funding after a watchdog restart to avoid resetting
-                    paper-trading state on healthy forks.
         """
         if not self._anvil_funding:
             logger.info("No anvil_funding in config -- skipping wallet funding")
@@ -404,37 +359,18 @@ class ManagedGateway:
             else:
                 erc20_tokens[symbol] = parsed
 
-        managers_to_fund = {c: m for c, m in self._anvil_managers.items() if chains is None or c in chains}
-        for chain, manager in managers_to_fund.items():
+        for chain, manager in self._anvil_managers.items():
             try:
                 # Only fund the native token that matches this chain
                 chain_native = self.CHAIN_NATIVE_SYMBOL.get(chain)
-                # Warn if the user specified "ETH" but this chain uses a different native token.
-                # This is a common footgun: BSC/Avalanche/Polygon use BNB/AVAX/MATIC, not ETH.
-                if chain_native and chain_native != "ETH" and "ETH" in native_amounts:
-                    eth_amount = native_amounts["ETH"]
-                    logger.warning(
-                        "anvil_funding contains 'ETH' (%.4f) but chain='%s' uses '%s' as native token. "
-                        "Did you mean '%s'? The 'ETH' entry will NOT fund native gas on this chain. "
-                        "Update your config.json anvil_funding key.",
-                        eth_amount,
-                        chain,
-                        chain_native,
-                        chain_native,
-                    )
                 native_amount = native_amounts.get(chain_native, Decimal("0")) if chain_native else Decimal("0")
                 if native_amount > 0:
                     await manager.fund_wallet(wallet, native_amount)
-                    logger.info(f"Funded native {chain_native}: {native_amount}")
                 if erc20_tokens:
-                    # VIB-2570: Log each ERC20 token being funded so failures are traceable
-                    logger.info(f"Funding ERC20 tokens on {chain}: {list(erc20_tokens.keys())}")
                     await manager.fund_tokens(wallet, erc20_tokens)
                 logger.info(f"Anvil funding complete for {chain}")
             except Exception as e:
-                # VIB-2570: Log at ERROR (not WARNING) when funding fails after restart —
-                # the strategy WILL fail with INSUFFICIENT_FUNDS if this is not resolved.
-                logger.error(f"Anvil funding failed for {chain}: {e}")
+                logger.warning(f"Anvil funding failed for {chain}: {e}")
 
     async def _stop_anvil_forks(self, *, force: bool = False) -> None:
         """Stop all managed Anvil fork instances and restore env vars.
@@ -476,47 +412,6 @@ class ManagedGateway:
             else:
                 os.environ[env_var] = original
 
-    # Anvil watchdog check interval (seconds). Env-overridable for tests.
-    _WATCHDOG_INTERVAL: float = float(os.environ.get("ALMANAK_ANVIL_WATCHDOG_INTERVAL", "5.0"))
-
-    async def _anvil_watchdog(self) -> None:
-        """Background task: detect crashed Anvil processes and restart them.
-
-        Runs on the gateway event loop. Checks each managed Anvil process
-        every _WATCHDOG_INTERVAL seconds. If a process has exited (poll() is
-        not None), resets it to the latest block and re-funds the wallet.
-
-        Does not restart if a gateway shutdown has been requested.
-        """
-        while not self._stop_requested.is_set():
-            await asyncio.sleep(self._WATCHDOG_INTERVAL)
-            if self._stop_requested.is_set():
-                break
-            for chain, manager in list(self._anvil_managers.items()):
-                if chain in self._resetting_chains:
-                    continue  # Skip chains being intentionally reset via reset_anvil_forks()
-                if not manager.is_running:
-                    logger.warning(
-                        "Anvil fork for %s is no longer running (process exited). Restarting...",
-                        chain,
-                    )
-                    try:
-                        ok = await manager.reset_to_latest()
-                        if ok:
-                            # VIB-2570: Re-fund ALL tokens (native + ERC20) after restart.
-                            # anvil_reset / stop-start resets the fork to mainnet state,
-                            # losing all storage-slot-manipulated ERC20 balances.
-                            logger.info(
-                                "Anvil fork for %s reset. Re-funding wallet (native + ERC20)...",
-                                chain,
-                            )
-                            await self._fund_anvil_wallets(chains=[chain])
-                            logger.info("Anvil fork for %s restarted and re-funded successfully", chain)
-                        else:
-                            logger.error("Failed to restart Anvil fork for %s", chain)
-                    except Exception:
-                        logger.exception("Error restarting Anvil fork for %s", chain)
-
     def _run_server(self) -> None:
         """Thread target: create event loop and run server."""
         try:
@@ -534,19 +429,8 @@ class ManagedGateway:
                     await self._fund_anvil_wallets()
                 await server.start()
                 self._started.set()
-                # Start Anvil watchdog alongside the main server loop
-                if self._anvil_managers:
-                    watchdog_task = asyncio.ensure_future(self._anvil_watchdog())
-                else:
-                    watchdog_task = None
                 while not self._stop_requested.is_set():
                     await asyncio.sleep(0.1)
-                if watchdog_task is not None:
-                    watchdog_task.cancel()
-                    try:
-                        await watchdog_task
-                    except asyncio.CancelledError:
-                        pass
                 await server.stop()
                 if self._anvil_managers:
                     await self._stop_anvil_forks()
@@ -674,18 +558,13 @@ class ManagedGateway:
             return False
 
         async def _reset_all() -> bool:
-            chains = list(self._anvil_managers.keys())
-            self._resetting_chains.update(chains)
-            try:
-                for chain, manager in self._anvil_managers.items():
-                    ok = await manager.reset_to_latest()
-                    if not ok:
-                        logger.error(f"Failed to reset Anvil fork for {chain}")
-                        return False
-                    logger.info(f"Anvil fork reset for {chain} to latest block")
-                await self._fund_anvil_wallets()
-            finally:
-                self._resetting_chains.difference_update(chains)
+            for chain, manager in self._anvil_managers.items():
+                ok = await manager.reset_to_latest()
+                if not ok:
+                    logger.error(f"Failed to reset Anvil fork for {chain}")
+                    return False
+                logger.info(f"Anvil fork reset for {chain} to latest block")
+            await self._fund_anvil_wallets()
             return True
 
         import concurrent.futures

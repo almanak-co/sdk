@@ -15,9 +15,6 @@ Key Concepts:
 
 Supported chains:
 - Avalanche (Chain ID: 43114)
-- Arbitrum (Chain ID: 42161)
-- BSC (Chain ID: 56)
-- Ethereum (Chain ID: 1)
 
 Example:
     from almanak.framework.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
@@ -48,7 +45,7 @@ Example:
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -76,7 +73,6 @@ __all__ = [
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
-    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -113,15 +109,10 @@ class TraderJoeV2Config:
 
     chain: str
     wallet_address: str
-    rpc_url: str | None = None  # DEPRECATED — use gateway_client
+    rpc_url: str
     private_key: str | None = None
     default_slippage_bps: int = 50  # 0.5%
     default_deadline_seconds: int = 300  # 5 minutes
-    gateway_client: "GatewayClient | None" = field(default=None, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        if self.rpc_url is None and self.gateway_client is None:
-            raise TraderJoeV2SDKError("TraderJoeV2Config requires either rpc_url (deprecated) or gateway_client")
 
 
 @dataclass
@@ -291,19 +282,14 @@ class TraderJoeV2Adapter:
         self.chain = config.chain.lower()
 
         # Validate chain
-        from almanak.core.contracts import TRADERJOE_V2 as TJ_ADDRESSES
-
-        if self.chain not in TJ_ADDRESSES:
-            raise TraderJoeV2SDKError(
-                f"Chain '{config.chain}' not supported. TraderJoe V2 supported on: {list(TJ_ADDRESSES.keys())}"
-            )
+        if self.chain != "avalanche":
+            raise TraderJoeV2SDKError(f"Chain '{config.chain}' not supported. TraderJoe V2 is only on Avalanche.")
 
         # Initialize SDK
         self.sdk = TraderJoeV2SDK(
             chain=self.chain,
             rpc_url=config.rpc_url,
             wallet_address=config.wallet_address,
-            gateway_client=config.gateway_client,
         )
 
         # TokenResolver integration
@@ -315,12 +301,6 @@ class TraderJoeV2Adapter:
             self._token_resolver = get_token_resolver()
 
         logger.info(f"TraderJoeV2Adapter initialized for {self.chain}: wallet={config.wallet_address[:10]}...")
-
-    def _get_chain_id(self) -> int:
-        """Get the EIP-155 chain ID for the configured chain."""
-        from almanak.core.constants import get_chain_id
-
-        return get_chain_id(self.chain)
 
     # =========================================================================
     # Token Utilities
@@ -450,10 +430,13 @@ class TraderJoeV2Adapter:
             ).call()
             amount_out_wei = swap_out[1]  # (amountInLeft, amountOut, fee)
         except Exception as e:
-            raise TraderJoeV2SDKError(
-                f"On-chain quote failed for {token_in}->{token_out} (bin_step={bin_step}): {e}. "
-                f"Cannot safely estimate swap output without router quote."
-            ) from e
+            # Fallback: estimate from spot rate
+            logger.warning(f"getSwapOut failed, using spot rate estimate: {e}")
+            spot_rate = self.sdk.get_pool_spot_rate(pool_addr)
+            if swap_for_y:
+                amount_out_wei = int(amount_in_wei * Decimal(str(spot_rate)))
+            else:
+                amount_out_wei = int(amount_in_wei / Decimal(str(spot_rate)))
 
         amount_out = self.from_wei(amount_out_wei, token_out)
 
@@ -531,7 +514,7 @@ class TraderJoeV2Adapter:
             data=tx["data"].hex() if isinstance(tx["data"], bytes) else tx["data"],
             value=tx.get("value", 0),
             gas=gas,
-            chain_id=self._get_chain_id(),
+            chain_id=43114,
         )
 
     def swap_exact_input(
@@ -672,7 +655,6 @@ class TraderJoeV2Adapter:
         bin_step: int = 20,
         bin_range: int = 10,
         slippage_bps: int | None = None,
-        id_slippage: int = 50,
     ) -> TransactionData:
         """Build an add liquidity transaction.
 
@@ -686,10 +668,6 @@ class TraderJoeV2Adapter:
             bin_step: Bin step of the pool
             bin_range: Number of bins on each side of active bin
             slippage_bps: Slippage tolerance in basis points
-            id_slippage: Allowed deviation in active bin ID between pool query
-                and TX execution. Default 50 (was 5, increased to handle
-                Avalanche's high throughput where bins shift between
-                simulation and execution). VIB-2579.
 
         Returns:
             TransactionData ready for signing and execution
@@ -710,27 +688,24 @@ class TraderJoeV2Adapter:
 
         # Distribute tokens across bins
         # X goes in bins above active, Y goes in bins below
-        # Skip distribution for a token if its amount is 0 (single-sided LP)
         distribution_x = [0] * num_bins
         distribution_y = [0] * num_bins
 
-        # X distribution (bins above active) — only if providing token X
-        if amount_x_wei > 0:
-            bins_above = bin_range
-            if bins_above > 0:
-                share = 10**18 // bins_above
-                for i in range(bin_range + 1, num_bins):
-                    distribution_x[i] = share
-                # Adjust remainder
-                distribution_x[-1] += 10**18 - sum(distribution_x)
+        # X distribution (bins above active)
+        bins_above = bin_range
+        if bins_above > 0:
+            share = 10**18 // bins_above
+            for i in range(bin_range + 1, num_bins):
+                distribution_x[i] = share
+            # Adjust remainder
+            distribution_x[-1] += 10**18 - sum(distribution_x)
 
-        # Y distribution (bins at and below active) — only if providing token Y
-        if amount_y_wei > 0:
-            bins_below = bin_range + 1
-            share = 10**18 // bins_below
-            for i in range(bins_below):
-                distribution_y[i] = share
-            distribution_y[bin_range] += 10**18 - sum(distribution_y)
+        # Y distribution (bins at and below active)
+        bins_below = bin_range + 1
+        share = 10**18 // bins_below
+        for i in range(bins_below):
+            distribution_y[i] = share
+        distribution_y[bin_range] += 10**18 - sum(distribution_y)
 
         # For LP operations, set minimums to 0.
         # TraderJoe V2's Liquidity Book doesn't guarantee all tokens will be added -
@@ -750,7 +725,7 @@ class TraderJoeV2Adapter:
             amount_x_min=amount_x_min,
             amount_y_min=amount_y_min,
             active_id_desired=pool_info.active_id,
-            id_slippage=id_slippage,
+            id_slippage=5,
             delta_ids=delta_ids,
             distribution_x=distribution_x,
             distribution_y=distribution_y,
@@ -763,7 +738,7 @@ class TraderJoeV2Adapter:
             data=tx["data"].hex() if isinstance(tx["data"], bytes) else tx["data"],
             value=tx.get("value", 0),
             gas=gas,
-            chain_id=self._get_chain_id(),
+            chain_id=43114,
         )
 
     def build_remove_liquidity_transaction(
@@ -817,7 +792,7 @@ class TraderJoeV2Adapter:
             data=tx["data"].hex() if isinstance(tx["data"], bytes) else tx["data"],
             value=tx.get("value", 0),
             gas=gas,
-            chain_id=self._get_chain_id(),
+            chain_id=43114,
         )
 
     # =========================================================================
@@ -894,5 +869,5 @@ class TraderJoeV2Adapter:
             data=tx["data"].hex() if isinstance(tx["data"], bytes) else tx["data"],
             value=tx.get("value", 0),
             gas=gas,
-            chain_id=self._get_chain_id(),
+            chain_id=43114,
         )

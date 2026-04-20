@@ -43,24 +43,8 @@ from almanak.framework.execution.interfaces import (
     Simulator,
     UnsignedTransaction,
 )
-from almanak.framework.execution.simulator.config import is_local_rpc
 
 logger = logging.getLogger(__name__)
-
-# Timeout for waiting for transaction receipts during simulation state setup.
-# 30s accommodates slower chains (Avalanche, Ethereum mainnet forks) where
-# Aave V3 supply and similar complex transactions can take 12-15s.
-# 10s was too short and caused spurious failures on non-L2 chains (VIB-1842).
-_STATE_SETUP_TX_TIMEOUT = 30
-
-# Gas buffer multiplier for state-setup transaction execution.
-# eth_estimateGas returns the minimum gas needed at the current block state,
-# but actual execution via send_transaction mines a new block, which can
-# change opcode costs slightly (SLOAD cold/warm, block-dependent opcodes).
-# Without a buffer, decreaseLiquidity (V3 LP_CLOSE) consistently reverts
-# during state setup even though eth_estimateGas passes (VIB-572).
-# 20% buffer is standard practice (MetaMask uses 1.5x for complex TXs).
-_STATE_SETUP_GAS_BUFFER = 1.2
 
 
 class LocalSimulator(Simulator):
@@ -142,9 +126,7 @@ class LocalSimulator(Simulator):
     async def _get_web3(self) -> AsyncWeb3:
         """Get or create AsyncWeb3 instance."""
         if self._web3 is None:
-            from almanak.gateway.utils.ssl_context import build_ssl_context
-
-            self._web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url, request_kwargs={"ssl": build_ssl_context()}))
+            self._web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url))
         return self._web3
 
     async def _estimate_gas(
@@ -264,33 +246,10 @@ class LocalSimulator(Simulator):
         """
         web3 = await self._get_web3()
         try:
-            # Apply gas buffer: eth_estimateGas returns the minimum gas at the
-            # current block, but send_transaction mines a new block which can
-            # shift opcode costs (cold/warm SLOAD, block-dependent ops). Without
-            # a buffer, multi-TX state setup (e.g., V3 LP_CLOSE decreaseLiquidity)
-            # consistently reverts even though estimation passes (VIB-572).
-            buffered_gas = int(gas_limit * _STATE_SETUP_GAS_BUFFER)
-
-            # Use explicit legacy gasPrice to bypass web3.py's EIP-1559 middleware
-            # which calls eth_feeHistory/eth_maxPriorityFeePerGas and can hang
-            # on Anvil forks (VIB-1831). On Anvil 0.4.0+ with --no-gas-cap,
-            # gasPrice=0 works. On older Anvil (0.3.x), the gas cap is enforced
-            # so we must use the block's base fee to avoid rejection.
-            try:
-                block = await web3.eth.get_block("latest")
-                base_fee = block.get("baseFeePerGas", 1_000_000_000)
-                # Use 2x base fee to handle block-to-block base fee increases
-                # (Anvil may advance to next block between query and submission)
-                gas_price = Wei(base_fee * 2)
-            except Exception as e:
-                logger.warning(f"Failed to query baseFeePerGas, falling back to 1 gwei: {e}")
-                gas_price = Wei(1_000_000_000)
-
             tx_params: TxParams = {
                 "value": Wei(tx.value),
                 "data": HexBytes(tx.data) if tx.data else HexBytes("0x"),
-                "gas": buffered_gas,
-                "gasPrice": gas_price,
+                "gas": gas_limit,
             }
             if tx.from_address:
                 tx_params["from"] = web3.to_checksum_address(tx.from_address)
@@ -298,7 +257,7 @@ class LocalSimulator(Simulator):
                 tx_params["to"] = web3.to_checksum_address(tx.to)
 
             tx_hash = await web3.eth.send_transaction(tx_params)
-            receipt = await web3.eth.wait_for_transaction_receipt(tx_hash, timeout=_STATE_SETUP_TX_TIMEOUT)
+            receipt = await web3.eth.wait_for_transaction_receipt(tx_hash, timeout=10)
 
             if receipt["status"] != 1:
                 return False, "Transaction reverted"
@@ -356,31 +315,23 @@ class LocalSimulator(Simulator):
         snapshot_id = None
         snapshot_unavailable = False
         if tx_count > 1:
-            if not is_local_rpc(self._rpc_url):
-                # evm_snapshot is an Anvil/Hardhat-only method; skip silently on remote RPCs
-                snapshot_unavailable = True
-                logger.debug(
-                    "Skipping evm_snapshot: not a local RPC (evm_snapshot is Anvil-only). "
-                    "Proceeding with gas estimation only."
-                )
-            else:
-                try:
-                    result = await web3.provider.make_request(RPCEndpoint("evm_snapshot"), [])
-                    snapshot_id = result.get("result")
-                    if snapshot_id is not None:
-                        logger.debug(f"Created EVM snapshot: {snapshot_id}")
-                    else:
-                        snapshot_unavailable = True
-                        logger.warning(
-                            "evm_snapshot returned None - snapshot not supported. "
-                            "Proceeding with gas estimation only (no state-mutating execution)."
-                        )
-                except Exception as e:
+            try:
+                result = await web3.provider.make_request(RPCEndpoint("evm_snapshot"), [])
+                snapshot_id = result.get("result")
+                if snapshot_id is not None:
+                    logger.debug(f"Created EVM snapshot: {snapshot_id}")
+                else:
                     snapshot_unavailable = True
                     logger.warning(
-                        f"evm_snapshot failed (unexpected on Anvil): {e}. "
+                        "evm_snapshot returned None - snapshot not supported. "
                         "Proceeding with gas estimation only (no state-mutating execution)."
                     )
+            except Exception as e:
+                snapshot_unavailable = True
+                logger.warning(
+                    f"evm_snapshot failed (not Anvil?): {e}. "
+                    "Proceeding with gas estimation only (no state-mutating execution)."
+                )
 
             # Add warning to result when snapshot is unavailable for multi-tx bundles
             if snapshot_unavailable:

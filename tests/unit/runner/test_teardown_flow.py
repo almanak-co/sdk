@@ -19,7 +19,6 @@ import pytest
 from almanak.framework.runner.strategy_runner import (
     IterationResult,
     IterationStatus,
-    RunnerConfig,
     StrategyRunner,
 )
 from almanak.framework.teardown.models import TeardownMode
@@ -621,7 +620,7 @@ class TestTeardownViaManager:
         strategy = _make_strategy()
         market = MagicMock(get_price_oracle_dict=MagicMock(return_value={"ETH": Decimal("3000")}))
 
-        with patch("almanak.framework.runner.runner_teardown.IntentCompiler") as mock_compiler_cls:
+        with patch("almanak.framework.runner.strategy_runner.IntentCompiler") as mock_compiler_cls:
             mock_compiler_cls.return_value = MagicMock()
             compiler = runner._build_teardown_compiler(strategy, market)
 
@@ -639,7 +638,7 @@ class TestTeardownViaManager:
         runner = _make_runner()
         strategy = _make_strategy()
 
-        with patch("almanak.framework.runner.runner_teardown.IntentCompiler", side_effect=RuntimeError("bad")):
+        with patch("almanak.framework.runner.strategy_runner.IntentCompiler", side_effect=RuntimeError("bad")):
             compiler = runner._build_teardown_compiler(strategy, None)
 
         assert compiler is None
@@ -649,7 +648,6 @@ class TestTeardownViaManager:
     async def test_fallback_to_inline_when_compiler_fails(self, mock_get_manager):
         """Falls back to inline execution when compiler cannot be built."""
         runner = _make_runner()
-        runner.config = RunnerConfig(allow_unsafe_teardown_fallback=True)
         intent = _make_intent()
         strategy = _make_strategy(should_teardown=True, teardown_intents=[intent])
 
@@ -691,7 +689,6 @@ class TestTeardownViaManager:
         (which would trivially pass loss caps). Instead, fall back to inline.
         """
         runner = _make_runner()
-        runner.config = RunnerConfig(allow_unsafe_teardown_fallback=True)
         intent = _make_intent()
         strategy = _make_strategy(should_teardown=True, teardown_intents=[intent])
         strategy.get_open_positions.side_effect = RuntimeError("RPC timeout")

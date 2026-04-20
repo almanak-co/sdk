@@ -49,25 +49,23 @@ class TestCAGRCrash:
         metrics = backtester._calculate_metrics(portfolio, [], config)
 
         assert isinstance(metrics, BacktestMetrics)
-        # VIB-2915: annualized_return_pct is a percentage (-100 = -100%), not a ratio (-1).
-        assert metrics.annualized_return_pct == Decimal("-100")
+        assert metrics.annualized_return_pct == Decimal("-1")
 
     def test_portfolio_loses_exactly_100_pct(self, backtester, config):
         """Portfolio going to zero should cap at -100%."""
         portfolio = _make_portfolio(Decimal("10000"), Decimal("0"))
         metrics = backtester._calculate_metrics(portfolio, [], config)
 
-        # VIB-2915: annualized_return_pct is a percentage (-100 = -100%), not a ratio (-1).
-        assert metrics.annualized_return_pct == Decimal("-100")
+        assert metrics.annualized_return_pct == Decimal("-1")
 
     def test_normal_loss_unaffected(self, backtester, config):
         """Normal loss (<100%) should calculate CAGR normally."""
         portfolio = _make_portfolio(Decimal("10000"), Decimal("8000"))
         metrics = backtester._calculate_metrics(portfolio, [], config)
 
-        # Should be a negative return but not capped at -100% (VIB-2915: value is a percentage).
+        # Should be a negative return but not -1
         assert metrics.annualized_return_pct < Decimal("0")
-        assert metrics.annualized_return_pct > Decimal("-100")
+        assert metrics.annualized_return_pct > Decimal("-1")
 
     def test_normal_gain_unaffected(self, backtester, config):
         """Normal gain should calculate CAGR normally."""
@@ -92,6 +90,5 @@ class TestCAGRCrash:
         metrics = backtester._calculate_metrics(portfolio, [trade], config)
 
         assert isinstance(metrics, BacktestMetrics)
-        # VIB-2915: annualized_return_pct is a percentage (-100 = -100%), not a ratio (-1).
-        assert metrics.annualized_return_pct == Decimal("-100")
+        assert metrics.annualized_return_pct == Decimal("-1")
         assert metrics.total_gas_usd == Decimal("19")

@@ -40,29 +40,12 @@ def apply_patches(patches):
             p.stop()
 
 
-def _make_state_manager() -> MagicMock:
-    """Build a state_manager mock with awaitable persistence methods.
-
-    VIB-3157: ``_write_ledger_entry`` awaits ``save_ledger_entry`` /
-    ``save_position_event`` and, in live mode, re-raises unexpected failures
-    as ``AccountingPersistenceError``. Plain ``MagicMock`` attributes are
-    not awaitables, so the fail-closed path blows up on test shims unless
-    these coroutines are explicitly provided.
-    """
-    sm = MagicMock()
-    sm.save_ledger_entry = AsyncMock(return_value=None)
-    sm.save_position_event = AsyncMock(return_value=None)
-    sm.save_portfolio_snapshot = AsyncMock(return_value=1)
-    sm.save_portfolio_metrics = AsyncMock(return_value=True)
-    return sm
-
-
 def _make_runner(**overrides) -> StrategyRunner:
     defaults = dict(
         price_oracle=MagicMock(),
         balance_provider=MagicMock(),
         execution_orchestrator=MagicMock(),
-        state_manager=_make_state_manager(),
+        state_manager=MagicMock(),
         alert_manager=None,
     )
     defaults.update(overrides)

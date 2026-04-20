@@ -42,7 +42,7 @@
 |----------|-------------|-----------|
 | `ENSO_API_KEY` | 通过 Enso Finance 聚合器进行交换路由 | [enso.finance](https://enso.finance/) |
 | `COINGECKO_API_KEY` | 改善价格数据的速率限制（无密钥也可使用） | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
-| `ALMANAK_API_KEY` | Almanak 平台身份验证 | [app.almanak.co](https://app.almanak.co/) |
+| `ALMANAK_API_KEY` | 平台功能：`strat push`、`strat pull`、部署 | [app.almanak.co](https://app.almanak.co/) |
 | `THEGRAPH_API_KEY` | 使用子图数据进行回测（DEX 交易量、借贷 APY） | [thegraph.com/studio](https://thegraph.com/studio/) |
 
 ---
@@ -73,14 +73,6 @@
 | 变量 | 描述 |
 |----------|-------------|
 | `ALMANAK_GATEWAY_PENDLE_API_KEY` | Pendle 协议 API 密钥 |
-
-### Solana
-
-| 变量 | 描述 |
-|----------|-------------|
-| `SOLANA_PRIVATE_KEY` | Ed25519 密钥对，base58 格式（或 64 字符十六进制种子）。Solana 策略必需。 |
-| `SOLANA_RPC_URL` | Solana RPC 端点。默认为 `https://api.mainnet-beta.solana.com`（有速率限制）。生产环境请使用 Helius、QuickNode 或 Triton。 |
-| `JUPITER_API_KEY` | Jupiter 聚合器 API 密钥。未设置时使用免费层级。 |
 
 ---
 

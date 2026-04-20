@@ -464,9 +464,6 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
         1. Validates new config values against the config's schema
         2. Validates changes against RiskGuard (can't bypass risk limits)
         3. Applies changes atomically
-        3a. Runs strategy-level ``validate_config()`` hook (if defined on the
-            subclass); on failure, rolls back to previous values so live
-            invariants cannot be bypassed via hot-reload or snapshot restore
         4. Persists config snapshot to persistent_state
         5. Emits CONFIG_UPDATED event with old and new values
         6. Sends notification to operator
@@ -517,50 +514,6 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
         if not result.success:
             logger.warning(f"Config update failed for {self.strategy_id}: {result.error}")
             return result
-
-        # Step 3a: Strategy-level validate_config() hook (if defined).
-        # Mirrors the preflight check run at __init__ so invariants enforced
-        # at startup (e.g. cross-field constraints like rsi_oversold <
-        # rsi_overbought) cannot be silently bypassed via a live config
-        # reload or snapshot restore.
-        #
-        # Uses duck-typing via hasattr() because validate_config() is defined
-        # on IntentStrategy (not StrategyBase) so older/alternative strategy
-        # bases without the hook remain compatible.
-        validate_hook = getattr(self, "validate_config", None)
-        if callable(validate_hook):
-            try:
-                validate_hook()
-            except Exception as exc:  # noqa: BLE001 -- we roll back on ANY raised error
-                # Roll back the mutation so the live strategy is never left
-                # in an invalid state. ``result.previous_values`` maps field ->
-                # old value; re-apply via config.update() to restore.
-                rollback_error: str | None = None
-                try:
-                    rollback_result = self.config.update(**result.previous_values)
-                    if not rollback_result.success:
-                        rollback_error = rollback_result.error
-                except Exception as rb_exc:  # noqa: BLE001
-                    rollback_error = str(rb_exc)
-
-                error_msg = f"validate_config() rejected update: {exc}"
-                if rollback_error:
-                    # Rollback itself failed -- surface loudly; strategy may
-                    # be in an inconsistent state and needs operator review.
-                    logger.error(
-                        f"Config update validation FAILED for {self.strategy_id} AND rollback failed: "
-                        f"validation_error={exc!r}; rollback_error={rollback_error!r}"
-                    )
-                    error_msg = (
-                        f"{error_msg}; rollback also failed: {rollback_error} "
-                        f"-- strategy config may be inconsistent, operator review required"
-                    )
-                else:
-                    logger.warning(
-                        f"Config update rejected by validate_config for {self.strategy_id}: {exc} "
-                        f"(rolled back to previous values)"
-                    )
-                return ConfigUpdateResult(success=False, error=error_msg)
 
         # Step 4: Persist config snapshot to persistent_state
         self._save_config_snapshot(updated_by)

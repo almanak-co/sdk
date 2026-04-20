@@ -29,7 +29,7 @@ The following are in scope for security reports:
 - `almanak` PyPI package (SDK framework, connectors, intents, backtesting)
 - Gateway (gRPC sidecar)
 - CLI (`almanak` command)
-- Documentation site (sdk.docs.almanak.co)
+- Documentation site (docs.almanak.co)
 - Bundled dependencies shipped with the package
 
 ## Out of Scope

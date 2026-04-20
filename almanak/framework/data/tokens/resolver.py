@@ -61,12 +61,7 @@ from almanak.core.enums import Chain
 
 from .cache import TokenCacheManager
 from .defaults import DEFAULT_TOKENS, NATIVE_SENTINEL, SYMBOL_ALIASES, WRAPPED_NATIVE
-from .exceptions import (
-    AmbiguousTokenError,
-    InvalidTokenAddressError,
-    TokenNotFoundError,
-    TokenResolutionError,
-)
+from .exceptions import InvalidTokenAddressError, TokenNotFoundError, TokenResolutionError
 from .models import CHAIN_ID_MAP, BridgeType, ResolvedToken, Token
 
 if TYPE_CHECKING:
@@ -214,21 +209,6 @@ def _normalize_chain(chain: str | Chain) -> tuple[str, Chain]:
     )
 
 
-def _parse_ambiguous_candidates(error_str: str) -> list[str]:
-    """Parse candidate addresses out of an AMBIGUOUS_SYMBOL marker string.
-
-    The gateway encodes ambiguity as
-    ``AMBIGUOUS_SYMBOL|addresses=0xA,0xB,0xC|<exc-details>`` inside the gRPC
-    error details. This helper pulls the address list so the client-side
-    AmbiguousTokenError can carry it into the strategy author's error path.
-    """
-    for segment in error_str.split("|"):
-        if segment.startswith("addresses="):
-            raw = segment[len("addresses=") :]
-            return [addr for addr in raw.split(",") if addr]
-    return []
-
-
 class TokenResolver:
     """Unified token resolver with multi-layer caching.
 
@@ -298,7 +278,6 @@ class TokenResolver:
         self._static_address_index: dict[str, dict[str, Token]] = {}
 
         self._build_static_indices()
-        self._register_pendle_tokens()
 
         # Performance tracking
         self._stats = {
@@ -307,178 +286,26 @@ class TokenResolver:
             "gateway_lookups": 0,
             "gateway_errors": 0,
             "errors": 0,
-            "negative_cache_hits": 0,
         }
 
-        # Negative cache (VIB-2715): remember failed resolutions so we
-        # don't burn a 30s gateway timeout on every subsequent attempt
-        # for the same (chain, key). Map (chain_lower, key_lower) ->
-        # expiry_monotonic_seconds. Symbol + address lookups share the
-        # cache since the key space doesn't collide (addresses are 42-
-        # char hex or 32-44 char base58; symbols aren't).
-        self._negative_cache: dict[tuple[str, str], float] = {}
-
-        # Thread-local flag set by the gateway helpers to distinguish a
-        # "definitive not found" (gateway reached and said the token
-        # doesn't exist) from a "transient failure" (timeout, UNAVAILABLE,
-        # integrity-check reject). Only definitive misses should be
-        # cached — a transient outage must not poison the resolver for
-        # 5 minutes once the gateway recovers.
-        self._gateway_miss_state = threading.local()
-
-        # Defaults first, then env overrides. 5 minutes TTL is long enough
-        # that repeat balance/price queries for the same unknown token in
-        # one strategy iteration stop hammering the gateway; short enough
-        # that newly-listed tokens are picked up within a reasonable
-        # window. 10000 is a soft cap — when we insert and the map
-        # exceeds this, expired entries are swept before the new write.
-        self._negative_cache_ttl_seconds: float = 300.0
-        self._negative_cache_max_size: int = 10000
-
-        # Operators can tune both without subclassing. Long-lived
-        # platforms (kitchen loop, backtester) may want a longer TTL;
-        # tests may want a tiny TTL for fast expiry checks.
-        import os
-
-        try:
-            env_ttl = float(os.environ.get("ALMANAK_TOKEN_NEGATIVE_CACHE_TTL_S", ""))
-            if env_ttl > 0:
-                self._negative_cache_ttl_seconds = env_ttl
-        except ValueError:
-            pass
-        try:
-            env_cap = int(os.environ.get("ALMANAK_TOKEN_NEGATIVE_CACHE_MAX", ""))
-            if env_cap > 0:
-                self._negative_cache_max_size = env_cap
-        except ValueError:
-            pass
-
     def _build_static_indices(self) -> None:
-        """Build indices for fast static registry lookups.
-
-        Protects against two data-integrity hazards in tokens.json:
-
-        1. **Symbol collisions on the same chain.** Multiple records can
-           share ``(chain, symbol)`` when the fetcher adds long-tail tokens
-           with chain-suffixed ``var_name`` — e.g. ``MNT`` vs ``MNT_MANTLE``
-           on Mantle. Without protection, later records would silently
-           shadow hand-curated ones (MNT native sentinel replaced by the
-           CoinGecko-indexed ERC20, breaking native auto-wrap).
-           **We use first-write-wins and emit a WARNING for every
-           subsequent collision.** The JSON file order is therefore the
-           ground truth: hand-curated entries come first, bulk imports last.
-        2. **Address collisions on the same chain.** Same policy: the
-           first record registered for an address wins; subsequent
-           duplicates are skipped and logged.
-
-        Records that lose a symbol collision remain findable by address
-        (they're still valid ``Token`` records), but cannot be looked up
-        by their ambiguous symbol. Consumers of such tokens must pass the
-        address explicitly or use ``register_token()``.
-        """
+        """Build indices for fast static registry lookups."""
         for token in DEFAULT_TOKENS:
             for chain_name in token.chains:
                 chain_lower = chain_name.lower()
-                symbol_upper = token.symbol.upper()
+
+                # Index by symbol
+                if chain_lower not in self._static_registry:
+                    self._static_registry[chain_lower] = {}
+                self._static_registry[chain_lower][token.symbol.upper()] = token
+
+                # Index by address (case-insensitive for EVM, case-sensitive for Solana)
                 address = token.get_address(chain_name)
-
-                # Index by symbol (first-write-wins).
-                chain_symbols = self._static_registry.setdefault(chain_lower, {})
-                if symbol_upper in chain_symbols:
-                    existing = chain_symbols[symbol_upper]
-                    if existing is not token:
-                        logger.debug(
-                            "token_registry_symbol_collision chain=%s symbol=%s "
-                            "kept=%s dropped=%s reason=first-write-wins",
-                            chain_lower,
-                            symbol_upper,
-                            existing.get_address(chain_name) or existing.symbol,
-                            address or token.symbol,
-                        )
-                else:
-                    chain_symbols[symbol_upper] = token
-
-                # Index by address (first-write-wins; addresses identify
-                # one contract uniquely, so a collision here is always a
-                # JSON authoring bug rather than legitimate ambiguity).
                 if address:
                     addr_key = _normalize_address_for_chain(address, chain_lower)
-                    chain_addresses = self._static_address_index.setdefault(chain_lower, {})
-                    if addr_key in chain_addresses:
-                        existing_addr = chain_addresses[addr_key]
-                        if existing_addr is not token:
-                            logger.warning(
-                                "token_registry_address_collision chain=%s address=%s "
-                                "kept_symbol=%s dropped_symbol=%s reason=first-write-wins",
-                                chain_lower,
-                                addr_key,
-                                existing_addr.symbol,
-                                token.symbol,
-                            )
-                    else:
-                        chain_addresses[addr_key] = token
-
-    def _register_pendle_tokens(self) -> None:
-        """Auto-register Pendle PT/YT tokens from the connector's static mappings.
-
-        This avoids requiring every Pendle strategy to manually call
-        register_token() for PT/YT tokens (VIB-2536).  Tokens are indexed
-        by symbol (uppercased) and address so both resolve paths work.
-        """
-        try:
-            from almanak.framework.connectors.pendle.sdk import PT_TOKEN_INFO, YT_TOKEN_INFO
-        except ImportError:
-            return  # Pendle connector not installed — nothing to register
-
-        for token_map in (PT_TOKEN_INFO, YT_TOKEN_INFO):
-            for chain, tokens in token_map.items():
-                chain_lower = chain.lower()
-                seen_addresses: set[str] = set()
-                for name, (address, decimals) in tokens.items():
-                    addr_key = _normalize_address_for_chain(address, chain_lower)
-                    if addr_key in seen_addresses:
-                        continue  # Skip case-variant duplicates
-                    seen_addresses.add(addr_key)
-
-                    token = Token(
-                        symbol=name,
-                        name=name,
-                        decimals=decimals,
-                        addresses={chain: address},
-                    )
-                    symbol_upper = name.upper()
-
-                    # Respect first-write-wins: if tokens.json (loaded
-                    # in ``_build_static_indices``) already registered
-                    # this (chain, symbol) or (chain, address), keep the
-                    # JSON entry as the source of truth. Pendle's in-
-                    # memory mappings are useful for tokens the JSON
-                    # doesn't know about, but must never silently
-                    # shadow a curated entry.
-                    chain_symbols = self._static_registry.setdefault(chain_lower, {})
-                    if symbol_upper not in chain_symbols:
-                        chain_symbols[symbol_upper] = token
-                    elif chain_symbols[symbol_upper] is not token:
-                        logger.debug(
-                            "pendle_registry_symbol_collision chain=%s symbol=%s kept=%s dropped_pendle=%s",
-                            chain_lower,
-                            symbol_upper,
-                            chain_symbols[symbol_upper].get_address(chain_lower),
-                            address,
-                        )
-
-                    chain_addresses = self._static_address_index.setdefault(chain_lower, {})
-                    if addr_key not in chain_addresses:
-                        chain_addresses[addr_key] = token
-                    elif chain_addresses[addr_key] is not token:
-                        logger.warning(
-                            "pendle_registry_address_collision chain=%s address=%s "
-                            "kept_symbol=%s dropped_pendle_symbol=%s",
-                            chain_lower,
-                            addr_key,
-                            chain_addresses[addr_key].symbol,
-                            name,
-                        )
+                    if chain_lower not in self._static_address_index:
+                        self._static_address_index[chain_lower] = {}
+                    self._static_address_index[chain_lower][addr_key] = token
 
     @classmethod
     def get_instance(
@@ -567,14 +394,6 @@ class TokenResolver:
         start_time = time.perf_counter()
         chain_lower, chain_enum = _normalize_chain(chain)
 
-        # Reset the per-call miss flag at the top. The gateway helpers
-        # set ``definitive = True`` only when they actually reach the
-        # gateway and get a "not found" answer. If we leave the flag
-        # carrying state from a prior call, a later ``resolve(...,
-        # skip_gateway=True)`` on the same thread could write a
-        # negative-cache entry for a static-only failure.
-        self._gateway_miss_state.definitive = False
-
         try:
             # Determine if input is address or symbol (pure functions, no lock needed)
             is_address = _is_address(token, chain_lower)
@@ -584,55 +403,23 @@ class TokenResolver:
             elif _looks_like_address(token):
                 _validate_address(token, chain_lower)
 
-            # Negative cache short-circuit (VIB-2715). Normalize the key
-            # the same way we store it so hits don't depend on caller
-            # casing. Skipped when ``skip_gateway`` is set -- that caller
-            # is explicitly asking for a static-only answer and shouldn't
-            # be blocked by a stale gateway-era miss.
-            neg_key = (
-                chain_lower,
-                _normalize_address_for_chain(token, chain_lower) if is_address else token.upper(),
-            )
-            if not skip_gateway and self._check_negative_cache(neg_key):
-                self._record_negative_cache_hit(token, chain_lower, neg_key, start_time)
-                raise TokenNotFoundError(
-                    token=token,
-                    chain=chain_lower,
-                    reason=(
-                        f"{'Address' if is_address else f'Symbol {token!r}'} not found "
-                        f"(negative cache; next retry in ~{self._negative_cache_ttl_seconds:.0f}s)"
-                    ),
-                    suggestions=(self._get_symbol_suggestions(token.upper(), chain_lower) if not is_address else [])
-                    + ["Use register_token() if you know the address"],
-                )
-
             # Fast path: cache + static registry (under lock)
-            symbol_needs_gateway = False
             with self._lock:
                 if is_address:
                     result = self._try_fast_resolve_address(token, chain_lower, chain_enum)
                 else:
                     result = self._resolve_by_symbol(token, chain_lower, chain_enum)
-                    # _resolve_by_symbol returns None (sentinel) when gateway is available
-                    # and the symbol wasn't found statically, signalling us to try the
-                    # gateway's dynamic resolution path outside the lock.
-                    if result is None:
-                        symbol_needs_gateway = True
+                    # Symbol resolution is fully handled (no gateway path for symbols)
+                    # _resolve_by_symbol raises TokenNotFoundError if not found
 
             if result is not None:
                 self._record_resolution_success(token, chain_lower, result, start_time)
                 return result
 
-            # Slow path: gateway lookup (NO lock held)
+            # Slow path: gateway on-chain lookup (NO lock held)
+            # Only reached for address resolution when not in cache/static
             if not skip_gateway and (self._gateway_channel is not None or self._gateway_client is not None):
-                if symbol_needs_gateway:
-                    # Symbol not in static registry -- try gateway's dynamic resolution
-                    # (Jupiter for Solana, CoinGecko for EVM)
-                    resolved = self._resolve_symbol_via_gateway(token, chain_lower, chain_enum)
-                else:
-                    # Address not in static registry -- try on-chain ERC20 lookup
-                    resolved = self._resolve_via_gateway(token, chain_lower, chain_enum)
-
+                resolved = self._resolve_via_gateway(token, chain_lower, chain_enum)
                 if resolved:
                     # Write back to cache (under lock)
                     with self._lock:
@@ -642,36 +429,18 @@ class TokenResolver:
 
             # Token not found - provide helpful error
             _try_record_metric("record_token_resolution_cache_miss", chain_lower)
-            if is_address or not symbol_needs_gateway:
-                suggestions = [
-                    "Verify the contract address is correct",
-                    "Check if the address is deployed on this chain",
-                    "Use register() to add custom tokens",
-                ]
-                reason = f"Address not found in registry for {chain_lower}"
-            else:
-                suggestions = self._get_symbol_suggestions(token.upper(), chain_lower)
-                reason = f"Symbol '{token}' not found in registry for {chain_lower}"
+            suggestions = [
+                "Verify the contract address is correct",
+                "Check if the address is deployed on this chain",
+                "Use register() to add custom tokens",
+            ]
             if self._gateway_channel is None and self._gateway_client is None:
                 suggestions.append("Connect to gateway for on-chain token discovery")
-
-            # VIB-2715: remember this miss so the next request for the
-            # same (chain, key) returns instantly instead of hitting
-            # the gateway again. Only cache DEFINITIVE misses — the
-            # gateway helpers set ``_gateway_miss_state.definitive`` to
-            # True only when the gateway actually answered "token does
-            # not exist". Timeouts, UNAVAILABLE errors, and integrity-
-            # reject paths stay False, so transient gateway trouble
-            # doesn't get locked in for 5 minutes.
-            definitive_miss = getattr(self._gateway_miss_state, "definitive", False)
-            gateway_attempted = self._gateway_channel is not None or self._gateway_client is not None
-            if gateway_attempted and definitive_miss:
-                self._store_negative_cache(neg_key)
 
             raise TokenNotFoundError(
                 token=token,
                 chain=chain_lower,
-                reason=reason,
+                reason=f"Address not found in registry for {chain_lower}",
                 suggestions=suggestions,
             )
 
@@ -754,16 +523,8 @@ class TokenResolver:
         )
         _try_record_metric("record_token_resolution_latency", chain_lower, result.source, elapsed_s)
 
-    def _resolve_by_symbol(self, symbol: str, chain_lower: str, chain_enum: Chain) -> ResolvedToken | None:
-        """Resolve a token by symbol.
-
-        Returns:
-            ResolvedToken if found in cache/static registry/aliases.
-            None (sentinel) if a gateway is available and dynamic resolution
-            should be attempted by the caller outside the lock.
-            Raises TokenNotFoundError if no gateway is available and the symbol
-            is not in the registry.
-        """
+    def _resolve_by_symbol(self, symbol: str, chain_lower: str, chain_enum: Chain) -> ResolvedToken:
+        """Resolve a token by symbol."""
         symbol_upper = symbol.upper()
 
         # 1. Check cache (memory + disk)
@@ -803,21 +564,14 @@ class TokenResolver:
             # Resolve by the canonical address
             return self._resolve_by_address(alias_address, chain_lower, chain_enum)
 
-        # 4. Try gateway dynamic symbol resolution (Jupiter for Solana, CoinGecko for EVM).
-        # Must be called WITHOUT the lock held to avoid blocking while waiting for network.
-        # We raise here if no gateway -- this check is inside the lock.
-        if self._gateway_channel is None and self._gateway_client is None:
-            _try_record_metric("record_token_resolution_cache_miss", chain_lower)
-            raise TokenNotFoundError(
-                token=symbol,
-                chain=chain_lower,
-                reason=f"Symbol '{symbol}' not found in registry for {chain_lower}",
-                suggestions=self._get_symbol_suggestions(symbol_upper, chain_lower),
-            )
-
-        # Signal to the caller (resolve()) that gateway symbol resolution should be attempted
-        # by returning None instead of raising.  resolve() will handle this outside the lock.
-        return None  # sentinel: gateway path needed
+        # Token not found - provide helpful error
+        _try_record_metric("record_token_resolution_cache_miss", chain_lower)
+        raise TokenNotFoundError(
+            token=symbol,
+            chain=chain_lower,
+            reason=f"Symbol '{symbol}' not found in registry for {chain_lower}",
+            suggestions=self._get_symbol_suggestions(symbol_upper, chain_lower),
+        )
 
     def _resolve_by_address(self, address: str, chain_lower: str, chain_enum: Chain) -> ResolvedToken:
         """Resolve a token by address from cache or static registry (must be called under lock).
@@ -940,11 +694,6 @@ class TokenResolver:
             - Caches discovered tokens for future lookups
             - Logs warnings on gateway errors but doesn't fail
         """
-        # Reset the definitive-miss flag — any None return below that
-        # doesn't set ``definitive = True`` is a transient failure and
-        # must NOT be negative-cached by the caller.
-        self._gateway_miss_state.definitive = False
-
         # Check if gateway is available
         if not self._check_gateway_available():
             logger.debug(f"Gateway not available for on-chain lookup of {address} on {chain_lower}")
@@ -987,9 +736,6 @@ class TokenResolver:
                     },
                 )
                 _try_record_metric("record_token_resolution_onchain_lookup", chain_lower, "not_found")
-                # The gateway reached the chain and said "no token here" —
-                # cache this so we don't keep hitting it.
-                self._gateway_miss_state.definitive = True
                 return None
 
             # Validate gateway response before creating ResolvedToken.
@@ -1139,167 +885,6 @@ class TokenResolver:
             _try_record_metric("record_token_resolution_onchain_lookup", chain_lower, status)
             return None
 
-    def _resolve_symbol_via_gateway(self, symbol: str, chain_lower: str, chain_enum: Chain) -> "ResolvedToken | None":
-        """Attempt to resolve a symbol via the gateway's dynamic ResolveToken RPC.
-
-        The gateway's ResolveToken now includes dynamic fallbacks (Jupiter for
-        Solana, CoinGecko for EVM) that go beyond the static registry.  Calling
-        ResolveToken here (rather than GetTokenMetadata) allows us to use those
-        dynamic paths for symbol lookups.
-
-        Args:
-            symbol: Token symbol (e.g., "swETH", "USDS")
-            chain_lower: Chain name (lowercase)
-            chain_enum: Chain enum value
-
-        Returns:
-            ResolvedToken if successful, None otherwise
-        """
-        # Reset the definitive-miss flag — only the explicit "gateway
-        # said this symbol doesn't exist" path below sets it to True.
-        # Timeouts, UNAVAILABLE, and integrity rejects stay False and
-        # therefore do NOT poison the negative cache.
-        self._gateway_miss_state.definitive = False
-
-        if not self._check_gateway_available():
-            logger.debug("Gateway not available for symbol lookup of %s on %s", symbol, chain_lower)
-            return None
-
-        stub = self._get_gateway_stub()
-        if stub is None:
-            return None
-
-        with self._lock:
-            self._stats["gateway_lookups"] += 1
-        gateway_start = time.perf_counter()
-
-        try:
-            from almanak.gateway.proto import gateway_pb2
-
-            request = gateway_pb2.ResolveTokenRequest(
-                token=symbol,
-                chain=chain_lower,
-            )
-            # VIB-2715: 5s budget for symbol lookups. The gateway's
-            # CoinGecko/Jupiter path is usually <1s when the symbol
-            # exists; 30s was only ever the CoinGecko rate-limit
-            # worst case. Keeping it that high turned unknown-symbol
-            # lookups into 30s hangs, which is far worse UX than
-            # accepting the occasional slow-path miss.
-            response = stub.ResolveToken(request, timeout=5.0)
-
-            if not response.success:
-                with self._lock:
-                    self._stats["gateway_errors"] += 1
-                logger.debug(
-                    "token_gateway_symbol_not_found: symbol=%s chain=%s error=%s",
-                    symbol,
-                    chain_lower,
-                    response.error,
-                )
-                # Definitive "not found" from the gateway — safe to cache.
-                self._gateway_miss_state.definitive = True
-                return None
-
-            decimals = response.decimals
-            if not isinstance(decimals, int) or decimals < 0 or decimals > 77:
-                logger.warning(
-                    "token_gateway_symbol_integrity_rejected: decimals out of range (symbol=%s chain=%s decimals=%s)",
-                    symbol,
-                    chain_lower,
-                    decimals,
-                )
-                return None
-
-            # Validate the returned address format before caching.
-            # A misconfigured gateway could return an empty or malformed address —
-            # reject it so it doesn't poison the resolver cache.
-            returned_address = response.address
-            if not returned_address:
-                logger.warning(
-                    "token_gateway_symbol_integrity_rejected: empty address returned (symbol=%s chain=%s)",
-                    symbol,
-                    chain_lower,
-                )
-                return None
-            try:
-                _validate_address(returned_address, chain_lower)
-            except InvalidTokenAddressError:
-                logger.warning(
-                    "token_gateway_symbol_integrity_rejected: invalid address format (symbol=%s chain=%s address=%s)",
-                    symbol,
-                    chain_lower,
-                    returned_address,
-                )
-                return None
-
-            resolved = ResolvedToken(
-                symbol=response.symbol or symbol,
-                address=returned_address,
-                decimals=decimals,
-                chain=chain_enum,
-                chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
-                name=response.name or None,
-                coingecko_id=None,
-                is_stablecoin=False,
-                is_native=False,
-                is_wrapped_native=False,
-                canonical_symbol=response.symbol or symbol,
-                bridge_type=BridgeType.NATIVE,
-                source=response.source or "gateway_dynamic",
-                is_verified=response.is_verified,
-                resolved_at=datetime.now(),
-            )
-
-            gateway_elapsed_ms = (time.perf_counter() - gateway_start) * 1000
-            logger.info(
-                "token_symbol_dynamic_discovered: symbol=%s chain=%s address=%s decimals=%d source=%s latency_ms=%.1f",
-                symbol,
-                chain_lower,
-                returned_address,
-                decimals,
-                response.source,
-                gateway_elapsed_ms,
-            )
-            _try_record_metric("record_token_resolution_onchain_lookup", chain_lower, "gateway_symbol")
-            return resolved
-
-        except Exception as e:
-            error_str = str(e)
-            with self._lock:
-                self._stats["gateway_errors"] += 1
-            is_unavailable = "UNAVAILABLE" in error_str.upper()
-            if is_unavailable:
-                self._gateway_available = False
-                self._gateway_check_time = time.time()
-
-            # Ambiguity marker: the gateway surfaced multiple liquid contracts
-            # claiming this symbol. Raise AmbiguousTokenError client-side with
-            # the candidate list so the strategy author can disambiguate with
-            # an explicit address. This path must NOT poison the negative
-            # cache — the symbol is not missing, it is ambiguous.
-            if "AMBIGUOUS_SYMBOL" in error_str:
-                candidates = _parse_ambiguous_candidates(error_str)
-                logger.info(
-                    "token_gateway_symbol_ambiguous: symbol=%s chain=%s candidates=%s",
-                    symbol,
-                    chain_lower,
-                    candidates,
-                )
-                raise AmbiguousTokenError(
-                    token=symbol,
-                    chain=chain_lower,
-                    reason=(
-                        f"Gateway returned multiple liquid contracts claiming '{symbol}' on "
-                        f"{chain_lower}. Disambiguate with an explicit address."
-                    ),
-                    matching_addresses=candidates,
-                    suggestions=[f"Candidate: {addr}" for addr in candidates],
-                ) from e
-
-            logger.debug("token_gateway_symbol_lookup_error: symbol=%s chain=%s error=%s", symbol, chain_lower, e)
-            return None
-
     def is_gateway_connected(self) -> bool:
         """Check if gateway is connected and available for on-chain lookups.
 
@@ -1388,7 +973,7 @@ class TokenResolver:
 
         return ResolvedToken(
             symbol=token.symbol,
-            address=addr_norm,
+            address=address,
             decimals=decimals,
             chain=chain_enum,
             chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
@@ -1605,75 +1190,6 @@ class TokenResolver:
             # Other protocols (lending, etc.) may accept native tokens
             return self.resolve(token, chain)
 
-    # ------------------------------------------------------------------
-    # Negative cache (VIB-2715)
-    # ------------------------------------------------------------------
-
-    def _check_negative_cache(self, key: tuple[str, str]) -> bool:
-        """Return True if this (chain, key) is still in the negative cache."""
-        with self._lock:
-            expiry = self._negative_cache.get(key)
-            if expiry is None:
-                return False
-            if time.monotonic() >= expiry:
-                # Entry expired -- evict so the next attempt is a real try.
-                self._negative_cache.pop(key, None)
-                return False
-            return True
-
-    def _store_negative_cache(self, key: tuple[str, str]) -> None:
-        with self._lock:
-            now = time.monotonic()
-            # Lazy sweep: long-running resolvers that accumulate many
-            # unique bad symbols would otherwise let the map grow
-            # unbounded because expired entries are only dropped when
-            # the exact same key is looked up again. Sweep on insert
-            # when the map is larger than the soft cap.
-            if len(self._negative_cache) > self._negative_cache_max_size:
-                self._negative_cache = {k: exp for k, exp in self._negative_cache.items() if exp > now}
-            self._negative_cache[key] = now + self._negative_cache_ttl_seconds
-
-    def _invalidate_negative_cache(self, chain_lower: str, *keys: str) -> None:
-        """Drop matching entries so a freshly-registered token is visible.
-
-        ``keys`` are looked up case-insensitively for symbols and
-        address-normalized for addresses (the same normalization used when
-        we insert).
-        """
-        with self._lock:
-            for raw in keys:
-                if not raw:
-                    continue
-                # Try the raw key (address path) and the uppercase key
-                # (symbol path). Both are cheap.
-                self._negative_cache.pop((chain_lower, _normalize_address_for_chain(raw, chain_lower)), None)
-                self._negative_cache.pop((chain_lower, raw.upper()), None)
-
-    def clear_negative_cache(self) -> None:
-        """Drop all negative-cache entries. Useful in tests and after
-        a large registry refresh."""
-        with self._lock:
-            self._negative_cache.clear()
-
-    def _record_negative_cache_hit(
-        self,
-        token: str,
-        chain_lower: str,
-        key: tuple[str, str],
-        start_time: float,
-    ) -> None:
-        with self._lock:
-            self._stats["negative_cache_hits"] += 1
-        elapsed_ms = (time.perf_counter() - start_time) * 1000
-        logger.debug(
-            "token_negative_cache_hit token=%s chain=%s key=%s latency_ms=%.3f",
-            token,
-            chain_lower,
-            key[1],
-            elapsed_ms,
-        )
-        _try_record_metric("record_token_resolution_cache_hit", chain_lower, "negative")
-
     def register(self, token: ResolvedToken) -> None:
         """Register a token explicitly at runtime.
 
@@ -1694,18 +1210,9 @@ class TokenResolver:
             )
             resolver.register(custom_token)
         """
-        chain_lower = token.chain.value.lower()
-        # One critical section: populate the cache AND clear any pending
-        # negative-cache entry atomically. A concurrent resolve() must
-        # never see "cache has the token" while "negative cache still
-        # says it's missing" -- that would let a stale miss short-
-        # circuit a resolve for a token that has just been registered.
         with self._lock:
             self._cache.put(token)
-            self._negative_cache.pop((chain_lower, _normalize_address_for_chain(token.symbol, chain_lower)), None)
-            self._negative_cache.pop((chain_lower, token.symbol.upper()), None)
-            self._negative_cache.pop((chain_lower, _normalize_address_for_chain(token.address, chain_lower)), None)
-            logger.debug(f"Registered token {token.symbol} on {chain_lower}")
+            logger.debug(f"Registered token {token.symbol} on {token.chain.value}")
 
     def register_token(
         self,

@@ -166,7 +166,6 @@ class TestExecuteActions:
     async def test_successful_execution(self, planner, action_bundle, mock_receipt):
         """Full flow: sign -> send -> confirm -> receipt."""
         with (
-            patch.object(planner, "_replace_blockhash", new_callable=AsyncMock, side_effect=lambda tx: tx),
             patch.object(planner._rpc, "send_transaction", new_callable=AsyncMock) as mock_send,
             patch.object(planner._rpc, "confirm_and_get_receipt", new_callable=AsyncMock) as mock_confirm,
         ):
@@ -185,11 +184,10 @@ class TestExecuteActions:
     @pytest.mark.asyncio
     async def test_dry_run(self, planner, action_bundle):
         """Dry run should sign but not submit."""
-        with patch.object(planner, "_replace_blockhash", new_callable=AsyncMock, side_effect=lambda tx: tx):
-            outcome = await planner.execute_actions(
-                [action_bundle],
-                context={"dry_run": True},
-            )
+        outcome = await planner.execute_actions(
+            [action_bundle],
+            context={"dry_run": True},
+        )
         assert outcome.success is True
         assert outcome.tx_ids == ["dry-run-signature"]
 
@@ -198,14 +196,11 @@ class TestExecuteActions:
         """RPC send error should return failed outcome."""
         from almanak.framework.execution.solana.rpc import SolanaRpcError
 
-        with (
-            patch.object(planner, "_replace_blockhash", new_callable=AsyncMock, side_effect=lambda tx: tx),
-            patch.object(
-                planner._rpc,
-                "send_transaction",
-                new_callable=AsyncMock,
-                side_effect=SolanaRpcError("sendTransaction", {"code": -1}),
-            ),
+        with patch.object(
+            planner._rpc,
+            "send_transaction",
+            new_callable=AsyncMock,
+            side_effect=SolanaRpcError("sendTransaction", {"code": -1}),
         ):
             outcome = await planner.execute_actions([action_bundle])
 
@@ -216,7 +211,6 @@ class TestExecuteActions:
     async def test_confirmation_timeout(self, planner, action_bundle):
         """Confirmation timeout should return failed outcome."""
         with (
-            patch.object(planner, "_replace_blockhash", new_callable=AsyncMock, side_effect=lambda tx: tx),
             patch.object(planner._rpc, "send_transaction", new_callable=AsyncMock) as mock_send,
             patch.object(
                 planner._rpc,
@@ -241,7 +235,6 @@ class TestExecuteActions:
             err={"InstructionError": [0, "Custom"]},
         )
         with (
-            patch.object(planner, "_replace_blockhash", new_callable=AsyncMock, side_effect=lambda tx: tx),
             patch.object(planner._rpc, "send_transaction", new_callable=AsyncMock) as mock_send,
             patch.object(planner._rpc, "confirm_and_get_receipt", new_callable=AsyncMock) as mock_confirm,
         ):
@@ -288,7 +281,6 @@ class TestMultiSignerPassthrough:
         )
 
         with (
-            patch.object(planner, "_replace_blockhash", new_callable=AsyncMock, side_effect=lambda tx: tx),
             patch.object(planner._rpc, "send_transaction", new_callable=AsyncMock) as mock_send,
             patch.object(planner._rpc, "confirm_and_get_receipt", new_callable=AsyncMock) as mock_confirm,
         ):

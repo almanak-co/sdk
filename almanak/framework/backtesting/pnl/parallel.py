@@ -673,7 +673,7 @@ def aggregate_results(results: list[ParallelBacktestResult]) -> AggregatedSweepR
 
     logger.info(
         f"Aggregated {total_count} results: {success_count} succeeded, {failure_count} failed, "
-        f"avg Sharpe: {avg_sharpe:.3f}, avg return: {avg_return:.2f}%"
+        f"avg Sharpe: {avg_sharpe:.3f}, avg return: {avg_return:.2%}"
     )
 
     return AggregatedSweepResults(

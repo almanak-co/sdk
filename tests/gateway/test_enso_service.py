@@ -1,13 +1,12 @@
 """Tests for EnsoService gateway implementation."""
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
-from almanak.gateway.services.enso_service import EnsoServiceServicer, _decode_bundle_arg
+from almanak.gateway.services.enso_service import EnsoServiceServicer
 
 
 @pytest.fixture
@@ -102,75 +101,3 @@ class TestEnsoServiceAmountOutNormalization:
 
         assert response.success is True
         assert response.amount_out == "555"
-
-
-class TestBundleArgDecoding:
-    """``_decode_bundle_arg`` reverses client-side JSON encoding so native
-    types survive the proto map<string,string> round-trip to Enso."""
-
-    @pytest.mark.parametrize(
-        "encoded,expected",
-        [
-            (json.dumps("0x1234"), "0x1234"),
-            (json.dumps(1000), 1000),
-            (json.dumps(True), True),
-            (json.dumps(False), False),
-            (json.dumps(None), None),
-            (json.dumps([1, 2, 3]), [1, 2, 3]),
-            (json.dumps({"nested": "dict"}), {"nested": "dict"}),
-        ],
-    )
-    def test_roundtrip_native_types(self, encoded, expected):
-        assert _decode_bundle_arg(encoded) == expected
-
-    def test_invalid_json_falls_back_to_raw_string(self):
-        # A malformed payload (e.g., a legacy client that stuffed an unquoted
-        # string into the map) must fall back to the raw value so we don't
-        # break loose clients with a 500.
-        assert _decode_bundle_arg("not-json") == "not-json"
-
-    def test_empty_string_returns_empty(self):
-        assert _decode_bundle_arg("") == ""
-
-    @pytest.mark.asyncio
-    async def test_get_bundle_decodes_args_before_forwarding(self, enso_service, mock_context):
-        """GetBundle should JSON-decode action args before calling the Enso API."""
-        action = gateway_pb2.EnsoBundleAction(
-            protocol="aave-v3",
-            action="deposit",
-            args={
-                "amount": json.dumps("1000000"),
-                "deadline": json.dumps(1_700_000_000),
-                "permit": json.dumps(True),
-                "path": json.dumps(["0xA", "0xB"]),
-            },
-        )
-        request = gateway_pb2.EnsoBundleRequest(
-            chain="arbitrum",
-            from_address="0x3333333333333333333333333333333333333333",
-            actions=[action],
-        )
-        mock_payload = {
-            "tx": {
-                "to": "0x4444444444444444444444444444444444444444",
-                "data": "0xabc",
-                "value": "0",
-                "gas": "210000",
-            }
-        }
-
-        captured: dict = {}
-
-        async def capture_request(method, path, params=None, json_body=None):
-            captured["json_body"] = json_body
-            return (True, mock_payload, None)
-
-        with patch.object(enso_service, "_request", side_effect=capture_request):
-            response = await enso_service.GetBundle(request, mock_context)
-
-        assert response.success is True
-        forwarded_args = captured["json_body"][0]["args"]
-        assert forwarded_args["amount"] == "1000000"  # string preserved
-        assert forwarded_args["deadline"] == 1_700_000_000  # int decoded
-        assert forwarded_args["permit"] is True  # bool decoded
-        assert forwarded_args["path"] == ["0xA", "0xB"]  # list decoded

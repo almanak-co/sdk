@@ -5,13 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from almanak.framework.strategies.intent_strategy import (
-    DEFAULT_TIMEFRAME,
-    MarketSnapshot,
-    MultiChainMarketSnapshot,
-    PriceData,
-    RSIData,
-)
+from almanak.framework.strategies.intent_strategy import MarketSnapshot, MultiChainMarketSnapshot, PriceData
 
 
 class TestMarketSnapshotSetPriceData:
@@ -216,69 +210,3 @@ class TestCollateralValueUsd:
 
         result = market.collateral_value_usd("WETH", Decimal("0"))
         assert result == Decimal("0")
-
-
-class TestMarketSnapshotTimeframeResolution:
-    """Tests for _resolve_timeframe() priority: explicit > config default > 4h fallback."""
-
-    def test_explicit_timeframe_overrides_default(self):
-        """An explicit timeframe argument should override the config-driven default."""
-        market = MarketSnapshot(
-            chain="arbitrum",
-            wallet_address="0xtest",
-            default_timeframe="15m",
-        )
-        # Explicit "1h" should win over the "15m" default
-        assert market._resolve_timeframe("1h") == "1h"
-
-    def test_explicit_timeframe_overrides_fallback(self):
-        """An explicit timeframe should override the 4h module-level fallback."""
-        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
-        assert market._resolve_timeframe("30m") == "30m"
-
-    def test_config_data_granularity_used_as_default(self):
-        """When no explicit timeframe is passed, the config default_timeframe should be used."""
-        market = MarketSnapshot(
-            chain="arbitrum",
-            wallet_address="0xtest",
-            default_timeframe="15m",
-        )
-        assert market._resolve_timeframe(None) == "15m"
-
-    def test_fallback_to_4h_when_no_config(self):
-        """When neither explicit timeframe nor config default is set, fall back to DEFAULT_TIMEFRAME."""
-        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
-        result = market._resolve_timeframe(None)
-        assert result == DEFAULT_TIMEFRAME
-        assert result == "4h"
-
-    def test_timeframe_resolution_flows_through_rsi(self):
-        """Verify _resolve_timeframe is actually used by indicator methods (RSI)."""
-        captured_timeframes = []
-
-        def mock_rsi_provider(token, period, timeframe=None):
-            captured_timeframes.append(timeframe)
-            return RSIData(value=Decimal("55"), period=period)
-
-        # Case 1: config default should flow through when no explicit timeframe
-        market_with_config = MarketSnapshot(
-            chain="arbitrum",
-            wallet_address="0xtest",
-            rsi_provider=mock_rsi_provider,
-            default_timeframe="15m",
-        )
-        market_with_config.rsi("ETH", period=14)
-        assert captured_timeframes[-1] == "15m"
-
-        # Case 2: explicit timeframe should override config default
-        market_with_config.rsi("BTC", period=14, timeframe="1h")
-        assert captured_timeframes[-1] == "1h"
-
-        # Case 3: no config, no explicit -> 4h fallback
-        market_no_config = MarketSnapshot(
-            chain="arbitrum",
-            wallet_address="0xtest",
-            rsi_provider=mock_rsi_provider,
-        )
-        market_no_config.rsi("ETH", period=14)
-        assert captured_timeframes[-1] == "4h"

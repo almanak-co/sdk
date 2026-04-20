@@ -64,30 +64,22 @@ USDC_WHALE = "0x0B0A5886664376F59C351ba3f598C8A8B4d0dBa3"  # Circle reserve on B
 
 
 def _find_free_port() -> int:
-    """Find a free TCP port by binding to an ephemeral port."""
+    """Find a free TCP port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
+        s.bind(("", 0))
         return s.getsockname()[1]
 
 
-def _wait_for_port(host: str, port: int, timeout: float = 60.0, process: subprocess.Popen | None = None) -> bool:
-    """Wait until a TCP port is accepting connections.
-
-    If *process* is given, returns early when it exits (port will never open).
-    """
+def _wait_for_port(host: str, port: int, timeout: float = 30.0) -> bool:
+    """Wait until a TCP port is accepting connections."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if process is not None and process.poll() is not None:
-            return False  # process exited — no point waiting
         try:
             with socket.create_connection((host, port), timeout=2.0):
                 return True
         except OSError:
             time.sleep(0.5)
     return False
-
-
-_MAX_START_ATTEMPTS = 3
 
 
 class AnvilFork:
@@ -100,50 +92,29 @@ class AnvilFork:
         self._process: subprocess.Popen | None = None
 
     def start(self, block_number: int | None = None) -> None:
-        """Start Anvil fork with retry on port conflicts."""
-        last_error = None
-        for attempt in range(_MAX_START_ATTEMPTS):
-            if attempt > 0:
-                self.port = _find_free_port()
-                logger.info("Retry %d/%d with new port %d", attempt + 1, _MAX_START_ATTEMPTS, self.port)
+        """Start Anvil fork."""
+        cmd = [
+            "anvil",
+            "--fork-url", self.rpc_url,
+            "--port", str(self.port),
+            "--chain-id", str(self.chain_id),
+            "--accounts", "10",
+            "--balance", "10000",
+            "--silent",
+        ]
+        if block_number:
+            cmd.extend(["--fork-block-number", str(block_number)])
 
-            cmd = [
-                "anvil",
-                "--fork-url", self.rpc_url,
-                "--port", str(self.port),
-                "--chain-id", str(self.chain_id),
-                "--accounts", "10",
-                "--balance", "10000",
-                "--silent",
-            ]
-            if block_number is not None:
-                cmd.extend(["--fork-block-number", str(block_number)])
+        logger.info("Starting Anvil: %s", " ".join(cmd))
+        self._process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
 
-            redacted_cmd = ["<redacted>" if part == self.rpc_url else part for part in cmd]
-            logger.info("Starting Anvil: %s", " ".join(redacted_cmd))
-            self._process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-
-            if _wait_for_port(ANVIL_HOST, self.port, timeout=60.0, process=self._process):
-                break
-
-            # Grab pipe reference before stop() clears _process.
-            stderr_pipe = self._process.stderr if self._process else None
+        if not _wait_for_port(ANVIL_HOST, self.port, timeout=30.0):
             self.stop()
-            stderr_output = ""
-            if stderr_pipe:
-                try:
-                    stderr_output = stderr_pipe.read(4096).decode(errors="replace")
-                except Exception:
-                    pass
-            sanitized_stderr = stderr_output.replace(self.rpc_url, "<redacted>") if stderr_output else "(empty)"
-            last_error = f"Anvil failed to start on port {self.port}. stderr: {sanitized_stderr}"
-            logger.warning(last_error)
-        else:
-            raise RuntimeError(f"Anvil failed after {_MAX_START_ATTEMPTS} attempts. Last: {last_error}")
+            raise RuntimeError(f"Anvil failed to start on port {self.port}")
         logger.info("Anvil ready on port %d", self.port)
 
     def stop(self) -> None:

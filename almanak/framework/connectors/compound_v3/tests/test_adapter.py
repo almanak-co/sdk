@@ -693,17 +693,6 @@ class TestCrossChain:
         """Test different markets have different Comet addresses."""
         assert adapter.comet_address != weth_adapter.comet_address
 
-    def test_polygon_usdc_e_and_usdc_bridged_alias(self):
-        """Test Polygon has both usdc_e and usdc_bridged aliases pointing to same address.
-
-        VIB-2250: usdc_bridged alias is required so that the rate monitor's
-        USDC.e -> usdc_bridged token-to-market mapping resolves correctly on Polygon.
-        """
-        polygon_markets = COMPOUND_V3_COMET_ADDRESSES["polygon"]
-        assert "usdc_e" in polygon_markets
-        assert "usdc_bridged" in polygon_markets
-        assert polygon_markets["usdc_e"] == polygon_markets["usdc_bridged"]
-
 
 # =============================================================================
 # Error Handling Tests

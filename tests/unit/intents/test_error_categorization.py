@@ -1,11 +1,8 @@
-"""Tests for VIB-327 + VIB-2096: Fail-fast for non-retriable compilation errors.
+"""Tests for VIB-327: Fail-fast for non-retriable compilation errors.
 
 Validates that the IntentStateMachine correctly categorizes errors
 and that the StrategyRunner aborts retries for permanent errors
 (like 'not supported' compilation failures) instead of retrying 3 times.
-
-VIB-2096: Extended to cover 'unknown router' and similar deterministic
-compilation failures that previously retried 3 times with exponential backoff.
 """
 
 from unittest.mock import MagicMock
@@ -109,38 +106,6 @@ class TestErrorCategorization:
     def test_slippage_error(self):
         sm = self._make_state_machine()
         assert sm._categorize_error("Slippage tolerance exceeded") == "SLIPPAGE"
-
-    # VIB-2096: Additional deterministic compilation failures
-
-    def test_unknown_router(self):
-        sm = self._make_state_machine()
-        assert sm._categorize_error("Unknown router for protocol pancakeswap_v3 on optimism") == "COMPILATION_PERMANENT"
-
-    def test_unknown_protocol(self):
-        sm = self._make_state_machine()
-        assert sm._categorize_error("Unknown protocol: sushiswap_v4") == "COMPILATION_PERMANENT"
-
-    def test_no_router_configured(self):
-        sm = self._make_state_machine()
-        assert sm._categorize_error("No router configured for chain polygon") == "COMPILATION_PERMANENT"
-
-    def test_no_adapter_found(self):
-        sm = self._make_state_machine()
-        assert sm._categorize_error("No adapter found for protocol xyz") == "COMPILATION_PERMANENT"
-
-    def test_protocol_not_available(self):
-        sm = self._make_state_machine()
-        assert sm._categorize_error("Protocol not available on this chain") == "COMPILATION_PERMANENT"
-
-    def test_unknown_market(self):
-        # Morpho Blue on a chain where the contract isn't deployed reports
-        # "Unknown market" — deterministic, should fail fast (no retries).
-        sm = self._make_state_machine()
-        assert sm._categorize_error("Unknown market: 0xabc") == "COMPILATION_PERMANENT"
-
-    def test_not_deployed(self):
-        sm = self._make_state_machine()
-        assert sm._categorize_error("PancakeSwap V3 not deployed on optimism") == "COMPILATION_PERMANENT"
 
     def test_unknown_error_returns_none(self):
         sm = self._make_state_machine()
@@ -281,39 +246,6 @@ class TestStateMachinePermanentErrorFlow:
         assert "not supported" in result.error
 
         # Step 2: SADFLOW -> hook aborts -> FAILED (no retry)
-        result = sm.step()
-        assert result.is_complete is True
-        assert result.success is False
-        assert sm.retry_count == 0  # No retries attempted
-
-    def test_unknown_router_fails_immediately_without_hook(self):
-        """VIB-2096: 'Unknown router' should fail without retry even without sadflow hook."""
-        intent = self._make_swap_intent()
-
-        compiler = MagicMock()
-        from almanak.framework.intents.compiler import CompilationResult, CompilationStatus
-
-        compiler.compile.return_value = CompilationResult(
-            status=CompilationStatus.FAILED,
-            error="Unknown router for protocol pancakeswap_v3 on optimism",
-        )
-
-        config = StateMachineConfig(
-            retry_config=RetryConfig(max_retries=3),
-        )
-        sm = IntentStateMachine(
-            intent=intent,
-            compiler=compiler,
-            config=config,
-            # No on_sadflow_enter hook — the state machine itself should abort
-        )
-
-        # Step 1: PREPARING -> compilation fails -> SADFLOW
-        result = sm.step()
-        assert result.error is not None
-        assert "Unknown router" in result.error
-
-        # Step 2: SADFLOW -> built-in fail-fast -> FAILED (no retry)
         result = sm.step()
         assert result.is_complete is True
         assert result.success is False

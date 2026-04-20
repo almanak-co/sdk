@@ -21,9 +21,6 @@ from almanak.framework.connectors.base import EventRegistry, HexDecoder
 
 logger = logging.getLogger(__name__)
 
-# Compound V2 convention: all cTokens/qiTokens/jTokens use 8 decimals
-CTOKEN_DECIMALS = 8
-
 
 # =============================================================================
 # Event Topic Signatures (Compound V2 / BENQI)
@@ -287,9 +284,7 @@ class BenqiReceiptParser:
                 mint_amount_raw = HexDecoder.decode_uint256(hex_data[64:128])
                 mint_tokens_raw = HexDecoder.decode_uint256(hex_data[128:192])
                 data["mint_amount"] = str(Decimal(mint_amount_raw) / Decimal(10**self.underlying_decimals))
-                data["mint_tokens"] = str(
-                    Decimal(mint_tokens_raw) / Decimal(10**CTOKEN_DECIMALS)
-                )  # qiTokens have 8 decimals
+                data["mint_tokens"] = str(Decimal(mint_tokens_raw) / Decimal(10**8))  # qiTokens have 8 decimals
 
         elif event_name == "Redeem":
             # Redeem(address redeemer, uint256 redeemAmount, uint256 redeemTokens)
@@ -298,7 +293,7 @@ class BenqiReceiptParser:
                 redeem_amount_raw = HexDecoder.decode_uint256(hex_data[64:128])
                 redeem_tokens_raw = HexDecoder.decode_uint256(hex_data[128:192])
                 data["redeem_amount"] = str(Decimal(redeem_amount_raw) / Decimal(10**self.underlying_decimals))
-                data["redeem_tokens"] = str(Decimal(redeem_tokens_raw) / Decimal(10**CTOKEN_DECIMALS))
+                data["redeem_tokens"] = str(Decimal(redeem_tokens_raw) / Decimal(10**8))
 
         elif event_name == "Borrow":
             # Borrow(address borrower, uint256 borrowAmount, uint256 accountBorrows, uint256 totalBorrows)
@@ -333,9 +328,7 @@ class BenqiReceiptParser:
                 data["repay_amount"] = str(Decimal(repay_amount_raw) / Decimal(10**self.underlying_decimals))
                 data["ctoken_collateral"] = HexDecoder.decode_address_from_data(hex_data[192:256])
                 seize_tokens_raw = HexDecoder.decode_uint256(hex_data[256:320])
-                data["seize_tokens"] = str(
-                    Decimal(seize_tokens_raw) / Decimal(10**CTOKEN_DECIMALS)
-                )  # qiTokens have 8 decimals
+                data["seize_tokens"] = str(Decimal(seize_tokens_raw) / Decimal(10**8))  # qiTokens have 8 decimals
 
         elif event_name == "Transfer":
             # Transfer(address indexed from, address indexed to, uint256 value)
@@ -379,7 +372,7 @@ class BenqiReceiptParser:
                 "qi_tokens_minted": str(parsed.qi_tokens_minted),
             }
         except Exception as e:
-            logger.warning("Failed to extract supply data: %s", e)
+            logger.warning(f"Failed to extract supply data: {e}")
             return None
 
     def extract_borrow_data(self, result: dict[str, Any]) -> dict | None:
@@ -401,7 +394,7 @@ class BenqiReceiptParser:
                 "borrow_amount": str(parsed.borrow_amount),
             }
         except Exception as e:
-            logger.warning("Failed to extract borrow data: %s", e)
+            logger.warning(f"Failed to extract borrow data: {e}")
             return None
 
     def extract_withdraw_data(self, result: dict[str, Any]) -> dict | None:
@@ -423,7 +416,7 @@ class BenqiReceiptParser:
                 "withdraw_amount": str(parsed.withdraw_amount),
             }
         except Exception as e:
-            logger.warning("Failed to extract withdraw data: %s", e)
+            logger.warning(f"Failed to extract withdraw data: {e}")
             return None
 
     def extract_repay_data(self, result: dict[str, Any]) -> dict | None:
@@ -445,5 +438,5 @@ class BenqiReceiptParser:
                 "repay_amount": str(parsed.repay_amount),
             }
         except Exception as e:
-            logger.warning("Failed to extract repay data: %s", e)
+            logger.warning(f"Failed to extract repay data: {e}")
             return None

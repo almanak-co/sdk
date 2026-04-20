@@ -882,7 +882,7 @@ class WalkForwardResult:
             "",
             "Combined Test Period Performance:",
             f"  Total PnL:    ${self.combined_test_pnl_usd:,.2f}",
-            f"  Total Return: {self.combined_test_return_pct:.2f}%",
+            f"  Total Return: {self.combined_test_return_pct:.2%}",
             "",
         ]
 

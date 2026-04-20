@@ -604,8 +604,7 @@ class TestPortfolioGetMetrics:
         metrics = portfolio.get_metrics()
 
         assert metrics.total_pnl_usd == Decimal("1000")
-        # VIB-2915: `total_return_pct` is now stored as an actual percentage (10 for 10%), not a ratio.
-        assert metrics.total_return_pct == Decimal("10")
+        assert metrics.total_return_pct == Decimal("0.1")  # 10%
 
     def test_get_metrics_with_trades(self, portfolio: SimulatedPortfolio, base_timestamp: datetime) -> None:
         """Test get_metrics calculates trade statistics."""

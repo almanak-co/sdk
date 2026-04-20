@@ -789,9 +789,7 @@ class ChainlinkDataProvider:
         try:
             from web3 import AsyncHTTPProvider, AsyncWeb3
 
-            from almanak.gateway.utils.ssl_context import build_ssl_context
-
-            web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url, request_kwargs={"ssl": build_ssl_context()}))
+            web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url))
 
             # Try to get a historical block (~1000 blocks ago)
             latest_block = await web3.eth.get_block("latest")
@@ -841,9 +839,7 @@ class ChainlinkDataProvider:
         try:
             from web3 import AsyncHTTPProvider, AsyncWeb3
 
-            from almanak.gateway.utils.ssl_context import build_ssl_context
-
-            web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url, request_kwargs={"ssl": build_ssl_context()}))
+            web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url))
             feed_checksum = web3.to_checksum_address(feed_address)
 
             # Encode round_id as uint80 (padded to 32 bytes)
@@ -1125,9 +1121,7 @@ class ChainlinkDataProvider:
         try:
             from web3 import AsyncHTTPProvider, AsyncWeb3
 
-            from almanak.gateway.utils.ssl_context import build_ssl_context
-
-            web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url, request_kwargs={"ssl": build_ssl_context()}))
+            web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url))
             feed_checksum = web3.to_checksum_address(feed_address)
             # Note: multicall_address reserved for future true multicall implementation
             # multicall_address = web3.to_checksum_address(MULTICALL3_ADDRESS)

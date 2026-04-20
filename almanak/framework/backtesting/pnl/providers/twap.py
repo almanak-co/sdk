@@ -714,9 +714,7 @@ class TWAPDataProvider:
         try:
             from web3 import AsyncHTTPProvider, AsyncWeb3
 
-            from almanak.gateway.utils.ssl_context import build_ssl_context
-
-            web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url, request_kwargs={"ssl": build_ssl_context()}))
+            web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url))
 
             # Get latest block to use as reference
             latest_block = await web3.eth.get_block("latest")
@@ -774,9 +772,7 @@ class TWAPDataProvider:
         try:
             from web3 import AsyncHTTPProvider, AsyncWeb3
 
-            from almanak.gateway.utils.ssl_context import build_ssl_context
-
-            web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url, request_kwargs={"ssl": build_ssl_context()}))
+            web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url))
 
             # Get reference block if not set
             if self._reference_block is None or self._reference_timestamp is None:
@@ -856,9 +852,7 @@ class TWAPDataProvider:
         try:
             from web3 import AsyncHTTPProvider, AsyncWeb3
 
-            from almanak.gateway.utils.ssl_context import build_ssl_context
-
-            web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url, request_kwargs={"ssl": build_ssl_context()}))
+            web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url))
             pool_checksum = web3.to_checksum_address(pool_address)
 
             # Encode and execute call at specific block

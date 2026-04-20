@@ -76,11 +76,10 @@ class MockSignedOrder:
     order: Any = None
     signature: str = "0xmocksignature"
 
-    def to_api_payload(self, owner: str, order_type: str = "GTC") -> dict[str, Any]:
+    def to_api_payload(self) -> dict[str, Any]:
         return {
-            "order": {"tokenId": "111111", "side": "BUY", "signature": self.signature},
-            "owner": owner,
-            "orderType": order_type,
+            "order": {"tokenId": "111111", "side": "BUY"},
+            "signature": self.signature,
         }
 
 
@@ -127,12 +126,6 @@ def mock_clob_client(test_market):
     mock.create_and_sign_limit_order.return_value = MockSignedOrder()
     mock.create_and_sign_market_order.return_value = MockSignedOrder()
     mock.close.return_value = None
-    # round_price_to_tick is called by the adapter to snap user-supplied prices
-    # onto the market's tick grid. Tests pin pre-aligned prices so the identity
-    # passthrough is correct.
-    mock.round_price_to_tick.side_effect = lambda price, side, market=None, tick_size=None: price
-    # Adapter reads clob.credentials.api_key to build the order `owner` field
-    mock.credentials.api_key = "test-api-key"
     return mock
 
 
@@ -214,13 +207,12 @@ class TestAdapterInitialization:
 class TestBuyIntentCompilation:
     """Tests for compiling PredictionBuyIntent."""
 
-    def test_compile_buy_intent_with_amount_usd(self, adapter_with_mocks, test_market):
-        """Test compiling a buy with amount_usd. max_price is required (VIB-3131)."""
+    def test_compile_buy_intent_market_order_amount_usd(self, adapter_with_mocks, test_market):
+        """Test compiling a market order with amount_usd."""
         intent = PredictionBuyIntent(
             market_id=test_market.id,
             outcome="YES",
             amount_usd=Decimal("100"),
-            max_price=Decimal("0.65"),
         )
 
         bundle = adapter_with_mocks.compile_intent(intent)
@@ -232,13 +224,12 @@ class TestBuyIntentCompilation:
         assert bundle.metadata["protocol"] == "polymarket"
         assert "order_payload" in bundle.metadata
 
-    def test_compile_buy_intent_with_shares(self, adapter_with_mocks, test_market):
-        """Test compiling a buy with shares. max_price is required (VIB-3131)."""
+    def test_compile_buy_intent_market_order_shares(self, adapter_with_mocks, test_market):
+        """Test compiling a market order with shares."""
         intent = PredictionBuyIntent(
             market_id=test_market.id,
             outcome="YES",
             shares=Decimal("50"),
-            max_price=Decimal("0.65"),
         )
 
         bundle = adapter_with_mocks.compile_intent(intent)
@@ -262,124 +253,12 @@ class TestBuyIntentCompilation:
         assert bundle.metadata["price"] == "0.65"
         assert bundle.metadata["order_type"] == "GTC"
 
-    def test_buy_intent_with_max_price_routes_to_limit_even_if_default_market(self, adapter_with_mocks, test_market):
-        """When max_price is set we route to LIMIT regardless of intent.order_type.
-
-        Pre-fix the adapter required BOTH ``order_type=='limit'`` AND ``max_price``;
-        otherwise it fell back to market sweep at worst_price=0.99 — which on
-        cheap markets reserves an $80 nominal against a $1 wallet and gets
-        rejected by the CLOB. See PM incident 2026-04-19, market 556063.
-        """
-        intent = PredictionBuyIntent(
-            market_id=test_market.id,
-            outcome="YES",
-            shares=Decimal("100"),
-            max_price=Decimal("0.65"),
-            # order_type left at its "market" default
-        )
-
-        bundle = adapter_with_mocks.compile_intent(intent)
-
-        adapter_with_mocks.clob.create_and_sign_limit_order.assert_called_once()
-        adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
-        assert bundle.metadata["price"] == "0.65"
-
-    def test_buy_intent_without_max_price_returns_error_bundle(self, adapter_with_mocks, test_market):
-        """A buy intent without max_price must reject — the legacy "warn and
-        sweep at 0.99" path was a footgun (PM Exp 14 / VIB-3131): it reserved
-        ~size*$0.99 of USDC allowance against fills that landed much cheaper,
-        and on cheap markets the CLOB rejected the over-allocated order anyway.
-        The compile path now raises; the surrounding handler converts that to
-        an error ActionBundle with no signed order.
-        """
-        intent = PredictionBuyIntent(
-            market_id=test_market.id,
-            outcome="YES",
-            shares=Decimal("100"),
-        )
-
-        bundle = adapter_with_mocks.compile_intent(intent)
-
-        adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
-        adapter_with_mocks.clob.create_and_sign_limit_order.assert_not_called()
-        assert "error" in bundle.metadata
-        assert "max_price is required" in bundle.metadata["error"]
-
-    def test_buy_intent_market_to_limit_elevation_uses_ioc_not_gtc(self, adapter_with_mocks, test_market):
-        """When the strategy declares ``order_type='market'`` (the default) but
-        we elevate to LIMIT for safety, force IOC so we don't silently leave a
-        long-lived GTC order resting on the book.
-
-        Auditor finding: the previous market path was IOC; routing to LIMIT
-        with ``_map_time_in_force(intent.time_in_force)`` defaulted to GTC,
-        silently changing the order's lifecycle.
-        """
-        intent = PredictionBuyIntent(
-            market_id=test_market.id,
-            outcome="YES",
-            shares=Decimal("100"),
-            max_price=Decimal("0.65"),
-            # order_type left at its "market" default
-        )
-
-        bundle = adapter_with_mocks.compile_intent(intent)
-
-        # Elevated market→limit must use IOC, not GTC
-        assert bundle.metadata["order_type"] == "IOC"
-
-    def test_buy_intent_explicit_limit_keeps_declared_tif(self, adapter_with_mocks, test_market):
-        """An explicit ``order_type='limit'`` must respect the user's TIF."""
-        intent = PredictionBuyIntent(
-            market_id=test_market.id,
-            outcome="YES",
-            shares=Decimal("100"),
-            max_price=Decimal("0.65"),
-            order_type="limit",
-            time_in_force="GTC",
-        )
-
-        bundle = adapter_with_mocks.compile_intent(intent)
-        assert bundle.metadata["order_type"] == "GTC"
-
-    def test_buy_intent_size_uses_pre_snap_max_price(self, adapter_with_mocks, test_market):
-        """When max_price doesn't lie on the tick grid, size must come from the
-        user-supplied price (preserving sizing intent), not the snapped price.
-
-        Auditor finding: amount_usd=$10 with max_price=0.0135 on a 0.01-tick
-        market would otherwise snap price → 0.01 → size = 10/0.01 = 1000 shares
-        (vs. user-intended 10/0.0135 ≈ 740). The snap should only affect the
-        submission price, not the share count.
-        """
-        # Configure round_price_to_tick to actually snap (mock returns floor-to-0.01)
-        adapter_with_mocks.clob.round_price_to_tick.side_effect = lambda price, side, market=None, tick_size=None: (
-            Decimal("0.01")
-        )
-
-        intent = PredictionBuyIntent(
-            market_id=test_market.id,
-            outcome="YES",
-            amount_usd=Decimal("10.00"),
-            max_price=Decimal("0.0135"),
-        )
-
-        bundle = adapter_with_mocks.compile_intent(intent)
-
-        # size = amount_usd / pre-snap max_price = 10 / 0.0135 ≈ 740.74
-        # (NOT 10 / 0.01 = 1000 which would silently inflate the position 35%)
-        size_str = bundle.metadata["size"]
-        size = Decimal(size_str)
-        expected = Decimal("10") / Decimal("0.0135")
-        assert size == expected, f"size {size} != pre-snap-derived {expected}"
-        # Snapped price went into submission
-        assert bundle.metadata["price"] == "0.01"
-
     def test_compile_buy_intent_no_outcome(self, adapter_with_mocks, test_market):
-        """Test compiling buy for NO outcome. max_price required (VIB-3131)."""
+        """Test compiling buy for NO outcome."""
         intent = PredictionBuyIntent(
             market_id=test_market.id,
             outcome="NO",
             amount_usd=Decimal("100"),
-            max_price=Decimal("0.65"),
         )
 
         bundle = adapter_with_mocks.compile_intent(intent)
@@ -388,7 +267,8 @@ class TestBuyIntentCompilation:
         assert bundle.metadata["token_id"] == test_market.no_token_id
 
     def test_compile_buy_intent_with_slug(self, adapter_with_mocks, test_market):
-        """Test compiling buy intent using market slug. max_price required (VIB-3131)."""
+        """Test compiling buy intent using market slug."""
+        # Configure mock to fail on get_market but succeed on get_market_by_slug
         adapter_with_mocks.clob.get_market.side_effect = Exception("Not found")
         adapter_with_mocks.clob.get_market_by_slug.return_value = test_market
 
@@ -396,7 +276,6 @@ class TestBuyIntentCompilation:
             market_id=test_market.slug,
             outcome="YES",
             amount_usd=Decimal("100"),
-            max_price=Decimal("0.65"),
         )
 
         bundle = adapter_with_mocks.compile_intent(intent)
@@ -444,12 +323,11 @@ class TestSellIntentCompilation:
     """Tests for compiling PredictionSellIntent."""
 
     def test_compile_sell_intent_specific_shares(self, adapter_with_mocks, test_market):
-        """Test compiling sell with specific shares. min_price is required (VIB-3131)."""
+        """Test compiling sell with specific shares."""
         intent = PredictionSellIntent(
             market_id=test_market.id,
             outcome="YES",
             shares=Decimal("25"),
-            min_price=Decimal("0.50"),
         )
 
         bundle = adapter_with_mocks.compile_intent(intent)
@@ -459,7 +337,8 @@ class TestSellIntentCompilation:
         assert bundle.metadata["side"] == "SELL"
 
     def test_compile_sell_intent_all_shares(self, adapter_with_mocks, test_market):
-        """Test compiling sell with shares='all'. min_price is required (VIB-3131)."""
+        """Test compiling sell with shares='all'."""
+        # Setup mock position
         position = MagicMock()
         position.token_id = test_market.yes_token_id
         position.size = Decimal("100")
@@ -469,7 +348,6 @@ class TestSellIntentCompilation:
             market_id=test_market.id,
             outcome="YES",
             shares="all",
-            min_price=Decimal("0.50"),
         )
 
         bundle = adapter_with_mocks.compile_intent(intent)
@@ -477,57 +355,14 @@ class TestSellIntentCompilation:
         assert bundle.intent_type == IntentType.PREDICTION_SELL.value
         assert bundle.metadata["size"] == "100"
 
-    def test_sell_intent_without_min_price_returns_error_bundle(self, adapter_with_mocks, test_market):
-        """A sell intent without min_price must reject — the legacy "warn and
-        sweep at the 0.01 floor" path could fill a $0.50/share position at
-        $0.01/share. Mirror of the BUY rejection (PM Exp 14 / VIB-3131).
-        """
-        intent = PredictionSellIntent(
-            market_id=test_market.id,
-            outcome="YES",
-            shares=Decimal("25"),
-        )
-
-        bundle = adapter_with_mocks.compile_intent(intent)
-
-        adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
-        adapter_with_mocks.clob.create_and_sign_limit_order.assert_not_called()
-        assert "error" in bundle.metadata
-        assert "min_price is required" in bundle.metadata["error"]
-
-    def test_sell_intent_all_shares_without_min_price_rejects_deterministically(self, adapter_with_mocks, test_market):
-        """Regression: shares="all" without min_price must reject for the SAME
-        reason as explicit shares — not short-circuit to "No position to sell"
-        when the wallet happens to be empty (CodeRabbit catch on PR #1567).
-        Without this guard, VIB-3131 enforcement would be nondeterministic in
-        common teardown/dry-run flows where positions are not yet open.
-        """
-        adapter_with_mocks.clob.get_positions.return_value = []
-
-        intent = PredictionSellIntent(
-            market_id=test_market.id,
-            outcome="YES",
-            shares="all",
-        )
-
-        bundle = adapter_with_mocks.compile_intent(intent)
-
-        adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
-        adapter_with_mocks.clob.create_and_sign_limit_order.assert_not_called()
-        # Must be the min_price error, NOT "No position to sell".
-        assert "error" in bundle.metadata
-        assert "min_price is required" in bundle.metadata["error"]
-        assert "No position to sell" not in bundle.metadata["error"]
-
     def test_compile_sell_intent_no_position(self, adapter_with_mocks, test_market):
-        """Test sell intent with valid min_price but no position to sell."""
+        """Test sell intent when no position exists."""
         adapter_with_mocks.clob.get_positions.return_value = []
 
         intent = PredictionSellIntent(
             market_id=test_market.id,
             outcome="YES",
             shares="all",
-            min_price=Decimal("0.50"),
         )
 
         bundle = adapter_with_mocks.compile_intent(intent)
@@ -549,48 +384,6 @@ class TestSellIntentCompilation:
 
         assert bundle.metadata["price"] == "0.70"
         assert bundle.metadata["order_type"] == "GTC"
-
-    def test_sell_intent_with_min_price_routes_to_limit_even_if_default_market(self, adapter_with_mocks, test_market):
-        """Mirror of the BUY routing test on the SELL side: presence of
-        ``min_price`` elevates SELL to LIMIT regardless of declared order_type.
-        Pre-fix the SELL path mirrored the BUY footgun."""
-        intent = PredictionSellIntent(
-            market_id=test_market.id,
-            outcome="YES",
-            shares=Decimal("50"),
-            min_price=Decimal("0.70"),
-            # order_type left at its "market" default
-        )
-
-        bundle = adapter_with_mocks.compile_intent(intent)
-
-        adapter_with_mocks.clob.create_and_sign_limit_order.assert_called_once()
-        adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
-        # Elevation must use IOC, not GTC, to preserve fail-fast immediacy
-        assert bundle.metadata["order_type"] == "IOC"
-        assert bundle.metadata["price"] == "0.70"
-
-    def test_sell_intent_off_tick_min_price_is_snapped(self, adapter_with_mocks, test_market):
-        """Off-tick ``min_price`` (e.g. 0.7035 on a 0.01-tick market) must be
-        snapped via ``round_price_to_tick`` before submission. Mirror of the
-        BUY off-tick test on the SELL side."""
-        # SELL rounds UP (ceiling) — mock the snap to return the next tick up
-        adapter_with_mocks.clob.round_price_to_tick.side_effect = lambda price, side, market=None, tick_size=None: (
-            Decimal("0.71")
-        )
-
-        intent = PredictionSellIntent(
-            market_id=test_market.id,
-            outcome="YES",
-            shares=Decimal("50"),
-            min_price=Decimal("0.7035"),  # off-tick on a 0.01-tick market
-        )
-
-        bundle = adapter_with_mocks.compile_intent(intent)
-
-        adapter_with_mocks.clob.round_price_to_tick.assert_called()
-        # Submitted at the snapped price
-        assert bundle.metadata["price"] == "0.71"
 
 
 # =============================================================================

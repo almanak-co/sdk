@@ -57,7 +57,7 @@ from almanak.framework.backtesting.paper.background import (
     PIDFile,
     TradeHistoryWriter,
 )
-from almanak.framework.backtesting.paper.config import ForkLifecycle, PaperTraderConfig
+from almanak.framework.backtesting.paper.config import PaperTraderConfig
 from almanak.framework.backtesting.paper.engine import (
     ERC20_DECIMALS_CALL_TIMEOUT,
     NATIVE_ETH_ADDRESS,
@@ -75,7 +75,6 @@ from almanak.framework.backtesting.paper.models import (
     PaperTradeError,
     PaperTradeErrorType,
     PaperTradingSummary,
-    PnLBreakdown,
 )
 from almanak.framework.backtesting.paper.portfolio_tracker import PaperPortfolioTracker
 from almanak.framework.backtesting.paper.position_queries import (
@@ -129,14 +128,12 @@ __all__ = [
     "get_token_decimals",
     "get_token_decimals_with_fallback",
     # Configuration
-    "ForkLifecycle",
     "PaperTraderConfig",
     # Fork management
     "RollingForkManager",
     # Portfolio tracking
     "PaperPortfolioTracker",
     # Trade models
-    "PnLBreakdown",
     "PaperTrade",
     "PaperTradeError",
     "PaperTradeErrorType",

@@ -249,11 +249,9 @@ class TestUniswapV3SwapIntent:
         """Test that SwapIntent with insufficient balance fails gracefully."""
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         token_in = tokens["USDC"]
-        token_out = tokens["WETH"]
 
         # Get current balance
         usdc_balance = get_token_balance(web3, token_in, funded_wallet)
-        weth_before = get_token_balance(web3, token_out, funded_wallet)
         assert usdc_balance > 0, "funded_wallet failed to fund USDC (balance is 0)"
         in_decimals = get_token_decimals(web3, token_in)
         balance_decimal = Decimal(usdc_balance) / Decimal(10**in_decimals)
@@ -291,11 +289,9 @@ class TestUniswapV3SwapIntent:
         assert not execution_result.success, "Execution should fail with insufficient balance"
         print(f"Execution failed as expected: {execution_result.error}")
 
-        # Verify balances unchanged (bilateral conservation check)
+        # Verify balance unchanged
         usdc_after = get_token_balance(web3, token_in, funded_wallet)
-        weth_after = get_token_balance(web3, token_out, funded_wallet)
-        assert usdc_after == usdc_balance, "Input token balance must be unchanged after failed swap"
-        assert weth_after == weth_before, "Output token balance must be unchanged after failed swap"
+        assert usdc_after == usdc_balance, "Balance must be unchanged after failed swap"
 
         print("\nALL CHECKS PASSED")
 

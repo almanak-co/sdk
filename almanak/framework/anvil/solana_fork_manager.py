@@ -111,15 +111,7 @@ DEFAULT_CLONE_ACCOUNTS: list[str] = [
 DEFAULT_CLONE_PROGRAMS: list[str] = [
     # Jupiter v6 (upgradeable, so we use --clone-upgradeable-program)
     JUPITER_PROGRAM,
-    # Orca Whirlpools (Solana CLMM)
-    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
-    # Metaplex Token Metadata Program (BPFLoaderUpgradeable, required by Orca openPositionWithMetadata)
-    "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s",
 ]
-
-# Non-upgradeable programs to clone via --clone (BPFLoader2, NOT BPFLoaderUpgradeable).
-# These are also pre-fetched as JSON files for reliability.
-DEFAULT_CLONE_PROGRAM_ACCOUNTS: list[str] = []
 
 # SPL Token Mint account layout (82 bytes)
 # https://github.com/solana-labs/solana-program-library/blob/master/token/program/src/state.rs
@@ -206,10 +198,6 @@ class SolanaForkManager:
 
             # Fetch and modify mint accounts (replace authority with ours)
             await self._prepare_modified_mints()
-
-            # Pre-fetch clone_accounts as JSON files so they load via --account
-            # (more reliable than --clone which can fail silently with --quiet)
-            await self._prepare_clone_account_files()
 
             # Build validator command
             cmd = self._build_validator_command()
@@ -507,12 +495,6 @@ class SolanaForkManager:
             cmd.extend(["--clone-upgradeable-program", program])
             has_clones = True
 
-        # Clone non-upgradeable programs (BPFLoader2) via --clone if any are declared
-        for program in DEFAULT_CLONE_PROGRAM_ACCOUNTS:
-            if program not in modified_mint_addresses:
-                cmd.extend(["--clone", program])
-                has_clones = True
-
         # --url must come once (global) if any cloning is needed
         if has_clones:
             cmd.extend(["--url", self.rpc_url])
@@ -629,63 +611,6 @@ class SolanaForkManager:
 
             except Exception as e:
                 logger.warning(f"Failed to prepare mint for {symbol}: {e}")
-
-    async def _prepare_clone_account_files(self) -> None:
-        """Pre-fetch clone_accounts and DEFAULT_CLONE_PROGRAM_ACCOUNTS from mainnet.
-
-        This is more reliable than using --clone during validator startup,
-        which can fail silently when combined with --quiet and --account flags.
-        Accounts written here will be loaded via --account instead of --clone.
-        Includes non-upgradeable programs (e.g. Metaplex Token Metadata).
-        """
-        # Only pre-fetch data accounts (not programs — executables must use --clone)
-        all_addresses = list(self.clone_accounts)
-        if not all_addresses or not self._modified_mint_dir:
-            return
-
-        # Collect addresses already handled by _prepare_modified_mints
-        existing_files = set()
-        if os.path.isdir(self._modified_mint_dir):
-            for fname in os.listdir(self._modified_mint_dir):
-                if fname.endswith(".json"):
-                    existing_files.add(fname.replace(".json", ""))
-
-        for address in all_addresses:
-            if address in existing_files:
-                continue  # Already prepared by _prepare_modified_mints
-
-            try:
-                account_info = await self._rpc_call_to_url(
-                    self.rpc_url,
-                    "getAccountInfo",
-                    [address, {"encoding": "base64"}],
-                )
-
-                if not account_info or not account_info.get("value"):
-                    logger.warning(f"Could not pre-fetch clone account {address[:8]}..., will fall back to --clone")
-                    continue
-
-                value = account_info["value"]
-                account_json = {
-                    "pubkey": address,
-                    "account": {
-                        "lamports": value["lamports"],
-                        "data": value["data"],
-                        "owner": value["owner"],
-                        "executable": value["executable"],
-                        "rentEpoch": value.get("rentEpoch", 0),
-                        "space": value.get("space", 0),
-                    },
-                }
-
-                filepath = os.path.join(self._modified_mint_dir, f"{address}.json")
-                with open(filepath, "w") as f:
-                    json.dump(account_json, f)
-
-                logger.info(f"Pre-fetched clone account {address[:8]}... (owner={value['owner'][:12]}...)")
-
-            except Exception as e:
-                logger.warning(f"Failed to pre-fetch clone account {address[:8]}...: {e}")
 
     # =========================================================================
     # Internal: Token Operations (post-startup)

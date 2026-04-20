@@ -99,15 +99,11 @@ CHAIN_CONFIGS = {
             "USDC": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
             "WAVAX": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
             "USDT": "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7",
-            "USDC.e": "0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664",
-            "USDT.e": "0xc7198437980c041c805A1EDcbA50c1Ce5db95118",
         },
         "balance_slots": {
             "USDC": 9,
             "WAVAX": 3,
             "USDT": 2,
-            "USDC.e": 0,
-            "USDT.e": 0,
         },
     },
     "ethereum": {
@@ -135,17 +131,11 @@ CHAIN_CONFIGS = {
             "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
             "WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
             "USDT": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
-            "wstETH": "0x5979D7b546E38E414F7E9822514be443A4800529",
         },
         "balance_slots": {
             "USDC": 9,
             "WETH": 51,
             "USDT": 51,
-            # Arbitrum wstETH (OFT bridged): OpenZeppelin-style ERC20 with `_balances`
-            # mapping at storage slot 1. Slot verified 2026-04-17 by computing
-            # keccak256(abi.encode(holder, slot=1)) for a known holder and confirming
-            # the resulting storage value matched balanceOf(). Holder-independent.
-            "wstETH": 1,
         },
     },
     "optimism": {
@@ -171,17 +161,11 @@ CHAIN_CONFIGS = {
             "USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
             "WETH": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
             "USDT": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
-            "WBTC": "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",
         },
         "balance_slots": {
             "USDC": 9,
             "WETH": 0,  # UChildERC20Proxy (PoS bridge): _balances is slot 0 in ERC20 base
             "USDT": 0,  # UChildERC20Proxy (PoS bridge): _balances is slot 0 in ERC20 base
-            # Polygon WBTC (PoS-bridged) uses slot 0 for `_balances`. Verified
-            # 2026-04-17 by computing keccak256(abi.encode(holder, slot=0)) for
-            # Morpho Blue (a known holder with ~143 WBTC) and confirming storage
-            # value matched balanceOf(). Holder-independent.
-            "WBTC": 0,
         },
     },
     "bsc": {
@@ -253,63 +237,11 @@ CHAIN_CONFIGS = {
             "USDT": "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE",
         },
         "balance_slots": {
-            "WMNT": 0,  # Unused — wraps from native MNT
-            "USDC": 9,  # Bridged USDC uses slot 9 (verified via cast index + cast storage)
-            "WETH": 0,  # L2 predeploy WETH uses slot 0
-            "USDT": 0,  # Bridged USDT uses slot 0
+            "WMNT": 0,
+            "USDC": 0,
+            "WETH": 0,
+            "USDT": 0,
         },
-    },
-    "monad": {
-        # Public Monad RPC (verified 2026-04-18 to serve historical state for Anvil forking).
-        # Alchemy Monad mainnet requires per-app enablement; use public RPC as the default
-        # to keep intent tests self-contained. User can override via MONAD_RPC_URL env var.
-        "rpc_url": "https://rpc.monad.xyz",
-        "chain_id": 143,
-        "alchemy_key": None,  # Optional — requires per-app enablement on Alchemy dashboard
-        "tokens": {
-            # Addresses match almanak/core/contracts.py (MORPHO_BLUE_TOKENS["monad"]).
-            "WMON": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
-            "WETH": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",
-            "USDC": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
-        },
-        "balance_slots": {
-            # WMON wraps native MON — funded via _wrap_native_token, slot unused but set
-            # for consistency with how base handles WETH.
-            "WMON": 3,
-            # WETH9-canonical layout (bridged WETH on Monad). Slot 3 per standard.
-            "WETH": 3,
-            # USDC on Monad uses OpenZeppelin upgradeable pattern. Slot 9 is Circle's
-            # standard across Arbitrum/Base/Ethereum/Polygon; assumed here, probe in
-            # fixture seeding if it fails.
-            "USDC": 9,
-        },
-    },
-    "xlayer": {
-        "rpc_url": "https://rpc.xlayer.tech",
-        "chain_id": 196,
-        "alchemy_key": None,  # No Alchemy support, uses public RPC
-        "tokens": {
-            "USDC": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
-            "WETH": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",
-            "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
-        },
-        "balance_slots": {
-            "USDC": 9,  # Native Circle USDC uses slot 9
-            "WETH": 0,  # Bridged WETH
-            "USDT0": 51,  # OpenZeppelin upgradeable pattern
-        },
-    },
-    "zerog": {
-        "rpc_url": "https://0g-rpc.publicnode.com",
-        "chain_id": 16661,
-        "alchemy_key": None,  # 0G uses public RPC only
-        "tokens": {
-            "W0G": "0x1Cd0690fF9a693f5EF2dD976660a8dAFc81A109c",
-            "USDC.e": "0x1f3AA82227281cA364bFb3d253B0f1af1Da6473E",
-        },
-        # Storage slots not yet mapped for 0G tokens — native-only funding.
-        # Tests that need ERC20 acquire it by swapping from native via Jaine.
-        "balance_slots": {},
     },
 }
 # Import Anvil fixtures and constants from shared gateway conftest.
@@ -324,12 +256,8 @@ from tests.conftest_gateway import (
     anvil_base,
     anvil_bsc,
     anvil_ethereum,
-    anvil_mantle,
-    anvil_monad,
     anvil_optimism,
     anvil_polygon,
-    anvil_xlayer,
-    anvil_zerog,
     get_anvil_rpc_url,
 )
 
@@ -341,24 +269,17 @@ __all__ = [
     "anvil_base",
     "anvil_bsc",
     "anvil_ethereum",
-    "anvil_mantle",
-    "anvil_monad",
     "anvil_optimism",
     "anvil_polygon",
-    "anvil_xlayer",
-    "anvil_zerog",
     # Price oracle fixtures (session-scoped per chain)
     "price_oracle_arbitrum",
     "price_oracle_avalanche",
     "price_oracle_base",
-    "price_oracle_monad",
     "price_oracle_bsc",
     "price_oracle_bnb",
     "price_oracle_ethereum",
-    "price_oracle_mantle",
     "price_oracle_optimism",
     "price_oracle_polygon",
-    "price_oracle_xlayer",
     # Utilities
     "fund_native_token",
     "fund_erc20_token",
@@ -777,151 +698,6 @@ def format_token_amount(amount: int, decimals: int) -> Decimal:
     return Decimal(amount) / Decimal(10**decimals)
 
 
-# =============================================================================
-# L3 Semantic Verification Helpers
-# =============================================================================
-
-
-def assert_swap_semantic_match(
-    intent_amount: Decimal,
-    intent_from_token: str,
-    intent_to_token: str,
-    swap_result: object,
-    *,
-    tolerance_bps: int = 200,
-    chain: str | None = None,
-) -> None:
-    """L3 semantic verification: cross-check intent params against receipt parser output.
-
-    Catches the case where a TX succeeds and balance deltas look plausible,
-    but the wrong operation executed (e.g., wrong token pair, wrong amount).
-
-    Args:
-        intent_amount: The amount from the SwapIntent (in token units, e.g. 100 USDC)
-        intent_from_token: The from_token symbol from the SwapIntent
-        intent_to_token: The to_token symbol from the SwapIntent
-        swap_result: The parse_result.swap_result from a receipt parser
-        tolerance_bps: Maximum acceptable deviation in basis points (default: 200 = 2%)
-        chain: Chain name for token address resolution (optional)
-    """
-    # 1. Amount match: receipt amount_in should be close to intent amount
-    actual_in = getattr(swap_result, "amount_in_decimal", None)
-    if actual_in is not None:
-        assert actual_in > 0, (
-            f"L3 semantic: receipt amount_in must be positive, got {actual_in}"
-        )
-        expected = Decimal(str(intent_amount))
-        deviation_bps = abs(actual_in - expected) / expected * 10000
-        assert deviation_bps <= tolerance_bps, (
-            f"L3 semantic: receipt amount_in ({actual_in}) deviates from intent amount ({expected}) "
-            f"by {deviation_bps} bps (tolerance: {tolerance_bps} bps)"
-        )
-
-    # 2. Effective price sanity: must be positive and finite
-    effective_price = getattr(swap_result, "effective_price", None)
-    if effective_price is not None:
-        assert effective_price > 0, (
-            f"L3 semantic: effective_price must be positive, got {effective_price}"
-        )
-
-    # 3. Token address match (if receipt parser populates token_in/token_out)
-    receipt_token_in = getattr(swap_result, "token_in", None)
-    receipt_token_out = getattr(swap_result, "token_out", None)
-    if chain and (receipt_token_in or receipt_token_out):
-        try:
-            from almanak.framework.data.tokens import get_token_resolver
-
-            resolver = get_token_resolver()
-            if receipt_token_in:
-                expected_in = resolver.resolve_for_swap(intent_from_token, chain)
-                if expected_in:
-                    assert receipt_token_in.lower() == expected_in.address.lower(), (
-                        f"L3 semantic: receipt token_in ({receipt_token_in}) != "
-                        f"intent from_token resolved ({expected_in.address})"
-                    )
-            if receipt_token_out:
-                expected_out = resolver.resolve_for_swap(intent_to_token, chain)
-                if expected_out:
-                    assert receipt_token_out.lower() == expected_out.address.lower(), (
-                        f"L3 semantic: receipt token_out ({receipt_token_out}) != "
-                        f"intent to_token resolved ({expected_out.address})"
-                    )
-        except ImportError:
-            pass  # Token resolver not available — skip address check
-
-    # 4. Receipt amounts must be bilateral (non-zero on both sides)
-    actual_out = getattr(swap_result, "amount_out_decimal", None)
-    if actual_out is not None:
-        assert actual_out > 0, (
-            f"L3 semantic: receipt amount_out must be positive, got {actual_out}"
-        )
-
-
-def assert_swap_bilateral_deltas(
-    web3: Web3,
-    token_in: str,
-    token_out: str,
-    wallet: str,
-    in_balance_before: int,
-    out_balance_before: int,
-    expected_in_spent: int,
-    *,
-    in_decimals: int = 18,
-    out_decimals: int = 18,
-) -> tuple[int, int]:
-    """Assert bilateral balance deltas for a successful swap.
-
-    Verifies BOTH sides of a swap:
-    - Input token MUST decrease by the exact expected amount
-    - Output token MUST increase by at least 1 unit (no-op guard)
-
-    Returns (amount_spent, amount_received) for further assertions.
-    """
-    in_after = get_token_balance(web3, token_in, wallet)
-    out_after = get_token_balance(web3, token_out, wallet)
-
-    amount_spent = in_balance_before - in_after
-    amount_received = out_after - out_balance_before
-
-    assert amount_spent == expected_in_spent, (
-        f"Input token must decrease by exact swap amount. "
-        f"Expected: {format_token_amount(expected_in_spent, in_decimals)}, "
-        f"Got: {format_token_amount(amount_spent, in_decimals)}"
-    )
-    assert amount_received > 0, (
-        f"Output token must increase (no-op guard). "
-        f"Got delta: {format_token_amount(amount_received, out_decimals)}"
-    )
-    return amount_spent, amount_received
-
-
-def assert_swap_conservation(
-    web3: Web3,
-    token_in: str,
-    token_out: str,
-    wallet: str,
-    in_balance_before: int,
-    out_balance_before: int,
-) -> None:
-    """Assert bilateral balance conservation after a failed swap.
-
-    Verifies BOTH tokens are unchanged:
-    - Input token balance must be identical to before
-    - Output token balance must be identical to before
-    """
-    in_after = get_token_balance(web3, token_in, wallet)
-    out_after = get_token_balance(web3, token_out, wallet)
-
-    assert in_after == in_balance_before, (
-        f"Input token balance must be unchanged after failed swap. "
-        f"Before: {in_balance_before}, After: {in_after}"
-    )
-    assert out_after == out_balance_before, (
-        f"Output token balance must be unchanged after failed swap. "
-        f"Before: {out_balance_before}, After: {out_after}"
-    )
-
-
 def get_chain_name_from_id(chain_id: int) -> str:
     """Get chain name from chain ID."""
     chain_id_to_name = {
@@ -988,17 +764,12 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "linea: Tests that run on Linea chain")
     config.addinivalue_line("markers", "blast: Tests that run on Blast chain")
     config.addinivalue_line("markers", "mantle: Tests that run on Mantle chain")
-    config.addinivalue_line("markers", "xlayer: Tests that run on X-Layer chain")
-    config.addinivalue_line("markers", "zerog: Tests that run on 0G Chain (Jaine DEX)")
     config.addinivalue_line("markers", "swap: Tests for SwapIntent")
     config.addinivalue_line("markers", "lp: Tests for LP intents (Open/Close)")
     config.addinivalue_line("markers", "lending: Tests for lending intents")
     config.addinivalue_line("markers", "perps: Tests for perps intents")
     config.addinivalue_line("markers", "supply: Tests for supply intents")
     config.addinivalue_line("markers", "borrow: Tests for borrow intents")
-    config.addinivalue_line("markers", "repay: Tests for repay intents")
-    config.addinivalue_line("markers", "withdraw: Tests for withdraw intents")
-    config.addinivalue_line("markers", "l3_semantic: L3 semantic verification — cross-checks intent params against receipt")
 
 
 # =============================================================================
@@ -1008,140 +779,6 @@ def pytest_configure(config: pytest.Config) -> None:
 # Baseline map: (chain_id, module_path) -> baseline_snapshot_id
 # Captured once per module after funding is complete, re-armed after each revert.
 _module_baselines: dict[tuple[int, str], str] = {}
-
-# Session pristine map: chain_id -> pristine_snapshot_id
-# Captured lazily on first module's setup per chain and re-captured after each
-# revert (Anvil consumes snapshot IDs on revert). Used by `reset_fork_to_pristine`
-# to give every test module a clean fork independent of prior modules on the
-# same chain's session-scoped Anvil fork (VIB-3059).
-_session_pristine: dict[int, str] = {}
-
-
-def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
-    """Revert fork to session pristine state, then recapture pristine for next module.
-
-    On the first call for a chain: captures current fork state as the pristine
-    baseline and returns immediately (no revert — caller is expected to invoke
-    this at the start of the first module before any seeding mutates the fork).
-
-    On subsequent calls: reverts to the stored pristine snapshot and then
-    immediately recaptures a new pristine snapshot at the just-reverted state
-    so the NEXT module can revert too.
-
-    Also purges stale `_module_baselines` entries for this chain, since Anvil's
-    `evm_revert` invalidates all snapshots taken after the reverted one.
-
-    Returns:
-        True if pristine state is now active (captured for the first time, or
-        successfully reverted + recaptured). False if the fork is unhealthy
-        enough that pristine state could not be established; callers may
-        continue but cross-module isolation is degraded.
-    """
-    snap_id = _session_pristine.get(chain_id)
-
-    if snap_id is None:
-        # First time for this chain — capture current state as pristine.
-        try:
-            resp = web3_instance.provider.make_request("evm_snapshot", [])
-            new_snap = resp.get("result") if isinstance(resp, dict) else None
-        except Exception as e:
-            print(f"WARNING: could not capture initial pristine snapshot for chain {chain_id}: {e}")
-            return False
-        if new_snap is None:
-            print(f"WARNING: evm_snapshot returned no result for chain {chain_id}: {resp}")
-            return False
-        _session_pristine[chain_id] = new_snap
-        print(f"  [pristine] Captured session pristine {new_snap} for chain {chain_id}")
-        return True
-
-    # Revert to pristine. `evm_revert` consumes snap_id AND any snapshots taken
-    # after it on this fork, so stale module baselines for this chain are now
-    # invalid and must be purged regardless of revert outcome.
-    try:
-        resp = web3_instance.provider.make_request("evm_revert", [snap_id])
-        reverted = bool(resp.get("result")) if isinstance(resp, dict) else False
-    except Exception as e:
-        print(f"WARNING: pristine revert raised for chain {chain_id}: {e}")
-        reverted = False
-
-    for old_key in list(_module_baselines):
-        if old_key[0] == chain_id:
-            del _module_baselines[old_key]
-
-    if not reverted:
-        # Pristine snapshot gone (fork was restarted mid-session, or anvil_revert
-        # failed). Recapture current state so the NEXT module at least gets a
-        # stable reference; cross-module isolation for THIS module is degraded.
-        print(
-            f"WARNING: pristine snapshot {snap_id} for chain {chain_id} invalid; "
-            "recapturing current state as best-effort pristine"
-        )
-        try:
-            resp = web3_instance.provider.make_request("evm_snapshot", [])
-            new_snap = resp.get("result") if isinstance(resp, dict) else None
-        except Exception as e:
-            print(f"WARNING: could not recapture pristine after failed revert for chain {chain_id}: {e}")
-            _session_pristine.pop(chain_id, None)
-            return False
-        if new_snap is None:
-            _session_pristine.pop(chain_id, None)
-            return False
-        _session_pristine[chain_id] = new_snap
-        return False
-
-    # Recapture pristine at the just-reverted state so the next module can revert.
-    # If recapture fails, report False so callers can surface degraded isolation —
-    # the CURRENT module is fine (we already reverted), but the NEXT module would
-    # lose its pristine anchor and potentially see this module's residue.
-    try:
-        resp = web3_instance.provider.make_request("evm_snapshot", [])
-        new_snap = resp.get("result") if isinstance(resp, dict) else None
-    except Exception as e:
-        print(f"WARNING: could not recapture pristine after revert for chain {chain_id}: {e}")
-        _session_pristine.pop(chain_id, None)
-        return False
-    if new_snap is None:
-        print(f"WARNING: evm_snapshot returned no result after revert for chain {chain_id}: {resp}")
-        _session_pristine.pop(chain_id, None)
-        return False
-    _session_pristine[chain_id] = new_snap
-    print(f"  [pristine] Re-armed session pristine {new_snap} for chain {chain_id}")
-    return True
-
-
-def reset_fork_to_pristine(web3_instance: Web3, *, strict: bool = True) -> bool:
-    """Helper for per-chain `funded_wallet` fixtures: revert to session pristine.
-
-    Call this at the top of a module-scoped `funded_wallet` fixture, BEFORE
-    seeding tokens, so each module sees a clean fork independent of prior
-    modules on the same chain (VIB-3059).
-
-    On first call per chain: captures current state as pristine (no revert).
-    On subsequent calls: reverts fork to the captured pristine state and
-    recaptures pristine for the next module.
-
-    By default `strict=True`, so the function raises ``RuntimeError`` if the
-    pristine reset cannot be guaranteed — this is the intent-test convention:
-    surface infrastructure problems rather than silently running with degraded
-    isolation. Pass ``strict=False`` if the caller wants to attempt best-effort
-    seeding on a partially healthy fork (returns False on failure in that case).
-    """
-    try:
-        chain_id = int(web3_instance.eth.chain_id)
-    except Exception as e:
-        msg = f"could not determine chain_id for pristine reset: {e}"
-        print(f"WARNING: {msg}")
-        if strict:
-            raise RuntimeError(msg) from e
-        return False
-
-    ok = _ensure_pristine_and_rearm(web3_instance, chain_id)
-    if strict and not ok:
-        raise RuntimeError(
-            f"pristine reset could not be established for chain_id={chain_id}; "
-            "fork appears unhealthy and module isolation cannot be guaranteed"
-        )
-    return ok
 
 
 def _get_baseline_key(request: pytest.FixtureRequest) -> tuple[int, str]:
@@ -1561,12 +1198,8 @@ price_oracle_ethereum = _create_price_oracle_fixture("ethereum")
 price_oracle_avalanche = _create_price_oracle_fixture("avalanche")
 price_oracle_bsc = _create_price_oracle_fixture("bsc")
 price_oracle_bnb = _create_price_oracle_fixture("bnb")  # Alias for bsc
-price_oracle_mantle = _create_price_oracle_fixture("mantle")
 price_oracle_optimism = _create_price_oracle_fixture("optimism")
 price_oracle_polygon = _create_price_oracle_fixture("polygon")
-price_oracle_mantle = _create_price_oracle_fixture("mantle")
-price_oracle_monad = _create_price_oracle_fixture("monad")
-price_oracle_xlayer = _create_price_oracle_fixture("xlayer")
 
 
 # =============================================================================
@@ -1596,14 +1229,11 @@ def price_oracle(chain_name: str, request) -> dict[str, Decimal]:
         "arbitrum": "price_oracle_arbitrum",
         "base": "price_oracle_base",
         "ethereum": "price_oracle_ethereum",
-        "mantle": "price_oracle_mantle",
-        "monad": "price_oracle_monad",
         "avalanche": "price_oracle_avalanche",
         "bsc": "price_oracle_bsc",
         "bnb": "price_oracle_bnb",
         "optimism": "price_oracle_optimism",
         "polygon": "price_oracle_polygon",
-        "xlayer": "price_oracle_xlayer",
     }
 
     fixture_name = fixture_map.get(chain_name)

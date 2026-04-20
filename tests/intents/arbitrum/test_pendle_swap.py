@@ -351,7 +351,6 @@ class TestPendleSwapIntent:
 
         # Get current balance and guard against zero
         weth_balance = get_token_balance(web3, weth, funded_wallet)
-        pt_before = get_token_balance(web3, PT_WSTETH_ADDRESS, funded_wallet)
         assert weth_balance > 0, "Funded wallet must have positive WETH balance for this test"
         weth_decimals = get_token_decimals(web3, weth)
         balance_decimal = Decimal(weth_balance) / Decimal(10**weth_decimals)
@@ -391,11 +390,9 @@ class TestPendleSwapIntent:
         assert not execution_result.success, "Execution should fail with insufficient balance"
         print(f"Execution failed as expected: {execution_result.error}")
 
-        # Verify balances unchanged (bilateral conservation check)
+        # Verify balance unchanged
         weth_after = get_token_balance(web3, weth, funded_wallet)
-        pt_after = get_token_balance(web3, PT_WSTETH_ADDRESS, funded_wallet)
-        assert weth_after == weth_balance, "Input token balance must be unchanged after failed swap"
-        assert pt_after == pt_before, "Output token balance must be unchanged after failed swap"
+        assert weth_after == weth_balance, "Balance must be unchanged after failed swap"
 
         print("\nALL CHECKS PASSED")
 

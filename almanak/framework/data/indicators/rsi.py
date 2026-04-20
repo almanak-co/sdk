@@ -518,11 +518,6 @@ class RSICalculator:
             default_period,
         )
 
-    async def close(self) -> None:
-        """Close the underlying OHLCV provider's resources (e.g. HTTP sessions)."""
-        if hasattr(self._ohlcv_provider, "close"):
-            await self._ohlcv_provider.close()
-
     @staticmethod
     def calculate_rsi_from_prices(close_prices: list[Decimal], period: int = 14) -> float:
         """Calculate RSI from a list of close prices using Wilder's smoothing.

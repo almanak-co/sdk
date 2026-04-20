@@ -449,31 +449,6 @@ class StateServiceStub(object):
                 request_serializer=gateway__pb2.DeleteStateRequest.SerializeToString,
                 response_deserializer=gateway__pb2.DeleteStateResponse.FromString,
                 _registered_method=True)
-        self.SavePortfolioSnapshot = channel.unary_unary(
-                '/almanak.gateway.proto.StateService/SavePortfolioSnapshot',
-                request_serializer=gateway__pb2.SaveSnapshotRequest.SerializeToString,
-                response_deserializer=gateway__pb2.SaveSnapshotResponse.FromString,
-                _registered_method=True)
-        self.GetLatestSnapshot = channel.unary_unary(
-                '/almanak.gateway.proto.StateService/GetLatestSnapshot',
-                request_serializer=gateway__pb2.GetLatestSnapshotRequest.SerializeToString,
-                response_deserializer=gateway__pb2.SnapshotData.FromString,
-                _registered_method=True)
-        self.GetSnapshotsSince = channel.unary_unary(
-                '/almanak.gateway.proto.StateService/GetSnapshotsSince',
-                request_serializer=gateway__pb2.GetSnapshotsSinceRequest.SerializeToString,
-                response_deserializer=gateway__pb2.SnapshotList.FromString,
-                _registered_method=True)
-        self.SavePortfolioMetrics = channel.unary_unary(
-                '/almanak.gateway.proto.StateService/SavePortfolioMetrics',
-                request_serializer=gateway__pb2.SaveMetricsRequest.SerializeToString,
-                response_deserializer=gateway__pb2.SaveMetricsResponse.FromString,
-                _registered_method=True)
-        self.GetPortfolioMetrics = channel.unary_unary(
-                '/almanak.gateway.proto.StateService/GetPortfolioMetrics',
-                request_serializer=gateway__pb2.GetMetricsRequest.SerializeToString,
-                response_deserializer=gateway__pb2.PortfolioMetricsData.FromString,
-                _registered_method=True)
 
 
 class StateServiceServicer(object):
@@ -504,41 +479,6 @@ class StateServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def SavePortfolioSnapshot(self, request, context):
-        """Save a portfolio snapshot for value tracking.
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def GetLatestSnapshot(self, request, context):
-        """Get the most recent portfolio snapshot.
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def GetSnapshotsSince(self, request, context):
-        """Get portfolio snapshots since a given timestamp.
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def SavePortfolioMetrics(self, request, context):
-        """Save or update portfolio metrics (PnL baseline).
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def GetPortfolioMetrics(self, request, context):
-        """Get portfolio metrics for a strategy.
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
 
 def add_StateServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -556,31 +496,6 @@ def add_StateServiceServicer_to_server(servicer, server):
                     servicer.DeleteState,
                     request_deserializer=gateway__pb2.DeleteStateRequest.FromString,
                     response_serializer=gateway__pb2.DeleteStateResponse.SerializeToString,
-            ),
-            'SavePortfolioSnapshot': grpc.unary_unary_rpc_method_handler(
-                    servicer.SavePortfolioSnapshot,
-                    request_deserializer=gateway__pb2.SaveSnapshotRequest.FromString,
-                    response_serializer=gateway__pb2.SaveSnapshotResponse.SerializeToString,
-            ),
-            'GetLatestSnapshot': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetLatestSnapshot,
-                    request_deserializer=gateway__pb2.GetLatestSnapshotRequest.FromString,
-                    response_serializer=gateway__pb2.SnapshotData.SerializeToString,
-            ),
-            'GetSnapshotsSince': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetSnapshotsSince,
-                    request_deserializer=gateway__pb2.GetSnapshotsSinceRequest.FromString,
-                    response_serializer=gateway__pb2.SnapshotList.SerializeToString,
-            ),
-            'SavePortfolioMetrics': grpc.unary_unary_rpc_method_handler(
-                    servicer.SavePortfolioMetrics,
-                    request_deserializer=gateway__pb2.SaveMetricsRequest.FromString,
-                    response_serializer=gateway__pb2.SaveMetricsResponse.SerializeToString,
-            ),
-            'GetPortfolioMetrics': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetPortfolioMetrics,
-                    request_deserializer=gateway__pb2.GetMetricsRequest.FromString,
-                    response_serializer=gateway__pb2.PortfolioMetricsData.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -668,141 +583,6 @@ class StateService(object):
             '/almanak.gateway.proto.StateService/DeleteState',
             gateway__pb2.DeleteStateRequest.SerializeToString,
             gateway__pb2.DeleteStateResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def SavePortfolioSnapshot(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/almanak.gateway.proto.StateService/SavePortfolioSnapshot',
-            gateway__pb2.SaveSnapshotRequest.SerializeToString,
-            gateway__pb2.SaveSnapshotResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def GetLatestSnapshot(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/almanak.gateway.proto.StateService/GetLatestSnapshot',
-            gateway__pb2.GetLatestSnapshotRequest.SerializeToString,
-            gateway__pb2.SnapshotData.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def GetSnapshotsSince(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/almanak.gateway.proto.StateService/GetSnapshotsSince',
-            gateway__pb2.GetSnapshotsSinceRequest.SerializeToString,
-            gateway__pb2.SnapshotList.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def SavePortfolioMetrics(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/almanak.gateway.proto.StateService/SavePortfolioMetrics',
-            gateway__pb2.SaveMetricsRequest.SerializeToString,
-            gateway__pb2.SaveMetricsResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def GetPortfolioMetrics(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/almanak.gateway.proto.StateService/GetPortfolioMetrics',
-            gateway__pb2.GetMetricsRequest.SerializeToString,
-            gateway__pb2.PortfolioMetricsData.FromString,
             options,
             channel_credentials,
             insecure,
@@ -1567,21 +1347,6 @@ class IntegrationServiceStub(object):
                 request_serializer=gateway__pb2.TheGraphQueryRequest.SerializeToString,
                 response_deserializer=gateway__pb2.TheGraphQueryResponse.FromString,
                 _registered_method=True)
-        self.GeckoTerminalGetOHLCV = channel.unary_unary(
-                '/almanak.gateway.proto.IntegrationService/GeckoTerminalGetOHLCV',
-                request_serializer=gateway__pb2.GeckoTerminalOHLCVRequest.SerializeToString,
-                response_deserializer=gateway__pb2.GeckoTerminalOHLCVResponse.FromString,
-                _registered_method=True)
-        self.GetWalletPortfolio = channel.unary_unary(
-                '/almanak.gateway.proto.IntegrationService/GetWalletPortfolio',
-                request_serializer=gateway__pb2.WalletPortfolioRequest.SerializeToString,
-                response_deserializer=gateway__pb2.WalletPortfolioResponse.FromString,
-                _registered_method=True)
-        self.GetWalletPositions = channel.unary_unary(
-                '/almanak.gateway.proto.IntegrationService/GetWalletPositions',
-                request_serializer=gateway__pb2.WalletPortfolioRequest.SerializeToString,
-                response_deserializer=gateway__pb2.WalletPortfolioResponse.FromString,
-                _registered_method=True)
 
 
 class IntegrationServiceServicer(object):
@@ -1648,26 +1413,6 @@ class IntegrationServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def GeckoTerminalGetOHLCV(self, request, context):
-        """GeckoTerminal DEX OHLCV endpoint (proxy for deployed strategies without internet)
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def GetWalletPortfolio(self, request, context):
-        """External portfolio APIs (Zerion, future providers)
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def GetWalletPositions(self, request, context):
-        """Missing associated documentation comment in .proto file."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
 
 def add_IntegrationServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -1715,21 +1460,6 @@ def add_IntegrationServiceServicer_to_server(servicer, server):
                     servicer.TheGraphQuery,
                     request_deserializer=gateway__pb2.TheGraphQueryRequest.FromString,
                     response_serializer=gateway__pb2.TheGraphQueryResponse.SerializeToString,
-            ),
-            'GeckoTerminalGetOHLCV': grpc.unary_unary_rpc_method_handler(
-                    servicer.GeckoTerminalGetOHLCV,
-                    request_deserializer=gateway__pb2.GeckoTerminalOHLCVRequest.FromString,
-                    response_serializer=gateway__pb2.GeckoTerminalOHLCVResponse.SerializeToString,
-            ),
-            'GetWalletPortfolio': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetWalletPortfolio,
-                    request_deserializer=gateway__pb2.WalletPortfolioRequest.FromString,
-                    response_serializer=gateway__pb2.WalletPortfolioResponse.SerializeToString,
-            ),
-            'GetWalletPositions': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetWalletPositions,
-                    request_deserializer=gateway__pb2.WalletPortfolioRequest.FromString,
-                    response_serializer=gateway__pb2.WalletPortfolioResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1979,87 +1709,6 @@ class IntegrationService(object):
             '/almanak.gateway.proto.IntegrationService/TheGraphQuery',
             gateway__pb2.TheGraphQueryRequest.SerializeToString,
             gateway__pb2.TheGraphQueryResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def GeckoTerminalGetOHLCV(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/almanak.gateway.proto.IntegrationService/GeckoTerminalGetOHLCV',
-            gateway__pb2.GeckoTerminalOHLCVRequest.SerializeToString,
-            gateway__pb2.GeckoTerminalOHLCVResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def GetWalletPortfolio(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/almanak.gateway.proto.IntegrationService/GetWalletPortfolio',
-            gateway__pb2.WalletPortfolioRequest.SerializeToString,
-            gateway__pb2.WalletPortfolioResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def GetWalletPositions(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/almanak.gateway.proto.IntegrationService/GetWalletPositions',
-            gateway__pb2.WalletPortfolioRequest.SerializeToString,
-            gateway__pb2.WalletPortfolioResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -2348,11 +1997,6 @@ class DashboardServiceStub(object):
                 request_serializer=gateway__pb2.PurgeInstanceRequest.SerializeToString,
                 response_deserializer=gateway__pb2.PurgeInstanceResponse.FromString,
                 _registered_method=True)
-        self.GetTransactionLedger = channel.unary_unary(
-                '/almanak.gateway.proto.DashboardService/GetTransactionLedger',
-                request_serializer=gateway__pb2.GetTransactionLedgerRequest.SerializeToString,
-                response_deserializer=gateway__pb2.GetTransactionLedgerResponse.FromString,
-                _registered_method=True)
 
 
 class DashboardServiceServicer(object):
@@ -2432,13 +2076,6 @@ class DashboardServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def GetTransactionLedger(self, request, context):
-        """Get structured trade records from the transaction ledger (VIB-2402).
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
 
 def add_DashboardServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -2491,11 +2128,6 @@ def add_DashboardServiceServicer_to_server(servicer, server):
                     servicer.PurgeStrategyInstance,
                     request_deserializer=gateway__pb2.PurgeInstanceRequest.FromString,
                     response_serializer=gateway__pb2.PurgeInstanceResponse.SerializeToString,
-            ),
-            'GetTransactionLedger': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetTransactionLedger,
-                    request_deserializer=gateway__pb2.GetTransactionLedgerRequest.FromString,
-                    response_serializer=gateway__pb2.GetTransactionLedgerResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -2772,33 +2404,6 @@ class DashboardService(object):
             '/almanak.gateway.proto.DashboardService/PurgeStrategyInstance',
             gateway__pb2.PurgeInstanceRequest.SerializeToString,
             gateway__pb2.PurgeInstanceResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def GetTransactionLedger(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/almanak.gateway.proto.DashboardService/GetTransactionLedger',
-            gateway__pb2.GetTransactionLedgerRequest.SerializeToString,
-            gateway__pb2.GetTransactionLedgerResponse.FromString,
             options,
             channel_credentials,
             insecure,

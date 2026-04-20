@@ -23,7 +23,6 @@ from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
-    assert_swap_semantic_match,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -153,16 +152,6 @@ class TestAerodromeSwapIntent:
                     print(f"  Amount out: {parse_result.swap_result.amount_out_decimal}")
                     print(f"  Price:      {parse_result.swap_result.effective_price}")
 
-                    # L3 semantic verification
-                    assert_swap_semantic_match(
-                        intent_amount=swap_amount,
-                        intent_from_token="USDC",
-                        intent_to_token="WETH",
-                        swap_result=parse_result.swap_result,
-                        chain=CHAIN_NAME,
-                    )
-                    print("  L3 semantic check: PASSED")
-
         # Verify balance changes
         usdc_after = get_token_balance(web3, token_in, funded_wallet)
         weth_after = get_token_balance(web3, token_out, funded_wallet)
@@ -220,7 +209,7 @@ class TestAerodromeSwapIntent:
             from_token="WETH",
             to_token="USDC",
             amount=swap_amount,
-            max_slippage=Decimal("0.20"),  # 20% slippage for oracle-based quoting (VIB-2297)
+            max_slippage=Decimal("0.01"),
             protocol="aerodrome",
             chain=CHAIN_NAME,
         )
@@ -269,11 +258,8 @@ class TestAerodromeSwapIntent:
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         token_in = tokens["USDC"]
 
-        token_out = tokens["WETH"]
-
         # Get current balance
         usdc_balance = get_token_balance(web3, token_in, funded_wallet)
-        weth_before = get_token_balance(web3, token_out, funded_wallet)
         in_decimals = get_token_decimals(web3, token_in)
         balance_decimal = Decimal(usdc_balance) / Decimal(10**in_decimals)
 
@@ -311,11 +297,9 @@ class TestAerodromeSwapIntent:
         assert not execution_result.success, "Execution should fail with insufficient balance"
         print(f"Execution failed as expected: {execution_result.error}")
 
-        # Verify balances unchanged (bilateral conservation check)
+        # Verify balance unchanged
         usdc_after = get_token_balance(web3, token_in, funded_wallet)
-        weth_after = get_token_balance(web3, token_out, funded_wallet)
-        assert usdc_after == usdc_balance, "Input token balance must be unchanged after failed swap"
-        assert weth_after == weth_before, "Output token balance must be unchanged after failed swap"
+        assert usdc_after == usdc_balance, "Balance must be unchanged after failed swap"
 
         print("\nALL CHECKS PASSED ✓")
 

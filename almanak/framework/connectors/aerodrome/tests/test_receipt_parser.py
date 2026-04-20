@@ -11,12 +11,12 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.core.contracts import AERODROME_TOKENS as TOKEN_ADDRESSES
-
 from ..receipt_parser import (
     BURN_EVENT_TOPIC,
     MINT_EVENT_TOPIC,
     SWAP_EVENT_TOPIC,
+    TOKEN_ADDRESSES,
+    TOKEN_DECIMALS,
     TOPIC_TO_EVENT,
     AerodromeEvent,
     AerodromeEventType,
@@ -26,18 +26,6 @@ from ..receipt_parser import (
     ParseResult,
     SwapEventData,
 )
-
-# Token decimals constant (was previously in receipt_parser, now derived inline)
-TOKEN_DECIMALS: dict[str, int] = {
-    "USDC": 6,
-    "USDBC": 6,
-    "WETH": 18,
-    "DAI": 18,
-    "ETH": 18,
-    "AERO": 18,
-    "CBETH": 18,
-    "RETH": 18,
-}
 
 # =============================================================================
 # Parser Initialization Tests
@@ -599,68 +587,3 @@ class TestAerodromeEvent:
         assert event.event_type == AerodromeEventType.SWAP
         assert event.event_name == "Swap"
         assert event.data["key"] == "value"
-
-
-# =============================================================================
-# Position ID Extraction Tests
-# =============================================================================
-
-
-class TestExtractPositionId:
-    """Tests for extract_position_id (LP_OPEN enrichment)."""
-
-    def test_extract_position_id_from_mint(self) -> None:
-        """Mint event pool address is returned as position_id."""
-        parser = AerodromeReceiptParser(chain="base")
-        pool_addr = "0xB4885Bc63399BF5518b994c1d0C153334Ee579D0"
-        receipt = {
-            "logs": [
-                {
-                    "address": pool_addr,
-                    "topics": [MINT_EVENT_TOPIC, "0x" + "00" * 32],
-                    "data": "0x" + "00" * 64,
-                }
-            ],
-        }
-
-        result = parser.extract_position_id(receipt)
-        assert result == pool_addr.lower()
-
-    def test_extract_position_id_no_mint(self) -> None:
-        """Returns None when no Mint event is present."""
-        parser = AerodromeReceiptParser(chain="base")
-        receipt = {
-            "logs": [
-                {
-                    "address": "0xSomeContract",
-                    "topics": [SWAP_EVENT_TOPIC],
-                    "data": "0x" + "00" * 128,
-                }
-            ],
-        }
-
-        result = parser.extract_position_id(receipt)
-        assert result is None
-
-    def test_extract_position_id_bytes_address(self) -> None:
-        """Pool address as bytes is normalized to hex string."""
-        parser = AerodromeReceiptParser(chain="base")
-        pool_bytes = bytes.fromhex("B4885Bc63399BF5518b994c1d0C153334Ee579D0")
-        receipt = {
-            "logs": [
-                {
-                    "address": pool_bytes,
-                    "topics": [MINT_EVENT_TOPIC, "0x" + "00" * 32],
-                    "data": "0x" + "00" * 64,
-                }
-            ],
-        }
-
-        result = parser.extract_position_id(receipt)
-        assert result == "0xb4885bc63399bf5518b994c1d0c153334ee579d0"
-
-    def test_extract_position_id_empty_logs(self) -> None:
-        """Returns None when logs are empty."""
-        parser = AerodromeReceiptParser(chain="base")
-        assert parser.extract_position_id({"logs": []}) is None
-        assert parser.extract_position_id({}) is None

@@ -150,8 +150,7 @@ class OrcaWhirlpoolSDK:
             OrcaPoolError: If pool not found.
             OrcaAPIError: If API request fails.
         """
-        raw = self._make_request(f"/pools/{pool_address}")
-        data = raw.get("data", raw) if isinstance(raw, dict) else raw
+        data = self._make_request(f"/pools/{pool_address}")
 
         if not data or (isinstance(data, dict) and not data.get("address")):
             raise OrcaPoolError(f"Pool not found: {pool_address}")
@@ -415,32 +414,24 @@ class OrcaWhirlpoolSDK:
             tick_upper,
         )
 
-        # Account ordering matches Orca Whirlpools IDL for open_position_with_metadata:
-        # https://github.com/orca-so/whirlpools/blob/main/programs/whirlpool/src/lib.rs
-        # IDL order: funder, owner, position, positionMint, positionMetadataAccount,
-        #            positionTokenAccount, whirlpool, tokenProgram, systemProgram,
-        #            rent, associatedTokenProgram, metadataProgram, metadataUpdateAuth
         open_accounts = [
             AccountMeta(self._owner, is_signer=True, is_writable=True),  # funder
             AccountMeta(self._owner, is_signer=False, is_writable=False),  # owner
             AccountMeta(position_pda, is_signer=False, is_writable=True),  # position
-            AccountMeta(nft_mint, is_signer=True, is_writable=True),  # positionMint
-            AccountMeta(metadata_account, is_signer=False, is_writable=True),  # positionMetadataAccount
-            AccountMeta(nft_ata, is_signer=False, is_writable=True),  # positionTokenAccount
+            AccountMeta(nft_mint, is_signer=True, is_writable=True),  # position_mint
+            AccountMeta(nft_ata, is_signer=False, is_writable=True),  # position_token_account
             AccountMeta(pool_pubkey, is_signer=False, is_writable=False),  # whirlpool
-            AccountMeta(token_program, is_signer=False, is_writable=False),  # tokenProgram
-            AccountMeta(system_program, is_signer=False, is_writable=False),  # systemProgram
+            AccountMeta(token_program, is_signer=False, is_writable=False),  # token_program
+            AccountMeta(system_program, is_signer=False, is_writable=False),  # system_program
             AccountMeta(rent, is_signer=False, is_writable=False),  # rent
-            AccountMeta(ata_program, is_signer=False, is_writable=False),  # associatedTokenProgram
-            AccountMeta(metadata_program, is_signer=False, is_writable=False),  # metadataProgram
-            # Orca Whirlpools metadata update authority — hardcoded in the program at:
-            # https://github.com/orca-so/whirlpools/blob/main/programs/whirlpool/src/constants.rs
-            # Verified via mainnet openPositionWithMetadata txns (e.g. Orca UI LP opens).
+            AccountMeta(ata_program, is_signer=False, is_writable=False),  # associated_token_program
+            AccountMeta(metadata_program, is_signer=False, is_writable=False),  # metadata_program
+            AccountMeta(metadata_account, is_signer=False, is_writable=True),  # metadata_account
             AccountMeta(
-                Pubkey.from_string("3axbTs2z5GBy6usVbNVoqEgZMng3vZvMnAoX29BFfwhr"),
+                Pubkey.from_string("METAewgxyPbgwsseH8T16a39CQ5VyVxZi9zXiDPY18m"),
                 is_signer=False,
                 is_writable=False,
-            ),  # metadataUpdateAuth
+            ),  # metadata_update_auth
         ]
 
         ixs.append(Instruction(self._program_id, open_ix_data, open_accounts))

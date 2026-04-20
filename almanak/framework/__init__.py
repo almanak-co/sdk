@@ -130,7 +130,6 @@ from .strategies import (
     STRATEGY_REGISTRY,
     BalanceProvider,
     ConfigSnapshot,
-    ConfigValidationError,
     ExecutionResult,
     # Intent Strategy
     IntentStrategy,

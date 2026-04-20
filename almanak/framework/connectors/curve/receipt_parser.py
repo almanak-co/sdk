@@ -30,24 +30,10 @@ EVENT_TOPICS: dict[str, str] = {
     # CryptoSwap/Tricrypto: TokenExchange(address,uint256,uint256,uint256,uint256)
     "TokenExchangeCrypto": "0xb2e76ae99761dc136e598d4a629bb347eccb9532a5f8bbd72e18467c3c34cc98",
     "TokenExchangeUnderlying": "0xd013ca23e77a65003c2c659c5442c00c805371b7fc1ebd4c206c41d1536bd90b",
-    # AddLiquidity for NG pools (StableswapNG, TwocryptoNG):
-    # AddLiquidity(address,uint256[2],uint256[2],uint256,uint256) — includes fees array
     "AddLiquidity2": "0x26f55a85081d24974e85c6c00045d0f0453991e95873f52bff0d21af4079a768",
     "AddLiquidity3": "0x423f6495a08fc652425cf4ed0d1f9e37e571d9b9529b1c1c23cce780b2e7df0d",
-    # AddLiquidity(address,uint256[4],uint256[4],uint256,uint256) — 4-coin NG pool
-    "AddLiquidity4": "0x3f1915775e0c9a38a57a7bb7f1f9005f486fb904e1f84aa215364d567319a58d",
-    # AddLiquidity for old-style Twocrypto (pre-NG, no fees array):
-    # AddLiquidity(address,uint256[2],uint256,uint256) — provider, amounts, invariant, supply
-    "AddLiquidityV2Crypto2": "0x540ab385f9b5d450a27404172caade516b3ba3f4be88239ac56a2ad1de2a1f5a",
-    # RemoveLiquidity for NG pools (includes fees array):
-    # RemoveLiquidity(address,uint256[2],uint256[2],uint256)
     "RemoveLiquidity2": "0x7c363854ccf79623411f8995b362bce5eddff18c927edc6f5dbbb5e05819a82c",
     "RemoveLiquidity3": "0xa49d4cf02656aebf8c771f5a8585638a2a15ee6c97cf7205d4208ed7c1df252d",
-    # RemoveLiquidity(address,uint256[4],uint256[4],uint256) — 4-coin NG pool
-    "RemoveLiquidity4": "0x9878ca375e106f2a43c3b599fc624568131c4c9a4ba66a14563715763be9d59d",
-    # RemoveLiquidity for old-style Twocrypto (no fees array):
-    # RemoveLiquidity(address,uint256[2],uint256)
-    "RemoveLiquidityV2Crypto2": "0xdd3c0336a16f1b64f172b7bb0dad5b2b3c7c76f91e8c4aafd6aae60dce800153",
     "RemoveLiquidityOne": "0x5ad056f2e28a8cec232015406b843668c1e36cda598127ec3b8c59b8c72773a0",
     "RemoveLiquidityImbalance": "0x2b5508378d7e19e0d5fa338419034731416c4f5b219a10379956f764317fd47e",
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
@@ -84,12 +70,8 @@ EVENT_NAME_TO_TYPE: dict[str, CurveEventType] = {
     "TokenExchangeUnderlying": CurveEventType.TOKEN_EXCHANGE_UNDERLYING,
     "AddLiquidity2": CurveEventType.ADD_LIQUIDITY,
     "AddLiquidity3": CurveEventType.ADD_LIQUIDITY,
-    "AddLiquidity4": CurveEventType.ADD_LIQUIDITY,
-    "AddLiquidityV2Crypto2": CurveEventType.ADD_LIQUIDITY,  # old-style Twocrypto (pre-NG)
     "RemoveLiquidity2": CurveEventType.REMOVE_LIQUIDITY,
     "RemoveLiquidity3": CurveEventType.REMOVE_LIQUIDITY,
-    "RemoveLiquidity4": CurveEventType.REMOVE_LIQUIDITY,
-    "RemoveLiquidityV2Crypto2": CurveEventType.REMOVE_LIQUIDITY,  # old-style Twocrypto (pre-NG)
     "RemoveLiquidityOne": CurveEventType.REMOVE_LIQUIDITY_ONE,
     "RemoveLiquidityImbalance": CurveEventType.REMOVE_LIQUIDITY_IMBALANCE,
     "Transfer": CurveEventType.TRANSFER,
@@ -426,9 +408,9 @@ class CurveReceiptParser:
         if event_type in (CurveEventType.TOKEN_EXCHANGE, CurveEventType.TOKEN_EXCHANGE_UNDERLYING):
             return self._decode_swap_data(topics, data, address, event_name=event_name)
         elif event_type == CurveEventType.ADD_LIQUIDITY:
-            return self._decode_add_liquidity_data(topics, data, address, event_name=event_name)
+            return self._decode_add_liquidity_data(topics, data, address)
         elif event_type == CurveEventType.REMOVE_LIQUIDITY:
-            return self._decode_remove_liquidity_data(topics, data, address, event_name=event_name)
+            return self._decode_remove_liquidity_data(topics, data, address)
         else:
             return {"raw_data": data}
 
@@ -479,46 +461,18 @@ class CurveReceiptParser:
         topics: list[Any],
         data: str,
         address: str,
-        event_name: str = "",
     ) -> dict[str, Any]:
-        """Decode AddLiquidity event data.
-
-        Two formats are supported:
-        - NG pools (AddLiquidity2/AddLiquidity3): amounts + fees + invariant + supply
-          (2-coin: 6 fields × 64 = 384 hex chars; 3-coin: 8 fields × 512 hex chars)
-        - Old-style Twocrypto (AddLiquidityV2Crypto2): amounts + invariant + supply
-          (NO fees array: 2-coin: 4 fields × 64 = 256 hex chars)
-        """
+        """Decode AddLiquidity event data."""
         try:
             # Indexed: provider
             provider = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
-            pool_address = address.lower() if isinstance(address, str) else ""
 
-            # Old-style Twocrypto (pre-NG): no fees array
-            # Format: amounts[0], amounts[1], invariant, token_supply
-            if event_name == "AddLiquidityV2Crypto2":
-                token_amounts = [
-                    HexDecoder.decode_uint256(data, 0),
-                    HexDecoder.decode_uint256(data, 32),
-                ]
-                invariant = HexDecoder.decode_uint256(data, 64)
-                token_supply = HexDecoder.decode_uint256(data, 96)
-                return {
-                    "provider": provider,
-                    "token_amounts": token_amounts,
-                    "fees": [],  # Old-style pools don't emit fees in this event
-                    "invariant": invariant,
-                    "token_supply": token_supply,
-                    "pool_address": pool_address,
-                }
-
-            # NG pools: amounts + fees + invariant + supply
-            # Determine n_coins from data length: n_coins*2 + 2 fields, each 64 hex chars
-            # 2-coin: 6 * 64 = 384, 3-coin: 8 * 64 = 512, 4-coin: 10 * 64 = 640
+            # Determine pool type (2-coin or 3-coin) based on data length
+            # AddLiquidity: amounts + fees + invariant + supply
+            # 2-coin: 2 + 2 + 1 + 1 = 6 fields × 64 = 384 hex chars
+            # 3-coin: 3 + 3 + 1 + 1 = 8 fields × 64 = 512 hex chars
             data_len = len(data)
-            if data_len >= 640:  # 10 * 64 for 4-coin
-                n_coins = 4
-            elif data_len >= 512:  # 8 * 64 for 3-coin
+            if data_len >= 512:  # 8 * 64 for 3-coin
                 n_coins = 3
             else:
                 n_coins = 2
@@ -536,6 +490,8 @@ class CurveReceiptParser:
             # Parse invariant and supply
             invariant = HexDecoder.decode_uint256(data, n_coins * 2 * 32)
             token_supply = HexDecoder.decode_uint256(data, (n_coins * 2 + 1) * 32)
+
+            pool_address = address.lower() if isinstance(address, str) else ""
 
             return {
                 "provider": provider,
@@ -555,44 +511,18 @@ class CurveReceiptParser:
         topics: list[Any],
         data: str,
         address: str,
-        event_name: str = "",
     ) -> dict[str, Any]:
-        """Decode RemoveLiquidity event data.
-
-        Two formats are supported:
-        - NG pools (RemoveLiquidity2/RemoveLiquidity3): amounts + fees + supply
-          (2-coin: 5 fields × 64 = 320 hex chars; 3-coin: 7 fields × 448 hex chars)
-        - Old-style Twocrypto (RemoveLiquidityV2Crypto2): amounts + supply (NO fees)
-          (2-coin: 3 fields × 64 = 192 hex chars)
-        """
+        """Decode RemoveLiquidity event data."""
         try:
             # Indexed: provider
             provider = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
-            pool_address = address.lower() if isinstance(address, str) else ""
 
-            # Old-style Twocrypto (pre-NG): no fees array
-            # Format: amounts[0], amounts[1], token_supply
-            if event_name == "RemoveLiquidityV2Crypto2":
-                token_amounts = [
-                    HexDecoder.decode_uint256(data, 0),
-                    HexDecoder.decode_uint256(data, 32),
-                ]
-                token_supply = HexDecoder.decode_uint256(data, 64)
-                return {
-                    "provider": provider,
-                    "token_amounts": token_amounts,
-                    "fees": [],  # Old-style pools don't emit fees in this event
-                    "token_supply": token_supply,
-                    "pool_address": pool_address,
-                }
-
-            # NG pools: amounts + fees + supply (no invariant)
-            # Determine n_coins from data length: n_coins*2 + 1 fields, each 64 hex chars
-            # 2-coin: 5 * 64 = 320, 3-coin: 7 * 64 = 448, 4-coin: 9 * 64 = 576
+            # Determine pool type based on data length
+            # RemoveLiquidity: amounts + fees + supply (no invariant)
+            # 2-coin: 2 + 2 + 1 = 5 fields × 64 = 320 hex chars
+            # 3-coin: 3 + 3 + 1 = 7 fields × 64 = 448 hex chars
             data_len = len(data)
-            if data_len >= 576:  # 9 * 64 for 4-coin
-                n_coins = 4
-            elif data_len >= 448:  # 7 * 64 for 3-coin
+            if data_len >= 448:  # 7 * 64 for 3-coin
                 n_coins = 3
             else:
                 n_coins = 2
@@ -609,6 +539,8 @@ class CurveReceiptParser:
 
             # Parse supply
             token_supply = HexDecoder.decode_uint256(data, n_coins * 2 * 32)
+
+            pool_address = address.lower() if isinstance(address, str) else ""
 
             return {
                 "provider": provider,
@@ -778,83 +710,84 @@ class CurveReceiptParser:
     def extract_position_id(self, receipt: dict[str, Any]) -> int | str | None:
         """Extract position identifier from LP transaction receipt.
 
-        For Curve (pool-based LP, no NFT positions), returns the LP token
-        contract address.  Unlike V3 DEXes where position_id is an NFT tokenId,
-        Curve LP tokens are fungible ERC-20s — the LP token address is the
-        stable identifier for the position.
-
-        The minted LP token *amount* is available separately via
-        ``extract_liquidity()``.
+        For Curve (pool-based LP, no NFT positions), returns the LP token amount
+        as a decimal string so it can be stored and passed directly to
+        Intent.lp_close(position_id=...) — which _compile_lp_close_curve()
+        interprets as the LP token amount to burn (e.g., "99").
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
 
         Returns:
-            LP token address as hex string, or None if not found
+            LP token amount as decimal string (e.g., "99"), or None if not found
         """
         try:
-            # Find the mint Transfer event (from zero address) and return the
-            # emitting contract address — that is the LP token contract.
+            lp_amount_raw = self.extract_lp_tokens_received(receipt)
+            if lp_amount_raw is None:
+                return None
+
+            # Find LP token address from the mint Transfer event (from zero address)
             zero_addr = "0x0000000000000000000000000000000000000000"
             transfer_topic = EVENT_TOPICS["Transfer"].lower()
-
+            lp_token_address: str | None = None
             for log in receipt.get("logs", []):
                 topics = log.get("topics", [])
                 if len(topics) < 3:
                     continue
-
                 first_topic = topics[0]
                 if isinstance(first_topic, bytes):
                     first_topic = "0x" + first_topic.hex()
-                first_topic = str(first_topic).lower()
-
-                if first_topic != transfer_topic:
+                if str(first_topic).lower() != transfer_topic:
                     continue
-
-                from_addr = HexDecoder.topic_to_address(topics[1])
-                if from_addr.lower() == zero_addr:
+                from_topic = topics[1]
+                if isinstance(from_topic, bytes):
+                    from_topic = "0x" + from_topic.hex()
+                from_addr = "0x" + str(from_topic).lower()[-40:]
+                if from_addr == zero_addr:
                     lp_token_address = log.get("address", "")
-                    if isinstance(lp_token_address, bytes):
-                        lp_token_address = "0x" + lp_token_address.hex()
-                    lp_token_address = str(lp_token_address).strip()
-                    if lp_token_address.startswith("0x") and len(lp_token_address) == 42:
-                        return lp_token_address
-                    return None
+                    break
 
-            return None
+            if not lp_token_address:
+                logger.warning("Cannot extract position_id: LP token address not found in receipt")
+                return None
+
+            lp_token_address = str(lp_token_address).lower()
+            decimals = self._resolve_decimals(lp_token_address)
+            if decimals is None:
+                # All Curve LP tokens use 18 decimals — fall back rather than silently dropping
+                # the position_id (consistent with _compile_lp_close_curve which also assumes 18).
+                logger.warning(f"Decimals unknown for Curve LP token {lp_token_address}; falling back to 18")
+                decimals = 18
+
+            return str(Decimal(lp_amount_raw) / Decimal(10**decimals))
         except Exception as e:
             logger.warning(f"Failed to extract position_id: {e}")
             return None
 
-    def extract_liquidity(self, receipt: dict[str, Any]) -> Decimal | None:
+    def extract_liquidity(self, receipt: dict[str, Any]) -> int | None:
         """Extract LP tokens minted from AddLiquidity transaction.
 
-        Returns the LP token amount in **human-readable** form (e.g., ``Decimal("98.133")``)
-        by dividing the raw wei value by 10^decimals. This matches the convention expected by
-        the LP_CLOSE compiler, which treats the value as a human-readable amount and converts
-        back to wei internally.
-
-        Curve LP tokens always have 18 decimals. If the LP token address is found in the
-        receipt, decimals are resolved via the token resolver; otherwise falls back to 18.
+        Looks for ERC-20 Transfer events from the zero address (mint) to identify
+        the LP tokens minted during add_liquidity.
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
 
         Returns:
-            LP token amount in human-readable Decimal, or None if not found
+            LP token amount minted, or None if not found
         """
         return self.extract_lp_tokens_received(receipt)
 
-    def extract_lp_tokens_received(self, receipt: dict[str, Any]) -> Decimal | None:
+    def extract_lp_tokens_received(self, receipt: dict[str, Any]) -> int | None:
         """Extract LP tokens received from AddLiquidity transaction.
 
-        Looks for Transfer events from the zero address (mint).
+        Looks for Transfer events from the pool address to the user.
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
 
         Returns:
-            LP token amount in human-readable Decimal, or None if not found
+            LP token amount if found, None otherwise
         """
         try:
             # Look for Transfer events from zero address (mint)
@@ -878,21 +811,8 @@ class CurveReceiptParser:
                 from_addr = HexDecoder.topic_to_address(topics[1])
                 if from_addr.lower() == zero_addr:
                     data = HexDecoder.normalize_hex(log.get("data", ""))
-                    lp_amount_raw = HexDecoder.decode_uint256(data, 0)
-
-                    # Resolve LP token decimals (Curve LP tokens are always 18,
-                    # but resolve to be safe)
-                    lp_token_address = log.get("address", "")
-                    if isinstance(lp_token_address, bytes):
-                        lp_token_address = "0x" + lp_token_address.hex()
-                    decimals = self._resolve_decimals(str(lp_token_address).lower())
-                    if decimals is None:
-                        logger.warning(
-                            f"Cannot resolve decimals for Curve LP token {lp_token_address}; falling back to 18"
-                        )
-                        decimals = 18
-
-                    return Decimal(lp_amount_raw) / Decimal(10**decimals)
+                    lp_amount = HexDecoder.decode_uint256(data, 0)
+                    return lp_amount
 
             return None
 
@@ -934,22 +854,12 @@ class CurveReceiptParser:
                     fees0 = fees[0] if len(fees) > 0 else 0
                     fees1 = fees[1] if len(fees) > 1 else 0
 
-                    # Capture additional amounts for 3/4-coin pools
-                    additional_amounts = None
-                    additional_fees = None
-                    if len(token_amounts) > 2:
-                        additional_amounts = {i: token_amounts[i] for i in range(2, len(token_amounts))}
-                    if len(fees) > 2:
-                        additional_fees = {i: fees[i] for i in range(2, len(fees))}
-
                     return LPCloseData(
                         amount0_collected=amount0,
                         amount1_collected=amount1,
                         fees0=fees0,
                         fees1=fees1,
                         liquidity_removed=None,  # LP tokens burned
-                        additional_amounts=additional_amounts,
-                        additional_fees=additional_fees,
                     )
 
             return None

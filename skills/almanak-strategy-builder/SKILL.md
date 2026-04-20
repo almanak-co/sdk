@@ -12,7 +12,7 @@ description: >-
   debugging strategy execution on Anvil forks. Do NOT use for general
   smart contract development, Solidity code, or non-strategy SDK internals.
 metadata:
-  version: "2.13.0"
+  version: "2.0.0"
   author: Almanak
   license: Apache-2.0
   type: documentation
@@ -45,10 +45,9 @@ See the [Gateway](#gateway) section for details.
 strategy or modify `strategy.py` in a way that changes protocols, intent types,
 tokens, or chains, you MUST regenerate the Zodiac Roles permission manifest
 by running `almanak strat permissions -o permissions.json`
-from the strategy directory. The file MUST be named exactly `permissions.json`
-— the platform deploy pipeline hardcodes this filename. This ensures the Safe
-wallet permissions stay in sync with the strategy's actual contract interactions.
-Always do this as a final step after writing or editing strategy code.
+from the strategy directory. This ensures the Safe wallet permissions stay in
+sync with the strategy's actual contract interactions. Always do this as a
+final step after writing or editing strategy code.
 
 <!-- almanak-sdk-start: quick-start -->
 
@@ -92,24 +91,6 @@ my_strategy/
   tests/             # Test scaffold
   AGENTS.md          # AI agent guide
 ```
-
-**pyproject.toml example:**
-
-```toml
-[project]
-name = "my-strategy"
-version = "0.1.0"
-requires-python = ">=3.12"
-dependencies = [
-    "almanak>=2.4.0",
-]
-
-[tool.almanak.run]
-interval = 60
-```
-
-The `[tool.almanak.run]` section is required — it sets the execution interval (in seconds)
-for the strategy loop in production. Always include it when writing pyproject.toml manually.
 
 **Adding dependencies:**
 
@@ -197,24 +178,6 @@ Attaches metadata used by the framework and CLI:
 )
 ```
 
-**IMPORTANT — Intent Type Teardown Complements**: `intent_types` must include
-both the "open" and "close" side of every operation. These are used to generate
-Zodiac Roles permissions for Safe wallet deployments. If you declare the open
-side without its complement, the strategy will deploy but **teardown will fail
-on-chain** because the wallet lacks permission for the close operation.
-
-| If you declare... | You MUST also declare... |
-|--------------------|--------------------------|
-| `SUPPLY`           | `WITHDRAW`               |
-| `BORROW`           | `REPAY`                  |
-| `LP_OPEN`          | `LP_CLOSE`               |
-| `VAULT_DEPOSIT`    | `VAULT_REDEEM`           |
-| `PERP_OPEN`        | `PERP_CLOSE`             |
-
-The decorator emits a `UserWarning` at import time if complements are missing.
-The permission generator also auto-expands missing complements as a safety net,
-but always declare them explicitly.
-
 ### Config Access
 
 In `__init__`, read parameters from `self.config` (dict loaded from config.json):
@@ -227,8 +190,7 @@ def __init__(self, *args, **kwargs):
     self.base_token = self.config.get("base_token", "WETH")
 ```
 
-Also available: `self.chain` (str), `self.wallet_address` (str), `self.chains` (list[str]),
-`self.get_wallet_for_chain(chain)` (str).
+Also available: `self.chain` (str), `self.wallet_address` (str).
 
 <!-- almanak-sdk-end: core-concepts -->
 
@@ -324,7 +286,7 @@ Intent.borrow(
     collateral_amount=Decimal("10"),
     borrow_token="USDC",
     borrow_amount=Decimal("5000"),
-    interest_rate_mode="variable",  # Aave: "variable" only (stable deprecated)
+    interest_rate_mode="variable",  # Aave: "variable" or "stable"
     market_id=None,                 # Required for Morpho Blue
 )
 ```
@@ -440,11 +402,9 @@ Intent.flash_loan(
 
 ```python
 Intent.vault_deposit(
-    protocol="metamorpho",           # Vault protocol
-    vault_address="0x...",           # Vault contract address
-    amount=Decimal("1000"),          # Amount of underlying to deposit (or "all")
-    deposit_token="USDC",            # Underlying token symbol (for backtesting)
-    chain="ethereum",                # Optional: override chain
+    vault="0x...",           # Vault contract address
+    asset_token="USDC",
+    amount=Decimal("1000"),
 )
 ```
 
@@ -452,33 +412,17 @@ Intent.vault_deposit(
 
 ```python
 Intent.vault_redeem(
-    protocol="metamorpho",           # Vault protocol
-    vault_address="0x...",           # Vault contract address
-    shares=Decimal("1000"),          # Shares to redeem (or "all")
-    deposit_token="USDC",            # Underlying token symbol (for backtesting)
-    chain="ethereum",                # Optional: override chain
+    vault="0x...",
+    shares_amount=Decimal("1000"),
 )
 ```
 
 ### Prediction Markets
 
 ```python
-Intent.prediction_buy(
-    market_id="will-bitcoin-exceed-100000",  # Polymarket market ID or slug
-    outcome="YES",                            # "YES" or "NO"
-    amount_usd=Decimal("100"),                # USDC to spend (or use shares=)
-    protocol="polymarket",
-)
-Intent.prediction_sell(
-    market_id="will-bitcoin-exceed-100000",
-    outcome="YES",
-    shares=Decimal("50"),                     # Shares to sell (or "all")
-    protocol="polymarket",
-)
-Intent.prediction_redeem(
-    market_id="will-bitcoin-exceed-100000",   # Redeem after market resolves
-    protocol="polymarket",
-)
+Intent.prediction_buy(protocol="polymarket", market="...", amount_usd=Decimal("100"))
+Intent.prediction_sell(protocol="polymarket", market="...", amount_shares=Decimal("50"))
+Intent.prediction_redeem(protocol="polymarket", market="...")
 ```
 
 ### Cross-Chain
@@ -500,20 +444,13 @@ return resolved
 
 ### Token Utilities
 
-**Intent.wrap** (WrapNative) - Wrap native tokens to ERC-20 (ETH -> WETH, MATIC -> WMATIC, etc.)
+**UnwrapNativeIntent** - Unwrap wrapped native tokens (WETH -> ETH, WMATIC -> MATIC, etc.)
 
 ```python
-Intent.wrap(
-    token="WETH",              # Wrapped token symbol to receive
-    amount=Decimal("0.5"),     # Amount of native token to wrap (or "all")
-    chain="arbitrum",          # Target chain
-)
-```
+from almanak.framework.intents import UnwrapNativeIntent
+from decimal import Decimal
 
-**Intent.unwrap** (UnwrapNative) - Unwrap wrapped native tokens (WETH -> ETH, WMATIC -> MATIC, etc.)
-
-```python
-Intent.unwrap(
+UnwrapNativeIntent(
     token="WETH",              # Wrapped token symbol
     amount=Decimal("0.5"),     # Amount to unwrap (or "all")
     chain="arbitrum",          # Target chain
@@ -628,29 +565,34 @@ ema = market.ema("WETH", period=12)
 # Both return MAData with: .value, .is_price_above, .is_price_below, .signal
 
 adx = market.adx("WETH", period=14)
-adx.value           # Decimal
-adx.plus_di         # Decimal
-adx.minus_di        # Decimal
-adx.is_trending     # bool
-adx.is_uptrend      # bool
+adx.adx             # Decimal (0-100, trend strength)
+adx.plus_di          # Decimal (+DI)
+adx.minus_di         # Decimal (-DI)
+adx.is_strong_trend  # bool (adx >= 25)
+adx.is_uptrend       # bool (+DI > -DI)
+adx.is_downtrend     # bool (-DI > +DI)
 
-obv = market.obv("WETH", signal_period=21)
-obv.value           # Decimal
-obv.signal          # Decimal
-obv.is_bullish      # bool
+obv = market.obv("WETH")
+obv.obv              # Decimal (OBV value)
+obv.signal_line      # Decimal (SMA of OBV)
+obv.is_bullish       # bool (OBV > signal)
+obv.is_bearish       # bool (OBV < signal)
 
 cci = market.cci("WETH", period=20)
-cci.value           # Decimal
-cci.is_overbought   # bool
-cci.is_oversold     # bool
+cci.value            # Decimal
+cci.is_oversold      # bool (value <= -100)
+cci.is_overbought    # bool (value >= 100)
 
-ich = market.ichimoku("WETH", tenkan_period=9, kijun_period=26, senkou_b_period=52)
-ich.tenkan_sen      # Decimal (conversion line)
-ich.kijun_sen       # Decimal (base line)
-ich.senkou_span_a   # Decimal (leading span A)
-ich.senkou_span_b   # Decimal (leading span B)
-ich.is_bullish_crossover  # bool
-ich.is_above_cloud  # bool
+ich = market.ichimoku("WETH")
+ich.tenkan_sen       # Decimal (conversion line)
+ich.kijun_sen        # Decimal (base line)
+ich.senkou_span_a    # Decimal (leading span A)
+ich.senkou_span_b    # Decimal (leading span B)
+ich.cloud_top        # Decimal
+ich.cloud_bottom     # Decimal
+ich.is_bullish_crossover  # bool (tenkan > kijun)
+ich.is_above_cloud   # bool
+ich.signal           # "BUY" | "SELL" | "HOLD"
 ```
 
 ### Multi-Token Queries
@@ -721,45 +663,6 @@ positions = market.prediction_positions("market_id")     # list[PredictionPositi
 orders = market.prediction_orders("market_id")           # list[PredictionOrder]
 ```
 
-### Rate History (Backtesting)
-
-```python
-hist = market.lending_rate_history("aave_v3", "USDC", days=90)  # DataEnvelope[list[LendingRateSnapshot]]
-for snap in hist.value:
-    print(f"Supply: {snap.supply_apy}%, Borrow: {snap.borrow_apy}%")
-
-fh = market.funding_rate_history("binance", "ETH-PERP", hours=168)  # DataEnvelope[list[FundingRateSnapshot]]
-```
-
-### Position Health
-
-```python
-ph = market.position_health("morpho_blue", market_id="0x...")  # PositionHealth
-ph.health_factor     # Decimal
-ph.ltv               # Decimal
-
-pt = market.pt_position_health("0x...", pendle_market_address="0x...")  # PTPositionHealth
-```
-
-### LST Exchange Rates (Solana)
-
-```python
-rate = market.lst_exchange_rate("jitoSOL")   # LSTExchangeRate
-rate.rate            # Decimal - rate vs SOL
-rate.apy             # Decimal
-
-all_rates = market.lst_all_rates()           # dict[str, LSTExchangeRate]
-```
-
-### Risk Metrics
-
-```python
-vol = market.realized_vol("WETH", window_days=30)    # RealizedVol
-cone = market.vol_cone("WETH")                       # VolCone
-risk = market.portfolio_risk()                        # PortfolioRisk
-sharpe = market.rolling_sharpe("WETH", window_days=30)  # RollingSharpe
-```
-
 ### Yield and Analytics
 
 ```python
@@ -775,8 +678,6 @@ signals = market.wallet_activity(action_types=["SWAP", "LP_OPEN"])  # list
 market.chain            # str - current chain name
 market.wallet_address   # str - wallet address
 market.timestamp        # datetime - snapshot timestamp
-market.fork_rpc_url     # str | None - Local Anvil fork RPC URL (paper trading only; bypasses the gateway and is None in production)
-market.fork_block       # int | None - current fork block number (paper trading only)
 ```
 
 <!-- almanak-sdk-end: market-snapshot-api -->
@@ -878,13 +779,8 @@ def on_intent_executed(self, intent, success: bool, result):
 
 ### config.json
 
-Contains the target chain and tunable runtime parameters. `name`, `description`, and
-`supported_chains` still live in the `@almanak_strategy` decorator on your strategy class; the
-config.json `chain` field acts as an explicit override of the decorator's `default_chain` and
-lets tooling (sdk-planner, operators, deployment UIs) read the target chain without importing
-the strategy module.
-
-**Single-chain:**
+Contains only tunable runtime parameters. Structural metadata (name, description, default execution chain) lives in
+the `@almanak_strategy` decorator on your strategy class.
 
 ```json
 {
@@ -903,23 +799,8 @@ the strategy module.
 }
 ```
 
-**Multi-chain:**
-
-```json
-{
-    "chains": ["base", "arbitrum"],
-    "swap_amount_usdc": "100",
-    "max_slippage_bps": 100,
-    "anvil_funding": {
-        "USDC": 500
-    }
-}
-```
-
-The `chains` field lists the chains the strategy operates on and is read by the platform at
-deployment time. It should match `supported_chains` from the `@almanak_strategy` decorator.
-For single-chain strategies, `chain` (singular) is also accepted. `anvil_funding` is flat --
-the same tokens are funded on all chains.
+The `chain` field sets the execution chain for the strategy and is read by the platform at deployment
+time. It should match one of the values in `supported_chains` from the `@almanak_strategy` decorator.
 All other fields are strategy-specific and accessed via `self.config.get(key, default)`.
 
 ### .env (local development only)
@@ -941,27 +822,6 @@ ALCHEMY_API_KEY=<your-alchemy-key>
 # COINGECKO_API_KEY=<key>
 # ALMANAK_API_KEY=<key>
 ```
-
-### token_funding (recommended, will be required)
-
-Structured list declaring exactly which tokens the strategy needs to be funded before the first tick.
-Each entry specifies the token symbol, on-chain address, amount, and how to interpret the amount.
-`strat new` generates this automatically when the template includes token fields.
-
-```json
-"token_funding": [
-    {"symbol": "WETH", "address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", "chain": "arbitrum", "amount": "1", "amount_type": "token"},
-    {"symbol": "USDC", "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "amount": "5000", "amount_type": "usd"}
-]
-```
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `symbol` | yes | Token symbol (e.g. "WETH") |
-| `address` | yes | ERC-20 contract address |
-| `chain` | no | Defaults to strategy chain |
-| `amount` | yes | Quantity (string to preserve precision) |
-| `amount_type` | yes | `"token"` (native units), `"usd"` (dollar value), or `"percentage"` (of held balance) |
 
 ### anvil_funding
 
@@ -1063,7 +923,7 @@ results.plot()  # Matplotlib equity curve
 - **OHLCV data**: The PnL backtester uses historical close prices from CoinGecko. Indicators that require OHLCV data (ATR, Stochastic, Ichimoku) need a paid CoinGecko tier or an external data source.
 - **RPC for paper trading**: Paper trading requires an RPC endpoint. Alchemy free tier is recommended for performance; public RPCs work but are slow.
 - **No CWD auto-discovery**: Backtest CLI commands (`backtest pnl`, `backtest paper`, `backtest sweep`) require an explicit `-s strategy_name` flag. They do not auto-discover strategies from the current directory like `strat run` does.
-- **Percentage fields**: `total_return_pct` and `annualized_return_pct` are actual percentages (33 = 33%) after VIB-2915. Other `_pct` fields like `max_drawdown_pct` and `win_rate` are still decimal fractions (0.33 = 33%).
+- **Percentage fields**: `total_return_pct` and similar `_pct` result fields are decimal fractions (0.33 = 33%), not percentages.
 
 <!-- almanak-sdk-end: backtesting -->
 
@@ -1136,37 +996,9 @@ almanak gateway --port 50052          # Custom port
 ```bash
 almanak agent install                 # Auto-detect platforms and install
 almanak agent install -p claude       # Install for specific platform
-almanak agent install -p all          # Install for all 10 platforms
+almanak agent install -p all          # Install for all 9 platforms
 almanak agent update                  # Update installed skill files
 almanak agent status                  # Check installation status
-```
-
-### Strategy Operations
-
-```bash
-almanak strat list                    # List deployed strategies
-almanak strat status                  # Show strategy status
-almanak strat logs                    # View strategy logs
-almanak strat pause                   # Pause a running strategy
-almanak strat resume                  # Resume a paused strategy
-```
-
-### Copy Trading
-
-```bash
-almanak copy validate                 # Validate a copy trading config
-almanak copy replay                   # Replay copy trades
-almanak copy report                   # Generate copy trading report
-```
-
-### Services & Tools
-
-```bash
-almanak ax                            # Almanak agentic execution
-almanak backtest-service              # Start backtest service
-almanak dashboard                     # Launch strategy dashboard
-almanak mcp serve                     # Start MCP server
-almanak info matrix                   # Show chain/protocol support matrix
 ```
 
 ### Documentation
@@ -1198,12 +1030,11 @@ Regenerate permissions whenever you:
 ### How It Works
 
 1. Reads `supported_protocols` and `intent_types` from the `@almanak_strategy()` decorator
-2. **Auto-expands teardown complements** (e.g. SUPPLY adds WITHDRAW) so teardown permissions are always included
-3. Creates synthetic intents for each (protocol, intent_type) pair
-4. Compiles them through the real IntentCompiler to extract target contracts and selectors
-5. Adds ERC-20 `approve` permissions for tokens found in `config.json`
-6. Adds infrastructure permissions (MultiSend for atomic execution)
-7. Merges, deduplicates, and outputs as Zodiac Roles Target[] format
+2. Creates synthetic intents for each (protocol, intent_type) pair
+3. Compiles them through the real IntentCompiler to extract target contracts and selectors
+4. Adds ERC-20 `approve` permissions for tokens found in `config.json`
+5. Adds infrastructure permissions (MultiSend for atomic execution)
+6. Merges, deduplicates, and outputs as Zodiac Roles Target[] format
 
 ### Usage
 
@@ -1275,12 +1106,9 @@ class MyStrategy(IntentStrategy):
 | Sonic | `SONIC` | `sonic` |
 | Plasma | `PLASMA` | `plasma` |
 | Blast | `BLAST` | `blast` |
-| Linea | `LINEA` | `linea` |
 | Mantle | `MANTLE` | `mantle` |
 | Berachain | `BERACHAIN` | `berachain` |
 | Monad | `MONAD` | `monad` |
-| X-Layer | `XLAYER` | `xlayer` |
-| 0G Chain | `ZEROG` | `zerog` |
 | Solana | `SOLANA` | `solana` |
 
 <!-- almanak-sdk-end: supported-chains -->
@@ -1292,7 +1120,6 @@ class MyStrategy(IntentStrategy):
 | Protocol | Enum Value | Type | Config Name |
 |----------|-----------|------|-------------|
 | Uniswap V3 | `UNISWAP_V3` | DEX / LP | `uniswap_v3` |
-| Uniswap V4 | `UNISWAP_V4` | DEX / LP | `uniswap_v4` |
 | PancakeSwap V3 | `PANCAKESWAP_V3` | DEX / LP | `pancakeswap_v3` |
 | SushiSwap V3 | `SUSHISWAP_V3` | DEX / LP | `sushiswap_v3` |
 | TraderJoe V2 | `TRADERJOE_V2` | DEX / LP | `traderjoe_v2` |
@@ -1301,12 +1128,7 @@ class MyStrategy(IntentStrategy):
 | Enso | `ENSO` | Aggregator | `enso` |
 | Pendle | `PENDLE` | Yield | `pendle` |
 | MetaMorpho | `METAMORPHO` | Lending | `metamorpho` |
-| Radiant V2 | `RADIANT_V2` | Lending | `radiant_v2` |
 | LiFi | `LIFI` | Bridge | `lifi` |
-| BenQi | `BENQI` | Lending | `benqi` |
-| Joe Lend | `JOE_LEND` | Lending | `joelend` |
-| Silo V2 | `SILO_V2` | Lending | `silo_v2` |
-| Euler V2 | `EULER_V2` | Lending | `euler_v2` |
 | Vault | `VAULT` | ERC-4626 | `vault` |
 | Curve | `CURVE` | DEX / LP | `curve` |
 | Balancer | `BALANCER` | DEX / LP | `balancer` |
@@ -1409,113 +1231,6 @@ def decide(self, market):
         description="Leverage loop: buy WETH, supply, borrow USDC",
     )
 ```
-
-### Multi-Chain Strategies
-
-Strategies can operate across multiple chains with per-chain wallet addresses.
-The primary chain is `supported_chains[0]`. Intents without an explicit `chain=`
-parameter run on the primary chain.
-
-**Decorator:**
-
-```python
-@almanak_strategy(
-    name="cross_chain_arb",
-    supported_chains=["base", "arbitrum"],       # base is primary (first in list)
-    supported_protocols=["uniswap_v3", "across"],
-    intent_types=["SWAP", "BRIDGE", "HOLD"],
-)
-class CrossChainArbStrategy(IntentStrategy):
-    ...
-```
-
-**config.json:**
-
-```json
-{
-    "chains": ["base", "arbitrum"],
-    "swap_amount_usdc": "100",
-    "anvil_funding": {
-        "USDC": 500
-    }
-}
-```
-
-Note: `anvil_funding` is flat (not per-chain) -- the same tokens are funded on
-all chains.
-
-**Strategy properties:**
-
-```python
-self.chain                          # "base" (primary chain = supported_chains[0])
-self.chains                         # ["base", "arbitrum"]
-self.wallet_address                 # default wallet
-self.get_wallet_for_chain("arbitrum")  # per-chain wallet (if wallet registry configured)
-```
-
-When a gateway wallet registry is configured (`ALMANAK_GATEWAY_WALLETS`), each
-chain can use a different Safe wallet. The framework resolves destination wallets
-automatically for bridge intents.
-
-**decide() with cross-chain intents:**
-
-```python
-def decide(self, market: MarketSnapshot):
-    return Intent.sequence([
-        # Bridge USDC from Base to Arbitrum
-        Intent.bridge(
-            token="USDC",
-            amount=Decimal("100"),
-            from_chain="base",
-            to_chain="arbitrum",
-            preferred_bridge="across",
-            max_slippage=Decimal("0.01"),
-        ),
-        # Swap on Arbitrum (explicit chain= required for non-primary chain)
-        Intent.swap(
-            from_token="USDC",
-            to_token="WETH",
-            amount=Decimal("50"),
-            protocol="uniswap_v3",
-            chain="arbitrum",
-        ),
-        # Bridge back to primary chain
-        Intent.bridge(
-            token="USDC",
-            amount=Decimal("50"),
-            from_chain="arbitrum",
-            to_chain="base",
-            preferred_bridge="across",
-        ),
-    ], description="Arb USDC across chains")
-```
-
-**Multi-chain market data:**
-
-For multi-chain strategies, `market` is a `MultiChainMarketSnapshot` with
-chain-aware queries:
-
-```python
-def decide(self, market):
-    # Chain-specific prices and balances
-    arb_price = market.price("WETH", chain="arbitrum")
-    base_price = market.price("WETH", chain="base")
-    usdc_on_base = market.balance("USDC", chain="base")
-
-    # Chain health monitoring
-    market.healthy_chains       # ["base", "arbitrum"]
-    market.stale_chains         # [] (empty if all healthy)
-    market.all_chains_healthy   # True
-```
-
-**Key rules:**
-
-- Intents on the primary chain can omit `chain=` -- it's implicit
-- Intents on non-primary chains must include `chain="arbitrum"` etc.
-- Bridge intents always require explicit `from_chain` and `to_chain`
-- Use `Intent.sequence()` to order cross-chain operations
-- `amount="all"` chaining does not work after bridge intents (bridge receipt
-  parsers don't extract output amounts) -- use explicit amounts instead
 
 ### Alerting
 
@@ -1652,14 +1367,15 @@ def generate_teardown_intents(self, mode, market=None) -> list[Intent]:
 
 ### Error Handling
 
-Let exceptions propagate from `decide()`. The framework catches them and feeds
-them into its built-in circuit breaker, which tracks consecutive failures and
-stops the strategy after a threshold is reached.
+Always wrap `decide()` in try/except and return `Intent.hold()` on error:
 
 ```python
 def decide(self, market):
-    rsi = market.rsi("WETH", period=14)
-    # ... strategy logic — no try/except needed
+    try:
+        # ... strategy logic
+    except Exception as e:
+        logger.exception(f"Error in decide(): {e}")
+        return Intent.hold(reason=f"Error: {e}")
 ```
 
 ### Execution Failure Tracking (Circuit Breaker)

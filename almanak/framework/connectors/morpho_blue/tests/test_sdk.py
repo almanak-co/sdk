@@ -455,16 +455,10 @@ class TestSDKInitialization:
         assert exc_info.value.chain == "invalid_chain"
 
     def test_unsupported_chain_error_message(self) -> None:
-        """Test error message includes supported chains.
-
-        Uses a fake chain name rather than a real (currently-unsupported) chain so
-        the test doesn't break every time VIB-2967 adds Morpho support on another
-        EVM chain. The previous version passed chain="polygon", which regressed
-        the moment VIB-2971 wired Polygon into SUPPORTED_CHAINS.
-        """
+        """Test error message includes supported chains."""
         with pytest.raises(UnsupportedChainError) as exc_info:
-            MorphoBlueSDK(chain="unsupported_chain_fixture")
-        assert "unsupported_chain_fixture" in str(exc_info.value)
+            MorphoBlueSDK(chain="polygon")
+        assert "polygon" in str(exc_info.value)
         assert "ethereum" in str(exc_info.value) or "base" in str(exc_info.value)
 
 

@@ -10,13 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import time
 from typing import TYPE_CHECKING
 
 import click
-
-from almanak.framework.data.models import _NATIVE_TO_WRAPPED
-from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
 
 if TYPE_CHECKING:
     from almanak.gateway.managed import ManagedGateway
@@ -214,9 +210,8 @@ def _handle_natural_language(ctx: click.Context, text: str):
     if not llm_config.api_key:
         render_error(
             "Natural language mode requires an LLM API key.\n"
-            "Set the AGENT_LLM_API_KEY environment variable to an Anthropic API key.\n"
-            "Get one at: https://console.anthropic.com\n\n"
-            "  export AGENT_LLM_API_KEY=sk-ant-...\n\n"
+            "Set AGENT_LLM_API_KEY environment variable.\n\n"
+            "  export AGENT_LLM_API_KEY=sk-...\n\n"
             "Or use structured syntax: almanak ax swap USDC ETH 100",
             json_output=json_output,
         )
@@ -298,20 +293,11 @@ def _get_executor(ctx: click.Context):
     if "executor" in ctx.obj:
         return ctx.obj["executor"], ctx.obj["client"]
 
-    import os
-
     from almanak.framework.agent_tools.cli_executor import create_cli_executor
 
     host = ctx.obj["gateway_host"]
     port = ctx.obj["gateway_port"]
     network = ctx.obj.get("network")
-
-    # Read the auth token from env so the CLI can reach a gateway that was
-    # started by another process (e.g. a long-running strategy) and therefore
-    # has auth enabled. ALMANAK_GATEWAY_AUTH_TOKEN is the canonical name;
-    # GATEWAY_AUTH_TOKEN is accepted for parity with other clients. Bug 5 of
-    # the 0G DogFooding report (2026-04-16).
-    env_auth_token = os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN") or os.environ.get("GATEWAY_AUTH_TOKEN") or None
 
     # Try connecting to an existing gateway first.
     # Suppress gateway_client logger during the quick probe so users don't
@@ -330,12 +316,7 @@ def _get_executor(ctx: click.Context):
             wallet_address=ctx.obj["wallet"],
             max_single_trade_usd=ctx.obj["max_trade_usd"],
             connect_timeout=2.0,  # quick probe
-            auth_token=env_auth_token,
         )
-        # Remember the token so follow-up commands in the same CLI session
-        # (e.g. the auto-start path below) can reuse it.
-        if env_auth_token is not None:
-            ctx.obj.setdefault("gateway_auth_token", env_auth_token)
         ctx.obj["executor"] = executor
         ctx.obj["client"] = client
         return executor, client
@@ -496,216 +477,14 @@ def price(ctx, token):
 
 
 # ---------------------------------------------------------------------------
-# almanak ax resolve <token>
-# ---------------------------------------------------------------------------
-
-
-@ax.command()
-@click.argument("token")
-@click.option(
-    "--gateway/--no-gateway",
-    default=True,
-    help=(
-        "Dynamic fallback via the gateway (CoinGecko/Jupiter/on-chain ERC20) "
-        "when the token isn't in the static registry. Default ON — matches "
-        "what humans expect. Pass --no-gateway for a strict offline lookup "
-        "(useful in AI-agent code-generation loops where determinism and "
-        "speed matter more than coverage)."
-    ),
-)
-@click.pass_context
-def resolve(ctx, token, gateway: bool):
-    """Resolve a token symbol or address to its metadata on a chain.
-
-    Checks, in order: memory cache -> disk cache -> static JSON registry
-    -> symbol aliases. If ``--gateway`` (default), also tries the gateway's
-    dynamic path (CoinGecko/Jupiter for symbols, on-chain ERC20 for
-    addresses). With ``--no-gateway``, stops at the static layers for a
-    fast, offline, deterministic lookup.
-
-    ``--gateway`` requires a reachable gateway at ``--gateway-host/port``
-    (default ``localhost:50051``). If none is reachable the command
-    still answers from the static registry and flags the miss instead of
-    hanging.
-
-    \b
-    Examples:
-        almanak ax -c arbitrum resolve USDC
-        almanak ax -c arbitrum --json resolve USDC
-        almanak ax -c arbitrum --json resolve LUME              # tries dynamic
-        almanak ax -c arbitrum --no-gateway resolve LUME        # static only
-        almanak ax -c arbitrum resolve 0xaf88d065e77c8cC2239327C5EDb3A432268e5831
-
-    Exit codes:
-        0 -- token resolved.
-        1 -- token not found (address / symbol unknown on this chain).
-        2 -- invalid input (e.g. malformed address).
-    """
-    import json as _json
-
-    from almanak.framework.cli.ax_render import render_error
-    from almanak.framework.data.tokens.exceptions import (
-        InvalidTokenAddressError,
-        TokenNotFoundError,
-        TokenResolutionError,
-    )
-
-    json_output = ctx.obj["json_output"]
-    chain = ctx.obj["chain"]
-
-    resolver, gateway_channel, gateway_note, prior_channel = _build_resolver_for_cli(ctx, use_gateway=gateway)
-
-    try:
-        resolved = resolver.resolve(token, chain, skip_gateway=not gateway, log_errors=False)
-    except InvalidTokenAddressError as e:
-        render_error(f"Invalid address: {e}", json_output=json_output)
-        sys.exit(2)
-    except TokenNotFoundError as e:
-        if json_output:
-            payload = {
-                "status": "not_found",
-                "token": token,
-                "chain": chain,
-                "suggestions": list(e.suggestions or []),
-            }
-            if gateway_note:
-                payload["gateway"] = gateway_note
-            payload["hint"] = (
-                "If you have the contract address, pass it directly or use resolver.register_token() in your strategy."
-            )
-            click.echo(_json.dumps(payload, indent=2))
-        else:
-            if gateway_note:
-                click.echo(f"(gateway: {gateway_note})", err=True)
-            render_error(f"Token not found: {e}", json_output=False)
-        sys.exit(1)
-    except TokenResolutionError as e:
-        # Covers ``TokenResolutionTimeoutError``, ``AmbiguousTokenError``,
-        # and any future subclass. The exit-code contract promises 1 for
-        # "couldn't resolve" (not_found-shaped), 2 for "malformed input"
-        # (the ``InvalidTokenAddressError`` branch above). An ambiguous
-        # or timed-out resolution is functionally "couldn't resolve",
-        # so it falls under exit 1. The JSON payload carries the error
-        # class name so callers can branch on the specifics if they want.
-        if json_output:
-            payload = {
-                "status": "error",
-                "token": token,
-                "chain": chain,
-                "error_type": type(e).__name__,
-                "error": str(e),
-                "suggestions": list(getattr(e, "suggestions", []) or []),
-            }
-            if gateway_note:
-                payload["gateway"] = gateway_note
-            click.echo(_json.dumps(payload, indent=2))
-        else:
-            if gateway_note:
-                click.echo(f"(gateway: {gateway_note})", err=True)
-            render_error(f"{type(e).__name__}: {e}", json_output=False)
-        sys.exit(1)
-    finally:
-        # Restore whatever channel was on the singleton before this
-        # command ran (so an in-process caller that had a live gateway
-        # connection configured doesn't lose it because a one-shot
-        # ``ax resolve`` ran through the singleton), then close the
-        # temporary channel we attached. Both operations are best-
-        # effort -- a failed close on a dead TCP port must not hide
-        # the command's real result.
-        if gateway_channel is not None:
-            try:
-                resolver.set_gateway_channel(prior_channel)
-            except Exception:
-                pass
-            try:
-                gateway_channel.close()
-            except Exception:
-                pass
-
-    payload = {
-        "symbol": resolved.symbol,
-        "address": resolved.address,
-        "decimals": resolved.decimals,
-        "chain": resolved.chain.value.lower(),
-        "chain_id": resolved.chain_id,
-        "name": resolved.name,
-        "coingecko_id": resolved.coingecko_id,
-        "is_stablecoin": resolved.is_stablecoin,
-        "is_native": resolved.is_native,
-        "is_wrapped_native": resolved.is_wrapped_native,
-        "bridge_type": resolved.bridge_type.value,
-        "source": resolved.source,
-        "is_verified": resolved.is_verified,
-    }
-
-    if json_output:
-        click.echo(_json.dumps(payload, indent=2))
-    else:
-        click.echo(f"{resolved.symbol} on {chain}")
-        click.echo(f"  address     {resolved.address}")
-        click.echo(f"  decimals    {resolved.decimals}")
-        click.echo(f"  name        {resolved.name or '-'}")
-        click.echo(f"  coingecko   {resolved.coingecko_id or '-'}")
-        click.echo(f"  source      {resolved.source}")
-        click.echo(f"  stablecoin  {'yes' if resolved.is_stablecoin else 'no'}")
-
-
-def _build_resolver_for_cli(ctx, *, use_gateway: bool):
-    """Return ``(resolver, channel_or_None, gateway_note, prior_channel)``.
-
-    When ``use_gateway`` is True, try to attach a gRPC channel to the
-    configured host/port so the resolver can reach the dynamic fallback.
-    ``prior_channel`` is whatever was on the singleton *before* we
-    attached — the CLI's ``finally`` block restores it so an in-process
-    caller that already had a live gateway configured doesn't lose it
-    because a one-shot ``ax resolve`` ran through the shared singleton.
-
-    If the gateway channel can't be built we fall back to static-only
-    resolution and return a human-readable note explaining what we
-    tried. Never blocks or hangs: we only verify the channel is
-    constructable here, the resolver's own 5s timeout handles calls.
-    """
-    from almanak.framework.data.tokens import get_token_resolver
-
-    resolver = get_token_resolver()
-
-    if not use_gateway:
-        return resolver, None, None, resolver._gateway_channel
-
-    host = ctx.obj.get("gateway_host", "localhost")
-    port = ctx.obj.get("gateway_port", 50051)
-    try:
-        import grpc
-
-        channel = grpc.insecure_channel(f"{host}:{port}")
-    except Exception as e:  # grpc import or construction failure
-        return resolver, None, f"could not build gRPC channel to {host}:{port}: {e}", resolver._gateway_channel
-
-    prior_channel = resolver._gateway_channel
-    # Attach the channel to the singleton for this command via the
-    # locked set_gateway_channel API (never mutate _gateway_channel
-    # directly — that skips the lock and leaves _gateway_stub /
-    # _gateway_available cached against the old channel).
-    resolver.set_gateway_channel(channel)
-    return resolver, channel, f"attempted dynamic lookup via {host}:{port}", prior_channel
-
-
-# ---------------------------------------------------------------------------
 # almanak ax balance <token>
 # ---------------------------------------------------------------------------
 
 
 @ax.command()
 @click.argument("token")
-@click.option(
-    "--chain",
-    "-c",
-    "sub_chain",
-    default=None,
-    help="Chain to query (overrides the group-level --chain when both are set).",
-)
 @click.pass_context
-def balance(ctx, token, sub_chain):
+def balance(ctx, token):
     """Get the balance of a token in your wallet.
 
     \b
@@ -717,19 +496,6 @@ def balance(ctx, token, sub_chain):
     from almanak.framework.cli.ax_render import render_error, render_result
 
     json_output = ctx.obj["json_output"]
-    # Subcommand-level --chain wins over group-level when provided. This
-    # matches Click's "more specific placement wins" convention and keeps
-    # both invocation styles working:
-    #   almanak ax balance ETH --chain base        (sub)
-    #   almanak ax --chain base balance ETH        (group)
-    #
-    # We update ctx.obj["chain"] (not just the tool arg) because downstream
-    # infrastructure -- _get_executor() and _start_managed_gateway() -- reads
-    # the chain from ctx.obj to initialize the executor / gateway client /
-    # managed gateway. Passing the override only to the tool args would leave
-    # the gateway pointed at the group-level chain (or default).
-    if sub_chain is not None:
-        ctx.obj["chain"] = sub_chain
     try:
         response = _run_tool(
             ctx,
@@ -790,17 +556,7 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_yes, sub_dry
 
     yes, dry_run, json_output = _merge_flags(ctx, sub_yes, sub_dry_run, sub_json_output)
 
-    _chain = ctx.obj["chain"]
-    _network = ctx.obj.get("network")
-
-    # Detect native token output -- DEX swaps produce the wrapped version (e.g. WETH on Ethereum).
-    # Check chain-aware: only show the hint when to_token IS this chain's native token.
-    _chain_native = NATIVE_TOKEN_SYMBOLS.get(_chain.lower(), "ETH")
-    wrapped_name = _NATIVE_TO_WRAPPED.get(to_token.upper()) if to_token.upper() == _chain_native else None
-    is_native_output = wrapped_name is not None
-    _ax_flags = f"--chain {_chain}" + (f" --network {_network}" if _network and _network != "mainnet" else "")
-
-    action_desc = f"Swap {amount} {from_token.upper()} -> {to_token.upper()} on {_chain}"
+    action_desc = f"Swap {amount} {from_token.upper()} -> {to_token.upper()} on {ctx.obj['chain']}"
 
     try:
         # Build tool arguments
@@ -819,20 +575,11 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_yes, sub_dry
             args["dry_run"] = True
             response = _run_tool(ctx, "swap_tokens", args)
             render_simulation(response, json_output=json_output)
-            if is_native_output and not json_output and response.status != "error":
-                click.echo(
-                    f"\nNote: DEX swaps produce {wrapped_name}, not native {to_token.upper()}. "
-                    f"To get native {to_token.upper()}, run: almanak ax {_ax_flags} unwrap {wrapped_name} <amount>"
-                )
             if response.status == "error":
                 sys.exit(1)
             return
 
         # Safety gate: confirm before executing
-        if is_native_output and not json_output:
-            action_desc += (
-                f" (output will be {wrapped_name} -- use 'almanak ax {_ax_flags} unwrap' for native {to_token.upper()})"
-            )
         proceed = check_safety_gate(dry_run=False, yes=yes, action_description=action_desc)
         if not proceed:
             click.echo("Cancelled.")
@@ -841,11 +588,6 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_yes, sub_dry
         # Execute
         response = _run_tool(ctx, "swap_tokens", args)
         render_result(response, json_output=json_output, title="Swap")
-        if is_native_output and not json_output and response.status != "error":
-            click.echo(
-                f"\nTip: Output is {wrapped_name} (ERC-20). To unwrap to native {to_token.upper()}: "
-                f"almanak ax {_ax_flags} unwrap {wrapped_name} <amount>"
-            )
         if response.status == "error":
             sys.exit(1)
     except click.ClickException:
@@ -944,27 +686,17 @@ def lp_close(ctx, position_id, protocol, no_collect_fees, sub_yes, sub_dry_run, 
     default="uniswap_v3",
     help="LP protocol (default: uniswap_v3).",
 )
-@click.option(
-    "--network",
-    "lp_network",
-    type=click.Choice(["mainnet", "anvil"], case_sensitive=False),
-    default="mainnet",
-    help="Network to query (default: mainnet). Use 'anvil' for local fork.",
-)
 @click.pass_context
-def lp_info(ctx, position_id, protocol, lp_network):
+def lp_info(ctx, position_id, protocol):
     """Get details about an existing LP position.
 
     Shows range, liquidity, accrued fees, and in-range status.
-    Queries mainnet by default so live positions are always accessible,
-    even when a local Anvil gateway is running.
 
     \b
     Examples:
-        almanak ax lp-info 123456                      # View LP #123456 on mainnet
+        almanak ax lp-info 123456                      # View LP #123456
         almanak ax lp-info 123456 --json               # JSON output
         almanak ax lp-info 123456 --protocol uniswap_v3
-        almanak ax lp-info 123456 --network anvil      # Query local Anvil fork
     """
     from almanak.framework.cli.ax_render import render_error, render_result
 
@@ -977,7 +709,6 @@ def lp_info(ctx, position_id, protocol, lp_network):
                 "position_id": position_id,
                 "chain": ctx.obj["chain"],
                 "protocol": protocol,
-                "network": lp_network,
             },
         )
         render_result(response, json_output=json_output, title=f"LP Position: #{position_id}")
@@ -988,521 +719,6 @@ def lp_info(ctx, position_id, protocol, lp_network):
     except Exception as e:
         render_error(str(e), json_output=json_output)
         sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
-# almanak ax lp-list / lending-list / portfolio -- read-only discovery (VIB-2995)
-# ---------------------------------------------------------------------------
-
-
-@ax.command("lp-list")
-@click.option("--protocol", default="uniswap_v3", help="LP protocol (default: uniswap_v3).")
-@click.option(
-    "--wallet-override",
-    default=None,
-    help="Override the wallet address (default: ax's configured wallet).",
-)
-@click.option(
-    "--include-empty",
-    is_flag=True,
-    default=False,
-    help="Include positions with zero liquidity (burned or fully withdrawn).",
-)
-@click.option(
-    "--network",
-    "lp_network",
-    type=click.Choice(["mainnet", "anvil"], case_sensitive=False),
-    default=None,
-    help="Network to query. Defaults to group-level --network, then 'mainnet'.",
-)
-@click.pass_context
-def lp_list(ctx, protocol, wallet_override, include_empty, lp_network):
-    """List all LP positions owned by your wallet on a chain.
-
-    Enumerates NonfungiblePositionManager.tokenOfOwnerByIndex + positions().
-    Pair with `ax lp-info <id>` to drill into any specific position.
-
-    \b
-    Examples:
-        almanak ax lp-list                                 # Arbitrum Uniswap V3
-        almanak ax --chain base lp-list                    # Base
-        almanak ax lp-list --include-empty                 # Include burned/empty
-        almanak ax --chain zerog lp-list --protocol uniswap_v3 --network mainnet
-    """
-    from almanak.framework.cli.ax_render import render_error, render_result
-
-    json_output = ctx.obj["json_output"]
-    effective_network = lp_network or ctx.obj.get("network") or "mainnet"
-    try:
-        response = _run_tool(
-            ctx,
-            "list_lp_positions",
-            {
-                "chain": ctx.obj["chain"],
-                "protocol": protocol,
-                "wallet_address": wallet_override or "",
-                "include_empty": include_empty,
-                "network": effective_network,
-            },
-        )
-        render_result(response, json_output=json_output, title=f"LP Positions ({ctx.obj['chain']})")
-        if response.status == "error":
-            sys.exit(1)
-    except click.ClickException:
-        raise
-    except Exception as e:
-        render_error(str(e), json_output=json_output)
-        sys.exit(1)
-
-
-@ax.command("lending-list")
-@click.option("--protocol", default="aave_v3", help="Lending protocol (default: aave_v3).")
-@click.option(
-    "--wallet-override",
-    default=None,
-    help="Override the wallet address (default: ax's configured wallet).",
-)
-@click.option(
-    "--network",
-    "lend_network",
-    type=click.Choice(["mainnet", "anvil"], case_sensitive=False),
-    default=None,
-    help="Network to query. Defaults to group-level --network, then 'mainnet'.",
-)
-@click.pass_context
-def lending_list(ctx, protocol, wallet_override, lend_network):
-    """List a wallet's lending positions (account totals + health factor).
-
-    v1 queries Aave V3's Pool.getUserAccountData — the same totals you see
-    at the top of Aave's dashboard. Per-reserve breakdown is a follow-up.
-
-    \b
-    Examples:
-        almanak ax lending-list                    # Arbitrum Aave V3
-        almanak ax --chain base lending-list       # Base Aave V3
-    """
-    from almanak.framework.cli.ax_render import render_error, render_result
-
-    json_output = ctx.obj["json_output"]
-    effective_network = lend_network or ctx.obj.get("network") or "mainnet"
-    try:
-        response = _run_tool(
-            ctx,
-            "list_lending_positions",
-            {
-                "chain": ctx.obj["chain"],
-                "protocol": protocol,
-                "wallet_address": wallet_override or "",
-                "network": effective_network,
-            },
-        )
-        render_result(response, json_output=json_output, title=f"Lending ({protocol}, {ctx.obj['chain']})")
-        if response.status == "error":
-            sys.exit(1)
-    except click.ClickException:
-        raise
-    except Exception as e:
-        render_error(str(e), json_output=json_output)
-        sys.exit(1)
-
-
-@ax.command("portfolio")
-@click.option(
-    "--tokens",
-    default=None,
-    help="Comma-separated ERC20 symbols to include in the balance snapshot (e.g. 'USDC,WETH').",
-)
-@click.option(
-    "--wallet-override",
-    default=None,
-    help="Override the wallet address (default: ax's configured wallet).",
-)
-@click.option(
-    "--network",
-    "pf_network",
-    type=click.Choice(["mainnet", "anvil"], case_sensitive=False),
-    default=None,
-    help="Network to query. Defaults to group-level --network, then 'mainnet'.",
-)
-@click.pass_context
-def portfolio(ctx, tokens, wallet_override, pf_network):
-    """Aggregate snapshot: native + ERC20 balances, LP positions, lending.
-
-    Read-only. Combines list_lp_positions + list_lending_positions + native
-    balance + (optional) batch_get_balances for a chain in one call.
-
-    \b
-    Examples:
-        almanak ax portfolio                                   # Arbitrum, no ERC20 list
-        almanak ax portfolio --tokens USDC,WETH,ARB             # With balances
-        almanak ax --chain base portfolio --tokens USDC,WETH    # Different chain
-    """
-    from almanak.framework.cli.ax_render import render_error, render_result
-
-    json_output = ctx.obj["json_output"]
-    # Strip + drop empty entries so "USDC,,WETH," doesn't trigger a bogus
-    # "" lookup that fails resolver validation. (CodeRabbit PR #1536.)
-    token_list = [t for t in (s.strip() for s in tokens.split(",")) if t] if tokens else []
-    effective_network = pf_network or ctx.obj.get("network") or "mainnet"
-    try:
-        response = _run_tool(
-            ctx,
-            "get_portfolio",
-            {
-                "chain": ctx.obj["chain"],
-                "wallet_address": wallet_override or "",
-                "tokens": token_list,
-                "network": effective_network,
-            },
-        )
-        render_result(response, json_output=json_output, title=f"Portfolio ({ctx.obj['chain']})")
-        if response.status == "error":
-            sys.exit(1)
-    except click.ClickException:
-        raise
-    except Exception as e:
-        render_error(str(e), json_output=json_output)
-        sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
-# almanak ax lending-supply / lending-borrow / lending-repay / lending-withdraw
-# ---------------------------------------------------------------------------
-
-
-_ISOLATED_MARKET_PROTOCOLS = frozenset({"morpho", "morpho_blue", "curvance"})
-
-
-def _uses_isolated_markets(protocol: str) -> bool:
-    """True if the protocol uses isolated markets (requires --market-id).
-
-    Normalizes hyphens and whitespace to underscores so ``morpho-blue`` and
-    ``"morpho blue"`` are accepted alongside ``morpho_blue`` — consistent with
-    the schema-layer protocol-key normalization.
-    """
-    from almanak.framework.agent_tools.schemas import _normalize_protocol_key
-
-    return _normalize_protocol_key(protocol) in _ISOLATED_MARKET_PROTOCOLS
-
-
-def _guard_market_id_flag(protocol: str, market_id: str | None) -> None:
-    """Reject --market-id on protocols that ignore it.
-
-    The schema / intent layer accepts ``market_id=None`` for any protocol, so
-    downstream won't complain — but an operator who typed ``--market-id`` and
-    it silently had no effect deserves a clear error. Only isolated-market
-    protocols (Morpho Blue, Curvance) accept per-market routing; others
-    (Aave V3, Compound, Spark, ...) use a unified pool.
-    """
-    if market_id is not None and not _uses_isolated_markets(protocol):
-        raise click.UsageError(
-            f"--market-id is only supported on isolated-market protocols "
-            f"(morpho_blue, curvance); got protocol={protocol}"
-        )
-
-
-def _run_lending_tool(
-    ctx: click.Context,
-    tool_name: str,
-    args: dict,
-    action_desc: str,
-    title: str,
-    sub_yes: bool,
-    sub_dry_run: bool,
-    sub_json_output: bool,
-) -> None:
-    """Shared plumbing for ax lending-* commands.
-
-    Mirrors the dry-run/confirm/execute loop used by ax swap and ax lp-close
-    so all four lending CLIs behave identically.
-    """
-    from almanak.framework.cli.ax_render import (
-        check_safety_gate,
-        render_error,
-        render_result,
-        render_simulation,
-    )
-
-    yes, dry_run, json_output = _merge_flags(ctx, sub_yes, sub_dry_run, sub_json_output)
-
-    try:
-        if dry_run:
-            args = {**args, "dry_run": True}
-            response = _run_tool(ctx, tool_name, args)
-            render_simulation(response, json_output=json_output)
-            if response.status == "error":
-                sys.exit(1)
-            return
-
-        proceed = check_safety_gate(dry_run=False, yes=yes, action_description=action_desc)
-        if not proceed:
-            click.echo("Cancelled.")
-            return
-
-        response = _run_tool(ctx, tool_name, args)
-        render_result(response, json_output=json_output, title=title)
-        if response.status == "error":
-            sys.exit(1)
-    except click.ClickException:
-        raise
-    except Exception as e:
-        render_error(str(e), json_output=json_output)
-        sys.exit(1)
-
-
-@ax.command("lending-supply")
-@click.argument("token")
-@click.argument("amount")
-@click.option("--protocol", default="aave_v3", help="Lending protocol (default: aave_v3).")
-@click.option("--no-collateral", is_flag=True, default=False, help="Supply without enabling as collateral.")
-@click.option("--market-id", default=None, help="Market id for isolated-market protocols (e.g. Morpho Blue).")
-@_action_options
-@click.pass_context
-def lending_supply(ctx, token, amount, protocol, no_collateral, market_id, sub_yes, sub_dry_run, sub_json_output):
-    """Supply tokens to a lending protocol.
-
-    \b
-    Examples:
-        almanak ax lending-supply USDC 100
-        almanak ax lending-supply USDC 100 --protocol aave_v3 --dry-run
-        almanak ax lending-supply WETH 0.5 --no-collateral
-        almanak ax lending-supply USDC 100 --protocol morpho_blue --market-id 0x...
-    """
-    _guard_market_id_flag(protocol, market_id)
-
-    args: dict = {
-        "token": token,
-        "amount": amount,
-        "protocol": protocol,
-        "use_as_collateral": not no_collateral,
-        "chain": ctx.obj["chain"],
-    }
-    if market_id:
-        args["market_id"] = market_id
-    _run_lending_tool(
-        ctx,
-        "supply_lending",
-        args,
-        action_desc=f"Supply {amount} {token.upper()} to {protocol} on {ctx.obj['chain']}",
-        title=f"Lending Supply: {amount} {token.upper()}",
-        sub_yes=sub_yes,
-        sub_dry_run=sub_dry_run,
-        sub_json_output=sub_json_output,
-    )
-
-
-@ax.command("lending-borrow")
-@click.argument("token")
-@click.argument("amount")
-@click.option("--collateral", "collateral_token", required=True, help="Collateral token symbol.")
-@click.option(
-    "--collateral-amount",
-    required=True,
-    help="Collateral amount (decimal) or 'all' to use full balance.",
-)
-@click.option("--protocol", default="aave_v3", help="Lending protocol (default: aave_v3).")
-@click.option("--market-id", default=None, help="Market id for isolated-market protocols (e.g. Morpho Blue).")
-@_action_options
-@click.pass_context
-def lending_borrow(
-    ctx,
-    token,
-    amount,
-    collateral_token,
-    collateral_amount,
-    protocol,
-    market_id,
-    sub_yes,
-    sub_dry_run,
-    sub_json_output,
-):
-    """Borrow tokens from a lending protocol.
-
-    \b
-    Examples:
-        almanak ax lending-borrow USDC 100 --collateral WETH --collateral-amount 0.1
-        almanak ax lending-borrow USDC 100 --collateral WETH --collateral-amount all --dry-run
-        almanak ax lending-borrow USDC 100 --collateral WETH --collateral-amount 0.1 \\
-            --protocol morpho_blue --market-id 0x...
-    """
-    _guard_market_id_flag(protocol, market_id)
-
-    args: dict = {
-        "token": token,
-        "amount": amount,
-        "collateral_token": collateral_token,
-        "collateral_amount": collateral_amount,
-        "protocol": protocol,
-        "chain": ctx.obj["chain"],
-    }
-    if market_id:
-        args["market_id"] = market_id
-    _run_lending_tool(
-        ctx,
-        "borrow_lending",
-        args,
-        action_desc=(
-            f"Borrow {amount} {token.upper()} against {collateral_amount} "
-            f"{collateral_token.upper()} on {protocol} ({ctx.obj['chain']})"
-        ),
-        title=f"Lending Borrow: {amount} {token.upper()}",
-        sub_yes=sub_yes,
-        sub_dry_run=sub_dry_run,
-        sub_json_output=sub_json_output,
-    )
-
-
-@ax.command("lending-repay")
-@click.argument("token")
-@click.argument("amount", required=False, default=None)
-@click.option(
-    "--full",
-    "repay_full",
-    is_flag=True,
-    default=False,
-    help="Repay the entire outstanding debt (shortcut for amount='all').",
-)
-@click.option("--protocol", default="aave_v3", help="Lending protocol (default: aave_v3).")
-@click.option("--market-id", default=None, help="Market id for isolated-market protocols (e.g. Morpho Blue).")
-@_action_options
-@click.pass_context
-def lending_repay(ctx, token, amount, repay_full, protocol, market_id, sub_yes, sub_dry_run, sub_json_output):
-    """Repay a lending position.
-
-    \b
-    Examples:
-        almanak ax lending-repay USDC 100            # Repay 100 USDC
-        almanak ax lending-repay USDC --full          # Repay full debt (= amount 'all')
-        almanak ax lending-repay USDC all             # Same as --full
-        almanak ax lending-repay USDC --full --protocol morpho_blue --market-id 0x...
-    """
-    if repay_full:
-        if amount is not None and str(amount).lower() != "all":
-            raise click.UsageError("--full conflicts with a non-'all' positional amount; pass one or the other")
-        resolved_amount = "all"
-    elif amount is None:
-        raise click.UsageError("Pass an amount, or use --full for full repayment")
-    else:
-        resolved_amount = amount
-
-    _guard_market_id_flag(protocol, market_id)
-
-    args: dict = {
-        "token": token,
-        "amount": resolved_amount,
-        "protocol": protocol,
-        "chain": ctx.obj["chain"],
-    }
-    if market_id:
-        args["market_id"] = market_id
-    _run_lending_tool(
-        ctx,
-        "repay_lending",
-        args,
-        action_desc=f"Repay {resolved_amount} {token.upper()} on {protocol} ({ctx.obj['chain']})",
-        title=f"Lending Repay: {resolved_amount} {token.upper()}",
-        sub_yes=sub_yes,
-        sub_dry_run=sub_dry_run,
-        sub_json_output=sub_json_output,
-    )
-
-
-@ax.command("lending-withdraw")
-@click.argument("token")
-@click.argument("amount", required=False, default=None)
-@click.option(
-    "--all",
-    "withdraw_all",
-    is_flag=True,
-    default=False,
-    help=(
-        "Withdraw the full supplied balance (shortcut for amount='all'). "
-        "Queries the protocol for the current balance at execution time."
-    ),
-)
-@click.option("--protocol", default="aave_v3", help="Lending protocol (default: aave_v3).")
-@click.option(
-    "--market-id",
-    default=None,
-    help="Morpho Blue market id. Rejected for non-Morpho protocols (unified pools don't use markets).",
-)
-@click.option(
-    "--loan-token/--collateral",
-    "is_loan_token",
-    default=False,
-    help=(
-        "Morpho Blue only: --loan-token withdraws the loan token, "
-        "--collateral (default) withdraws the collateral token."
-    ),
-)
-@_action_options
-@click.pass_context
-def lending_withdraw(
-    ctx,
-    token,
-    amount,
-    withdraw_all,
-    protocol,
-    market_id,
-    is_loan_token,
-    sub_yes,
-    sub_dry_run,
-    sub_json_output,
-):
-    """Withdraw supplied tokens from a lending protocol.
-
-    \b
-    Examples:
-        almanak ax lending-withdraw USDC 100         # Withdraw 100 USDC
-        almanak ax lending-withdraw USDC --all        # Withdraw full supplied balance
-        almanak ax lending-withdraw USDC all          # Same as --all
-        almanak ax lending-withdraw USDC --all --protocol morpho_blue --market-id 0xabc...
-    """
-    if withdraw_all:
-        if amount is not None and str(amount).lower() != "all":
-            raise click.UsageError("--all conflicts with a non-'all' positional amount; pass one or the other")
-        resolved_amount = "all"
-    elif amount is None:
-        raise click.UsageError("Pass an amount, or use --all to withdraw full supplied balance")
-    else:
-        resolved_amount = amount
-
-    # Reject Morpho-only flags on non-Morpho protocols rather than silently
-    # ignoring them. Downstream WithdrawIntent would accept the fields without
-    # complaint (CodeRabbit PR #1535 review), leaving the operator to wonder
-    # why their --market-id or --loan-token had no effect.
-    _guard_market_id_flag(protocol, market_id)
-    # --loan-token remains Morpho-specific (Curvance has no analogous flag);
-    # reject it on any other isolated-market protocol too.
-    from almanak.framework.agent_tools.schemas import _normalize_protocol_key
-
-    _is_morpho = _normalize_protocol_key(protocol) in ("morpho", "morpho_blue")
-    if is_loan_token and not _is_morpho:
-        raise click.UsageError(f"--loan-token is only supported on Morpho Blue; got protocol={protocol}")
-
-    args: dict = {
-        "token": token,
-        "amount": resolved_amount,
-        "protocol": protocol,
-        "chain": ctx.obj["chain"],
-    }
-    # is_collateral and market_id are Morpho-specific; only forward them when
-    # the protocol actually uses them.
-    if _is_morpho:
-        args["is_collateral"] = not is_loan_token
-        if market_id:
-            args["market_id"] = market_id
-
-    _run_lending_tool(
-        ctx,
-        "withdraw_lending",
-        args,
-        action_desc=f"Withdraw {resolved_amount} {token.upper()} from {protocol} ({ctx.obj['chain']})",
-        title=f"Lending Withdraw: {resolved_amount} {token.upper()}",
-        sub_yes=sub_yes,
-        sub_dry_run=sub_dry_run,
-        sub_json_output=sub_json_output,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1716,115 +932,6 @@ def unwrap(ctx, token, amount, sub_yes, sub_dry_run, sub_json_output):
     except Exception as e:
         render_error(str(e), json_output=json_output)
         sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
-# almanak ax bundle-list / bundle-clear
-# ---------------------------------------------------------------------------
-
-
-@ax.command("bundle-list")
-@click.pass_context
-def bundle_list(ctx):
-    """List compiled intent bundles cached on disk.
-
-    Bundles produced by ``ax run compile_intent`` persist to
-    ``${XDG_CACHE_HOME:-~/.cache}/almanak/bundles/`` so a follow-up
-    ``ax run execute_compiled_bundle '{"bundle_id":"..."}'`` from a new
-    shell can still find them. Expired entries are shown with remaining
-    TTL <= 0; run ``ax bundle-clear --expired`` to prune them.
-    """
-    import json as json_mod
-
-    from almanak.framework.agent_tools.bundle_cache import BundleCache
-
-    json_output = ctx.obj["json_output"]
-    cache = BundleCache()
-    now = time.time()
-    entries = cache.list_entries()
-
-    if json_output:
-        payload = [
-            {
-                "bundle_id": bid,
-                "chain": entry.chain,
-                "age_seconds": round(entry.age_seconds(now), 2),
-                "ttl_seconds": entry.ttl_seconds,
-                "expired": entry.is_expired(now),
-                "intent_type": entry.args.get("intent_type"),
-            }
-            for bid, entry in entries
-        ]
-        click.echo(json_mod.dumps({"cache_dir": str(cache.cache_dir), "entries": payload}, indent=2))
-        return
-
-    if not entries:
-        click.echo(f"No cached bundles in {cache.cache_dir}")
-        return
-
-    click.echo(f"\nCached bundles ({len(entries)}) in {cache.cache_dir}:")
-    click.echo("-" * 100)
-    click.echo(f"  {'bundle_id':<38} {'chain':<10} {'intent':<20} {'age':>6} {'ttl':>6} state")
-    click.echo("-" * 100)
-    for bundle_id, entry in entries:
-        age = int(entry.age_seconds(now))
-        intent_type = str(entry.args.get("intent_type") or "-")[:20]
-        state = "EXPIRED" if entry.is_expired(now) else "live"
-        color = "red" if state == "EXPIRED" else "green"
-        click.echo(
-            f"  {bundle_id:<38} {entry.chain:<10} {intent_type:<20} "
-            f"{age:>5}s {entry.ttl_seconds:>5}s {click.style(state, fg=color)}"
-        )
-    click.echo()
-
-
-@ax.command("bundle-clear")
-@click.option("--expired", is_flag=True, default=False, help="Only remove entries past their TTL.")
-@click.option("--yes", is_flag=True, default=False, help="Skip interactive confirmation.")
-@click.pass_context
-def bundle_clear(ctx, expired, yes):
-    """Remove cached compiled bundles from disk.
-
-    Default is to clear all entries; pass ``--expired`` to prune only
-    entries past their TTL.
-    """
-    import json as json_mod
-
-    from almanak.framework.agent_tools.bundle_cache import BundleCache
-
-    json_output = ctx.obj["json_output"]
-    cache = BundleCache()
-    entries = cache.list_entries()
-
-    if expired:
-        now = time.time()
-        target_count = sum(1 for _, e in entries if e.is_expired(now))
-    else:
-        target_count = len(entries)
-
-    if target_count == 0:
-        msg = "No expired bundles to clear." if expired else f"No bundles to clear in {cache.cache_dir}"
-        if json_output:
-            click.echo(json_mod.dumps({"removed": 0, "cache_dir": str(cache.cache_dir)}))
-        else:
-            click.echo(msg)
-        return
-
-    # Respect the group-level --yes/-y flag so ``ax --yes bundle-clear`` works
-    # without an additional subcommand flag, matching other ax commands.
-    effective_yes = yes or ctx.obj.get("yes", False)
-    if not effective_yes and not json_output:
-        target = "expired" if expired else "all"
-        if not click.confirm(f"Remove {target_count} {target} bundle(s) from {cache.cache_dir}?"):
-            click.echo("Cancelled.")
-            return
-
-    removed = cache.prune_expired() if expired else cache.clear()
-
-    if json_output:
-        click.echo(json_mod.dumps({"removed": removed, "cache_dir": str(cache.cache_dir)}))
-    else:
-        click.echo(f"Removed {removed} bundle(s) from {cache.cache_dir}")
 
 
 # ---------------------------------------------------------------------------

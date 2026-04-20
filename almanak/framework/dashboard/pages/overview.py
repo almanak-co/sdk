@@ -30,23 +30,19 @@ from almanak.framework.dashboard.utils import (
 @st.fragment
 def render_portfolio_summary(strategies: list[Strategy]) -> None:
     """Render the portfolio summary section at the top."""
-    # Only count RUNNING/PAUSED strategies for portfolio totals (VIB-2767).
-    # Archived/inactive strategies inflate the total with stale values.
-    _ACTIVE_STATUSES = {StrategyStatus.RUNNING, StrategyStatus.PAUSED}
-    active = [s for s in strategies if s.status in _ACTIVE_STATUSES]
-    total_value = sum((s.total_value_usd for s in active), Decimal("0"))
-    total_pnl_24h = sum((s.pnl_24h_usd for s in active), Decimal("0"))
+    total_value = sum((s.total_value_usd for s in strategies), Decimal("0"))
+    total_pnl_24h = sum((s.pnl_24h_usd for s in strategies), Decimal("0"))
     strategy_count = len(strategies)
-    running_count = len(active)
+    running_count = sum(1 for s in strategies if s.status == StrategyStatus.RUNNING)
 
     # Calculate multi-chain stats
-    multi_chain_count = sum(1 for s in active if s.is_multi_chain)
-    total_bridge_fees = sum((s.bridge_fees_usd for s in active), Decimal("0"))
+    multi_chain_count = sum(1 for s in strategies if s.is_multi_chain)
+    total_bridge_fees = sum((s.bridge_fees_usd for s in strategies), Decimal("0"))
 
-    # Collect all unique chains across active strategies
+    # Collect all unique chains across all strategies
     all_chains: set[str] = set()
     value_by_chain: dict[str, Decimal] = {}
-    for strategy in active:
+    for strategy in strategies:
         if strategy.is_multi_chain and strategy.chains:
             all_chains.update(strategy.chains)
             for chain, position in strategy.positions_by_chain.items():
@@ -84,7 +80,7 @@ def render_portfolio_summary(strategies: list[Strategy]) -> None:
         )
 
     with col4:
-        attention_count = sum(1 for s in active if s.attention_required)
+        attention_count = sum(1 for s in strategies if s.attention_required)
         st.metric(
             label="Needs Attention",
             value=attention_count,
@@ -94,7 +90,7 @@ def render_portfolio_summary(strategies: list[Strategy]) -> None:
 
     # Per-chain breakdown if multi-chain strategies exist
     if multi_chain_count > 0 and len(all_chains) > 1:
-        render_chain_breakdown(active, all_chains, value_by_chain)
+        render_chain_breakdown(strategies, all_chains, value_by_chain)
 
 
 @st.fragment
@@ -222,11 +218,7 @@ def render_strategy_card(strategy: Strategy, col_idx: int, manage_mode: bool = F
     """Render a single strategy card."""
     status_icon = get_status_icon(strategy.status)
     status_color = get_status_color(strategy.status)
-    is_paper = strategy.execution_mode == "paper"
-    pnl_value = strategy.pnl_24h_usd
-    if is_paper and strategy.paper_metrics:
-        pnl_value = strategy.paper_metrics.simulated_pnl_usd
-    pnl_color = "#00c853" if pnl_value >= 0 else "#f44336"
+    pnl_color = "#00c853" if strategy.pnl_24h_usd >= 0 else "#f44336"
 
     # Build chain display - for multi-chain strategies, show badges
     if strategy.is_multi_chain and strategy.chains:
@@ -243,10 +235,10 @@ def render_strategy_card(strategy: Strategy, col_idx: int, manage_mode: bool = F
         chain_color = get_chain_color(strategy.chain)
         chain_display = format_chain_badge(strategy.chain, chain_color)
 
-    # Mode badges (multi-chain, paper)
-    extra_badges = ""
+    # Multi-chain indicator
+    multi_chain_badge = ""
     if strategy.is_multi_chain:
-        extra_badges += """
+        multi_chain_badge = """
         <span style="
             background-color: #9c27b022;
             color: #9c27b0;
@@ -257,52 +249,27 @@ def render_strategy_card(strategy: Strategy, col_idx: int, manage_mode: bool = F
             margin-left: 0.5rem;
         ">MULTI-CHAIN</span>
         """
-    if is_paper:
-        extra_badges += """
-        <span style="
-            background-color: #2196f322;
-            color: #2196f3;
-            padding: 0.1rem 0.4rem;
-            border-radius: 8px;
-            font-size: 0.65rem;
-            font-weight: bold;
-            margin-left: 0.5rem;
-        ">PAPER</span>
-        """
 
     # Escape user-controllable values to prevent XSS
     safe_name = html.escape(strategy.name)
     safe_protocol = html.escape(strategy.protocol)
 
-    value_label = "Simulated Value" if is_paper else "Total Value"
-    pnl_label = "Simulated PnL" if is_paper else "24h PnL"
-
-    paper_info_html = ""
-    if is_paper and strategy.paper_metrics:
-        pm = strategy.paper_metrics
-        rate_pct = f"{pm.success_rate * 100:.0f}%"
-        paper_info_html = (
-            f'<div style="color: #2196f3; font-size: 0.75rem; margin-bottom: 0.5rem;">'
-            f"Ticks: {pm.tick_count} | Success: {rate_pct}"
-            f"</div>"
-        )
-
     # Pure HTML card - no inline JS (Streamlit strips onclick/onmouseover, corrupting the DOM)
     card_html = f"""<div style="background-color: #1e1e1e; border: 1px solid #333; border-left: 4px solid {status_color}; border-radius: 8px; padding: 1rem; margin-bottom: 0.5rem;">
 <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.5rem;">
-<span style="font-weight: bold; font-size: 1.1rem;">{safe_name}{extra_badges}</span>
+<span style="font-weight: bold; font-size: 1.1rem;">{safe_name}{multi_chain_badge}</span>
 <span>{status_icon}</span>
 </div>
 <div style="margin-bottom: 0.5rem;">{chain_display}</div>
 <div style="color: #888; font-size: 0.8rem; margin-bottom: 0.5rem;">{safe_protocol}</div>
-{paper_info_html}<div style="display: flex; justify-content: space-between; align-items: flex-end;">
+<div style="display: flex; justify-content: space-between; align-items: flex-end;">
 <div>
-<div style="color: #888; font-size: 0.75rem;">{value_label}</div>
+<div style="color: #888; font-size: 0.75rem;">Total Value</div>
 <div style="font-size: 1.1rem;">{format_usd(strategy.total_value_usd)}</div>
 </div>
 <div style="text-align: right;">
-<div style="color: #888; font-size: 0.75rem;">{pnl_label}</div>
-<div style="font-size: 1.1rem; color: {pnl_color};">{format_pnl(pnl_value)}</div>
+<div style="color: #888; font-size: 0.75rem;">24h PnL</div>
+<div style="font-size: 1.1rem; color: {pnl_color};">{format_pnl(strategy.pnl_24h_usd)}</div>
 </div>
 </div>
 </div>"""
@@ -476,7 +443,7 @@ def page(strategies: list[Strategy]) -> None:
 
         Run a strategy to see it here:
         ```bash
-        almanak strat run -d almanak/demo_strategies/uniswap_rsi --once
+        almanak strat run -d strategies/demo/uniswap_rsi --once
         ```
 
         Check the **Strategy Library** page to see available strategy templates.

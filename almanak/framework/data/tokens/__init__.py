@@ -22,7 +22,11 @@ Token Resolution Exceptions:
     - TokenNotFoundError: Token not found in any registry
     - InvalidTokenAddressError: Malformed token address
 
-Example:
+Legacy Components (Deprecated):
+    - get_default_registry: Use get_token_resolver() instead
+    - TokenRegistry: Use TokenResolver instead
+
+Example - Modern API (Recommended):
     from almanak.framework.data.tokens import get_token_resolver
 
     # Get the singleton resolver
@@ -43,7 +47,16 @@ Example:
 
     # Resolve for swap (auto-wraps native tokens like ETH -> WETH)
     token = resolver.resolve_for_swap("ETH", "arbitrum")  # Returns WETH
+
+Example - Legacy API (Deprecated):
+    # This still works but triggers a deprecation warning
+    from almanak.framework.data.tokens import get_default_registry
+
+    registry = get_default_registry()  # DeprecationWarning emitted
+    usdc = registry.get("USDC")
 """
+
+import warnings
 
 from .defaults import (
     AAVE,
@@ -69,6 +82,9 @@ from .defaults import (
     get_coingecko_id,
     get_coingecko_ids,
 )
+from .defaults import (
+    get_default_registry as _get_default_registry_impl,
+)
 from .exceptions import (
     AmbiguousTokenError,
     InvalidTokenAddressError,
@@ -77,12 +93,43 @@ from .exceptions import (
     TokenResolutionTimeoutError,
 )
 from .models import BridgeType, ChainToken, ChainTokenConfig, ResolvedToken, Token
+from .registry import TokenRegistry
 from .resolver import TokenResolver, get_token_resolver
-from .utils import denormalize, normalize
+from .utils import denormalize, denormalize_token, normalize, normalize_token
+
+
+def get_default_registry() -> TokenRegistry:
+    """Create a TokenRegistry pre-populated with default tokens.
+
+    .. deprecated::
+        Use `get_token_resolver()` instead. The TokenResolver provides
+        better performance through caching and a unified API.
+        See almanak.framework.data.tokens.resolver module for details.
+
+    Returns:
+        TokenRegistry with pre-registered tokens.
+
+    Example:
+        # Old way (deprecated)
+        registry = get_default_registry()
+        usdc = registry.get("USDC")
+
+        # New way (recommended)
+        resolver = get_token_resolver()
+        usdc = resolver.resolve("USDC", "arbitrum")
+    """
+    warnings.warn(
+        "get_default_registry() is deprecated. Use get_token_resolver() instead. "
+        "See almanak.framework.data.tokens.resolver module for details.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _get_default_registry_impl()
+
 
 __all__ = [
     # =========================================================================
-    # Primary API
+    # Primary API (Recommended)
     # =========================================================================
     # Token Resolver - main entry point
     "get_token_resolver",
@@ -106,15 +153,21 @@ __all__ = [
     "SYMBOL_ALIASES",
     "DEFAULT_TOKENS",
     # =========================================================================
-    # Token model and helpers
+    # Legacy API (Deprecated - will be removed in future release)
     # =========================================================================
+    # Core classes (still useful for some operations)
     "Token",
     "ChainToken",
+    "TokenRegistry",
+    # Registry functions (deprecated - use get_token_resolver() instead)
+    "get_default_registry",
     "get_coingecko_id",
     "get_coingecko_ids",
     # Utility functions
     "normalize",
     "denormalize",
+    "normalize_token",
+    "denormalize_token",
     # =========================================================================
     # Default Token Instances
     # =========================================================================

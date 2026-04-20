@@ -147,7 +147,7 @@ Set it via environment variable:
   export AGENT_LLM_API_KEY=sk-...
 
 Any OpenAI-compatible provider works (OpenAI, Anthropic, Ollama, etc.).
-See: https://sdk.docs.almanak.co/agentic/
+See: https://docs.almanak.co/agentic/
 ```
 
 ## Building Your Own Agent

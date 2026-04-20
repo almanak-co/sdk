@@ -2,28 +2,21 @@
 
 from __future__ import annotations
 
-import json
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from almanak.framework.connectors.uniswap_v4.sdk import (
     FEE_TIERS,
     NATIVE_CURRENCY,
-    PERMIT2_ADDRESS,
-    PERMIT2_APPROVE_SELECTOR,
     POOL_MANAGER_ADDRESSES,
     QUOTER_ADDRESSES,
     ROUTER_ADDRESSES,
     TICK_SPACING,
     UNISWAP_V4_GAS_ESTIMATES,
-    UNIVERSAL_ROUTER_EXECUTE_SELECTOR,
-    V4_SWAP_EXACT_IN_SINGLE,
     PoolKey,
     SwapQuote,
     UniswapV4SDK,
-    _encode_execute,
 )
 
 
@@ -41,23 +34,20 @@ class TestConstants:
         assert TICK_SPACING[3000] == 60
 
     def test_gas_estimates(self):
-        assert UNISWAP_V4_GAS_ESTIMATES["approve"] == 65_000
-        assert UNISWAP_V4_GAS_ESTIMATES["swap"] == 250_000
+        assert UNISWAP_V4_GAS_ESTIMATES["approve"] == 50_000
+        assert UNISWAP_V4_GAS_ESTIMATES["swap"] == 200_000
 
     def test_pool_manager_addresses(self):
-        # Each chain should have a non-empty pool manager address
-        from almanak.core.contracts import UNISWAP_V4
+        # All chains should have the same pool manager (CREATE2 deployment)
         for chain, addr in POOL_MANAGER_ADDRESSES.items():
-            expected = UNISWAP_V4[chain]["pool_manager"].lower()
-            assert addr.lower() == expected, f"PoolManager on {chain} mismatch"
+            assert addr.lower() == "0x000000000004444c5dc75cb358380d2e3de08a90"
 
     def test_router_addresses(self):
-        expected_chains = {"ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc"}
-        assert expected_chains.issubset(set(ROUTER_ADDRESSES.keys()))
+        assert "arbitrum" in ROUTER_ADDRESSES
+        assert "ethereum" in ROUTER_ADDRESSES
 
     def test_quoter_addresses(self):
-        expected_chains = {"ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc"}
-        assert expected_chains.issubset(set(QUOTER_ADDRESSES.keys()))
+        assert "arbitrum" in QUOTER_ADDRESSES
 
 
 # =============================================================================
@@ -124,10 +114,9 @@ class TestPoolKey:
 
 class TestUniswapV4SDKInit:
     def test_init_supported_chain(self):
-        from almanak.core.contracts import UNISWAP_V4
         sdk = UniswapV4SDK(chain="arbitrum")
         assert sdk.chain == "arbitrum"
-        assert sdk.pool_manager.lower() == UNISWAP_V4["arbitrum"]["pool_manager"].lower()
+        assert sdk.pool_manager.lower() == "0x000000000004444c5dc75cb358380d2e3de08a90"
 
     def test_init_unsupported_chain(self):
         with pytest.raises(ValueError, match="not supported"):
@@ -239,8 +228,8 @@ class TestBuildSwapTx:
         )
         tx = sdk.build_swap_tx(quote, recipient="0x1234567890123456789012345678901234567890")
         assert tx.to == sdk.router
-        assert tx.data.startswith("0x3593564c")  # UniversalRouter execute selector
-        assert tx.gas_estimate == 250_000
+        assert tx.data.startswith("0xf3cd914c")  # SWAP_SELECTOR
+        assert tx.gas_estimate == 200_000
         assert tx.value == 0  # Not native ETH
 
     def test_build_native_swap_tx(self):
@@ -256,95 +245,6 @@ class TestBuildSwapTx:
         assert tx.value == 10**18  # ETH value set
 
 
-class TestWethRouting:
-    """Test WETH -> native ETH routing in build_swap_tx."""
-
-    WETH_ETHEREUM = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-    USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
-    RECIPIENT = "0x1234567890123456789012345678901234567890"
-
-    @staticmethod
-    def _extract_commands(calldata: str) -> list[int]:
-        """Extract UniversalRouter command bytes from execute() calldata.
-
-        execute(bytes commands, bytes[] inputs, uint256 deadline)
-        ABI layout: selector(4) + offset_commands(32) + offset_inputs(32) + deadline(32)
-                    + commands_len(32) + commands_data(padded)
-        """
-        raw = calldata[2:]  # strip 0x
-        # offset to commands data: read first 32-byte word after selector
-        cmd_offset = int(raw[8:72], 16) * 2  # byte offset -> hex char offset
-        # commands data starts at: selector(8) + cmd_offset
-        cmd_start = 8 + cmd_offset
-        cmd_len = int(raw[cmd_start : cmd_start + 64], 16)
-        cmd_hex = raw[cmd_start + 64 : cmd_start + 64 + cmd_len * 2]
-        return [int(cmd_hex[i : i + 2], 16) for i in range(0, len(cmd_hex), 2)]
-
-    def test_weth_in_produces_permit2_transfer_and_unwrap(self):
-        """WETH -> ERC20: commands = [PERMIT2_TRANSFER_FROM, UNWRAP_WETH, V4_SWAP]."""
-        sdk = UniswapV4SDK(chain="ethereum")
-        quote = SwapQuote(
-            amount_in=5 * 10**16, amount_out=100 * 10**6,
-            fee_tier=500, token_in=self.WETH_ETHEREUM, token_out=self.USDC,
-        )
-        tx = sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
-        assert tx.value == 0, "WETH-in should not send native ETH"
-        cmds = self._extract_commands(tx.data)
-        assert cmds == [0x02, 0x0C, 0x10], (
-            f"Expected [PERMIT2_TRANSFER_FROM, UNWRAP_WETH, V4_SWAP], got {[hex(c) for c in cmds]}"
-        )
-
-    def test_weth_out_produces_wrap_eth(self):
-        """ERC20 -> WETH: commands = [V4_SWAP, WRAP_ETH]."""
-        sdk = UniswapV4SDK(chain="ethereum")
-        quote = SwapQuote(
-            amount_in=100 * 10**6, amount_out=5 * 10**16,
-            fee_tier=500, token_in=self.USDC, token_out=self.WETH_ETHEREUM,
-        )
-        tx = sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
-        assert tx.value == 0, "ERC20-in should not send native ETH"
-        cmds = self._extract_commands(tx.data)
-        assert cmds == [0x10, 0x0B], (
-            f"Expected [V4_SWAP, WRAP_ETH], got {[hex(c) for c in cmds]}"
-        )
-
-    def test_weth_to_weth_raises(self):
-        """WETH -> WETH: should raise ValueError."""
-        sdk = UniswapV4SDK(chain="ethereum")
-        quote = SwapQuote(
-            amount_in=10**18, amount_out=10**18,
-            fee_tier=500, token_in=self.WETH_ETHEREUM, token_out=self.WETH_ETHEREUM,
-        )
-        with pytest.raises(ValueError, match="Cannot swap wrapped native token to itself"):
-            sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
-
-    def test_native_eth_passthrough_unchanged(self):
-        """Native ETH swap should NOT trigger WETH routing."""
-        sdk = UniswapV4SDK(chain="ethereum")
-        quote = SwapQuote(
-            amount_in=10**18, amount_out=100 * 10**6,
-            fee_tier=500, token_in=NATIVE_CURRENCY, token_out=self.USDC,
-        )
-        tx = sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
-        assert tx.value == 10**18, "Native ETH-in should set msg.value"
-        cmds = self._extract_commands(tx.data)
-        assert cmds == [0x10], f"Native ETH should be single V4_SWAP, got {[hex(c) for c in cmds]}"
-
-    def test_native_eth_out_has_sweep(self):
-        """ERC20 -> native ETH: commands = [V4_SWAP, SWEEP]."""
-        sdk = UniswapV4SDK(chain="ethereum")
-        quote = SwapQuote(
-            amount_in=100 * 10**6, amount_out=5 * 10**16,
-            fee_tier=500, token_in=self.USDC, token_out=NATIVE_CURRENCY,
-        )
-        tx = sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
-        assert tx.value == 0
-        cmds = self._extract_commands(tx.data)
-        assert cmds == [0x10, 0x04], (
-            f"Expected [V4_SWAP, SWEEP], got {[hex(c) for c in cmds]}"
-        )
-
-
 class TestBuildApproveTx:
     def test_build_approve(self):
         sdk = UniswapV4SDK(chain="arbitrum")
@@ -354,7 +254,7 @@ class TestBuildApproveTx:
             amount=10**18,
         )
         assert tx.data.startswith("0x095ea7b3")
-        assert tx.gas_estimate == 65_000
+        assert tx.gas_estimate == 50_000
         assert tx.value == 0
 
 
@@ -378,263 +278,3 @@ class TestTickMath:
     def test_price_to_tick_negative(self):
         with pytest.raises(ValueError, match="positive"):
             UniswapV4SDK.price_to_tick(Decimal("-1"))
-
-
-# =============================================================================
-# Permit2 approve tests
-# =============================================================================
-
-
-class TestBuildPermit2ApproveTx:
-    def test_basic_permit2_approve(self):
-        sdk = UniswapV4SDK(chain="arbitrum")
-        tx = sdk.build_permit2_approve_tx(
-            token_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            spender="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            amount=10**18,
-            expiration=1_700_000_000,
-        )
-        assert tx.to == PERMIT2_ADDRESS
-        assert tx.value == 0
-        assert tx.data.startswith(PERMIT2_APPROVE_SELECTOR)
-        assert tx.gas_estimate == UNISWAP_V4_GAS_ESTIMATES["permit2_approve"]
-
-    def test_permit2_approve_clamps_uint160(self):
-        sdk = UniswapV4SDK(chain="arbitrum")
-        huge_amount = (1 << 200)  # exceeds uint160
-        tx = sdk.build_permit2_approve_tx(
-            token_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            spender="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            amount=huge_amount,
-            expiration=1_700_000_000,
-        )
-        assert tx.to == PERMIT2_ADDRESS
-        # Decode amount word (3rd word after selector) and verify uint160 clamp
-        payload = tx.data[10:]  # strip 0x + 4-byte selector
-        amount_word = int(payload[128:192], 16)
-        assert amount_word == (1 << 160) - 1
-
-    def test_permit2_approve_default_expiration(self):
-        import time
-
-        sdk = UniswapV4SDK(chain="arbitrum")
-        before = int(time.time())
-        tx = sdk.build_permit2_approve_tx(
-            token_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            spender="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            amount=10**18,
-        )
-        after = int(time.time())
-        assert tx.to == PERMIT2_ADDRESS
-        assert tx.data.startswith(PERMIT2_APPROVE_SELECTOR)
-        # Verify auto-generated expiration is ~30 days from now
-        payload = tx.data[10:]
-        expiration = int(payload[192:256], 16)
-        thirty_days = 30 * 86400
-        assert before + thirty_days <= expiration <= after + thirty_days
-
-
-# =============================================================================
-# UniversalRouter encode_execute tests
-# =============================================================================
-
-
-class TestEncodeExecute:
-    def test_single_command_structure(self):
-        """Verify _encode_execute produces valid ABI structure."""
-        # Use a simple 11-word (352 byte) input for predictability
-        dummy_input = "aa" * 352  # 352 bytes = 11 words
-        result = _encode_execute(
-            commands=bytes([V4_SWAP_EXACT_IN_SINGLE]),
-            inputs=[dummy_input],
-            deadline=1_700_000_000,
-        )
-        # Must start with UniversalRouter execute selector
-        assert result.startswith("0x" + UNIVERSAL_ROUTER_EXECUTE_SELECTOR[2:])
-        # Strip selector
-        body = result[10:]  # remove 0x + 8 hex selector chars
-        # All hex, no odd-length
-        assert len(body) % 64 == 0, "ABI encoding must be 32-byte aligned"
-
-    def test_deadline_encoded(self):
-        """Verify the deadline appears in the third head slot."""
-        result = _encode_execute(
-            commands=bytes([0x06]),
-            inputs=["00" * 32],
-            deadline=12345,
-        )
-        body = result[10:]
-        # Third 32-byte word in head is the deadline
-        deadline_word = body[128:192]
-        assert int(deadline_word, 16) == 12345
-
-    def test_commands_length_encoded(self):
-        """Verify command bytes length is correctly encoded."""
-        result = _encode_execute(
-            commands=bytes([0x06, 0x07]),
-            inputs=["00" * 32, "00" * 32],
-            deadline=1_000,
-        )
-        body = result[10:]
-        # commands section starts at offset 0x60 = 96 bytes = 192 hex chars
-        commands_length_word = body[192:256]
-        assert int(commands_length_word, 16) == 2  # 2 command bytes
-
-
-# =============================================================================
-# ExactInputSingleParams encoding tests
-# =============================================================================
-
-
-class TestEncodeExactInputSingleParams:
-    def test_params_contain_pool_key_and_amounts(self):
-        """Verify the encoded params contain expected pool key fields."""
-        sdk = UniswapV4SDK(chain="arbitrum")
-        quote = SwapQuote(
-            amount_in=10**18,
-            amount_out=997 * 10**15,
-            fee_tier=3000,
-            token_in="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            token_out="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        )
-        params = sdk._encode_exact_input_single_params(quote, amount_out_minimum=990 * 10**15)
-        # Should be hex string (no 0x prefix)
-        assert not params.startswith("0x")
-        # 10 words: 5 pool key + zeroForOne + amountIn + amountOutMin + hookData offset + hookData length
-        # (sqrtPriceLimitX96 removed in deployed V4 contracts)
-        words = [params[i : i + 64] for i in range(0, len(params), 64)]
-        assert len(words) == 10, f"Expected 10 words, got {len(words)}"
-        # Verify fee tier (word 2), amountIn (word 6), amountOutMinimum (word 7)
-        assert int(words[2], 16) == 3000  # fee_tier
-        assert int(words[6], 16) == 10**18  # amount_in
-        assert int(words[7], 16) == 990 * 10**15  # amount_out_minimum
-
-    def test_integer_slippage_precision(self):
-        """Verify integer floor division gives correct amount_out_minimum."""
-        sdk = UniswapV4SDK(chain="arbitrum")
-        quote = SwapQuote(
-            amount_in=10**30,
-            amount_out=10**30,
-            fee_tier=3000,
-            token_in="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            token_out="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        )
-        # build_swap_tx uses integer floor division now
-        tx = sdk.build_swap_tx(
-            quote, recipient="0x1234567890123456789012345678901234567890", slippage_bps=50
-        )
-        # The amount_out_minimum should be exactly: 10^30 * 9950 // 10000
-        expected = 10**30 * 9950 // 10000
-        assert expected == 995000000000000000000000000000
-        # Verify the encoded calldata contains the exact expected value
-        assert f"{expected:064x}" in tx.data
-
-
-# =============================================================================
-# get_position_liquidity tests
-# =============================================================================
-
-
-class TestGetPositionLiquidity:
-    """Unit tests for on-chain liquidity query via eth_call."""
-
-    RPC_URL = "https://arb-mainnet.g.alchemy.com/v2/test"
-    TOKEN_ID = 42
-
-    def _make_sdk(self) -> UniswapV4SDK:
-        sdk = UniswapV4SDK(chain="arbitrum")
-        sdk.rpc_url = self.RPC_URL
-        return sdk
-
-    def _mock_urlopen(self, response_body: dict):
-        """Return a context-manager mock for urllib.request.urlopen."""
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(response_body).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        return mock_resp
-
-    def test_success_returns_liquidity(self):
-        sdk = self._make_sdk()
-        liquidity_value = 123456789
-        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1, "result": hex(liquidity_value)})
-
-        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
-            result = sdk.get_position_liquidity(self.TOKEN_ID)
-
-        assert result == liquidity_value
-        # Verify calldata includes selector and position_manager
-        call_args = mock_open.call_args[0][0]
-        payload = json.loads(call_args.data)
-        assert payload["method"] == "eth_call"
-        assert payload["params"][0]["data"].startswith("0x1efeed33")
-        assert payload["params"][0]["to"] == sdk.position_manager
-
-    def test_rpc_error_response_raises(self):
-        sdk = self._make_sdk()
-        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "revert"}})
-
-        with patch("urllib.request.urlopen", return_value=resp):
-            with pytest.raises(ValueError, match="reverted"):
-                sdk.get_position_liquidity(self.TOKEN_ID)
-
-    def test_missing_rpc_url_raises(self):
-        sdk = self._make_sdk()
-        sdk.rpc_url = None
-
-        with pytest.raises(ValueError, match="RPC URL required"):
-            sdk.get_position_liquidity(self.TOKEN_ID, rpc_url=None)
-
-    def test_malformed_result_missing_field_raises(self):
-        sdk = self._make_sdk()
-        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1})  # no "result" key
-
-        with patch("urllib.request.urlopen", return_value=resp):
-            with pytest.raises(ValueError, match="missing or invalid"):
-                sdk.get_position_liquidity(self.TOKEN_ID)
-
-    def test_malformed_result_non_hex_raises(self):
-        sdk = self._make_sdk()
-        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1, "result": "not_hex"})
-
-        with patch("urllib.request.urlopen", return_value=resp):
-            with pytest.raises(ValueError, match="Malformed liquidity hex"):
-                sdk.get_position_liquidity(self.TOKEN_ID)
-
-    def test_transport_failure_raises(self):
-        sdk = self._make_sdk()
-
-        with patch("urllib.request.urlopen", side_effect=ConnectionError("timeout")):
-            with pytest.raises(ValueError, match="RPC call to getPositionLiquidity failed"):
-                sdk.get_position_liquidity(self.TOKEN_ID)
-
-    def test_explicit_rpc_url_overrides_default(self):
-        sdk = self._make_sdk()
-        override_url = "https://other-rpc.example.com"
-        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1, "result": "0x1"})
-
-        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
-            sdk.get_position_liquidity(self.TOKEN_ID, rpc_url=override_url)
-
-        call_args = mock_open.call_args[0][0]
-        assert call_args.full_url == override_url
-
-    def test_file_scheme_rejected(self):
-        sdk = self._make_sdk()
-        with pytest.raises(ValueError, match="must use http"):
-            sdk.get_position_liquidity(self.TOKEN_ID, rpc_url="file:///etc/hosts")
-
-    def test_calldata_encodes_token_id(self):
-        sdk = self._make_sdk()
-        token_id = 9999
-        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1, "result": "0x0"})
-
-        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
-            sdk.get_position_liquidity(token_id)
-
-        call_args = mock_open.call_args[0][0]
-        payload = json.loads(call_args.data)
-        calldata = payload["params"][0]["data"]
-        # Token ID should be zero-padded to 64 hex chars after selector
-        expected_token_hex = format(token_id, "064x")
-        assert calldata == "0x1efeed33" + expected_token_hex

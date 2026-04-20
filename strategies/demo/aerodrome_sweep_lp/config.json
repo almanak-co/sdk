@@ -1,0 +1,21 @@
+{
+    "strategy_id": "demo_aerodrome_sweep_lp",
+    "strategy_name": "demo_aerodrome_sweep_lp",
+    "description": "Aerodrome LP strategy for parameter sweep backtesting on Base",
+    "pool": "WETH/USDC",
+    "stable": false,
+    "amount0": "0.001",
+    "amount1": "3",
+    "rsi_period": 14,
+    "rsi_oversold": "30",
+    "rsi_overbought": "70",
+    "reentry_cooldown": 2,
+    "max_lp_cycles": 5,
+    "chain": "base",
+    "network": "mainnet",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

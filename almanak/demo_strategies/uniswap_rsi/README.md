@@ -188,4 +188,4 @@ This is a **demo strategy** for educational purposes:
 ## Support
 
 - Issues: https://github.com/almanak/stack/issues
-- Docs: https://sdk.docs.almanak.co
+- Docs: https://docs.almanak.co

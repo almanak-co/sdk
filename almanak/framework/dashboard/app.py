@@ -6,16 +6,12 @@ Provides strategy overview, status monitoring, and operator actions.
 This is the main entry point that sets up navigation and routing.
 """
 
-import logging
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
-from streamlit.runtime.scriptrunner import RerunException, StopException
-
-logger = logging.getLogger(__name__)
 
 # Add project root to path for imports
 # app.py is at almanak/framework/dashboard/app.py, so we need to go up 4 levels
@@ -247,12 +243,7 @@ def main() -> None:
             teardown.page(strategies)
         else:
             overview.page(strategies)
-    except (RerunException, StopException):
-        # Streamlit control-flow exceptions must propagate — catching them
-        # kills the rerun/stop mechanism and can crash the process (VIB-2431).
-        raise
     except Exception as e:
-        logger.exception("Error rendering page '%s'", current_page)
         st.error(f"Error rendering page '{current_page}': {e}")
         import traceback
 

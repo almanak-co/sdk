@@ -21,22 +21,6 @@ ACTION_PERPS = "perps"
 ACTION_FLASH_LOAN = "flash_loan"
 ACTION_YIELD = "yield"
 ACTION_AGGREGATOR = "aggregator"
-ACTION_PREDICTION = "prediction"
-
-# Ordered list of all supported categories. Used both to emit protocols in a
-# stable order inside `_build_matrix()` and to derive the CLI --category help
-# text, so adding a new ACTION_* constant above only requires adding it here
-# once to flow through to the rendered table and CLI help.
-SUPPORTED_CATEGORIES: tuple[str, ...] = (
-    ACTION_SWAP,
-    ACTION_LP,
-    ACTION_LENDING,
-    ACTION_PERPS,
-    ACTION_YIELD,
-    ACTION_PREDICTION,
-    ACTION_FLASH_LOAN,
-    ACTION_AGGREGATOR,
-)
 
 
 def _build_matrix() -> dict:
@@ -54,7 +38,6 @@ def _build_matrix() -> dict:
         MORPHO_BLUE,
         PENDLE,
         TRADERJOE_V2,
-        UNISWAP_V4,
     )
     from almanak.framework.intents.compiler import (
         BALANCER_VAULT_ADDRESSES,
@@ -93,11 +76,12 @@ def _build_matrix() -> dict:
         all_chains.add(chain)
         lending_protocols.setdefault("morpho_blue", set()).add(chain)
 
-    # Compound V3 — derive chains from adapter's COMET_ADDRESSES (single source of truth)
+    # Compound V3 — check connector existence
     try:
-        from almanak.framework.connectors.compound_v3 import COMPOUND_V3_COMET_ADDRESSES
+        from almanak.framework.connectors.compound_v3 import CompoundV3Adapter  # noqa: F401
 
-        compound_chains = list(COMPOUND_V3_COMET_ADDRESSES.keys())
+        # Compound V3 supports these chains (from adapter)
+        compound_chains = ["ethereum", "arbitrum", "base", "polygon"]
         lending_protocols.setdefault("compound_v3", set()).update(compound_chains)
         all_chains.update(compound_chains)
     except ImportError:
@@ -118,43 +102,6 @@ def _build_matrix() -> dict:
 
         lending_protocols.setdefault("spark", set()).add("ethereum")
         all_chains.add("ethereum")
-    except ImportError:
-        pass
-
-    # Silo V2 — Avalanche isolated lending (ERC-4626 vault pairs)
-    try:
-        from almanak.framework.connectors.silo_v2.adapter import SiloV2Adapter  # noqa: F401
-
-        lending_protocols.setdefault("silo_v2", set()).add("avalanche")
-        all_chains.add("avalanche")
-    except ImportError:
-        pass
-
-    # Euler V2 — lending on Avalanche + Ethereum (derived from adapter's CHAIN_ADDRESSES)
-    try:
-        from almanak.framework.connectors.euler_v2.adapter import CHAIN_ADDRESSES as EULER_V2_CHAINS
-
-        euler_v2_chains = set(EULER_V2_CHAINS.keys())
-        lending_protocols.setdefault("euler_v2", set()).update(euler_v2_chains)
-        all_chains.update(euler_v2_chains)
-    except ImportError:
-        pass
-
-    # Joe Lend (Banker Joe) — Avalanche Compound V2 fork
-    try:
-        from almanak.framework.connectors.joelend.adapter import JoeLendAdapter  # noqa: F401
-
-        lending_protocols.setdefault("joelend", set()).add("avalanche")
-        all_chains.add("avalanche")
-    except ImportError:
-        pass
-
-    # Jupiter Lend — Solana isolated-vault lending
-    try:
-        from almanak.framework.connectors.jupiter_lend import JupiterLendAdapter  # noqa: F401
-
-        lending_protocols.setdefault("jupiter_lend", set()).add("solana")
-        all_chains.add("solana")
     except ImportError:
         pass
 
@@ -179,18 +126,6 @@ def _build_matrix() -> dict:
 
         perps_protocols.setdefault("hyperliquid", set()).add("hyperliquid")
         all_chains.add("hyperliquid")
-    except ImportError:
-        pass
-
-    # Aster (ApolloX rebrand) — BSC perps (Diamond proxy, broker_id 0).
-    # PancakeSwap Perps is a shim over aster_perps (broker_id 2), so it ships
-    # whenever the Aster adapter is importable.
-    try:
-        from almanak.framework.connectors.aster_perps.adapter import AsterPerpsAdapter  # noqa: F401
-
-        perps_protocols.setdefault("aster_perps", set()).add("bsc")
-        perps_protocols.setdefault("pancakeswap_perps", set()).add("bsc")
-        all_chains.add("bsc")
     except ImportError:
         pass
 
@@ -225,30 +160,6 @@ def _build_matrix() -> dict:
         morpho_vault_chains = ["ethereum", "base"]
         yield_protocols.setdefault("morpho_vault", set()).update(morpho_vault_chains)
         all_chains.update(morpho_vault_chains)
-    except ImportError:
-        pass
-
-    # Gimo — liquid staking on 0G Chain (StaFi EVM LSD Stack)
-    try:
-        from almanak.framework.connectors.gimo import GimoAdapter  # noqa: F401
-
-        yield_protocols.setdefault("gimo", set()).add("zerog")
-        all_chains.add("zerog")
-    except ImportError:
-        pass
-
-    # --- Prediction markets ---
-    prediction_protocols: dict[str, set[str]] = {}
-
-    # Polymarket — prediction markets on Polygon (off-chain CLOB + on-chain CTF).
-    # Edge/agent-side compatibility filters consult this matrix — dropping
-    # Polymarket from "yield" into a dedicated "prediction" category avoids
-    # surfacing it as a yield opportunity (VIB-3139).
-    try:
-        from almanak.framework.connectors.polymarket.adapter import PolymarketAdapter  # noqa: F401
-
-        prediction_protocols.setdefault("polymarket", set()).add("polygon")
-        all_chains.add("polygon")
     except ImportError:
         pass
 
@@ -299,26 +210,10 @@ def _build_matrix() -> dict:
         # Already in swap_protocols via PROTOCOL_ROUTERS, but ensure LP
         lp_protocols.setdefault("aerodrome", set()).add(chain)
 
-    # TraderJoe V2 — LP + swap (VIB-1928 compiler path) on all TJ V2 chains
+    # TraderJoe V2
     for chain in TRADERJOE_V2:
         all_chains.add(chain)
         lp_protocols.setdefault("traderjoe_v2", set()).add(chain)
-        swap_protocols.setdefault("traderjoe_v2", set()).add(chain)
-
-    # Uniswap V4 — swap via Universal Router (LP already populated by
-    # LP_POSITION_MANAGERS via PROTOCOL_ROUTERS in compiler_constants)
-    for chain in UNISWAP_V4:
-        all_chains.add(chain)
-        swap_protocols.setdefault("uniswap_v4", set()).add(chain)
-
-    # Fluid DEX — swap on Arbitrum (LP already populated via LP_POSITION_MANAGERS)
-    try:
-        from almanak.framework.connectors.fluid.adapter import FluidAdapter  # noqa: F401
-
-        swap_protocols.setdefault("fluid", set()).add("arbitrum")
-        all_chains.add("arbitrum")
-    except ImportError:
-        pass
 
     # Agni Finance (Uniswap V3 fork on Mantle)
     for chain in AGNI_FINANCE:
@@ -399,8 +294,6 @@ def _build_matrix() -> dict:
         _add(name, ACTION_PERPS, chains)
     for name, chains in sorted(yield_protocols.items()):
         _add(name, ACTION_YIELD, chains)
-    for name, chains in sorted(prediction_protocols.items()):
-        _add(name, ACTION_PREDICTION, chains)
     for name, chains in sorted(flash_protocols.items()):
         _add(name, ACTION_FLASH_LOAN, chains)
     for name, chains in sorted(agg_protocols.items()):
@@ -485,7 +378,7 @@ def _render_table(data: dict) -> str:
     "-c",
     type=str,
     default=None,
-    help=f"Filter by category ({', '.join(SUPPORTED_CATEGORIES)}).",
+    help="Filter by category (swap, lp, lending, perps, yield, flash_loan, aggregator).",
 )
 @click.option("--chain", type=str, default=None, help="Filter by chain name.")
 @click.option("--protocol", "-p", type=str, default=None, help="Filter by protocol name (partial match).")

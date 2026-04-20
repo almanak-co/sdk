@@ -7,11 +7,8 @@ The gateway is REQUIRED for the dashboard to function. If the gateway
 is not available, the dashboard will show an error and stop.
 """
 
-import json
 import logging
-from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
 
 from almanak.framework.dashboard.gateway_client import (
     GatewayConnectionError,
@@ -22,9 +19,7 @@ from almanak.framework.dashboard.gateway_client import (
     reset_dashboard_client,
 )
 from almanak.framework.dashboard.models import (
-    EquityCurvePoint,
     LPPosition,
-    PaperMetrics,
     PositionSummary,
     Strategy,
     StrategyStatus,
@@ -63,7 +58,6 @@ def _convert_status(status_str: str) -> StrategyStatus:
         "INACTIVE": StrategyStatus.INACTIVE,
         "STALE": StrategyStatus.STALE,
         "ARCHIVED": StrategyStatus.ARCHIVED,
-        "PAPER_TRADING": StrategyStatus.PAPER_TRADING,
     }
     return status_map.get(status_str, StrategyStatus.PAUSED)
 
@@ -98,74 +92,6 @@ def _convert_event_type(event_type_str: str) -> TimelineEventType:
     return event_type_map.get(normalized, TimelineEventType.TRADE)
 
 
-def _build_paper_metrics(summary: StrategySummary) -> PaperMetrics | None:
-    """Build PaperMetrics from gateway summary paper_metrics_json."""
-    if not summary.paper_metrics_json:
-        return None
-
-    try:
-        data = json.loads(summary.paper_metrics_json)
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-    if not isinstance(data, dict):
-        return None
-
-    equity_curve = []
-    for pt in data.get("equity_curve", []):
-        try:
-            equity_curve.append(
-                EquityCurvePoint(
-                    timestamp=datetime.fromisoformat(pt["timestamp"]),
-                    value_usd=Decimal(str(pt["value"])),
-                )
-            )
-        except (KeyError, ValueError, TypeError):
-            continue
-
-    last_trade_at = None
-    if data.get("last_trade_at"):
-        try:
-            last_trade_at = datetime.fromisoformat(data["last_trade_at"])
-            if last_trade_at.tzinfo is None:
-                last_trade_at = last_trade_at.replace(tzinfo=UTC)
-        except (ValueError, TypeError):
-            pass
-
-    session_start = None
-    if data.get("session_start"):
-        try:
-            session_start = datetime.fromisoformat(data["session_start"])
-            if session_start.tzinfo is None:
-                session_start = session_start.replace(tzinfo=UTC)
-        except (ValueError, TypeError):
-            pass
-
-    def _safe_decimal(value: Any, default: str = "0") -> Decimal:
-        try:
-            return Decimal(str(value)) if value is not None else Decimal(default)
-        except (ValueError, TypeError, ArithmeticError):
-            return Decimal(default)
-
-    return PaperMetrics(
-        tick_count=data.get("tick_count", 0),
-        success_count=data.get("success_count", 0),
-        hold_count=data.get("hold_count", 0),
-        error_count=data.get("error_count", 0),
-        simulated_pnl_usd=_safe_decimal(data.get("simulated_pnl_usd")),
-        total_gas_cost_usd=_safe_decimal(data.get("total_gas_cost_usd")),
-        last_trade_at=last_trade_at,
-        session_start=session_start,
-        trades_per_hour=_safe_decimal(data.get("trades_per_hour")),
-        equity_curve=equity_curve,
-        error_breakdown=data.get("error_breakdown", {}) if isinstance(data.get("error_breakdown"), dict) else {},
-        ticks_with_fork=data.get("ticks_with_fork", 0),
-        ticks_with_indicators=data.get("ticks_with_indicators", 0),
-        ticks_with_action=data.get("ticks_with_action", 0),
-        anvil_result=data.get("anvil_result"),
-    )
-
-
 def _convert_gateway_summary_to_model(summary: StrategySummary) -> Strategy:
     """Convert gateway StrategySummary to dashboard Strategy model.
 
@@ -175,9 +101,6 @@ def _convert_gateway_summary_to_model(summary: StrategySummary) -> Strategy:
     Returns:
         Strategy model for dashboard display
     """
-    execution_mode = summary.execution_mode or "live"
-    paper_metrics = _build_paper_metrics(summary)
-
     return Strategy(
         id=summary.strategy_id,
         name=summary.name,
@@ -198,8 +121,6 @@ def _convert_gateway_summary_to_model(summary: StrategySummary) -> Strategy:
         pnl_history=[],
         is_multi_chain=summary.is_multi_chain,
         chains=summary.chains,
-        execution_mode=execution_mode,
-        paper_metrics=paper_metrics,
     )
 
 

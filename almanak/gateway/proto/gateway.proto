@@ -44,7 +44,6 @@ message RegisterChainsResponse {
   repeated string initialized_chains = 2;  // Chains that were successfully initialized
   string wallet_address = 3;               // Wallet address derived from gateway private key
   string error = 4;
-  map<string, string> chain_wallets = 5;   // Per-chain wallet addresses resolved from wallet registry
 }
 
 // =============================================================================
@@ -74,11 +73,6 @@ service MarketService {
 message PriceRequest {
   string token = 1;
   string quote = 2;  // Default: USD
-  // Optional chain hint. Required for address-based lookups (so the gateway
-  // knows which chain to resolve an unknown contract address on) and for
-  // picking the right CoinGecko asset-platform for the contract-address
-  // pricing endpoint. Empty string = fall back to the gateway's primary chain.
-  string chain = 3;
 }
 
 message PriceResponse {
@@ -143,21 +137,6 @@ service StateService {
 
   // Delete strategy state.
   rpc DeleteState(DeleteStateRequest) returns (DeleteStateResponse);
-
-  // Save a portfolio snapshot for value tracking.
-  rpc SavePortfolioSnapshot(SaveSnapshotRequest) returns (SaveSnapshotResponse);
-
-  // Get the most recent portfolio snapshot.
-  rpc GetLatestSnapshot(GetLatestSnapshotRequest) returns (SnapshotData);
-
-  // Get portfolio snapshots since a given timestamp.
-  rpc GetSnapshotsSince(GetSnapshotsSinceRequest) returns (SnapshotList);
-
-  // Save or update portfolio metrics (PnL baseline).
-  rpc SavePortfolioMetrics(SaveMetricsRequest) returns (SaveMetricsResponse);
-
-  // Get portfolio metrics for a strategy.
-  rpc GetPortfolioMetrics(GetMetricsRequest) returns (PortfolioMetricsData);
 }
 
 message LoadStateRequest {
@@ -196,90 +175,6 @@ message DeleteStateRequest {
 message DeleteStateResponse {
   bool success = 1;
   string error = 2;
-}
-
-// Portfolio snapshot messages
-message SaveSnapshotRequest {
-  string strategy_id = 1;
-  int64 timestamp = 2;  // Unix epoch seconds
-  int32 iteration_number = 3;
-  string total_value_usd = 4;
-  string available_cash_usd = 5;
-  string value_confidence = 6;  // "HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"
-  bytes positions_json = 7;  // JSON-serialized positions array
-  string chain = 8;
-}
-
-message SaveSnapshotResponse {
-  bool success = 1;
-  int64 snapshot_id = 2;
-  string error = 3;
-}
-
-message GetLatestSnapshotRequest {
-  string strategy_id = 1;
-}
-
-message GetSnapshotsSinceRequest {
-  string strategy_id = 1;
-  int64 since = 2;  // Unix epoch seconds
-  int32 limit = 3;  // Max snapshots to return (default 168)
-}
-
-message SnapshotData {
-  string strategy_id = 1;
-  int64 timestamp = 2;
-  int32 iteration_number = 3;
-  string total_value_usd = 4;
-  string available_cash_usd = 5;
-  string value_confidence = 6;
-  bytes positions_json = 7;
-  string chain = 8;
-  bool found = 9;  // False if no snapshot exists
-}
-
-message SnapshotList {
-  repeated SnapshotData snapshots = 1;
-}
-
-// Portfolio metrics messages (PnL baseline tracking)
-message SaveMetricsRequest {
-  string strategy_id = 1;
-  string initial_value_usd = 2;
-  int64 initial_timestamp = 3;  // Unix epoch seconds
-  string deposits_usd = 4;
-  string withdrawals_usd = 5;
-  string gas_spent_usd = 6;
-  // Phase 4 accounting identity fields (VIB-2835/2837/2839)
-  string deployment_id = 7;
-  string cycle_id = 8;
-  string execution_mode = 9;
-  bool is_complete = 10;
-}
-
-message SaveMetricsResponse {
-  bool success = 1;
-  string error = 2;
-}
-
-message GetMetricsRequest {
-  string strategy_id = 1;
-}
-
-message PortfolioMetricsData {
-  string strategy_id = 1;
-  string initial_value_usd = 2;
-  int64 initial_timestamp = 3;
-  string deposits_usd = 4;
-  string withdrawals_usd = 5;
-  string gas_spent_usd = 6;
-  int64 updated_at = 7;
-  bool found = 8;
-  // Phase 4 accounting identity fields (VIB-2835/2837/2839)
-  string deployment_id = 9;
-  string cycle_id = 10;
-  string execution_mode = 11;
-  bool is_complete = 12;
 }
 
 // =============================================================================
@@ -403,8 +298,6 @@ message RecordTimelineEventRequest {
   string chain = 5;            // Optional: chain name
   string details_json = 6;     // Optional: JSON-encoded details
   int64 timestamp = 7;         // Optional: event timestamp (uses server time if 0)
-  string cycle_id = 8;         // Optional: correlation ID linking events in one decide->execute cycle
-  string phase = 9;            // Optional: strategy lifecycle phase (DECIDE, COMPILE, VALIDATE, EXECUTE, ENRICH)
 }
 
 message RecordTimelineEventResponse {
@@ -442,7 +335,6 @@ message RpcRequest {
   string method = 2;          // JSON-RPC method (e.g., "eth_call", "eth_getBalance")
   string params = 3;          // JSON-encoded params array
   string id = 4;              // Request ID for correlation
-  string network = 5;         // Optional network override ("mainnet", "anvil"). If empty, uses gateway default.
 }
 
 message RpcResponse {
@@ -531,13 +423,6 @@ service IntegrationService {
 
   // TheGraph subgraph query endpoint
   rpc TheGraphQuery(TheGraphQueryRequest) returns (TheGraphQueryResponse);
-
-  // GeckoTerminal DEX OHLCV endpoint (proxy for deployed strategies without internet)
-  rpc GeckoTerminalGetOHLCV(GeckoTerminalOHLCVRequest) returns (GeckoTerminalOHLCVResponse);
-
-  // External portfolio APIs (Zerion, future providers)
-  rpc GetWalletPortfolio(WalletPortfolioRequest) returns (WalletPortfolioResponse);
-  rpc GetWalletPositions(WalletPortfolioRequest) returns (WalletPortfolioResponse);
 }
 
 // =============================================================================
@@ -707,39 +592,6 @@ message TheGraphQueryResponse {
 }
 
 // =============================================================================
-// Wallet Portfolio Integration Messages
-// =============================================================================
-
-message WalletPortfolioRequest {
-  string wallet_address = 1;  // Wallet address to inspect
-  string chain = 2;           // Chain name (e.g., "avalanche", "arbitrum")
-  string provider = 3;        // Optional provider override (default: settings)
-}
-
-message WalletPortfolioPosition {
-  string position_id = 1;     // Provider-specific position id when available
-  string protocol = 2;        // Protocol slug or display name
-  string label = 3;           // Human-readable label
-  string position_type = 4;   // Provider-native type classification
-  string value_usd = 5;       // USD value as string
-  string pool_address = 6;    // Pool/vault/market address when available
-  repeated string token_symbols = 7;  // Token symbols involved in the position
-  string raw_details_json = 8; // Provider-normalized details payload
-}
-
-message WalletPortfolioResponse {
-  bool success = 1;
-  string provider = 2;
-  string wallet_address = 3;
-  string chain = 4;
-  string total_value_usd = 5;
-  int64 timestamp = 6;
-  bool cache_hit = 7;
-  string error = 8;
-  repeated WalletPortfolioPosition positions = 9;
-}
-
-// =============================================================================
 // SimulationService - transaction simulation via Alchemy/Tenderly
 // =============================================================================
 
@@ -863,9 +715,6 @@ service DashboardService {
 
   // Purge a strategy instance and all its events (permanent delete).
   rpc PurgeStrategyInstance(PurgeInstanceRequest) returns (PurgeInstanceResponse);
-
-  // Get structured trade records from the transaction ledger (VIB-2402).
-  rpc GetTransactionLedger(GetTransactionLedgerRequest) returns (GetTransactionLedgerResponse);
 }
 
 // =============================================================================
@@ -899,13 +748,6 @@ message StrategySummary {
   string attention_reason = 10;
   bool is_multi_chain = 11;
   repeated string chains = 12;
-  int32  consecutive_errors  = 13;  // count of consecutive failed iterations
-  int64  last_iteration_at   = 14;  // unix timestamp of last iteration completion
-  string pnl_since_deploy_usd = 15; // lifetime PnL after gas; empty if unavailable
-  string wallet_address = 16;
-  map<string, string> chain_wallets = 17;
-  string execution_mode = 18;       // "live" (default) or "paper"
-  string paper_metrics_json = 19;   // JSON-encoded paper trading metrics (when execution_mode="paper")
 }
 
 message GetStrategyDetailsRequest {
@@ -1068,8 +910,6 @@ message RegisterInstanceRequest {
   string wallet_address = 6;
   string config_json = 7;
   string version = 8;
-  repeated string chains = 9;
-  map<string, string> chain_wallets = 10;
 }
 
 message RegisterInstanceResponse {
@@ -1110,41 +950,6 @@ message PurgeInstanceRequest {
 message PurgeInstanceResponse {
   bool success = 1;
   string error = 2;
-}
-
-// Transaction ledger messages (VIB-2402) -------------------------------------
-
-message GetTransactionLedgerRequest {
-  string strategy_id = 1;
-  int64 since_timestamp = 2;  // Optional: only entries after this time (unix)
-  string intent_type_filter = 3;  // Optional: filter by intent type
-  int32 limit = 4;  // Default 100
-}
-
-message GetTransactionLedgerResponse {
-  repeated LedgerEntryInfo entries = 1;
-  bool has_more = 2;
-}
-
-message LedgerEntryInfo {
-  string id = 1;
-  string cycle_id = 2;
-  string strategy_id = 3;
-  int64 timestamp = 4;
-  string intent_type = 5;
-  string token_in = 6;
-  string amount_in = 7;
-  string token_out = 8;
-  string amount_out = 9;
-  string effective_price = 10;
-  float slippage_bps = 11;
-  int64 gas_used = 12;
-  string gas_usd = 13;
-  string tx_hash = 14;
-  string chain = 15;
-  string protocol = 16;
-  bool success = 17;
-  string error = 18;
 }
 
 // =============================================================================
@@ -1764,30 +1569,4 @@ message WriteAgentCommandRequest {
 message WriteAgentCommandResponse {
   bool success = 1;
   string error = 2;
-}
-
-// =============================================================================
-// GeckoTerminal Integration Messages
-// =============================================================================
-
-message GeckoTerminalOHLCVRequest {
-  string token = 1;             // Token symbol (e.g., "ALMANAK", "WETH")
-  string chain = 2;             // Chain name (e.g., "base", "ethereum")
-  string timeframe = 3;         // Candle timeframe (1m, 5m, 15m, 1h, 4h, 1d)
-  int32 limit = 4;              // Number of candles (max 1000)
-  string pool_address = 5;      // Explicit pool address (optional)
-  string quote = 6;             // Quote currency (default "USD")
-}
-
-message GeckoTerminalOHLCVCandle {
-  int64 timestamp = 1;          // Unix timestamp in seconds
-  string open = 2;
-  string high = 3;
-  string low = 4;
-  string close = 5;
-  string volume = 6;
-}
-
-message GeckoTerminalOHLCVResponse {
-  repeated GeckoTerminalOHLCVCandle candles = 1;
 }

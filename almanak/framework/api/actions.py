@@ -264,7 +264,7 @@ def _load_strategy_state_from_db(strategy_id: str) -> StrategyState | None:
 
         # Query the strategy state
         cursor.execute(
-            "SELECT strategy_id, state_data, updated_at FROM strategy_state WHERE strategy_id = ?", (strategy_id,)
+            "SELECT strategy_id, state_data, updated_at FROM v2_strategy_state WHERE strategy_id = ?", (strategy_id,)
         )
         row = cursor.fetchone()
         conn.close()

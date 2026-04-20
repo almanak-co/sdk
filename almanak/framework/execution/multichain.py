@@ -294,7 +294,6 @@ class MultiChainOrchestrator:
         _wallet_address: str | None = None,
         _primary_chain: str | None = None,
         _max_gas_price_gwei: int = 0,
-        chain_wallets: dict[str, str] | None = None,
     ) -> None:
         """Initialize the MultiChainOrchestrator.
 
@@ -319,9 +318,6 @@ class MultiChainOrchestrator:
         self._compilers: dict[str, IntentCompiler] = {}
         self._compiler_locks: dict[str, asyncio.Lock] = {}
         self._initialized = False
-
-        # Per-chain wallet overrides from wallet registry
-        self._gw_chain_wallets = chain_wallets
 
         # Shared state for both modes
         if self._use_gateway:
@@ -360,7 +356,6 @@ class MultiChainOrchestrator:
         wallet_address: str,
         primary_chain: str | None = None,
         max_gas_price_gwei: int = 0,
-        chain_wallets: dict[str, str] | None = None,
     ) -> "MultiChainOrchestrator":
         """Create orchestrator backed by the gateway.
 
@@ -374,7 +369,6 @@ class MultiChainOrchestrator:
             wallet_address: Wallet address (derived from gateway private key)
             primary_chain: Default chain (first chain if not specified)
             max_gas_price_gwei: Gas price cap (0 = use gateway default)
-            chain_wallets: Per-chain wallet addresses from wallet registry
 
         Returns:
             MultiChainOrchestrator in gateway mode
@@ -386,7 +380,6 @@ class MultiChainOrchestrator:
             _wallet_address=wallet_address,
             _primary_chain=primary_chain,
             _max_gas_price_gwei=max_gas_price_gwei,
-            chain_wallets=chain_wallets,
         )
 
     # =========================================================================
@@ -484,17 +477,12 @@ class MultiChainOrchestrator:
 
             # Use execution_address so that Enso/protocols see the correct sender
             # (Safe address in Safe mode, EOA otherwise)
-            # Per-chain wallet from registry takes precedence
-            effective_wallet = self._config.execution_address
-            if self._gw_chain_wallets and chain_lower in self._gw_chain_wallets:
-                effective_wallet = self._gw_chain_wallets[chain_lower]
             self._compilers[chain_lower] = IntentCompiler(
                 chain=chain_lower,
-                wallet_address=effective_wallet,
+                wallet_address=self._config.execution_address,
                 default_protocol=default_protocol,
                 rpc_url=rpc_url,
                 config=IntentCompilerConfig(allow_placeholder_prices=True),
-                chain_wallets=self._gw_chain_wallets,
             )
             logger.debug(f"Created IntentCompiler for {chain_lower} (wallet={self._config.execution_address[:10]}...)")
 
@@ -522,13 +510,10 @@ class MultiChainOrchestrator:
             )
 
         if chain_lower not in self._gateway_orchestrators:
-            effective_wallet = self._gw_wallet_address
-            if self._gw_chain_wallets and chain_lower in self._gw_chain_wallets:
-                effective_wallet = self._gw_chain_wallets[chain_lower]
             self._gateway_orchestrators[chain_lower] = GatewayExecutionOrchestrator(
                 client=self._gateway_client,
                 chain=chain_lower,
-                wallet_address=effective_wallet,
+                wallet_address=self._gw_wallet_address,
                 max_gas_price_gwei=self._gw_max_gas_price_gwei,
             )
             logger.debug(f"Created GatewayExecutionOrchestrator for {chain_lower}")
@@ -1120,15 +1105,12 @@ class MultiChainOrchestrator:
             for chain in self._gw_chains:
                 try:
                     native_symbol = NATIVE_TOKEN_INFO.get(chain, {}).get("symbol", "ETH")
-                    effective_wallet = self._gw_wallet_address
-                    if self._gw_chain_wallets and chain in self._gw_chain_wallets:
-                        effective_wallet = self._gw_chain_wallets[chain]
                     response = await asyncio.to_thread(
                         self._gateway_client.market.GetBalance,
                         gateway_pb2.BalanceRequest(
                             token=native_symbol,
                             chain=chain,
-                            wallet_address=effective_wallet,
+                            wallet_address=self._gw_wallet_address,
                         ),
                         timeout=10.0,
                     )
@@ -1147,11 +1129,6 @@ class MultiChainOrchestrator:
                     balances[chain] = 0
 
         return balances
-
-    @property
-    def chain_wallets(self) -> dict[str, str] | None:
-        """Get per-chain wallet overrides from wallet registry."""
-        return self._gw_chain_wallets
 
     def __repr__(self) -> str:
         """Return string representation."""

@@ -544,8 +544,7 @@ class TestBatchResolveTokens:
             resolved_at=datetime.now(),
         )
 
-        def mock_resolve(token, chain, *, log_errors=True):
-            assert log_errors is False
+        def mock_resolve(token, chain):
             if token == "USDC":
                 return usdc
             return weth
@@ -568,8 +567,7 @@ class TestBatchResolveTokens:
     async def test_batch_resolve_partial_failure(self, token_service, mock_context, sample_resolved_token):
         """BatchResolveTokens returns partial success with errors."""
 
-        def mock_resolve(token, chain, *, log_errors=True):
-            assert log_errors is False
+        def mock_resolve(token, chain):
             if token == "USDC":
                 return sample_resolved_token
             raise TokenNotFoundError(token=token, chain=chain, reason="Not found")

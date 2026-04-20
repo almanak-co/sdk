@@ -49,7 +49,6 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
-from almanak.core.constants import STABLECOINS
 from almanak.core.enums import Chain
 from almanak.framework.backtesting.adapters.base import (
     StrategyBacktestAdapter,
@@ -470,7 +469,10 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             return self._data_config.strict_historical_mode
         return False
 
-    _STABLECOIN_SYMBOLS: frozenset[str] = STABLECOINS
+    # Known stablecoins for which a $1 fallback is reasonable
+    _STABLECOIN_SYMBOLS: frozenset[str] = frozenset(
+        {"USDC", "USDT", "DAI", "FRAX", "LUSD", "USDC.E", "USDT.E", "BUSD", "TUSD", "USDBC"}
+    )
 
     def _price_fallback(self, token: str, fallback: Decimal, context: str) -> Decimal:
         """Return *fallback* price for *token* while logging a warning.

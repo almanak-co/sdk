@@ -472,8 +472,6 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
             tx_hash=request.tx_hash if request.tx_hash else None,
             chain=request.chain if request.chain else None,
             details=details,
-            cycle_id=request.cycle_id if request.cycle_id else "",
-            phase=request.phase if request.phase else "",
         )
 
         try:

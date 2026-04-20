@@ -47,43 +47,6 @@ def _validate_non_negative_int_string(v: str, field_name: str) -> str:
 
 _ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
-
-def _normalize_protocol_key(protocol: str) -> str:
-    """Canonicalize protocol identifiers for capability lookups.
-
-    The PROTOCOL_CAPABILITIES table uses snake_case keys (e.g. ``morpho_blue``).
-    Operators typing ``--protocol morpho-blue`` or ``"morpho blue"`` on the CLI
-    (or agents passing aliases) would otherwise miss the capability entry and
-    skip schema-level guards. Collapse hyphens and whitespace into underscores
-    before lookup. (CodeRabbit PR #1535 review.)
-    """
-    return protocol.strip().lower().replace("-", "_").replace(" ", "_")
-
-
-def _protocol_requires_market_id(protocol: str) -> bool:
-    """Return True if the protocol uses isolated markets and needs ``market_id``.
-
-    Read from the authoritative PROTOCOL_CAPABILITIES table so schema checks
-    stay in sync with the intent-layer validator. Imported lazily to avoid a
-    circular import between schemas.py and framework/intents/*.
-    """
-    from almanak.framework.intents.vocabulary import PROTOCOL_CAPABILITIES
-
-    return bool(PROTOCOL_CAPABILITIES.get(_normalize_protocol_key(protocol), {}).get("requires_market_id", False))
-
-
-def _check_market_id(protocol: str, market_id: str | None, op: str) -> None:
-    """Fail fast if ``market_id`` is missing for an isolated-market protocol.
-
-    Surfacing this at the schema layer means tool invocations (via agent or
-    CLI) fail before the gateway RPC round-trip, matching the UX of other
-    required fields. The compiler still validates independently as defense in
-    depth. (Review: CodeRabbit + Claude pr-auditor on PR #1535.)
-    """
-    if _protocol_requires_market_id(protocol) and (not market_id or not market_id.strip()):
-        raise ValueError(f"market_id is required when protocol='{protocol}' for {op} (isolated-market protocol)")
-
-
 # =============================================================================
 # Shared envelope
 # =============================================================================
@@ -204,102 +167,6 @@ class GetLPPositionResponse(BaseModel):
     tokens_owed_a: str = ""
     tokens_owed_b: str = ""
     in_range: bool = True
-    current_tick: int | None = None
-    fees_a_usd: float | None = None
-    fees_b_usd: float | None = None
-    total_fees_usd: float | None = None
-
-
-class ListLPPositionsRequest(BaseModel):
-    """List all LP positions owned by a wallet.
-
-    Iterates NonfungiblePositionManager.tokenOfOwnerByIndex(owner, i) for
-    i in [0, balanceOf(owner)). Returns a compact summary per position so
-    operators can pick a tokenId without drilling into `get_lp_position`.
-    """
-
-    chain: str = Field(default="arbitrum")
-    protocol: str = Field(default="uniswap_v3", description="LP protocol (uniswap_v3 only for v1).")
-    wallet_address: str = Field(default="", description="Wallet to query. Defaults to strategy wallet.")
-    network: str = Field(default="", description="'mainnet' or 'anvil'; empty means gateway default.")
-    include_empty: bool = Field(
-        default=False,
-        description="Include positions with zero liquidity (default: skip burned/fully-withdrawn positions).",
-    )
-
-
-class LPPositionSummary(BaseModel):
-    position_id: str
-    token0: str = Field(description="token0 contract address (lowercased)")
-    token1: str = Field(description="token1 contract address (lowercased)")
-    token0_symbol: str = ""
-    token1_symbol: str = ""
-    fee_tier: int = 0
-    liquidity: str = ""
-
-
-class ListLPPositionsResponse(BaseModel):
-    chain: str
-    protocol: str
-    wallet_address: str
-    count: int = 0
-    positions: list[LPPositionSummary] = []
-
-
-class ListLendingPositionsRequest(BaseModel):
-    """List lending positions for a wallet on a supported protocol.
-
-    v1: Aave V3 only. Returns account-level totals + health factor via
-    Pool.getUserAccountData(user). Per-reserve drill-down is a future
-    extension.
-    """
-
-    chain: str = Field(default="arbitrum")
-    protocol: str = Field(default="aave_v3", description="Lending protocol (aave_v3 only for v1).")
-    wallet_address: str = Field(default="", description="Wallet to query. Defaults to strategy wallet.")
-    network: str = Field(default="", description="'mainnet' or 'anvil'; empty means gateway default.")
-
-
-class ListLendingPositionsResponse(BaseModel):
-    chain: str
-    protocol: str
-    wallet_address: str
-    total_collateral_usd: str = ""
-    total_debt_usd: str = ""
-    available_borrows_usd: str = ""
-    current_liquidation_threshold_bps: int = 0
-    ltv_bps: int = 0
-    health_factor: str = Field(default="", description="1e18-scaled health factor as decimal string; '∞' when no debt.")
-
-
-class GetPortfolioRequest(BaseModel):
-    """Summarize a wallet's on-chain positions on a single chain.
-
-    Combines native balance, ERC20 balances (via batch_get_balances for
-    common symbols or a caller-supplied list), LP positions, and lending
-    positions.
-    """
-
-    chain: str = Field(default="arbitrum")
-    wallet_address: str = Field(default="", description="Wallet to query. Defaults to strategy wallet.")
-    tokens: list[str] = Field(
-        default_factory=list,
-        description="ERC20 symbols to include in the balance snapshot (e.g. ['USDC', 'WETH']).",
-    )
-    network: str = Field(default="", description="'mainnet' or 'anvil'; empty means gateway default.")
-
-
-class GetPortfolioResponse(BaseModel):
-    chain: str
-    wallet_address: str
-    native_balance: str = ""
-    native_symbol: str = ""
-    token_balances: list[dict] = Field(default_factory=list)
-    lp_positions: list[LPPositionSummary] = Field(default_factory=list)
-    lending: dict | None = Field(
-        default=None,
-        description="Aave V3 summary (total_collateral_usd / total_debt_usd / health_factor) or None if no position.",
-    )
 
 
 class ResolveTokenRequest(BaseModel):
@@ -527,10 +394,6 @@ class SupplyLendingRequest(BaseModel):
     amount: str = Field(description="Amount as decimal string")
     protocol: str = Field(default="aave_v3", description="Lending protocol")
     use_as_collateral: bool = Field(default=True)
-    market_id: str | None = Field(
-        default=None,
-        description="Required for isolated-market protocols (Morpho Blue); ignored for unified-pool protocols",
-    )
     chain: str = Field(default="arbitrum")
     dry_run: bool = Field(default=False)
 
@@ -538,11 +401,6 @@ class SupplyLendingRequest(BaseModel):
     @classmethod
     def amount_must_be_positive(cls, v: str) -> str:
         return _validate_positive_decimal(v, "amount")
-
-    @model_validator(mode="after")
-    def validate_market_id(self) -> SupplyLendingRequest:
-        _check_market_id(self.protocol, self.market_id, "supply")
-        return self
 
 
 class SupplyLendingResponse(BaseModel):
@@ -559,10 +417,6 @@ class BorrowLendingRequest(BaseModel):
     collateral_token: str = Field(description="Token to use as collateral")
     collateral_amount: str = Field(description="Amount of collateral as decimal string, or 'all'")
     protocol: str = Field(default="aave_v3")
-    market_id: str | None = Field(
-        default=None,
-        description="Required for isolated-market protocols (Morpho Blue); ignored for unified-pool protocols",
-    )
     chain: str = Field(default="arbitrum")
     dry_run: bool = Field(default=False)
 
@@ -575,11 +429,6 @@ class BorrowLendingRequest(BaseModel):
     @classmethod
     def collateral_amount_must_be_positive_or_all(cls, v: str) -> str:
         return _validate_positive_or_all(v, "collateral_amount")
-
-    @model_validator(mode="after")
-    def validate_market_id(self) -> BorrowLendingRequest:
-        _check_market_id(self.protocol, self.market_id, "borrow")
-        return self
 
 
 class BorrowLendingResponse(BaseModel):
@@ -594,10 +443,6 @@ class RepayLendingRequest(BaseModel):
     token: str = Field(description="Token to repay")
     amount: str = Field(description="Amount as decimal string, or 'all' for full repayment")
     protocol: str = Field(default="aave_v3")
-    market_id: str | None = Field(
-        default=None,
-        description="Required for isolated-market protocols (Morpho Blue); ignored for unified-pool protocols",
-    )
     chain: str = Field(default="arbitrum")
     dry_run: bool = Field(default=False)
 
@@ -605,50 +450,11 @@ class RepayLendingRequest(BaseModel):
     @classmethod
     def amount_must_be_positive_or_all(cls, v: str) -> str:
         return _validate_positive_or_all(v, "amount")
-
-    @model_validator(mode="after")
-    def validate_market_id(self) -> RepayLendingRequest:
-        _check_market_id(self.protocol, self.market_id, "repay")
-        return self
 
 
 class RepayLendingResponse(BaseModel):
     tx_hash: str | None = None
     amount_repaid: str = ""
-    gas_usd: str = ""
-
-
-class WithdrawLendingRequest(BaseModel):
-    """Withdraw supplied tokens from a lending protocol."""
-
-    token: str = Field(description="Token to withdraw")
-    amount: str = Field(description="Amount as decimal string, or 'all' for full withdrawal")
-    protocol: str = Field(default="aave_v3")
-    market_id: str | None = Field(
-        default=None,
-        description="Required for protocols with isolated markets (e.g. Morpho Blue); ignored for Aave V3",
-    )
-    is_collateral: bool = Field(
-        default=True,
-        description="Morpho Blue only: True withdraws collateral, False withdraws loan token",
-    )
-    chain: str = Field(default="arbitrum")
-    dry_run: bool = Field(default=False)
-
-    @field_validator("amount")
-    @classmethod
-    def amount_must_be_positive_or_all(cls, v: str) -> str:
-        return _validate_positive_or_all(v, "amount")
-
-    @model_validator(mode="after")
-    def validate_market_id(self) -> WithdrawLendingRequest:
-        _check_market_id(self.protocol, self.market_id, "withdraw")
-        return self
-
-
-class WithdrawLendingResponse(BaseModel):
-    tx_hash: str | None = None
-    amount_withdrawn: str = ""
     gas_usd: str = ""
 
 
@@ -925,79 +731,3 @@ class TeardownVaultResponse(BaseModel):
     final_nav: str = Field(default="0", description="Final NAV after teardown")
     tx_hashes: list[str] = Field(default_factory=list, description="All transaction hashes")
     message: str = ""
-
-
-# ── WRAP NATIVE ────────────────────────────────────────────────────────
-
-
-class WrapNativeRequest(BaseModel):
-    """Wrap native tokens to their ERC-20 equivalent (e.g. ETH -> WETH, MATIC -> WMATIC)."""
-
-    token: str = Field(description="Wrapped token symbol to receive (e.g. 'WETH', 'WMATIC', 'WAVAX')")
-    amount: str = Field(description="Amount of native token to wrap as a decimal string, or 'all'")
-    chain: str = Field(default="arbitrum", description="Blockchain name")
-    dry_run: bool = Field(default=False, description="If true, simulate only")
-    execution_wallet: str | None = Field(default=None, description="Override wallet for execution")
-
-    @field_validator("amount")
-    @classmethod
-    def amount_must_be_positive_or_all(cls, v: str) -> str:
-        return _validate_positive_or_all(v, "amount")
-
-
-class WrapNativeResponse(BaseModel):
-    tx_hash: str | None = None
-    amount_wrapped: str = ""
-    token: str = ""
-    chain: str = ""
-    gas_usd: str = ""
-
-
-# ── WALLET OVERVIEW ────────────────────────────────────────────────────
-
-
-class GetWalletOverviewRequest(BaseModel):
-    """Get a complete wallet balance overview in a single call.
-
-    Automatically queries all common tokens for the chain (ETH, WETH, USDC, USDT, etc.)
-    plus any additional tokens specified. Filters out dust balances below min_balance_usd.
-    """
-
-    chain: str = Field(default="arbitrum", description="Blockchain name")
-    wallet_address: str = Field(default="", description="Wallet to query. Defaults to strategy wallet.")
-    min_balance_usd: float = Field(default=0.01, ge=0, description="Minimum USD balance to include (filters dust)")
-    extra_tokens: list[str] = Field(
-        default_factory=list,
-        description="Additional token symbols to query beyond the default set",
-    )
-
-
-class GetWalletOverviewResponse(BaseModel):
-    wallet_address: str = ""
-    chain: str = ""
-    tokens: list[dict] = Field(default_factory=list, description="List of {symbol, balance, balance_usd}")
-    total_usd: str = "0"
-
-
-# ── CHECK PROTOCOL SUPPORT ────────────────────────────────────────────
-
-
-class CheckProtocolSupportRequest(BaseModel):
-    """Check whether the SDK supports a given protocol on a given chain.
-
-    Returns supported actions, recommended strategy template, and known issues.
-    Uses static SDK registry data — no network calls needed.
-    """
-
-    protocol: str = Field(description="Protocol name (e.g. 'uniswap_v3', 'morpho_blue', 'fluid-dex')")
-    chain: str = Field(default="", description="Chain to check (e.g. 'arbitrum'). If empty, returns all chains.")
-
-
-class CheckProtocolSupportResponse(BaseModel):
-    supported: bool = False
-    protocol: str = ""
-    chain: str = ""
-    supported_chains: list[str] = Field(default_factory=list, description="Chains where protocol is supported")
-    supported_actions: list[str] = Field(default_factory=list, description="Actions: swap, lp, lending, perps, yield")
-    sdk_template: str | None = Field(default=None, description="Recommended strategy template")
-    notes: str = ""

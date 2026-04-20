@@ -13,7 +13,6 @@ Tests cover:
 import json
 import tempfile
 from datetime import UTC, datetime
-from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -21,7 +20,6 @@ from uuid import uuid4
 import grpc
 import pytest
 
-from almanak.framework.portfolio.models import PortfolioSnapshot, ValueConfidence
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.dashboard_service import DashboardServiceServicer
@@ -87,9 +85,6 @@ def _make_instance(
     inst.template_name = "TestStrategy"
     inst.chain = chain
     inst.protocol = protocol
-    inst.wallet_address = "0x1234"
-    inst.chains = chain
-    inst.chain_wallets = ""
     inst.status = status
     inst.archived = False
     inst.last_heartbeat_at = last_heartbeat_at or datetime.now(UTC)
@@ -106,12 +101,6 @@ class TestListStrategies:
     - Status filters (RUNNING, PAUSED, etc.): applied on registry results
     - Invalid filters: return INVALID_ARGUMENT
     """
-
-    @pytest.fixture(autouse=True)
-    def _no_paper_sessions(self, dashboard_service):
-        """Prevent real ~/.almanak/paper/ from leaking into tests."""
-        with patch.object(dashboard_service, "_discover_paper_sessions", return_value=[]):
-            yield
 
     @pytest.mark.asyncio
     async def test_default_filter_is_registry(self, dashboard_service, mock_context):
@@ -394,103 +383,6 @@ class TestGetStrategyDetails:
         response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
-
-
-class TestPortfolioFallback:
-    """Tests for dashboard portfolio fallback behavior."""
-
-    @pytest.mark.asyncio
-    async def test_fresh_metrics_preferred_over_external(self, dashboard_service):
-        """Fresh metrics should win and avoid external reads."""
-        dashboard_service._initialized = True
-        dashboard_service._state_manager = AsyncMock()
-        dashboard_service._state_manager.get_portfolio_metrics = AsyncMock(
-            return_value=MagicMock(total_value_usd=Decimal("123.45"))
-        )
-        dashboard_service._state_manager.get_latest_snapshot = AsyncMock(
-            return_value=PortfolioSnapshot(
-                timestamp=datetime.now(UTC),
-                strategy_id="test_strategy",
-                total_value_usd=Decimal("123.45"),
-                available_cash_usd=Decimal("100"),
-                value_confidence=ValueConfidence.HIGH,
-            )
-        )
-        dashboard_service._portfolio_chain = AsyncMock()
-
-        result = await dashboard_service._get_portfolio_value_and_pnl(
-            "test_strategy",
-        )
-
-        assert result == ("123.45", "0")
-        dashboard_service._portfolio_chain.get_wallet_portfolio.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_metrics_always_win_even_with_stale_snapshot(self, dashboard_service):
-        """Metrics are authoritative and should not be skipped due to stale snapshots."""
-        dashboard_service._initialized = True
-        dashboard_service._state_manager = AsyncMock()
-        dashboard_service._state_manager.get_portfolio_metrics = AsyncMock(
-            return_value=MagicMock(total_value_usd=Decimal("100"))
-        )
-        dashboard_service._state_manager.get_latest_snapshot = AsyncMock(
-            return_value=PortfolioSnapshot(
-                timestamp=datetime.fromtimestamp(0, tz=UTC),
-                strategy_id="test_strategy",
-                total_value_usd=Decimal("100"),
-                available_cash_usd=Decimal("0"),
-                value_confidence=ValueConfidence.STALE,
-            )
-        )
-        dashboard_service._portfolio_chain = AsyncMock()
-
-        result = await dashboard_service._get_portfolio_value_and_pnl(
-            "test_strategy",
-        )
-
-        assert result == ("100", "0")
-        # Zerion should not be called when metrics are available
-        dashboard_service._portfolio_chain.get_wallet_portfolio.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_stale_snapshot_returns_zeros_when_no_metrics(self, dashboard_service):
-        """Stale snapshot without metrics should return zeros (no external fallback)."""
-        dashboard_service._initialized = True
-        dashboard_service._state_manager = AsyncMock()
-        dashboard_service._state_manager.get_portfolio_metrics = AsyncMock(return_value=None)
-        dashboard_service._state_manager.get_latest_snapshot = AsyncMock(
-            return_value=PortfolioSnapshot(
-                timestamp=datetime.fromtimestamp(0, tz=UTC),
-                strategy_id="test_strategy",
-                total_value_usd=Decimal("100"),
-                available_cash_usd=Decimal("0"),
-                value_confidence=ValueConfidence.STALE,
-            )
-        )
-
-        result = await dashboard_service._get_portfolio_value_and_pnl(
-            "test_strategy",
-        )
-
-        # Stale snapshots are no longer used — simplified read path returns zeros
-        assert result == ("0", "0")
-
-    @pytest.mark.asyncio
-    async def test_no_metrics_no_snapshot_returns_zeros(self, dashboard_service):
-        """No metrics and no snapshot should return zeros without external calls."""
-        dashboard_service._initialized = True
-        dashboard_service._state_manager = AsyncMock()
-        dashboard_service._state_manager.get_portfolio_metrics = AsyncMock(return_value=None)
-        dashboard_service._state_manager.get_latest_snapshot = AsyncMock(return_value=None)
-        dashboard_service._portfolio_chain = AsyncMock()
-
-        result = await dashboard_service._get_portfolio_value_and_pnl(
-            "test_strategy",
-        )
-
-        assert result == ("0", "0")
-        # External portfolio API should never be called
-        dashboard_service._portfolio_chain.get_wallet_portfolio.assert_not_called()
 
 
 class TestGetTimeline:
@@ -805,122 +697,3 @@ class TestProtocolDerivation:
         assert dashboard_service._derive_protocol_from_config({}, "aerodrome_lp") == "Aerodrome"
         assert dashboard_service._derive_protocol_from_config({}, "tj_liquidity") == "TraderJoe V2"
         assert dashboard_service._derive_protocol_from_config({}, "unknown_strategy") == "Unknown"
-
-
-class TestDeployedModeAgentIdResolution:
-    """Tests for AGENT_ID normalization in deployed (K8s) mode.
-
-    When the platform injects AGENT_ID into the container, all gateway
-    service methods should use that ID for registry and state lookups,
-    regardless of the strategy_id sent by the SDK runner.
-    """
-
-    @pytest.mark.asyncio
-    async def test_get_strategy_details_resolves_agent_id(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
-        """GetStrategyDetails uses AGENT_ID for registry lookup when env var is set."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
-        dashboard_service._initialized = True
-        dashboard_service._strategies_root = Path("/nonexistent")
-
-        mock_registry = MagicMock()
-        inst = _make_instance("platform-uuid-1234", strategy_name="uniswap_rsi")
-        mock_registry.get.return_value = inst
-
-        with patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry):
-            # Dashboard sends the SDK strategy_id, but it gets resolved to AGENT_ID
-            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="uniswap_rsi")
-            response = await dashboard_service.GetStrategyDetails(request, mock_context)
-
-        # Registry was queried with the resolved AGENT_ID
-        mock_registry.get.assert_called_with("platform-uuid-1234")
-        assert response.summary.strategy_id == "platform-uuid-1234"
-
-    @pytest.mark.asyncio
-    async def test_register_instance_resolves_agent_id(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
-        """RegisterStrategyInstance stores under AGENT_ID when env var is set."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
-
-        mock_registry = MagicMock()
-        mock_registry.get.return_value = None
-        mock_registry.register.return_value = True
-
-        with patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry):
-            request = gateway_pb2.RegisterInstanceRequest(
-                strategy_id="uniswap_rsi:abc123",
-                strategy_name="uniswap_rsi",
-                chain="arbitrum",
-                protocol="Uniswap V3",
-            )
-            response = await dashboard_service.RegisterStrategyInstance(request, mock_context)
-
-        assert response.success
-        # The registered instance should have strategy_id = AGENT_ID
-        registered = mock_registry.register.call_args[0][0]
-        assert registered.strategy_id == "platform-uuid-1234"
-
-    @pytest.mark.asyncio
-    async def test_update_status_resolves_agent_id(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
-        """UpdateStrategyInstanceStatus uses AGENT_ID for registry lookup."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
-
-        mock_registry = MagicMock()
-        mock_registry.heartbeat.return_value = True
-
-        with patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry):
-            request = gateway_pb2.UpdateInstanceStatusRequest(
-                strategy_id="uniswap_rsi:abc123",
-                heartbeat_only=True,
-            )
-            response = await dashboard_service.UpdateStrategyInstanceStatus(request, mock_context)
-
-        assert response.success
-        mock_registry.heartbeat.assert_called_with("platform-uuid-1234")
-
-    @pytest.mark.asyncio
-    async def test_local_mode_passes_through(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
-        """Without AGENT_ID, strategy_id passes through unchanged (local mode)."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
-        dashboard_service._initialized = True
-        dashboard_service._strategies_root = Path("/nonexistent")
-
-        mock_registry = MagicMock()
-        mock_registry.get.return_value = _make_instance("uniswap_rsi:abc123")
-
-        with patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry):
-            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="uniswap_rsi:abc123")
-            await dashboard_service.GetStrategyDetails(request, mock_context)
-
-        # Registry queried with the original strategy_id
-        mock_registry.get.assert_called_with("uniswap_rsi:abc123")
-
-    @pytest.mark.asyncio
-    async def test_get_strategy_config_falls_back_to_registry(
-        self, dashboard_service, mock_context, monkeypatch
-    ):
-        """GetStrategyConfig serves config from registry when filesystem has no match (deployed mode)."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
-        dashboard_service._initialized = True
-        dashboard_service._strategies_root = Path("/nonexistent")
-
-        config_data = {"strategy_name": "uniswap_rsi", "chain": "arbitrum"}
-        mock_registry = MagicMock()
-        inst = _make_instance("platform-uuid-1234", strategy_name="uniswap_rsi")
-        inst.config_json = json.dumps(config_data)
-        inst.updated_at = datetime.now(UTC)
-        mock_registry.get.return_value = inst
-
-        with patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry):
-            request = gateway_pb2.GetStrategyConfigRequest(strategy_id="uniswap_rsi")
-            response = await dashboard_service.GetStrategyConfig(request, mock_context)
-
-        assert response.strategy_id == "platform-uuid-1234"
-        assert response.strategy_name == "uniswap_rsi"
-        assert json.loads(response.config_json) == config_data

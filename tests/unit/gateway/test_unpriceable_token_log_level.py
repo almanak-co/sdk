@@ -77,7 +77,6 @@ class TestGetPriceLogLevel:
         request = MagicMock()
         request.token = "PT-wstETH"
         request.quote = "USD"
-        request.chain = ""
         context = MagicMock()
 
         with caplog.at_level(logging.WARNING, logger="almanak.gateway.services.market_service"):
@@ -102,7 +101,6 @@ class TestGetPriceLogLevel:
 
         request = MagicMock()
         request.token = "WETH"
-        request.chain = ""
         request.quote = "USD"
         context = MagicMock()
 
@@ -123,7 +121,6 @@ class TestGetPriceLogLevel:
         svc._price_aggregator.get_aggregated_price.side_effect = RuntimeError("unexpected failure")
 
         request = MagicMock()
-        request.chain = ""
         request.token = "PT-wstETH"
         request.quote = "USD"
         context = MagicMock()

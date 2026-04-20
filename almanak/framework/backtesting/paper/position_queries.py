@@ -41,7 +41,6 @@ UNISWAP_V3_POSITION_MANAGER: dict[str, str] = {
     "optimism": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
     "polygon": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
     "base": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
-    "zerog": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72",  # Jaine DEX (Uniswap V3 fork)
 }
 
 # Function selectors for NonfungiblePositionManager

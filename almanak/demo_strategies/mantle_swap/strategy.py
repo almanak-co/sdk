@@ -1,18 +1,18 @@
 """Mantle Basic Swap Demo Strategy.
 
-The simplest possible swap strategy on Mantle: swap tokens via
-Agni Finance (Uniswap V3 fork) on every iteration (if funds allow).
+The simplest possible swap strategy on Mantle: buy WMNT with USDT via
+Agni Finance on every iteration (if funds allow).
 
 What this strategy does:
-    1. Checks from_token balance
-    2. Swaps a fixed USD amount via Agni Finance
+    1. Checks USDT balance
+    2. Swaps a fixed USD amount of USDT -> WMNT via Agni Finance
     3. Holds if insufficient balance
 
 This is the "hello world" of Mantle strategies — no indicators, no signals,
 just a clean on-chain swap showing the core execution flow.
 
 Usage:
-    almanak strat run -d almanak/demo_strategies/mantle_swap --network anvil --once
+    almanak strat run -d mantle_swap --network anvil --once
 """
 
 import logging
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 @almanak_strategy(
     name="demo_mantle_swap",
-    description="Basic swap demo on Mantle L2 via Agni Finance",
+    description="Basic swap demo on Mantle L2 — USDT -> WMNT via Agni Finance",
     version="1.0.0",
     author="Almanak",
     tags=["demo", "mantle", "swap", "agni", "beginner"],
@@ -42,8 +42,8 @@ class MantleSwapStrategy(IntentStrategy):
 
     Configuration (config.json):
         trade_size_usd: Amount per swap in USD (default: 5)
-        from_token: Token to sell (default: USDC)
-        to_token: Token to buy (default: WETH)
+        from_token: Token to sell (default: USDT)
+        to_token: Token to buy (default: WMNT)
         max_slippage_bps: Max slippage in basis points (default: 300)
     """
 
@@ -51,8 +51,8 @@ class MantleSwapStrategy(IntentStrategy):
         super().__init__(*args, **kwargs)
 
         self.trade_size_usd = Decimal(str(self.get_config("trade_size_usd", "5")))
-        self.from_token = self.get_config("from_token", "USDC")
-        self.to_token = self.get_config("to_token", "WETH")
+        self.from_token = self.get_config("from_token", "USDT0")
+        self.to_token = self.get_config("to_token", "WMNT")
         self.max_slippage_bps = int(self.get_config("max_slippage_bps", 300))
 
         logger.info(
@@ -95,29 +95,19 @@ class MantleSwapStrategy(IntentStrategy):
     def get_open_positions(self):
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
-        positions: list[PositionInfo] = []
-
-        try:
-            market = self.create_market_snapshot()
-            to_balance = market.balance(self.to_token)
-            if to_balance.balance > 0:
-                positions.append(
-                    PositionInfo(
-                        position_type=PositionType.TOKEN,
-                        position_id=f"mantle_swap_{self.to_token.lower()}",
-                        chain=self.chain,
-                        protocol="agni",
-                        value_usd=to_balance.balance_usd,
-                        details={"asset": self.to_token, "balance": str(to_balance.balance)},
-                    )
-                )
-        except Exception:
-            logger.warning("Failed to query balance for teardown; reporting no positions")
-
         return TeardownPositionSummary(
             strategy_id=getattr(self, "strategy_id", "demo_mantle_swap"),
             timestamp=datetime.now(UTC),
-            positions=positions,
+            positions=[
+                PositionInfo(
+                    position_type=PositionType.TOKEN,
+                    position_id="mantle_swap_wmnt",
+                    chain=self.chain,
+                    protocol="agni",
+                    value_usd=self.trade_size_usd,
+                    details={"asset": self.to_token},
+                )
+            ],
         )
 
     def generate_teardown_intents(self, mode, market=None) -> list[Intent]:

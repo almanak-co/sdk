@@ -34,9 +34,6 @@ Registered Protocols:
     - morpho_blue / morpho: MorphoBlueReceiptParser
     - compound_v3: CompoundV3ReceiptParser
     - benqi: BenqiReceiptParser (Compound V2 fork on Avalanche)
-    - joelend: JoeLendReceiptParser (Banker Joe / Compound V2 fork on Avalanche)
-    - euler_v2: EulerV2ReceiptParser (ERC-4626 vaults + EVC on Avalanche)
-    - silo_v2: SiloV2ReceiptParser (Isolated lending on Avalanche)
 
     Perpetuals:
     - gmx_v2: GMXv2ReceiptParser (Arbitrum perps)
@@ -155,10 +152,6 @@ class ReceiptParserRegistry:
             "almanak.framework.connectors.traderjoe_v2.receipt_parser",
             "TraderJoeV2ReceiptParser",
         ),
-        "fluid": (
-            "almanak.framework.connectors.fluid.receipt_parser",
-            "FluidReceiptParser",
-        ),
         "sushiswap_v3": (
             "almanak.framework.connectors.sushiswap_v3.receipt_parser",
             "SushiSwapV3ReceiptParser",
@@ -172,10 +165,6 @@ class ReceiptParserRegistry:
             "almanak.framework.connectors.aave_v3.receipt_parser",
             "AaveV3ReceiptParser",
         ),
-        "radiant_v2": (
-            "almanak.framework.connectors.radiant_v2.receipt_parser",
-            "RadiantV2ReceiptParser",
-        ),
         "spark": (
             "almanak.framework.connectors.spark.receipt_parser",
             "SparkReceiptParser",
@@ -188,10 +177,6 @@ class ReceiptParserRegistry:
             "almanak.framework.connectors.morpho_blue.receipt_parser",
             "MorphoBlueReceiptParser",
         ),  # Alias for morpho_blue
-        "curvance": (
-            "almanak.framework.connectors.curvance.receipt_parser",
-            "CurvanceReceiptParser",
-        ),
         "compound_v3": (
             "almanak.framework.connectors.compound_v3.receipt_parser",
             "CompoundV3ReceiptParser",
@@ -199,18 +184,6 @@ class ReceiptParserRegistry:
         "benqi": (
             "almanak.framework.connectors.benqi.receipt_parser",
             "BenqiReceiptParser",
-        ),
-        "joelend": (
-            "almanak.framework.connectors.joelend.receipt_parser",
-            "JoeLendReceiptParser",
-        ),
-        "euler_v2": (
-            "almanak.framework.connectors.euler_v2.receipt_parser",
-            "EulerV2ReceiptParser",
-        ),
-        "silo_v2": (
-            "almanak.framework.connectors.silo_v2.receipt_parser",
-            "SiloV2ReceiptParser",
         ),
         # Perpetuals
         "drift": (
@@ -221,21 +194,6 @@ class ReceiptParserRegistry:
             "almanak.framework.connectors.gmx_v2.receipt_parser",
             "GMXv2ReceiptParser",
         ),
-        # Aster Perps is canonical; pancakeswap_perps is a shim that routes to
-        # the same parser class. Both keys are registered so protocol="pancakeswap_perps"
-        # legacy intents and protocol="aster_perps" new intents both resolve.
-        # The pancakeswap_perps key intentionally points at the shim submodule
-        # (which re-exports the Aster parser under the legacy class name) so
-        # the registry-completeness invariant — "every receipt_parser.py gets
-        # a matching registry entry" — still holds after the extraction.
-        "aster_perps": (
-            "almanak.framework.connectors.aster_perps.receipt_parser",
-            "AsterPerpsReceiptParser",
-        ),
-        "pancakeswap_perps": (
-            "almanak.framework.connectors.pancakeswap_perps.receipt_parser",
-            "PancakeSwapPerpsReceiptParser",
-        ),
         # Staking Protocols
         "lido": (
             "almanak.framework.connectors.lido.receipt_parser",
@@ -244,10 +202,6 @@ class ReceiptParserRegistry:
         "ethena": (
             "almanak.framework.connectors.ethena.receipt_parser",
             "EthenaReceiptParser",
-        ),
-        "gimo": (
-            "almanak.framework.connectors.gimo.receipt_parser",
-            "GimoReceiptParser",
         ),
         # Aggregators
         "enso": (

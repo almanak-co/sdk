@@ -47,7 +47,6 @@ class TokenBalance:
     balance: Decimal
     value_usd: Decimal
     address: str = ""
-    price_usd: Decimal | None = None  # Per-token price; enables redenomination (DB persistence is Week 2)
 
     def __post_init__(self) -> None:
         """Normalize numeric fields to Decimal."""
@@ -55,8 +54,6 @@ class TokenBalance:
             self.balance = Decimal(str(self.balance))
         if isinstance(self.value_usd, int | float | str):
             self.value_usd = Decimal(str(self.value_usd))
-        if self.price_usd is not None and isinstance(self.price_usd, int | float | str):
-            self.price_usd = Decimal(str(self.price_usd))
 
 
 @dataclass
@@ -79,49 +76,10 @@ class PositionValue:
     # Protocol-specific details for drill-down views
     details: dict[str, Any] = field(default_factory=dict)
 
-    # Per-position economic state (Phase 4, VIB-2833)
-    cost_basis_usd: Decimal = Decimal("0")  # Total capital deployed
-    unrealized_pnl_usd: Decimal = Decimal("0")  # value - cost_basis
-    realized_pnl_usd: Decimal = Decimal("0")  # Accumulated from closes
-    entry_timestamp: str = ""  # ISO timestamp when position was opened
-    last_update_timestamp: str = ""  # ISO timestamp of last valuation
-    ledger_entry_id: str = ""  # FK to transaction_ledger for traceability
-
     def __post_init__(self) -> None:
         """Normalize numeric fields to Decimal."""
         if isinstance(self.value_usd, int | float | str):
             self.value_usd = Decimal(str(self.value_usd))
-        for attr in ["cost_basis_usd", "unrealized_pnl_usd", "realized_pnl_usd"]:
-            value = getattr(self, attr)
-            if isinstance(value, int | float | str):
-                setattr(self, attr, Decimal(str(value)))
-
-
-def _position_to_dict(p: "PositionValue") -> dict[str, Any]:
-    """Serialize a PositionValue to dict, including Phase 4 economic state fields."""
-    d: dict[str, Any] = {
-        "position_type": p.position_type.value if hasattr(p.position_type, "value") else str(p.position_type),
-        "protocol": p.protocol,
-        "chain": p.chain,
-        "value_usd": str(p.value_usd),
-        "label": p.label,
-        "tokens": p.tokens,
-        "details": p.details,
-    }
-    # Phase 4 economic state fields — only include when set to keep payload lean
-    if p.cost_basis_usd:
-        d["cost_basis_usd"] = str(p.cost_basis_usd)
-    if p.unrealized_pnl_usd:
-        d["unrealized_pnl_usd"] = str(p.unrealized_pnl_usd)
-    if p.realized_pnl_usd:
-        d["realized_pnl_usd"] = str(p.realized_pnl_usd)
-    if p.entry_timestamp:
-        d["entry_timestamp"] = p.entry_timestamp
-    if p.last_update_timestamp:
-        d["last_update_timestamp"] = p.last_update_timestamp
-    if p.ledger_entry_id:
-        d["ledger_entry_id"] = p.ledger_entry_id
-    return d
 
 
 @dataclass
@@ -157,14 +115,9 @@ class PortfolioSnapshot:
     # Wallet balances (uninvested funds)
     wallet_balances: list[TokenBalance] = field(default_factory=list)
 
-    # Token prices used for valuation (audit trail)
-    # key: "chain:address", value: {"price_usd": str, "symbol": str, "decimals": int|None}
-    token_prices: dict[str, dict] = field(default_factory=dict)
-
     # Metadata
     chain: str = ""
     iteration_number: int = 0
-    snapshot_metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Normalize numeric fields to Decimal."""
@@ -185,44 +138,37 @@ class PortfolioSnapshot:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSON storage."""
-        data: dict[str, Any] = {
+        return {
             "timestamp": self.timestamp.isoformat(),
             "strategy_id": self.strategy_id,
             "total_value_usd": str(self.total_value_usd),
             "available_cash_usd": str(self.available_cash_usd),
             "value_confidence": self.value_confidence.value,
             "error": self.error,
-            "positions": [_position_to_dict(p) for p in self.positions],
+            "positions": [
+                {
+                    "position_type": p.position_type.value
+                    if hasattr(p.position_type, "value")
+                    else str(p.position_type),
+                    "protocol": p.protocol,
+                    "chain": p.chain,
+                    "value_usd": str(p.value_usd),
+                    "label": p.label,
+                    "tokens": p.tokens,
+                    "details": p.details,
+                }
+                for p in self.positions
+            ],
             "wallet_balances": [
                 {
                     "symbol": b.symbol,
                     "balance": str(b.balance),
                     "value_usd": str(b.value_usd),
-                    "price_usd": str(b.price_usd) if b.price_usd is not None else None,
-                    "address": b.address,
                 }
                 for b in self.wallet_balances
             ],
-            "token_prices": self.token_prices,
             "chain": self.chain,
             "iteration_number": self.iteration_number,
-        }
-        if self.snapshot_metadata:
-            data["snapshot_metadata"] = self.snapshot_metadata
-        return data
-
-    def to_positions_payload(self) -> list[dict[str, Any]] | dict[str, Any]:
-        """Serialize positions_json payload for persistence.
-
-        Legacy rows store a bare positions list. New rows may store an envelope
-        with reconciliation metadata.
-        """
-        positions = [_position_to_dict(p) for p in self.positions]
-        if not self.snapshot_metadata:
-            return positions
-        return {
-            "positions": positions,
-            "metadata": self.snapshot_metadata,
         }
 
     @classmethod
@@ -241,25 +187,16 @@ class PortfolioSnapshot:
                     label=p["label"],
                     tokens=p.get("tokens", []),
                     details=p.get("details", {}),
-                    cost_basis_usd=Decimal(p.get("cost_basis_usd", "0")),
-                    unrealized_pnl_usd=Decimal(p.get("unrealized_pnl_usd", "0")),
-                    realized_pnl_usd=Decimal(p.get("realized_pnl_usd", "0")),
-                    entry_timestamp=p.get("entry_timestamp", ""),
-                    last_update_timestamp=p.get("last_update_timestamp", ""),
-                    ledger_entry_id=p.get("ledger_entry_id", ""),
                 )
             )
 
         wallet_balances = []
         for b in data.get("wallet_balances", []):
-            price_usd = b.get("price_usd")
             wallet_balances.append(
                 TokenBalance(
                     symbol=b["symbol"],
                     balance=Decimal(b["balance"]),
                     value_usd=Decimal(b["value_usd"]),
-                    address=b.get("address", ""),
-                    price_usd=Decimal(price_usd) if price_usd is not None else None,
                 )
             )
 
@@ -272,23 +209,9 @@ class PortfolioSnapshot:
             error=data.get("error"),
             positions=positions,
             wallet_balances=wallet_balances,
-            token_prices=data.get("token_prices", {}),
             chain=data.get("chain", ""),
             iteration_number=data.get("iteration_number", 0),
-            snapshot_metadata=data.get("snapshot_metadata", {}),
         )
-
-    @staticmethod
-    def unpack_positions_payload(payload: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Parse either the legacy list payload or the metadata envelope."""
-        if isinstance(payload, list):
-            return payload, {}
-        if isinstance(payload, dict):
-            positions = payload.get("positions", [])
-            metadata = payload.get("metadata", {})
-            if isinstance(positions, list) and isinstance(metadata, dict):
-                return positions, metadata
-        return [], {}
 
 
 @dataclass
@@ -315,15 +238,6 @@ class PortfolioMetrics:
     deposits_usd: Decimal = Decimal("0")  # Cumulative deposits
     withdrawals_usd: Decimal = Decimal("0")  # Cumulative withdrawals
     gas_spent_usd: Decimal = Decimal("0")  # Cumulative gas costs
-
-    # Phase 1a: rich accounting fields (persisted in SQLite, round-tripped)
-    positions_json: str = "[]"  # JSON-encoded position details
-    cycle_id: str | None = None  # Current execution cycle
-
-    # Phase 4: canonical identity and execution mode (VIB-2835/2837)
-    deployment_id: str = ""  # Canonical deployment key (wallet+chain hash or --id)
-    execution_mode: str = ""  # "live", "paper", "dry_run", "backtest"
-    is_complete: bool = True  # Whether all expected records for this cycle were committed
 
     def __post_init__(self) -> None:
         """Normalize numeric fields to Decimal."""
@@ -362,11 +276,6 @@ class PortfolioMetrics:
             "deposits_usd": str(self.deposits_usd),
             "withdrawals_usd": str(self.withdrawals_usd),
             "gas_spent_usd": str(self.gas_spent_usd),
-            "positions_json": self.positions_json,
-            "cycle_id": self.cycle_id,
-            "deployment_id": self.deployment_id,
-            "execution_mode": self.execution_mode,
-            "is_complete": self.is_complete,
         }
 
     @classmethod
@@ -380,9 +289,4 @@ class PortfolioMetrics:
             deposits_usd=Decimal(data.get("deposits_usd", "0")),
             withdrawals_usd=Decimal(data.get("withdrawals_usd", "0")),
             gas_spent_usd=Decimal(data.get("gas_spent_usd", "0")),
-            positions_json=data.get("positions_json", "[]"),
-            cycle_id=data.get("cycle_id"),
-            deployment_id=data.get("deployment_id", ""),
-            execution_mode=data.get("execution_mode", ""),
-            is_complete=data.get("is_complete", True),
         )

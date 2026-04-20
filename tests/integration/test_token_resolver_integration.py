@@ -795,31 +795,53 @@ class TestConcurrentAccess:
 # ============================================================================
 
 
-class TestLegacyAPIsRemoved:
-    """Test that legacy token APIs have been fully removed."""
+class TestDeprecationWarningsMigrationPath:
+    """Test that old APIs trigger deprecation warnings."""
 
-    def test_token_registry_removed(self):
-        """TokenRegistry module has been removed."""
-        with pytest.raises(ImportError):
-            from almanak.framework.data.tokens.registry import TokenRegistry  # noqa: F401
+    def test_get_default_registry_emits_warning(self):
+        """get_default_registry() should emit DeprecationWarning."""
+        from almanak.framework.data.tokens import get_default_registry
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            registry = get_default_registry()
+
+            deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+            assert len(deprecation_warnings) >= 1
+            assert "get_token_resolver" in str(deprecation_warnings[0].message)
+            assert registry is not None
+
+    def test_token_registry_init_emits_warning(self):
+        """TokenRegistry() should emit DeprecationWarning."""
+        from almanak.framework.data.tokens.registry import TokenRegistry
+
+        # Reset warned flag for clean test
+        TokenRegistry._warned = False
+        try:
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                _registry = TokenRegistry()
+
+                deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+                assert len(deprecation_warnings) >= 1
+                assert "get_token_resolver" in str(deprecation_warnings[0].message)
+        finally:
+            TokenRegistry._warned = False
 
     def test_token_addresses_removed_from_compiler(self):
         """TOKEN_ADDRESSES has been removed from compiler.py after deprecation period."""
         with pytest.raises(ImportError):
             from almanak.framework.intents.compiler import TOKEN_ADDRESSES  # noqa: F401
 
-    def test_get_default_registry_removed(self):
-        """get_default_registry has been removed from the public API."""
-        assert not hasattr(__import__("almanak.framework.data.tokens", fromlist=["get_default_registry"]), "get_default_registry")
-
-    def test_resolver_api_works(self, resolver):
-        """get_token_resolver() and TokenResolver work without deprecation warnings."""
+    def test_new_api_does_not_emit_warning(self, resolver):
+        """get_token_resolver() and TokenResolver should NOT emit deprecation warnings."""
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             _resolver = get_token_resolver()
             _token = _resolver.resolve("USDC", "arbitrum")
 
             deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+            # Filter out warnings from internal legacy callers
             direct_warnings = [
                 w
                 for w in deprecation_warnings

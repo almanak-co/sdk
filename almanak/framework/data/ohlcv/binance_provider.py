@@ -20,7 +20,6 @@ Example:
         print(f"{candle.timestamp}: close={candle.close}")
 """
 
-import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -38,11 +37,6 @@ from ..interfaces import (
 
 logger = logging.getLogger(__name__)
 
-# Quote currencies to try when dynamically resolving unknown tokens (VIB-645).
-_DYNAMIC_QUOTE_CANDIDATES = ("USDT", "USDC", "FDUSD")
-
-# TTL for negative cache entries (tokens confirmed not on Binance).
-_NEGATIVE_CACHE_TTL = 4 * 3600  # 4 hours
 
 # Token symbol to Binance trading pair mapping
 BINANCE_SYMBOL_MAP: dict[str, str] = {
@@ -216,13 +210,8 @@ class BinanceOHLCVProvider:
         # Health metrics
         self._metrics = BinanceHealthMetrics()
 
-        # HTTP session and the event loop it was created on
+        # HTTP session
         self._session: aiohttp.ClientSession | None = None
-        self._session_loop: asyncio.AbstractEventLoop | None = None
-
-        # Dynamic symbol resolution caches (VIB-645)
-        self._dynamic_symbol_cache: dict[str, str] = {}  # TOKEN -> resolved Binance symbol
-        self._negative_cache: dict[str, float] = {}  # TOKEN -> timestamp of failed lookup
 
         logger.info(
             "Initialized BinanceOHLCVProvider",
@@ -240,28 +229,10 @@ class BinanceOHLCVProvider:
         return self.SUPPORTED_TIMEFRAMES.copy()
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create HTTP session.
-
-        Creates a new session if none exists, the existing one is closed,
-        or the existing one was created on a different event loop (which
-        happens when _run_async falls back to a thread pool).
-        """
-        current_loop = asyncio.get_running_loop()
-        if self._session is not None and not self._session.closed:
-            # Check if session belongs to the current event loop
-            if self._session_loop is not None and self._session_loop is not current_loop:
-                # Session from a different loop — close it and create a new one
-                try:
-                    await self._session.close()
-                except Exception:
-                    pass
-                self._session = None
-                self._session_loop = None
-
+        """Get or create HTTP session."""
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=self._request_timeout)
             self._session = aiohttp.ClientSession(timeout=timeout)
-            self._session_loop = current_loop
         return self._session
 
     async def close(self) -> None:
@@ -299,60 +270,8 @@ class BinanceOHLCVProvider:
         )
 
     def _resolve_symbol(self, token: str) -> str | None:
-        """Resolve token symbol to Binance trading pair (static map only)."""
+        """Resolve token symbol to Binance trading pair."""
         return BINANCE_SYMBOL_MAP.get(token.upper())
-
-    async def _resolve_symbol_dynamic(self, token: str) -> str | None:
-        """Try to find a valid Binance trading pair for an unknown token (VIB-645).
-
-        Probes {TOKEN}USDT, {TOKEN}USDC, {TOKEN}FDUSD against the ticker API.
-        Returns the first valid pair, or None. Caches results.
-        """
-        token_upper = token.upper()
-
-        # Guard against non-alphanumeric tokens being injected into URLs
-        if not token_upper.isalnum():
-            return None
-
-        # Check dynamic cache first
-        if token_upper in self._dynamic_symbol_cache:
-            return self._dynamic_symbol_cache[token_upper]
-
-        # Check negative cache (4h TTL)
-        neg_ts = self._negative_cache.get(token_upper)
-        if neg_ts and (time.time() - neg_ts) < _NEGATIVE_CACHE_TTL:
-            return None
-
-        session = await self._get_session()
-        saw_transient_error = False
-        for quote in _DYNAMIC_QUOTE_CANDIDATES:
-            candidate = f"{token_upper}{quote}"
-            url = f"{self.API_BASE}/ticker/price?symbol={candidate}"
-            try:
-                async with session.get(url) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get("price"):
-                            self._dynamic_symbol_cache[token_upper] = candidate
-                            logger.warning(
-                                "Dynamically resolved Binance OHLCV pair for %s -> %s",
-                                token_upper,
-                                candidate,
-                            )
-                            return candidate
-                    elif resp.status in (429, 418) or resp.status >= 500:
-                        saw_transient_error = True
-                        continue
-            except (aiohttp.ClientError, TimeoutError):
-                saw_transient_error = True
-                continue
-
-        # Only negative-cache if all probes got definitive 4xx (not-found) responses
-        if not saw_transient_error:
-            self._negative_cache[token_upper] = time.time()
-        else:
-            logger.debug("Skipping negative cache for %s due to transient errors during probe", token_upper)
-        return None
 
     def _resolve_interval(self, timeframe: str) -> str | None:
         """Resolve timeframe to Binance API interval."""
@@ -404,12 +323,10 @@ class BinanceOHLCVProvider:
             )
             return cached
 
-        # Resolve symbol and interval (static map, then dynamic probe)
+        # Resolve symbol and interval
         symbol = self._resolve_symbol(token_upper)
         if symbol is None:
-            symbol = await self._resolve_symbol_dynamic(token_upper)
-        if symbol is None:
-            error_msg = f"Unknown token for Binance: {token_upper} (tried dynamic resolution)"
+            error_msg = f"Unknown token for Binance: {token_upper}"
             self._metrics.errors += 1
             raise DataSourceUnavailable(source="binance_ohlcv", reason=error_msg)
 
@@ -434,21 +351,17 @@ class BinanceOHLCVProvider:
             async with session.get(url, params=params) as response:
                 latency_ms = (time.time() - start_time) * 1000
 
-                if response.status in (429, 418):
+                if response.status == 429:
                     self._metrics.errors += 1
                     raise DataSourceUnavailable(
                         source="binance_ohlcv",
-                        reason=f"Rate limited by Binance (HTTP {response.status})",
+                        reason="Rate limited by Binance",
                         retry_after=60.0,
                     )
 
                 if response.status != 200:
                     error_text = await response.text()
                     self._metrics.errors += 1
-                    # Evict stale dynamic mappings on definitive rejection (4xx, not rate-limit/ban)
-                    if response.status < 500 and token_upper in self._dynamic_symbol_cache:
-                        del self._dynamic_symbol_cache[token_upper]
-                        logger.warning("Evicted stale dynamic Binance OHLCV mapping for %s", token_upper)
                     raise DataSourceUnavailable(
                         source="binance_ohlcv",
                         reason=f"HTTP {response.status}: {error_text}",
@@ -526,10 +439,8 @@ class BinanceOHLCVProvider:
         }
 
     def clear_cache(self) -> None:
-        """Clear the OHLCV cache and dynamic resolution caches."""
+        """Clear the OHLCV cache."""
         self._cache.clear()
-        self._dynamic_symbol_cache.clear()
-        self._negative_cache.clear()
         logger.info("Cleared Binance OHLCV cache")
 
     async def __aenter__(self) -> "BinanceOHLCVProvider":

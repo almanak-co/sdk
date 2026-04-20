@@ -46,12 +46,6 @@ from .adapter import (
     GMXv2Position,
     GMXv2PositionSide,
 )
-from .market_rules import (
-    get_allowed_collaterals,
-    is_market_registered,
-    registered_markets,
-    validate_collateral,
-)
 from .receipt_parser import (
     GMXv2Event,
     GMXv2EventType,
@@ -93,9 +87,4 @@ __all__ = [
     "DecreasePositionSwapType",
     "GMX_V2_SDK_ADDRESSES",
     "get_gmx_v2_sdk",
-    # Market collateral rules (single source of truth)
-    "get_allowed_collaterals",
-    "is_market_registered",
-    "registered_markets",
-    "validate_collateral",
 ]

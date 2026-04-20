@@ -1,0 +1,15 @@
+{
+    "pool": "WAVAX/USDC/20",
+    "range_width_pct": "0.10",
+    "amount_x": "0.5",
+    "amount_y": "10",
+    "num_bins": 11,
+    "rebalance_threshold_pct": "0.08",
+    "chain": "avalanche",
+    "network": "mainnet",
+    "anvil_funding": {
+        "AVAX": 100,
+        "WAVAX": 100,
+        "USDC": 10000
+    }
+}

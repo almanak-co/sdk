@@ -23,27 +23,9 @@ from ..models.reproduction_bundle import ActionBundle
 logger = logging.getLogger(__name__)
 
 
-def _is_local_rpc(rpc_url: str | None) -> bool:
-    """Thin wrapper around the canonical local-RPC detector in simulator.config.
-
-    Lazy-imported to avoid circular dependency between execution submodules.
-    """
-    from .simulator.config import is_local_rpc
-
-    return is_local_rpc(rpc_url)
-
-
-# Minimum slippage (basis points) for on-chain guards on Anvil forks.
-# Enso routes are quoted against live mainnet pools, but Anvil fork state
-# diverges over time. Without a wider tolerance, the safeRouteSingle
-# minAmountOut check reverts because forked pool reserves differ from mainnet.
-_ANVIL_MIN_SLIPPAGE_BPS = 500  # 5%
-
-
 def refresh_deferred_bundle(
     action_bundle: ActionBundle,
     wallet_address: str,
-    rpc_url: str | None = None,
 ) -> ActionBundle:
     """Refresh stale deferred transaction data in an ActionBundle.
 
@@ -58,9 +40,6 @@ def refresh_deferred_bundle(
     Args:
         action_bundle: The ActionBundle to refresh.
         wallet_address: Wallet address for the fresh quote request.
-        rpc_url: RPC URL for network detection. When pointing to a local
-            Anvil fork, slippage tolerance is widened to account for pool
-            state divergence between mainnet and the fork.
 
     Returns:
         A new ActionBundle with fresh transaction data, or the original
@@ -76,27 +55,8 @@ def refresh_deferred_bundle(
         logger.warning("Bundle has deferred_swap=True but no route_params; skipping refresh")
         return action_bundle
 
-    # Deep-copy metadata upfront so we never mutate the caller's bundle,
-    # and so that any slippage widening is visible to the fresh API call.
-    refresh_metadata = copy.deepcopy(metadata)
-
-    # Widen slippage for Enso on Anvil forks: Enso quotes against live mainnet
-    # pools, but Anvil fork state diverges — the on-chain minAmountOut guard
-    # reverts if the fork's pool reserves differ enough from mainnet.
-    # Only Enso uses slippage_bps; LiFi uses a different slippage field.
-    if protocol == "enso" and _is_local_rpc(rpc_url):
-        enso_route_params = refresh_metadata.get("route_params")
-        if enso_route_params and enso_route_params.get("slippage_bps", 0) < _ANVIL_MIN_SLIPPAGE_BPS:
-            original_bps = enso_route_params["slippage_bps"]
-            enso_route_params["slippage_bps"] = _ANVIL_MIN_SLIPPAGE_BPS
-            logger.info(
-                "Anvil fork detected: widening Enso slippage from %d bps to %d bps",
-                original_bps,
-                _ANVIL_MIN_SLIPPAGE_BPS,
-            )
-
     try:
-        fresh_tx = _fetch_fresh_transaction(protocol, refresh_metadata, wallet_address)
+        fresh_tx = _fetch_fresh_transaction(protocol, metadata, wallet_address)
     except Exception:
         logger.exception(f"Failed to refresh deferred {protocol} transaction; proceeding with stale data")
         return action_bundle
@@ -104,11 +64,11 @@ def refresh_deferred_bundle(
     if fresh_tx is None:
         return action_bundle
 
-    # Build the new bundle with the (potentially widened) metadata
+    # Deep-copy the bundle so we don't mutate the caller's object
     new_bundle = ActionBundle(
         intent_type=action_bundle.intent_type,
         transactions=copy.deepcopy(action_bundle.transactions),
-        metadata=refresh_metadata,
+        metadata=copy.deepcopy(action_bundle.metadata),
     )
 
     # Find and replace the deferred transaction

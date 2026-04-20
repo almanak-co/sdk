@@ -48,7 +48,7 @@ This auto-detects your platform (Claude Code, Codex, Cursor, Copilot, and [6 mor
 almanak strat demo
 ```
 
-This shows an interactive menu of working demo strategies. Pick one and it gets copied into your current directory, ready to run. You can also skip the menu:
+This shows an interactive menu of 13 working demo strategies. Pick one and it gets copied into your current directory, ready to run. You can also skip the menu:
 
 ```bash
 almanak strat demo --name uniswap_rsi
@@ -209,10 +209,8 @@ class MyStrategy(IntentStrategy):
 | `PredictionRedeemIntent` | Redeem prediction market winnings |
 | `VaultDepositIntent` | Deposit into a vault |
 | `VaultRedeemIntent` | Redeem from a vault |
-| `WrapNativeIntent` | Wrap native tokens (e.g., ETH to WETH). Factory: `Intent.wrap()` |
-| `UnwrapNativeIntent` | Unwrap native tokens (e.g., WETH to ETH). Factory: `Intent.unwrap()` |
-| `Intent.bridge()` | Bridge tokens cross-chain (factory method returning a composite intent) |
-| `Intent.ensure_balance()` | Ensure minimum token balance on a target chain (factory method resolving to a bridge or hold) |
+| `BridgeIntent` | Bridge tokens cross-chain |
+| `EnsureBalanceIntent` | Meta-intent that resolves to a `BridgeIntent` or `HoldIntent` to ensure minimum token balance on a target chain |
 
 ## State Persistence (Required for Stateful Strategies)
 

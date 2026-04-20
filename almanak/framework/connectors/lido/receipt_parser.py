@@ -656,28 +656,6 @@ class LidoReceiptParser:
             logger.warning(f"Failed to extract shares received: {e}")
             return None
 
-    def extract_wsteth_received(self, receipt: dict[str, Any]) -> int | None:
-        """Extract wstETH amount received from a stake-with-wrap transaction.
-
-        When staking with receive_wrapped=True, the TX emits a Transfer (mint)
-        event on the wstETH contract. This method extracts that amount so
-        strategy authors don't need to estimate the stETH->wstETH exchange rate.
-
-        Args:
-            receipt: Transaction receipt dict with 'logs' field
-
-        Returns:
-            wstETH amount in wei if a wrap mint was found, None otherwise
-        """
-        try:
-            result = self.parse_receipt(receipt)
-            if result.wraps:
-                return int(result.wraps[0].amount * Decimal(10**18))
-            return None
-        except Exception as e:
-            logger.warning(f"Failed to extract wstETH received: {e}")
-            return None
-
     def extract_unstake_amount(self, receipt: dict[str, Any]) -> int | None:
         """Extract unstake amount from transaction receipt.
 

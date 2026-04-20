@@ -1,0 +1,5 @@
+{
+    "display_name": "Uniswap RSI",
+    "description": "RSI mean reversion strategy on Uniswap V3 showing indicator, position, and PnL",
+    "icon": "\ud83d\udcc8"
+}

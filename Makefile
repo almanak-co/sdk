@@ -71,15 +71,10 @@ test-integration:
 test-all:
 	uv run pytest tests/ --ignore=tests/intents -m "not integration" -v --import-mode=importlib
 
-# Run all tests for CI (with JUnit XML report, no coverage)
-test-ci:
-	uv run pytest tests/ --ignore=tests/intents --ignore=tests/visual/nightly -m "not integration" -v --import-mode=importlib \
-		--junitxml=test-results.xml
-
 # Run all tests with coverage report
 test-coverage:
 	uv run pytest tests/ --ignore=tests/intents --ignore=tests/visual/nightly -m "not integration" -v --import-mode=importlib \
-		--cov=almanak --cov-report=xml:coverage.xml \
+		--cov=almanak --cov-report=html:coverage-html --cov-report=xml:coverage.xml --cov-report=term \
 		--junitxml=test-results.xml
 
 # Run nightly-only visual Market Data API contract tests
@@ -165,7 +160,7 @@ run-example:
 		echo "Please set it with: export ALCHEMY_API_KEY=your_api_key"; \
 		exit 1; \
 	fi
-	uv run almanak strat new -n example_strategy -t mean_reversion -c arbitrum --output-dir ./example_strategy
+	uv run almanak strat new -n example_strategy -t mean_reversion -c arbitrum
 	@echo "Example strategy created in example_strategy/"
 	@echo "To test: cd example_strategy && uv run almanak strat run --once"
 
@@ -233,7 +228,7 @@ dashboard:
 anvil-dev:
 	@if [ -z "$(STRATEGY_DIR)" ]; then \
 		echo "Error: STRATEGY_DIR is required"; \
-		echo "Example: make anvil-dev STRATEGY_DIR=almanak/demo_strategies/uniswap_rsi"; \
+		echo "Example: make anvil-dev STRATEGY_DIR=strategies/demo/uniswap_rsi"; \
 		exit 1; \
 	fi
 	@echo "Starting strategy (auto-starts managed gateway + Anvil)..."
@@ -317,4 +312,4 @@ clean:
 	find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name ".ruff_cache" -exec rm -rf {} + 2>/dev/null || true
 	rm -rf dist/ build/ *.egg-info .eggs/ site/
-	rm -rf coverage.xml test-results.xml .coverage .coverage.*
+	rm -rf coverage-html/ coverage.xml test-results.xml .coverage

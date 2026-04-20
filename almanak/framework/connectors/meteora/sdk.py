@@ -138,7 +138,7 @@ class MeteoraSDK:
             MeteoraPoolError: If pool not found.
             MeteoraAPIError: If API request fails.
         """
-        data = self._make_request(f"/pools/{pool_address}")
+        data = self._make_request(f"/pair/{pool_address}")
 
         if not data:
             raise MeteoraPoolError(f"Pool not found: {pool_address}")
@@ -163,20 +163,17 @@ class MeteoraSDK:
         Returns:
             Best matching MeteoraPool, or None if not found.
         """
-        data = self._make_request("/pools", params={"limit": 100})
+        data = self._make_request("/pair/all_with_pagination", params={"limit": 100})
 
         if not data:
             return None
 
-        pairs = data if isinstance(data, list) else (data.get("data") or data.get("pairs") or [])
+        pairs = data if isinstance(data, list) else data.get("pairs", data.get("data", []))
 
         candidates = []
         for pair_data in pairs:
-            # New API nests mints under token_x/token_y objects
-            tx = pair_data.get("token_x", {}) if isinstance(pair_data.get("token_x"), dict) else {}
-            ty = pair_data.get("token_y", {}) if isinstance(pair_data.get("token_y"), dict) else {}
-            mint_x = tx.get("address", "") or pair_data.get("mint_x", pair_data.get("mintX", ""))
-            mint_y = ty.get("address", "") or pair_data.get("mint_y", pair_data.get("mintY", ""))
+            mint_x = pair_data.get("mint_x", pair_data.get("mintX", ""))
+            mint_y = pair_data.get("mint_y", pair_data.get("mintY", ""))
 
             if (mint_x == token_a and mint_y == token_b) or (mint_x == token_b and mint_y == token_a):
                 candidates.append(pair_data)

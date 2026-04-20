@@ -43,8 +43,6 @@ def _make_instance(
         protocol="Uniswap V3",
         wallet_address="0x1234",
         config_json="{}",
-        chains=chain,
-        chain_wallets="{}",
         status=status,
         archived=archived,
         created_at=now,
@@ -123,48 +121,14 @@ class TestInstanceRegistryBasics:
             registry = InstanceRegistry(db_path=db_path)
             registry.initialize()
 
-            registry.register(_make_instance("strat1:aaa111", strategy_name="strat_a"))
-            registry.register(_make_instance("strat2:bbb222", strategy_name="strat_b"))
+            registry.register(_make_instance("strat1:aaa111"))
+            registry.register(_make_instance("strat2:bbb222"))
 
             instances = registry.list_all()
             assert len(instances) == 2
             ids = {i.strategy_id for i in instances}
             assert "strat1:aaa111" in ids
             assert "strat2:bbb222" in ids
-
-
-    def test_auto_archive_older_instances_same_name(self):
-        """Registering a new instance auto-archives older ones with the same strategy_name."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "test.db"
-            registry = InstanceRegistry(db_path=db_path)
-            registry.initialize()
-
-            registry.register(_make_instance("my_strat:aaa111", strategy_name="my_strat"))
-            registry.register(_make_instance("my_strat:bbb222", strategy_name="my_strat"))
-
-            # Only the latest should be non-archived
-            non_archived = registry.list_all(include_archived=False)
-            assert len(non_archived) == 1
-            assert non_archived[0].strategy_id == "my_strat:bbb222"
-
-            # The old one should be archived
-            old = registry.get("my_strat:aaa111")
-            assert old.archived is True
-            assert old.status == "INACTIVE"
-
-    def test_auto_archive_does_not_affect_different_names(self):
-        """Instances with different strategy_names are not auto-archived."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "test.db"
-            registry = InstanceRegistry(db_path=db_path)
-            registry.initialize()
-
-            registry.register(_make_instance("strat_a:aaa", strategy_name="alpha"))
-            registry.register(_make_instance("strat_b:bbb", strategy_name="beta"))
-
-            non_archived = registry.list_all(include_archived=False)
-            assert len(non_archived) == 2
 
 
 class TestInstanceRegistryStatus:
@@ -420,8 +384,7 @@ class TestInstanceRegistryThreadSafety:
             def register_instances(thread_id: int):
                 try:
                     for i in range(20):
-                        sid = f"strat_{thread_id}:{i:06d}"
-                        inst = _make_instance(sid, strategy_name=sid)
+                        inst = _make_instance(f"strat_{thread_id}:{i:06d}")
                         registry.register(inst)
                 except Exception as e:
                     errors.append(e)
@@ -444,9 +407,9 @@ class TestInstanceRegistryThreadSafety:
             registry = InstanceRegistry(db_path=db_path)
             registry.initialize()
 
-            # Register some instances with unique names
+            # Register some instances
             for i in range(5):
-                registry.register(_make_instance(f"strat:{i:06d}", strategy_name=f"strat_{i}"))
+                registry.register(_make_instance(f"strat:{i:06d}"))
 
             errors = []
 
@@ -477,9 +440,9 @@ class TestInstanceRegistryStartupReconciliation:
             registry = InstanceRegistry(db_path=db_path)
             registry.initialize()
 
-            registry.register(_make_instance("strat1:aaa", strategy_name="strat_a", status="RUNNING"))
-            registry.register(_make_instance("strat2:bbb", strategy_name="strat_b", status="RUNNING"))
-            registry.register(_make_instance("strat3:ccc", strategy_name="strat_c", status="INACTIVE"))
+            registry.register(_make_instance("strat1:aaa", status="RUNNING"))
+            registry.register(_make_instance("strat2:bbb", status="RUNNING"))
+            registry.register(_make_instance("strat3:ccc", status="INACTIVE"))
 
             count = registry.reconcile_stale_on_startup()
             assert count == 2
@@ -640,11 +603,11 @@ class TestInstanceRegistryHeartbeatTTL:
 
             now = datetime.now(UTC)
 
-            fresh = _make_instance("fresh:aaa", strategy_name="fresh_strat", status="RUNNING")
+            fresh = _make_instance("fresh:aaa", status="RUNNING")
             # last_heartbeat_at is now by default
             registry.register(fresh)
 
-            stale = _make_instance("stale:bbb", strategy_name="stale_strat", status="RUNNING")
+            stale = _make_instance("stale:bbb", status="RUNNING")
             stale.last_heartbeat_at = now - timedelta(seconds=400)
             registry.register(stale)
 
@@ -686,74 +649,3 @@ class TestInstanceRegistrySingleton:
     def teardown_method(self):
         """Reset singleton after each test."""
         reset_instance_registry()
-
-
-class TestAgentIdResolution:
-    """Tests for AGENT_ID normalization in deployed mode.
-
-    When AGENT_ID env var is set, the registry should use it as the key
-    for all operations, ensuring write/read consistency with the dashboard.
-    """
-
-    def test_register_uses_agent_id(self, tmp_path, monkeypatch):
-        """Register stores instance under AGENT_ID when env var is set."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
-        registry = InstanceRegistry(db_path=tmp_path / "test.db")
-        registry.initialize()
-
-        instance = _make_instance(strategy_id="uniswap_rsi:abc123")
-        registry.register(instance)
-
-        # Stored under AGENT_ID, not the original strategy_id
-        assert registry.get("platform-uuid-1234") is not None
-        assert registry.get("platform-uuid-1234").strategy_name == "test_strat"
-
-    def test_get_resolves_agent_id(self, tmp_path, monkeypatch):
-        """Get resolves AGENT_ID so lookups match registered data."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
-        registry = InstanceRegistry(db_path=tmp_path / "test.db")
-        registry.initialize()
-
-        instance = _make_instance(strategy_id="uniswap_rsi:abc123")
-        registry.register(instance)
-
-        # Querying with SDK strategy_id also resolves to AGENT_ID
-        result = registry.get("uniswap_rsi:abc123")
-        assert result is not None
-        assert result.strategy_id == "platform-uuid-1234"
-
-    def test_heartbeat_resolves_agent_id(self, tmp_path, monkeypatch):
-        """Heartbeat finds the instance via resolved AGENT_ID."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
-        registry = InstanceRegistry(db_path=tmp_path / "test.db")
-        registry.initialize()
-
-        instance = _make_instance(strategy_id="uniswap_rsi:abc123")
-        registry.register(instance)
-
-        # Heartbeat with SDK strategy_id resolves to AGENT_ID
-        assert registry.heartbeat("uniswap_rsi:abc123") is True
-
-    def test_update_status_resolves_agent_id(self, tmp_path, monkeypatch):
-        """Status update finds the instance via resolved AGENT_ID."""
-        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
-        registry = InstanceRegistry(db_path=tmp_path / "test.db")
-        registry.initialize()
-
-        instance = _make_instance(strategy_id="uniswap_rsi:abc123")
-        registry.register(instance)
-
-        assert registry.update_status("uniswap_rsi:abc123", "PAUSED") is True
-        assert registry.get("platform-uuid-1234").status == "PAUSED"
-
-    def test_no_env_var_passes_through(self, tmp_path, monkeypatch):
-        """Without AGENT_ID, strategy_id passes through unchanged (local mode)."""
-        monkeypatch.delenv("AGENT_ID", raising=False)
-        registry = InstanceRegistry(db_path=tmp_path / "test.db")
-        registry.initialize()
-
-        instance = _make_instance(strategy_id="uniswap_rsi:abc123")
-        registry.register(instance)
-
-        assert registry.get("uniswap_rsi:abc123") is not None
-        assert registry.get("platform-uuid-1234") is None
