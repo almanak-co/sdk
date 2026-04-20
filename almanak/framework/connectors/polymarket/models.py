@@ -27,6 +27,7 @@ Model Type Usage:
     boundaries requiring validation, and @dataclass for trusted internal data structures.
 """
 
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,6 +36,8 @@ from enum import Enum, StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Constants
@@ -85,12 +88,25 @@ class OrderType(StrEnum):
 
 
 class OrderStatus(StrEnum):
-    """Order status values."""
+    """Order status values.
+
+    VIB-3218: Polymarket's POST /order response can return ``delayed`` (matching
+    engine still processing) and ``unmatched`` (IOC / FOK failed to match any
+    liquidity) in addition to the historical four. ``FAILED`` / ``REJECTED``
+    cover adapter-side and API-side rejections. Missing these from the enum
+    caused ``OrderResponse.from_api_response`` to silently coerce them to
+    ``LIVE``, turning a rejected order into a "healthy resting order" and
+    defeating downstream failure detection.
+    """
 
     LIVE = "LIVE"
     MATCHED = "MATCHED"
     CANCELLED = "CANCELLED"
     EXPIRED = "EXPIRED"
+    DELAYED = "DELAYED"
+    UNMATCHED = "UNMATCHED"
+    FAILED = "FAILED"
+    REJECTED = "REJECTED"
 
 
 class TradeStatus(StrEnum):
@@ -725,7 +741,13 @@ class SignedOrder:
 
 
 class OrderResponse(BaseModel):
-    """Response from order submission."""
+    """Response from order submission.
+
+    The POST /order API returns ``status``, ``filledSize`` (immediate fills at
+    submission time) and, when available, ``avgPrice`` (volume-weighted fill
+    price). These fields are the basis for distinguishing "order accepted"
+    from "order filled" in downstream execution (VIB-3218).
+    """
 
     order_id: str = Field(description="Order ID")
     status: OrderStatus = Field(description="Order status")
@@ -734,11 +756,26 @@ class OrderResponse(BaseModel):
     price: Decimal = Field(description="Order price")
     size: Decimal = Field(description="Order size")
     filled_size: Decimal = Field(default=Decimal("0"), description="Filled amount")
+    avg_fill_price: Decimal | None = Field(
+        default=None,
+        description=(
+            "Volume-weighted average fill price if any portion of the order "
+            "filled at submission time. None if there were no immediate fills."
+        ),
+    )
     created_at: datetime | None = Field(default=None, description="Creation time")
 
     @classmethod
     def from_api_response(cls, data: dict) -> "OrderResponse":
-        """Create from CLOB API response."""
+        """Create from CLOB API response.
+
+        VIB-3218: Polymarket POST /order returns statuses the original enum
+        did not cover (``delayed`` / ``unmatched``); the ``OrderStatus`` enum
+        has been extended to include them. A truly-unknown status (new API
+        value, typo) falls back to ``FAILED`` with a warning -- the safest
+        default for a money-critical path is to force caller attention, not
+        to silently pretend the order is resting on the book.
+        """
         created_at = None
         if data.get("createdAt"):
             try:
@@ -746,17 +783,38 @@ class OrderResponse(BaseModel):
             except (ValueError, AttributeError):
                 pass
 
+        # CLOB returns lowercase status strings ("live", "matched", "delayed",
+        # "unmatched", …); our enum is uppercase. Normalize.
+        raw_status = str(data.get("status", "LIVE")).upper()
+        try:
+            status = OrderStatus(raw_status)
+        except ValueError:
+            logger.warning(
+                "Unknown Polymarket order status %r; treating as FAILED",
+                raw_status,
+            )
+            status = OrderStatus.FAILED
+
+        avg_fill_price_raw = data.get("avgPrice") or data.get("avg_price")
+        avg_fill_price: Decimal | None = None
+        if avg_fill_price_raw is not None:
+            try:
+                value = Decimal(str(avg_fill_price_raw))
+                if value > 0:
+                    avg_fill_price = value
+            except (ValueError, ArithmeticError):
+                avg_fill_price = None
+
         return cls(
             # Gamma responses alternate between `orderID` and `orderId`.
             order_id=data.get("orderID") or data.get("orderId", ""),
-            # CLOB returns lowercase status strings ("live", "matched", …); our
-            # enum is uppercase. Normalize to match.
-            status=OrderStatus(str(data.get("status", "LIVE")).upper()),
+            status=status,
             market=data.get("market", ""),
             side=data.get("side", "BUY"),
             price=Decimal(str(data.get("price", "0"))),
             size=Decimal(str(data.get("size", "0"))),
             filled_size=Decimal(str(data.get("filledSize", "0"))),
+            avg_fill_price=avg_fill_price,
             created_at=created_at,
         )
 

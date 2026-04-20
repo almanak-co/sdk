@@ -2010,6 +2010,15 @@ class StrategyRunner:
                         }
                         if clob_result.order_id:
                             execution_result.extracted_data["order_id"] = clob_result.order_id
+                        # VIB-3218: attach PredictionFill so strategies can
+                        # distinguish "order accepted" from "order filled"
+                        # without reaching into clob_handler internals.
+                        # requested_size may be absent (e.g. SELL "all") --
+                        # skip PredictionFill if we don't have it; strategies
+                        # should then rely on post-execution balance reads.
+                        prediction_fill = clob_result.to_prediction_fill()
+                        if prediction_fill is not None:
+                            execution_result.prediction_fill = prediction_fill
                         last_execution_result = execution_result
                     else:
                         # Update native token price for USD-denominated risk guards

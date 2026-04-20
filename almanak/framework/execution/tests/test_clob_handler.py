@@ -80,6 +80,11 @@ def valid_clob_bundle():
             "side": "BUY",
             "size": "100",
             "price": "0.50",
+            # VIB-3218: production adapter always sets order_type on the
+            # bundle (polymarket/adapter.py:354). Omitting it from the
+            # fixture would let GTC tests pass via the ``order_type_hint == ""``
+            # branch and mask regressions in the IOC/FOK zero-fill demotion.
+            "order_type": "GTC",
             "intent_id": "test-intent-123",
         },
     )
@@ -97,7 +102,7 @@ def on_chain_bundle():
 
 @pytest.fixture
 def mock_order_response():
-    """Create a mock OrderResponse."""
+    """Create a mock OrderResponse (unfilled, on-book)."""
     response = MagicMock()
     response.order_id = "order-123"
     response.status = MagicMock()
@@ -107,6 +112,7 @@ def mock_order_response():
     response.price = Decimal("0.50")
     response.size = Decimal("100")
     response.filled_size = Decimal("0")
+    response.avg_fill_price = None
     return response
 
 
@@ -212,6 +218,10 @@ class TestExecute:
         mock_response.order_id = "order-456"
         mock_response.status = MagicMock()
         mock_response.status.value = "MATCHED"
+        # VIB-3218: _classify_status reads filled_size / avg_fill_price; give
+        # the mock realistic values so Decimal comparisons work.
+        mock_response.filled_size = Decimal("100")
+        mock_response.avg_fill_price = Decimal("0.65")
         mock_clob_client.submit_order_payload.return_value = mock_response
 
         result = asyncio.run(handler.execute(valid_clob_bundle))
@@ -227,6 +237,235 @@ class TestExecute:
 
         assert result.submitted_at is not None
         assert isinstance(result.submitted_at, datetime)
+
+    # ========================================================================
+    # VIB-3218: accept-vs-fill distinction
+    # ========================================================================
+
+    def test_gtc_on_book_reports_zero_fill_not_matched(
+        self, handler, mock_clob_client, valid_clob_bundle, mock_order_response
+    ):
+        """GTC that rests on the book returns success=True but filled_size=0."""
+        mock_clob_client.submit_order_payload.return_value = mock_order_response
+        # valid_clob_bundle.metadata["order_type"] is GTC by payload
+
+        result = asyncio.run(handler.execute(valid_clob_bundle))
+
+        assert result.success is True  # API accepted the submission
+        assert result.filled_size == Decimal("0")  # But nothing filled
+        assert result.status == ClobOrderStatus.LIVE
+        assert result.requested_size == Decimal("100")
+
+    def test_ioc_unmatched_reports_failed_not_live(self, handler, mock_clob_client, valid_clob_bundle):
+        """IOC order with zero fills on a LIVE response is FAILED + success=False.
+
+        Post-audit (Codex P1): the classifier demotes LIVE+filled=0 on IOC to
+        FAILED, and ``execute`` then sets ``success=False`` so the runner does
+        NOT call ``on_intent_executed(success=True, ...)`` on an unmatched IOC.
+        """
+        mock_response = MagicMock()
+        mock_response.order_id = "order-ioc-unmatched"
+        mock_response.status = MagicMock()
+        mock_response.status.value = "LIVE"
+        mock_response.filled_size = Decimal("0")
+        mock_response.avg_fill_price = None
+        mock_clob_client.submit_order_payload.return_value = mock_response
+        valid_clob_bundle.metadata["order_type"] = "IOC"
+
+        result = asyncio.run(handler.execute(valid_clob_bundle))
+
+        assert result.success is False  # FAILED classification flows into success
+        assert result.status == ClobOrderStatus.FAILED
+        assert result.filled_size == Decimal("0")
+        assert result.error is not None
+
+    def test_partial_ioc_fill_is_terminal_matched(self, handler, mock_clob_client, valid_clob_bundle):
+        """Partial IOC fill classifies as MATCHED (terminal), NOT PARTIALLY_FILLED.
+
+        CodeRabbit #1611 round 1 (Major): IOC/FOK never rest on the book, so
+        a partial fill is the FINAL state. Classifying it as PARTIALLY_FILLED
+        (which ``ClobOrderState.is_open`` treats as open) would keep the
+        order in the live-order set even though no additional fills will
+        ever arrive. For IOC/FOK, any non-zero fill -> MATCHED (terminal).
+        The actual fill amount remains on ``filled_size`` for partial-fill
+        detection at the strategy level.
+
+        For a GTC partial fill, PARTIALLY_FILLED is still the correct
+        classification (see the ``_determine_order_status`` path).
+        """
+        mock_response = MagicMock()
+        mock_response.order_id = "order-partial"
+        mock_response.status = MagicMock()
+        mock_response.status.value = "LIVE"
+        mock_response.filled_size = Decimal("10")
+        mock_response.avg_fill_price = Decimal("0.51")
+        mock_clob_client.submit_order_payload.return_value = mock_response
+        valid_clob_bundle.metadata["order_type"] = "IOC"
+
+        result = asyncio.run(handler.execute(valid_clob_bundle))
+
+        assert result.success is True
+        assert result.filled_size == Decimal("10")
+        assert result.requested_size == Decimal("100")
+        assert result.status == ClobOrderStatus.MATCHED
+        # ClobOrderState.is_terminal must be true for IOC/FOK partial fills.
+        terminal_state = ClobOrderState(
+            order_id="x",
+            market_id="x",
+            token_id="x",
+            side="BUY",
+            status=result.status,
+            price=Decimal("0.5"),
+            size=Decimal("100"),
+            filled_size=result.filled_size,
+        )
+        assert terminal_state.is_terminal is True
+        assert terminal_state.is_open is False
+        assert result.avg_fill_price == Decimal("0.51")
+
+    def test_partial_gtc_fill_still_partially_filled(self, handler, mock_clob_client, valid_clob_bundle):
+        """Partial GTC fill remains PARTIALLY_FILLED (the order is still resting).
+
+        Counterpart to ``test_partial_ioc_fill_is_terminal_matched`` -- GTC
+        partial fills are NOT terminal, so the classifier must keep using
+        PARTIALLY_FILLED there.
+        """
+        mock_response = MagicMock()
+        mock_response.order_id = "order-partial-gtc"
+        mock_response.status = MagicMock()
+        mock_response.status.value = "LIVE"
+        mock_response.filled_size = Decimal("10")
+        mock_response.avg_fill_price = Decimal("0.51")
+        mock_clob_client.submit_order_payload.return_value = mock_response
+        # Fixture default is GTC (we set it explicitly for clarity).
+        valid_clob_bundle.metadata["order_type"] = "GTC"
+
+        result = asyncio.run(handler.execute(valid_clob_bundle))
+
+        assert result.success is True
+        assert result.status == ClobOrderStatus.PARTIALLY_FILLED
+        assert result.filled_size == Decimal("10")
+
+    def test_to_prediction_fill_preserves_fill_state(self, handler, mock_clob_client, valid_clob_bundle):
+        """ClobExecutionResult.to_prediction_fill() surfaces filled vs requested."""
+        mock_response = MagicMock()
+        mock_response.order_id = "order-partial"
+        mock_response.status = MagicMock()
+        mock_response.status.value = "MATCHED"
+        mock_response.filled_size = Decimal("25")
+        mock_response.avg_fill_price = Decimal("0.48")
+        mock_clob_client.submit_order_payload.return_value = mock_response
+        valid_clob_bundle.metadata["order_type"] = "IOC"
+
+        result = asyncio.run(handler.execute(valid_clob_bundle))
+        fill = result.to_prediction_fill()
+
+        assert fill is not None
+        assert fill.filled_shares == Decimal("25")
+        assert fill.requested_shares == Decimal("100")
+        assert fill.avg_fill_price == Decimal("0.48")
+        assert fill.is_partial is True
+        assert fill.is_fully_filled is False
+        assert fill.is_filled is True
+
+    def test_to_prediction_fill_returns_none_without_requested_size(
+        self, handler, mock_clob_client, valid_clob_bundle, mock_order_response
+    ):
+        """Bundles with no size hint (e.g. SELL 'all') produce no PredictionFill."""
+        mock_clob_client.submit_order_payload.return_value = mock_order_response
+        del valid_clob_bundle.metadata["size"]
+
+        result = asyncio.run(handler.execute(valid_clob_bundle))
+
+        assert result.requested_size is None
+        assert result.to_prediction_fill() is None
+
+    def test_string_filled_size_is_normalized_not_routed_to_failure(self, handler, mock_clob_client, valid_clob_bundle):
+        """CodeRabbit #1611 round 2 (Major): non-Decimal response numerics.
+
+        If a connector returns ``filled_size`` as a string (or any connector
+        test double forgets to coerce), the raw ``Decimal > int`` comparison
+        in ``_classify_status`` would raise TypeError and silently route the
+        submission to the ``except`` branch -> ``success=False, FAILED``.
+        The handler must coerce through ``_parse_decimal`` before comparison.
+        """
+        mock_response = MagicMock()
+        mock_response.order_id = "order-strings"
+        mock_response.status = MagicMock()
+        mock_response.status.value = "MATCHED"
+        mock_response.filled_size = "100"  # string, not Decimal
+        mock_response.avg_fill_price = "0.47"  # string, not Decimal
+        mock_clob_client.submit_order_payload.return_value = mock_response
+
+        result = asyncio.run(handler.execute(valid_clob_bundle))
+
+        assert result.success is True
+        assert result.status == ClobOrderStatus.MATCHED
+        assert result.filled_size == Decimal("100")
+        assert result.avg_fill_price == Decimal("0.47")
+
+    def test_none_filled_size_is_treated_as_zero(self, handler, mock_clob_client, valid_clob_bundle):
+        """``None`` filled_size coerces to 0 without raising TypeError."""
+        mock_response = MagicMock()
+        mock_response.order_id = "order-none-fill"
+        mock_response.status = MagicMock()
+        mock_response.status.value = "LIVE"
+        mock_response.filled_size = None
+        mock_response.avg_fill_price = None
+        mock_clob_client.submit_order_payload.return_value = mock_response
+        # Default GTC in fixture -> None fill is consistent with resting order
+        result = asyncio.run(handler.execute(valid_clob_bundle))
+
+        assert result.success is True
+        assert result.filled_size == Decimal("0")
+        assert result.avg_fill_price is None
+        assert result.status == ClobOrderStatus.LIVE
+
+    def test_fok_unmatched_reports_failed_and_success_false(self, handler, mock_clob_client, valid_clob_bundle):
+        """FOK that fails to match must surface status=FAILED AND success=False.
+
+        Codex P1 / pr-auditor Blocker #3: a classifier-demoted FAILED status
+        with ``success=True`` still rode the happy path through StrategyRunner
+        (ledger entry, timeline event, on_intent_executed(success=True)).
+        Requiring ``success=False`` here locks the contract.
+        """
+        mock_response = MagicMock()
+        mock_response.order_id = "order-fok"
+        mock_response.status = MagicMock()
+        mock_response.status.value = "LIVE"
+        mock_response.filled_size = Decimal("0")
+        mock_response.avg_fill_price = None
+        mock_clob_client.submit_order_payload.return_value = mock_response
+        valid_clob_bundle.metadata["order_type"] = "FOK"
+
+        result = asyncio.run(handler.execute(valid_clob_bundle))
+
+        assert result.status == ClobOrderStatus.FAILED
+        assert result.success is False
+        assert result.error is not None and "failed" in result.error.lower()
+
+    def test_matched_status_preserved_when_requested_size_unknown(self, handler, mock_clob_client, valid_clob_bundle):
+        """API MATCHED + filled_size>0 must stay MATCHED even if requested_size is None.
+
+        CodeRabbit I5: downgrading a terminal MATCHED to PARTIALLY_FILLED (via
+        the requested_size-vs-filled_size comparison) would leave downstream
+        treating a completed order as still open.
+        """
+        mock_response = MagicMock()
+        mock_response.order_id = "order-match-noreq"
+        mock_response.status = MagicMock()
+        mock_response.status.value = "MATCHED"
+        mock_response.filled_size = Decimal("50")
+        mock_response.avg_fill_price = Decimal("0.60")
+        mock_clob_client.submit_order_payload.return_value = mock_response
+        # No size metadata -> requested_size is None
+        del valid_clob_bundle.metadata["size"]
+
+        result = asyncio.run(handler.execute(valid_clob_bundle))
+
+        assert result.status == ClobOrderStatus.MATCHED
+        assert result.success is True
+        assert result.filled_size == Decimal("50")
 
 
 # =============================================================================

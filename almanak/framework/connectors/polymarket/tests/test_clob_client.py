@@ -475,6 +475,113 @@ class TestModels:
         assert credentials.passphrase.get_secret_value() == "test_pass"
 
 
+class TestOrderResponseFromApiResponse:
+    """Direct unit tests for OrderResponse.from_api_response (VIB-3218).
+
+    This is the parser for Polymarket's untrusted POST /order response. It is
+    the only boundary between the exchange and the CLOB handler's
+    classification logic, so it must not silently normalize away failure
+    signals (``rejected`` / ``unmatched``) into "healthy resting order"
+    shapes.
+    """
+
+    def test_parses_matched_fill_with_avg_price(self):
+        """POST /order response with matched status + fill amount + avg price."""
+        from almanak.framework.connectors.polymarket.models import OrderResponse, OrderStatus
+
+        response = OrderResponse.from_api_response(
+            {
+                "orderID": "0xabc",
+                "status": "matched",
+                "market": "token-123",
+                "side": "BUY",
+                "price": "0.65",
+                "size": "100",
+                "filledSize": "100",
+                "avgPrice": "0.64",
+            }
+        )
+
+        assert response.order_id == "0xabc"
+        assert response.status == OrderStatus.MATCHED
+        assert response.filled_size == Decimal("100")
+        assert response.avg_fill_price == Decimal("0.64")
+
+    def test_preserves_unmatched_status_for_ioc_rejection(self):
+        """`unmatched` (IOC that didn't fill) must not be silenced to LIVE."""
+        from almanak.framework.connectors.polymarket.models import OrderResponse, OrderStatus
+
+        response = OrderResponse.from_api_response(
+            {
+                "orderID": "0xioc",
+                "status": "unmatched",
+                "filledSize": "0",
+            }
+        )
+        assert response.status == OrderStatus.UNMATCHED
+
+    def test_preserves_delayed_status(self):
+        """`delayed` (matching engine backlog) must stay distinct from LIVE."""
+        from almanak.framework.connectors.polymarket.models import OrderResponse, OrderStatus
+
+        response = OrderResponse.from_api_response({"orderID": "0xd", "status": "delayed", "filledSize": "0"})
+        assert response.status == OrderStatus.DELAYED
+
+    def test_preserves_rejected_status(self):
+        """`rejected` must never silently become LIVE."""
+        from almanak.framework.connectors.polymarket.models import OrderResponse, OrderStatus
+
+        response = OrderResponse.from_api_response({"orderID": "0xr", "status": "rejected", "filledSize": "0"})
+        assert response.status == OrderStatus.REJECTED
+
+    def test_unknown_status_falls_back_to_failed_not_live(self):
+        """Truly-unknown statuses default to FAILED (safe default), not LIVE.
+
+        Regression test for VIB-3218 blocker: the original implementation
+        silently coerced any unknown status to ``OrderStatus.LIVE``, which
+        makes a rejected order look like a healthy resting order. FAILED is
+        the safest default because it forces caller attention via the new
+        ``success = (status != FAILED)`` rule in the handler.
+        """
+        from almanak.framework.connectors.polymarket.models import OrderResponse, OrderStatus
+
+        response = OrderResponse.from_api_response({"orderID": "0xunk", "status": "fabulous", "filledSize": "0"})
+        assert response.status == OrderStatus.FAILED
+
+    def test_avg_fill_price_absent_when_zero_or_missing(self):
+        """Zero / missing avgPrice should not pollute the typed field."""
+        from almanak.framework.connectors.polymarket.models import OrderResponse
+
+        missing = OrderResponse.from_api_response({"orderID": "0x1", "status": "live", "filledSize": "0"})
+        assert missing.avg_fill_price is None
+
+        zero = OrderResponse.from_api_response({"orderID": "0x2", "status": "live", "filledSize": "0", "avgPrice": "0"})
+        assert zero.avg_fill_price is None
+
+    def test_avg_fill_price_accepts_string_and_number(self):
+        """avgPrice can arrive as str or numeric; both should parse."""
+        from almanak.framework.connectors.polymarket.models import OrderResponse
+
+        as_str = OrderResponse.from_api_response(
+            {"orderID": "0x1", "status": "matched", "filledSize": "10", "avgPrice": "0.73"}
+        )
+        assert as_str.avg_fill_price == Decimal("0.73")
+
+        as_num = OrderResponse.from_api_response(
+            {"orderID": "0x2", "status": "matched", "filledSize": "10", "avgPrice": 0.73}
+        )
+        assert as_num.avg_fill_price == Decimal(str(0.73))
+
+    def test_handles_both_orderid_spellings(self):
+        """Gamma alternates between ``orderID`` and ``orderId``."""
+        from almanak.framework.connectors.polymarket.models import OrderResponse
+
+        camel = OrderResponse.from_api_response({"orderId": "0xcamel", "status": "live"})
+        upper = OrderResponse.from_api_response({"orderID": "0xupper", "status": "live"})
+        assert camel.order_id == "0xcamel"
+        assert upper.order_id == "0xupper"
+
+
 # =============================================================================
 # Signature Type Tests
 # =============================================================================

@@ -224,11 +224,18 @@ async def test_clob_bundle_routes_to_clob_handler() -> None:
 
     mock_clob_handler = MagicMock()
     mock_clob_handler.can_handle.return_value = True
+    # Include requested_size + filled_size so to_prediction_fill() returns
+    # a populated PredictionFill (rather than None) and we can assert that
+    # the runner propagates it onto execution_result.prediction_fill.
+    from decimal import Decimal as _D
     mock_clob_handler.execute = AsyncMock(
         return_value=ClobExecutionResult(
             success=True,
             order_id="order-abc-123",
-            status=ClobOrderStatus.LIVE,
+            status=ClobOrderStatus.MATCHED,
+            filled_size=_D("100"),
+            avg_fill_price=_D("0.50"),
+            requested_size=_D("100"),
         )
     )
 
@@ -264,7 +271,15 @@ async def test_clob_bundle_routes_to_clob_handler() -> None:
     assert result.status == IterationStatus.SUCCESS
     assert result.execution_result is not None
     assert result.execution_result.extracted_data["order_id"] == "order-abc-123"
-    assert result.execution_result.extracted_data["clob_status"] == ClobOrderStatus.LIVE.value
+    assert result.execution_result.extracted_data["clob_status"] == ClobOrderStatus.MATCHED.value
+    # CodeRabbit #1611: verify PredictionFill propagates end-to-end so
+    # strategies can read ``result.prediction_fill.filled_shares`` without
+    # reaching into ClobExecutionResult.
+    assert result.execution_result.prediction_fill is not None
+    assert result.execution_result.prediction_fill.filled_shares == _D("100")
+    assert result.execution_result.prediction_fill.requested_shares == _D("100")
+    assert result.execution_result.prediction_fill.avg_fill_price == _D("0.50")
+    assert result.execution_result.prediction_fill.is_fully_filled is True
 
 
 @pytest.mark.asyncio
@@ -351,6 +366,12 @@ async def test_clob_failure_propagates() -> None:
     assert result.execution_result.error == "Insufficient balance"
     # clob_status is always present, even when order_id is None
     assert result.execution_result.extracted_data["clob_status"] == ClobOrderStatus.FAILED.value
+    # CodeRabbit #1611: when the handler has no ``requested_size`` to thread
+    # through (e.g. exception before parsing, or a SELL "all" bundle),
+    # ``to_prediction_fill()`` returns None and the runner leaves
+    # ``execution_result.prediction_fill`` as None. Strategies should then
+    # fall back to post-execution balance reads.
+    assert result.execution_result.prediction_fill is None
 
 
 @pytest.mark.asyncio

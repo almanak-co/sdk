@@ -51,7 +51,7 @@ from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 from ..models.reproduction_bundle import ActionBundle
 from ..strategies.base import RiskGuard, RiskGuardResult
 from ..utils.log_formatters import _emojis_enabled, format_gas_cost, format_tx_hash
-from .extracted_data import LPCloseData, SwapAmounts
+from .extracted_data import LPCloseData, PredictionFill, SwapAmounts
 
 if TYPE_CHECKING:
     from .outcome import ExecutionOutcome
@@ -181,6 +181,10 @@ class ExecutionResult:
         position_id: LP position ID for LP_OPEN intents (NFT tokenId int, or pool address str for pool-based protocols like Curve), populated by ResultEnricher
         swap_amounts: Swap execution data for SWAP intents
         lp_close_data: LP close data for LP_CLOSE intents
+        prediction_fill: Polymarket CLOB fill data for PREDICTION_BUY / PREDICTION_SELL
+            intents. Populated by the runner's CLOB branch (VIB-3218). Strategy
+            authors should read ``result.prediction_fill.filled_shares`` rather
+            than assuming the intent's requested size filled.
         bin_ids: TraderJoe V2 bin IDs for LP positions
         extracted_data: Flexible dict for protocol-specific extracted data
         extraction_warnings: Non-fatal warnings from extraction process
@@ -205,6 +209,7 @@ class ExecutionResult:
     position_id: int | str | None = None
     swap_amounts: SwapAmounts | None = None
     lp_close_data: LPCloseData | None = None
+    prediction_fill: PredictionFill | None = None
     bin_ids: list[int] | None = None  # TraderJoe V2 LP bin IDs
     extracted_data: dict[str, Any] = field(default_factory=dict)
     extraction_warnings: list[str] = field(default_factory=list)
@@ -293,6 +298,7 @@ class ExecutionResult:
             "position_id": self.position_id,
             "swap_amounts": self.swap_amounts.to_dict() if self.swap_amounts else None,
             "lp_close_data": self.lp_close_data.to_dict() if self.lp_close_data else None,
+            "prediction_fill": self.prediction_fill.to_dict() if self.prediction_fill else None,
             "extracted_data": self.extracted_data,
             "extraction_warnings": self.extraction_warnings,
         }

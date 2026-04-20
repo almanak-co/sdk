@@ -315,6 +315,76 @@ class StakeData:
 
 
 @dataclass(frozen=True)
+class PredictionFill:
+    """Extracted Polymarket CLOB fill data (VIB-3218).
+
+    Polymarket orders submit off-chain; the CLOB API returns "order accepted"
+    before the order is matched. A ``PREDICTION_BUY`` strategy that flips its
+    ``position_open`` flag on submission-success was persisting the REQUESTED
+    size -- not the actual fill -- so partial IOC fills and unfilled GTC
+    limits both got booked as full positions. This struct carries the actual
+    fill amount from the CLOB response back to the strategy.
+
+    Attributes:
+        filled_shares: Shares actually filled at response time. 0 means the
+            order is either resting on the book (GTC/live) or was rejected
+            (IOC/unmatched). Never assume `== requested_shares`.
+        requested_shares: Shares the intent asked for. Kept alongside
+            ``filled_shares`` so strategies can detect partial fills without
+            re-reading the intent.
+        avg_fill_price: Volume-weighted average price of immediate fills.
+            None when no portion of the order filled yet.
+        order_id: CLOB-assigned order identifier for follow-up queries.
+        status: Lowercase CLOB order lifecycle state as a free-form string
+            ("matched", "live", "unmatched", "delayed", …). The typed status
+            is on :class:`ClobExecutionResult`; this field is a hint for
+            logging / diagnostics without reaching into extracted_data.
+
+    Example::
+
+        def on_intent_executed(self, intent, success, result):
+            if not success or result.prediction_fill is None:
+                return
+            fill = result.prediction_fill
+            if fill.filled_shares == 0:
+                return  # GTC resting or IOC unmatched -- position NOT open
+            self._filled_shares = fill.filled_shares
+            self._position_open = True
+    """
+
+    filled_shares: Decimal
+    requested_shares: Decimal
+    avg_fill_price: Decimal | None = None
+    order_id: str | None = None
+    status: str | None = None
+
+    @property
+    def is_filled(self) -> bool:
+        """True when at least some portion of the order filled."""
+        return self.filled_shares > 0
+
+    @property
+    def is_fully_filled(self) -> bool:
+        """True when the full requested size filled."""
+        return self.filled_shares >= self.requested_shares and self.filled_shares > 0
+
+    @property
+    def is_partial(self) -> bool:
+        """True when some but not all of the requested size filled."""
+        return 0 < self.filled_shares < self.requested_shares
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "filled_shares": str(self.filled_shares),
+            "requested_shares": str(self.requested_shares),
+            "avg_fill_price": str(self.avg_fill_price) if self.avg_fill_price is not None else None,
+            "order_id": self.order_id,
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True)
 class ProtocolFees:
     """Protocol fees paid by the user on a single transaction.
 
@@ -423,5 +493,6 @@ __all__ = [
     "SupplyData",
     "PerpData",
     "StakeData",
+    "PredictionFill",
     "ProtocolFees",
 ]

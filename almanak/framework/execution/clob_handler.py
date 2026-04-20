@@ -176,6 +176,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from almanak.framework.connectors.polymarket import ClobClient
+    from almanak.framework.execution.extracted_data import PredictionFill
     from almanak.framework.models.reproduction_bundle import ActionBundle
 
 logger = logging.getLogger(__name__)
@@ -377,11 +378,38 @@ class ClobExecutionResult:
     This mirrors TransactionResult semantics for uniform handling
     in the execution pipeline.
 
+    VIB-3218: ``success`` reflects the CLOB order's *classified lifecycle*,
+    not just HTTP acceptance. The handler computes
+    ``success = (status != FAILED)`` after running the submission through
+    :meth:`_classify_status`, so an IOC/FOK the API accepted but that
+    matched zero liquidity surfaces here as ``success=False`` -- the
+    StrategyRunner then routes it through the failure path (no ledger
+    entry, no ``on_intent_executed(success=True)`` callback).
+
+    A GTC that goes to the book (LIVE) and an IOC/FOK that at-least-partially
+    matched (MATCHED) both return ``success=True`` but have very different
+    ``filled_size`` values. Strategies distinguish them by reading
+    ``filled_size`` -- or, preferably, the richer :class:`PredictionFill`
+    attached to the downstream :class:`ExecutionResult`.
+
+    Exception path: any uncaught error during submission yields
+    ``success=False`` with ``status=FAILED`` and ``error`` populated.
+
     Attributes:
-        success: Whether order was accepted by the API
+        success: True iff the classified status is NOT FAILED. Combines
+            "API accepted the request" AND "the classified lifecycle isn't
+            a terminal failure" (unmatched IOC/FOK, rejected, etc.).
         order_id: API-assigned order identifier
-        status: Current order status
-        filled_size: Amount filled (if any immediate fills)
+        status: Current order lifecycle state (LIVE/MATCHED/PARTIALLY_FILLED/
+            FAILED/...). Computed by :meth:`_classify_status` from the raw
+            API status, the fill amount, and the order type hint.
+        filled_size: Amount filled at response time. 0 for resting GTC or for
+            IOC orders that failed to match any liquidity.
+        avg_fill_price: Volume-weighted average price of immediate fills.
+            None when no portion of the order filled.
+        requested_size: The size the intent asked for. Preserved here so
+            the downstream :class:`PredictionFill` can expose fill-vs-request
+            without re-reading the intent.
         fills: List of fill events
         error: Error message if failed
         submitted_at: When order was submitted
@@ -391,6 +419,8 @@ class ClobExecutionResult:
     order_id: str | None = None
     status: ClobOrderStatus = ClobOrderStatus.PENDING
     filled_size: Decimal = Decimal("0")
+    avg_fill_price: Decimal | None = None
+    requested_size: Decimal | None = None
     fills: list[ClobFill] = field(default_factory=list)
     error: str | None = None
     submitted_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -402,10 +432,32 @@ class ClobExecutionResult:
             "order_id": self.order_id,
             "status": self.status.value,
             "filled_size": str(self.filled_size),
+            "avg_fill_price": str(self.avg_fill_price) if self.avg_fill_price is not None else None,
+            "requested_size": str(self.requested_size) if self.requested_size is not None else None,
             "fills": [f.to_dict() for f in self.fills],
             "error": self.error,
             "submitted_at": self.submitted_at.isoformat(),
         }
+
+    def to_prediction_fill(self) -> "PredictionFill | None":
+        """Project this result onto a :class:`PredictionFill` for strategies.
+
+        Returns ``None`` when ``requested_size`` is unknown (e.g. a "SELL all"
+        intent where the requested size is the current position balance,
+        derived at compile time but not persisted on the bundle). In that
+        case strategies should read post-execution wallet balances instead.
+        """
+        from almanak.framework.execution.extracted_data import PredictionFill
+
+        if self.requested_size is None:
+            return None
+        return PredictionFill(
+            filled_shares=self.filled_size,
+            requested_shares=self.requested_size,
+            avg_fill_price=self.avg_fill_price,
+            order_id=self.order_id,
+            status=self.status.value,
+        )
 
 
 # =============================================================================
@@ -525,6 +577,8 @@ class ClobActionHandler:
 
         order_payload = bundle.metadata.get("order_payload", {})
         intent_id = bundle.metadata.get("intent_id")
+        requested_size = _parse_decimal(bundle.metadata.get("size"))
+        order_type_hint = str(bundle.metadata.get("order_type", "")).upper()
 
         try:
             # Submit order to CLOB API
@@ -535,6 +589,7 @@ class ClobActionHandler:
                     "side": bundle.metadata.get("side"),
                     "size": bundle.metadata.get("size"),
                     "price": bundle.metadata.get("price"),
+                    "order_type": order_type_hint or None,
                 },
             )
 
@@ -542,23 +597,55 @@ class ClobActionHandler:
             # submit_order_payload accepts the pre-built payload from the adapter
             order_response = self._clob.submit_order_payload(order_payload)
 
-            # OrderResponse is a Pydantic model with order_id, status, etc.
+            # VIB-3218: propagate filled_size / avg_fill_price so the runner
+            # can build a PredictionFill on the ExecutionResult and strategies
+            # don't end up persisting requested-not-filled amounts.
+            #
+            # CodeRabbit #1611 round 2 (Major): coerce the response numerics
+            # through _parse_decimal. The attributes are typed ``Decimal`` on
+            # ``OrderResponse`` but may arrive as strings / None from test
+            # doubles or a connector that skips validation; a raw comparison
+            # in ``_classify_status`` would otherwise raise TypeError and
+            # route to the exception path with ``success=False``.
             order_id = order_response.order_id
-            status = self._map_api_status(order_response.status.value)
+            filled_size = _parse_decimal(getattr(order_response, "filled_size", None)) or Decimal("0")
+            avg_fill_price = _parse_decimal(getattr(order_response, "avg_fill_price", None))
+            status = self._classify_status(
+                api_status=order_response.status.value,
+                filled_size=filled_size,
+                requested_size=requested_size,
+                order_type_hint=order_type_hint,
+            )
+
+            # VIB-3218: ``success`` is what the runner uses to decide whether
+            # to call ``on_intent_executed(success=True, ...)``, write a
+            # positive ledger entry, and emit a "transaction confirmed"
+            # timeline event. An order the classifier demoted to FAILED
+            # (REJECTED API status, IOC/FOK that didn't match, etc.) must NOT
+            # flow through the happy path -- treat it as a failed execution.
+            success = status != ClobOrderStatus.FAILED
+            error = None if success else f"CLOB order rejected (status={status.value})"
 
             logger.info(
                 "CLOB order submitted",
                 extra={
                     "order_id": order_id,
                     "status": status.value,
+                    "filled_size": str(filled_size),
+                    "avg_fill_price": str(avg_fill_price) if avg_fill_price is not None else None,
                     "intent_id": intent_id,
+                    "success": success,
                 },
             )
 
             return ClobExecutionResult(
-                success=True,
+                success=success,
                 order_id=order_id,
                 status=status,
+                filled_size=filled_size,
+                avg_fill_price=avg_fill_price,
+                requested_size=requested_size,
+                error=error,
                 submitted_at=datetime.now(UTC),
             )
 
@@ -567,6 +654,7 @@ class ClobActionHandler:
             return ClobExecutionResult(
                 success=False,
                 status=ClobOrderStatus.FAILED,
+                requested_size=requested_size,
                 error=str(e),
             )
 
@@ -679,8 +767,87 @@ class ClobActionHandler:
             "FAILED": ClobOrderStatus.FAILED,
             "REJECTED": ClobOrderStatus.FAILED,
             "PENDING": ClobOrderStatus.PENDING,
+            # VIB-3218: Polymarket emits these in POST /order responses.
+            "UNMATCHED": ClobOrderStatus.FAILED,
+            "DELAYED": ClobOrderStatus.PENDING,
         }
         return status_map.get(api_status.upper(), ClobOrderStatus.PENDING)
+
+    def _classify_status(
+        self,
+        api_status: str,
+        filled_size: Decimal,
+        requested_size: Decimal | None,
+        order_type_hint: str,
+    ) -> ClobOrderStatus:
+        """Classify the true CLOB lifecycle state from the response (VIB-3218).
+
+        The raw API status alone is insufficient -- a "live" response plus a
+        non-zero ``filledSize`` is a partial fill, and a "live" response on
+        an IOC order with ``filledSize == 0`` is effectively "unmatched".
+        This helper combines both signals so downstream sees a status that
+        faithfully reflects fill state.
+        """
+        base = self._map_api_status(api_status)
+
+        # Any response with non-zero fills is at least partially filled.
+        # If the API already reports a terminal MATCHED (Polymarket's
+        # "matched" status), preserve it even when ``requested_size`` is
+        # unknown -- downgrading a completed order to PARTIALLY_FILLED would
+        # leave downstream treating it as still open. Noted by CodeRabbit.
+        if filled_size > 0:
+            if base == ClobOrderStatus.MATCHED:
+                return ClobOrderStatus.MATCHED
+            if requested_size is not None and filled_size >= requested_size:
+                return ClobOrderStatus.MATCHED
+            # CodeRabbit #1611 round 1 (Major): IOC / FOK with a partial fill
+            # is TERMINAL -- the matcher never fills more. PARTIALLY_FILLED
+            # is treated as open by ``ClobOrderState.is_open``, which would
+            # keep the order in the live-order set even though no additional
+            # fills will ever arrive. Classify IOC/FOK partials as MATCHED
+            # (terminal) so reconciliation doesn't chase a ghost order.
+            # ``filled_size`` remains on the result for partial-fill detection
+            # at the strategy level.
+            if order_type_hint in ("IOC", "FOK"):
+                return ClobOrderStatus.MATCHED
+            return ClobOrderStatus.PARTIALLY_FILLED
+
+        # IOC / FOK never rest on the book. A "live" or "pending" response
+        # with zero fills means no liquidity matched -- treat as FAILED so
+        # strategies don't mark a position open on a no-fill acknowledgement.
+        if (
+            filled_size == 0
+            and order_type_hint in ("IOC", "FOK")
+            and base
+            in (
+                ClobOrderStatus.LIVE,
+                ClobOrderStatus.PENDING,
+            )
+        ):
+            return ClobOrderStatus.FAILED
+
+        return base
+
+
+# =============================================================================
+# Module helpers
+# =============================================================================
+
+
+def _parse_decimal(value: Any) -> Decimal | None:
+    """Best-effort parse of ActionBundle-metadata values into Decimal.
+
+    Used for the requested-size hint we thread through to ``PredictionFill``.
+    ActionBundle metadata values are stringified at compile time, so we
+    coerce back to ``Decimal``; non-numeric or missing values simply drop to
+    ``None`` rather than exploding.
+    """
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (ValueError, ArithmeticError):
+        return None
 
 
 # =============================================================================
