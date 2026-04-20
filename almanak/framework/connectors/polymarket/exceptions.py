@@ -75,30 +75,70 @@ class PolymarketInvalidPriceError(PolymarketOrderError):
 
 
 class PolymarketMinimumOrderError(PolymarketOrderError):
-    """Order size below minimum."""
+    """Order size below minimum.
+
+    Two failure modes share this class, distinguished by the ``$`` prefix on
+    ``size`` / ``minimum``:
+    - Share-count floor failure: ``size="5"``, ``minimum="10"`` (market's
+      ``order_min_size``).
+    - USD-value floor failure: ``size="$0.30"``, ``minimum="$1"`` — Polymarket
+      CLOB rejects BUY orders with makerAmount < $1. The live CLOB message is
+      ``invalid amount for a marketable BUY order ($X), min size: $1``; we
+      embed that exact string in the exception message so strategy authors
+      can grep for it (VIB-3140, coordinated with VIB-3141's non_retryable
+      classification).
+    """
 
     def __init__(self, size: str, minimum: str):
         self.size = size
         self.minimum = minimum
-        super().__init__(f"Order size {size} below minimum {minimum}")
+        # Emit the exact live-CLOB error text for the USD-floor case so
+        # strategy authors can grep for it (VIB-3140).
+        if minimum.startswith("$"):
+            # Live CLOB: `invalid amount for a marketable BUY order ($X), min size: $1`
+            super().__init__(f"invalid amount for a marketable BUY order ({size}), min size: {minimum}")
+        else:
+            super().__init__(f"Order size {size} below minimum {minimum}")
 
 
 class PolymarketInvalidTickSizeError(PolymarketOrderError):
     """Price does not conform to market tick size.
 
     Polymarket markets have specific tick sizes (e.g., 0.01, 0.001) that
-    prices must be multiples of. This error is raised when a price cannot
-    be rounded to a valid tick.
+    prices must be multiples of. The live CLOB rejects off-tick prices
+    with ``order {order_hash} breaks minimum tick size rule: {tick_size}``;
+    we embed that exact string in the exception message so strategy authors
+    can grep for it (VIB-3140, coordinated with VIB-3141's non_retryable
+    classification).
     """
 
     def __init__(self, price: str, tick_size: str, nearest_valid: str | None = None):
         self.price = price
         self.tick_size = tick_size
         self.nearest_valid = nearest_valid
-        if nearest_valid:
-            super().__init__(f"Price {price} is not a valid tick: tick_size={tick_size}, nearest valid={nearest_valid}")
-        else:
-            super().__init__(f"Price {price} is not a valid tick: tick_size={tick_size}")
+        # Emit the exact live-CLOB error text so strategy authors can grep
+        # for it (VIB-3140). The CLOB prefixes with an order hash; we use
+        # the user-supplied price instead for dry-run readability, but the
+        # trailing `breaks minimum tick size rule: <tick_size>` is verbatim.
+        hint = f", nearest valid={nearest_valid}" if nearest_valid else ""
+        super().__init__(f"order (price={price}) breaks minimum tick size rule: {tick_size}{hint}")
+
+
+class PolymarketInvalidPrecisionError(PolymarketOrderError):
+    """Order price or size has too many decimals for the CLOB to accept.
+
+    Polymarket's CLOB caps price precision at 4 decimals (tick sizes top out
+    at 0.0001) and size precision at 2 decimals (shares quantized to 0.01).
+    Submitting extra decimals causes the server to round down silently or
+    reject with an INVALID_ORDER error. We surface this at compile time so
+    strategy authors cannot accidentally over-specify precision (VIB-3140).
+    """
+
+    def __init__(self, field: str, value: str, max_decimals: int):
+        self.field = field
+        self.value = value
+        self.max_decimals = max_decimals
+        super().__init__(f"INVALID_ORDER: {field} {value} has too many decimals (max {max_decimals} decimals allowed)")
 
 
 class PolymarketMarketError(PolymarketError):
@@ -154,6 +194,7 @@ __all__ = [
     "PolymarketInsufficientBalanceError",
     "PolymarketInvalidPriceError",
     "PolymarketInvalidTickSizeError",
+    "PolymarketInvalidPrecisionError",
     "PolymarketMinimumOrderError",
     "PolymarketMarketError",
     "PolymarketMarketNotFoundError",

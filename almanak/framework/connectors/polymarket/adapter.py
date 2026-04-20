@@ -40,6 +40,7 @@ from ...models.reproduction_bundle import ActionBundle
 from .clob_client import ClobClient
 from .ctf_sdk import BINARY_PARTITION, INDEX_SET_NO, INDEX_SET_YES, CtfSDK
 from .exceptions import (
+    PolymarketInvalidPrecisionError,
     PolymarketMarketNotFoundError,
     PolymarketMarketNotResolvedError,
 )
@@ -67,6 +68,17 @@ POLYMARKET_GAS_ESTIMATES = {
     "approve_ctf": 50_000,
     "redeem_positions": 200_000,
 }
+
+# CLOB pre-flight precision cap. The adapter validates user-supplied PRICES
+# against this BEFORE snapping (VIB-3140) so `--dry-run` matches the live CLOB.
+# Tick sizes top out at 0.0001 (4 decimals); any price with more fractional
+# digits is meaningless on the CLOB wire and almost certainly came from a
+# Python-float-to-Decimal conversion (e.g. ``Decimal(0.7)`` → 17 decimals).
+# Share SIZE precision is intentionally NOT checked here: the SDK's internal
+# share-quantization (``_build_amounts_at_price``) floors shares to the 2-dec
+# grid, and typical sizing patterns (``amount_usd / price``) legitimately
+# produce many-decimal values that the CLOB accepts.
+CLOB_MAX_PRICE_DECIMALS = 4
 
 
 # =============================================================================
@@ -259,6 +271,17 @@ class PolymarketAdapter:
                 # max_price=0.0135 on a 0.01-tick market would snap price → 0.01
                 # and sizing → 100 shares (vs. the user-intended ~74).
                 size = self._calculate_size(intent, intent.max_price)
+                # Run the live-CLOB pre-flight checks on the USER-supplied price
+                # (pre-snap) so `--dry-run` fails with the same error text the
+                # CLOB would emit in production instead of silently correcting
+                # the price (VIB-3140). Tick / precision / $1-floor are all
+                # covered here.
+                self._validate_clob_preflight(
+                    side="BUY",
+                    price=intent.max_price,
+                    size=size,
+                    market=market,
+                )
                 price = self.clob.round_price_to_tick(intent.max_price, "BUY", market=market)
                 params = LimitOrderParams(
                     token_id=token_id,
@@ -411,6 +434,17 @@ class PolymarketAdapter:
             # min_price guaranteed non-None by the upfront check; route to LIMIT.
             # Market SELLs at the 0.01 default underprice the position and risk
             # filling at the floor — always go through the LIMIT path.
+            # Run the live-CLOB pre-flight checks on the USER-supplied price
+            # (pre-snap) so `--dry-run` fails with the same error text the
+            # CLOB would emit in production instead of silently correcting
+            # the price (VIB-3140). Tick size and decimal precision apply to
+            # SELL orders too; the $1 USD floor is BUY-only and skipped here.
+            self._validate_clob_preflight(
+                side="SELL",
+                price=intent.min_price,
+                size=size,
+                market=market,
+            )
             price = self.clob.round_price_to_tick(intent.min_price, "SELL", market=market)
             params = LimitOrderParams(
                 token_id=token_id,
@@ -690,6 +724,87 @@ class PolymarketAdapter:
         if expiration_hours is None:
             return 0
         return int(datetime.now(UTC).timestamp()) + (expiration_hours * 3600)
+
+    # =========================================================================
+    # CLOB Pre-Flight Validation (VIB-3140)
+    # =========================================================================
+
+    def _validate_clob_preflight(
+        self,
+        *,
+        side: str,
+        price: Decimal,
+        size: Decimal,
+        market: GammaMarket,
+    ) -> None:
+        """Run all live-CLOB pre-flight validations at compile / dry-run time.
+
+        The strategy runner's ``--dry-run`` mode stops before any network
+        submission — so any validation that happens only on the live CLOB
+        (off-tick prices, sub-$1 BUY, excess decimals) silently passes in
+        dry-run and then blows up in production. This method closes that gap
+        by running the CLOB's pre-flight checks against the *user-supplied*
+        price (i.e. BEFORE :meth:`ClobClient.round_price_to_tick` snaps it).
+
+        The error messages include the exact strings the live CLOB emits so
+        strategy authors can grep for them and ``non_retryable`` classifiers
+        (VIB-3141) can pattern-match the same text.
+
+        Checks (all run in order, first failure raises):
+        1. **Tick size** — ``price`` must be an integer multiple of
+           ``market.order_price_min_tick_size``. Live CLOB:
+           ``breaks minimum tick size rule: <tick_size>``.
+        2. **Price precision** — ``price`` must have at most 4 decimals
+           (CLOB caps at 0.0001 tick). Guards against Python-float ->
+           Decimal bugs that inflate ``as_integer_ratio`` denominators.
+        3. **Minimum order value** — for BUY, ``size * price`` must be
+           ``>= $1``. Live CLOB:
+           ``invalid amount for a marketable BUY order ($X), min size: $1``.
+
+        Post-sign validations in :meth:`ClobClient.build_limit_order` and
+        :meth:`ClobClient.build_market_order` remain in place as defence in
+        depth — re-checking snapped amounts catches cases where flooring
+        drops below the per-market shares minimum.
+
+        Args:
+            side: Order side ("BUY" or "SELL"). Only BUY is subject to the
+                $1 USD floor; SELL pays in shares.
+            price: User-supplied price (``intent.max_price`` for BUY,
+                ``intent.min_price`` for SELL). Validated pre-snap so
+                off-tick prices fail instead of being silently corrected.
+            size: Number of shares being bought/sold.
+            market: Resolved ``GammaMarket`` providing tick / size metadata.
+
+        Raises:
+            PolymarketInvalidTickSizeError: Price is not a tick multiple.
+            PolymarketInvalidPrecisionError: Price or size has too many
+                decimals for the CLOB precision caps.
+            PolymarketMinimumOrderError: BUY order value (size * price) is
+                below the $1 USD floor.
+        """
+        # 1. Tick size — the ClobClient helper raises with the exact CLOB text
+        #    (see PolymarketInvalidTickSizeError) when the price is off-tick.
+        self.clob._validate_tick_size(price, market=market)
+
+        # 2. Price precision — Decimal.as_tuple().exponent is negative for
+        #    fractional values; -5 means 5 decimal places. Normalize() strips
+        #    trailing zeros so e.g. Decimal("0.1200") registers as 2 decimals.
+        #    Positive exponents (e.g. Decimal("1E+2")) have 0 fractional
+        #    digits and are fine; we only reject when fractional-digit count
+        #    exceeds the CLOB's 4-decimal cap.
+        price_exp = price.normalize().as_tuple().exponent
+        if isinstance(price_exp, int) and price_exp < 0 and -price_exp > CLOB_MAX_PRICE_DECIMALS:
+            raise PolymarketInvalidPrecisionError(
+                field="price",
+                value=str(price),
+                max_decimals=CLOB_MAX_PRICE_DECIMALS,
+            )
+
+        # 3. Minimum order value — $1 USD floor for BUY only. Delegates to
+        #    the ClobClient so we emit the same error text that the post-sign
+        #    path does.
+        if side == "BUY":
+            self.clob._validate_order_value_usd(size * price)
 
     def _map_time_in_force(self, tif: str) -> OrderType:
         """Map time-in-force string to OrderType enum.
