@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop
+.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage crap test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop
 
 # Load .env file if it exists
 -include .env
@@ -81,6 +81,11 @@ test-coverage:
 	uv run pytest tests/ --ignore=tests/intents --ignore=tests/visual/nightly -m "not integration" -v --import-mode=importlib \
 		--cov=almanak --cov-report=xml:coverage.xml \
 		--junitxml=test-results.xml
+
+# Compute CRAP (Change Risk Anti-Patterns) score per function. Requires a .coverage
+# file from a prior `make test-coverage` run. Flags high-risk functions (CRAP > 30).
+crap:
+	uv run scripts/crap_score.py --top 30
 
 # Run nightly-only visual Market Data API contract tests
 test-nightly-visual:
