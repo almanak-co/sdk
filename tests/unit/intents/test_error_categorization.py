@@ -142,6 +142,50 @@ class TestErrorCategorization:
         sm = self._make_state_machine()
         assert sm._categorize_error("PancakeSwap V3 not deployed on optimism") == "COMPILATION_PERMANENT"
 
+    # VIB-3141: CLOB 4xx fatal rejections (Polymarket and similar order books)
+
+    def test_clob_breaks_minimum_tick_size(self):
+        # Polymarket CLOB rejects orders with off-tick prices. Deterministic.
+        sm = self._make_state_machine()
+        assert sm._categorize_error(
+            "CLOB 400: order 0xabc breaks minimum tick size rule: 0.001"
+        ) == "COMPILATION_PERMANENT"
+
+    def test_clob_minimum_order_value(self):
+        sm = self._make_state_machine()
+        assert sm._categorize_error(
+            "CLOB 400: order below minimum order value"
+        ) == "COMPILATION_PERMANENT"
+
+    def test_clob_invalid_order(self):
+        sm = self._make_state_machine()
+        assert sm._categorize_error(
+            "CLOB 400 INVALID_ORDER: validation failed"
+        ) == "COMPILATION_PERMANENT"
+
+    def test_clob_invalid_tick(self):
+        sm = self._make_state_machine()
+        assert sm._categorize_error(
+            "CLOB 400 INVALID_TICK: price not on tick grid"
+        ) == "COMPILATION_PERMANENT"
+
+    def test_clob_order_below_minimum(self):
+        sm = self._make_state_machine()
+        assert sm._categorize_error(
+            "CLOB 400 ORDER_BELOW_MINIMUM: size too small"
+        ) == "COMPILATION_PERMANENT"
+
+    def test_clob_5xx_stays_retryable(self):
+        """Regression guard: transient CLOB 5xx / timeout must remain retryable (VIB-3141)."""
+        sm = self._make_state_machine()
+        # 5xx with no fatal substring -> not a permanent error
+        # "internal server error" has no matching keyword so returns None
+        assert sm._categorize_error("CLOB 500: internal server error") is None
+        # Explicit timeout should still categorize as TIMEOUT (retryable)
+        assert sm._categorize_error("CLOB request timed out") == "TIMEOUT"
+        # Generic network blip
+        assert sm._categorize_error("CLOB connection reset") == "NETWORK_ERROR"
+
     def test_unknown_error_returns_none(self):
         sm = self._make_state_machine()
         assert sm._categorize_error("Something went wrong") is None
@@ -205,6 +249,19 @@ class TestNonRetryableAbort:
         context.error_message = "Nonce too low"
 
         result = runner._on_sadflow_enter("NONCE_ERROR", 1, context)
+
+        assert result is not None
+        assert result.action_type == SadflowActionType.ABORT
+
+    def test_clob_fatal_aborts(self):
+        """VIB-3141: CLOB fatal 4xx errors (categorized as COMPILATION_PERMANENT) abort."""
+        from almanak.framework.runner.strategy_runner import StrategyRunner
+
+        runner = StrategyRunner.__new__(StrategyRunner)
+        context = MagicMock(spec=SadflowContext)
+        context.error_message = "CLOB 400: order 0xabc breaks minimum tick size rule: 0.001"
+
+        result = runner._on_sadflow_enter("COMPILATION_PERMANENT", 1, context)
 
         assert result is not None
         assert result.action_type == SadflowActionType.ABORT
@@ -318,6 +375,113 @@ class TestStateMachinePermanentErrorFlow:
         assert result.is_complete is True
         assert result.success is False
         assert sm.retry_count == 0  # No retries attempted
+
+    def test_clob_breaks_minimum_tick_fails_immediately(self):
+        """VIB-3141: CLOB 'breaks minimum tick size' must fail with 0 retries."""
+        intent = self._make_swap_intent()
+
+        compiler = MagicMock()
+        from almanak.framework.intents.compiler import CompilationResult, CompilationStatus
+
+        compiler.compile.return_value = CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="CLOB 400: order 0xabc breaks minimum tick size rule: 0.001",
+        )
+
+        from almanak.framework.runner.strategy_runner import StrategyRunner
+
+        runner = StrategyRunner.__new__(StrategyRunner)
+
+        config = StateMachineConfig(
+            retry_config=RetryConfig(max_retries=3),
+        )
+        sm = IntentStateMachine(
+            intent=intent,
+            compiler=compiler,
+            config=config,
+            on_sadflow_enter=runner._on_sadflow_enter,
+        )
+
+        # Step 1: PREPARING -> compilation fails -> SADFLOW
+        result = sm.step()
+        assert result.error is not None
+        assert "tick size" in result.error
+
+        # Step 2: SADFLOW -> hook aborts -> FAILED (no retry)
+        result = sm.step()
+        assert result.is_complete is True
+        assert result.success is False
+        assert sm.retry_count == 0  # CRITICAL: 0 retries for fatal CLOB rejection
+
+    def test_clob_minimum_order_value_fails_immediately(self):
+        """VIB-3141: CLOB 'minimum order value' must fail with 0 retries."""
+        intent = self._make_swap_intent()
+
+        compiler = MagicMock()
+        from almanak.framework.intents.compiler import CompilationResult, CompilationStatus
+
+        compiler.compile.return_value = CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="CLOB 400: order below minimum order value",
+        )
+
+        from almanak.framework.runner.strategy_runner import StrategyRunner
+
+        runner = StrategyRunner.__new__(StrategyRunner)
+
+        config = StateMachineConfig(
+            retry_config=RetryConfig(max_retries=3),
+        )
+        sm = IntentStateMachine(
+            intent=intent,
+            compiler=compiler,
+            config=config,
+            on_sadflow_enter=runner._on_sadflow_enter,
+        )
+
+        result = sm.step()
+        assert result.error is not None
+        result = sm.step()
+        assert result.is_complete is True
+        assert result.success is False
+        assert sm.retry_count == 0
+
+    def test_clob_500_still_retries(self):
+        """VIB-3141 regression guard: transient CLOB 5xx must stay retryable."""
+        intent = self._make_swap_intent()
+
+        compiler = MagicMock()
+        from almanak.framework.intents.compiler import CompilationResult, CompilationStatus
+
+        # "timed out" -> TIMEOUT (transient, retryable)
+        compiler.compile.side_effect = [
+            CompilationResult(status=CompilationStatus.FAILED, error="CLOB request timed out"),
+            CompilationResult(status=CompilationStatus.FAILED, error="CLOB request timed out"),
+        ]
+
+        from almanak.framework.runner.strategy_runner import StrategyRunner
+
+        runner = StrategyRunner.__new__(StrategyRunner)
+
+        config = StateMachineConfig(
+            retry_config=RetryConfig(max_retries=3, initial_delay_seconds=0.0),
+        )
+        sm = IntentStateMachine(
+            intent=intent,
+            compiler=compiler,
+            config=config,
+            on_sadflow_enter=runner._on_sadflow_enter,
+        )
+
+        # Step 1: PREPARING -> fails -> SADFLOW
+        result = sm.step()
+        assert result.error is not None
+
+        # Step 2: SADFLOW -> retry allowed -> back to PREPARING
+        result = sm.step()
+        assert result.retry_delay is not None
+        assert sm.retry_count == 1  # Transient: retry counted
+        assert not result.is_complete
 
     def test_transient_error_does_retry(self):
         """A transient error should trigger retry (existing behavior preserved)."""

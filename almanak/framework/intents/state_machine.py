@@ -990,6 +990,9 @@ class IntentStateMachine:
         # Permanent configuration/support errors (non-retriable)
         # These indicate missing protocol support, unsupported chains, missing positions, etc.
         # Placed last so transient errors (timeout, revert, network) are caught first.
+        # NOTE: error_lower is lowercased, so keywords here must be lowercase.
+        # CLOB 4xx fatal rejections (VIB-3141) are listed below — see VIB-3140 for
+        # the upstream dry-run error strings these mirror byte-for-byte (modulo case).
         permanent_keywords = (
             "not supported",
             "unsupported",
@@ -1006,6 +1009,15 @@ class IntentStateMachine:
             "protocol not available",
             "missing configuration",
             "not deployed",
+            # VIB-3141: CLOB 4xx fatal rejections (Polymarket and similar order books).
+            # These are deterministic order validation errors — retrying with the same
+            # inputs will fail identically. Transient 5xx errors stay retryable because
+            # they never match these substrings.
+            "breaks minimum tick size",
+            "minimum order value",
+            "invalid_order",
+            "invalid_tick",
+            "order_below_minimum",
         )
         if any(kw in error_lower for kw in permanent_keywords):
             return "COMPILATION_PERMANENT"
