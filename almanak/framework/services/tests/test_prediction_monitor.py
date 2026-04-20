@@ -910,8 +910,11 @@ class TestGenerateSellIntent:
         assert sell_intent.shares == "all"
         assert sell_intent.order_type == "limit"
         assert sell_intent.time_in_force == "IOC"
-        # min_price should be 95% of stop_loss_price
-        assert sell_intent.min_price == Decimal("0.50") * Decimal("0.95")
+        # VIB-3217: min_price is the 95% safety margin snapped DOWN to the
+        # market tick (0.01 default). 0.50 * 0.95 = 0.475, floored to 0.47.
+        # Snapping down preserves the "ensure execution" intent of the
+        # multiplier -- ceiling-rounding would tighten the margin.
+        assert sell_intent.min_price == Decimal("0.47")
 
     def test_generate_sell_intent_for_take_profit(
         self,
@@ -963,9 +966,10 @@ class TestGenerateSellIntent:
 
         assert sell_intent is not None
         assert isinstance(sell_intent, PredictionSellIntent)
-        # min_price should be 95% of trailing_stop_price
-        expected_min = Decimal("0.675") * Decimal("0.95")
-        assert sell_intent.min_price == expected_min
+        # VIB-3217: trailing-stop applies the 95% safety margin and then
+        # snaps DOWN to the default 0.01 tick. 0.675 * 0.95 = 0.64125 ->
+        # floored to 0.64. A fine-tick market (0.001) is covered below.
+        assert sell_intent.min_price == Decimal("0.64")
         assert sell_intent.order_type == "limit"
 
     def test_generate_sell_intent_for_resolution_approaching(
@@ -1109,6 +1113,164 @@ class TestGenerateSellIntent:
         # the adapter's mandatory-anchor check passes.
         assert sell_intent.min_price == Decimal("0.01")
         assert sell_intent.order_type == "market"
+
+
+# =============================================================================
+# Test VIB-3217: Off-tick min_price snap
+# =============================================================================
+
+
+class TestOffTickMinPriceSnap:
+    """Regression tests for VIB-3217.
+
+    `generate_sell_intent` used to multiply a threshold by 0.95 and return it
+    verbatim. On a 0.01-tick market that produces 0.475 (off-tick); on a
+    0.001-tick market that produces 0.64125 (also off-tick). The adapter's
+    preflight raises PolymarketInvalidTickSizeError on either, so the first
+    stop-loss / trailing-stop trigger would fail to submit.
+    """
+
+    def test_stop_loss_snapped_to_default_0_01_tick(
+        self,
+        monitor: PredictionPositionMonitor,
+        position_with_conditions: MonitoredPosition,
+    ) -> None:
+        """0.50 * 0.95 = 0.475 -> snapped DOWN to 0.47 on default 0.01 tick."""
+        from almanak.framework.intents.vocabulary import PredictionSellIntent
+
+        result = MonitoringResult(
+            position=position_with_conditions,
+            event=PredictionEvent.STOP_LOSS_TRIGGERED,
+            triggered=True,
+            details={"current_price": "0.48", "stop_loss_price": "0.50"},
+            suggested_action="SELL",
+        )
+        # No snapshot -> default tick 0.01 applied.
+        sell_intent = monitor.generate_sell_intent(result)
+        assert isinstance(sell_intent, PredictionSellIntent)
+        assert sell_intent.min_price == Decimal("0.47")
+        # The whole point of the fix: min_price must be a clean 0.01 multiple.
+        assert (sell_intent.min_price * Decimal("100")) % Decimal("1") == Decimal("0")
+
+    def test_trailing_stop_snapped_to_fine_0_001_tick(
+        self,
+        monitor: PredictionPositionMonitor,
+        position_with_conditions: MonitoredPosition,
+    ) -> None:
+        """Trailing-stop path: 0.675 * 0.95 = 0.64125 -> 0.641 on a 0.001-tick market.
+
+        Renamed from ``test_stop_loss_snapped_to_fine_0_001_tick`` per CodeRabbit
+        review of PR #1610: the test exercises ``TRAILING_STOP_TRIGGERED``, not
+        ``STOP_LOSS_TRIGGERED``. A dedicated stop-loss fine-tick test lives
+        below.
+        """
+        from almanak.framework.intents.vocabulary import PredictionSellIntent
+
+        snapshot = PositionSnapshot(
+            market_id="test-market",
+            current_price=Decimal("0.60"),
+            tick_size=Decimal("0.001"),
+        )
+        result = MonitoringResult(
+            position=position_with_conditions,
+            event=PredictionEvent.TRAILING_STOP_TRIGGERED,
+            triggered=True,
+            details={
+                "current_price": "0.60",
+                "highest_price": "0.75",
+                "trailing_stop_price": "0.675",
+            },
+            suggested_action="SELL",
+        )
+        sell_intent = monitor.generate_sell_intent(result, snapshot=snapshot)
+        assert isinstance(sell_intent, PredictionSellIntent)
+        assert sell_intent.min_price == Decimal("0.641")
+        # Snapped price must be a clean 0.001 multiple.
+        remainder = (sell_intent.min_price * Decimal("1000")) % Decimal("1")
+        assert remainder == Decimal("0")
+
+    def test_stop_loss_snapped_to_fine_0_001_tick(
+        self,
+        monitor: PredictionPositionMonitor,
+        position_with_conditions: MonitoredPosition,
+    ) -> None:
+        """Dedicated stop-loss test on a 0.001-tick market.
+
+        ``stop_loss_price = 0.50`` from the fixture. 0.50 * 0.95 = 0.475,
+        floored onto the 0.001 tick grid = 0.475 (already on-tick at 0.001
+        resolution). Verifies the stop-loss path uses the snapshot's
+        ``tick_size`` field, not the default 0.01.
+        """
+        from almanak.framework.intents.vocabulary import PredictionSellIntent
+
+        snapshot = PositionSnapshot(
+            market_id="test-market",
+            current_price=Decimal("0.48"),
+            tick_size=Decimal("0.001"),
+        )
+        result = MonitoringResult(
+            position=position_with_conditions,
+            event=PredictionEvent.STOP_LOSS_TRIGGERED,
+            triggered=True,
+            details={"current_price": "0.48", "stop_loss_price": "0.50"},
+            suggested_action="SELL",
+        )
+        sell_intent = monitor.generate_sell_intent(result, snapshot=snapshot)
+        assert isinstance(sell_intent, PredictionSellIntent)
+        # 0.50 * 0.95 = 0.475 -> on 0.001 tick -> 0.475
+        assert sell_intent.min_price == Decimal("0.475")
+        remainder = (sell_intent.min_price * Decimal("1000")) % Decimal("1")
+        assert remainder == Decimal("0")
+
+    def test_snap_never_drops_below_clob_floor(self) -> None:
+        """Floor to 0.01 even when the computed value would be below it."""
+        # Direct helper test: arbitrary tiny input should clamp to 0.01.
+        snapped = PredictionPositionMonitor._snap_sell_min_price_to_tick(Decimal("0.002"), Decimal("0.01"))
+        assert snapped == Decimal("0.01")
+
+    def test_snap_is_idempotent_on_valid_tick(self) -> None:
+        """A price already on the tick passes through unchanged."""
+        snapped = PredictionPositionMonitor._snap_sell_min_price_to_tick(Decimal("0.47"), Decimal("0.01"))
+        assert snapped == Decimal("0.47")
+
+    def test_snap_clamps_to_on_tick_floor_for_non_divisor_tick(self) -> None:
+        """Gemini PR #1610 concern: tick_size that doesn't divide 0.01 evenly.
+
+        Polymarket tick sizes today are 0.01 / 0.001 / 0.0001, all divisors
+        of the CLOB minimum (0.01). But if the exchange ever emits a 0.1
+        tick, a naive ``max(snapped, 0.01)`` clamp would return 0.01, which
+        is OFF the 0.1 tick grid and would be rejected by the adapter. The
+        clamp must compute ``ceil(0.01 / 0.1) * 0.1 = 0.1`` instead.
+        """
+        snapped = PredictionPositionMonitor._snap_sell_min_price_to_tick(Decimal("0.005"), Decimal("0.1"))
+        # 0.005 floors to 0 on a 0.1 tick; clamp must bring us up to the
+        # smallest on-tick value at or above the CLOB min -> 0.1.
+        assert snapped == Decimal("0.1")
+
+    def test_non_positive_tick_size_falls_back_to_clob_minimum(self, caplog) -> None:
+        """CodeRabbit PR #1610 round 2: a non-positive tick must NOT bypass snapping.
+
+        Upstream market metadata parsers don't enforce positivity, so if a
+        bad tick_size slipped through (0 or negative) and we returned the
+        raw price, we'd recreate the exact off-tick failure this PR fixes.
+        The helper must fall back to the CLOB minimum tick (0.01) and log
+        a warning.
+        """
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            snapped = PredictionPositionMonitor._snap_sell_min_price_to_tick(Decimal("0.475"), Decimal("0"))
+
+        # Raw price was off-tick for 0.01 (0.475); fallback snaps to 0.47.
+        assert snapped == Decimal("0.47")
+        assert any("non-positive tick_size" in r.message for r in caplog.records), (
+            "expected a warning log identifying the bad tick_size"
+        )
+
+    def test_negative_tick_size_falls_back_to_clob_minimum(self) -> None:
+        """Mirror of the zero-tick case with an explicitly negative input."""
+        snapped = PredictionPositionMonitor._snap_sell_min_price_to_tick(Decimal("0.475"), Decimal("-0.01"))
+        assert snapped == Decimal("0.47")
 
 
 # =============================================================================

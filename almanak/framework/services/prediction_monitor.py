@@ -189,6 +189,13 @@ class PositionSnapshot:
     market_end_date: datetime | None = None
     """Market resolution deadline."""
 
+    tick_size: Decimal = Decimal("0.01")
+    """Market tick size. Used by ``generate_sell_intent`` to snap computed
+    ``min_price`` values onto a valid tick. Defaults to the CLOB-wide 0.01
+    tick; callers with market metadata should pass the real value (e.g.
+    0.001 for fine-tick tail markets) to avoid off-tick adapter rejects.
+    VIB-3217."""
+
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     """When this snapshot was taken."""
 
@@ -861,6 +868,57 @@ class PredictionPositionMonitor:
 
         return safe_size, True  # Partial exit
 
+    # CLOB minimum price. The Polymarket adapter rejects anything below 0.01.
+    _CLOB_MIN_PRICE: Decimal = Decimal("0.01")
+
+    @staticmethod
+    def _snap_sell_min_price_to_tick(price: Decimal, tick_size: Decimal) -> Decimal:
+        """Snap a SELL ``min_price`` down onto a valid tick (VIB-3217).
+
+        We floor (ROUND_DOWN) so that any pre-applied safety margin (e.g. the
+        ``* 0.95`` multiplier used by stop-loss / trailing-stop paths) is
+        preserved: the snapped price is always <= the input. The result is
+        then clamped UP to the smallest ON-TICK value at or above the CLOB
+        minimum (0.01) so we never emit an on-tick-but-below-floor price.
+
+        Gemini review of PR #1610: a naive ``max(snapped, 0.01)`` would be
+        off-tick for ticks that aren't divisors of 0.01 (e.g. a 0.1 tick
+        market would end up with 0.01, not a valid tick). Ceiling-rounding
+        the CLOB minimum onto the tick grid is the safe, defensive fix.
+        Polymarket tick sizes today are 0.01 / 0.001 / 0.0001 -- all
+        divisors of 0.01 -- so in practice this clamp resolves to 0.01, but
+        the math stays correct for any future tick size.
+
+        CodeRabbit PR #1610 round 2: a non-positive ``tick_size`` previously
+        bypassed snapping and returned the raw (potentially off-tick) price,
+        which would recreate the exact failure this PR fixes. Upstream
+        market-metadata parsers don't enforce positivity, so we defensively
+        fall back to the CLOB minimum tick (0.01) and log a warning rather
+        than emit an off-tick price.
+        """
+        # ROUND_CEILING is imported at module top; keep it close to ROUND_DOWN
+        # so future edits don't silently switch direction.
+        from decimal import ROUND_CEILING
+
+        if tick_size <= 0:
+            logger.warning(
+                "Received non-positive tick_size=%s; falling back to CLOB minimum %s. "
+                "Check upstream market metadata for a missing or malformed "
+                "order_price_min_tick_size field.",
+                tick_size,
+                PredictionPositionMonitor._CLOB_MIN_PRICE,
+            )
+            tick_size = PredictionPositionMonitor._CLOB_MIN_PRICE
+
+        ticks = (price / tick_size).to_integral_value(rounding=ROUND_DOWN)
+        snapped = ticks * tick_size
+
+        # Smallest on-tick value at or above the CLOB minimum.
+        floor_ticks = (PredictionPositionMonitor._CLOB_MIN_PRICE / tick_size).to_integral_value(rounding=ROUND_CEILING)
+        min_valid = floor_ticks * tick_size
+
+        return max(snapped, min_valid)
+
     def generate_sell_intent(
         self,
         result: MonitoringResult,
@@ -914,25 +972,45 @@ class PredictionPositionMonitor:
         min_price = Decimal("0.01")
         order_type: Literal["market", "limit"] = "market"
 
+        # VIB-3217: multiplying a threshold by 0.95 routinely produces off-tick
+        # prices (0.50 * 0.95 = 0.475 on a 0.01-tick market; 0.675 * 0.95 =
+        # 0.64125 on a 0.001-tick market). The adapter's preflight raises
+        # PolymarketInvalidTickSizeError on any off-tick input, so without
+        # snapping the first stop-loss / trailing-stop trigger would fail to
+        # submit and the position would not exit. We snap DOWN so the margin
+        # below the threshold is preserved (never tightened).
+        tick_size = snapshot.tick_size if snapshot is not None else Decimal("0.01")
+
         if result.event == PredictionEvent.STOP_LOSS_TRIGGERED:
             # For stop-loss, use the stop-loss price as a floor
             if position.exit_conditions and position.exit_conditions.stop_loss_price:
-                # Use a slightly lower price to ensure execution
-                min_price = position.exit_conditions.stop_loss_price * Decimal("0.95")
+                # Use a slightly lower price to ensure execution, snapped to tick.
+                min_price = self._snap_sell_min_price_to_tick(
+                    position.exit_conditions.stop_loss_price * Decimal("0.95"),
+                    tick_size,
+                )
                 order_type = "limit"
 
         elif result.event == PredictionEvent.TAKE_PROFIT_TRIGGERED:
-            # For take-profit, use the take-profit price as a floor
+            # For take-profit, use the take-profit price as a floor.
+            # Take-profit prices are configured explicitly by the strategy
+            # author; snap to tick for defense-in-depth against misconfig.
             if position.exit_conditions and position.exit_conditions.take_profit_price:
-                min_price = position.exit_conditions.take_profit_price
+                min_price = self._snap_sell_min_price_to_tick(
+                    position.exit_conditions.take_profit_price,
+                    tick_size,
+                )
                 order_type = "limit"
 
         elif result.event == PredictionEvent.TRAILING_STOP_TRIGGERED:
             # For trailing stop, use the calculated stop price
             if "trailing_stop_price" in result.details:
                 trailing_price = Decimal(result.details["trailing_stop_price"])
-                # Use a slightly lower price to ensure execution
-                min_price = trailing_price * Decimal("0.95")
+                # Use a slightly lower price to ensure execution, snapped to tick.
+                min_price = self._snap_sell_min_price_to_tick(
+                    trailing_price * Decimal("0.95"),
+                    tick_size,
+                )
                 order_type = "limit"
 
         # RESOLUTION_APPROACHING falls through with min_price=0.01 and
