@@ -91,7 +91,12 @@ def compile_lp_open_aerodrome(compiler, intent: LPOpenIntent) -> CompilationResu
         from .pool_validation import validate_aerodrome_pool
 
         pool_check = validate_aerodrome_pool(
-            compiler.chain, token0_info.address, token1_info.address, stable, compiler._get_chain_rpc_url()
+            compiler.chain,
+            token0_info.address,
+            token1_info.address,
+            stable,
+            compiler._get_chain_rpc_url(),
+            gateway_client=compiler._gateway_client,
         )
         failed = compiler._validate_pool(pool_check, intent.intent_id)
         if failed is not None:
@@ -490,13 +495,23 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:
             from .pool_validation import validate_aerodrome_pool
 
             pool_check = validate_aerodrome_pool(
-                compiler.chain, from_token.address, to_token.address, stable, compiler._get_chain_rpc_url()
+                compiler.chain,
+                from_token.address,
+                to_token.address,
+                stable,
+                compiler._get_chain_rpc_url(),
+                gateway_client=compiler._gateway_client,
             )
         else:
             from .pool_validation import validate_aerodrome_cl_pool
 
             pool_check = validate_aerodrome_cl_pool(
-                compiler.chain, from_token.address, to_token.address, tick_spacing, compiler._get_chain_rpc_url()
+                compiler.chain,
+                from_token.address,
+                to_token.address,
+                tick_spacing,
+                compiler._get_chain_rpc_url(),
+                gateway_client=compiler._gateway_client,
             )
         failed = compiler._validate_pool(pool_check, intent.intent_id)
         if failed is not None:

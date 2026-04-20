@@ -190,6 +190,34 @@ class TestFlashLoanEOAGuard:
             with patch("httpx.post", return_value=self._mock_rpc_response("0x")):
                 assert compiler._is_wallet_contract() is False
 
+    def test_is_wallet_contract_uses_gateway_rpc_when_connected(self):
+        """_is_wallet_contract prefers gateway RPC over direct HTTP."""
+        compiler = self._make_compiler()
+        gateway_client = MagicMock()
+        gateway_client.is_connected = True
+        gateway_client.rpc.Call.return_value = MagicMock(success=True, result='"0x6080604052"', error="")
+        compiler._gateway_client = gateway_client
+
+        with patch("httpx.post") as mock_post:
+            assert compiler._is_wallet_contract() is True
+
+        mock_post.assert_not_called()
+        gateway_client.rpc.Call.assert_called_once()
+
+    def test_is_wallet_contract_gateway_failure_does_not_fallback_to_direct_http(self):
+        """Gateway-backed deployments should not bypass the gateway on eth_getCode failure."""
+        compiler = self._make_compiler()
+        gateway_client = MagicMock()
+        gateway_client.is_connected = True
+        gateway_client.rpc.Call.return_value = MagicMock(success=False, result="", error="rpc failed")
+        compiler._gateway_client = gateway_client
+
+        with patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"):
+            with patch("httpx.post") as mock_post:
+                assert compiler._is_wallet_contract() is None
+
+        mock_post.assert_not_called()
+
     def test_is_wallet_contract_contract(self):
         """_is_wallet_contract returns True for contract."""
         compiler = self._make_compiler()

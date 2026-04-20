@@ -22,9 +22,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from almanak.core.contracts import AERODROME, AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, TRADERJOE_V2, UNISWAP_V3
 from almanak.framework.data.pools.reader import GET_POOL_SELECTOR
+
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -83,12 +87,32 @@ class PoolValidationResult:
     error: str | None = None
 
 
-def _eth_call(rpc_url: str, to: str, data: str, timeout: float = 5.0) -> bytes | None:
-    """Perform a raw eth_call via JSON-RPC. Returns None on any failure."""
+def _eth_call(
+    rpc_url: str,
+    to: str,
+    data: str,
+    timeout: float = 5.0,
+    *,
+    chain: str | None = None,
+    gateway_client: GatewayClient | None = None,
+) -> bytes | None:
+    """Perform an eth_call via gateway when available, otherwise direct JSON-RPC."""
+    if gateway_client is not None and getattr(gateway_client, "is_connected", False) and chain:
+        try:
+            result = gateway_client.eth_call(chain=chain, to=to, data=data)
+            if not result or result == "0x":
+                return None
+            return bytes.fromhex(result.removeprefix("0x"))
+        except Exception:
+            return None
+
+    if not rpc_url:
+        return None
+
     import requests
 
     try:
-        resp = requests.post(
+        resp = requests.post(  # vib-2986-exempt: local-only fallback when no connected gateway client is available
             rpc_url,
             json={
                 "jsonrpc": "2.0",
@@ -136,6 +160,7 @@ def validate_v3_pool(
     token_b: str,
     fee_tier: int,
     rpc_url: str | None,
+    gateway_client: GatewayClient | None = None,
 ) -> PoolValidationResult:
     """Validate that a V3-style pool exists on-chain.
 
@@ -147,12 +172,13 @@ def validate_v3_pool(
         token_a: Token A address (checksummed or lowercase).
         token_b: Token B address (checksummed or lowercase).
         fee_tier: Fee tier in basis points (e.g. 500, 3000).
-        rpc_url: RPC URL for on-chain query. If None, returns unknown.
+        rpc_url: RPC URL for on-chain query. If None, returns unknown unless gateway_client is available.
+        gateway_client: Optional connected gateway client for gateway-routed eth_call.
 
     Returns:
         PoolValidationResult with exists=True/False/None.
     """
-    if rpc_url is None:
+    if rpc_url is None and gateway_client is None:
         return PoolValidationResult(
             exists=None,
             reason=PoolValidationReason.RPC_UNAVAILABLE,
@@ -177,7 +203,7 @@ def validate_v3_pool(
     factory = chain_contracts["factory"]
 
     calldata = _encode_get_pool_v3(token_a, token_b, fee_tier)
-    raw = _eth_call(rpc_url, factory, calldata)
+    raw = _eth_call(rpc_url or "", factory, calldata, chain=chain, gateway_client=gateway_client)
 
     if raw is None:
         return PoolValidationResult(
@@ -208,6 +234,7 @@ def validate_aerodrome_pool(
     token_b: str,
     stable: bool,
     rpc_url: str | None,
+    gateway_client: GatewayClient | None = None,
 ) -> PoolValidationResult:
     """Validate that an Aerodrome Classic pool exists on-chain.
 
@@ -216,12 +243,13 @@ def validate_aerodrome_pool(
         token_a: Token A address.
         token_b: Token B address.
         stable: True for stable pool, False for volatile.
-        rpc_url: RPC URL for on-chain query. If None, returns unknown.
+        rpc_url: RPC URL for on-chain query. If None, returns unknown unless gateway_client is available.
+        gateway_client: Optional connected gateway client for gateway-routed eth_call.
 
     Returns:
         PoolValidationResult with exists=True/False/None.
     """
-    if rpc_url is None:
+    if rpc_url is None and gateway_client is None:
         return PoolValidationResult(
             exists=None,
             reason=PoolValidationReason.RPC_UNAVAILABLE,
@@ -238,7 +266,7 @@ def validate_aerodrome_pool(
     factory = chain_contracts["factory"]
 
     calldata = _encode_get_pool_aerodrome(token_a, token_b, stable)
-    raw = _eth_call(rpc_url, factory, calldata)
+    raw = _eth_call(rpc_url or "", factory, calldata, chain=chain, gateway_client=gateway_client)
 
     if raw is None:
         return PoolValidationResult(
@@ -284,6 +312,7 @@ def validate_aerodrome_cl_pool(
     token_b: str,
     tick_spacing: int,
     rpc_url: str | None,
+    gateway_client: GatewayClient | None = None,
 ) -> PoolValidationResult:
     """Validate that an Aerodrome Slipstream (CL) pool exists on-chain.
 
@@ -292,12 +321,13 @@ def validate_aerodrome_cl_pool(
         token_a: Token A address.
         token_b: Token B address.
         tick_spacing: CL pool tick spacing (e.g. 100).
-        rpc_url: RPC URL for on-chain query. If None, returns unknown.
+        rpc_url: RPC URL for on-chain query. If None, returns unknown unless gateway_client is available.
+        gateway_client: Optional connected gateway client for gateway-routed eth_call.
 
     Returns:
         PoolValidationResult with exists=True/False/None.
     """
-    if rpc_url is None:
+    if rpc_url is None and gateway_client is None:
         return PoolValidationResult(
             exists=None,
             reason=PoolValidationReason.RPC_UNAVAILABLE,
@@ -314,7 +344,7 @@ def validate_aerodrome_cl_pool(
     cl_factory = chain_contracts["cl_factory"]
 
     calldata = _encode_get_pool_aerodrome_cl(token_a, token_b, tick_spacing)
-    raw = _eth_call(rpc_url, cl_factory, calldata)
+    raw = _eth_call(rpc_url or "", cl_factory, calldata, chain=chain, gateway_client=gateway_client)
 
     if raw is None:
         return PoolValidationResult(
@@ -345,7 +375,13 @@ _SLOT0_SELECTOR = "0x3850c7bd"
 _TRADERJOE_GET_RESERVES_SELECTOR = "0x0902f1ac"
 
 
-def fetch_v3_pool_sqrt_price_x96(pool_address: str, rpc_url: str) -> tuple[int, int] | None:
+def fetch_v3_pool_sqrt_price_x96(
+    pool_address: str,
+    rpc_url: str | None,
+    *,
+    chain: str | None = None,
+    gateway_client: GatewayClient | None = None,
+) -> tuple[int, int] | None:
     """Fetch sqrtPriceX96 and current tick from a Uniswap V3-compatible pool's slot0().
 
     Calls slot0() on the pool contract and returns the first two return values:
@@ -358,11 +394,13 @@ def fetch_v3_pool_sqrt_price_x96(pool_address: str, rpc_url: str) -> tuple[int, 
     Args:
         pool_address: Pool contract address.
         rpc_url: RPC URL for on-chain query.
+        chain: Chain name for gateway-routed eth_call.
+        gateway_client: Optional connected gateway client for gateway-routed eth_call.
 
     Returns:
         (sqrtPriceX96, current_tick) as (int, int), or None on any failure.
     """
-    raw = _eth_call(rpc_url, pool_address, _SLOT0_SELECTOR)
+    raw = _eth_call(rpc_url or "", pool_address, _SLOT0_SELECTOR, chain=chain, gateway_client=gateway_client)
     if raw is None or len(raw) < 64:
         return None
     sqrt_price_x96 = int.from_bytes(raw[:32], "big")
@@ -385,6 +423,7 @@ def validate_traderjoe_pool(
     token_y: str,
     bin_step: int,
     rpc_url: str | None,
+    gateway_client: GatewayClient | None = None,
     *,
     allow_empty_reserves: bool = False,
 ) -> PoolValidationResult:
@@ -397,14 +436,15 @@ def validate_traderjoe_pool(
         token_x: Token X address.
         token_y: Token Y address.
         bin_step: Bin step of the pair (e.g. 20).
-        rpc_url: RPC URL for on-chain query. If None, returns unknown.
+        rpc_url: RPC URL for on-chain query. If None, returns unknown unless gateway_client is available.
+        gateway_client: Optional connected gateway client for gateway-routed eth_call.
         allow_empty_reserves: If True, skip the zero-liquidity check. Set True
             for LP_OPEN flows where seeding an empty pool is valid.
 
     Returns:
         PoolValidationResult with exists=True/False/None.
     """
-    if rpc_url is None:
+    if rpc_url is None and gateway_client is None:
         return PoolValidationResult(
             exists=None,
             reason=PoolValidationReason.RPC_UNAVAILABLE,
@@ -428,7 +468,7 @@ def validate_traderjoe_pool(
     bs = hex(bin_step)[2:].zfill(64)
     calldata = selector + x + y + bs
 
-    raw = _eth_call(rpc_url, factory, calldata)
+    raw = _eth_call(rpc_url or "", factory, calldata, chain=chain, gateway_client=gateway_client)
 
     if raw is None:
         return PoolValidationResult(
@@ -463,7 +503,13 @@ def validate_traderjoe_pool(
     # Skip for LP_OPEN where seeding an empty pool is valid.
     # getReserves() selector: 0x0902f1ac
     if not allow_empty_reserves:
-        reserves_raw = _eth_call(rpc_url, pool_address, _TRADERJOE_GET_RESERVES_SELECTOR)
+        reserves_raw = _eth_call(
+            rpc_url or "",
+            pool_address,
+            _TRADERJOE_GET_RESERVES_SELECTOR,
+            chain=chain,
+            gateway_client=gateway_client,
+        )
         if reserves_raw is not None and len(reserves_raw) >= 64:
             reserve_x = int.from_bytes(reserves_raw[0:32], "big")
             reserve_y = int.from_bytes(reserves_raw[32:64], "big")

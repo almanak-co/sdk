@@ -198,6 +198,7 @@ class DefaultSwapAdapter:
         fixed_fee_tier: int | None = None,
         rpc_url: str | None = None,
         rpc_timeout: float = 10.0,
+        gateway_client: Any | None = None,
     ) -> None:
         """Initialize the adapter.
 
@@ -208,6 +209,7 @@ class DefaultSwapAdapter:
             fixed_fee_tier: Optional fixed fee tier (required when pool_selection_mode="fixed")
             rpc_url: Optional RPC URL for on-chain quote queries in auto mode
             rpc_timeout: HTTP timeout for on-chain quote calls in seconds
+            gateway_client: Optional gateway client for gateway-routed quoter calls
         """
         self.chain = chain
         self.protocol = protocol
@@ -215,6 +217,7 @@ class DefaultSwapAdapter:
         self.fixed_fee_tier = fixed_fee_tier
         self.rpc_url = rpc_url
         self.rpc_timeout = rpc_timeout
+        self.gateway_client = gateway_client
         self.last_fee_selection: dict[str, Any] = {}
         self.last_quoted_amount_out: int | None = None
         self._cached_fee: int | None = None
@@ -455,7 +458,7 @@ class DefaultSwapAdapter:
         candidates: tuple[int, ...],
     ) -> dict[str, Any] | None:
         """Try quoting all candidate tiers via QuoterV2 and return best output tier."""
-        if not self.rpc_url:
+        if self.gateway_client is None and not self.rpc_url:
             return None
         quoter_address = SWAP_QUOTER_ADDRESSES.get(self.chain, {}).get(self.protocol)
         if not quoter_address:
@@ -466,12 +469,23 @@ class DefaultSwapAdapter:
         except ImportError:
             return None
 
-        web3 = Web3(
-            Web3.HTTPProvider(
-                self.rpc_url,
-                request_kwargs={"timeout": self.rpc_timeout},
+        if self.gateway_client is not None and getattr(self.gateway_client, "is_connected", False):
+            from almanak.framework.web3.gateway_provider import get_gateway_web3
+
+            web3 = get_gateway_web3(
+                self.gateway_client,
+                chain=self.chain,
+                request_timeout=self.rpc_timeout,
             )
-        )
+        else:
+            if self.rpc_url is None:
+                return None
+            web3 = Web3(
+                Web3.HTTPProvider(
+                    self.rpc_url,
+                    request_kwargs={"timeout": self.rpc_timeout},
+                )
+            )
         if not web3.is_connected():
             return None
 

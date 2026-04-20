@@ -118,6 +118,25 @@ class TestDefaultSwapAdapterFeeSelection:
         assert adapter.last_fee_selection["selected_fee_tier"] == 500
         assert adapter.last_fee_selection["source"] == "heuristic_fallback"
 
+    def test_auto_mode_uses_heuristic_when_gateway_is_disconnected(self) -> None:
+        """AUTO mode should not crash when a gateway client exists but is disconnected."""
+        adapter = DefaultSwapAdapter(
+            chain="arbitrum",
+            protocol="uniswap_v3",
+            pool_selection_mode="auto",
+            gateway_client=SimpleNamespace(is_connected=False),
+        )
+        adapter.get_swap_calldata(
+            from_token="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",  # USDC
+            to_token="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",  # WETH
+            amount_in=1_000_000,
+            min_amount_out=1,
+            recipient="0x1234567890123456789012345678901234567890",
+            deadline=0,
+        )
+        assert adapter.last_fee_selection["selected_fee_tier"] == 500
+        assert adapter.last_fee_selection["source"] == "heuristic_fallback"
+
     def test_fixed_mode_raises_when_protocol_has_no_fee_tiers(self) -> None:
         """Fixed mode should fail deterministically when protocol has no supported tiers."""
         adapter = DefaultSwapAdapter(

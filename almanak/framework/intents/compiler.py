@@ -518,6 +518,30 @@ class IntentCompiler:
         Returns:
             True if contract, False if EOA, None if RPC unavailable.
         """
+        if self._gateway_client is not None and self._gateway_client.is_connected:
+            try:
+                import json
+
+                from almanak.gateway.proto import gateway_pb2
+
+                response = self._gateway_client.rpc.Call(
+                    gateway_pb2.RpcRequest(
+                        chain=self.chain,
+                        method="eth_getCode",
+                        params=json.dumps([self.wallet_address, "latest"]),
+                        id="wallet_contract_check",
+                    ),
+                    timeout=self.rpc_timeout,
+                )
+                if not response.success:
+                    logger.debug("Gateway eth_getCode RPC error: %s", response.error)
+                    return None
+                code = json.loads(response.result) if response.result else None
+                return code not in ("0x", "0x0", "", None)
+            except Exception as e:
+                logger.debug("Failed to check wallet bytecode via gateway eth_getCode: %s", e)
+                return None
+
         rpc_url = self._get_chain_rpc_url()
         if not rpc_url:
             return None
@@ -525,7 +549,7 @@ class IntentCompiler:
         try:
             import httpx
 
-            response = httpx.post(
+            response = httpx.post(  # vib-2986-exempt: local-only fallback when no connected gateway client is available
                 rpc_url,
                 json={
                     "jsonrpc": "2.0",
@@ -1412,6 +1436,7 @@ class IntentCompiler:
                 fixed_fee_tier=self._config.fixed_swap_fee_tier,
                 rpc_url=self._get_chain_rpc_url(),
                 rpc_timeout=self.rpc_timeout,
+                gateway_client=self._gateway_client,
             )
             router_address = adapter.get_router_address()
 
@@ -1553,7 +1578,13 @@ class IntentCompiler:
                 from .pool_validation import validate_v3_pool
 
                 pool_check = validate_v3_pool(
-                    self.chain, protocol, actual_from_token, actual_to_token, selected_fee, self._get_chain_rpc_url()
+                    self.chain,
+                    protocol,
+                    actual_from_token,
+                    actual_to_token,
+                    selected_fee,
+                    self._get_chain_rpc_url(),
+                    gateway_client=self._gateway_client,
                 )
                 failed = self._validate_pool(pool_check, intent.intent_id)
                 if failed is not None:
@@ -2500,6 +2531,7 @@ class IntentCompiler:
                 token1_info.address,
                 fee_tier,
                 self._get_chain_rpc_url(),
+                gateway_client=self._gateway_client,
             )
             failed = self._validate_pool(pool_check, intent.intent_id)
             if failed is not None:
@@ -2552,12 +2584,18 @@ class IntentCompiler:
             # + getAmountsForLiquidity aligns amounts to the pool's actual price.
             if pool_check.pool_address:
                 rpc_url_for_slot0 = self._get_chain_rpc_url()
-                if rpc_url_for_slot0:
+                gateway_connected = self._gateway_client is not None and self._gateway_client.is_connected
+                if rpc_url_for_slot0 or gateway_connected:
                     from .lp_math import recompute_lp_amounts
                     from .pool_validation import fetch_v3_pool_sqrt_price_x96
 
                     try:
-                        slot0_result = fetch_v3_pool_sqrt_price_x96(pool_check.pool_address, rpc_url_for_slot0)
+                        slot0_result = fetch_v3_pool_sqrt_price_x96(
+                            pool_check.pool_address,
+                            rpc_url_for_slot0,
+                            chain=self.chain,
+                            gateway_client=self._gateway_client,
+                        )
                     except Exception as exc:
                         logger.warning(
                             "LP slot0 lookup failed for pool %s; proceeding with oracle-derived amounts "
@@ -3097,6 +3135,7 @@ class IntentCompiler:
                 token_y_addr,
                 bin_step,
                 self._get_chain_rpc_url(),
+                gateway_client=self._gateway_client,
                 allow_empty_reserves=True,  # LP_OPEN can seed empty pools
             )
             failed = self._validate_pool(pool_check, intent.intent_id)
@@ -4149,7 +4188,12 @@ class IntentCompiler:
             from .pool_validation import validate_traderjoe_pool
 
             pool_check = validate_traderjoe_pool(
-                self.chain, swap_from_token.address, swap_to_token.address, bin_step, rpc_url
+                self.chain,
+                swap_from_token.address,
+                swap_to_token.address,
+                bin_step,
+                rpc_url,
+                gateway_client=self._gateway_client,
             )
             failed = self._validate_pool(pool_check, intent.intent_id)
             if failed is not None:

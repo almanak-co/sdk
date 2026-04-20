@@ -8,7 +8,7 @@ Verifies correct behavior for:
 - Zero address detection
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -126,6 +126,24 @@ class TestV3PoolValidation:
         assert result.reason == PoolValidationReason.RPC_FAILED
         assert result.warning is not None
         assert "RPC call" in result.warning
+
+    def test_gateway_eth_call_is_used_when_available(self):
+        gateway_client = MagicMock()
+        gateway_client.is_connected = True
+        gateway_client.eth_call.return_value = "0x" + ("00" * 12) + "c31e54c7a869b9fcbecc14363cf510d1c41fa443"
+
+        result = validate_v3_pool(
+            "arbitrum",
+            "uniswap_v3",
+            "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+            "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            500,
+            None,
+            gateway_client=gateway_client,
+        )
+
+        assert result.exists is True
+        gateway_client.eth_call.assert_called_once()
 
 
 class TestAerodromePoolValidation:

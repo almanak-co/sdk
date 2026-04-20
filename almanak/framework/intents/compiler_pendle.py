@@ -373,6 +373,7 @@ def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:
                 fixed_fee_tier=compiler._config.fixed_swap_fee_tier,
                 rpc_url=compiler._get_chain_rpc_url(),
                 rpc_timeout=compiler.rpc_timeout,
+                gateway_client=compiler._gateway_client,
             )
 
             pre_swap_min_out = int(Decimal(str(estimated_mint_sy_output)) * (Decimal("1") - intent.max_slippage))

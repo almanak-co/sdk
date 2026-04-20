@@ -184,6 +184,7 @@ class TestCompileLPOpenInversion:
         c.default_lp_slippage = Decimal("0.20")
         c.default_deadline_seconds = 600
         c.wallet_address = "0x" + "11" * 20
+        c._gateway_client = None
         return c
 
     def _make_lp_intent(self, *, range_lower, range_upper, amount0, amount1, pool="WBNB/USDT/500"):
@@ -314,3 +315,49 @@ class TestCompileLPOpenInversion:
         assert len(tick_calls) == 2
         assert tick_calls[0] == Decimal("3000")
         assert tick_calls[1] == Decimal("4000")
+
+    @patch("almanak.framework.intents.pool_validation.fetch_v3_pool_sqrt_price_x96")
+    @patch("almanak.framework.intents.lp_math.recompute_lp_amounts")
+    @patch("almanak.framework.intents.pool_validation.validate_v3_pool")
+    @patch("almanak.framework.intents.compiler.UniswapV3LPAdapter")
+    def test_slot0_recompute_runs_in_gateway_only_mode(
+        self,
+        MockAdapter,
+        mock_validate,
+        mock_recompute,
+        mock_fetch_slot0,
+        compiler,
+    ):
+        """Gateway-only LP compilation should still attempt slot0-based recomputation."""
+        mock_adapter = MockAdapter.return_value
+        mock_adapter.get_position_manager_address.return_value = "0x" + "AA" * 20
+        mock_adapter.get_mint_calldata.return_value = b"\x00" * 32
+        mock_adapter.estimate_mint_gas.return_value = 500000
+        mock_validate.return_value = MagicMock(exists=True, pool_address="0x" + "22" * 20)
+        mock_fetch_slot0.return_value = (2**96, 0)
+        mock_recompute.return_value = (1_000_000, 500_000_000_000_000_000)
+        compiler._gateway_client = MagicMock(is_connected=True)
+
+        intent = self._make_lp_intent(
+            pool="USDC/WETH/3000",
+            range_lower=3000,
+            range_upper=4000,
+            amount0=Decimal("1"),
+            amount1=Decimal("0.5"),
+        )
+
+        with (
+            patch.object(compiler, "_parse_pool_info", return_value=(USDC, WETH, 3000, False)),
+            patch.object(compiler, "_validate_pool", return_value=None),
+            patch.object(compiler, "_get_chain_rpc_url", return_value=None),
+            patch.object(IntentCompiler, "_price_to_tick", side_effect=[-100, 100]),
+            patch.object(compiler, "_build_approve_tx", return_value=[]),
+        ):
+            compiler._compile_lp_open(intent)
+
+        mock_fetch_slot0.assert_called_once_with(
+            "0x" + "22" * 20,
+            None,
+            chain="bsc",
+            gateway_client=compiler._gateway_client,
+        )
