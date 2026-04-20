@@ -175,6 +175,35 @@ class MockExecutionOrchestrator:
         return result
 
 
+def _make_orchestrator_without_swap_amounts() -> "MockExecutionOrchestrator":
+    """Build a MockExecutionOrchestrator whose result has swap_amounts=None.
+
+    The default MockExecutionOrchestrator leaves ``swap_amounts`` as an
+    auto-mocked attribute on MagicMock, which then trips the slippage
+    circuit-breaker comparison when the runner multiplies a MagicMock by
+    an int. Tests that care about post-execution branches (e.g. reconciliation
+    enforcement) should prefer this helper so the slippage check is skipped.
+    """
+    orch = MockExecutionOrchestrator(success=True)
+
+    async def _execute(action_bundle, context=None):
+        orch.execute_called = True
+        orch.last_bundle = action_bundle
+        result = MagicMock(spec=ExecutionResult)
+        result.success = True
+        result.error = None
+        result.phase = ExecutionPhase.COMPLETE
+        result.transaction_results = []
+        result.total_gas_used = 100000
+        result.total_gas_cost_wei = 1000000000000
+        result.swap_amounts = None
+        result.to_dict = MagicMock(return_value={"success": True})
+        return result
+
+    orch.execute = _execute
+    return orch
+
+
 class MockStateManager:
     """Mock state manager for testing.
 
@@ -520,6 +549,15 @@ class TestRunIteration:
             state_manager=state_manager,
         )
 
+        # VIB-3158 fail-closed would flag the 1st intent's missing swap_amounts
+        # as a reconciliation incident before the 2nd intent gets a chance to
+        # fail compilation. This test is specifically about IntentSequence
+        # `amount='all'` validation, so bypass reconciliation here.
+        async def skip_reconcile(strategy, intent, execution_result, pre_snapshot=None):
+            return None
+
+        runner_no_swap._reconcile_post_execution_balances = skip_reconcile  # type: ignore[method-assign]
+
         sequence = IntentSequence(
             intents=[
                 Intent.swap(
@@ -542,6 +580,126 @@ class TestRunIteration:
         # so the second intent with amount='all' should fail
         assert result.status == IterationStatus.COMPILATION_FAILED
         assert "amount='all'" in result.error
+
+    @pytest.mark.asyncio
+    async def test_reconciliation_incident_returns_failed_status(
+        self,
+        price_oracle: MockPriceOracle,
+        balance_provider: MockBalanceProvider,
+        state_manager: MockStateManager,
+        alert_manager: MockAlertManager,
+    ) -> None:
+        """VIB-3158: reconciliation incident flips iteration from SUCCESS to RECONCILIATION_FAILED.
+
+        When pre/post balance deltas fall outside the intent's expected range, the
+        runner MUST NOT commit the iteration as clean. Instead it returns
+        RECONCILIATION_FAILED so the downstream failure handler (circuit breaker,
+        consecutive-errors alert) engages instead of the success path.
+        """
+        orch = _make_orchestrator_without_swap_amounts()
+
+        runner = StrategyRunner(
+            price_oracle=price_oracle,
+            balance_provider=balance_provider,
+            execution_orchestrator=orch,
+            state_manager=state_manager,
+            alert_manager=alert_manager,
+        )
+
+        fake_recon = {
+            "tokens_checked": ["USDC", "ETH"],
+            "pre_balances": {"USDC": "10000", "ETH": "10"},
+            "post_balances": {"USDC": "9000", "ETH": "10"},
+            "actual_deltas": {"USDC": "-1000", "ETH": "0"},
+            "expected_ranges": {
+                "USDC": {"min": "-1010", "max": "-990"},
+                "ETH": {"min": "0.49", "max": "0.51"},
+            },
+            "mismatches": [
+                {"token": "ETH", "actual": "0", "expected_min": "0.49", "expected_max": "0.51"},
+            ],
+            "warnings": [],
+            "incident": True,
+            "enforced": True,
+        }
+
+        async def fake_reconcile(strategy, intent, execution_result, pre_snapshot=None):
+            return fake_recon
+
+        runner._reconcile_post_execution_balances = fake_reconcile  # type: ignore[method-assign]
+
+        strategy = MockStrategy(
+            decide_returns=Intent.swap(
+                from_token="USDC",
+                to_token="ETH",
+                amount_usd=Decimal("1000"),
+            )
+        )
+
+        result = await runner.run_iteration(strategy)
+
+        assert result.status == IterationStatus.RECONCILIATION_FAILED
+        assert result.success is False
+        assert result.balance_reconciliation is fake_recon
+        assert result.error is not None
+        assert "ETH" in result.error
+        assert orch.execute_called is True
+
+        # Enforcement must not increment successful iterations — the downstream
+        # run_loop failure handler (record_failure on the circuit breaker +
+        # consecutive-errors alerting) keys off result.success being False,
+        # which we assert above. Here we just lock in that run_iteration itself
+        # did NOT treat this as a success path.
+        metrics = runner.get_metrics()
+        assert metrics["successful_iterations"] == 0
+
+    @pytest.mark.asyncio
+    async def test_reconciliation_clean_keeps_success_status(
+        self,
+        price_oracle: MockPriceOracle,
+        balance_provider: MockBalanceProvider,
+        state_manager: MockStateManager,
+    ) -> None:
+        """Clean reconciliation (incident=False) must not alter the SUCCESS path."""
+        orch = _make_orchestrator_without_swap_amounts()
+
+        runner = StrategyRunner(
+            price_oracle=price_oracle,
+            balance_provider=balance_provider,
+            execution_orchestrator=orch,
+            state_manager=state_manager,
+        )
+
+        fake_recon = {
+            "tokens_checked": ["USDC", "ETH"],
+            "pre_balances": {"USDC": "10000", "ETH": "10"},
+            "post_balances": {"USDC": "9000", "ETH": "10.5"},
+            "actual_deltas": {"USDC": "-1000", "ETH": "0.5"},
+            "expected_ranges": {},
+            "mismatches": [],
+            "warnings": [],
+            "incident": False,
+            "enforced": True,
+        }
+
+        async def fake_reconcile(strategy, intent, execution_result, pre_snapshot=None):
+            return fake_recon
+
+        runner._reconcile_post_execution_balances = fake_reconcile  # type: ignore[method-assign]
+
+        strategy = MockStrategy(
+            decide_returns=Intent.swap(
+                from_token="USDC",
+                to_token="ETH",
+                amount_usd=Decimal("1000"),
+            )
+        )
+
+        result = await runner.run_iteration(strategy)
+
+        assert result.status == IterationStatus.SUCCESS
+        assert result.success is True
+        assert result.balance_reconciliation is fake_recon
 
     @pytest.mark.asyncio
     async def test_balance_cache_invalidated_after_execution(

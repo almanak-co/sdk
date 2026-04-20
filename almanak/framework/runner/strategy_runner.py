@@ -1864,6 +1864,10 @@ class StrategyRunner:
         # which case the realized-slippage plumbing would silently degrade.
         last_bundle_metadata: dict[str, Any] | None = None
 
+        # Capture pre-execution balance snapshot for real reconciliation (VIB-3158).
+        # Non-fatal: on failure we fall back to the legacy post-only mode.
+        pre_snapshot = await self._snapshot_balances_for_intent(intent)
+
         # Execute through state machine loop
         while not state_machine.is_complete:
             step_result = state_machine.step()
@@ -2224,6 +2228,88 @@ class StrategyRunner:
                         duration_ms=self._calculate_duration_ms(start_time),
                     )
 
+            # Post-execution balance reconciliation (VIB-3158).
+            # Run BEFORE we commit the iteration as a success so an incident
+            # (pre/post delta outside the intent's expected range) can steer
+            # the iteration into the failure path — triggering circuit-breaker
+            # recording, consecutive-error alerting, and a non-success status
+            # downstream. Without this gate, operators would see a green
+            # iteration summary while the strategy confidently traded on
+            # corrupted accounting.
+            recon = await self._reconcile_post_execution_balances(
+                strategy, intent, last_execution_result, pre_snapshot=pre_snapshot
+            )
+            recon_incident = bool(recon and recon.get("incident"))
+
+            if recon_incident:
+                recon_error = self._format_reconciliation_error(recon)
+                logger.error(
+                    "Reconciliation enforcement tripped for %s: %s",
+                    strategy_id,
+                    recon_error,
+                )
+
+                # Attach error to the execution result FIRST so the timeline
+                # event and downstream consumers (alerts, operator cards,
+                # ledger) see the reconciliation error rather than the stale
+                # execution-level error.
+                if last_execution_result is not None:
+                    last_execution_result.error = recon_error
+
+                # Emit timeline event as a failure so the strategy timeline
+                # reflects the accounting breach, not a clean success.
+                self._emit_execution_timeline_event(strategy, intent, success=False, result=last_execution_result)
+
+                # Notify strategy of the failed outcome so it does not treat
+                # the execution as clean.
+                if hasattr(strategy, "on_intent_executed"):
+                    try:
+                        strategy.on_intent_executed(intent, success=False, result=last_execution_result)
+                    except Exception as e:
+                        logger.warning(f"Error in on_intent_executed callback: {e}")
+                self._invoke_optional_hook(
+                    strategy,
+                    "on_copy_execution_result",
+                    intent,
+                    False,
+                    last_execution_result,
+                )
+
+                # Record failed trade in ledger (VIB-2402) — on-chain state
+                # changed, but the accounting outcome is a failure.
+                await self._write_ledger_entry(
+                    strategy, intent, result=last_execution_result, success=False, error=recon_error
+                )
+
+                # Persist strategy state even on reconciliation failure: the
+                # on-chain state has already moved, so any internal bookkeeping
+                # the strategy captured pre-reconciliation must not be lost.
+                if hasattr(strategy, "save_state"):
+                    try:
+                        strategy.save_state()
+                    except Exception as e:
+                        logger.warning(f"Error saving strategy state: {e}")
+
+                # Operator-facing alert on this single incident (independent
+                # of the consecutive-errors alert that the outer run loop
+                # fires on threshold).
+                if last_execution_result is not None:
+                    try:
+                        await self._handle_execution_error(strategy, last_execution_result)
+                    except Exception as e:
+                        logger.debug("reconciliation alert dispatch failed: %s", e)
+
+                return IterationResult(
+                    status=IterationStatus.RECONCILIATION_FAILED,
+                    intent=intent,
+                    execution_result=last_execution_result,
+                    error=recon_error,
+                    strategy_id=strategy_id,
+                    duration_ms=self._calculate_duration_ms(start_time),
+                    balance_reconciliation=recon,
+                )
+
+            # Clean reconciliation → commit the success path.
             # Emit timeline event for successful execution
             self._emit_execution_timeline_event(strategy, intent, success=True, result=last_execution_result)
             # Write structured trade record to transaction ledger (VIB-2402)
@@ -2254,9 +2340,6 @@ class StrategyRunner:
                     strategy.save_state()
                 except Exception as e:
                     logger.warning(f"Error saving strategy state: {e}")
-
-            # Post-execution balance reconciliation
-            recon = await self._reconcile_post_execution_balances(strategy, intent, last_execution_result)
 
             return IterationResult(
                 status=IterationStatus.SUCCESS,
@@ -3294,10 +3377,34 @@ class StrategyRunner:
             duration_ms=self._calculate_duration_ms(start_time),
         )
 
-    async def _reconcile_post_execution_balances(self, strategy, intent, execution_result):
+    async def _reconcile_post_execution_balances(self, strategy, intent, execution_result, pre_snapshot=None):
         from .runner_state import reconcile_post_execution_balances
 
-        return await reconcile_post_execution_balances(self, strategy, intent, execution_result)
+        return await reconcile_post_execution_balances(
+            self, strategy, intent, execution_result, pre_snapshot=pre_snapshot
+        )
+
+    @staticmethod
+    def _format_reconciliation_error(recon: dict | None) -> str:
+        """Compact one-line summary of reconciliation mismatches for logs/alerts."""
+        if not recon:
+            return "Balance reconciliation incident (no detail)"
+        mismatches = recon.get("mismatches") or []
+        if not mismatches:
+            return "Balance reconciliation incident (no mismatch detail)"
+        parts = []
+        for m in mismatches:
+            token = m.get("token", "?")
+            actual = m.get("actual", "?")
+            expected_min = m.get("expected_min", "?")
+            expected_max = m.get("expected_max", "?")
+            parts.append(f"{token} delta={actual} expected=[{expected_min},{expected_max}]")
+        return "Balance reconciliation incident: " + "; ".join(parts)
+
+    async def _snapshot_balances_for_intent(self, intent):
+        from .runner_state import snapshot_balances_for_intent
+
+        return await snapshot_balances_for_intent(self, intent)
 
     @staticmethod
     def _extract_intent_tokens(intent):

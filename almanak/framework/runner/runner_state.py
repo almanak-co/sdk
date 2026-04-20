@@ -16,6 +16,7 @@ from ..intents.vocabulary import AnyIntent, HoldIntent
 from ..portfolio import PortfolioMetrics, PortfolioSnapshot, ValueConfidence
 from ..state.exceptions import AccountingPersistenceError
 from ..state.state_manager import StateData, StateNotFoundError
+from .reconciliation import BalanceSnapshot, build_reconciliation_report
 
 if TYPE_CHECKING:
     from ..execution.orchestrator import ExecutionResult
@@ -464,49 +465,126 @@ async def is_strategy_paused(runner: Any, strategy_id: str) -> tuple[bool, str |
 # -------------------------------------------------------------------------
 
 
+async def snapshot_balances_for_intent(
+    runner: Any,
+    intent: AnyIntent,
+) -> BalanceSnapshot | None:
+    """Capture a balance snapshot for every token named by the intent.
+
+    Returns a ``BalanceSnapshot`` (with the timestamp of when balances were
+    actually queried) for tokens whose balance query succeeded, or ``None``
+    if the intent names no tokens or every balance query failed. Individual
+    balance failures are skipped (non-fatal) so a flaky RPC for one token
+    does not blind reconciliation on the others.
+    """
+    tokens = extract_intent_tokens(intent)
+    if not tokens:
+        return None
+
+    balances: dict[str, Decimal] = {}
+    for token_symbol in tokens:
+        try:
+            bal = await runner.balance_provider.get_balance(token_symbol)
+            balances[token_symbol] = bal.balance
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Balance snapshot: failed to fetch %s balance: %s", token_symbol, exc)
+            continue
+    # If every balance query failed, treat the pre-snapshot as unavailable so
+    # callers fall back to the legacy post-only mode rather than silently
+    # running real-delta reconciliation with zero tokens to compare.
+    if not balances:
+        return None
+    return BalanceSnapshot(timestamp=datetime.now(UTC), balances=balances)
+
+
 async def reconcile_post_execution_balances(
     runner: Any,
     strategy: StrategyProtocol,
     intent: AnyIntent,
     execution_result: ExecutionResult | None,
+    pre_snapshot: BalanceSnapshot | None = None,
 ) -> dict[str, Any] | None:
     """Verify post-execution token balances match intent expectations.
 
-    After a successful on-chain execution, queries actual balances and
-    compares with expected token flow direction. Returns a reconciliation
-    dict with results, or None if reconciliation couldn't be performed.
+    When ``pre_snapshot`` is supplied the reconciliation runs in real-delta
+    mode (VIB-3158): actual deltas are computed from pre vs post, and for
+    supported intent types (currently SwapIntent) an expected-range check is
+    performed. Any mismatch is flagged as an incident in the returned dict.
 
-    This is a safety net: even if the transaction receipt looks fine,
-    the on-chain balance should reflect the expected token movements.
+    When ``pre_snapshot`` is ``None`` the legacy post-only behavior is
+    preserved so older call sites continue to work; in that case only
+    warnings (not incidents) are produced.
     """
     try:
-        # Extract tokens from the intent
         tokens = extract_intent_tokens(intent)
         if not tokens:
             return None
 
-        # Query current balances for involved tokens
         post_balances: dict[str, Decimal] = {}
         for token_symbol in tokens:
             try:
                 bal = await runner.balance_provider.get_balance(token_symbol)
                 post_balances[token_symbol] = bal.balance
             except Exception as exc:  # noqa: BLE001
-                logger.debug("Balance reconciliation: failed to fetch %s balance: %s", token_symbol, exc)
-                # Balance query failures are non-fatal for reconciliation
+                logger.debug(
+                    "Balance reconciliation: failed to fetch %s balance: %s",
+                    token_symbol,
+                    exc,
+                )
                 continue
+        # Capture the post-query timestamp immediately after the loop so the
+        # reported pre/post timestamps reflect when the balances were
+        # actually read, not when the report is materialised.
+        post_timestamp = datetime.now(UTC)
 
         if not post_balances:
             return None
 
-        # Build reconciliation report
-        recon: dict[str, Any] = {
+        if pre_snapshot is not None:
+            # Real-delta mode — build a structured report with deltas and
+            # SwapIntent expected-range enforcement.
+            post_snapshot = BalanceSnapshot(timestamp=post_timestamp, balances=post_balances)
+
+            # Resolve the chain's native gas token + actual gas spend so the
+            # reconciliation can absorb gas outflow for native-from swaps
+            # (e.g. ETH->USDC on Arbitrum). Without this, successful
+            # native-gas-token swaps are falsely flagged as overspends.
+            gas_token, gas_cost_native = _resolve_gas_context(intent, execution_result)
+
+            report = build_reconciliation_report(
+                pre=pre_snapshot,
+                post=post_snapshot,
+                intent=intent,
+                execution_result=execution_result,
+                gas_token=gas_token,
+                gas_cost_native=gas_cost_native,
+            )
+            recon = report.to_dict()
+
+            if report.incident:
+                logger.error(
+                    "Balance reconciliation incident for %s: %s",
+                    strategy.strategy_id,
+                    recon["mismatches"],
+                )
+            elif report.warnings:
+                logger.warning(
+                    "Balance reconciliation warnings for %s: %s",
+                    strategy.strategy_id,
+                    report.warnings,
+                )
+
+            return recon
+
+        # Legacy post-only fallback (no pre-snapshot available).
+        recon = {
             "tokens_checked": list(post_balances.keys()),
             "post_balances": {k: str(v) for k, v in post_balances.items()},
             "warnings": [],
+            "incident": False,
+            "enforced": False,
         }
 
-        # For swaps, verify directional correctness using enriched swap_amounts
         if execution_result and execution_result.swap_amounts:
             sa = execution_result.swap_amounts
             if sa.amount_out_decimal is not None and sa.amount_out_decimal <= 0:
@@ -541,6 +619,49 @@ def extract_intent_tokens(intent: AnyIntent) -> list[str]:
     elif hasattr(intent, "token"):
         tokens.append(intent.token)
     return tokens
+
+
+def _resolve_gas_context(
+    intent: AnyIntent,
+    execution_result: ExecutionResult | None,
+) -> tuple[str | None, Decimal | None]:
+    """Resolve (native_gas_symbol, gas_cost_native) for the intent's chain.
+
+    Returns ``(None, None)`` when the chain is unknown, the execution result
+    lacks gas data, or the chain has no registered native-token entry. The
+    reconciliation logic only stretches the from-token bound when
+    ``gas_token == intent.from_token``, so a conservative default of ``None``
+    simply means "do not absorb gas" — which matches the prior behavior for
+    non-native-from swaps.
+    """
+    if execution_result is None:
+        return None, None
+    chain = getattr(intent, "chain", None)
+    if not chain:
+        return None, None
+
+    gas_cost_wei = getattr(execution_result, "total_gas_cost_wei", 0) or 0
+    if gas_cost_wei <= 0:
+        return None, None
+
+    try:
+        from almanak.gateway.services.onchain_lookup import NATIVE_TOKEN_INFO
+    except Exception:  # noqa: BLE001 — optional dep path
+        return None, None
+
+    info = NATIVE_TOKEN_INFO.get(str(chain).lower())
+    if not info:
+        return None, None
+
+    symbol = info.get("symbol")
+    if not symbol:
+        return None, None
+
+    # EVM native gas tokens are always 18 decimals by protocol design
+    # (gas_cost_wei is in wei); this is not the same as the ERC-20 "never
+    # default to 18 decimals" rule.
+    gas_cost_native = Decimal(gas_cost_wei) / Decimal(10**18)
+    return symbol, gas_cost_native
 
 
 # -------------------------------------------------------------------------
@@ -704,10 +825,16 @@ def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | No
         gas_used = getattr(er, "total_gas_used", 0) or 0
 
     # Extract reconciliation status (tri-state: None=unchecked, True=clean, False=mismatch)
+    # VIB-3158: a report is only "clean" when there is neither an incident
+    # NOR outstanding warnings — warning-only reports mean coverage was
+    # degraded (missing balance, stale cache, unenforceable intent type) and
+    # must not be summarized as OK.
     reconciliation_ok: bool | None = None
     if result.balance_reconciliation is not None:
-        warnings = result.balance_reconciliation.get("warnings", [])
-        reconciliation_ok = len(warnings) == 0
+        recon = result.balance_reconciliation
+        has_incident = bool(recon.get("incident", False))
+        has_warnings = bool(recon.get("warnings"))
+        reconciliation_ok = not has_incident and not has_warnings
 
     logger.info(
         "iteration_summary",

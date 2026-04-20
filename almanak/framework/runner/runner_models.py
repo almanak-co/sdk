@@ -254,6 +254,13 @@ class IterationStatus(StrEnum):
     TEARDOWN = "TEARDOWN"  # Strategy is executing teardown
     COMPILATION_FAILED = "COMPILATION_FAILED"
     EXECUTION_FAILED = "EXECUTION_FAILED"
+    # Tx landed on-chain but pre/post balance deltas fell outside the
+    # intent's expected range (fee-on-transfer token, malicious router,
+    # approval skim, oracle corruption). On-chain state already moved —
+    # rolling back is not possible — so we mark the iteration failed so
+    # the circuit breaker + alerting path fire and the strategy does not
+    # confidently keep trading on corrupted accounting.
+    RECONCILIATION_FAILED = "RECONCILIATION_FAILED"
     STRATEGY_ERROR = "STRATEGY_ERROR"
     STRATEGY_TIMEOUT = "STRATEGY_TIMEOUT"  # strategy.decide() exceeded time limit
     DATA_ERROR = "DATA_ERROR"
