@@ -163,6 +163,44 @@ from .compiler_models import (  # noqa: F401
 )
 
 # =============================================================================
+# Native-token symbol table (VIB-3135)
+# =============================================================================
+#
+# Per-chain set of symbols that refer to that chain's native gas token. Used
+# by ``IntentCompiler._resolve_token`` as a defense-in-depth check: if the
+# token registry sets ``is_native=False`` for an entry but the symbol matches
+# the chain's native gas token (e.g. POL on Polygon with the 0x...1010
+# precompile address), we coerce ``is_native`` to True so the swap compile
+# path skips ERC20 allowance/approve on a non-ERC20 address. Inlined here —
+# not imported from ``almanak.gateway.data.balance.web3_provider`` — to keep
+# the compiler free of the gateway web3 import chain (unit tests that mock
+# ``web3`` would otherwise crash during ``_resolve_token``).
+#
+# Both the pre-rebrand (MATIC) and current (POL) Polygon symbols are treated
+# as native. Mantle (MNT), Monad (MON), Berachain (BERA), Sonic (S) and
+# zerog (A0GI) are included for future coverage but their entries in the
+# token registry already carry ``is_native=True`` so this is belt-and-braces.
+_CHAIN_NATIVE_SYMBOLS: dict[str, frozenset[str]] = {
+    "ethereum": frozenset({"ETH"}),
+    "arbitrum": frozenset({"ETH"}),
+    "optimism": frozenset({"ETH"}),
+    "base": frozenset({"ETH"}),
+    "blast": frozenset({"ETH"}),
+    "linea": frozenset({"ETH"}),
+    "polygon": frozenset({"MATIC", "POL"}),
+    "avalanche": frozenset({"AVAX"}),
+    "bsc": frozenset({"BNB"}),
+    "sonic": frozenset({"S"}),
+    "plasma": frozenset({"XPL"}),
+    "mantle": frozenset({"MNT"}),
+    "berachain": frozenset({"BERA"}),
+    "monad": frozenset({"MON"}),
+    "xlayer": frozenset({"OKB"}),
+    "zerog": frozenset({"A0GI"}),
+}
+
+
+# =============================================================================
 # Intent Compiler
 # =============================================================================
 
@@ -6235,6 +6273,15 @@ class IntentCompiler:
         Uses the TokenResolver for unified token lookup with caching and
         optional on-chain discovery via gateway.
 
+        Applies a defensive native-token cross-check against
+        ``NATIVE_TOKEN_SYMBOLS``: any token whose symbol matches the chain's
+        native gas-token symbol is coerced to ``is_native=True`` even when
+        the underlying registry entry uses a chain-specific precompile
+        address (e.g. Polygon's POL at ``0x...1010``) rather than the shared
+        sentinel. This closes VIB-3135 — an unconditional ERC20 ``allowance``
+        query against the precompile address because ``is_native`` was
+        ``False``.
+
         Args:
             token: Token symbol (e.g., "USDC") or address
             chain: Optional chain to resolve token for (defaults to self.chain)
@@ -6248,11 +6295,55 @@ class IntentCompiler:
             # Use TokenResolver for unified lookup
             resolved = self._token_resolver.resolve(token, target_chain)
 
+            is_native = resolved.is_native
+            # Restrict the symbol-table override to symbol-form inputs (e.g.
+            # "POL", "MATIC"). For raw address-form inputs we trust the
+            # resolver verbatim — flipping is_native based on a resolved
+            # symbol could mis-classify a custom ERC20 deployed at an
+            # arbitrary address that happens to share a native ticker
+            # (e.g. a wrapper contract symbolised "POL"), forcing it down
+            # the no-allowance native path and breaking real ERC20 swaps.
+            input_is_address = isinstance(token, str) and token.startswith("0x")
+            if not is_native and not input_is_address:
+                # Defense-in-depth: if the registry address for a chain's gas
+                # token doesn't match the native sentinel (e.g. POL on
+                # Polygon uses the 0x...1010 precompile address), the
+                # resolver may set is_native=False even though the token IS
+                # the chain's native gas token. Cross-check a local symbol
+                # table to avoid ERC20-path operations (allowance, approve)
+                # against addresses that aren't real ERC20s.
+                #
+                # This table is intentionally inlined here rather than
+                # imported from ``almanak.gateway.data.balance.web3_provider``
+                # to keep the compiler free of gateway-side web3 imports —
+                # unit tests monkeypatch ``web3`` and that import chain
+                # breaks if the resolver touches it during compile.
+                #
+                # Normalize aliases (``bnb`` -> ``bsc``, ``eth`` ->
+                # ``ethereum``, ``avax`` -> ``avalanche``) so a caller that
+                # passes a non-canonical chain name still hits the table.
+                # Without this, the resolver could succeed with a chain
+                # alias while this lookup misses and the ERC20 path is
+                # incorrectly taken.
+                lookup_chain = target_chain.lower()
+                try:
+                    from almanak.core.constants import resolve_chain_name
+
+                    lookup_chain = resolve_chain_name(target_chain)
+                except (ImportError, ValueError):
+                    # ImportError shouldn't happen (constants is local), and
+                    # ValueError means the chain is unknown — fall back to
+                    # the raw lowercased name (table miss is the safe default).
+                    pass
+                chain_native = _CHAIN_NATIVE_SYMBOLS.get(lookup_chain, ())
+                if chain_native and resolved.symbol.upper() in chain_native:
+                    is_native = True
+
             return TokenInfo(
                 symbol=resolved.symbol,
                 address=resolved.address,
                 decimals=resolved.decimals,
-                is_native=resolved.is_native,
+                is_native=is_native,
             )
         except Exception as e:
             # Import lazily to avoid circular import

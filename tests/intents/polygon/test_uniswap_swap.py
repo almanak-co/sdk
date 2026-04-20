@@ -237,6 +237,173 @@ class TestUniswapV3SwapIntent:
         print(f"USDC received: {format_token_amount(usdc_received, out_decimals)}")
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.asyncio
+    async def test_swap_native_matic_to_usdc_using_intent(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+    ):
+        """Test native MATIC -> USDC swap via SwapIntent (VIB-3135).
+
+        Regression guard for the native-in allowance bug: the compiler must
+        emit a single value-bearing swap tx (no ERC20 approve) when the
+        input is the chain's native gas token, even when the registry uses
+        a chain-specific precompile address (Polygon's native at
+        ``0x0000000000000000000000000000000000001010``) rather than the
+        shared sentinel.
+
+        4-layer verification:
+          1. Compilation -> SUCCESS, no approve tx, exactly one swap tx
+          2. Execution   -> on-chain success
+          3. Receipt     -> Uniswap V3 Swap event parsed with positive amounts
+          4. Balance     -> native MATIC decreases by ~swap_amount + gas;
+                            USDC increases by a positive amount
+        """
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        token_out = tokens["USDC"]
+        wmatic_address = "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"  # WMATIC on Polygon
+        fail_if_v3_pool_missing(web3, CHAIN_NAME, "uniswap_v3", wmatic_address, token_out, 500)
+
+        out_decimals = get_token_decimals(web3, token_out)
+
+        # Use a small native amount to keep gas-buffer math comfortable
+        # (test wallet was funded with 100 MATIC).
+        swap_amount = Decimal("1")  # 1 MATIC
+
+        print(f"\n{'='*80}")
+        print("Test: native MATIC -> USDC Swap via SwapIntent (VIB-3135)")
+        print(f"{'='*80}")
+        print(f"Swap amount: {swap_amount} MATIC")
+
+        # Record balances before
+        matic_before = web3.eth.get_balance(Web3.to_checksum_address(funded_wallet))
+        usdc_before = get_token_balance(web3, token_out, funded_wallet)
+
+        print(f"MATIC before: {format_token_amount(matic_before, 18)}")
+        print(f"USDC  before: {format_token_amount(usdc_before, out_decimals)}")
+        assert matic_before >= int(swap_amount * Decimal(10**18)), (
+            "Test wallet must have at least swap_amount native MATIC"
+        )
+
+        # Create SwapIntent with native MATIC as input
+        intent = SwapIntent(
+            from_token="MATIC",
+            to_token="USDC",
+            amount=swap_amount,
+            max_slippage=SWAP_MAX_SLIPPAGE,
+            protocol="uniswap_v3",
+            chain=CHAIN_NAME,
+        )
+
+        # The shared polygon price oracle covers ERC20 tokens only (USDC,
+        # WETH, USDT, WBTC). Inject native MATIC/POL so slippage protection
+        # can compute. We fetch the live MATIC price from CoinGecko so the
+        # compiler's price-impact guard doesn't reject the swap when the
+        # forked pool quote diverges from a hardcoded estimate.
+        try:
+            import urllib.request
+            import json as _json
+
+            req = urllib.request.Request(
+                "https://api.coingecko.com/api/v3/simple/price?ids=matic-network&vs_currencies=usd",
+                headers={"User-Agent": "almanak-sdk-tests"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+                data = _json.loads(resp.read().decode())
+            matic_price = Decimal(str(data["matic-network"]["usd"]))
+        except Exception:
+            # Fallback: a low-but-realistic MATIC price keeps the price-
+            # impact guard satisfied even if CoinGecko is unreachable.
+            matic_price = Decimal("0.10")
+
+        prices_with_native = {
+            **price_oracle,
+            "MATIC": matic_price,
+            "POL": matic_price,
+            "WMATIC": matic_price,
+        }
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=prices_with_native,
+        )
+
+        # ---- Layer 1: Compilation ------------------------------------------
+        compilation_result = compiler.compile(intent)
+        assert compilation_result.status.value == "SUCCESS", (
+            f"Compilation failed: {compilation_result.error}"
+        )
+        assert compilation_result.action_bundle is not None
+
+        txs = compilation_result.transactions or []
+        approve_txs = [t for t in txs if t.tx_type.startswith("approve")]
+        swap_txs = [t for t in txs if t.tx_type == "swap"]
+        assert approve_txs == [], (
+            "Native-in swap MUST NOT emit ERC20 approve/allowance txs against "
+            "the Polygon native precompile address — this is the VIB-3135 bug."
+        )
+        assert len(swap_txs) == 1, "Native-in swap must emit exactly one swap tx"
+        assert swap_txs[0].value == int(swap_amount * Decimal(10**18)), (
+            "Swap tx must carry the native amount as msg.value"
+        )
+
+        # ---- Layer 2: Execution --------------------------------------------
+        execution_result = await orchestrator.execute(compilation_result.action_bundle)
+        assert execution_result.success, f"Execution failed: {execution_result.error}"
+        assert len(execution_result.transaction_results) == 1, (
+            "Native-in swap should execute exactly one tx (no approve)"
+        )
+
+        # ---- Layer 3: Receipt parsing --------------------------------------
+        tx_result = execution_result.transaction_results[0]
+        assert tx_result.receipt is not None, "Receipt must be present after execution"
+
+        from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+
+        parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
+        parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+        assert parse_result.success, f"Receipt parse failed: {parse_result.error}"
+        assert parse_result.swap_result is not None, "Swap event must be parsed"
+        assert parse_result.swap_result.amount_in > 0
+        assert parse_result.swap_result.amount_out > 0
+
+        # ---- Layer 4: Balance deltas ---------------------------------------
+        matic_after = web3.eth.get_balance(Web3.to_checksum_address(funded_wallet))
+        usdc_after = get_token_balance(web3, token_out, funded_wallet)
+
+        matic_spent = matic_before - matic_after
+        usdc_received = usdc_after - usdc_before
+        swap_amount_wei = int(swap_amount * Decimal(10**18))
+
+        # Compute exact gas fee from the framework receipt. The
+        # TransactionReceipt dataclass exposes both ``gas_used`` and
+        # ``effective_gas_price`` — multiplied together they give the
+        # actual gas paid, which lets us turn the prior range-based
+        # tolerance into strict equality.
+        gas_fee = int(tx_result.receipt.gas_used) * int(tx_result.receipt.effective_gas_price)
+
+        print(f"MATIC spent:    {format_token_amount(matic_spent, 18)}  (incl. gas)")
+        print(f"Gas fee:        {format_token_amount(gas_fee, 18)} MATIC")
+        print(f"USDC  received: {format_token_amount(usdc_received, out_decimals)}")
+
+        # Exact balance conservation: native spent == swap value + gas fee.
+        # The receipt-derived gas figure removes the previous range-based
+        # tolerance and turns this into a strict 4-layer-verification check.
+        assert matic_spent == swap_amount_wei + gas_fee, (
+            f"MATIC delta mismatch. "
+            f"Expected {swap_amount_wei + gas_fee} (swap {swap_amount_wei} + gas {gas_fee}), "
+            f"got {matic_spent}."
+        )
+        # Receiver must get exactly what the parsed Swap event reports.
+        assert usdc_received == parse_result.swap_result.amount_out, (
+            f"USDC delta must equal parsed amount_out. "
+            f"Expected {parse_result.swap_result.amount_out}, got {usdc_received}."
+        )
+
+        print("\nALL CHECKS PASSED")
+
     @pytest.mark.xfail(reason="flaky: needs more investigation", strict=False)
     @pytest.mark.asyncio
     async def test_swap_intent_with_insufficient_balance_fails(
