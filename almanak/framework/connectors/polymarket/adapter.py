@@ -40,13 +40,13 @@ from ...models.reproduction_bundle import ActionBundle
 from .clob_client import ClobClient
 from .ctf_sdk import BINARY_PARTITION, INDEX_SET_NO, INDEX_SET_YES, CtfSDK
 from .exceptions import (
+    PolymarketInvalidPrecisionError,
     PolymarketMarketNotFoundError,
     PolymarketMarketNotResolvedError,
 )
 from .models import (
     GammaMarket,
     LimitOrderParams,
-    MarketOrderParams,
     OrderType,
     PolymarketConfig,
 )
@@ -68,6 +68,17 @@ POLYMARKET_GAS_ESTIMATES = {
     "approve_ctf": 50_000,
     "redeem_positions": 200_000,
 }
+
+# CLOB pre-flight precision cap. The adapter validates user-supplied PRICES
+# against this BEFORE snapping (VIB-3140) so `--dry-run` matches the live CLOB.
+# Tick sizes top out at 0.0001 (4 decimals); any price with more fractional
+# digits is meaningless on the CLOB wire and almost certainly came from a
+# Python-float-to-Decimal conversion (e.g. ``Decimal(0.7)`` → 17 decimals).
+# Share SIZE precision is intentionally NOT checked here: the SDK's internal
+# share-quantization (``_build_amounts_at_price``) floors shares to the 2-dec
+# grid, and typical sizing patterns (``amount_usd / price``) legitimately
+# produce many-decimal values that the CLOB accepts.
+CLOB_MAX_PRICE_DECIMALS = 4
 
 
 # =============================================================================
@@ -245,12 +256,33 @@ class PolymarketAdapter:
             market = self._resolve_market(intent.market_id)
             token_id = self._get_token_id(market, intent.outcome)
 
-            # Determine order parameters
-            if intent.order_type == "limit" and intent.max_price is not None:
-                # Limit order with specified price
-                price = intent.max_price
-                size = self._calculate_size(intent, price)
-
+            # Order routing: prefer LIMIT whenever the strategy gave us a price
+            # to anchor to. Market BUYs at the 0.99 default reserve a full
+            # ~size*$0.99 nominal against the wallet's USDC allowance, which
+            # the CLOB rejects on cheap markets ($1 budget vs $80 nominal). A
+            # tick-aligned limit at max_price has nominal = size*max_price and
+            # avoids the footgun entirely. See Portfolio Manager incident
+            # 2026-04-19 (market 556063).
+            if intent.max_price is not None:
+                # Compute size from the user-supplied max_price (preserve sizing
+                # intent), then snap the submission price to the tick grid. If we
+                # used the snapped price for sizing, an off-tick max_price would
+                # silently inflate the share count: e.g. amount_usd=$1 with
+                # max_price=0.0135 on a 0.01-tick market would snap price → 0.01
+                # and sizing → 100 shares (vs. the user-intended ~74).
+                size = self._calculate_size(intent, intent.max_price)
+                # Run the live-CLOB pre-flight checks on the USER-supplied price
+                # (pre-snap) so `--dry-run` fails with the same error text the
+                # CLOB would emit in production instead of silently correcting
+                # the price (VIB-3140). Tick / precision / $1-floor are all
+                # covered here.
+                self._validate_clob_preflight(
+                    side="BUY",
+                    price=intent.max_price,
+                    size=size,
+                    market=market,
+                )
+                price = self.clob.round_price_to_tick(intent.max_price, "BUY", market=market)
                 params = LimitOrderParams(
                     token_id=token_id,
                     side="BUY",
@@ -258,29 +290,43 @@ class PolymarketAdapter:
                     size=size,
                     expiration=self._calculate_expiration(intent.expiration_hours),
                 )
-                # Pass market metadata for market-specific minimum validation
                 signed_order = self.clob.create_and_sign_limit_order(params, market=market)
-                order_type = self._map_time_in_force(intent.time_in_force)
+                # If the strategy declared order_type='market' (the default), it
+                # expected fail-fast immediacy. Routing to LIMIT for safety must
+                # NOT silently downgrade that to a long-lived GTC order resting
+                # on the book — force IOC so the order either fills or cancels.
+                if intent.order_type == "market":
+                    order_type = OrderType.IOC
+                else:
+                    order_type = self._map_time_in_force(intent.time_in_force)
 
             else:
-                # Market order - use aggressive price
-                # For BUY, use 0.99 (max) to ensure fill
-                price = intent.max_price or Decimal("0.99")
-                size = self._calculate_size(intent, price)
-
-                market_params = MarketOrderParams(
-                    token_id=token_id,
-                    side="BUY",
-                    amount=size * price,  # USDC amount
-                    worst_price=price,
+                # No max_price → reject. The legacy fallback was an aggressive
+                # market sweep at 0.99 which reserved ~size*$0.99 of USDC
+                # allowance even though the actual fill landed at the order
+                # book's best ask. On cheap markets ($1 budget vs $80 nominal
+                # reserve) the CLOB rejected the order anyway, so the silent
+                # "warn and submit" path was a footgun: misleading wallet
+                # accounting AND a guaranteed CLOB rejection. Force the
+                # strategy author to anchor the buy with a tick-aligned
+                # max_price (PM Exp 14 / VIB-3131).
+                raise ValueError(
+                    "PredictionBuyIntent.max_price is required: a buy without "
+                    "an explicit anchor price would reserve ~size * $0.99 of "
+                    "USDC allowance for what may fill at a much lower price. "
+                    "Set intent.max_price (e.g. best_ask + a slippage buffer, "
+                    "snapped to the market's tick grid) so the order routes "
+                    "through the LIMIT path."
                 )
-                # Pass market metadata for market-specific minimum validation
-                signed_order = self.clob.create_and_sign_market_order(market_params, market=market)
-                order_type = OrderType.IOC  # Market orders use IOC
 
-            # Build order payload
-            order_payload = signed_order.to_api_payload()
-            order_payload["orderType"] = order_type.value
+            # Build order payload (owner = API key, required by CLOB matcher).
+            # Use get_or_create_credentials() so lazy L2 derivation works when
+            # the adapter was initialized with wallet-only config.
+            credentials = self.clob.get_or_create_credentials()
+            order_payload = signed_order.to_api_payload(
+                owner=credentials.api_key,
+                order_type=order_type.value,
+            )
 
             logger.info(
                 "Compiled buy intent",
@@ -344,6 +390,20 @@ class PolymarketAdapter:
             ActionBundle with CLOB order action
         """
         try:
+            # Validate min_price BEFORE any market/position lookup so the new
+            # mandatory-anchor rule (PM Exp 14 / VIB-3131) fails deterministically.
+            # Otherwise an "all"-shares intent against an empty wallet would
+            # short-circuit to "No position to sell" and the missing-anchor bug
+            # would only surface once a position existed (CodeRabbit catch).
+            if intent.min_price is None:
+                raise ValueError(
+                    "PredictionSellIntent.min_price is required: a sell "
+                    "without an explicit floor would fill at any price down "
+                    "to the 0.01 tick. Set intent.min_price (e.g. best_bid "
+                    "minus a slippage buffer, snapped to the market's tick "
+                    "grid) so the order routes through the LIMIT path."
+                )
+
             # Resolve market to get token IDs
             market = self._resolve_market(intent.market_id)
             token_id = self._get_token_id(market, intent.outcome)
@@ -371,39 +431,44 @@ class PolymarketAdapter:
                     raise TypeError(f"Expected Decimal for shares, got {type(intent.shares).__name__}")
                 size = intent.shares
 
-            # Determine order parameters
-            if intent.order_type == "limit" and intent.min_price is not None:
-                # Limit order with specified minimum price
-                price = intent.min_price
-
-                params = LimitOrderParams(
-                    token_id=token_id,
-                    side="SELL",
-                    price=price,
-                    size=size,
-                )
-                # Pass market metadata for market-specific minimum validation
-                signed_order = self.clob.create_and_sign_limit_order(params, market=market)
+            # min_price guaranteed non-None by the upfront check; route to LIMIT.
+            # Market SELLs at the 0.01 default underprice the position and risk
+            # filling at the floor — always go through the LIMIT path.
+            # Run the live-CLOB pre-flight checks on the USER-supplied price
+            # (pre-snap) so `--dry-run` fails with the same error text the
+            # CLOB would emit in production instead of silently correcting
+            # the price (VIB-3140). Tick size and decimal precision apply to
+            # SELL orders too; the $1 USD floor is BUY-only and skipped here.
+            self._validate_clob_preflight(
+                side="SELL",
+                price=intent.min_price,
+                size=size,
+                market=market,
+            )
+            price = self.clob.round_price_to_tick(intent.min_price, "SELL", market=market)
+            params = LimitOrderParams(
+                token_id=token_id,
+                side="SELL",
+                price=price,
+                size=size,
+            )
+            signed_order = self.clob.create_and_sign_limit_order(params, market=market)
+            # Mirror the BUY routing: when the strategy declared 'market' but
+            # we elevated to LIMIT for safety, force IOC so we don't leave a
+            # long-lived GTC order resting on the book.
+            if intent.order_type == "market":
+                order_type = OrderType.IOC
+            else:
                 order_type = self._map_time_in_force(intent.time_in_force)
 
-            else:
-                # Market order - use aggressive price
-                # For SELL, use 0.01 (min) to ensure fill
-                price = intent.min_price or Decimal("0.01")
-
-                market_params = MarketOrderParams(
-                    token_id=token_id,
-                    side="SELL",
-                    amount=size,  # Shares to sell
-                    worst_price=price,
-                )
-                # Pass market metadata for market-specific minimum validation
-                signed_order = self.clob.create_and_sign_market_order(market_params, market=market)
-                order_type = OrderType.IOC  # Market orders use IOC
-
-            # Build order payload
-            order_payload = signed_order.to_api_payload()
-            order_payload["orderType"] = order_type.value
+            # Build order payload (owner = API key, required by CLOB matcher).
+            # Use get_or_create_credentials() so lazy L2 derivation works when
+            # the adapter was initialized with wallet-only config.
+            credentials = self.clob.get_or_create_credentials()
+            order_payload = signed_order.to_api_payload(
+                owner=credentials.api_key,
+                order_type=order_type.value,
+            )
 
             logger.info(
                 "Compiled sell intent",
@@ -659,6 +724,87 @@ class PolymarketAdapter:
         if expiration_hours is None:
             return 0
         return int(datetime.now(UTC).timestamp()) + (expiration_hours * 3600)
+
+    # =========================================================================
+    # CLOB Pre-Flight Validation (VIB-3140)
+    # =========================================================================
+
+    def _validate_clob_preflight(
+        self,
+        *,
+        side: str,
+        price: Decimal,
+        size: Decimal,
+        market: GammaMarket,
+    ) -> None:
+        """Run all live-CLOB pre-flight validations at compile / dry-run time.
+
+        The strategy runner's ``--dry-run`` mode stops before any network
+        submission — so any validation that happens only on the live CLOB
+        (off-tick prices, sub-$1 BUY, excess decimals) silently passes in
+        dry-run and then blows up in production. This method closes that gap
+        by running the CLOB's pre-flight checks against the *user-supplied*
+        price (i.e. BEFORE :meth:`ClobClient.round_price_to_tick` snaps it).
+
+        The error messages include the exact strings the live CLOB emits so
+        strategy authors can grep for them and ``non_retryable`` classifiers
+        (VIB-3141) can pattern-match the same text.
+
+        Checks (all run in order, first failure raises):
+        1. **Tick size** — ``price`` must be an integer multiple of
+           ``market.order_price_min_tick_size``. Live CLOB:
+           ``breaks minimum tick size rule: <tick_size>``.
+        2. **Price precision** — ``price`` must have at most 4 decimals
+           (CLOB caps at 0.0001 tick). Guards against Python-float ->
+           Decimal bugs that inflate ``as_integer_ratio`` denominators.
+        3. **Minimum order value** — for BUY, ``size * price`` must be
+           ``>= $1``. Live CLOB:
+           ``invalid amount for a marketable BUY order ($X), min size: $1``.
+
+        Post-sign validations in :meth:`ClobClient.build_limit_order` and
+        :meth:`ClobClient.build_market_order` remain in place as defence in
+        depth — re-checking snapped amounts catches cases where flooring
+        drops below the per-market shares minimum.
+
+        Args:
+            side: Order side ("BUY" or "SELL"). Only BUY is subject to the
+                $1 USD floor; SELL pays in shares.
+            price: User-supplied price (``intent.max_price`` for BUY,
+                ``intent.min_price`` for SELL). Validated pre-snap so
+                off-tick prices fail instead of being silently corrected.
+            size: Number of shares being bought/sold.
+            market: Resolved ``GammaMarket`` providing tick / size metadata.
+
+        Raises:
+            PolymarketInvalidTickSizeError: Price is not a tick multiple.
+            PolymarketInvalidPrecisionError: Price or size has too many
+                decimals for the CLOB precision caps.
+            PolymarketMinimumOrderError: BUY order value (size * price) is
+                below the $1 USD floor.
+        """
+        # 1. Tick size — the ClobClient helper raises with the exact CLOB text
+        #    (see PolymarketInvalidTickSizeError) when the price is off-tick.
+        self.clob._validate_tick_size(price, market=market)
+
+        # 2. Price precision — Decimal.as_tuple().exponent is negative for
+        #    fractional values; -5 means 5 decimal places. Normalize() strips
+        #    trailing zeros so e.g. Decimal("0.1200") registers as 2 decimals.
+        #    Positive exponents (e.g. Decimal("1E+2")) have 0 fractional
+        #    digits and are fine; we only reject when fractional-digit count
+        #    exceeds the CLOB's 4-decimal cap.
+        price_exp = price.normalize().as_tuple().exponent
+        if isinstance(price_exp, int) and price_exp < 0 and -price_exp > CLOB_MAX_PRICE_DECIMALS:
+            raise PolymarketInvalidPrecisionError(
+                field="price",
+                value=str(price),
+                max_decimals=CLOB_MAX_PRICE_DECIMALS,
+            )
+
+        # 3. Minimum order value — $1 USD floor for BUY only. Delegates to
+        #    the ClobClient so we emit the same error text that the post-sign
+        #    path does.
+        if side == "BUY":
+            self.clob._validate_order_value_usd(size * price)
 
     def _map_time_in_force(self, tif: str) -> OrderType:
         """Map time-in-force string to OrderType enum.

@@ -442,12 +442,14 @@ class AcrossBridgeAdapter(BridgeAdapter):
 
             # Calculate fill deadline (quote expiry + buffer)
             fill_deadline = quote.route_data.get("fill_deadline")
+            if fill_deadline is not None:
+                fill_deadline = int(fill_deadline)
             if not fill_deadline:
                 # Default: 4 hours from now
                 fill_deadline = int(time.time()) + (4 * 60 * 60)
 
             # Exclusivity settings
-            exclusivity_deadline = quote.route_data.get("exclusivity_deadline", 0)
+            exclusivity_deadline = int(quote.route_data.get("exclusivity_deadline", 0))
             exclusive_relayer = quote.route_data.get("exclusive_relayer")
             if not exclusive_relayer or exclusive_relayer == "0x":
                 exclusive_relayer = "0x0000000000000000000000000000000000000000"
@@ -474,6 +476,8 @@ class AcrossBridgeAdapter(BridgeAdapter):
 
             # For quoteTimestamp, use current timestamp if not in route_data
             quote_timestamp = quote.route_data.get("timestamp")
+            if quote_timestamp is not None:
+                quote_timestamp = int(quote_timestamp)
             if not quote_timestamp:
                 quote_timestamp = int(time.time())
 

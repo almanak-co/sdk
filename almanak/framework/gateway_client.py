@@ -101,6 +101,75 @@ class _AuthClientInterceptor(
         return continuation(new_details, request_iterator)
 
 
+class _CycleIdInterceptor(
+    grpc.UnaryUnaryClientInterceptor,
+    grpc.UnaryStreamClientInterceptor,
+    grpc.StreamUnaryClientInterceptor,
+    grpc.StreamStreamClientInterceptor,
+):
+    """Client interceptor that propagates cycle_id as gRPC metadata.
+
+    Reads the current cycle_id from the ContextVar and attaches it to
+    every outgoing RPC call, so the gateway can correlate all calls
+    within a single decide->execute cycle.
+    """
+
+    METADATA_KEY = "x-cycle-id"
+
+    def _add_cycle_metadata(self, metadata: tuple | None) -> tuple:
+        from almanak.framework.observability.context import get_cycle_id
+
+        metadata = metadata or ()
+        cycle_id = get_cycle_id()
+        if cycle_id:
+            return metadata + ((self.METADATA_KEY, cycle_id),)
+        return metadata
+
+    def intercept_unary_unary(self, continuation, client_call_details, request):
+        new_details = _ClientCallDetails(
+            client_call_details.method,
+            client_call_details.timeout,
+            self._add_cycle_metadata(client_call_details.metadata),
+            client_call_details.credentials,
+            client_call_details.wait_for_ready,
+            client_call_details.compression,
+        )
+        return continuation(new_details, request)
+
+    def intercept_unary_stream(self, continuation, client_call_details, request):
+        new_details = _ClientCallDetails(
+            client_call_details.method,
+            client_call_details.timeout,
+            self._add_cycle_metadata(client_call_details.metadata),
+            client_call_details.credentials,
+            client_call_details.wait_for_ready,
+            client_call_details.compression,
+        )
+        return continuation(new_details, request)
+
+    def intercept_stream_unary(self, continuation, client_call_details, request_iterator):
+        new_details = _ClientCallDetails(
+            client_call_details.method,
+            client_call_details.timeout,
+            self._add_cycle_metadata(client_call_details.metadata),
+            client_call_details.credentials,
+            client_call_details.wait_for_ready,
+            client_call_details.compression,
+        )
+        return continuation(new_details, request_iterator)
+
+    def intercept_stream_stream(self, continuation, client_call_details, request_iterator):
+        new_details = _ClientCallDetails(
+            client_call_details.method,
+            client_call_details.timeout,
+            self._add_cycle_metadata(client_call_details.metadata),
+            client_call_details.credentials,
+            client_call_details.wait_for_ready,
+            client_call_details.compression,
+        )
+        return continuation(new_details, request_iterator)
+
+
 class _ClientCallDetails(
     grpc.ClientCallDetails,
 ):
@@ -135,17 +204,23 @@ class GatewayClientConfig:
     def from_env(cls) -> "GatewayClientConfig":
         """Load configuration from environment variables.
 
-        Environment variables:
-            GATEWAY_HOST: Gateway hostname
-            GATEWAY_PORT: Gateway port
-            GATEWAY_TIMEOUT: RPC timeout in seconds
-            GATEWAY_AUTH_TOKEN: Authentication token for gateway access
+        Environment variables (preferred names with fallback):
+            ALMANAK_GATEWAY_HOST: Gateway hostname (preferred, falls back to GATEWAY_HOST)
+            ALMANAK_GATEWAY_PORT: Gateway port (preferred, falls back to GATEWAY_PORT)
+            ALMANAK_GATEWAY_TIMEOUT: RPC timeout in seconds (preferred, falls back to GATEWAY_TIMEOUT)
+            ALMANAK_GATEWAY_AUTH_TOKEN: Authentication token (preferred, falls back to GATEWAY_AUTH_TOKEN)
         """
+        # Read each config value: prefer ALMANAK_* names, fallback to legacy GATEWAY_* names
+        host = os.environ.get("ALMANAK_GATEWAY_HOST") or os.environ.get("GATEWAY_HOST", "localhost")
+        port_str = os.environ.get("ALMANAK_GATEWAY_PORT") or os.environ.get("GATEWAY_PORT", "50051")
+        timeout_str = os.environ.get("ALMANAK_GATEWAY_TIMEOUT") or os.environ.get("GATEWAY_TIMEOUT", "30.0")
+        auth_token = os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN") or os.environ.get("GATEWAY_AUTH_TOKEN")
+
         return cls(
-            host=os.environ.get("GATEWAY_HOST", "localhost"),
-            port=int(os.environ.get("GATEWAY_PORT", "50051")),
-            timeout=float(os.environ.get("GATEWAY_TIMEOUT", "30.0")),
-            auth_token=os.environ.get("GATEWAY_AUTH_TOKEN"),
+            host=host,
+            port=int(port_str),
+            timeout=float(timeout_str),
+            auth_token=auth_token,
         )
 
 
@@ -195,6 +270,9 @@ class GatewayClient:
         self._polymarket_stub: gateway_pb2_grpc.PolymarketServiceStub | None = None
         self._enso_stub: gateway_pb2_grpc.EnsoServiceStub | None = None
         self._lifecycle_stub: gateway_pb2_grpc.LifecycleServiceStub | None = None
+        self._gateway_health_stub: gateway_pb2_grpc.HealthStub | None = None
+        self.registered_chains: list[str] | None = None
+        self.registered_with_wallet_registry: bool = False
 
     @property
     def target(self) -> str:
@@ -307,15 +385,16 @@ class GatewayClient:
 
         base_channel = grpc.insecure_channel(self.target)
 
-        # Wrap channel with auth interceptor if token is configured
+        # Wrap channel with interceptors
+        interceptors: list[grpc.UnaryUnaryClientInterceptor] = [_CycleIdInterceptor()]
         if self.config.auth_token:
-            interceptor = _AuthClientInterceptor(self.config.auth_token)
-            self._channel = grpc.intercept_channel(base_channel, interceptor)
+            interceptors.append(_AuthClientInterceptor(self.config.auth_token))
             logger.debug("Auth token configured for gateway connection")
-        else:
-            self._channel = base_channel
+
+        self._channel = grpc.intercept_channel(base_channel, *interceptors)
 
         self._health_stub = health_pb2_grpc.HealthStub(self._channel)
+        self._gateway_health_stub = gateway_pb2_grpc.HealthStub(self._channel)
 
         # Initialize Phase 2 service stubs
         self._market_stub = gateway_pb2_grpc.MarketServiceStub(self._channel)
@@ -356,6 +435,9 @@ class GatewayClient:
             self._channel.close()
             self._channel = None
             self._health_stub = None
+            self._gateway_health_stub = None
+            self.registered_chains = None
+            self.registered_with_wallet_registry = False
             self._market_stub = None
             self._state_stub = None
             self._execution_stub = None
@@ -447,6 +529,47 @@ class GatewayClient:
         """Context manager exit - disconnect from gateway."""
         self.disconnect()
 
+    def register_chains(self, chains: list[str]) -> dict[str, str]:
+        """Register chains with the gateway and discover per-chain wallets.
+
+        Calls the gateway's RegisterChains RPC to pre-warm orchestrators and
+        compilers. If the gateway has a wallet registry plugin, per-chain wallet
+        addresses are returned in the response.
+
+        Args:
+            chains: List of chain names to register (e.g., ["arbitrum", "base"])
+
+        Returns:
+            Dict mapping chain name to wallet address (from wallet registry).
+            Empty dict if no wallet registry is configured.
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        if self._gateway_health_stub is None:
+            raise RuntimeError("Gateway client not connected")
+
+        try:
+            response = self._gateway_health_stub.RegisterChains(
+                gateway_pb2.RegisterChainsRequest(chains=chains),
+                timeout=self.config.timeout,
+            )
+            chain_wallets = dict(response.chain_wallets) if response.chain_wallets else {}
+            self.registered_chains = list(response.initialized_chains)
+            self.registered_with_wallet_registry = bool(chain_wallets)
+            if chain_wallets:
+                logger.info(
+                    "Registered chains with wallet registry: %s",
+                    {k: v[:10] + "..." for k, v in chain_wallets.items()},
+                )
+            return chain_wallets
+        except grpc.RpcError as e:
+            # Legacy fallback: gateway may not support RegisterChains yet
+            if e.code() == grpc.StatusCode.UNIMPLEMENTED:
+                logger.debug("Gateway does not support RegisterChains, using legacy flow")
+                self.registered_chains = list(chains)
+                return {}
+            raise
+
     # =========================================================================
     # Convenience methods for typed RPC queries
     # =========================================================================
@@ -530,6 +653,92 @@ class GatewayClient:
             return None
         except grpc.RpcError as e:
             logger.warning(f"QueryBalance RPC error: {e}")
+            return None
+
+    def query_native_balance(
+        self,
+        chain: str,
+        wallet_address: str,
+    ) -> int | None:
+        """Query native token balance (ETH, MATIC, AVAX, etc.) via gateway RPC.
+
+        Args:
+            chain: Chain identifier (e.g., "arbitrum", "base")
+            wallet_address: Wallet address to query balance for
+
+        Returns:
+            Native balance in wei, or None if query fails
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        if self._rpc_stub is None:
+            logger.warning("Gateway client not connected")
+            return None
+
+        try:
+            import json
+
+            response = self._rpc_stub.Call(
+                gateway_pb2.RpcRequest(
+                    chain=chain,
+                    method="eth_getBalance",
+                    params=f'["{wallet_address}", "latest"]',
+                ),
+                timeout=self.config.timeout,
+            )
+            if not response.success:
+                logger.warning(f"Native balance query failed: {response.error}")
+                return None
+            if response.result:
+                hex_balance = json.loads(response.result)
+                return int(hex_balance, 16)
+            return None
+        except grpc.RpcError as e:
+            logger.warning(f"Native balance query RPC error: {e}")
+            return None
+
+    def eth_call(
+        self,
+        chain: str,
+        to: str,
+        data: str,
+    ) -> str | None:
+        """Perform a raw eth_call via the gateway's RPC proxy.
+
+        Args:
+            chain: Chain identifier (e.g., "base", "arbitrum")
+            to: Contract address to call
+            data: Hex-encoded calldata (with 0x prefix)
+
+        Returns:
+            Hex-encoded result string, or None on failure
+        """
+        import json
+
+        from almanak.gateway.proto import gateway_pb2
+
+        if self._rpc_stub is None:
+            logger.warning("Gateway client not connected")
+            return None
+
+        try:
+            params = json.dumps([{"to": to, "data": data}, "latest"])
+            response = self._rpc_stub.Call(
+                gateway_pb2.RpcRequest(
+                    chain=chain,
+                    method="eth_call",
+                    params=params,
+                ),
+                timeout=self.config.timeout,
+            )
+            if not response.success:
+                logger.warning(f"eth_call failed: {response.error}")
+                return None
+            if response.result:
+                return json.loads(response.result)
+            return None
+        except grpc.RpcError as e:
+            logger.warning(f"eth_call RPC error: {e}")
             return None
 
     def query_position_liquidity(

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
-from strategies.demo.benqi_lending_lifecycle.strategy import BenqiLendingLifecycleStrategy
+from almanak.demo_strategies.benqi_lending_lifecycle.strategy import BenqiLendingLifecycleStrategy
 
 
 @pytest.fixture

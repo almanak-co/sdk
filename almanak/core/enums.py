@@ -66,10 +66,13 @@ class Chain(Enum):
     SONIC = "SONIC"
     PLASMA = "PLASMA"
     BLAST = "BLAST"
+    LINEA = "LINEA"
     MANTLE = "MANTLE"
     BERACHAIN = "BERACHAIN"
     SOLANA = "SOLANA"
     MONAD = "MONAD"
+    XLAYER = "XLAYER"
+    ZEROG = "ZEROG"  # Preview support — 0G Chain (AI L1)
 
 
 class ChainFamily(Enum):
@@ -91,9 +94,12 @@ CHAIN_FAMILY_MAP: dict[Chain, "ChainFamily"] = {
     Chain.SONIC: ChainFamily.EVM,
     Chain.PLASMA: ChainFamily.EVM,
     Chain.BLAST: ChainFamily.EVM,
+    Chain.LINEA: ChainFamily.EVM,
     Chain.MANTLE: ChainFamily.EVM,
     Chain.BERACHAIN: ChainFamily.EVM,
     Chain.MONAD: ChainFamily.EVM,
+    Chain.XLAYER: ChainFamily.EVM,
+    Chain.ZEROG: ChainFamily.EVM,
     Chain.SOLANA: ChainFamily.SOLANA,
 }
 
@@ -152,6 +158,7 @@ class AtomicityRequirement(Enum):
 
 class Protocol(Enum):
     UNISWAP_V3 = "UNISWAP_V3"
+    UNISWAP_V4 = "UNISWAP_V4"
     PANCAKESWAP_V3 = "PANCAKESWAP_V3"
     SUSHISWAP_V3 = "SUSHISWAP_V3"
     TRADERJOE_V2 = "TRADERJOE_V2"
@@ -163,7 +170,12 @@ class Protocol(Enum):
     ENSO = "ENSO"
     PENDLE = "PENDLE"
     METAMORPHO = "METAMORPHO"
+    RADIANT_V2 = "RADIANT_V2"
+    SILO_V2 = "SILO_V2"
     LIFI = "LIFI"
+    BENQI = "BENQI"
+    JOE_LEND = "JOE_LEND"
+    EULER_V2 = "EULER_V2"
 
 
 class Network(Enum):

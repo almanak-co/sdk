@@ -1,0 +1,31 @@
+{
+    "chain": "base",
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "chain": "ethereum",
+            "amount": "0.05",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "chain": "ethereum",
+            "amount": "100",
+            "amount_type": "usd"
+        }
+    ],
+    "pool": "WETH/USDC/3000",
+    "_hook_address_note": "Zero address = standard pool (no hooks). Replace with a real hook address to test hook-aware LP.",
+    "hook_address": "0x0000000000000000000000000000000000000000",
+    "range_width_pct": 0.3,
+    "amount0": "0.01",
+    "amount1": "30",
+    "fee_hint": null,
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

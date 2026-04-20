@@ -106,6 +106,17 @@ def _parse_insufficient_funds_error(error_msg: str) -> tuple[int, int]:
     return 0, 0
 
 
+# Per-chain receipt confirmation timeout overrides (seconds).
+# These chains are significantly slower than L2s on Anvil forks.
+# Users can override per-strategy with TX_TIMEOUT_SECONDS env var or
+# tx_timeout_seconds in the runtime config.
+CHAIN_RECEIPT_TIMEOUTS: dict[str, int] = {
+    "bsc": 300,  # BSC Anvil forks: quoter ~60-80s, gas estimate ~155s
+    "avalanche": 180,  # Avalanche also slower than L2s
+}
+DEFAULT_RECEIPT_TIMEOUT: int = 120
+
+
 _CHAIN_NATIVE_SYMBOL: dict[str, str] = {
     "ethereum": "ETH",
     "arbitrum": "ETH",
@@ -119,6 +130,7 @@ _CHAIN_NATIVE_SYMBOL: dict[str, str] = {
     "mantle": "MNT",
     "monad": "MON",
     "berachain": "BERA",
+    "xlayer": "OKB",
 }
 
 
@@ -156,7 +168,7 @@ class ChainExecutorConfig:
 
     gas_buffer_multiplier: float | None = None
     max_gas_price_gwei: int = 100
-    tx_timeout_seconds: int = 120
+    tx_timeout_seconds: int | None = None  # None = use chain-specific default
     max_retries: int = 3
     base_retry_delay: float = 1.0
     max_retry_delay: float = 32.0
@@ -187,6 +199,11 @@ class ChainExecutorConfig:
         # Set default gas buffer multiplier based on chain
         if self.gas_buffer_multiplier is None:
             self.gas_buffer_multiplier = GAS_BUFFER_MULTIPLIERS.get(self.chain, DEFAULT_GAS_BUFFER)
+
+        # Apply chain-specific receipt timeout default when not explicitly set.
+        # Slow chains (BSC, Avalanche) need longer timeouts on Anvil forks.
+        if self.tx_timeout_seconds is None:
+            self.tx_timeout_seconds = CHAIN_RECEIPT_TIMEOUTS.get(self.chain, DEFAULT_RECEIPT_TIMEOUT)
 
 
 @dataclass
@@ -415,7 +432,9 @@ class ChainExecutor:
             AsyncWeb3 instance connected to the RPC endpoint
         """
         if self._web3 is None:
-            self._web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url))
+            from almanak.gateway.utils.ssl_context import build_ssl_context
+
+            self._web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url, request_kwargs={"ssl": build_ssl_context()}))
         return self._web3
 
     async def check_connection(self) -> bool:
@@ -527,6 +546,12 @@ class ChainExecutor:
         if max_fee > self.max_gas_price_wei:
             max_fee = self.max_gas_price_wei
             logger.warning(f"Capped max_fee_per_gas at {self._max_gas_price_gwei} gwei on {self._chain}")
+
+        # Ensure priority fee never exceeds max fee (required by EIP-1559).
+        # Can happen on OP-stack chains where base fees are near-zero and the
+        # gas cap kicks in, or when the RPC returns an unexpectedly high
+        # priority fee suggestion (VIB-1605).
+        max_priority_fee = min(max_priority_fee, max_fee)
 
         return {
             "max_fee_per_gas": max_fee,

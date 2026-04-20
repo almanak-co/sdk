@@ -1,0 +1,38 @@
+{
+    "strategy_name": "silo_v2_lending_lifecycle_avalanche",
+    "chain": "avalanche",
+    "network": "anvil",
+    "protocol": "silo_v2",
+    "description": "Silo V2 supply lifecycle on Avalanche: deposit USDC -> withdraw USDC",
+    "author": "Kitchen Loop",
+    "version": "1.0.0",
+    "tags": [
+        "kitchenloop",
+        "lending",
+        "silo_v2",
+        "avalanche",
+        "lifecycle"
+    ],
+    "supply_token": "USDC",
+    "supply_amount": "1000",
+    "anvil_funding": {
+        "AVAX": "10",
+        "USDC": "5000"
+    },
+    "risk_limits": {
+        "max_position_usd": 10000,
+        "max_slippage_bps": 100
+    },
+    "token_funding": [
+        {
+            "token": "AVAX",
+            "amount": "10",
+            "chain": "avalanche"
+        },
+        {
+            "token": "USDC",
+            "amount": "5000",
+            "chain": "avalanche"
+        }
+    ]
+}

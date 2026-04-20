@@ -1,0 +1,37 @@
+{
+    "chain": "monad",
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0xee8c0e9f1bffb4eb878d8f15f368a02a35481242",
+            "chain": "monad",
+            "amount": "0.005",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0x754704bc059f8c67012fed69bc8a327a5aafb603",
+            "chain": "monad",
+            "amount": "10",
+            "amount_type": "usd"
+        },
+        {
+            "symbol": "WMON",
+            "address": "0x3bd359c1119da7da1d913d1c4d2b7c461115433a",
+            "chain": "monad",
+            "amount": "1",
+            "amount_type": "token"
+        }
+    ],
+    "pool": "WETH/USDC/500",
+    "range_width_pct": 0.2,
+    "amount0": "0.001",
+    "amount1": "3",
+    "force_action": "open",
+    "anvil_funding": {
+        "MON": 1000,
+        "WMON": 10,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

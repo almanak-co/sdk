@@ -31,7 +31,7 @@ def _make_strategy(
     chain: str = "ethereum",
 ) -> Any:
     """Create a CurveCryptoSwapPnLStrategy with mocked framework wiring."""
-    from strategies.demo.curve_cryptoswap_pnl.strategy import CurveCryptoSwapPnLStrategy
+    from almanak.demo_strategies.curve_cryptoswap_pnl.strategy import CurveCryptoSwapPnLStrategy
 
     with patch.object(CurveCryptoSwapPnLStrategy, "__init__", lambda self, *a, **kw: None):
         strat = CurveCryptoSwapPnLStrategy.__new__(CurveCryptoSwapPnLStrategy)

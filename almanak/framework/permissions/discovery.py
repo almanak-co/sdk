@@ -84,6 +84,7 @@ def discover_permissions(
     chain: str,
     protocols: list[str],
     intent_types: list[str],
+    rpc_url: str | None = None,
 ) -> tuple[list[ContractPermission], list[str]]:
     """Discover required permissions by compiling synthetic intents.
 
@@ -95,6 +96,9 @@ def discover_permissions(
         chain: Target chain name
         protocols: List of protocol names
         intent_types: List of intent type strings
+        rpc_url: Optional RPC URL for on-chain queries during discovery.
+            Required for protocols like Aerodrome where LP_CLOSE needs to
+            resolve pool addresses via factory contract calls.
 
     Returns:
         Tuple of (permissions_list, warnings_list)
@@ -106,8 +110,10 @@ def discover_permissions(
     targets: dict[str, _TargetAccumulator] = {}
     warnings: list[str] = []
 
-    # Cache compilers by (pool_selection_mode, fee_tier) to avoid re-creating them
-    _compilers: dict[tuple[str, int], IntentCompiler] = {}
+    # Cache compilers by (pool_selection_mode, fee_tier, uses_rpc) to avoid re-creating them.
+    # RPC is only passed to protocols that declare needs_rpc_discovery=True in their
+    # PermissionHints, so other protocols are unaffected by the rpc_url parameter.
+    _compilers: dict[tuple[str, int, bool], IntentCompiler] = {}
 
     def _get_compiler(protocol: str) -> IntentCompiler:
         """Get or create a compiler configured for this protocol.
@@ -129,14 +135,22 @@ def discover_permissions(
             mode = "auto"
             fee_tier = chain_fee_override or 3000
 
-        key = (mode, fee_tier)
+        # Only pass RPC to protocols that need on-chain lookups for discovery
+        # (e.g. Aerodrome pool address resolution). Other protocols use static
+        # addresses and don't benefit from RPC — avoid unnecessary calls.
+        uses_rpc = hints.needs_rpc_discovery and rpc_url is not None
+        compiler_rpc = rpc_url if uses_rpc else None
+
+        key = (mode, fee_tier, uses_rpc)
         if key not in _compilers:
             _compilers[key] = IntentCompiler(
                 chain=chain,
+                rpc_url=compiler_rpc,
                 config=IntentCompilerConfig(
                     allow_placeholder_prices=True,
                     swap_pool_selection_mode=cast(Literal["auto", "fixed"], mode),
                     fixed_swap_fee_tier=fee_tier,
+                    permission_discovery=uses_rpc,
                 ),
             )
         return _compilers[key]
@@ -177,7 +191,16 @@ def discover_permissions(
                     # (e.g., protocol not deployed on this chain).
                     # Only warn if there's an unexpected error.
                     if result.error and "not supported" not in result.error.lower():
-                        warnings.append(f"Compilation failed for {protocol}/{intent_type} on {chain}: {result.error}")
+                        msg = f"Compilation failed for {protocol}/{intent_type} on {chain}: {result.error}"
+                        # Hint when the failure is due to missing RPC (e.g. pool address lookup)
+                        if rpc_url is None and (
+                            "pool not found" in result.error.lower() or "rpc" in result.error.lower()
+                        ):
+                            msg += (
+                                " — This protocol requires on-chain lookups for full permission"
+                                " discovery. Set ALCHEMY_API_KEY in your .env or pass --rpc-url."
+                            )
+                        warnings.append(msg)
                     continue
 
                 # Extract permissions from compiled transactions

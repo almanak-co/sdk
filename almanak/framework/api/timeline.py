@@ -6,8 +6,9 @@ strategy events, supporting pagination and filtering.
 
 import json
 import logging
+from copy import copy
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -136,6 +137,10 @@ class TimelineEvent:
     chain: str = ""
     details: dict[str, Any] = field(default_factory=dict)
 
+    # Forensic event correlation (Phase 2 observability)
+    cycle_id: str = ""
+    phase: str = ""
+
     # Computed field for block explorer link
     block_explorer_url: str | None = None
 
@@ -146,7 +151,7 @@ class TimelineEvent:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the timeline event to a dictionary for serialization."""
-        return {
+        d: dict[str, Any] = {
             "timestamp": self.timestamp.isoformat(),
             "event_type": self.event_type.value,
             "description": self.description,
@@ -156,6 +161,11 @@ class TimelineEvent:
             "details": self.details,
             "block_explorer_url": self.block_explorer_url,
         }
+        if self.cycle_id:
+            d["cycle_id"] = self.cycle_id
+        if self.phase:
+            d["phase"] = self.phase
+        return d
 
 
 @dataclass
@@ -188,6 +198,23 @@ _event_store: dict[str, list[TimelineEvent]] = {}
 
 # Gateway client for dual-write persistence (registered by StrategyRunner at startup)
 _gateway_client: Any = None
+
+# Throttle state: tracks last emission time per (strategy_id, event_type) for dedup.
+# Events matching a recently-emitted (strategy_id, event_type) within the cooldown
+# window are suppressed to prevent timeline spam (e.g. STRATEGY_STUCK every 60s).
+# Note: these dicts are accessed from the single-threaded strategy runner loop.
+# If add_event() is ever called from multiple threads, wrap in a threading.Lock.
+_throttle_last_emitted: dict[tuple[str, str], datetime] = {}
+_throttle_suppressed_counts: dict[tuple[str, str], int] = {}
+
+# Default throttle cooldown in seconds. Only event types listed in
+# _THROTTLED_EVENT_TYPES are subject to throttling.
+_THROTTLE_COOLDOWN_SECONDS = 300  # 5 minutes
+_THROTTLED_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "STRATEGY_STUCK",
+    }
+)
 
 
 def set_event_gateway_client(client: Any) -> None:
@@ -258,6 +285,8 @@ def _load_events_from_file() -> None:
                     strategy_id=event_data.get("strategy_id", strategy_id),
                     chain=event_data.get("chain", ""),
                     details=event_data.get("details") or event_data.get("metadata", {}),
+                    cycle_id=event_data.get("cycle_id", ""),
+                    phase=event_data.get("phase", ""),
                 )
                 # Avoid duplicates
                 if not any(
@@ -287,9 +316,40 @@ def add_event(event: TimelineEvent) -> None:
     the gateway's persistent SQLite store (if a gateway client is registered).
     All 26+ callers get gateway persistence for free with zero call-site changes.
 
+    Certain noisy event types (e.g. STRATEGY_STUCK) are throttled: if the same
+    (strategy_id, event_type) was emitted within the last 5 minutes, the event
+    is suppressed and a count is tracked. When the cooldown expires, the next
+    event includes the suppressed count in its description.
+
     Args:
         event: The timeline event to store
     """
+    # Throttle noisy event types to prevent timeline spam
+    event_type_str = event.event_type.value if hasattr(event.event_type, "value") else str(event.event_type)
+    if event_type_str in _THROTTLED_EVENT_TYPES and event.strategy_id:
+        throttle_key = (event.strategy_id, event_type_str)
+        now = datetime.now(UTC)
+        last_emitted = _throttle_last_emitted.get(throttle_key)
+        if last_emitted is not None:
+            elapsed = (now - last_emitted).total_seconds()
+            if elapsed < _THROTTLE_COOLDOWN_SECONDS:
+                _throttle_suppressed_counts[throttle_key] = _throttle_suppressed_counts.get(throttle_key, 0) + 1
+                logger.debug(
+                    "Throttled %s event for %s (%d suppressed in current window)",
+                    event_type_str,
+                    event.strategy_id,
+                    _throttle_suppressed_counts[throttle_key],
+                )
+                return
+
+        # Cooldown expired or first emission — annotate with suppressed count if any.
+        # Copy the event to avoid mutating the caller's object.
+        suppressed = _throttle_suppressed_counts.pop(throttle_key, 0)
+        if suppressed > 0:
+            event = copy(event)
+            event.description = f"{event.description} ({suppressed} suppressed since last emit)"
+        _throttle_last_emitted[throttle_key] = now
+
     if event.strategy_id not in _event_store:
         _event_store[event.strategy_id] = []
     _event_store[event.strategy_id].append(event)
@@ -313,6 +373,8 @@ def add_event(event: TimelineEvent) -> None:
                 chain=event.chain or "",
                 details_json=json.dumps(event.details) if event.details else "",
                 timestamp=int(event.timestamp.timestamp()),
+                cycle_id=event.cycle_id or "",
+                phase=event.phase or "",
             )
             _gateway_client.observe.RecordTimelineEvent(request, timeout=2.0)
         except Exception as e:
@@ -386,10 +448,17 @@ def clear_events(strategy_id: str | None = None) -> None:
         strategy_id: If provided, only clear events for this strategy.
                     If None, clear all events.
     """
-    if strategy_id:
+    if strategy_id is not None:
         _event_store.pop(strategy_id, None)
+        # Clear throttle state for this strategy so the next event isn't suppressed
+        keys_to_remove = [k for k in _throttle_last_emitted if k[0] == strategy_id]
+        for k in keys_to_remove:
+            _throttle_last_emitted.pop(k, None)
+            _throttle_suppressed_counts.pop(k, None)
     else:
         _event_store.clear()
+        _throttle_last_emitted.clear()
+        _throttle_suppressed_counts.clear()
 
     # Persist the cleared state
     _persist_events_to_file()

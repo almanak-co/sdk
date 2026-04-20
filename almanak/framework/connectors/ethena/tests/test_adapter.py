@@ -992,3 +992,83 @@ class TestCompileUnstakeIntent:
         note = bundle.metadata.get("note", "")
         assert "cooldown" in note.lower()
         assert "complete_unstake" in note.lower() or "7 days" in note.lower()
+
+
+# =============================================================================
+# ABI Selector Validation Tests
+# =============================================================================
+# These tests cross-validate every hardcoded ABI selector against the canonical
+# keccak derivation so a wrong selector cannot silently merge (VIB-1529).
+
+
+class TestEthenaABISelectors:
+    """Cross-validate all hardcoded selectors against Web3.keccak derivation.
+
+    History: ETHENA_UNSTAKE_SELECTOR was 0x2e17de78 (unstake(uint256)) for
+    5+ iterations because the tests only asserted calldata.startswith(selector),
+    which passes even when the selector is wrong. These tests catch that class
+    of bug at unit-test time.
+    """
+
+    def test_unstake_selector_matches_abi(self) -> None:
+        """ETHENA_UNSTAKE_SELECTOR must be keccak('unstake(address)')[:4]."""
+        from web3 import Web3
+
+        from ..adapter import ETHENA_UNSTAKE_SELECTOR
+
+        expected = "0x" + Web3.keccak(text="unstake(address)").hex()[:8]  # 4 bytes = 8 hex chars
+        assert ETHENA_UNSTAKE_SELECTOR == expected, (
+            f"ETHENA_UNSTAKE_SELECTOR is {ETHENA_UNSTAKE_SELECTOR!r} but "
+            f"keccak('unstake(address)')[:4] = {expected!r}. "
+            "Update the constant to match the correct ABI signature."
+        )
+
+    def test_cooldown_assets_selector_matches_abi(self) -> None:
+        """ETHENA_COOLDOWN_ASSETS_SELECTOR must be keccak('cooldownAssets(uint256)')[:4]."""
+        from web3 import Web3
+
+        from ..adapter import ETHENA_COOLDOWN_ASSETS_SELECTOR
+
+        expected = "0x" + Web3.keccak(text="cooldownAssets(uint256)").hex()[:8]
+        assert ETHENA_COOLDOWN_ASSETS_SELECTOR == expected, (
+            f"ETHENA_COOLDOWN_ASSETS_SELECTOR is {ETHENA_COOLDOWN_ASSETS_SELECTOR!r} "
+            f"but keccak('cooldownAssets(uint256)')[:4] = {expected!r}."
+        )
+
+    def test_cooldown_shares_selector_matches_abi(self) -> None:
+        """ETHENA_COOLDOWN_SHARES_SELECTOR must be keccak('cooldownShares(uint256)')[:4]."""
+        from web3 import Web3
+
+        from ..adapter import ETHENA_COOLDOWN_SHARES_SELECTOR
+
+        expected = "0x" + Web3.keccak(text="cooldownShares(uint256)").hex()[:8]
+        assert ETHENA_COOLDOWN_SHARES_SELECTOR == expected, (
+            f"ETHENA_COOLDOWN_SHARES_SELECTOR is {ETHENA_COOLDOWN_SHARES_SELECTOR!r} "
+            f"but keccak('cooldownShares(uint256)')[:4] = {expected!r}."
+        )
+
+    def test_deposit_selector_matches_abi(self) -> None:
+        """ETHENA_DEPOSIT_SELECTOR must be keccak('deposit(uint256,address)')[:4]."""
+        from web3 import Web3
+
+        from ..adapter import ETHENA_DEPOSIT_SELECTOR
+
+        expected = "0x" + Web3.keccak(text="deposit(uint256,address)").hex()[:8]
+        assert ETHENA_DEPOSIT_SELECTOR == expected, (
+            f"ETHENA_DEPOSIT_SELECTOR is {ETHENA_DEPOSIT_SELECTOR!r} "
+            f"but keccak('deposit(uint256,address)')[:4] = {expected!r}."
+        )
+
+    def test_unstake_calldata_uses_correct_selector(self, adapter: EthenaAdapter) -> None:
+        """complete_unstake calldata must start with the keccak-derived selector."""
+        from web3 import Web3
+
+        result = adapter.complete_unstake()
+
+        assert result.success is True
+        assert result.tx_data is not None
+        correct_selector = "0x" + Web3.keccak(text="unstake(address)").hex()[:8]
+        assert result.tx_data["data"].startswith(correct_selector), (
+            f"complete_unstake calldata starts with {result.tx_data['data'][:10]!r} "
+            f"but the correct selector for unstake(address) is {correct_selector!r}."
+        )

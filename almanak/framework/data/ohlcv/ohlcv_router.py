@@ -38,6 +38,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -99,8 +101,27 @@ _PROVIDER_CHAINS: dict[str, list[str]] = {
 # Candles older than this are considered finalized and cached immutably
 _FINALIZATION_AGE = timedelta(hours=24)
 
-# Default disk cache directory
-_DEFAULT_CACHE_DIR = Path.home() / ".almanak" / "data_cache" / "ohlcv"
+
+# Default disk cache directory — use home if writable, fall back to system temp
+def _resolve_cache_dir() -> Path:
+    candidates = [
+        Path.home() / ".almanak" / "data_cache" / "ohlcv",
+        Path(tempfile.gettempdir())
+        / f".almanak-{os.getuid() if hasattr(os, 'getuid') else os.getpid()}"
+        / "data_cache"
+        / "ohlcv",
+    ]
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            if os.access(candidate, os.W_OK):
+                return candidate
+        except OSError:
+            continue
+    return candidates[-1]
+
+
+_DEFAULT_CACHE_DIR = _resolve_cache_dir()
 
 
 @dataclass(frozen=True)

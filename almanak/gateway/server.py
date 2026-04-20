@@ -7,8 +7,11 @@ access to external services or credentials.
 
 import asyncio
 import logging
+import os
 import signal
 from concurrent import futures
+from importlib.metadata import entry_points
+from typing import Any
 
 import grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
@@ -41,6 +44,10 @@ from almanak.gateway.timeline import get_timeline_store
 
 logger = logging.getLogger(__name__)
 
+# Grace period (seconds) after closing servicer sessions to let aiohttp's
+# underlying TCP connectors finalize cleanup before the event loop exits.
+_AIOHTTP_SHUTDOWN_GRACE_SECONDS = 0.25
+
 
 class _RegisterChainsServicer(gateway_pb2_grpc.HealthServicer):
     """Custom Health servicer that adds RegisterChains RPC.
@@ -54,10 +61,14 @@ class _RegisterChainsServicer(gateway_pb2_grpc.HealthServicer):
         health_servicer: health_aio.HealthServicer,
         execution_servicer: "ExecutionServiceServicer",
         settings: "GatewaySettings",
+        wallet_registry: "Any | None" = None,
+        market_servicer: "Any | None" = None,
     ):
         self._health = health_servicer
         self._execution = execution_servicer
         self._settings = settings
+        self._wallet_registry: Any = wallet_registry
+        self._market: Any = market_servicer
 
     async def Check(self, request, context):
         return await self._health.Check(request, context)
@@ -68,6 +79,8 @@ class _RegisterChainsServicer(gateway_pb2_grpc.HealthServicer):
 
     async def RegisterChains(self, request, context):
         """Pre-initialize orchestrators and compilers for requested chains."""
+        from almanak.gateway.validation import validate_chain
+
         chains = list(request.chains)
         wallet_address = request.wallet_address
 
@@ -84,36 +97,110 @@ class _RegisterChainsServicer(gateway_pb2_grpc.HealthServicer):
                     key = "0x" + key
                 wallet_address = Account.from_key(key).address
 
-        if not wallet_address:
+        if not wallet_address and not self._wallet_registry:
             return gateway_pb2.RegisterChainsResponse(
                 success=False,
                 error="No wallet_address provided and no private key configured in gateway",
             )
 
+        # Resolve per-chain wallets from the wallet registry (if available)
+        chain_wallets: dict[str, str] = {}
+        if self._wallet_registry is not None:
+            for raw_chain in chains:
+                try:
+                    validated = validate_chain(raw_chain)
+                    resolved = self._wallet_registry.resolve(validated)
+                    # Solana reject guard
+                    if hasattr(resolved, "family") and str(resolved.family) == "solana":
+                        continue
+                    chain_wallets[validated] = resolved.account_address
+                except Exception as e:
+                    logger.debug(f"Wallet registry: no entry for {raw_chain}: {e}")
+
+        # Solana reject guard (wallet registry does not yet support Solana)
+        from almanak.gateway.validation import is_solana_chain
+
+        for chain in chains:
+            if is_solana_chain(chain) and chain.lower() in chain_wallets:
+                return gateway_pb2.RegisterChainsResponse(
+                    success=False,
+                    error=f"Wallet registry does not support Solana chain: {chain}",
+                )
+
         initialized = []
         errors = []
-        for chain in chains:
+        chain_wallet_map: dict[str, str] = {}
+        for raw_chain in chains:
             try:
-                await self._execution._get_orchestrator(chain.lower(), wallet_address)
-                self._execution._get_compiler(chain.lower(), wallet_address)
-                initialized.append(chain.lower())
-                logger.info(f"Pre-warmed orchestrator and compiler for {chain}")
+                chain = validate_chain(raw_chain)
+            except Exception as e:
+                errors.append(f"{raw_chain}: {e}")
+                continue
+
+            effective_wallet = chain_wallets.get(chain, wallet_address or "")
+            if not effective_wallet:
+                errors.append(f"{chain}: No wallet address available")
+                continue
+
+            chain_wallet_map[chain] = effective_wallet
+
+        # Store session topology BEFORE creating compilers so they pick up chain_wallets.
+        # Include ALL registry chains (not just requested ones) so cross-chain intents
+        # can resolve destination wallets for chains not explicitly registered.
+        full_chain_wallets = dict(chain_wallet_map)
+        if self._wallet_registry is not None:
+            for reg_chain in self._wallet_registry.all_chains():
+                if reg_chain not in full_chain_wallets:
+                    try:
+                        resolved = self._wallet_registry.resolve(reg_chain)
+                        if hasattr(resolved, "family") and str(resolved.family) == "solana":
+                            continue
+                        full_chain_wallets[reg_chain] = resolved.account_address
+                    except Exception:
+                        pass
+        self._execution._registered_chain_wallets = full_chain_wallets if full_chain_wallets else None
+        # Invalidate cached compilers so they get recreated with chain_wallets
+        self._execution._compiler_cache.clear()
+
+        for chain, effective_wallet in chain_wallet_map.items():
+            try:
+                await self._execution._get_orchestrator(chain, effective_wallet)
+                self._execution._get_compiler(chain, effective_wallet)
+                initialized.append(chain)
+                logger.info(f"Pre-warmed orchestrator and compiler for {chain} (wallet={effective_wallet[:10]}...)")
             except Exception as e:
                 errors.append(f"{chain}: {e}")
                 logger.error(f"Failed to pre-warm {chain}: {e}")
+
+        # Store initialized chains
+        self._execution._registered_chains = set(initialized)
+
+        # Re-initialize MarketService with full pricing stack now that we know
+        # the chain. This upgrades from CoinGecko-only (the default when no
+        # chains are configured at startup) to the full 4-source stack.
+        if self._market is not None and initialized:
+            try:
+                await self._market.reinitialize(initialized[0])
+            except Exception as e:
+                logger.warning("MarketService reinit failed for chain %s: %s", initialized[0], e)
+
+        # Derive a legacy wallet_address for backward compat
+        legacy_wallet = wallet_address or (full_chain_wallets.get(initialized[0], "") if initialized else "")
 
         if errors:
             return gateway_pb2.RegisterChainsResponse(
                 success=False,
                 initialized_chains=initialized,
-                wallet_address=wallet_address,
+                wallet_address=legacy_wallet,
                 error="; ".join(errors),
+                chain_wallets=full_chain_wallets,
             )
 
         return gateway_pb2.RegisterChainsResponse(
             success=True,
             initialized_chains=initialized,
-            wallet_address=wallet_address,
+            wallet_address=legacy_wallet,
+            chain_wallets=full_chain_wallets,
         )
 
 
@@ -187,24 +274,38 @@ class GatewayServer:
         # Create interceptors list
         # Auth interceptor runs first to reject unauthenticated requests early
         interceptors = []
-        if self.settings.auth_token:
-            interceptors.append(AuthInterceptor(self.settings.auth_token))
-            logger.info("Auth interceptor enabled - token authentication required")
-        elif self.settings.allow_insecure:
+        if self.settings.allow_insecure:
             network = self.settings.network
-            if network not in ("anvil", "sepolia"):
+            is_test_network = network in ("anvil", "sepolia")
+            if not is_test_network and self.settings.auth_token:
+                # Contradictory config on a production network: operator has
+                # explicitly configured auth AND asked to disable it. Refuse to
+                # start rather than silently serving unauthenticated RPCs.
+                raise RuntimeError(
+                    f"Gateway startup aborted: conflicting configuration on network '{network}'. "
+                    "ALMANAK_GATEWAY_ALLOW_INSECURE=true is set alongside ALMANAK_GATEWAY_AUTH_TOKEN. "
+                    "Pick one: unset ALMANAK_GATEWAY_ALLOW_INSECURE to keep auth enabled, "
+                    "or unset ALMANAK_GATEWAY_AUTH_TOKEN to run unauthenticated (NOT RECOMMENDED on mainnet)."
+                )
+            if not is_test_network:
                 logger.warning(
-                    "INSECURE MODE on network '%s': Auth interceptor disabled - no auth_token configured. "
+                    "INSECURE MODE on network '%s': Auth interceptor disabled. "
                     "Gateway authentication is DISABLED on a production network. "
-                    "Set ALMANAK_GATEWAY_AUTH_TOKEN or remove ALMANAK_GATEWAY_ALLOW_INSECURE.",
+                    "Remove ALMANAK_GATEWAY_ALLOW_INSECURE to require auth.",
                     network,
                 )
             else:
                 logger.warning(
-                    "INSECURE MODE: Auth interceptor disabled - no auth_token configured. "
-                    "This is acceptable for local development on '%s'.",
+                    "INSECURE MODE: Auth interceptor disabled. This is acceptable for local development on '%s'.",
                     network,
                 )
+            if self.settings.auth_token:
+                logger.warning(
+                    "Configured auth token ignored because allow_insecure=True on test network '%s'", network
+                )
+        elif self.settings.auth_token:
+            interceptors.append(AuthInterceptor(self.settings.auth_token))
+            logger.info("Auth interceptor enabled - token authentication required")
         else:
             raise RuntimeError(
                 "Gateway startup aborted: No auth_token configured. "
@@ -230,13 +331,15 @@ class GatewayServer:
             interceptors=interceptors,
         )
 
-        # Determine effective DB path for timeline: explicit override or unified gateway DB
-        effective_timeline_db = self.settings.timeline_db_path or self.settings.gateway_db_path
-
-        # Initialize TimelineStore with persistent path
-        # This must happen before services are created so they all share the same store
-        get_timeline_store(db_path=effective_timeline_db)
-        logger.debug(f"TimelineStore initialized with persistent storage: {effective_timeline_db}")
+        # Initialize TimelineStore: PostgreSQL for deployed mode, SQLite for local dev.
+        # This must happen before services are created so they all share the same store.
+        if self.settings.database_url:
+            get_timeline_store(database_url=self.settings.database_url)
+            logger.debug("TimelineStore initialized with PostgreSQL backend")
+        else:
+            effective_timeline_db = self.settings.timeline_db_path or self.settings.gateway_db_path
+            get_timeline_store(db_path=effective_timeline_db)
+            logger.debug(f"TimelineStore initialized with SQLite: {effective_timeline_db}")
 
         # Initialize InstanceRegistry with the same gateway DB
         from almanak.gateway.registry import get_instance_registry
@@ -250,13 +353,6 @@ class GatewayServer:
         if stale_count:
             logger.warning("Gateway startup: reconciled %d ghost RUNNING instance(s) -> STALE", stale_count)
 
-        # Ensure PostgreSQL schema is up-to-date (idempotent, runs once)
-        if self.settings.database_url:
-            from almanak.gateway.database import ensure_schema
-
-            await ensure_schema(self.settings.database_url)
-            logger.debug("PostgreSQL schema initialized")
-
         # Initialize LifecycleStore (uses same gateway DB or database_url for platform)
         lifecycle_store = get_lifecycle_store(
             database_url=self.settings.database_url,
@@ -268,27 +364,74 @@ class GatewayServer:
         if not self.settings.coingecko_api_key:
             logger.info(
                 "No CoinGecko API key -- using on-chain pricing (Chainlink oracles) "
-                "with free CoinGecko as fallback. Set ALMANAK_GATEWAY_COINGECKO_API_KEY "
+                "with free CoinGecko as fallback. Set COINGECKO_API_KEY "
                 "for CoinGecko as primary source."
             )
 
         # Add health service (standard gRPC health protocol)
         health_pb2_grpc.add_HealthServicer_to_server(self._health_servicer, self.server)
 
+        # ---- Plugin discovery: wallet registry ----
+        # Only activate when ALMANAK_GATEWAY_WALLETS is explicitly set.
+        # Legacy Safe env vars (ALMANAK_SAFE_ADDRESS, ALMANAK_GATEWAY_SAFE_MODE)
+        # use the existing non-registry path and must not be intercepted by the plugin.
+        wallet_registry = None
+        if os.environ.get("ALMANAK_GATEWAY_WALLETS"):
+            wallet_eps = entry_points(group="almanak.wallets")
+            registry_eps = [ep for ep in wallet_eps if ep.name == "registry"]
+            if registry_eps:
+                registry_cls = registry_eps[0].load()
+                wallet_registry = registry_cls.from_env(default_chains=self.settings.chains or None)
+                logger.info("Wallet registry plugin loaded: %s", registry_cls.__name__)
+                if os.environ.get("SAFE_WALLET_ADDRESS"):
+                    logger.warning(
+                        "Both ALMANAK_GATEWAY_WALLETS and SAFE_WALLET_ADDRESS are set. "
+                        "ALMANAK_GATEWAY_WALLETS takes precedence; legacy safe env vars are ignored."
+                    )
+            else:
+                logger.warning(
+                    "ALMANAK_GATEWAY_WALLETS is set but wallet plugin is not installed. "
+                    "Per-chain wallet config will be ignored. Install almanak-platform-plugins."
+                )
+            # Log wallet config at startup
+            if wallet_registry is not None:
+                for chain in wallet_registry.all_chains():
+                    resolved = wallet_registry.resolve(chain)
+                    logger.info(
+                        "Wallet config: chain=%s address=%s type=%s",
+                        chain,
+                        resolved.account_address[:10] + "..."
+                        if len(resolved.account_address) > 10
+                        else resolved.account_address,
+                        resolved.kind,
+                    )
+        self._wallet_registry = wallet_registry
+
         # Add Phase 2 services (execution first, needed for health servicer)
         self._execution_servicer = ExecutionServiceServicer(self.settings)
         gateway_pb2_grpc.add_ExecutionServiceServicer_to_server(self._execution_servicer, self.server)
+
+        # Assign wallet registry to execution servicer
+        self._execution_servicer.wallet_registry = wallet_registry
+
+        # Create market servicer early so RegisterChains can reinitialize it
+        # when chain info arrives (upgrades from CoinGecko-only to full 4-source stack)
+        self._market_servicer = MarketServiceServicer(self.settings)
+        self._market_servicer.wallet_registry = wallet_registry
+        gateway_pb2_grpc.add_MarketServiceServicer_to_server(self._market_servicer, self.server)
 
         # Add custom health servicer with RegisterChains support
         register_chains_servicer = _RegisterChainsServicer(
             self._health_servicer,
             self._execution_servicer,
             self.settings,
+            wallet_registry=wallet_registry,
+            market_servicer=self._market_servicer,
         )
         gateway_pb2_grpc.add_HealthServicer_to_server(register_chains_servicer, self.server)
 
-        self._market_servicer = MarketServiceServicer(self.settings)
-        gateway_pb2_grpc.add_MarketServiceServicer_to_server(self._market_servicer, self.server)
+        # Give execution service access to market service for self-serve price fetching
+        self._execution_servicer.market_servicer = self._market_servicer
 
         state_servicer = StateServiceServicer(self.settings)
         gateway_pb2_grpc.add_StateServiceServicer_to_server(state_servicer, self.server)
@@ -356,8 +499,10 @@ class GatewayServer:
         )
         reflection.enable_server_reflection(service_names, self.server)
 
-        # Mark as serving
-        await self._health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+        # VIB-2413: Explicitly mark NOT_SERVING before opening the port.
+        # The gRPC HealthServicer defaults to SERVING, so without this
+        # clients could connect during warmup and hit uninitialized providers.
+        await self._health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
 
         # Use grpc_host from settings, default to localhost for security
         listen_addr = f"{self.settings.grpc_host}:{self.settings.grpc_port}"
@@ -378,19 +523,112 @@ class GatewayServer:
         )
         logger.debug("Heartbeat TTL enforcer task started (interval=60s, threshold=300s)")
 
-        # Pre-warm orchestrators if chains are configured
-        if self.settings.chains:
-            await self._prewarm_chains()
+        # Pre-warm market service: initialize price sources AND fetch a common
+        # price to warm HTTP connections/caches. Also pre-warms the balance
+        # provider for the configured chain/wallet. (VIB-2392)
+        # Only pre-warm when chains are already configured; wallet-registry deployments
+        # get chains later via register_chains() and must lazy-init with the correct
+        # chain context (otherwise _ensure_initialized locks to CoinGecko-only).
+        if self._market_servicer and self.settings.chains:
+            wallet_for_warmup = self._resolve_wallet_address()
+            try:
+                await self._market_servicer.warmup(wallet_address=wallet_for_warmup)
+            except Exception as e:
+                logger.warning(f"Market service warmup failed (will lazy-init on first call): {e}")
+
+        # Pre-warm orchestrators if chains are configured or wallet registry has chains
+        if self.settings.chains or (self._wallet_registry and self._wallet_registry.all_chains()):
+            try:
+                await self._prewarm_chains()
+            except Exception as e:
+                logger.warning(f"Chain pre-warm failed (will lazy-init on first call): {e}")
+
+        # VIB-2413: Mark as serving AFTER warmup so clients don't call balance/price
+        # endpoints before providers are initialized. Previously this was set before
+        # warmup, causing the first market.balance() call to DEADLINE_EXCEEDED on
+        # slower RPC connections (e.g., Base mainnet).
+        await self._health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+        logger.info("Gateway marked SERVING (warmup complete)")
+
+    def _resolve_wallet_address(self) -> str | None:
+        """Resolve the wallet address from registry or legacy config.
+
+        Returns the first available wallet address (for balance provider warmup),
+        or None if no wallet is configured.
+        """
+        # Registry-aware path
+        if self._wallet_registry is not None:
+            for chain in self._wallet_registry.all_chains():
+                try:
+                    resolved = self._wallet_registry.resolve(chain)
+                    return resolved.account_address
+                except Exception:
+                    continue
+            return None
+
+        # Legacy path: Safe address first, then derive from private key
+        safe_mode_enabled = self.settings.safe_mode in ("direct", "zodiac")
+        if self.settings.safe_address and safe_mode_enabled:
+            return self.settings.safe_address
+        if not self.settings.private_key:
+            return None
+        try:
+            from eth_account import Account
+
+            key = self.settings.private_key
+            if not key.startswith("0x"):
+                key = "0x" + key
+            return Account.from_key(key).address
+        except Exception:
+            return None
 
     async def _prewarm_chains(self) -> None:
         """Pre-warm execution orchestrators for configured chains."""
-        if not self._execution_servicer or not self.settings.private_key:
-            logger.warning("Cannot pre-warm: execution servicer or private key not available")
+        if not self._execution_servicer:
+            logger.warning("Cannot pre-warm: execution servicer not available")
+            return
+
+        # VIB-2580: In single-chain Anvil mode, only pre-warm the configured chain.
+        # Warming all registry chains triggers RPC calls to non-running Anvil ports
+        # (e.g., port 8548 for Base when only Arbitrum/8545 is running), producing
+        # ERROR-level "Cannot connect to host" log entries that obscure real issues.
+        configured_chains = set(self.settings.chains) if self.settings.chains else set()
+        is_anvil_mode = self.settings.network == "anvil"
+
+        # Registry-aware branch: iterate wallet_registry chains
+        if self._wallet_registry is not None:
+            for chain in self._wallet_registry.all_chains():
+                # Skip non-configured chains in Anvil mode to avoid connecting to
+                # Anvil ports that aren't running
+                if is_anvil_mode and configured_chains and chain not in configured_chains:
+                    logger.debug(f"Skipping non-configured chain {chain} in Anvil mode")
+                    continue
+                try:
+                    resolved = self._wallet_registry.resolve(chain)
+                    # Skip Solana chains
+                    if hasattr(resolved, "family") and str(resolved.family) == "solana":
+                        logger.info(f"Skipping Solana chain {chain} during pre-warm")
+                        continue
+                    wallet_address = resolved.account_address
+                    await self._execution_servicer._get_orchestrator(chain, wallet_address)
+                    self._execution_servicer._get_compiler(chain, wallet_address)
+                    logger.info(f"Pre-warmed orchestrator for chain={chain} (wallet={wallet_address[:10]}...)")
+                except Exception as e:
+                    logger.warning(f"Failed to pre-warm chain {chain}: {e}")
+            return
+
+        # Legacy path: derive wallet from private key / Safe address
+        for chain in self.settings.chains:
+            await self._prewarm_chain_legacy(chain)
+
+    async def _prewarm_chain_legacy(self, chain: str) -> None:
+        """Pre-warm a single chain using the legacy private-key path."""
+        if not self.settings.private_key:
+            logger.warning(f"Cannot pre-warm {chain}: no private key configured")
             return
 
         from eth_account import Account
 
-        # Use Safe address when configured, otherwise derive from private key
         safe_mode_enabled = self.settings.safe_mode in ("direct", "zodiac")
         if self.settings.safe_address and safe_mode_enabled:
             wallet_address = self.settings.safe_address
@@ -400,13 +638,13 @@ class GatewayServer:
                 key = "0x" + key
             wallet_address = Account.from_key(key).address
 
-        for chain in self.settings.chains:
-            try:
-                await self._execution_servicer._get_orchestrator(chain.lower(), wallet_address)
-                self._execution_servicer._get_compiler(chain.lower(), wallet_address)
-                logger.info(f"Pre-warmed orchestrator for chain={chain}")
-            except Exception as e:
-                logger.warning(f"Failed to pre-warm chain {chain}: {e}")
+        try:
+            assert self._execution_servicer is not None
+            await self._execution_servicer._get_orchestrator(chain.lower(), wallet_address)
+            self._execution_servicer._get_compiler(chain.lower(), wallet_address)
+            logger.info(f"Pre-warmed orchestrator for chain={chain}")
+        except Exception as e:
+            logger.warning(f"Failed to pre-warm chain {chain}: {e}")
 
     async def stop(self, grace: float = 5.0) -> None:
         """Gracefully stop the server.
@@ -448,6 +686,10 @@ class GatewayServer:
         ):
             if servicer:
                 await servicer.close()
+        # Allow aiohttp's underlying connectors to finalize cleanup.
+        # Without this yield, session.__del__ fires the "Unclosed client session"
+        # warning before the TCP transport has been torn down (VIB-1832).
+        await asyncio.sleep(_AIOHTTP_SHUTDOWN_GRACE_SECONDS)
         # Reset LifecycleStore singleton so a subsequent start() gets a fresh instance
         reset_lifecycle_store()
 

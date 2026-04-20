@@ -184,6 +184,11 @@ class IntentState(Enum):
     VALIDATING_BRIDGE = auto()
     SADFLOW_BRIDGE = auto()
 
+    # WRAP_NATIVE intent states
+    PREPARING_WRAP_NATIVE = auto()
+    VALIDATING_WRAP_NATIVE = auto()
+    SADFLOW_WRAP_NATIVE = auto()
+
     # UNWRAP_NATIVE intent states
     PREPARING_UNWRAP_NATIVE = auto()
     VALIDATING_UNWRAP_NATIVE = auto()
@@ -222,6 +227,7 @@ def get_preparing_state(intent_type: IntentType) -> IntentState:
         IntentType.VAULT_MANAGE: IntentState.PREPARING_VAULT_MANAGE,
         IntentType.FLASH_LOAN: IntentState.PREPARING_FLASH_LOAN,
         IntentType.BRIDGE: IntentState.PREPARING_BRIDGE,
+        IntentType.WRAP_NATIVE: IntentState.PREPARING_WRAP_NATIVE,
         IntentType.UNWRAP_NATIVE: IntentState.PREPARING_UNWRAP_NATIVE,
     }
     return state_map.get(intent_type, IntentState.IDLE)
@@ -259,6 +265,7 @@ def get_validating_state(intent_type: IntentType) -> IntentState:
         IntentType.VAULT_MANAGE: IntentState.VALIDATING_VAULT_MANAGE,
         IntentType.FLASH_LOAN: IntentState.VALIDATING_FLASH_LOAN,
         IntentType.BRIDGE: IntentState.VALIDATING_BRIDGE,
+        IntentType.WRAP_NATIVE: IntentState.VALIDATING_WRAP_NATIVE,
         IntentType.UNWRAP_NATIVE: IntentState.VALIDATING_UNWRAP_NATIVE,
     }
     return state_map.get(intent_type, IntentState.IDLE)
@@ -296,6 +303,7 @@ def get_sadflow_state(intent_type: IntentType) -> IntentState:
         IntentType.VAULT_MANAGE: IntentState.SADFLOW_VAULT_MANAGE,
         IntentType.FLASH_LOAN: IntentState.SADFLOW_FLASH_LOAN,
         IntentType.BRIDGE: IntentState.SADFLOW_BRIDGE,
+        IntentType.WRAP_NATIVE: IntentState.SADFLOW_WRAP_NATIVE,
         IntentType.UNWRAP_NATIVE: IntentState.SADFLOW_UNWRAP_NATIVE,
     }
     return state_map.get(intent_type, IntentState.IDLE)
@@ -326,6 +334,7 @@ def is_preparing_state(state: IntentState) -> bool:
         IntentState.PREPARING_VAULT_MANAGE,
         IntentState.PREPARING_FLASH_LOAN,
         IntentState.PREPARING_BRIDGE,
+        IntentState.PREPARING_WRAP_NATIVE,
         IntentState.PREPARING_UNWRAP_NATIVE,
     }
 
@@ -355,6 +364,7 @@ def is_validating_state(state: IntentState) -> bool:
         IntentState.VALIDATING_VAULT_MANAGE,
         IntentState.VALIDATING_FLASH_LOAN,
         IntentState.VALIDATING_BRIDGE,
+        IntentState.VALIDATING_WRAP_NATIVE,
         IntentState.VALIDATING_UNWRAP_NATIVE,
     }
 
@@ -384,6 +394,7 @@ def is_sadflow_state(state: IntentState) -> bool:
         IntentState.SADFLOW_VAULT_MANAGE,
         IntentState.SADFLOW_FLASH_LOAN,
         IntentState.SADFLOW_BRIDGE,
+        IntentState.SADFLOW_WRAP_NATIVE,
         IntentState.SADFLOW_UNWRAP_NATIVE,
     }
 
@@ -986,6 +997,15 @@ class IntentStateMachine:
             "no existing position",
             "no position found",
             "no size specified",
+            "unknown router",
+            "unknown protocol",
+            "unknown market",
+            "no router configured",
+            "no adapter found",
+            "no connector found",
+            "protocol not available",
+            "missing configuration",
+            "not deployed",
         )
         if any(kw in error_lower for kw in permanent_keywords):
             return "COMPILATION_PERMANENT"
@@ -1146,6 +1166,24 @@ class IntentStateMachine:
         # Categorize the error for hooks
         if self._last_error and not self._error_type:
             self._error_type = self._categorize_error(self._last_error)
+
+        # Fail fast on deterministic errors that will never succeed on retry
+        _NON_RETRYABLE_TYPES = {"COMPILATION_PERMANENT", "INSUFFICIENT_FUNDS"}
+        if self._error_type in _NON_RETRYABLE_TYPES:
+            logger.info(
+                f"Non-retryable error ({self._error_type}): {self._last_error}. "
+                "Skipping retries — this error will not resolve by retrying."
+            )
+            self._completed_at = datetime.now(UTC)
+            self._in_sadflow = True
+            self._call_sadflow_exit(success=False)
+            self._transition_to(IntentState.FAILED)
+            return StepResult(
+                state=self._state,
+                is_complete=True,
+                success=False,
+                error=self._last_error or "Non-retryable error",
+            )
 
         # Build context for hooks
         context = self._build_sadflow_context()

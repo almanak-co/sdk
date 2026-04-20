@@ -1,9 +1,11 @@
 """Tests for managed gateway (background thread gateway for strat run)."""
 
+import asyncio
 import os
 import socket
 import threading
 import time
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
@@ -395,3 +397,387 @@ class TestManagedGatewayKeepAlive:
 
         # manager.stop() SHOULD have been called despite keep_anvil=True
         mock_manager.stop.assert_called_once()
+
+
+class TestAnvilWatchdog:
+    """Tests for the Anvil process watchdog."""
+
+    def _make_settings(self, port: int, network: str = "anvil") -> GatewaySettings:
+        return GatewaySettings(
+            grpc_port=port,
+            metrics_enabled=False,
+            audit_enabled=False,
+            allow_insecure=True,
+            network=network,
+        )
+
+    @pytest.mark.asyncio
+    async def test_watchdog_restarts_crashed_process(self):
+        """Watchdog detects a dead Anvil process and restarts it."""
+        import asyncio
+
+        settings = self._make_settings(50080)
+        gw = ManagedGateway(settings, anvil_chains=["arbitrum"])
+        gw._stop_requested = threading.Event()
+
+        # First call: not running (crashed). Second call: running (restarted).
+        mock_manager = AsyncMock()
+        mock_manager.is_running = False
+        mock_manager.reset_to_latest = AsyncMock(return_value=True)
+        gw._anvil_managers["arbitrum"] = mock_manager
+        gw._wallet_address = None  # no funding needed
+
+        # Use a short interval so the watchdog triggers immediately
+        gw._WATCHDOG_INTERVAL = 0.05
+
+        # Run watchdog for just long enough for one cycle, then stop
+        async def run_briefly():
+            task = asyncio.ensure_future(gw._anvil_watchdog())
+            await asyncio.sleep(0.15)
+            gw._stop_requested.set()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        await run_briefly()
+
+        mock_manager.reset_to_latest.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_watchdog_skips_healthy_process(self):
+        """Watchdog does not restart a healthy Anvil process."""
+        import asyncio
+
+        settings = self._make_settings(50081)
+        gw = ManagedGateway(settings, anvil_chains=["base"])
+        gw._stop_requested = threading.Event()
+
+        mock_manager = AsyncMock()
+        mock_manager.is_running = True  # healthy
+        mock_manager.reset_to_latest = AsyncMock(return_value=True)
+        gw._anvil_managers["base"] = mock_manager
+
+        gw._WATCHDOG_INTERVAL = 0.05
+
+        async def run_briefly():
+            task = asyncio.ensure_future(gw._anvil_watchdog())
+            await asyncio.sleep(0.15)
+            gw._stop_requested.set()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        await run_briefly()
+
+        mock_manager.reset_to_latest.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_watchdog_handles_restart_failure_gracefully(self):
+        """Watchdog logs an error but does not raise when restart fails."""
+        import asyncio
+
+        settings = self._make_settings(50082)
+        gw = ManagedGateway(settings, anvil_chains=["arbitrum"])
+        gw._stop_requested = threading.Event()
+
+        mock_manager = AsyncMock()
+        mock_manager.is_running = False
+        mock_manager.reset_to_latest = AsyncMock(return_value=False)  # restart fails
+        gw._anvil_managers["arbitrum"] = mock_manager
+
+        gw._WATCHDOG_INTERVAL = 0.05
+
+        async def run_briefly():
+            task = asyncio.ensure_future(gw._anvil_watchdog())
+            await asyncio.sleep(0.15)
+            gw._stop_requested.set()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Should not raise
+        await run_briefly()
+        mock_manager.reset_to_latest.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_watchdog_exits_on_stop_requested(self):
+        """Watchdog exits cleanly when stop is requested before first check."""
+        import asyncio
+
+        settings = self._make_settings(50083)
+        gw = ManagedGateway(settings, anvil_chains=["arbitrum"])
+        gw._stop_requested = threading.Event()
+        gw._stop_requested.set()  # stop immediately
+
+        mock_manager = AsyncMock()
+        mock_manager.is_running = False
+        gw._anvil_managers["arbitrum"] = mock_manager
+
+        gw._WATCHDOG_INTERVAL = 0.05
+
+        task = asyncio.ensure_future(gw._anvil_watchdog())
+        await asyncio.sleep(0.15)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should not have tried to restart since stop was requested immediately
+        mock_manager.reset_to_latest.assert_not_called()
+
+
+class TestAnvilPublicRpcFallback:
+    """Tests for public RPC fallback when primary Alchemy/private RPC fails."""
+
+    def _make_settings(self, port: int, network: str = "anvil") -> GatewaySettings:
+        return GatewaySettings(
+            grpc_port=port,
+            metrics_enabled=False,
+            audit_enabled=False,
+            allow_insecure=True,
+            network=network,
+        )
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_public_rpc_on_primary_failure(self):
+        """When primary RPC start fails, retries with public fallback URL."""
+        settings = self._make_settings(50090)
+        gw = ManagedGateway(settings, anvil_chains=["xlayer"])
+
+        # First call fails (primary RPC), second call succeeds (public fallback)
+        mock_manager_fail = AsyncMock()
+        mock_manager_fail.start.return_value = False
+        mock_manager_fail.anvil_port = 8557
+
+        mock_manager_ok = AsyncMock()
+        mock_manager_ok.start.return_value = True
+        mock_manager_ok.anvil_port = 8558
+
+        manager_instances = [mock_manager_fail, mock_manager_ok]
+
+        with (
+            patch(
+                "almanak.framework.anvil.fork_manager.RollingForkManager",
+                side_effect=manager_instances,
+            ),
+            patch(
+                "almanak.gateway.utils.rpc_provider.get_rpc_url",
+                return_value="https://xlayer-mainnet.g.alchemy.com/v2/FAKE_KEY",
+            ),
+            patch(
+                "almanak.gateway.utils.rpc_provider.PUBLIC_RPC_URLS",
+                {"xlayer": "https://rpc.xlayer.tech"},
+            ),
+            patch("almanak.gateway.managed.find_free_port", return_value=8558),
+            patch("shutil.which", return_value="/usr/bin/anvil"),
+        ):
+            await gw._start_anvil_forks()
+
+        # Should have ended up with the successful (public) manager
+        assert "xlayer" in gw._anvil_managers
+        assert gw._anvil_managers["xlayer"] is mock_manager_ok
+
+        # Cleanup
+        gw._keep_anvil = False
+        await gw._stop_anvil_forks()
+
+    @pytest.mark.asyncio
+    async def test_raises_when_both_rpc_fail(self):
+        """Raises RuntimeError when both primary and public RPC start fail."""
+        settings = self._make_settings(50091)
+        gw = ManagedGateway(settings, anvil_chains=["xlayer"])
+
+        mock_manager_fail = AsyncMock()
+        mock_manager_fail.start.return_value = False
+        mock_manager_fail.anvil_port = 8557
+
+        mock_manager_fail2 = AsyncMock()
+        mock_manager_fail2.start.return_value = False
+        mock_manager_fail2.anvil_port = 8558
+
+        with (
+            patch(
+                "almanak.framework.anvil.fork_manager.RollingForkManager",
+                side_effect=[mock_manager_fail, mock_manager_fail2],
+            ),
+            patch(
+                "almanak.gateway.utils.rpc_provider.get_rpc_url",
+                return_value="https://xlayer-mainnet.g.alchemy.com/v2/FAKE_KEY",
+            ),
+            patch(
+                "almanak.gateway.utils.rpc_provider.PUBLIC_RPC_URLS",
+                {"xlayer": "https://rpc.xlayer.tech"},
+            ),
+            patch("almanak.gateway.managed.find_free_port", return_value=8558),
+            patch("shutil.which", return_value="/usr/bin/anvil"),
+        ):
+            with pytest.raises(RuntimeError, match="Failed to start Anvil fork"):
+                await gw._start_anvil_forks()
+
+
+class TestAnvilForkBlockPinning:
+    """Tests for ANVIL_FORK_BLOCK_{CHAIN} env var passthrough to RollingForkManager."""
+
+    def _make_settings(self, port: int) -> GatewaySettings:
+        return GatewaySettings(
+            grpc_port=port,
+            metrics_enabled=False,
+            audit_enabled=False,
+            allow_insecure=True,
+            network="anvil",
+        )
+
+    @pytest.mark.asyncio
+    async def test_fork_block_env_var_passed_to_manager(self):
+        """When ANVIL_FORK_BLOCK_{CHAIN} is set, fork_block_number is passed to RollingForkManager."""
+        settings = self._make_settings(50095)
+        gw = ManagedGateway(settings, anvil_chains=["arbitrum"])
+
+        mock_manager = AsyncMock()
+        mock_manager.start.return_value = True
+        mock_manager.anvil_port = 8560
+
+        env_patch = patch.dict(os.environ, {"ANVIL_FORK_BLOCK_ARBITRUM": "449499053"})
+
+        with (
+            env_patch,
+            patch(
+                "almanak.framework.anvil.fork_manager.RollingForkManager",
+                return_value=mock_manager,
+            ) as mock_cls,
+            patch(
+                "almanak.gateway.utils.rpc_provider.get_rpc_url",
+                return_value="https://arb-mainnet.g.alchemy.com/v2/FAKE",
+            ),
+            patch("almanak.gateway.managed.find_free_port", return_value=8560),
+            patch("shutil.which", return_value="/usr/bin/anvil"),
+        ):
+            await gw._start_anvil_forks()
+
+        # Verify fork_block_number was passed
+        mock_cls.assert_called_once()
+        call_kwargs = mock_cls.call_args[1]
+        assert call_kwargs["fork_block_number"] == 449499053
+
+        # Cleanup
+        gw._keep_anvil = False
+        await gw._stop_anvil_forks()
+
+    @pytest.mark.asyncio
+    async def test_no_fork_block_env_var_defaults_to_none(self):
+        """When ANVIL_FORK_BLOCK_{CHAIN} is not set, fork_block_number is None."""
+        settings = self._make_settings(50096)
+        gw = ManagedGateway(settings, anvil_chains=["base"])
+
+        mock_manager = AsyncMock()
+        mock_manager.start.return_value = True
+        mock_manager.anvil_port = 8561
+
+        # Ensure the env var is NOT set
+        env_patch = patch.dict(os.environ, {}, clear=False)
+
+        with (
+            env_patch,
+            patch(
+                "almanak.framework.anvil.fork_manager.RollingForkManager",
+                return_value=mock_manager,
+            ) as mock_cls,
+            patch(
+                "almanak.gateway.utils.rpc_provider.get_rpc_url",
+                return_value="https://base-mainnet.g.alchemy.com/v2/FAKE",
+            ),
+            patch("almanak.gateway.managed.find_free_port", return_value=8561),
+            patch("shutil.which", return_value="/usr/bin/anvil"),
+        ):
+            # Remove env var if it happens to exist
+            os.environ.pop("ANVIL_FORK_BLOCK_BASE", None)
+            await gw._start_anvil_forks()
+
+        mock_cls.assert_called_once()
+        call_kwargs = mock_cls.call_args[1]
+        assert call_kwargs["fork_block_number"] is None
+
+        # Cleanup
+        gw._keep_anvil = False
+        await gw._stop_anvil_forks()
+
+
+class TestAnvilFundingNativeTokenWarning:
+    """VIB-1579: warn when anvil_funding uses 'ETH' on non-ETH chains."""
+
+    def _make_gateway(self, chain: str, anvil_funding: dict) -> "ManagedGateway":
+        from almanak.gateway.core.settings import GatewaySettings
+        from almanak.gateway.managed import ManagedGateway
+
+        settings = GatewaySettings(
+            host="127.0.0.1",
+            port=59990,
+            rpc_url=f"http://localhost:8545",
+            chain=chain,
+        )
+        gw = ManagedGateway(settings, anvil_chains=[chain], anvil_funding=anvil_funding)
+        gw._wallet_address = "0x" + "a" * 40
+        return gw
+
+    @pytest.mark.asyncio
+    async def test_eth_key_on_bsc_emits_warning(self):
+        """Using 'ETH' in anvil_funding on BSC should log a warning."""
+        gw = self._make_gateway("bsc", {"ETH": 10, "USDC": 1000})
+
+        mock_manager = AsyncMock()
+        mock_manager.fund_wallet = AsyncMock()
+        mock_manager.fund_tokens = AsyncMock()
+        gw._anvil_managers["bsc"] = mock_manager
+
+        with patch("almanak.gateway.managed.logger") as mock_logger:
+            await gw._fund_anvil_wallets()
+
+        # Should have warned about ETH on BSC
+        warning_calls = [str(call) for call in mock_logger.warning.call_args_list]
+        assert any("ETH" in w and "BNB" in w for w in warning_calls), (
+            f"Expected warning about ETH on BSC, got: {warning_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_bnb_key_on_bsc_no_warning(self):
+        """Using 'BNB' in anvil_funding on BSC should not warn."""
+        gw = self._make_gateway("bsc", {"BNB": 10, "USDC": 1000})
+
+        mock_manager = AsyncMock()
+        mock_manager.fund_wallet = AsyncMock()
+        mock_manager.fund_tokens = AsyncMock()
+        gw._anvil_managers["bsc"] = mock_manager
+
+        with patch("almanak.gateway.managed.logger") as mock_logger:
+            await gw._fund_anvil_wallets()
+
+        # Should NOT have warned about native token mismatch
+        warning_calls = [str(call) for call in mock_logger.warning.call_args_list]
+        assert not any("BNB" in w and "ETH" in w for w in warning_calls), (
+            f"Unexpected native token mismatch warning: {warning_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_eth_key_on_arbitrum_no_warning(self):
+        """Using 'ETH' in anvil_funding on Arbitrum (ETH-native) should not warn."""
+        gw = self._make_gateway("arbitrum", {"ETH": 1, "USDC": 1000})
+
+        mock_manager = AsyncMock()
+        mock_manager.fund_wallet = AsyncMock()
+        mock_manager.fund_tokens = AsyncMock()
+        gw._anvil_managers["arbitrum"] = mock_manager
+
+        with patch("almanak.gateway.managed.logger") as mock_logger:
+            await gw._fund_anvil_wallets()
+
+        # Arbitrum is ETH-native -- no warning expected
+        warning_calls = [str(call) for call in mock_logger.warning.call_args_list]
+        native_mismatch = [w for w in warning_calls if "Did you mean" in w]
+        assert not native_mismatch, f"Unexpected mismatch warning: {native_mismatch}"

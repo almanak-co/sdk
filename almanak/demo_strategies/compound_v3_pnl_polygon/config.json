@@ -1,0 +1,23 @@
+{
+    "chain": "polygon",
+    "token_funding": [
+        {
+            "symbol": "USDC.e",
+            "address": "0x2791bca1f2de4661ed88a30c99a7a9449aa84174",
+            "chain": "polygon",
+            "amount": "10000",
+            "amount_type": "usd"
+        }
+    ],
+    "supply_token": "USDC.e",
+    "supply_amount": "10000",
+    "market": "usdc_e",
+    "entry_rate_threshold": 0.03,
+    "exit_rate_threshold": 0.01,
+    "max_hold_ticks": 30,
+    "force_entry_if_no_rate": true,
+    "anvil_funding": {
+        "MATIC": 100,
+        "USDC.e": 50000
+    }
+}

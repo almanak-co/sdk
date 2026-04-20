@@ -14,10 +14,12 @@ import pytest
 
 from almanak.framework.intents.pool_validation import (
     ZERO_ADDRESS,
+    PoolValidationReason,
     PoolValidationResult,
     _decode_address,
     _encode_get_pool_aerodrome,
     _encode_get_pool_v3,
+    fetch_v3_pool_sqrt_price_x96,
     validate_aerodrome_pool,
     validate_traderjoe_pool,
     validate_v3_pool,
@@ -28,20 +30,29 @@ class TestPoolValidationResult:
     """Test PoolValidationResult dataclass."""
 
     def test_exists_true(self):
-        result = PoolValidationResult(exists=True, pool_address="0xabc")
+        result = PoolValidationResult(
+            exists=True, reason=PoolValidationReason.CONFIRMED, pool_address="0xabc"
+        )
         assert result.exists is True
+        assert result.reason == PoolValidationReason.CONFIRMED
         assert result.pool_address == "0xabc"
         assert result.error is None
         assert result.warning is None
 
     def test_exists_false(self):
-        result = PoolValidationResult(exists=False, error="Pool not found")
+        result = PoolValidationResult(
+            exists=False, reason=PoolValidationReason.NOT_FOUND, error="Pool not found"
+        )
         assert result.exists is False
+        assert result.reason == PoolValidationReason.NOT_FOUND
         assert result.error == "Pool not found"
 
     def test_exists_none(self):
-        result = PoolValidationResult(exists=None, warning="No RPC")
+        result = PoolValidationResult(
+            exists=None, reason=PoolValidationReason.RPC_UNAVAILABLE, warning="No RPC"
+        )
         assert result.exists is None
+        assert result.reason == PoolValidationReason.RPC_UNAVAILABLE
         assert result.warning == "No RPC"
 
 
@@ -51,18 +62,21 @@ class TestV3PoolValidation:
     def test_no_rpc_url_returns_none(self):
         result = validate_v3_pool("arbitrum", "uniswap_v3", "0xabc", "0xdef", 3000, None)
         assert result.exists is None
+        assert result.reason == PoolValidationReason.RPC_UNAVAILABLE
         assert result.warning is not None
         assert "No RPC URL" in result.warning
 
     def test_unknown_protocol_returns_none(self):
         result = validate_v3_pool("arbitrum", "unknown_protocol", "0xabc", "0xdef", 3000, "http://localhost:8545")
         assert result.exists is None
+        assert result.reason == PoolValidationReason.PROTOCOL_UNKNOWN
         assert result.warning is not None
         assert "Unknown protocol" in result.warning
 
     def test_unknown_chain_returns_none(self):
         result = validate_v3_pool("unknown_chain", "uniswap_v3", "0xabc", "0xdef", 3000, "http://localhost:8545")
         assert result.exists is None
+        assert result.reason == PoolValidationReason.FACTORY_MISSING
         assert result.warning is not None
         assert "No uniswap_v3 factory" in result.warning
 
@@ -77,6 +91,7 @@ class TestV3PoolValidation:
             3000, "http://localhost:8545"
         )
         assert result.exists is False
+        assert result.reason == PoolValidationReason.NOT_FOUND
         assert result.error is not None
         assert "No uniswap_v3 pool found" in result.error
 
@@ -93,12 +108,13 @@ class TestV3PoolValidation:
             500, "http://localhost:8545"
         )
         assert result.exists is True
+        assert result.reason == PoolValidationReason.CONFIRMED
         assert result.pool_address is not None
         assert "c31e54c7" in result.pool_address.lower()
 
     @patch("almanak.framework.intents.pool_validation._eth_call")
     def test_rpc_failure_returns_none(self, mock_eth_call):
-        """When RPC call fails, return unknown."""
+        """When RPC call fails, return RPC_FAILED (compiler must fail closed on this)."""
         mock_eth_call.return_value = None
         result = validate_v3_pool(
             "arbitrum", "uniswap_v3",
@@ -107,6 +123,7 @@ class TestV3PoolValidation:
             3000, "http://localhost:8545"
         )
         assert result.exists is None
+        assert result.reason == PoolValidationReason.RPC_FAILED
         assert result.warning is not None
         assert "RPC call" in result.warning
 
@@ -195,7 +212,10 @@ class TestTraderJoePoolValidation:
         pool_addr_word = bytes(12) + bytes.fromhex("abcdef1234567890abcdef1234567890abcdef12")
         third_word = bytes(32)  # createdByOwner
         fourth_word = bytes(32)  # ignoredForRouting
-        mock_eth_call.return_value = first_word + pool_addr_word + third_word + fourth_word
+        factory_response = first_word + pool_addr_word + third_word + fourth_word
+        # Second call is getReserves() — return non-zero reserves
+        reserves_response = (1000).to_bytes(32, byteorder="big") + (2000).to_bytes(32, byteorder="big")
+        mock_eth_call.side_effect = [factory_response, reserves_response]
         result = validate_traderjoe_pool(
             "avalanche",
             "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
@@ -206,9 +226,54 @@ class TestTraderJoePoolValidation:
         assert result.exists is True
         assert result.pool_address is not None
 
-        # Ensure selector matches getLBPairInformation(address,address,uint256)
-        _, _, calldata = mock_eth_call.call_args.args
+        # Ensure first call selector matches getLBPairInformation(address,address,uint256)
+        _, _, calldata = mock_eth_call.call_args_list[0].args
         assert calldata.startswith("0x704037bd")
+        # Ensure second call is getReserves() on the discovered pool address
+        _, reserves_to, reserves_calldata = mock_eth_call.call_args_list[1].args
+        assert reserves_calldata == "0x0902f1ac"
+        assert reserves_to.lower() == "0xabcdef1234567890abcdef1234567890abcdef12"
+
+    @patch("almanak.framework.intents.pool_validation._eth_call")
+    def test_zero_liquidity_pool_returns_false(self, mock_eth_call):
+        """Pool exists in factory but has zero reserves — should fail validation."""
+        first_word = (1).to_bytes(32, byteorder="big")  # binStep=1
+        pool_addr_word = bytes(12) + bytes.fromhex("abcdef1234567890abcdef1234567890abcdef12")
+        third_word = bytes(32)
+        fourth_word = bytes(32)
+        factory_response = first_word + pool_addr_word + third_word + fourth_word
+        # getReserves() returns zero reserves
+        reserves_response = (0).to_bytes(32, byteorder="big") + (0).to_bytes(32, byteorder="big")
+        mock_eth_call.side_effect = [factory_response, reserves_response]
+        result = validate_traderjoe_pool(
+            "avalanche",
+            "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+            "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
+            1,
+            "http://localhost:8545",
+        )
+        assert result.exists is False
+        assert "zero liquidity" in result.error
+
+    @patch("almanak.framework.intents.pool_validation._eth_call")
+    def test_reserves_rpc_failure_still_passes(self, mock_eth_call):
+        """If getReserves() RPC fails, pool should still pass (factory confirmed it exists)."""
+        first_word = (20).to_bytes(32, byteorder="big")
+        pool_addr_word = bytes(12) + bytes.fromhex("abcdef1234567890abcdef1234567890abcdef12")
+        third_word = bytes(32)
+        fourth_word = bytes(32)
+        factory_response = first_word + pool_addr_word + third_word + fourth_word
+        # getReserves() call fails (returns None)
+        mock_eth_call.side_effect = [factory_response, None]
+        result = validate_traderjoe_pool(
+            "avalanche",
+            "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+            "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
+            20,
+            "http://localhost:8545",
+        )
+        assert result.exists is True
+        assert result.pool_address is not None
 
 
 class TestEncodingHelpers:
@@ -253,3 +318,62 @@ class TestEncodingHelpers:
         data = bytes(16)
         addr = _decode_address(data)
         assert addr == ZERO_ADDRESS
+
+
+class TestFetchV3PoolSqrtPriceX96:
+    """Unit tests for fetch_v3_pool_sqrt_price_x96."""
+
+    POOL_ADDR = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
+    RPC_URL = "http://localhost:8545"
+
+    def test_rpc_failure_returns_none(self):
+        with patch("almanak.framework.intents.pool_validation._eth_call", return_value=None):
+            result = fetch_v3_pool_sqrt_price_x96(self.POOL_ADDR, self.RPC_URL)
+        assert result is None
+
+    def test_response_too_short_returns_none(self):
+        with patch("almanak.framework.intents.pool_validation._eth_call", return_value=bytes(32)):
+            result = fetch_v3_pool_sqrt_price_x96(self.POOL_ADDR, self.RPC_URL)
+        assert result is None
+
+    def test_valid_response_decodes_sqrt_price(self):
+        # Use a realistic sqrtPriceX96 (tick=0 -> Q96) and tick=42
+        sqrt_price = 79228162514264337593543950336  # Q96 (tick=0)
+        tick = 42
+        raw = sqrt_price.to_bytes(32, "big") + tick.to_bytes(32, "big")
+        with patch("almanak.framework.intents.pool_validation._eth_call", return_value=raw):
+            result = fetch_v3_pool_sqrt_price_x96(self.POOL_ADDR, self.RPC_URL)
+        assert result is not None
+        assert result[0] == sqrt_price
+        assert result[1] == tick
+
+    def test_negative_tick_sign_extended(self):
+        # Negative ticks are sign-extended to int256 in ABI encoding
+        sqrt_price = 79228162514264337593543950336  # Q96 (tick=0)
+        tick = -60
+        # ABI int256 two's complement for -60: 2**256 - 60
+        tick_encoded = (2**256 + tick).to_bytes(32, "big")
+        raw = sqrt_price.to_bytes(32, "big") + tick_encoded
+        with patch("almanak.framework.intents.pool_validation._eth_call", return_value=raw):
+            result = fetch_v3_pool_sqrt_price_x96(self.POOL_ADDR, self.RPC_URL)
+        assert result is not None
+        assert result[0] == sqrt_price
+        assert result[1] == tick
+
+    def test_out_of_range_sqrt_price_returns_none(self):
+        # sqrtPriceX96 below MIN_SQRT_RATIO should be rejected
+        sqrt_price = 100  # way below MIN_SQRT_RATIO
+        tick = 0
+        raw = sqrt_price.to_bytes(32, "big") + tick.to_bytes(32, "big")
+        with patch("almanak.framework.intents.pool_validation._eth_call", return_value=raw):
+            result = fetch_v3_pool_sqrt_price_x96(self.POOL_ADDR, self.RPC_URL)
+        assert result is None
+
+    def test_out_of_range_tick_returns_none(self):
+        # Tick beyond MAX_TICK should be rejected
+        sqrt_price = 79228162514264337593543950336  # Q96
+        tick = 900000  # beyond MAX_TICK
+        raw = sqrt_price.to_bytes(32, "big") + tick.to_bytes(32, "big")
+        with patch("almanak.framework.intents.pool_validation._eth_call", return_value=raw):
+            result = fetch_v3_pool_sqrt_price_x96(self.POOL_ADDR, self.RPC_URL)
+        assert result is None

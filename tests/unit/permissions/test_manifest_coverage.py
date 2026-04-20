@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-_DEMO_DIR = Path(__file__).parents[3] / "strategies" / "demo"
+_DEMO_DIR = Path(__file__).parents[3] / "almanak" / "demo_strategies"
 
 
 def _load_strategy_class(strategy_dir: Path):

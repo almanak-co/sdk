@@ -23,6 +23,7 @@ Example:
 import base64
 import hashlib
 import hmac
+import math
 import random
 import secrets
 import time
@@ -336,9 +337,15 @@ class ClobClient:
         signable = encode_typed_data(full_message=typed_data)
         signed = Account.sign_message(signable, private_key)
 
+        # Modern eth-account returns hex without `0x`; Polymarket's
+        # GET /auth/derive-api-key rejects unprefixed signatures.
+        sig_hex = signed.signature.hex()
+        if not sig_hex.startswith("0x"):
+            sig_hex = "0x" + sig_hex
+
         return {
             "POLY_ADDRESS": wallet,
-            "POLY_SIGNATURE": signed.signature.hex(),
+            "POLY_SIGNATURE": sig_hex,
             "POLY_TIMESTAMP": timestamp,
             "POLY_NONCE": str(nonce),
         }
@@ -466,14 +473,17 @@ class ClobClient:
         # Build message to sign
         message = f"{timestamp}{method}{path}{body}"
 
-        # Compute HMAC-SHA256
+        # Compute HMAC-SHA256. Polymarket API secrets are URL-safe base64
+        # (contain "-" / "_"); standard b64decode silently produces the wrong
+        # key bytes → HMAC verifies server-side, request comes back 401.
+        # Match canonical py-clob-client behavior exactly.
         signature = hmac.new(
-            base64.b64decode(secret),
+            base64.urlsafe_b64decode(secret),
             message.encode("utf-8"),
             hashlib.sha256,
         ).digest()
 
-        return base64.b64encode(signature).decode("utf-8")
+        return base64.urlsafe_b64encode(signature).decode("utf-8")
 
     def _build_l2_headers(
         self,
@@ -514,7 +524,7 @@ class ClobClient:
         url: str,
         authenticated: bool = False,
         params: dict | None = None,
-        json_body: dict | None = None,
+        json_body: dict | list | None = None,
         _retry_count: int = 0,
     ) -> Any:
         """Make HTTP request with optional authentication and retry on rate limit.
@@ -643,10 +653,16 @@ class ClobClient:
         url = f"{self.config.clob_base_url}{endpoint}"
         return self._request("POST", url, authenticated=authenticated, json_body=json_body)
 
-    def _delete(self, endpoint: str, params: dict | None = None, authenticated: bool = True) -> Any:
+    def _delete(
+        self,
+        endpoint: str,
+        params: dict | None = None,
+        json_body: dict | list | None = None,
+        authenticated: bool = True,
+    ) -> Any:
         """Make DELETE request (authenticated by default)."""
         url = f"{self.config.clob_base_url}{endpoint}"
-        return self._request("DELETE", url, authenticated=authenticated, params=params)
+        return self._request("DELETE", url, authenticated=authenticated, params=params, json_body=json_body)
 
     def _get_gamma(self, endpoint: str, params: dict | None = None) -> Any:
         """Make GET request to Gamma API."""
@@ -884,13 +900,33 @@ class ClobClient:
     MIN_PRICE = Decimal("0.01")
     MAX_PRICE = Decimal("0.99")
 
-    def _generate_salt(self) -> int:
-        """Generate a random salt for order uniqueness.
+    def _resolve_fee_rate_bps(self, requested: int, market: GammaMarket | None) -> int:
+        """Pick the feeRateBps to sign into the order.
 
-        Returns:
-            Random 256-bit integer
+        The Polymarket CLOB validator rejects orders whose ``feeRateBps`` does
+        not match the market's current ``makerBaseFee`` with::
+
+            400 {"error": "invalid fee rate (0), current market's maker fee: 1000"}
+
+        When market metadata is available we use its maker-fee value (fail-safe
+        default for GTC orders that rest on the book). Otherwise we fall back
+        to what the caller asked for. See VIB-3012.
         """
-        return int(secrets.token_hex(32), 16)
+        if market is not None and market.maker_base_fee_bps:
+            return market.maker_base_fee_bps
+        return requested
+
+    def _generate_salt(self) -> int:
+        """Generate a salt for order uniqueness.
+
+        EIP-712 declares salt as uint256 and full-width values validate fine
+        cryptographically. But Polymarket's CLOB server silently rejects
+        orders whose salt is outside the narrow range emitted by the canonical
+        py-clob-client / py-order-utils helper (``round(time.time() * random())``,
+        roughly 0..10^10) — the response is a bare ``400 "Invalid order
+        payload"`` with no further detail. Match that bound here. See VIB-3012.
+        """
+        return round(time.time() * secrets.SystemRandom().random())
 
     def _to_token_units(self, amount: Decimal) -> int:
         """Convert decimal amount to token units (6 decimals).
@@ -904,6 +940,108 @@ class ClobClient:
         # Round down to avoid overspending
         scaled = amount * self.DECIMAL_SCALE
         return int(scaled.quantize(Decimal("1"), rounding=ROUND_DOWN))
+
+    # CLOB API precision caps (expressed in 6-decimal token units):
+    #   USDC amounts  → 5 decimals  (multiples of 10)
+    #   Shares amounts → 2 decimals (multiples of 10_000)
+    _USDC_STEP = 10
+    _SHARES_STEP = 10_000
+
+    @classmethod
+    def _build_amounts_at_price(
+        cls,
+        side: str,
+        price: Decimal,
+        shares_tokens_desired: int,
+    ) -> tuple[int, int]:
+        """Compute (maker_tokens, taker_tokens) so the integer ratio equals ``price`` exactly.
+
+        The Polymarket CLOB rejects any order whose implied price (maker/taker for
+        BUY, taker/maker for SELL) is not a multiple of the market's tick size —
+        e.g. ``order ... breaks minimum tick size rule: 0.001``. Quantizing the
+        two legs independently (USDC to 5 decimals, shares to 2 decimals) satisfies
+        the per-leg precision caps but lets the ratio drift off-tick.
+
+        This helper picks the largest ``shares_tokens ≤ shares_tokens_desired`` such
+        that both legs are on their precision step AND the integer ratio
+        ``usdc_tokens / shares_tokens`` is exactly ``price`` — guaranteeing the
+        CLOB will accept the order at any tick size the price resolves to.
+
+        Algorithm:
+          1. Express ``price = p / q`` as an exact integer ratio (``price`` is always
+             a finite Decimal with at most 4 fractional digits — Polymarket's tick
+             sizes are 0.0001…0.1 — so ``q`` is bounded).
+          2. For shares_tokens on the shares step, usdc_tokens must be
+             ``shares_tokens * p / q``. Require ``q | shares_tokens`` for the
+             division to be exact ⇒ shares_tokens must be a multiple of
+             ``lcm(shares_step, q)``.
+          3. usdc_tokens must additionally be a multiple of usdc_step. Reduce
+             shares_tokens in whole ``lcm`` steps until that holds (always
+             terminates in ``usdc_step / gcd(M, usdc_step)`` iterations, where
+             ``M = lcm_step * p / q``).
+        """
+        if shares_tokens_desired <= 0:
+            return (0, 0)
+
+        # Exact integer ratio — Decimal("0.99").as_integer_ratio() -> (99, 100) etc.
+        p_num, p_den = price.as_integer_ratio()
+        if p_num <= 0 or p_den <= 0:
+            raise ValueError(f"price must be positive, got {price!r}")
+
+        # Polymarket tick sizes top out at 0.0001 ⇒ a tick-aligned price always has
+        # p_den ≤ 10_000. A larger denominator means the caller passed a price with
+        # too much precision (e.g. ``Decimal(0.7)`` from a Python float, whose
+        # ``as_integer_ratio`` returns p_den = 4_503_599_627_370_496). Without this
+        # guard, ``combined_step`` blows up to trillions of share-tokens and any
+        # realistic order silently snaps to ``(0, 0)`` — a garbage submission. Snap
+        # the price to the tick grid (or quantize the Decimal) before calling.
+        if p_den > 10_000:
+            raise ValueError(
+                f"price has too much precision (denominator {p_den} > 10_000); "
+                f"snap to a tick-aligned Decimal before calling. price={price!r}"
+            )
+
+        # Smallest shares-token granularity that yields an integer usdc-token count.
+        lcm_step = cls._SHARES_STEP * p_den // math.gcd(cls._SHARES_STEP, p_den)
+        # usdc-token count per ``lcm_step`` of shares tokens (integer by construction).
+        usdc_per_step = lcm_step * p_num // p_den
+        # How many lcm_steps to lift usdc_per_step * k onto the usdc_step grid.
+        g = math.gcd(usdc_per_step, cls._USDC_STEP)
+        k_multiple = cls._USDC_STEP // g  # typically 1 for tick ≥ 0.001
+        combined_step = lcm_step * k_multiple
+
+        shares_tokens = (shares_tokens_desired // combined_step) * combined_step
+        usdc_tokens = shares_tokens * p_num // p_den
+
+        if side == "BUY":
+            # maker = USDC out, taker = shares in
+            return usdc_tokens, shares_tokens
+        # SELL: maker = shares out, taker = USDC in
+        return shares_tokens, usdc_tokens
+
+    def _validate_quantized_amounts(
+        self,
+        side: str,
+        maker_amount: int,
+        taker_amount: int,
+        market: GammaMarket | None = None,
+    ) -> None:
+        """Re-run share-min and BUY $1-floor checks against post-snap amounts.
+
+        ``_build_amounts_at_price`` floors shares to a precision step that can
+        push the executable order below the per-market shares minimum or
+        Polymarket's $1 BUY floor — even when the requested values passed the
+        pre-snap checks. Example: market BUY ``amount=$1, worst_price=0.99``
+        passes ``_validate_order_value_usd($1)`` but snaps to ``maker=$0.9999``,
+        which the CLOB rejects with ``min size: $1``. This helper closes that
+        gap by re-validating after the snap.
+        """
+        shares_units = taker_amount if side == "BUY" else maker_amount
+        shares = Decimal(shares_units) / Decimal(self.DECIMAL_SCALE)
+        self._validate_size(shares, market=market)
+        if side == "BUY":
+            usdc = Decimal(maker_amount) / Decimal(self.DECIMAL_SCALE)
+            self._validate_order_value_usd(usdc)
 
     def _validate_price(self, price: Decimal) -> None:
         """Validate price is within allowed range.
@@ -924,6 +1062,11 @@ class ClobClient:
     # Default minimum order size - used when market metadata is unavailable
     DEFAULT_MIN_ORDER_SIZE = Decimal("5")
 
+    # Polymarket CLOB rejects BUY orders with makerAmount < $1 USD with
+    # `{"error": "invalid amount for a marketable BUY order ($X), min size: $1"}`.
+    # This floor is separate from the per-market `order_min_size` share count.
+    MIN_ORDER_VALUE_USD = Decimal("1")
+
     def _validate_size(
         self,
         size: Decimal,
@@ -932,7 +1075,10 @@ class ClobClient:
     ) -> None:
         """Validate order size meets market-specific minimum.
 
-        The minimum order size is determined in order of priority:
+        Validates the **share count** only. For BUY orders, also enforce the
+        Polymarket API's $1 USD floor via :meth:`_validate_order_value_usd`.
+
+        Priority:
         1. Explicit min_size parameter (if provided)
         2. Market's order_min_size field (if market metadata provided)
         3. DEFAULT_MIN_ORDER_SIZE fallback (5 shares)
@@ -943,7 +1089,9 @@ class ClobClient:
             market: GammaMarket metadata containing order_min_size
 
         Raises:
-            PolymarketMinimumOrderError: If size is below minimum with actual market minimum in error
+            PolymarketMinimumOrderError: If size is below the share-count minimum.
+                `minimum` is the raw share count (e.g. ``"5"``). USD-value failures
+                use a ``"$X"`` minimum instead — see :meth:`_validate_order_value_usd`.
         """
         # Determine the effective minimum size
         if min_size is not None:
@@ -955,6 +1103,28 @@ class ClobClient:
 
         if size < effective_min:
             raise PolymarketMinimumOrderError(size=str(size), minimum=str(effective_min))
+
+    def _validate_order_value_usd(self, value_usd: Decimal) -> None:
+        """Enforce Polymarket's $1 USD floor on BUY `makerAmount`.
+
+        Called by :meth:`build_limit_order` and :meth:`build_market_order`
+        for BUY orders — the validator at Polymarket's CLOB rejects any BUY
+        with makerAmount strictly below $1. SELL orders pay in shares and
+        are not subject to this floor.
+
+        Args:
+            value_usd: USD notional value of the order (size * price).
+
+        Raises:
+            PolymarketMinimumOrderError: If value_usd < MIN_ORDER_VALUE_USD.
+                Both `size` and `minimum` are prefixed with ``$`` to distinguish
+                a USD-floor failure from a share-count-floor failure.
+        """
+        if value_usd < self.MIN_ORDER_VALUE_USD:
+            raise PolymarketMinimumOrderError(
+                size=f"${value_usd}",
+                minimum=f"${self.MIN_ORDER_VALUE_USD}",
+            )
 
     # Default tick size used when market metadata is unavailable
     DEFAULT_TICK_SIZE = Decimal("0.01")
@@ -1140,27 +1310,20 @@ class ClobClient:
         self._validate_price(params.price)
         self._validate_tick_size(params.price, market=market)
         self._validate_size(params.size, market=market)
+        if params.side == "BUY":
+            self._validate_order_value_usd(params.size * params.price)
 
         wallet = self.config.wallet_address
         sig_type = self.config.signature_type.value
 
-        # Calculate amounts based on side
-        # BUY: pay USDC, receive shares
-        # SELL: pay shares, receive USDC
-        if params.side == "BUY":
-            # maker pays: size * price in USDC
-            # taker receives: size in shares
-            usdc_amount = params.size * params.price
-            maker_amount = self._to_token_units(usdc_amount)
-            taker_amount = self._to_token_units(params.size)
-            side = OrderSide.BUY.value
-        else:  # SELL
-            # maker pays: size in shares
-            # taker receives: size * price in USDC
-            usdc_amount = params.size * params.price
-            maker_amount = self._to_token_units(params.size)
-            taker_amount = self._to_token_units(usdc_amount)
-            side = OrderSide.SELL.value
+        # Derive maker/taker so that the integer ratio == params.price exactly.
+        # BUY: maker = USDC, taker = shares. SELL: maker = shares, taker = USDC.
+        shares_tokens_desired = self._to_token_units(params.size)
+        side = OrderSide.BUY.value if params.side == "BUY" else OrderSide.SELL.value
+        maker_amount, taker_amount = self._build_amounts_at_price(params.side, params.price, shares_tokens_desired)
+        # Re-validate AFTER snap — flooring can drop us below the per-market
+        # shares minimum or Polymarket's $1 BUY floor.
+        self._validate_quantized_amounts(params.side, maker_amount, taker_amount, market=market)
 
         # Build the order struct
         return UnsignedOrder(
@@ -1173,7 +1336,7 @@ class ClobClient:
             taker_amount=taker_amount,
             expiration=params.expiration or 0,  # 0 = no expiry
             nonce=0,  # Used for on-chain cancellation
-            fee_rate_bps=params.fee_rate_bps,
+            fee_rate_bps=self._resolve_fee_rate_bps(params.fee_rate_bps, market),
             side=side,
             signature_type=sig_type,
         )
@@ -1237,22 +1400,22 @@ class ClobClient:
         sig_type = self.config.signature_type.value
 
         if params.side == "BUY":
-            # For market BUY: amount is USDC to spend
-            # Calculate expected shares at worst price
+            # For market BUY: amount is USDC to spend; shares = amount / price.
             expected_shares = params.amount / price
             self._validate_size(expected_shares, market=market)
-
-            maker_amount = self._to_token_units(params.amount)
-            taker_amount = self._to_token_units(expected_shares)
+            self._validate_order_value_usd(params.amount)
+            shares_tokens_desired = self._to_token_units(expected_shares)
             side = OrderSide.BUY.value
         else:  # SELL
-            # For market SELL: amount is shares to sell
+            # For market SELL: amount is shares to sell.
             self._validate_size(params.amount, market=market)
-
-            expected_usdc = params.amount * price
-            maker_amount = self._to_token_units(params.amount)
-            taker_amount = self._to_token_units(expected_usdc)
+            shares_tokens_desired = self._to_token_units(params.amount)
             side = OrderSide.SELL.value
+
+        maker_amount, taker_amount = self._build_amounts_at_price(params.side, price, shares_tokens_desired)
+        # Re-validate AFTER snap — flooring can drop us below the per-market
+        # shares minimum or Polymarket's $1 BUY floor.
+        self._validate_quantized_amounts(params.side, maker_amount, taker_amount, market=market)
 
         return UnsignedOrder(
             salt=self._generate_salt(),
@@ -1264,7 +1427,7 @@ class ClobClient:
             taker_amount=taker_amount,
             expiration=0,  # Market orders should not expire
             nonce=0,
-            fee_rate_bps=0,  # Standard fee
+            fee_rate_bps=self._resolve_fee_rate_bps(0, market),
             side=side,
             signature_type=sig_type,
         )
@@ -1315,7 +1478,10 @@ class ClobClient:
             taker_amount=order.taker_amount,
         )
 
-        return SignedOrder(order=order, signature=signed.signature.hex())
+        sig_hex = signed.signature.hex()
+        if not sig_hex.startswith("0x"):
+            sig_hex = "0x" + sig_hex
+        return SignedOrder(order=order, signature=sig_hex)
 
     def create_and_sign_limit_order(
         self,
@@ -1369,8 +1535,10 @@ class ClobClient:
         Returns:
             OrderResponse with order ID and status
         """
-        payload = order.to_api_payload()
-        payload["orderType"] = order_type.value
+        if not self.credentials:
+            raise PolymarketAuthenticationError("API credentials required to submit order")
+
+        payload = order.to_api_payload(owner=self.credentials.api_key, order_type=order_type.value)
 
         logger.info(
             "Submitting order",
@@ -1439,27 +1607,18 @@ class ClobClient:
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an order by ID.
 
-        Args:
-            order_id: Order ID to cancel
-
-        Returns:
-            True if cancelled successfully
+        Polymarket's CLOB expects a DELETE with a JSON body, not query params —
+        sending query params 401s with "Invalid api key" because the HMAC
+        signature is computed over the body.
         """
         logger.info("Cancelling order", order_id=order_id)
-        self._delete("/order", params={"orderID": order_id})
+        self._delete("/order", json_body={"orderID": order_id})
         return True
 
     def cancel_orders(self, order_ids: list[str]) -> bool:
-        """Cancel multiple orders.
-
-        Args:
-            order_ids: List of order IDs to cancel
-
-        Returns:
-            True if cancelled successfully
-        """
+        """Cancel multiple orders."""
         logger.info("Cancelling orders", count=len(order_ids))
-        self._delete("/orders", params={"orderIDs": ",".join(order_ids)})
+        self._delete("/orders", json_body=order_ids)
         return True
 
     def cancel_all_orders(self) -> bool:
@@ -1489,20 +1648,35 @@ class ClobClient:
 
         data = self._get("/data/orders", params=params, authenticated=True)
 
+        # The /data/orders endpoint can return either a bare list or a paginated
+        # envelope {"data": [...], "next_cursor": "...", "count": N}; normalize.
+        if isinstance(data, dict) and isinstance(data.get("data"), list):
+            items = data["data"]
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = []
+
         orders = []
-        for item in data if isinstance(data, list) else []:
+        for item in items:
             try:
+                created_at_raw = item.get("createdAt") or item.get("created_at")
+                if isinstance(created_at_raw, int | float):
+                    created_at = datetime.fromtimestamp(created_at_raw, tz=UTC)
+                elif isinstance(created_at_raw, str):
+                    created_at = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+                else:
+                    created_at = None
                 orders.append(
                     OpenOrder(
-                        order_id=item.get("orderID", ""),
+                        order_id=item.get("id") or item.get("orderID", ""),
                         market=item.get("market", ""),
                         side=item.get("side", "BUY"),
                         price=Decimal(str(item.get("price", "0"))),
-                        size=Decimal(str(item.get("size", "0"))),
-                        filled_size=Decimal(str(item.get("filledSize", "0"))),
-                        created_at=datetime.fromisoformat(item["createdAt"].replace("Z", "+00:00"))
-                        if item.get("createdAt")
-                        else None,
+                        # Envelope uses `original_size`, legacy uses `size`
+                        size=Decimal(str(item.get("original_size") or item.get("size", "0"))),
+                        filled_size=Decimal(str(item.get("size_matched") or item.get("filledSize", "0"))),
+                        created_at=created_at,
                         expiration=item.get("expiration"),
                     )
                 )

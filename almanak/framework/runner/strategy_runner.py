@@ -29,19 +29,16 @@ Example:
 """
 
 import asyncio
-import hashlib
-import json
 import logging
 import os
 import signal
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from ..services.emergency_manager import EmergencyManager
@@ -71,13 +68,6 @@ from ..execution.plan_builder import (
 )
 from ..execution.result_enricher import ResultEnricher
 from ..execution.revert_diagnostics import diagnose_revert
-from ..execution.session import (
-    ExecutionPhase as SessionPhase,
-)
-from ..execution.session import (
-    ExecutionSession,
-    TransactionStatus,
-)
 from ..execution.session_store import ExecutionSessionStore
 from ..intents.compiler import IntentCompiler, IntentCompilerConfig
 from ..intents.state_machine import (
@@ -88,472 +78,79 @@ from ..intents.state_machine import (
     StateMachineConfig,
     TransactionReceipt,
 )
-from ..intents.vocabulary import AnyIntent, DecideResult, HoldIntent, Intent, IntentSequence, IntentType
+from ..intents.vocabulary import AnyIntent, HoldIntent, Intent, IntentSequence, IntentType
 from ..models.actions import AvailableAction, SuggestedAction
 from ..models.operator_card import EventType, OperatorCard, PositionSummary, Severity
 from ..models.stuck_reason import StuckReason
-from ..portfolio import PortfolioMetrics, PortfolioSnapshot, ValueConfidence
-from ..state.state_manager import StateData, StateManager, StateNotFoundError
+from ..state.exceptions import AccountingPersistenceError
+from ..state.state_manager import StateManager
 from ..utils.log_formatters import (
     _emojis_enabled,
-    format_intent_type_emoji,
-    format_percentage,
-    format_usd,
 )
 from ..utils.logging import add_context, clear_context
+from ..valuation.portfolio_valuer import PortfolioValuer
+
+# ---- Re-exports from runner_models (keeps all existing import paths working) ----
+from .runner_models import (  # noqa: F401
+    CriticalCallbackError,
+    ExecutionProgress,
+    IterationResult,
+    IterationStatus,
+    RunnerConfig,
+    StatefulActivityProviderProtocol,
+    StrategyProtocol,
+    _extract_tokens_from_intent,
+    _format_intent_for_log,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Exceptions
+# Mode derivation (VIB-3157)
 # =============================================================================
 
 
-class CriticalCallbackError(Exception):
-    """Raised by pre/post-iteration callbacks to signal a fail-closed condition.
+class ExecutionMode(StrEnum):
+    """Tri-state execution mode for accounting stamping.
 
-    When a pre_iteration_callback raises this exception, the strategy runner
-    will stop the loop instead of logging and continuing. This is used by
-    safety-critical callbacks like --reset-fork where continuing on failure
-    would run the strategy on stale fork state.
-
-    Regular Exception subclasses raised by callbacks are caught and logged
-    without stopping the loop (backward compatible behavior).
+    Single source of truth for the runner-mode label written onto ledger
+    entries, portfolio snapshots, and portfolio metrics. Using an enum
+    (instead of bare strings) catches typos and makes downstream
+    comparisons typo-safe — a misspelled ``"liev"`` would silently store
+    a bad row otherwise.
     """
 
-
-# =============================================================================
-# Intent Helpers
-# =============================================================================
-
-
-def _extract_tokens_from_intent(intent: "AnyIntent") -> list[str]:
-    """Extract token symbols from an intent for price pre-fetching.
-
-    Returns a list of token symbols mentioned in the intent. Used to
-    pre-populate the price cache when decide() doesn't call market.price().
-
-    Delegates to the shared ``extract_token_symbols`` utility which handles
-    all token fields and recurses into ``callback_intents`` for FlashLoanIntent.
-    """
-    from almanak.framework.runner.token_extraction import extract_token_symbols
-
-    return extract_token_symbols(intent)
+    DRY_RUN = "dry_run"
+    PAPER = "paper"
+    LIVE = "live"
 
 
-def _format_intent_for_log(intent: "AnyIntent", chain: str = "") -> str:
-    """Format an intent for user-friendly logging.
+def derive_execution_mode_from_config(config: Any) -> ExecutionMode:
+    """Return the canonical execution-mode label for a runner config.
+
+    The accounting layer needs a single, authoritative mapping from runner
+    state to the tri-state label stamped on ledger entries, portfolio
+    snapshots, and portfolio metrics. Keeping the branch logic here means
+    :meth:`StrategyRunner._is_live_mode`, ``_write_ledger_entry`` and
+    ``runner_state._build_metrics_for_snapshot`` cannot drift apart the
+    next time a new mode is introduced.
 
     Args:
-        intent: The intent to format
-        chain: Chain name for protocol display name resolution (e.g., "mantle")
+        config: A ``RunnerConfig`` (or subclass) object.
 
     Returns:
-        Human-readable string describing the intent with amounts and tokens
+        ``ExecutionMode.DRY_RUN`` when ``config.dry_run`` is set,
+        ``ExecutionMode.PAPER`` when ``config.paper_mode`` is truthy,
+        otherwise ``ExecutionMode.LIVE``. The returned value is a
+        ``StrEnum`` so it serialises as the bare label (``"dry_run"`` etc.)
+        for ledger / snapshot persistence.
     """
-    from almanak.framework.connectors.protocol_aliases import display_protocol
-
-    intent_type = intent.intent_type.value
-    emoji_type = format_intent_type_emoji(intent_type)
-
-    def _display(protocol: str | None) -> str:
-        """Resolve protocol to display name if chain context is available."""
-        if not protocol:
-            return ""
-        return display_protocol(chain, protocol) if chain else protocol
-
-    # SwapIntent
-    if hasattr(intent, "from_token") and hasattr(intent, "to_token"):
-        from_token = intent.from_token
-        to_token = intent.to_token
-
-        if hasattr(intent, "amount_usd") and intent.amount_usd:
-            amount_str = format_usd(intent.amount_usd)
-        elif hasattr(intent, "amount") and intent.amount:
-            if intent.amount == "all":
-                amount_str = "ALL"
-            else:
-                amount_str = f"{intent.amount}"
-        else:
-            amount_str = "N/A"
-
-        slippage = getattr(intent, "max_slippage", None)
-        slippage_str = f" (slippage: {format_percentage(slippage)})" if slippage else ""
-
-        protocol = getattr(intent, "protocol", None)
-        display_name = _display(protocol)
-        protocol_str = f" via {display_name}" if display_name else ""
-
-        return f"{emoji_type}: {amount_str} {from_token} → {to_token}{slippage_str}{protocol_str}"
-
-    # SupplyIntent
-    if intent_type == "SUPPLY":
-        token = getattr(intent, "token", "")
-        amount = getattr(intent, "amount", None)
-        amount_usd = getattr(intent, "amount_usd", None)
-        protocol = _display(getattr(intent, "protocol", ""))
-
-        if amount_usd:
-            amount_str = format_usd(amount_usd)
-        elif amount:
-            amount_str = f"{amount} {token}"
-        else:
-            amount_str = f"N/A {token}"
-
-        collateral = getattr(intent, "as_collateral", True)
-        collateral_str = " (as collateral)" if collateral else ""
-
-        return f"{emoji_type}: {amount_str} to {protocol}{collateral_str}"
-
-    # BorrowIntent
-    if intent_type == "BORROW":
-        borrow_token = getattr(intent, "borrow_token", "")
-        borrow_amount = getattr(intent, "borrow_amount", None)
-        collateral_token = getattr(intent, "collateral_token", "")
-        collateral_amount = getattr(intent, "collateral_amount", None)
-        protocol = _display(getattr(intent, "protocol", ""))
-
-        if borrow_amount:
-            amount_str = f"{borrow_amount} {borrow_token}"
-        else:
-            amount_str = f"N/A {borrow_token}"
-
-        collateral_str = ""
-        if collateral_amount == "all":
-            collateral_str = f" (collateral: ALL {collateral_token})"
-        elif collateral_amount:
-            collateral_str = f" (collateral: {collateral_amount} {collateral_token})"
-
-        return f"{emoji_type}: {amount_str} from {protocol}{collateral_str}"
-
-    # WithdrawIntent
-    if intent_type == "WITHDRAW":
-        token = getattr(intent, "token", "")
-        amount = getattr(intent, "amount", None)
-        protocol = _display(getattr(intent, "protocol", ""))
-
-        if amount == "all":
-            amount_str = f"ALL {token}"
-        elif amount:
-            amount_str = f"{amount} {token}"
-        else:
-            amount_str = f"N/A {token}"
-
-        return f"{emoji_type}: {amount_str} from {protocol}"
-
-    # RepayIntent
-    if intent_type == "REPAY":
-        token = getattr(intent, "token", "")
-        amount = getattr(intent, "amount", None)
-        protocol = _display(getattr(intent, "protocol", ""))
-
-        if amount == "all":
-            amount_str = f"ALL {token}"
-        elif amount:
-            amount_str = f"{amount} {token}"
-        else:
-            amount_str = f"N/A {token}"
-
-        return f"{emoji_type}: {amount_str} to {protocol}"
-
-    # LPOpenIntent
-    if intent_type == "LP_OPEN":
-        pool = getattr(intent, "pool", "")
-        amount0 = getattr(intent, "amount0", Decimal("0"))
-        amount1 = getattr(intent, "amount1", Decimal("0"))
-        range_lower = getattr(intent, "range_lower", None)
-        range_upper = getattr(intent, "range_upper", None)
-        protocol = _display(getattr(intent, "protocol", ""))
-
-        range_str = ""
-        if range_lower and range_upper:
-            range_str = f" [{range_lower:.0f} - {range_upper:.0f}]"
-
-        return f"{emoji_type}: {pool} ({amount0}, {amount1}){range_str} via {protocol}"
-
-    # LPCloseIntent
-    if intent_type == "LP_CLOSE":
-        position_id = getattr(intent, "position_id", "")
-        protocol = _display(getattr(intent, "protocol", ""))
-        return f"{emoji_type}: position {position_id[:8]}... via {protocol}"
-
-    # PerpOpenIntent
-    if intent_type == "PERP_OPEN":
-        market = getattr(intent, "market", "")
-        direction = getattr(intent, "direction", "")
-        size_usd = getattr(intent, "size_usd", None)
-        leverage = getattr(intent, "leverage", None)
-        protocol = _display(getattr(intent, "protocol", ""))
-
-        size_str = format_usd(size_usd) if size_usd else "N/A"
-        leverage_str = f" ({leverage}x)" if leverage else ""
-
-        return f"{emoji_type}: {direction} {market} {size_str}{leverage_str} via {protocol}"
-
-    # PerpCloseIntent
-    if intent_type == "PERP_CLOSE":
-        market = getattr(intent, "market", "")
-        position_id = getattr(intent, "position_id", "")
-        protocol = _display(getattr(intent, "protocol", ""))
-        return f"{emoji_type}: {market} position {position_id[:8] if position_id else 'N/A'}... via {protocol}"
-
-    # BridgeIntent
-    if intent_type == "BRIDGE":
-        token = getattr(intent, "token", "")
-        amount = getattr(intent, "amount", None)
-        from_chain = getattr(intent, "from_chain", "")
-        to_chain = getattr(intent, "to_chain", "")
-
-        if amount == "all":
-            amount_str = f"ALL {token}"
-        elif amount:
-            amount_str = f"{amount} {token}"
-        else:
-            amount_str = f"N/A {token}"
-
-        return f"{emoji_type}: {amount_str} {from_chain} → {to_chain}"
-
-    # HoldIntent
-    if intent_type == "HOLD":
-        reason = getattr(intent, "reason", "No action")
-        return f"{emoji_type}: {reason}"
-
-    # Default fallback
-    return f"{emoji_type} (id={intent.intent_id[:8]}...)"
-
-
-# =============================================================================
-# Enums and Data Classes
-# =============================================================================
-
-
-class IterationStatus(StrEnum):
-    """Status of a strategy iteration."""
-
-    SUCCESS = "SUCCESS"
-    DRY_RUN = "DRY_RUN"  # Dry run mode - no transactions submitted
-    HOLD = "HOLD"  # Strategy decided to hold
-    TEARDOWN = "TEARDOWN"  # Strategy is executing teardown
-    COMPILATION_FAILED = "COMPILATION_FAILED"
-    EXECUTION_FAILED = "EXECUTION_FAILED"
-    STRATEGY_ERROR = "STRATEGY_ERROR"
-    STRATEGY_TIMEOUT = "STRATEGY_TIMEOUT"  # strategy.decide() exceeded time limit
-    DATA_ERROR = "DATA_ERROR"
-    CIRCUIT_BREAKER_OPEN = "CIRCUIT_BREAKER_OPEN"  # Circuit breaker blocked execution
-
-
-@dataclass
-class IterationResult:
-    """Result of a single strategy iteration.
-
-    Attributes:
-        status: Outcome status of the iteration
-        intent: The intent produced by the strategy (if any)
-        execution_result: Result from execution orchestrator (if executed)
-        error: Error message (if failed)
-        strategy_id: ID of the strategy that ran
-        duration_ms: Time taken for the iteration in milliseconds
-        timestamp: When the iteration completed
-    """
-
-    status: IterationStatus
-    intent: AnyIntent | None = None
-    execution_result: ExecutionResult | None = None
-    error: str | None = None
-    strategy_id: str = ""
-    duration_ms: float = 0.0
-    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
-    balance_reconciliation: dict[str, Any] | None = None  # Post-execution balance check
-
-    @property
-    def success(self) -> bool:
-        """Check if iteration was successful (including DRY_RUN, HOLD, and TEARDOWN)."""
-        return self.status in (
-            IterationStatus.SUCCESS,
-            IterationStatus.DRY_RUN,
-            IterationStatus.HOLD,
-            IterationStatus.TEARDOWN,
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        return {
-            "status": self.status.value,
-            "intent": self.intent.serialize() if self.intent else None,
-            "execution_result": self.execution_result.to_dict() if self.execution_result else None,
-            "error": self.error,
-            "strategy_id": self.strategy_id,
-            "duration_ms": self.duration_ms,
-            "timestamp": self.timestamp.isoformat(),
-            "balance_reconciliation": self.balance_reconciliation,
-        }
-
-
-@dataclass
-class ExecutionProgress:
-    """Tracks execution progress for resuming after restart.
-
-    Attributes:
-        execution_id: Unique ID for this execution sequence
-        strategy_id: Strategy that owns this execution
-        intents_hash: Hash of serialized intents (to detect changes)
-        total_steps: Total number of steps in the sequence
-        completed_step_index: Index of last completed step (-1 if none)
-        previous_amount_received: Amount from last step (for chaining)
-        started_at: When this execution started
-        last_updated: When progress was last updated
-        serialized_intents: Serialized intent data for resumption
-        failed_at_step_index: Index of the step that failed (None if no failure)
-        failure_error: Error message from the failed step
-    """
-
-    execution_id: str
-    strategy_id: str
-    intents_hash: str
-    total_steps: int
-    completed_step_index: int = -1  # -1 means no steps completed
-    previous_amount_received: Decimal | None = None
-    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    last_updated: datetime = field(default_factory=lambda: datetime.now(UTC))
-    serialized_intents: list[dict[str, Any]] | None = None
-    failed_at_step_index: int | None = None
-    failure_error: str | None = None
-
-    @property
-    def is_stuck(self) -> bool:
-        """Check if execution is stuck (has a failed step that needs retry)."""
-        return self.failed_at_step_index is not None
-
-    @property
-    def next_step_to_execute(self) -> int:
-        """Get the index of the next step to execute (failed step or next after completed)."""
-        if self.failed_at_step_index is not None:
-            return self.failed_at_step_index
-        return self.completed_step_index + 1
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for storage."""
-        return {
-            "execution_id": self.execution_id,
-            "strategy_id": self.strategy_id,
-            "intents_hash": self.intents_hash,
-            "total_steps": self.total_steps,
-            "completed_step_index": self.completed_step_index,
-            "previous_amount_received": str(self.previous_amount_received)
-            if self.previous_amount_received is not None
-            else None,
-            "started_at": self.started_at.isoformat(),
-            "last_updated": self.last_updated.isoformat(),
-            "serialized_intents": self.serialized_intents,
-            "failed_at_step_index": self.failed_at_step_index,
-            "failure_error": self.failure_error,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ExecutionProgress":
-        """Create from dictionary."""
-        previous_amount = data.get("previous_amount_received")
-        return cls(
-            execution_id=data["execution_id"],
-            strategy_id=data["strategy_id"],
-            intents_hash=data["intents_hash"],
-            total_steps=data["total_steps"],
-            completed_step_index=data.get("completed_step_index", -1),
-            previous_amount_received=Decimal(previous_amount) if previous_amount is not None else None,
-            started_at=datetime.fromisoformat(data["started_at"]),
-            last_updated=datetime.fromisoformat(data["last_updated"]),
-            serialized_intents=data.get("serialized_intents"),
-            failed_at_step_index=data.get("failed_at_step_index"),
-            failure_error=data.get("failure_error"),
-        )
-
-
-@dataclass
-class RunnerConfig:
-    """Configuration for the strategy runner.
-
-    Attributes:
-        default_interval_seconds: Default interval between iterations
-        max_consecutive_errors: Maximum consecutive errors before alerting
-        enable_state_persistence: Whether to persist state between iterations
-        enable_alerting: Whether to send alerts on errors
-        dry_run: If True, compile but don't execute intents
-        max_retries: Maximum number of automatic retries per intent (default 3)
-        initial_retry_delay: Initial delay between retries in seconds (default 1.0)
-        max_retry_delay: Maximum delay between retries in seconds (default 60.0)
-        decide_timeout_seconds: Hard timeout for strategy.decide() in seconds (default 30.0)
-    """
-
-    default_interval_seconds: int = 60
-    max_consecutive_errors: int = 3
-    enable_state_persistence: bool = True
-    enable_alerting: bool = True
-    dry_run: bool = False
-    max_retries: int = 3
-    initial_retry_delay: float = 1.0
-    max_retry_delay: float = 60.0
-    lifecycle_poll_interval: float = 2.0
-    decide_timeout_seconds: float = 30.0
-
-
-# =============================================================================
-# Strategy Protocol
-# =============================================================================
-
-
-class StrategyProtocol(Protocol):
-    """Protocol defining the interface for strategies.
-
-    Strategies must implement these properties and methods to be
-    compatible with the StrategyRunner.
-    """
-
-    @property
-    def strategy_id(self) -> str:
-        """Unique identifier for the strategy."""
-        ...
-
-    @property
-    def chain(self) -> str:
-        """Target blockchain (e.g., 'arbitrum')."""
-        ...
-
-    @property
-    def wallet_address(self) -> str:
-        """Wallet address for the strategy."""
-        ...
-
-    def decide(self, market: Any) -> DecideResult:
-        """Main decision method that returns an intent, sequence, list, or None."""
-        ...
-
-    def create_market_snapshot(self) -> Any:
-        """Create a market snapshot for the strategy."""
-        ...
-
-    def get_portfolio_snapshot(self, market: Any = None) -> PortfolioSnapshot | None:
-        """Get current portfolio value and positions (optional).
-
-        Returns PortfolioSnapshot if implemented, None if not supported.
-        """
-        ...
-
-    def generate_teardown_intents(self, mode: Any, market: Any = None) -> list:
-        """Generate intents to close all positions (optional, checked via hasattr)."""
-        ...
-
-    def get_open_positions(self) -> Any:
-        """Return open positions for teardown safety validation (optional)."""
-        ...
-
-
-class StatefulActivityProviderProtocol(Protocol):
-    """Protocol for copy-trading activity providers with cursor state."""
-
-    def get_state(self) -> dict[str, Any]: ...
-
-    def set_state(self, state: dict[str, Any]) -> None: ...
+    if getattr(config, "dry_run", False):
+        return ExecutionMode.DRY_RUN
+    if getattr(config, "paper_mode", False):
+        return ExecutionMode.PAPER
+    return ExecutionMode.LIVE
 
 
 # =============================================================================
@@ -662,6 +259,8 @@ class StrategyRunner:
         # Portfolio snapshot tracking
         self._last_snapshot_time: datetime | None = None
         self._snapshot_interval_seconds = 300  # Capture time-series snapshot every 5 min
+        self._portfolio_valuer = PortfolioValuer()
+        self._iteration_had_trade = False  # Set by _write_ledger_entry on success
 
         # Optional explicit gateway client (set via set_gateway_client for multi-chain)
         self._gateway_client: Any | None = None
@@ -711,306 +310,69 @@ class StrategyRunner:
         return (Decimal("0"), Decimal("0"))
 
     def _get_gateway_client(self) -> Any | None:
-        """Get the gateway gRPC client from the execution orchestrator.
+        from .runner_gateway import get_gateway_client
 
-        Checks GatewayExecutionOrchestrator directly, gateway-backed
-        MultiChainOrchestrator, and legacy per-chain executors.
-
-        Returns:
-            GatewayClient instance or None if not gateway-backed.
-        """
-        # Prefer explicitly set client
-        if self._gateway_client is not None:
-            return self._gateway_client
-
-        from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
-
-        if isinstance(self.execution_orchestrator, GatewayExecutionOrchestrator):
-            return self.execution_orchestrator._client
-
-        # Gateway-backed MultiChainOrchestrator stores gateway client directly
-        if hasattr(self.execution_orchestrator, "_gateway_client"):
-            client = self.execution_orchestrator._gateway_client
-            if client is not None:
-                return client
-
-        # Legacy multi-chain mode: check per-chain executors for a gateway client
-        if self._is_multi_chain and hasattr(self.execution_orchestrator, "_executors"):
-            for executor in self.execution_orchestrator._executors.values():
-                orch = getattr(executor, "orchestrator", None)
-                if isinstance(orch, GatewayExecutionOrchestrator):
-                    return orch._client
-
-        return None
+        return get_gateway_client(self)
 
     def _register_with_gateway(self, strategy: StrategyProtocol) -> None:
-        """Register this strategy instance with the gateway's instance registry.
+        from .runner_gateway import register_with_gateway
 
-        Non-fatal: catches all exceptions so the strategy continues running
-        even if registration fails.
-        """
-        client = self._get_gateway_client()
-        if client is None:
-            return
-
-        try:
-            from almanak.gateway.proto import gateway_pb2
-
-            request = gateway_pb2.RegisterInstanceRequest(
-                strategy_id=strategy.strategy_id,
-                strategy_name=getattr(
-                    strategy,
-                    "strategy_display_name",
-                    getattr(getattr(strategy, "config", None), "strategy_display_name", strategy.strategy_id),
-                ),
-                template_name=type(strategy).__name__,
-                chain=getattr(strategy, "chain", ""),
-                protocol=getattr(strategy, "protocol", ""),
-                wallet_address=getattr(strategy, "wallet_address", ""),
-                config_json="",
-                version="",
-            )
-            response = client.dashboard.RegisterStrategyInstance(request)
-            if response.success:
-                verb = "Re-registered" if response.already_existed else "Registered"
-                logger.info(f"{verb} strategy instance with gateway: {strategy.strategy_id}")
-            else:
-                logger.warning(f"Failed to register with gateway: {response.error}")
-        except Exception as e:
-            logger.debug(f"Failed to register with gateway (non-fatal): {e}")
+        register_with_gateway(self, strategy)
 
     def _deregister_from_gateway(self, strategy_id: str) -> None:
-        """Mark this strategy instance as INACTIVE in the gateway registry.
+        from .runner_gateway import deregister_from_gateway
 
-        Non-fatal: catches all exceptions.
-        """
-        client = self._get_gateway_client()
-        if client is None:
-            return
+        deregister_from_gateway(self, strategy_id)
 
-        try:
-            from almanak.gateway.proto import gateway_pb2
+    def _gateway_update_status(self, strategy_id: str, status: str) -> None:
+        from .runner_gateway import gateway_update_status
 
-            request = gateway_pb2.UpdateInstanceStatusRequest(
-                strategy_id=strategy_id,
-                status="INACTIVE",
-                reason="Strategy runner stopped",
-            )
-            client.dashboard.UpdateStrategyInstanceStatus(request)
-            logger.debug(f"Deregistered strategy instance from gateway: {strategy_id}")
-        except Exception as e:
-            logger.debug(f"Failed to deregister from gateway (non-fatal): {e}")
+        gateway_update_status(self, strategy_id, status)
 
-    def _gateway_heartbeat(
-        self,
-        strategy_id: str,
-        positions: list | None = None,
-    ) -> None:
-        """Send a heartbeat to the gateway for this strategy instance.
+    def _gateway_heartbeat(self, strategy_id: str, positions: list | None = None) -> None:
+        from .runner_gateway import gateway_heartbeat
 
-        Args:
-            strategy_id: Strategy instance ID.
-            positions: Optional list of StrategyPosition protos to cache in the dashboard.
-
-        Non-fatal: catches all exceptions.
-        """
-        client = self._get_gateway_client()
-        if client is None:
-            return
-
-        try:
-            from almanak.gateway.proto import gateway_pb2
-
-            request = gateway_pb2.UpdateInstanceStatusRequest(
-                strategy_id=strategy_id,
-                heartbeat_only=True,
-            )
-            if positions:
-                request.positions.extend(positions)
-            client.dashboard.UpdateStrategyInstanceStatus(request)
-        except Exception as e:
-            logger.debug(f"Failed to send heartbeat to gateway (non-fatal): {e}")
+        gateway_heartbeat(self, strategy_id, positions)
 
     def _collect_position_snapshot(self, strategy: "StrategyProtocol") -> list | None:
-        """Call strategy.get_open_positions() and convert to proto messages.
+        from .runner_gateway import collect_position_snapshot
 
-        Non-fatal: returns None on any error so heartbeat still fires.
-        """
-        if self._get_gateway_client() is None:
-            return None
-        if not hasattr(strategy, "get_open_positions"):
-            return None
-
-        try:
-            summary = strategy.get_open_positions()
-            if summary is None or not hasattr(summary, "positions") or not summary.positions:
-                return None
-
-            from almanak.gateway.proto import gateway_pb2
-
-            protos = []
-            for pos in summary.positions:
-                sp = gateway_pb2.StrategyPosition(
-                    position_type=str(pos.position_type.value)
-                    if hasattr(pos.position_type, "value")
-                    else str(pos.position_type),
-                    position_id=str(pos.position_id),
-                    chain=str(pos.chain.value) if hasattr(pos.chain, "value") else str(pos.chain),
-                    protocol=str(pos.protocol),
-                    value_usd=str(pos.value_usd),
-                    liquidation_risk=bool(pos.liquidation_risk),
-                )
-                if pos.health_factor is not None:
-                    sp.health_factor = str(pos.health_factor)
-                if pos.details:
-                    for k, v in pos.details.items():
-                        sp.details[str(k)] = str(v)
-                # Optional monitoring fields
-                if pos.entry_price is not None:
-                    sp.entry_price = str(pos.entry_price)
-                if pos.current_price is not None:
-                    sp.current_price = str(pos.current_price)
-                if pos.unrealized_pnl_usd is not None:
-                    sp.unrealized_pnl_usd = str(pos.unrealized_pnl_usd)
-                if pos.unrealized_pnl_pct is not None:
-                    sp.unrealized_pnl_pct = str(pos.unrealized_pnl_pct)
-                if pos.direction is not None:
-                    sp.direction = str(pos.direction)
-                if pos.size_usd is not None:
-                    sp.size_usd = str(pos.size_usd)
-                if pos.collateral_usd is not None:
-                    sp.collateral_usd = str(pos.collateral_usd)
-                if pos.leverage is not None:
-                    sp.leverage = str(pos.leverage)
-                protos.append(sp)
-            return protos
-        except Exception as e:
-            logger.debug(f"Failed to collect position snapshot (non-fatal): {e}")
-            return None
+        return collect_position_snapshot(self, strategy)
 
     def _lifecycle_write_state(self, agent_id: str, state: str, error_message: str | None = None) -> None:
-        """Write agent state to LifecycleStore via gateway.
+        from .runner_gateway import lifecycle_write_state
 
-        Non-fatal: catches all exceptions.
-        """
-        client = self._get_gateway_client()
-        if client is None:
-            return
-        try:
-            from almanak.gateway.proto import gateway_pb2
-
-            request = gateway_pb2.WriteAgentStateRequest(
-                agent_id=agent_id,
-                state=state,
-                error_message=error_message or "",
-            )
-            client.lifecycle.WriteState(request)
-        except Exception as e:
-            logger.debug(f"Failed to write lifecycle state (non-fatal): {e}")
+        lifecycle_write_state(self, agent_id, state, error_message)
 
     def _lifecycle_heartbeat(self, agent_id: str) -> None:
-        """Send lifecycle heartbeat via gateway.
+        from .runner_gateway import lifecycle_heartbeat
 
-        Non-fatal: catches all exceptions.
-        """
-        client = self._get_gateway_client()
-        if client is None:
-            return
-        try:
-            from almanak.gateway.proto import gateway_pb2
-
-            request = gateway_pb2.HeartbeatRequest(agent_id=agent_id)
-            client.lifecycle.Heartbeat(request)
-        except Exception as e:
-            logger.debug(f"Failed to send lifecycle heartbeat (non-fatal): {e}")
+        lifecycle_heartbeat(self, agent_id)
 
     def _lifecycle_poll_command(self, agent_id: str) -> str | None:
-        """Poll for pending command from LifecycleStore.
+        from .runner_gateway import lifecycle_poll_command
 
-        Returns command string (PAUSE, RESUME, STOP) or None.
-        The command is acknowledged only after it is returned so that callers
-        can apply side-effects before the ack.  If the process crashes between
-        read and ack the command will be re-delivered on the next poll.
-        Non-fatal: catches all exceptions.
-        """
-        client = self._get_gateway_client()
-        if client is None:
-            return None
-        try:
-            from almanak.gateway.proto import gateway_pb2
-
-            request = gateway_pb2.ReadAgentCommandRequest(agent_id=agent_id)
-            response = client.lifecycle.ReadCommand(request)
-            if response.found:
-                command = response.command
-                logger.info("Received lifecycle command: %s (from %s)", command, response.issued_by)
-                # Acknowledge after reading so the command is re-delivered if we crash
-                try:
-                    ack_request = gateway_pb2.AckAgentCommandRequest(command_id=response.command_id)
-                    client.lifecycle.AckCommand(ack_request)
-                except Exception:
-                    logger.warning("Failed to ack lifecycle command %s (will be re-delivered)", response.command_id)
-                return command
-            return None
-        except Exception as e:
-            logger.debug("Failed to poll lifecycle command (non-fatal): %s", e)
-            return None
+        return lifecycle_poll_command(self, agent_id)
 
     def _lifecycle_handle_stop(self, strategy_id: str, strategy: Any) -> None:
-        """Handle STOP command: bridge into teardown or hard-stop.
+        from .runner_gateway import lifecycle_handle_stop
 
-        Shared by both the normal STOP path and the STOP-while-paused path.
-        """
-        self._lifecycle_write_state(strategy_id, "STOPPING")
-        from almanak.framework.teardown import TeardownMode, TeardownRequest, get_teardown_state_manager
-
-        try:
-            manager = get_teardown_state_manager()
-            teardown_request = TeardownRequest(
-                strategy_id=strategy_id,
-                mode=TeardownMode.SOFT,
-                reason="Lifecycle STOP command",
-                requested_by="lifecycle",
-            )
-            manager.create_request(teardown_request)
-            logger.info("Created teardown request for %s from STOP command", strategy_id)
-        except Exception as e:  # noqa: BLE001
-            logger.error("Failed to create teardown request for %s: %s; hard-stopping", strategy_id, e)
-            self._shutdown_requested = True
-        # Don't break -- let the next iteration pick up the teardown request
-        # via _check_teardown_requested(), which will execute teardown intents
-        # and then call request_shutdown()
+        lifecycle_handle_stop(self, strategy_id, strategy)
 
     def set_gateway_client(self, client: Any) -> None:
-        """Explicitly set the gateway client for instance registration.
+        from .runner_gateway import set_gateway_client
 
-        Use this when the gateway client can't be discovered from the
-        execution orchestrator (e.g. multi-chain mode).
-        """
-        self._gateway_client = client
+        set_gateway_client(self, client)
 
     def setup_gateway_integration(self, strategy: StrategyProtocol) -> None:
-        """Set up gateway dual-write and instance registration.
+        from .runner_gateway import setup_gateway_integration
 
-        Call this before run_iteration() when running outside run_loop()
-        (e.g. --once mode) so that single-iteration runs also appear
-        in the instance registry and emit gateway timeline events.
-        """
-        gateway_client = self._get_gateway_client()
-        if gateway_client is not None:
-            from ..api.timeline import set_event_gateway_client
-
-            set_event_gateway_client(gateway_client)
-            logger.debug("Enabled gateway dual-write for timeline events")
-
-        self._register_with_gateway(strategy)
+        setup_gateway_integration(self, strategy)
 
     def teardown_gateway_integration(self, strategy_id: str) -> None:
-        """Mark instance as INACTIVE and clear gateway dual-write.
+        from .runner_gateway import teardown_gateway_integration
 
-        Call this after run_iteration() when running outside run_loop().
-        """
-        self._deregister_from_gateway(strategy_id)
+        teardown_gateway_integration(self, strategy_id)
 
     async def run_iteration(self, strategy: StrategyProtocol) -> IterationResult:
         """Run a single iteration of the strategy.
@@ -1034,6 +396,13 @@ class StrategyRunner:
         # Bind correlation ID for all log messages during this iteration
         iteration_id = f"{strategy_id}_{self._total_iterations + 1}_{int(start_time.timestamp())}"
         add_context(correlation_id=iteration_id, strategy_id=strategy_id)
+
+        # Generate cycle_id for forensic event correlation across phases
+        from almanak.framework.observability.context import clear_cycle_id, new_cycle_id
+
+        cycle_id = new_cycle_id()
+        self._last_cycle_id = cycle_id  # Phase 4: preserve for snapshot capture after iteration
+        add_context(cycle_id=cycle_id)
 
         logger.info(f"Starting iteration for strategy: {strategy_id}")
 
@@ -1171,6 +540,20 @@ class StrategyRunner:
                     start_time,
                 )
 
+            # Step 1a: Inject simulated balances for dry-run mode (VIB-2329)
+            # When running --dry-run --no-gateway, balance providers return 0 or error
+            # for chains where the wallet has no positions. simulated_balances in config
+            # lets strategy authors test logic without needing real on-chain funds.
+            if self.config.dry_run:
+                self._inject_simulated_balances(market, strategy)
+
+            # Step 1b: Pre-warm price cache (VIB-2568)
+            # On cold Anvil forks, gateway price fetches can take 15-30s each.
+            # If decide() makes multiple market.price() calls, the total easily
+            # exceeds the 30s decide_timeout. Pre-warming populates the snapshot's
+            # _price_cache OUTSIDE the timeout budget so decide() hits cache.
+            await self._pre_warm_prices(market, strategy)
+
             # Step 2: Get strategy decision (with hard timeout)
             # NOTE: asyncio.to_thread runs decide() in a worker thread. If decide()
             # times out, the worker thread continues running (Python limitation).
@@ -1200,6 +583,15 @@ class StrategyRunner:
                     )
             try:
                 self._decide_in_progress = True
+                from almanak.framework.observability.emitter import emit_phase_event
+                from almanak.framework.observability.events import StrategyPhase
+
+                emit_phase_event(
+                    strategy_id=strategy_id,
+                    phase=StrategyPhase.DECIDE,
+                    event_type="STATE_CHANGE",
+                    description="decide() started",
+                )
                 if decide_timeout <= 0:
                     # Timeout disabled -- run decide() without a time limit
                     decide_result = await asyncio.to_thread(strategy.decide, market)
@@ -1209,6 +601,12 @@ class StrategyRunner:
                         timeout=decide_timeout,
                     )
                 self._decide_in_progress = False
+                emit_phase_event(
+                    strategy_id=strategy_id,
+                    phase=StrategyPhase.DECIDE,
+                    event_type="STATE_CHANGE",
+                    description=f"decide() returned {type(decide_result).__name__}",
+                )
             except TimeoutError:
                 # Worker thread may still be running; _decide_in_progress stays True
                 # to block overlapping calls. Recovery allowed after 2x timeout elapsed.
@@ -1537,6 +935,25 @@ class StrategyRunner:
                 return intent_result  # type: ignore[return-value]
 
         except Exception as e:
+            # VIB-3157: accounting persistence failure -- on-chain execution may
+            # have succeeded but the durable record is missing. Halt the
+            # iteration with ACCOUNTING_FAILED so run_loop's consecutive-error
+            # handler kicks in, and alert the operator before books drift.
+            from ..state.exceptions import AccountingPersistenceError
+
+            if isinstance(e, AccountingPersistenceError):
+                logger.exception(
+                    "Accounting persistence failed in live mode for %s (write_kind=%s)",
+                    strategy_id,
+                    e.write_kind,
+                )
+                await self._alert_accounting_failure(strategy, e)
+                return self._create_error_result(
+                    strategy_id,
+                    IterationStatus.ACCOUNTING_FAILED,
+                    f"Accounting persistence failed ({e.write_kind}): {e}",
+                    start_time,
+                )
             logger.exception(f"Unexpected error in iteration for {strategy_id}: {e}")
             return self._create_error_result(
                 strategy_id,
@@ -1547,6 +964,7 @@ class StrategyRunner:
         finally:
             # Clear correlation context to prevent bleed across iterations
             clear_context()
+            clear_cycle_id()
 
     async def run_loop(
         self,
@@ -1653,6 +1071,13 @@ class StrategyRunner:
                     except Exception as e:
                         logger.error(f"Pre-iteration callback error: {e}")
 
+                # Snapshot the error-streak flag BEFORE the iteration runs. Successful
+                # iterations reset `_consecutive_errors` to 0 inside `run_iteration`
+                # (via `_record_success`), so we must capture "were we in an error
+                # streak?" before that reset happens — otherwise the recovery branch
+                # below is unreachable.
+                was_in_error_streak = self._consecutive_errors >= self.config.max_consecutive_errors
+
                 # Run iteration
                 result = await self.run_iteration(strategy)
 
@@ -1661,7 +1086,7 @@ class StrategyRunner:
 
                 # Update state
                 if self.config.enable_state_persistence:
-                    await self._update_state(strategy_id, result)
+                    await self._update_state(strategy_id, result, strategy=strategy)
 
                 # Persist copy trading cursor state (if configured)
                 if activity_provider is not None and self.config.enable_state_persistence:
@@ -1670,12 +1095,54 @@ class StrategyRunner:
                     except Exception as e:
                         logger.warning(f"Failed to persist copy trading state: {e}")
 
-                # Capture portfolio snapshot for dashboard/PnL tracking
-                if self.config.enable_state_persistence and result.success:
-                    await self._capture_portfolio_snapshot(
-                        strategy=strategy,
-                        iteration_number=self._total_iterations,
-                    )
+                # Capture portfolio snapshot for dashboard/PnL tracking.
+                # Always capture regardless of iteration success — failed iterations
+                # don't change the portfolio, but we need continuity in the equity curve.
+                # _capture_portfolio_snapshot handles valuation failures gracefully
+                # (persists UNAVAILABLE snapshots), but real persistence failures
+                # propagate as AccountingPersistenceError (VIB-3157). Catch those
+                # here so snapshot/metrics failures take the same ACCOUNTING_FAILED
+                # path as ledger failures inside run_iteration.
+                if self.config.enable_state_persistence:
+                    snapshot_start = datetime.now(UTC)
+                    try:
+                        await self._capture_portfolio_snapshot(
+                            strategy=strategy,
+                            iteration_number=self._total_iterations,
+                        )
+                    except AccountingPersistenceError as acc_err:
+                        # Mode-aware: only escalate to ACCOUNTING_FAILED in
+                        # live mode, matching the contract used by
+                        # _write_ledger_entry (live raises, paper/dry-run
+                        # logs). In non-live modes, swallow + ERROR-log so
+                        # pre-prod drift is visible without halting the loop.
+                        if self._is_live_mode():
+                            logger.exception(
+                                "Accounting persistence failed in live mode for %s (write_kind=%s)",
+                                strategy_id,
+                                acc_err.write_kind,
+                            )
+                            await self._alert_accounting_failure(strategy, acc_err)
+                            # Build IterationResult directly instead of via
+                            # _create_error_result, which mutates
+                            # _consecutive_errors. The outer run_loop failure
+                            # handler (~line 1150) increments that counter
+                            # for any non-success result; using the helper
+                            # here would double-count the snapshot error.
+                            result = IterationResult(
+                                status=IterationStatus.ACCOUNTING_FAILED,
+                                error=f"Accounting persistence failed ({acc_err.write_kind}): {acc_err}",
+                                strategy_id=strategy_id,
+                                duration_ms=self._calculate_duration_ms(snapshot_start),
+                            )
+                        else:
+                            logger.error(
+                                "Snapshot accounting persistence failed in non-live mode for %s "
+                                "(write_kind=%s, continuing; pre-prod drift): %s",
+                                strategy_id,
+                                acc_err.write_kind,
+                                acc_err,
+                            )
 
                 # Call callback if provided
                 if iteration_callback:
@@ -1712,6 +1179,26 @@ class StrategyRunner:
                             strategy_id, "ERROR", error_message=str(result.error) if result.error else None
                         )
                 else:
+                    # Recover lifecycle state if we were in an error streak before
+                    # this iteration succeeded. The counter has already been reset to
+                    # 0 inside `run_iteration` via `_record_success`, so we rely on the
+                    # pre-iteration snapshot captured above. Skip the recovery write
+                    # when the same iteration has already transitioned to a terminal
+                    # state (e.g., teardown writes TERMINATED and requests shutdown) —
+                    # otherwise we would clobber that terminal state with RUNNING.
+                    if was_in_error_streak and not self._shutdown_requested and self._terminal_lifecycle_state is None:
+                        self._lifecycle_write_state(strategy_id, "RUNNING")
+                        logger.info(
+                            "Strategy %s recovered after error streak (max_consecutive_errors=%d) "
+                            "- lifecycle state reset to RUNNING",
+                            strategy_id,
+                            self.config.max_consecutive_errors,
+                        )
+                    elif was_in_error_streak:
+                        logger.debug(
+                            "Skipping lifecycle recovery write for %s: shutdown/terminal state active",
+                            strategy_id,
+                        )
                     self._consecutive_errors = 0
                     self._first_error_at = None
                     # Reset emergency guard so a future HALF_OPEN->OPEN relapse can re-fire
@@ -1736,6 +1223,9 @@ class StrategyRunner:
                 elif command == "PAUSE":
                     logger.info("Received PAUSE command for %s", strategy_id)
                     self._lifecycle_write_state(strategy_id, "PAUSED")
+                    self._gateway_update_status(strategy_id, "PAUSED")
+                    # Preserve position snapshot so the dashboard doesn't lose it during pause
+                    self._gateway_heartbeat(strategy_id, positions=self._collect_position_snapshot(strategy))
                     # Wait for RESUME command (send heartbeats so operator sees liveness)
                     while not self._shutdown_requested:
                         self._lifecycle_heartbeat(strategy_id)
@@ -1743,6 +1233,8 @@ class StrategyRunner:
                         if resume_cmd == "RESUME":
                             logger.info("Received RESUME command for %s", strategy_id)
                             self._lifecycle_write_state(strategy_id, "RUNNING")
+                            self._gateway_update_status(strategy_id, "RUNNING")
+                            self._gateway_heartbeat(strategy_id, positions=self._collect_position_snapshot(strategy))
                             break
                         elif resume_cmd == "STOP":
                             logger.info("Received STOP command while paused for %s", strategy_id)
@@ -1855,6 +1347,45 @@ class StrategyRunner:
                 error = getattr(result, "error", "Unknown error") if result else "Unknown error"
                 description = f"{intent_type_str} failed: {error}"
 
+            details: dict[str, Any] = {
+                "intent_type": intent_type_str,
+                "success": success,
+                "gas_used": gas_used,
+            }
+
+            # Enrich details with position/swap data extracted by ResultEnricher
+            # so downstream consumers (teardown, audits, PM dashboard) can recover
+            # position IDs and ranges directly from timeline events without
+            # reparsing receipts. Bug 4 of the 0G DogFooding report (2026-04-16).
+            if success and result is not None:
+                position_id = getattr(result, "position_id", None)
+                if position_id is not None:
+                    # NFT tokenIds can exceed JS's safe-integer range on chains
+                    # with high-throughput NPMs (Solana ALT indices, V4 salt-
+                    # derived IDs). Stringify oversized ints so dashboards
+                    # and webhooks that consume details_json as JSON don't
+                    # silently truncate them — matches the safeguard below
+                    # for liquidity / amount values.
+                    if isinstance(position_id, int) and abs(position_id) >= 2**53:
+                        details["position_id"] = str(position_id)
+                    elif isinstance(position_id, int | str):
+                        details["position_id"] = position_id
+                    else:
+                        details["position_id"] = str(position_id)
+                extracted = getattr(result, "extracted_data", None) or {}
+                for key in ("tick_lower", "tick_upper", "liquidity", "amount0", "amount1"):
+                    value = extracted.get(key)
+                    if value is None:
+                        continue
+                    # liquidity/amount0/amount1 can exceed JSON's safe integer range
+                    details[key] = str(value) if isinstance(value, int) and abs(value) >= 2**53 else value
+                lp_close_data = getattr(result, "lp_close_data", None)
+                if lp_close_data is not None and hasattr(lp_close_data, "to_dict"):
+                    details["lp_close"] = lp_close_data.to_dict()
+                swap_amounts = getattr(result, "swap_amounts", None)
+                if swap_amounts is not None and hasattr(swap_amounts, "to_dict"):
+                    details["swap"] = swap_amounts.to_dict()
+
             event = TimelineEvent(
                 timestamp=datetime.now(UTC),
                 event_type=event_type,
@@ -1862,15 +1393,184 @@ class StrategyRunner:
                 strategy_id=strategy_id,
                 chain=getattr(strategy, "chain", "") or getattr(self.config, "chain", ""),
                 tx_hash=tx_hash,
-                details={
-                    "intent_type": intent_type_str,
-                    "success": success,
-                    "gas_used": gas_used,
-                },
+                details=details,
             )
             add_event(event)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Failed to emit execution timeline event: {e}")
+
+    def _is_live_mode(self) -> bool:
+        """Return True when ledger/snapshot/metrics writes are mandatory.
+
+        Live mode = real execution against a real chain. Dry-run and paper
+        modes may drop writes on failure, but they still log at ERROR so the
+        drift is visible before it reaches production.
+
+        Paper-trading runners are subclasses that set ``config.paper_mode =
+        True`` (checked via ``getattr`` so the base ``RunnerConfig`` doesn't
+        need to know about paper trading). Backtest runners bypass the
+        StrategyRunner entirely.
+        """
+        return derive_execution_mode_from_config(self.config) is ExecutionMode.LIVE
+
+    def _derive_execution_mode(self) -> ExecutionMode:
+        """Tri-state mode label for accounting rows (dry_run / live / paper).
+
+        Centralised so ledger entries, portfolio snapshots, and portfolio
+        metrics all stamp the same value and the runner's mode semantics
+        cannot drift across these surfaces. Returns a ``StrEnum`` so callers
+        that stringify it (e.g. ``entry.execution_mode = mode``) get the
+        bare label back for persistence.
+        """
+        return derive_execution_mode_from_config(self.config)
+
+    async def _write_ledger_entry(
+        self,
+        strategy: StrategyProtocol,
+        intent: AnyIntent,
+        result: Any | None,
+        success: bool,
+        error: str = "",
+    ) -> None:
+        """Write a structured trade record to the transaction ledger.
+
+        VIB-3157: in live mode a persistence failure raises
+        ``AccountingPersistenceError`` so the caller (run_iteration) can halt
+        the cycle and alert the operator. In paper/dry-run mode we log ERROR
+        and continue -- the drift is visible but does not block the loop.
+        """
+        from ..state.exceptions import AccountingPersistenceError
+
+        try:
+            from ..observability.context import get_cycle_id
+            from ..observability.ledger import build_ledger_entry
+
+            cycle_id = get_cycle_id() or ""
+            chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
+            entry = build_ledger_entry(
+                strategy_id=strategy.strategy_id,
+                cycle_id=cycle_id,
+                intent=intent,
+                result=result,
+                chain=chain,
+                success=success,
+                error=error,
+            )
+
+            # Phase 4: stamp deployment_id and execution_mode onto the entry (VIB-2835/2837).
+            # VIB-3157: tri-state (dry_run / live / paper) via the shared
+            # ``derive_execution_mode_from_config`` helper so ledger,
+            # snapshot, and metrics stamping stay in lockstep.
+            deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+            execution_mode = self._derive_execution_mode()
+            entry.deployment_id = deployment_id
+            entry.execution_mode = execution_mode
+
+            # VIB-3157: fail-closed live path. A missing state manager or a
+            # state manager without ledger support in live mode is a
+            # misconfiguration that would let trades land with no durable
+            # accounting record -- exactly the footgun VIB-3157 is closing.
+            # In paper/dry-run we log at ERROR and continue so pre-prod drift
+            # is visible but the loop keeps moving.
+            if not self.state_manager or not hasattr(self.state_manager, "save_ledger_entry"):
+                if self._is_live_mode():
+                    raise AccountingPersistenceError(
+                        write_kind="ledger",
+                        strategy_id=strategy.strategy_id,
+                        message="State manager does not provide save_ledger_entry",
+                    )
+                logger.error(
+                    "Ledger write unavailable in non-live mode for %s "
+                    "(continuing, pre-prod drift; fix before promoting to live)",
+                    strategy.strategy_id,
+                )
+            else:
+                try:
+                    await self.state_manager.save_ledger_entry(entry)
+                except NotImplementedError as nie:
+                    # VIB-3157 known gap (tracked in
+                    # docs/internal/vib-3157-gateway-ledger-followup.md): the
+                    # gateway state manager does not yet implement a
+                    # SaveLedgerEntry RPC. Tighten the swallow to ONLY the
+                    # GatewayStateManager case so unrelated NotImplementedError
+                    # bugs from other backends still escalate as accounting
+                    # failures.
+                    from ..state.gateway_state_manager import GatewayStateManager
+
+                    if isinstance(self.state_manager, GatewayStateManager):
+                        logger.critical(
+                            "KNOWN GAP: ledger write skipped for %s — %s",
+                            strategy.strategy_id,
+                            nie,
+                        )
+                    else:
+                        raise AccountingPersistenceError(
+                            write_kind="ledger",
+                            strategy_id=strategy.strategy_id,
+                            cause=nie,
+                            message=(
+                                "Backend save_ledger_entry raised NotImplementedError outside the known gateway gap"
+                            ),
+                        ) from nie
+
+            # Emit position event for LP/perp intents (Phase 2, VIB-2775)
+            if success and self.state_manager and hasattr(self.state_manager, "save_position_event"):
+                try:
+                    from ..observability.position_events import build_position_event_from_intent
+
+                    pos_event = build_position_event_from_intent(
+                        deployment_id=deployment_id,
+                        intent=intent,
+                        result=result,
+                        ledger_entry_id=entry.id,
+                        chain=chain,
+                    )
+                    if pos_event is not None:
+                        # Phase 4: stamp cycle_id and execution_mode (VIB-2835/2837)
+                        pos_event.cycle_id = cycle_id
+                        pos_event.execution_mode = execution_mode
+                        await self.state_manager.save_position_event(pos_event)
+                        logger.debug(
+                            "Position event %s emitted for %s (position=%s)",
+                            pos_event.event_type,
+                            pos_event.position_type,
+                            pos_event.position_id,
+                        )
+                        # Run PnL attribution on CLOSE events (VIB-2776)
+                        if pos_event.event_type == "CLOSE" and pos_event.position_id:
+                            try:
+                                from ..observability.pnl_attributor import run_attribution_on_close
+
+                                await run_attribution_on_close(self.state_manager, pos_event)
+                            except Exception as attr_err:  # noqa: BLE001
+                                logger.debug("Attribution failed (non-blocking): %s", attr_err)
+                except Exception as pe:  # noqa: BLE001
+                    logger.debug("Failed to emit position event: %s", pe)
+
+            # Signal that this iteration executed a trade — forces snapshot
+            if success:
+                self._iteration_had_trade = True
+        except AccountingPersistenceError:
+            # Live mode: propagate so run_iteration halts the cycle and alerts.
+            # Paper/dry-run: swallow but log ERROR (not debug) so drift is visible.
+            if self._is_live_mode():
+                raise
+            logger.error(
+                "Ledger write failed in non-live mode for %s (continuing, pre-prod drift): "
+                "fix before promoting to live",
+                strategy.strategy_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            # Unexpected failure outside the persistence path (build_ledger_entry
+            # raised, position_event emission re-raised, etc.). Live mode still
+            # escalates -- a trade happened with no durable record.
+            if self._is_live_mode():
+                raise AccountingPersistenceError(
+                    write_kind="ledger",
+                    strategy_id=strategy.strategy_id,
+                    cause=e,
+                ) from e
+            logger.error(f"Failed to write ledger entry (non-live): {e}")
 
     def request_shutdown(self) -> None:
         """Request graceful shutdown of the run loop.
@@ -1880,6 +1580,22 @@ class StrategyRunner:
         """
         logger.info("Shutdown requested for strategy runner")
         self._shutdown_requested = True
+
+    def _request_teardown_failure_shutdown(self, error_message: str) -> None:
+        """Record error terminal state and request shutdown after teardown failure.
+
+        In managed deployments (K8s pods), this writes ERROR state so the platform
+        picks up the failure, then shuts down to free cluster resources.
+
+        In local development, the runner stays alive so the developer can inspect
+        state or retry — matching the circuit breaker pattern (see _check_circuit_breaker).
+        """
+        if not self._is_managed_deployment():
+            logger.warning("Teardown failed in local mode — runner stays alive for debugging: %s", error_message)
+            return
+        self._terminal_lifecycle_state = "ERROR"
+        self._terminal_lifecycle_error_message = error_message
+        self.request_shutdown()
 
     def _is_managed_deployment(self) -> bool:
         """Return True if running as a deployed agent (not local development).
@@ -2079,6 +1795,7 @@ class StrategyRunner:
                 price_oracle=price_oracle,
                 config=compiler_config,
                 gateway_client=gateway_client,
+                chain_wallets=getattr(strategy, "_chain_wallets", None),
             )
 
             state_machine_config = StateMachineConfig(
@@ -2104,6 +1821,17 @@ class StrategyRunner:
         logger.info(
             f"Created IntentStateMachine for {strategy_id} "
             f"(intent={intent.intent_id}, max_retries={self.config.max_retries})"
+        )
+
+        from almanak.framework.observability.emitter import emit_phase_event
+        from almanak.framework.observability.events import StrategyPhase
+
+        emit_phase_event(
+            strategy_id=strategy_id,
+            phase=StrategyPhase.COMPILE,
+            event_type="STATE_CHANGE",
+            description=f"Compiling intent {intent.intent_id} ({getattr(intent, 'intent_type', 'unknown')})",
+            chain=strategy.chain,
         )
 
         # Track the last execution result and context for final reporting
@@ -2145,11 +1873,14 @@ class StrategyRunner:
                 # Execute the action bundle through orchestrator
                 # Resolve protocol for result enrichment (intent is frozen, so we pass via context)
                 resolved_protocol = getattr(intent, "protocol", None) or compiler.default_protocol
+                from almanak.framework.observability.context import get_cycle_id
+
                 execution_context = ExecutionContext(
                     strategy_id=strategy_id,
                     chain=strategy.chain,
                     wallet_address=strategy.wallet_address,
                     correlation_id=intent.intent_id,
+                    cycle_id=get_cycle_id() or "",
                     protocol=resolved_protocol,
                 )
                 last_execution_context = execution_context
@@ -2250,16 +1981,26 @@ class StrategyRunner:
                             execution_result.extracted_data["order_id"] = clob_result.order_id
                         last_execution_result = execution_result
                     else:
-                        # Update native token price for USD gas guard
-                        # tx_risk_config only exists on local ExecutionOrchestrator, not GatewayExecutionOrchestrator
+                        # Update native token price for USD-denominated risk guards
+                        # (max_value_usd, max_gas_cost_usd).
+                        # tx_risk_config only exists on local ExecutionOrchestrator,
+                        # not GatewayExecutionOrchestrator. Reset BEFORE the fetch
+                        # attempt so a missed/failed oracle reliably trips fail-closed
+                        # in the validator instead of reusing the prior cycle's price.
                         tx_risk_cfg = getattr(single_chain_orch, "tx_risk_config", None)
-                        if tx_risk_cfg and tx_risk_cfg.max_gas_cost_usd > 0 and price_oracle:
-                            from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
+                        if tx_risk_cfg is not None and (
+                            tx_risk_cfg.max_gas_cost_usd > 0 or tx_risk_cfg.max_value_usd > 0
+                        ):
+                            tx_risk_cfg.native_token_price_usd = 0.0
+                            if price_oracle:
+                                from almanak.gateway.data.balance.web3_provider import (
+                                    NATIVE_TOKEN_SYMBOLS,
+                                )
 
-                            native_symbol = NATIVE_TOKEN_SYMBOLS.get(strategy.chain.lower(), "ETH")
-                            native_price = price_oracle.get(native_symbol, 0)
-                            if native_price:
-                                tx_risk_cfg.native_token_price_usd = float(native_price)
+                                native_symbol = NATIVE_TOKEN_SYMBOLS.get(strategy.chain.lower(), "ETH")
+                                native_price = price_oracle.get(native_symbol, 0)
+                                if native_price:
+                                    tx_risk_cfg.native_token_price_usd = float(native_price)
 
                         execution_result = await single_chain_orch.execute(
                             action_bundle=step_result.action_bundle,
@@ -2281,6 +2022,22 @@ class StrategyRunner:
 
                     # Set receipt for state machine validation
                     state_machine.set_receipt(receipt)
+
+                    emit_phase_event(
+                        strategy_id=strategy_id,
+                        phase=StrategyPhase.EXECUTE,
+                        event_type="TRANSACTION_CONFIRMED" if execution_result.success else "TRANSACTION_FAILED",
+                        description=f"Execution {'succeeded' if execution_result.success else 'failed'} "
+                        f"(gas={execution_result.total_gas_used})",
+                        chain=strategy.chain,
+                        tx_hash=tx_hash,
+                        details={
+                            "success": execution_result.success,
+                            "gas_used": execution_result.total_gas_used,
+                            "tx_count": len(execution_result.transaction_results),
+                            "error": execution_result.error or "",
+                        },
+                    )
 
                     if execution_result.success:
                         logger.info(
@@ -2395,6 +2152,11 @@ class StrategyRunner:
                         last_execution_result,
                     )
 
+                    # Record slippage-breach trade in ledger (VIB-2402)
+                    await self._write_ledger_entry(
+                        strategy, intent, result=last_execution_result, success=False, error=slippage_error
+                    )
+
                     # Persist state even when circuit breaker fails; on-chain state already changed.
                     if hasattr(strategy, "save_state"):
                         try:
@@ -2413,6 +2175,8 @@ class StrategyRunner:
 
             # Emit timeline event for successful execution
             self._emit_execution_timeline_event(strategy, intent, success=True, result=last_execution_result)
+            # Write structured trade record to transaction ledger (VIB-2402)
+            await self._write_ledger_entry(strategy, intent, result=last_execution_result, success=True)
             if record_metrics:
                 self._record_success(execution_proved=True)
 
@@ -2459,6 +2223,10 @@ class StrategyRunner:
             # Emit timeline event for failed execution
             timeline_result = last_execution_result or SimpleNamespace(error=error_msg)
             self._emit_execution_timeline_event(strategy, intent, success=False, result=timeline_result)
+            # Write failed trade to transaction ledger (VIB-2402)
+            await self._write_ledger_entry(
+                strategy, intent, result=last_execution_result, success=False, error=error_msg
+            )
 
             # Run revert diagnostics only for on-chain execution failures.
             # Skip when no execution was attempted (compilation failure, validation
@@ -2731,8 +2499,8 @@ class StrategyRunner:
                             try:
                                 market.price(token, chain=intent_chain)
                                 fetched_any = True
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.warning(f"Failed to pre-fetch price for {token} on {intent_chain}: {e}")
                 if fetched_any:
                     price_oracle = market.get_price_oracle_dict()
             if price_oracle:
@@ -2922,6 +2690,7 @@ class StrategyRunner:
         failed_step: str | None = None
         error_message: str | None = None
         failed_result = None  # Explicitly track the result of the failed step
+        callback_fired = False  # Track whether on_intent_executed was called for the failing step
 
         for i, intent in enumerate(intents):
             # Skip already-completed steps when resuming
@@ -2962,12 +2731,26 @@ class StrategyRunner:
                 result = await orchestrator.execute(intent_to_execute, price_map=price_map, price_oracle=price_oracle)
             except Exception as e:
                 logger.error(f"Step {step_num} execution failed: {e}")
+                # Notify strategy of failed execution (mirrors _execute_single_chain)
+                if hasattr(strategy, "on_intent_executed"):
+                    try:
+                        strategy.on_intent_executed(intent, success=False, result=None)
+                    except Exception as cb_err:
+                        logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+                callback_fired = True
                 failed_step = f"step-{step_num}"
                 error_message = str(e)
                 break
 
             if not result.success:
                 logger.error(f"Step {step_num} failed: {result.error}")
+                # Notify strategy of failed execution (mirrors _execute_single_chain)
+                if hasattr(strategy, "on_intent_executed"):
+                    try:
+                        strategy.on_intent_executed(intent, success=False, result=result)
+                    except Exception as cb_err:
+                        logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+                callback_fired = True
                 failed_result = result
                 failed_step = f"step-{step_num}"
                 error_message = result.error
@@ -3134,6 +2917,13 @@ class StrategyRunner:
                                     "Bridge normalization failed due to unresolved token metadata: %s",
                                     exc,
                                 )
+                                # Notify strategy of bridge failure (source tx succeeded but bridge normalization failed)
+                                if hasattr(strategy, "on_intent_executed"):
+                                    try:
+                                        strategy.on_intent_executed(intent, success=False, result=result)
+                                    except Exception as cb_err:
+                                        logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+                                callback_fired = True
                                 failed_step = f"step-{step_num}-bridge"
                                 error_message = str(exc)
                                 break
@@ -3156,21 +2946,59 @@ class StrategyRunner:
                                 )
                     else:
                         logger.error(f"Bridge failed: {bridge_status}")
+                        # Notify strategy of bridge failure (source tx succeeded but bridge failed)
+                        if hasattr(strategy, "on_intent_executed"):
+                            try:
+                                strategy.on_intent_executed(intent, success=False, result=result)
+                            except Exception as cb_err:
+                                logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+                        callback_fired = True
                         failed_step = f"step-{step_num}-bridge"
                         error_message = f"Bridge transfer failed: {bridge_status.get('error', 'Unknown')}"
                         break
 
                 except TimeoutError as e:
                     logger.error(f"Bridge timeout: {e}")
+                    # Notify strategy of bridge timeout (source tx succeeded but bridge timed out)
+                    if hasattr(strategy, "on_intent_executed"):
+                        try:
+                            strategy.on_intent_executed(intent, success=False, result=result)
+                        except Exception as cb_err:
+                            logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+                    callback_fired = True
                     failed_step = f"step-{step_num}-bridge"
                     error_message = "Bridge transfer timed out after 5 minutes"
                     break
+
+            # Notify strategy of successful execution (mirrors _execute_single_chain lines 2459-2478)
+            if hasattr(strategy, "on_intent_executed"):
+                try:
+                    strategy.on_intent_executed(intent, success=True, result=result)
+                except Exception as e:
+                    logger.warning(f"Error in on_intent_executed callback: {e}")
+
+            # Save strategy state after successful execution
+            if hasattr(strategy, "save_state"):
+                try:
+                    strategy.save_state()
+                except Exception as e:
+                    logger.warning(f"Error saving strategy state: {e}")
 
             # Save progress after each step completes successfully
             progress.completed_step_index = i
             progress.previous_amount_received = previous_amount_received
             await self._save_execution_progress(strategy_id, progress)
             logger.info(f"Step {step_num}/{len(intents)} completed, progress saved")
+
+        # Ensure strategy is notified of failure even for paths that didn't fire the callback
+        # inline (e.g. source TX verification failures, no-tx_hash, no-RPC-URL).
+        # This single finalization block covers all break exits without per-exit patching.
+        if failed_step and not callback_fired:
+            if hasattr(strategy, "on_intent_executed"):
+                try:
+                    strategy.on_intent_executed(intent, success=False, result=failed_result)
+                except Exception as cb_err:
+                    logger.warning(f"Error in on_intent_executed callback: {cb_err}")
 
         # Build result
         if failed_step:
@@ -3273,102 +3101,8 @@ class StrategyRunner:
             duration_ms=self._calculate_duration_ms(start_time),
         )
 
-    @staticmethod
-    def _bridge_token_resolution_candidates(
-        token_symbol: str | None,
-        bridge_status: dict[str, Any],
-    ) -> list[str]:
-        """Collect token identifiers for bridge amount normalization."""
-        candidates: list[str] = []
-        keys = (
-            "destination_token_address",
-            "destinationTokenAddress",
-            "token_address",
-            "tokenAddress",
-            "destination_token",
-            "destinationToken",
-            "token",
-            "token_symbol",
-        )
-
-        def _append_candidate(value: Any) -> None:
-            if isinstance(value, str) and value.strip():
-                candidates.append(value.strip())
-
-        for key in keys:
-            _append_candidate(bridge_status.get(key))
-
-        route_data = bridge_status.get("route_data")
-        if isinstance(route_data, dict):
-            for key in keys:
-                _append_candidate(route_data.get(key))
-
-        if token_symbol:
-            candidates.append(token_symbol)
-
-        # Preserve first-seen ordering while de-duplicating
-        seen: set[str] = set()
-        deduped: list[str] = []
-        for candidate in candidates:
-            candidate_key = candidate.lower()
-            if candidate_key not in seen:
-                seen.add(candidate_key)
-                deduped.append(candidate)
-        return deduped
-
-    @staticmethod
-    def _normalize_bridge_balance_increase(
-        balance_increase_wei: int | str,
-        destination_chain: str,
-        token_symbol: str | None,
-        bridge_status: dict[str, Any],
-    ) -> tuple[Decimal | None, dict[str, Any]]:
-        """Normalize bridge completion balance increase from wei to token units.
-
-        Returns:
-            (normalized_amount, metadata). If normalization fails, returns
-            (None, metadata) with raw wei preserved for diagnostics.
-        """
-        try:
-            raw_wei = int(balance_increase_wei)
-        except (TypeError, ValueError):
-            return None, {
-                "raw_wei": balance_increase_wei,
-                "destination_chain": destination_chain,
-                "token_symbol": token_symbol,
-                "error": "invalid_balance_increase_wei",
-            }
-
-        from ..data.tokens import get_token_resolver
-        from ..data.tokens.exceptions import TokenNotFoundError
-
-        resolver = get_token_resolver()
-        candidates = StrategyRunner._bridge_token_resolution_candidates(token_symbol, bridge_status)
-        for candidate in candidates:
-            try:
-                resolved = resolver.resolve(candidate, destination_chain)
-                decimals = resolved.decimals
-                normalized = Decimal(raw_wei) / Decimal(10**decimals)
-                return normalized, {
-                    "raw_wei": raw_wei,
-                    "destination_chain": destination_chain,
-                    "token_symbol": token_symbol,
-                    "resolved_from": candidate,
-                    "resolved_address": resolved.address,
-                    "decimals": decimals,
-                }
-            except Exception:
-                continue
-
-        unresolved = token_symbol or (candidates[0] if candidates else "<unknown-token>")
-        raise TokenNotFoundError(
-            token=unresolved,
-            chain=destination_chain,
-            reason=(f"Unable to resolve token decimals for bridge balance normalization (candidates={candidates})"),
-        )
-
     # -------------------------------------------------------------------------
-    # Teardown execution
+    # Teardown execution (delegated to runner_teardown.py)
     # -------------------------------------------------------------------------
 
     async def _execute_teardown(
@@ -3377,639 +3111,102 @@ class StrategyRunner:
         teardown_mode: "TeardownMode",
         start_time: datetime,
     ) -> IterationResult:
-        """Execute teardown, routing through TeardownManager when possible.
+        from .runner_teardown import execute_teardown
 
-        For single-chain strategies, delegates to TeardownManager which provides:
-        - Position-aware loss caps (1-3% based on position size)
-        - Escalating slippage tolerance (tight -> loose with approval gates)
-        - Cancel window (configurable, default 10 seconds)
-        - Post-execution verification (checks positions are actually closed)
-        - State persistence for resumability
-
-        For multi-chain strategies, uses the inline execution path (TeardownManager
-        does not yet support multi-chain orchestration).
-
-        Args:
-            strategy: The strategy to teardown
-            teardown_mode: SOFT (graceful) or HARD (emergency)
-            start_time: When the iteration started
-
-        Returns:
-            IterationResult with teardown status
-        """
-        from ..teardown import get_teardown_state_manager
-
-        strategy_id = strategy.strategy_id
-        manager = get_teardown_state_manager()
-        request = manager.get_active_request(strategy_id)
-
-        # Step T1: Create market snapshot (SAME as normal decide() path)
-        teardown_market = None
-        try:
-            teardown_market = strategy.create_market_snapshot()
-            if hasattr(teardown_market, "get_price_oracle_dict"):
-                logger.debug(
-                    f"Created market snapshot for teardown with prices: "
-                    f"{list(teardown_market.get_price_oracle_dict().keys())}"
-                )
-            else:
-                logger.debug("Created multi-chain market snapshot for teardown")
-        except Exception as e:
-            logger.warning(f"Failed to create market snapshot for teardown: {e}. Continuing without market data.")
-
-        # Step T2: Generate teardown intents WITH market (symmetric with decide(market))
-        try:
-            try:
-                teardown_intents = strategy.generate_teardown_intents(teardown_mode, market=teardown_market)
-            except TypeError as exc:
-                if "unexpected keyword argument" not in str(exc):
-                    raise
-                # Backward compat: old-style signature def generate_teardown_intents(self, mode)
-                logger.debug(f"Strategy {strategy_id} uses old teardown signature (no market param), falling back")
-                teardown_intents = strategy.generate_teardown_intents(teardown_mode)
-        except Exception as e:
-            logger.error(f"Failed to generate teardown intents for {strategy_id}: {e}")
-            if request:
-                manager.mark_failed(strategy_id, error=str(e))
-            return self._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
-
-        if not teardown_intents:
-            logger.info(f"🛑 {strategy_id} teardown complete (no positions to close)")
-            if request:
-                manager.mark_completed(strategy_id, result={"reason": "no_positions"})
-            self.request_shutdown()
-            self._record_success()
-            return IterationResult(
-                status=IterationStatus.TEARDOWN,
-                intent=None,
-                strategy_id=strategy_id,
-                duration_ms=self._calculate_duration_ms(start_time),
-            )
-
-        logger.info(f"🛑 {strategy_id} entering TEARDOWN mode ({len(teardown_intents)} intents to execute)")
-        if request:
-            manager.mark_started(strategy_id, total_positions=len(teardown_intents))
-
-        # Step T2.5: Pre-fetch prices for tokens in teardown intents
-        if teardown_market is not None and hasattr(teardown_market, "price"):
-            try:
-                self._prefetch_teardown_prices(teardown_market, teardown_intents)
-            except Exception as e:
-                logger.warning(f"Failed to pre-fetch teardown prices: {e}")
-
-        # Note: amount="all" resolution is handled lazily inside _execute_intents
-        # (per-intent, just before execution) so staged exits work correctly
-        # (e.g., withdraw then swap uses tokens produced by the earlier step).
-
-        # Step T2.7: If all intents were resolved away, teardown is complete
-        if not teardown_intents:
-            logger.info(f"🛑 {strategy_id} teardown complete (all positions already closed)")
-            if request:
-                manager.mark_completed(strategy_id, result={"reason": "all_balances_zero"})
-            self.request_shutdown()
-            self._lifecycle_write_state(strategy_id, "TERMINATED")
-            self._record_success()
-            return IterationResult(
-                status=IterationStatus.TEARDOWN,
-                intent=None,
-                strategy_id=strategy_id,
-                duration_ms=self._calculate_duration_ms(start_time),
-            )
-
-        # Step T3: Execute teardown intents
-        if self._is_multi_chain:
-            # Multi-chain: use inline path (TeardownManager doesn't support multi-chain yet)
-            result = await self._execute_multi_chain(
-                strategy=strategy,
-                intents=teardown_intents,
-                start_time=start_time,
-                market=teardown_market,
-            )
-            if result.success:
-                result.status = IterationStatus.TEARDOWN
-                logger.info(f"🛑 {strategy_id} teardown complete - shutting down strategy runner")
-                self.request_shutdown()
-                if request:
-                    manager.mark_completed(strategy_id, result={"intents": len(teardown_intents)})
-            else:
-                if request:
-                    manager.mark_failed(strategy_id, error=result.error or "execution failed")
-            return result
-        else:
-            # Single-chain: route through TeardownManager for safety guarantees
-            return await self._execute_teardown_via_manager(
-                strategy=strategy,
-                teardown_intents=teardown_intents,
-                teardown_mode=teardown_mode,
-                teardown_market=teardown_market,
-                start_time=start_time,
-                request=request,
-                state_manager=manager,
-            )
+        return await execute_teardown(self, strategy, teardown_mode, start_time)
 
     async def _execute_teardown_via_manager(
-        self,
-        strategy: StrategyProtocol,
-        teardown_intents: list,
-        teardown_mode: "TeardownMode",
-        teardown_market: Any | None,
-        start_time: datetime,
-        request: Any | None,
-        state_manager: Any,
-    ) -> IterationResult:
-        """Execute single-chain teardown through TeardownManager for full safety.
+        self, strategy, teardown_intents, teardown_mode, teardown_market, start_time, request, state_manager
+    ):
+        from .runner_teardown import execute_teardown_via_manager
 
-        TeardownManager provides safety features that the inline path lacks:
-        - Position-aware loss caps (1-3% based on portfolio size)
-        - Escalating slippage tolerance with operator approval gates
-        - Cancel window for operator intervention
-        - Post-execution verification (checks positions are closed on-chain)
-        - Resumable state persistence
-
-        Falls back to inline sequential execution if TeardownManager cannot
-        be initialized (e.g., incompatible orchestrator type).
-
-        Args:
-            strategy: The strategy to teardown
-            teardown_intents: Pre-resolved teardown intents
-            teardown_mode: SOFT (graceful) or HARD (emergency)
-            teardown_market: Market snapshot (may be None)
-            start_time: When the iteration started
-            request: Active teardown request from state manager
-            state_manager: Teardown state manager for lifecycle tracking
-        """
-        import uuid
-
-        from ..teardown import TeardownMode
-        from ..teardown.teardown_manager import TeardownManager
-
-        strategy_id = strategy.strategy_id
-        mode_str = "graceful" if teardown_mode == TeardownMode.SOFT else "emergency"
-
-        # Build compiler for TeardownManager
-        compiler = self._build_teardown_compiler(strategy, teardown_market)
-        if compiler is None:
-            logger.warning(
-                f"Cannot build compiler for TeardownManager — falling back to inline teardown for {strategy_id}"
-            )
-            return await self._execute_teardown_inline(
-                strategy, teardown_intents, teardown_market, start_time, request, state_manager
-            )
-
-        # Create TeardownManager with safety features
-        teardown_mgr = TeardownManager(
-            orchestrator=self.execution_orchestrator,  # type: ignore[arg-type]
-            compiler=compiler,
-            alert_manager=self.alert_manager,  # type: ignore[arg-type]
+        return await execute_teardown_via_manager(
+            self, strategy, teardown_intents, teardown_mode, teardown_market, start_time, request, state_manager
         )
-
-        # Execute with TeardownManager safety: loss caps, escalating slippage,
-        # cancel window, post-execution verification
-        logger.info(
-            f"🛑 Routing {strategy_id} teardown through TeardownManager "
-            f"(mode={mode_str}, intents={len(teardown_intents)})"
-        )
-
-        try:
-            # Get positions for safety validation (loss caps).
-            # If positions can't be fetched, fall back to inline execution —
-            # we must NOT pass an empty portfolio through safety validation
-            # as it would trivially pass loss cap checks (3% of $0 = $0).
-            try:
-                positions = strategy.get_open_positions()
-            except Exception as pos_err:
-                logger.warning(
-                    f"Cannot fetch positions for safety validation — "
-                    f"falling back to inline teardown for {strategy_id}: {pos_err}"
-                )
-                return await self._execute_teardown_inline(
-                    strategy, teardown_intents, teardown_market, start_time, request, state_manager
-                )
-
-            # Safety validation: check loss caps before execution
-            validation = teardown_mgr.safety_guard.validate_teardown_request(positions, teardown_mode)
-            if not validation.all_passed:
-                logger.error(f"🛑 Teardown safety validation failed: {validation.blocked_reason}")
-                if request:
-                    state_manager.mark_failed(
-                        strategy_id, error=f"Safety validation failed: {validation.blocked_reason}"
-                    )
-                return self._create_error_result(
-                    strategy_id,
-                    IterationStatus.STRATEGY_ERROR,
-                    f"Teardown safety validation failed: {validation.blocked_reason}",
-                    start_time,
-                )
-
-            # Persist state for resumability
-            teardown_id = f"td_{uuid.uuid4().hex[:12]}"
-            teardown_state = await teardown_mgr._persist_state(
-                teardown_id=teardown_id,
-                strategy=strategy,  # type: ignore[arg-type]
-                mode=teardown_mode,
-                intents=teardown_intents,
-            )
-
-            # Run cancel window — gives operator time to abort
-            cancel_result = await teardown_mgr.cancel_window.run_cancel_window(
-                teardown_id=teardown_id,
-                is_auto_mode=True,
-            )
-            if cancel_result.was_cancelled:
-                logger.info(f"🛑 Teardown {teardown_id} cancelled during window")
-                self._record_success()
-                return IterationResult(
-                    status=IterationStatus.TEARDOWN,
-                    intent=None,
-                    strategy_id=strategy_id,
-                    duration_ms=self._calculate_duration_ms(start_time),
-                )
-
-            # Update state to EXECUTING after cancel window
-            from ..teardown.models import TeardownStatus
-
-            teardown_state.status = TeardownStatus.EXECUTING
-            if teardown_mgr.state_manager:
-                await teardown_mgr.state_manager.save_teardown_state(teardown_state)
-
-            # Extract price oracle for accurate compilation during execution.
-            # Do NOT use `or None` — an empty dict {} should stay as-is,
-            # not collapse to None (which triggers placeholder prices).
-            price_oracle = None
-            if teardown_market is not None and hasattr(teardown_market, "get_price_oracle_dict"):
-                fetched = teardown_market.get_price_oracle_dict()
-                price_oracle = fetched if fetched is not None else None
-            if not price_oracle:
-                price_oracle = self._get_fallback_teardown_prices(teardown_market)
-
-            # Execute intents with escalating slippage
-            teardown_result = await teardown_mgr._execute_intents(
-                teardown_id=teardown_state.teardown_id,
-                strategy=strategy,  # type: ignore[arg-type]
-                intents=teardown_intents,
-                positions=positions,
-                mode=teardown_mode,
-                teardown_state=teardown_state,
-                is_auto_mode=True,
-                price_oracle=price_oracle,
-                market=teardown_market,
-            )
-
-            # Post-execution verification: check positions are actually closed.
-            # Fail closed: if verification raises, treat teardown as failed to
-            # avoid reporting success while positions may still be open.
-            try:
-                positions_closed = await teardown_mgr._verify_closure(strategy)  # type: ignore[arg-type]
-                if not positions_closed:
-                    # Log warning but don't fail — some strategies have advisory
-                    # get_open_positions() that doesn't reflect on-chain state.
-                    # Matches TeardownManager.execute() which also doesn't fail on this.
-                    logger.warning(
-                        f"Post-teardown verification: {strategy_id} still reports open positions "
-                        f"(may be advisory — check strategy's get_open_positions())"
-                    )
-            except Exception as verify_err:
-                logger.error(f"Post-teardown verification failed: {verify_err}")
-                if request:
-                    state_manager.mark_failed(strategy_id, error=f"Post-teardown verification failed: {verify_err}")
-                return self._create_error_result(
-                    strategy_id,
-                    IterationStatus.STRATEGY_ERROR,
-                    f"Post-teardown verification failed: {verify_err}",
-                    start_time,
-                )
-
-            # Send completion alert
-            if teardown_mgr.alert_manager and teardown_result.success:
-                try:
-                    await teardown_mgr.alert_manager.send_teardown_complete(teardown_result)
-                except Exception as alert_err:
-                    logger.warning(f"Failed to send teardown completion alert: {alert_err}")
-
-            # Clean up persisted state on success
-            if teardown_mgr.state_manager and teardown_result.success:
-                try:
-                    await teardown_mgr.state_manager.delete_teardown_state(teardown_id)
-                except Exception as cleanup_err:
-                    logger.warning(f"Failed to clean up teardown state: {cleanup_err}")
-
-        except Exception as e:
-            logger.error(f"🛑 TeardownManager execution failed for {strategy_id}: {e}")
-            if request:
-                state_manager.mark_failed(strategy_id, error=str(e))
-            return self._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
-
-        # Map TeardownResult -> IterationResult
-        if teardown_result.success:
-            logger.info(
-                f"🛑 {strategy_id} teardown complete via TeardownManager "
-                f"({teardown_result.intents_succeeded}/{teardown_result.intents_total} intents, "
-                f"{teardown_result.duration_seconds:.1f}s)"
-            )
-            self.request_shutdown()
-            self._lifecycle_write_state(strategy_id, "TERMINATED")
-            if request:
-                state_manager.mark_completed(
-                    strategy_id,
-                    result={
-                        "intents": teardown_result.intents_succeeded,
-                        "mode": mode_str,
-                        "duration_s": teardown_result.duration_seconds,
-                    },
-                )
-            self._record_success()
-            return IterationResult(
-                status=IterationStatus.TEARDOWN,
-                intent=None,
-                strategy_id=strategy_id,
-                duration_ms=self._calculate_duration_ms(start_time),
-            )
-        else:
-            logger.warning(f"🛑 {strategy_id} teardown incomplete via TeardownManager: {teardown_result.error}")
-            if request:
-                state_manager.mark_failed(strategy_id, error=teardown_result.error or "teardown failed")
-            return IterationResult(
-                status=IterationStatus.STRATEGY_ERROR,
-                error=teardown_result.error,
-                strategy_id=strategy_id,
-                duration_ms=self._calculate_duration_ms(start_time),
-            )
 
     async def _execute_teardown_inline(
-        self,
-        strategy: StrategyProtocol,
-        teardown_intents: list,
-        teardown_market: Any | None,
-        start_time: datetime,
-        request: Any | None,
-        state_manager: Any,
-    ) -> IterationResult:
-        """Fallback inline teardown execution (no TeardownManager safety features).
+        self, strategy, teardown_intents, teardown_market, start_time, request, state_manager
+    ):
+        from .runner_teardown import execute_teardown_inline
 
-        Used when TeardownManager cannot be initialized (e.g., incompatible
-        orchestrator type or missing compiler dependencies).
-
-        Executes teardown intents sequentially via _execute_single_chain.
-        """
-        strategy_id = strategy.strategy_id
-
-        all_success = True
-        last_result = None
-        for i, intent in enumerate(teardown_intents):
-            logger.info(f"🛑 Executing teardown intent {i + 1}/{len(teardown_intents)}: {intent.intent_type.value}")
-
-            # Resolve amount="all" to actual wallet balance before execution.
-            # Only resolve for intents with a token balance field (e.g., SwapIntent.from_token).
-            # Intents like vault_redeem(shares="all") are handled natively by the compiler.
-            intent_to_execute = intent
-            if Intent.has_chained_amount(intent):
-                balance_token = (
-                    getattr(intent, "from_token", None)
-                    or getattr(intent, "token", None)
-                    or getattr(intent, "token_in", None)
-                )
-                if balance_token and teardown_market is not None:
-                    # Resolve balance — pass chain for multi-chain market snapshots
-                    intent_chain = getattr(intent, "chain", None)
-                    try:
-                        if intent_chain:
-                            bal = teardown_market.balance(balance_token, intent_chain)
-                        else:
-                            bal = teardown_market.balance(balance_token)
-                    except TypeError:
-                        # Single-chain MarketSnapshot doesn't accept chain param
-                        bal = teardown_market.balance(balance_token)
-                    except Exception as e:  # noqa: BLE001
-                        logger.error(
-                            f"🛑 Teardown intent {i + 1}: failed to resolve balance for {balance_token}: {e}. "
-                            f"Token may be missing from the registry. Position may remain open."
-                        )
-                        all_success = False
-                        last_result = IterationResult(
-                            status=IterationStatus.COMPILATION_FAILED,
-                            intent=intent,
-                            error=f"Cannot resolve amount='all' for {balance_token}: {e}",
-                            strategy_id=strategy_id,
-                            duration_ms=self._calculate_duration_ms(start_time),
-                        )
-                        break
-                    # MarketSnapshot.balance() returns Decimal; IntentStrategy.balance() returns TokenBalance
-                    balance_value = bal.balance if hasattr(bal, "balance") else bal
-                    if balance_value <= 0:
-                        logger.info(
-                            f"🛑 Teardown intent {i + 1}: {balance_token} balance is 0, skipping (already closed)"
-                        )
-                        continue
-                    intent_to_execute = Intent.set_resolved_amount(intent, balance_value)
-                    logger.info(f"🛑 Resolved amount='all' for {balance_token}: {balance_value}")
-                elif balance_token and teardown_market is None:
-                    # Have a token to resolve but no market — log warning, let compiler try
-                    logger.warning(
-                        f"🛑 Teardown intent {i + 1}: amount='all' for {balance_token} but no market context. "
-                        f"Passing to compiler as-is — compilation may fail."
-                    )
-                else:
-                    # No token field — let compiler handle natively (e.g., shares="all")
-                    logger.debug(f"🛑 Teardown intent {i + 1}: no token field, passing to compiler as-is")
-
-            result = await self._execute_single_chain(
-                strategy=strategy,
-                intent=intent_to_execute,
-                start_time=start_time,
-                total_intents=1,
-                market=teardown_market,
-            )
-            last_result = result
-            if not result.success:
-                all_success = False
-                logger.error(f"🛑 Teardown intent {i + 1} failed: {result.error}")
-                break  # Stop on first failure
-
-        if last_result:
-            if all_success:
-                last_result.status = IterationStatus.TEARDOWN
-                logger.info(f"🛑 {strategy_id} teardown complete - shutting down strategy runner")
-                self.request_shutdown()
-                self._lifecycle_write_state(strategy_id, "TERMINATED")
-                self._record_success()
-                if request:
-                    state_manager.mark_completed(strategy_id, result={"intents": len(teardown_intents)})
-            else:
-                logger.warning(f"🛑 {strategy_id} teardown incomplete - manual intervention may be required")
-                if request:
-                    state_manager.mark_failed(strategy_id, error=last_result.error or "execution failed")
-            return last_result
-
-        # Edge case: no intents executed (all positions already closed)
-        logger.info(f"🛑 {strategy_id} teardown: all positions already closed, shutting down")
-        self.request_shutdown()
-        self._lifecycle_write_state(strategy_id, "TERMINATED")
-        self._record_success()
-        if request:
-            state_manager.mark_completed(strategy_id, result={"reason": "all_positions_already_closed"})
-        return IterationResult(
-            status=IterationStatus.TEARDOWN,
-            intent=None,
-            strategy_id=strategy_id,
-            duration_ms=self._calculate_duration_ms(start_time),
+        return await execute_teardown_inline(
+            self, strategy, teardown_intents, teardown_market, start_time, request, state_manager
         )
 
-    def _build_teardown_compiler(
-        self,
-        strategy: StrategyProtocol,
-        market: Any | None,
-    ) -> "IntentCompiler | None":
-        """Build an IntentCompiler for TeardownManager teardown execution.
+    def _build_teardown_compiler(self, strategy, market):
+        from .runner_teardown import build_teardown_compiler
 
-        Returns None if compiler cannot be built (e.g., missing RPC access).
-        """
-        from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
-
-        gateway_client = None
-        rpc_url = None
-
-        if isinstance(self.execution_orchestrator, GatewayExecutionOrchestrator):
-            gateway_client = self.execution_orchestrator._client
-        else:
-            rpc_url = getattr(self.execution_orchestrator, "rpc_url", None)
-
-        # Extract prices from market snapshot.
-        # IMPORTANT: do NOT convert {} to None via `or None` — an empty dict
-        # is distinct from None.  With None the compiler falls back to $1
-        # placeholder prices, producing wildly wrong slippage calculations
-        # and silent None action bundles on mainnet (VIB-1386..1391).
-        fetched: dict[str, Decimal] | None = None
-        if market is not None and hasattr(market, "get_price_oracle_dict"):
-            fetched = market.get_price_oracle_dict()
-        # Merge fallback prices (stablecoins + major tokens) into the fetched
-        # oracle.  This ensures partially-populated caches (e.g. only USDC)
-        # still get WETH/WBTC fallback prices instead of $1 placeholders.
-        fallback = self._get_fallback_teardown_prices(market)
-        merged = {**(fallback or {}), **(fetched if fetched is not None else {})}
-        price_oracle = merged if merged else None
-
-        has_prices = bool(price_oracle)
-        if not has_prices:
-            logger.warning(
-                "No token prices available for teardown compiler — "
-                "compilation will use placeholder prices ($1 for all tokens). "
-                "This is likely a gateway connectivity issue."
-            )
-
-        try:
-            compiler_config = IntentCompilerConfig(
-                allow_placeholder_prices=not has_prices,
-            )
-            return IntentCompiler(
-                chain=strategy.chain,
-                wallet_address=strategy.wallet_address,
-                rpc_url=rpc_url,
-                price_oracle=price_oracle,
-                config=compiler_config,
-                gateway_client=gateway_client,
-            )
-        except Exception as e:
-            logger.warning(f"Failed to build teardown compiler: {e}")
-            return None
+        return build_teardown_compiler(self, strategy, market)
 
     @staticmethod
-    def _prefetch_teardown_prices(market: Any, intents: list) -> None:
-        """Eagerly fetch prices for tokens referenced in teardown intents.
+    def _prefetch_teardown_prices(market, intents):
+        from .runner_teardown import prefetch_teardown_prices
 
-        MarketSnapshot uses lazy loading — prices only populate when market.price()
-        is called. During teardown, generate_teardown_intents() typically doesn't call
-        market.price(), so get_price_oracle_dict() returns {} until this method
-        pre-populates the cache with real prices for the teardown tokens.
+        prefetch_teardown_prices(market, intents)
 
-        Teardown intents often reference tokens by address (e.g. 0xdefa1d...) rather
-        than symbol. market.price() expects a symbol, so we resolve addresses to
-        symbols first using the token resolver. Without this, tokens like ALMANAK
-        (not in CoinGecko/Chainlink) fail price resolution during teardown.
+    @staticmethod
+    def _get_fallback_teardown_prices(market):
+        from .runner_teardown import get_fallback_teardown_prices
+
+        return get_fallback_teardown_prices(market)
+
+    def _inject_simulated_balances(self, market, strategy):
+        from .runner_teardown import inject_simulated_balances
+
+        inject_simulated_balances(self, market, strategy)
+
+    async def _pre_warm_prices(self, market, strategy) -> None:
+        """Pre-warm the market snapshot's price cache before decide().
+
+        On cold Anvil forks, gateway price fetches can take 15-30s each.
+        By fetching prices BEFORE the decide() timeout starts, the
+        strategy's market.price() calls hit cache instead of the gateway.
+
+        Uses the strategy's _get_tracked_tokens() to discover which tokens
+        the strategy needs. Failures are silently ignored — decide() will
+        still try to fetch prices if pre-warming misses or fails.
+
+        The entire pre-warm phase is capped at 60s to prevent stalled
+        gateway calls from blocking the iteration indefinitely.
         """
-        token_attrs = ("from_token", "to_token", "token", "collateral_token", "borrow_token", "token_in")
-        tokens: set[str] = set()
-        for intent in intents:
-            for attr in token_attrs:
-                val = getattr(intent, attr, None)
-                if val and isinstance(val, str):
-                    tokens.add(val)
+        try:
+            await asyncio.wait_for(self._do_pre_warm_prices(market, strategy), timeout=60.0)
+        except TimeoutError:
+            logger.warning("Price pre-warming timed out after 60s — proceeding to decide()")
+        except Exception as e:
+            logger.debug(f"Price pre-warming failed: {e}")
+
+    async def _do_pre_warm_prices(self, market, strategy) -> None:
+        """Inner implementation of price pre-warming (called with a timeout wrapper)."""
+        tokens: list[str] = []
+        if hasattr(strategy, "_get_tracked_tokens"):
+            try:
+                tokens = strategy._get_tracked_tokens()
+            except Exception as e:
+                logger.debug(f"Failed to get tracked tokens for pre-warming: {e}")
 
         if not tokens:
             return
 
-        # Resolve addresses to symbols so market.price() can look them up.
-        # market.price() expects symbols (e.g. "ALMANAK"), not addresses.
-        chain = getattr(market, "_chain", None) or getattr(market, "chain", None)
-        address_to_symbol: dict[str, str] = {}
-        if chain:
+        logger.debug(f"Pre-warming price cache for {len(tokens)} tokens: {tokens}")
+        # Sequential iteration is intentional — _price_cache is not thread-safe
+        for token in tokens:
             try:
-                from almanak.framework.data.tokens import get_token_resolver
-
-                resolver = get_token_resolver()
-                for token in tokens:
-                    if token.startswith("0x") and len(token) == 42:
-                        try:
-                            resolved = resolver.resolve(token, chain, log_errors=False, skip_gateway=True)
-                            address_to_symbol[token] = resolved.symbol
-                        except Exception as e:
-                            logger.debug(f"Could not resolve teardown token address {token} to symbol: {e}")
+                await asyncio.to_thread(market.price, token)
             except Exception as e:
-                logger.debug(f"Token resolver unavailable for teardown prefetch: {e}")
-
-        fetched = []
-        for token in sorted(tokens):
-            # Try the symbol if we resolved the address, otherwise try the raw value
-            symbol = address_to_symbol.get(token, token)
-            try:
-                market.price(symbol)
-                fetched.append(symbol)
-            except Exception:
-                # If symbol lookup failed and we have the original address, try that too
-                if symbol != token:
-                    try:
-                        market.price(token)
-                        fetched.append(token)
-                    except Exception:
-                        logger.debug(f"Could not pre-fetch price for teardown token {token} (symbol={symbol})")
-                else:
-                    logger.debug(f"Could not pre-fetch price for teardown token {token}")
-
-        if fetched:
-            logger.info(f"Pre-fetched {len(fetched)} teardown prices: {fetched}")
+                logger.debug(f"Price pre-warm failed for {token}: {e}")
 
     @staticmethod
-    def _get_fallback_teardown_prices(market: Any) -> dict[str, Decimal] | None:
-        """Build a minimal fallback price oracle when the market snapshot has no cached prices.
+    def _bridge_token_resolution_candidates(token_symbol, bridge_status):
+        from .runner_teardown import bridge_token_resolution_candidates
 
-        This prevents the compiler from using $1 placeholder prices for ALL tokens
-        on mainnet, which causes wildly wrong slippage calculations and silent
-        compilation failures (None action bundles).
+        return bridge_token_resolution_candidates(token_symbol, bridge_status)
 
-        Returns a dict with at least stablecoin prices, or None if nothing can be
-        determined.
-        """
-        # Start with stablecoin fallbacks (always ~$1, safe to assume)
-        fallback: dict[str, Decimal] = {
-            "USDC": Decimal("1"),
-            "USDT": Decimal("1"),
-            "DAI": Decimal("1"),
-            "USDC.e": Decimal("1"),
-            "USDbC": Decimal("1"),
-        }
+    @staticmethod
+    def _normalize_bridge_balance_increase(balance_increase_wei, destination_chain, token_symbol, bridge_status):
+        from .runner_teardown import normalize_bridge_balance_increase
 
-        # Try to get real prices from the market one more time — the gateway
-        # may have recovered since the prefetch attempt.
-        if market is not None and hasattr(market, "price"):
-            for symbol in ("ETH", "WETH", "WBTC", "AVAX", "WAVAX", "MATIC", "WMATIC"):
-                try:
-                    price = market.price(symbol)
-                    if price and price > 0:
-                        fallback[symbol] = price
-                except Exception as exc:
-                    logger.warning("Could not fetch fallback teardown price for %s: %s", symbol, exc)
-
-        # If we only have stablecoins, still return — it's better than $1 for everything
-        return fallback if fallback else None
+        return normalize_bridge_balance_increase(balance_increase_wei, destination_chain, token_symbol, bridge_status)
 
     def _create_error_result(
         self,
@@ -4031,463 +3228,73 @@ class StrategyRunner:
             duration_ms=self._calculate_duration_ms(start_time),
         )
 
-    async def _reconcile_post_execution_balances(
-        self,
-        strategy: StrategyProtocol,
-        intent: AnyIntent,
-        execution_result: ExecutionResult | None,
-    ) -> dict[str, Any] | None:
-        """Verify post-execution token balances match intent expectations.
+    async def _reconcile_post_execution_balances(self, strategy, intent, execution_result):
+        from .runner_state import reconcile_post_execution_balances
 
-        After a successful on-chain execution, queries actual balances and
-        compares with expected token flow direction. Returns a reconciliation
-        dict with results, or None if reconciliation couldn't be performed.
-
-        This is a safety net: even if the transaction receipt looks fine,
-        the on-chain balance should reflect the expected token movements.
-        """
-        try:
-            # Extract tokens from the intent
-            tokens = self._extract_intent_tokens(intent)
-            if not tokens:
-                return None
-
-            # Query current balances for involved tokens
-            post_balances: dict[str, Decimal] = {}
-            for token_symbol in tokens:
-                try:
-                    bal = await self.balance_provider.get_balance(token_symbol)
-                    post_balances[token_symbol] = bal.balance
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("Balance reconciliation: failed to fetch %s balance: %s", token_symbol, exc)
-                    # Balance query failures are non-fatal for reconciliation
-                    continue
-
-            if not post_balances:
-                return None
-
-            # Build reconciliation report
-            recon: dict[str, Any] = {
-                "tokens_checked": list(post_balances.keys()),
-                "post_balances": {k: str(v) for k, v in post_balances.items()},
-                "warnings": [],
-            }
-
-            # For swaps, verify directional correctness using enriched swap_amounts
-            if execution_result and execution_result.swap_amounts:
-                sa = execution_result.swap_amounts
-                if sa.amount_out_decimal is not None and sa.amount_out_decimal <= 0:
-                    recon["warnings"].append(f"Swap output amount is zero or negative: {sa.amount_out_decimal}")
-                if sa.amount_in_decimal is not None and sa.amount_in_decimal <= 0:
-                    recon["warnings"].append(f"Swap input amount is zero or negative: {sa.amount_in_decimal}")
-
-            if recon["warnings"]:
-                logger.warning(
-                    "Balance reconciliation warnings for %s: %s",
-                    strategy.strategy_id,
-                    recon["warnings"],
-                )
-
-            return recon
-
-        except Exception as e:
-            logger.debug(f"Balance reconciliation skipped: {e}")
-            return None
+        return await reconcile_post_execution_balances(self, strategy, intent, execution_result)
 
     @staticmethod
-    def _extract_intent_tokens(intent: AnyIntent) -> list[str]:
-        """Extract token symbols involved in an intent."""
-        tokens: list[str] = []
-        # SwapIntent
-        if hasattr(intent, "from_token") and hasattr(intent, "to_token"):
-            tokens.extend([intent.from_token, intent.to_token])
-        # LP intents
-        elif hasattr(intent, "token0") and hasattr(intent, "token1"):
-            tokens.extend([intent.token0, intent.token1])
-        # Supply/Borrow intents
-        elif hasattr(intent, "token"):
-            tokens.append(intent.token)
-        return tokens
+    def _extract_intent_tokens(intent):
+        from .runner_state import extract_intent_tokens
+
+        return extract_intent_tokens(intent)
 
     def _record_success(self, *, execution_proved: bool = False) -> None:
-        """Record a successful iteration in metrics and circuit breaker.
+        from .runner_state import record_success
 
-        Args:
-            execution_proved: True when an actual on-chain execution succeeded.
-                Only execution-proved successes count toward closing a HALF_OPEN
-                circuit breaker, so HOLD/DRY_RUN cannot prematurely close the
-                breaker without proving the execution path works.
-        """
-        self._total_iterations += 1
-        self._successful_iterations += 1
-        self._consecutive_errors = 0
-        if self._circuit_breaker is not None and execution_proved:
-            self._circuit_breaker.record_success()
+        record_success(self, execution_proved=execution_proved)
 
     def _calculate_duration_ms(self, start_time: datetime) -> float:
-        """Calculate duration in milliseconds since start_time."""
-        elapsed = datetime.now(UTC) - start_time
-        return elapsed.total_seconds() * 1000
+        from .runner_state import calculate_duration_ms
 
-    async def _detect_stuck_and_alert(self, strategy: StrategyProtocol, result: IterationResult) -> None:
-        """Run stuck detection on a failed iteration and generate an OperatorCard if stuck.
+        return calculate_duration_ms(self, start_time)
 
-        Lazy-initializes StuckDetector and OperatorCardGenerator on first call to
-        avoid import overhead on every iteration.
+    async def _detect_stuck_and_alert(self, strategy, result):
+        from .runner_state import detect_stuck_and_alert
 
-        Args:
-            strategy: The strategy that failed
-            result: The failed iteration result
-        """
-        try:
-            # Lazy import and init to avoid overhead on the happy path
-            if self._stuck_detector is None:
-                from ..services.stuck_detector import StuckDetector
+        await detect_stuck_and_alert(self, strategy, result)
 
-                self._stuck_detector = StuckDetector(emit_events=True)
+    def _emit_iteration_summary(self, result, chain=None):
+        from .runner_state import emit_iteration_summary
 
-            if self._operator_card_generator is None:
-                from ..services.operator_card_generator import OperatorCardGenerator
+        emit_iteration_summary(self, result, chain)
 
-                self._operator_card_generator = OperatorCardGenerator()
+    async def _is_strategy_paused(self, strategy_id):
+        from .runner_state import is_strategy_paused
 
-            from ..services.stuck_detector import StrategySnapshot
+        return await is_strategy_paused(self, strategy_id)
 
-            # Build a lightweight snapshot from available runner state
-            state_entered_at = self._first_error_at or datetime.now(UTC)
-            snapshot = StrategySnapshot(
-                strategy_id=strategy.strategy_id,
-                chain=getattr(strategy, "chain", "unknown"),
-                current_state=result.status.value,
-                state_entered_at=state_entered_at,
-                pending_transactions=[],
-                circuit_breaker_triggered=(
-                    self._circuit_breaker is not None and self._circuit_breaker.state.value != "closed"
-                ),
-            )
+    async def _update_state(self, strategy_id, result, strategy=None):
+        from .runner_state import update_state
 
-            detection = self._stuck_detector.detect_stuck(snapshot)
-            if not detection.is_stuck:
-                return
+        await update_state(self, strategy_id, result, strategy)
 
-            logger.warning(
-                "StuckDetector: %s is stuck (reason=%s, duration=%.0fs)",
-                strategy.strategy_id,
-                detection.reason.value if detection.reason else "unknown",
-                detection.time_in_state_seconds,
-            )
+    async def _persist_copy_trading_state(self, strategy_id, activity_provider):
+        from .runner_state import persist_copy_trading_state
 
-            # Generate OperatorCard
-            from ..services.operator_card_generator import ErrorContext, StrategyState
+        await persist_copy_trading_state(self, strategy_id, activity_provider)
 
-            total_value, available_balance = self._query_portfolio_value(strategy)
-            strategy_state = StrategyState(
-                strategy_id=strategy.strategy_id,
-                status="stuck",
-                total_value_usd=total_value,
-                available_balance_usd=available_balance,
-                stuck_since=state_entered_at,
-            )
-            error_context = ErrorContext(
-                error_type=result.status.value,
-                error_message=result.error or "unknown",
-            )
-            card = self._operator_card_generator.generate_card(
-                strategy_state=strategy_state,
-                error_context=error_context,
-            )
+    async def _persist_vault_state(self, strategy_id, vault_state_dict, vault_state_key):
+        from .runner_state import persist_vault_state
 
-            # Route card to AlertManager
-            if self.alert_manager is not None:
-                try:
-                    await self.alert_manager.send_alert(card)
-                except Exception as alert_err:
-                    logger.debug("Failed to send stuck alert (non-fatal): %s", alert_err)
+        await persist_vault_state(self, strategy_id, vault_state_dict, vault_state_key)
 
-        except Exception as e:
-            # Stuck detection is non-fatal — never block the runner
-            logger.debug("Stuck detection failed (non-fatal): %s", e)
+    async def _capture_portfolio_snapshot(self, strategy, iteration_number):
+        from .runner_state import capture_portfolio_snapshot
 
-    def _emit_iteration_summary(self, result: IterationResult, chain: str | None = None) -> None:
-        """Emit a structured iteration_summary log record for JSONL analysis.
+        # Pass trade flag to force snapshot on trade iterations (bypass throttle).
+        # Only clear the flag after successful persistence so a transient
+        # snapshot failure doesn't lose the forced-snapshot opportunity.
+        force = self._iteration_had_trade
+        result = await capture_portfolio_snapshot(self, strategy, iteration_number, force_snapshot=force)
+        if result is not None:
+            self._iteration_had_trade = False
+        return result
 
-        This provides a single, machine-readable record per iteration containing
-        all key fields needed for post-hoc analysis by AI agents or dashboards.
-        """
-        # Extract intent info
-        intent_type = None
-        intents_serialized: list[dict[str, Any]] = []
-        hold_reason_code: str | None = None
-        hold_reason: str | None = None
-        if result.intent:
-            intent_type = result.intent.intent_type.value if hasattr(result.intent, "intent_type") else None
-            try:
-                intents_serialized = [result.intent.serialize()] if hasattr(result.intent, "serialize") else []
-            except Exception:  # noqa: BLE001
-                logger.debug("Failed to serialize intent for iteration_summary", exc_info=True)
-            # Extract HOLD reason fields
-            if isinstance(result.intent, HoldIntent):
-                hold_reason = result.intent.reason
-                hold_reason_code = result.intent.reason_code
+    async def _update_portfolio_metrics(self, strategy_id, snapshot):
+        from .runner_state import update_portfolio_metrics
 
-        # Extract execution info
-        tx_hashes: list[str] = []
-        txs_planned = 0
-        txs_sent = 0
-        gas_used = 0
-        if result.execution_result:
-            er = result.execution_result
-            if hasattr(er, "transaction_results") and er.transaction_results:
-                tx_hashes = [tr.tx_hash for tr in er.transaction_results if hasattr(tr, "tx_hash") and tr.tx_hash]
-                txs_sent = len(tx_hashes)
-            if hasattr(er, "tx_hashes") and er.tx_hashes:
-                tx_hashes = tx_hashes or er.tx_hashes
-                txs_sent = txs_sent or len(er.tx_hashes)
-            # txs_planned: count from action bundle if available
-            if hasattr(er, "receipts"):
-                txs_planned = max(txs_planned, len(er.receipts))
-            txs_planned = max(txs_planned, txs_sent)
-            gas_used = getattr(er, "total_gas_used", 0) or 0
-
-        # Extract reconciliation status (tri-state: None=unchecked, True=clean, False=mismatch)
-        reconciliation_ok: bool | None = None
-        if result.balance_reconciliation is not None:
-            warnings = result.balance_reconciliation.get("warnings", [])
-            reconciliation_ok = len(warnings) == 0
-
-        logger.info(
-            "iteration_summary",
-            extra={
-                "event_type": "iteration_summary",
-                "strategy_id": result.strategy_id,
-                "chain": chain,
-                "iteration": self._total_iterations,
-                "decision": intent_type,
-                "intents": intents_serialized,
-                "dry_run": self.config.dry_run,
-                "txs_planned": txs_planned,
-                "txs_sent": txs_sent,
-                "tx_hashes": tx_hashes,
-                "gas_used": gas_used,
-                "status": result.status.value,
-                "duration_ms": round(result.duration_ms, 1),
-                "hold_reason": hold_reason,
-                "hold_reason_code": hold_reason_code,
-                "reconciliation_ok": reconciliation_ok,
-                "error": result.error,
-            },
-        )
-
-    async def _is_strategy_paused(self, strategy_id: str) -> tuple[bool, str | None]:
-        """Check persisted control state to determine if strategy is paused."""
-        try:
-            state_obj = await self.state_manager.load_state(strategy_id)
-        except Exception as e:  # noqa: BLE001
-            # Fail-open by design: if state is temporarily unavailable, continue strategy execution.
-            logger.warning("Unable to load pause state for %s; continuing as unpaused: %s", strategy_id, e)
-            return False, None
-
-        if state_obj is None or not isinstance(state_obj.state, dict):
-            return False, None
-
-        state = state_obj.state
-        if not bool(state.get("is_paused", False)):
-            return False, None
-
-        reason = state.get("pause_reason")
-        return True, str(reason) if isinstance(reason, str) and reason else None
-
-    async def _update_state(
-        self,
-        strategy_id: str,
-        result: IterationResult,
-    ) -> None:
-        """Update persisted state after an iteration."""
-        try:
-            # Try to load current state, create new if not found
-            try:
-                state = await self.state_manager.load_state(strategy_id)
-                # GatewayStateManager returns None instead of raising StateNotFoundError
-                if state is None:
-                    raise StateNotFoundError(strategy_id)
-                expected_version = state.version
-            except StateNotFoundError:
-                # First run - create new state
-                state = StateData(
-                    strategy_id=strategy_id,
-                    version=1,
-                    state={},
-                )
-                expected_version = None  # No version check for new state
-                logger.debug(f"Creating initial state for {strategy_id}")
-
-            # Update state with iteration info
-            state.state["last_iteration"] = {
-                "timestamp": result.timestamp.isoformat(),
-                "status": result.status.value,
-                "intent_type": result.intent.intent_type.value if result.intent else None,
-                "duration_ms": result.duration_ms,
-            }
-            state.state["total_iterations"] = self._total_iterations
-            state.state["successful_iterations"] = self._successful_iterations
-            state.state["consecutive_errors"] = self._consecutive_errors
-
-            # Save with CAS (or create if new)
-            await self.state_manager.save_state(state, expected_version=expected_version)
-
-            logger.debug(f"State updated for {strategy_id}")
-
-        except Exception as e:
-            logger.error(f"Failed to update state for {strategy_id}: {e}")
-
-    async def _persist_copy_trading_state(
-        self,
-        strategy_id: str,
-        activity_provider: StatefulActivityProviderProtocol,
-    ) -> None:
-        """Persist copy trading cursor state into the strategy state dict."""
-        try:
-            state = await self.state_manager.load_state(strategy_id)
-            if state is None:
-                return
-            expected_version = state.version
-            state.state["copy_trading_state"] = activity_provider.get_state()
-            await self.state_manager.save_state(state, expected_version=expected_version)
-            logger.debug("Copy trading state persisted")
-        except Exception as e:
-            logger.warning(f"Failed to persist copy trading state: {e}")
-
-    async def _persist_vault_state(
-        self,
-        strategy_id: str,
-        vault_state_dict: dict,
-        vault_state_key: str,
-    ) -> None:
-        """Persist vault lifecycle state into the strategy state dict."""
-        try:
-            state = await self.state_manager.load_state(strategy_id)
-            if state is None:
-                # First run -- create state so vault lifecycle is not lost
-                state = StateData(
-                    strategy_id=strategy_id,
-                    version=1,
-                    state={},
-                )
-                expected_version = None
-            else:
-                expected_version = state.version
-            state.state[vault_state_key] = vault_state_dict
-            await self.state_manager.save_state(state, expected_version=expected_version)
-            logger.debug("Vault state persisted (phase=%s)", vault_state_dict.get("settlement_phase", "?"))
-        except Exception as e:
-            logger.warning(f"Failed to persist vault state: {e}")
-
-    async def _capture_portfolio_snapshot(
-        self,
-        strategy: StrategyProtocol,
-        iteration_number: int,
-    ) -> PortfolioSnapshot | None:
-        """Capture and persist portfolio snapshot after iteration.
-
-        This method:
-        1. Calls strategy.get_portfolio_snapshot() if available
-        2. Stores in portfolio_snapshots table for dashboard/PnL charts
-        3. Initializes portfolio_metrics on first run for baseline tracking
-
-        Portfolio snapshots are captured at a configurable interval (default 5 min)
-        to avoid storing excessive data while providing good chart resolution.
-
-        Args:
-            strategy: The strategy to capture snapshot from
-            iteration_number: Current iteration count
-
-        Returns:
-            PortfolioSnapshot if captured, None if skipped or not supported
-        """
-        # Check if strategy supports get_portfolio_snapshot
-        if not hasattr(strategy, "get_portfolio_snapshot"):
-            return None
-
-        now = datetime.now(UTC)
-
-        # Rate-limit snapshot persistence (store every 5 min for time-series)
-        if self._last_snapshot_time is not None:
-            elapsed = (now - self._last_snapshot_time).total_seconds()
-            if elapsed < self._snapshot_interval_seconds:
-                return None
-
-        try:
-            # Get snapshot from strategy
-            snapshot = strategy.get_portfolio_snapshot()
-            if snapshot is None:
-                return None
-
-            # Set iteration number
-            snapshot.iteration_number = iteration_number
-
-            # Persist snapshot
-            snapshot_id = await self.state_manager.save_portfolio_snapshot(snapshot)
-            if snapshot_id > 0:
-                self._last_snapshot_time = now
-                logger.debug(
-                    f"Portfolio snapshot captured for {strategy.strategy_id}: "
-                    f"${snapshot.total_value_usd:.2f} (id={snapshot_id})"
-                )
-
-            # Initialize or update portfolio metrics for PnL tracking
-            await self._update_portfolio_metrics(strategy.strategy_id, snapshot)
-
-            return snapshot
-
-        except Exception as e:
-            logger.warning(f"Failed to capture portfolio snapshot: {e}")
-            return None
-
-    async def _update_portfolio_metrics(
-        self,
-        strategy_id: str,
-        snapshot: PortfolioSnapshot,
-    ) -> None:
-        """Update portfolio metrics for PnL tracking.
-
-        On first run, stores initial_value_usd as baseline for PnL calculation.
-        This baseline survives restarts for accurate cumulative PnL.
-
-        Args:
-            strategy_id: Strategy identifier
-            snapshot: Current portfolio snapshot
-        """
-        try:
-            # Skip if state manager doesn't support portfolio metrics (e.g., GatewayStateManager)
-            if not hasattr(self.state_manager, "get_portfolio_metrics"):
-                return
-
-            # Skip if snapshot value is unavailable (would seed bad baseline)
-            if snapshot.error or snapshot.value_confidence == ValueConfidence.UNAVAILABLE:
-                logger.info(f"Skipping portfolio metrics update for {strategy_id}: snapshot unavailable")
-                return
-
-            # Get existing metrics (may be None on first run)
-            existing = await self.state_manager.get_portfolio_metrics(strategy_id)
-
-            if existing is None:
-                # First run - establish baseline
-                metrics = PortfolioMetrics(
-                    strategy_id=strategy_id,
-                    timestamp=snapshot.timestamp,
-                    total_value_usd=snapshot.total_value_usd,
-                    initial_value_usd=snapshot.total_value_usd,
-                )
-                await self.state_manager.save_portfolio_metrics(metrics)
-                logger.info(f"Portfolio baseline established for {strategy_id}: ${snapshot.total_value_usd:.2f}")
-            else:
-                # Update current value (preserve initial_value)
-                existing.timestamp = snapshot.timestamp
-                existing.total_value_usd = snapshot.total_value_usd
-                await self.state_manager.save_portfolio_metrics(existing)
-
-        except Exception as e:
-            logger.warning(f"Failed to update portfolio metrics: {e}")
+        await update_portfolio_metrics(self, strategy_id, snapshot)
 
     async def _handle_execution_error(
         self,
@@ -4559,6 +3366,58 @@ class StrategyRunner:
 
         except Exception as e:
             logger.error(f"Failed to send execution error alert: {e}")
+
+    async def _alert_accounting_failure(
+        self,
+        strategy: StrategyProtocol,
+        error: Exception,
+    ) -> None:
+        """Send a CRITICAL operator alert for accounting persistence failure.
+
+        The on-chain state changed but the durable accounting write did not
+        succeed. This is a book-keeping emergency -- paused strategy and
+        manual reconciliation are required before resuming. Severity is
+        CRITICAL rather than HIGH because silent accounting loss is
+        irrecoverable once alerting is missed.
+        """
+        if not self.config.enable_alerting or not self.alert_manager:
+            return
+
+        try:
+            total_value, available = self._query_portfolio_value(strategy)
+            write_kind = getattr(error, "write_kind", "unknown")
+            card = OperatorCard(
+                strategy_id=strategy.strategy_id,
+                timestamp=datetime.now(UTC),
+                event_type=EventType.ERROR,
+                reason=StuckReason.UNKNOWN,
+                context={
+                    "accounting_write_kind": write_kind,
+                    "error": str(error),
+                },
+                severity=Severity.CRITICAL,
+                position_summary=PositionSummary(
+                    total_value_usd=total_value,
+                    available_balance_usd=available,
+                ),
+                risk_description=(
+                    f"Accounting persistence failed ({write_kind}). On-chain state may have "
+                    "changed without a durable ledger/snapshot/metrics record. Manual "
+                    "reconciliation required before resuming."
+                ),
+                suggested_actions=[
+                    SuggestedAction(
+                        action=AvailableAction.PAUSE,
+                        description="Pause strategy and investigate accounting backend",
+                        priority=1,
+                        is_recommended=True,
+                    ),
+                ],
+                available_actions=[AvailableAction.PAUSE, AvailableAction.RESUME],
+            )
+            await self.alert_manager.send_alert(card)
+        except Exception as alert_err:  # noqa: BLE001
+            logger.error("Failed to send accounting failure alert: %s", alert_err)
 
     async def _alert_consecutive_errors(
         self,
@@ -4733,428 +3592,65 @@ class StrategyRunner:
         except Exception as e:
             logger.error(f"Failed to trigger emergency stop for {strategy.strategy_id}: {e}")
 
-    def get_metrics(self) -> dict[str, Any]:
-        """Get current runner metrics.
+    def get_metrics(self):
+        from .runner_state import get_metrics
 
-        Returns:
-            Dictionary with iteration counts, error counts, and success rate
-        """
-        success_rate = self._successful_iterations / self._total_iterations if self._total_iterations > 0 else 0.0
+        return get_metrics(self)
 
-        return {
-            "total_iterations": self._total_iterations,
-            "successful_iterations": self._successful_iterations,
-            "consecutive_errors": self._consecutive_errors,
-            "success_rate": success_rate,
-            "shutdown_requested": self._shutdown_requested,
-        }
+    async def _recover_incomplete_sessions(self):
+        from .runner_recovery import recover_incomplete_sessions
 
-    # =========================================================================
-    # Startup Recovery
-    # =========================================================================
+        return await recover_incomplete_sessions(self)
 
-    async def _recover_incomplete_sessions(self) -> int:
-        """Recover incomplete execution sessions on startup.
+    async def _recover_session(self, session):
+        from .runner_recovery import recover_session
 
-        Scans for sessions that were interrupted (e.g., due to crash) and
-        attempts to recover them based on their phase:
+        return await recover_session(self, session)
 
-        - SUBMITTED phase: Poll for receipt - the transaction may have been
-          mined. If confirmed, update state; if failed/not found, mark complete.
-        - SIGNING/PREPARING phase: Safe to abandon - no on-chain state change
-          occurred. Mark as failed so they can be retried from scratch.
-        - CONFIRMING phase: Poll for receipt like SUBMITTED.
+    async def _recover_submitted_session(self, session):
+        from .runner_recovery import recover_submitted_session
 
-        Duplicate transaction prevention:
-        - Track recovered tx_hashes and nonces to prevent re-execution
-        - If a transaction was already submitted, we skip re-submission
+        return await recover_submitted_session(self, session)
 
-        Returns:
-            Number of sessions recovered
-        """
-        if self._session_store is None:
-            logger.debug("Session store not configured, skipping recovery")
-            return 0
+    async def _recover_early_phase_session(self, session):
+        from .runner_recovery import recover_early_phase_session
 
-        incomplete_sessions = self._session_store.get_incomplete_sessions()
+        return await recover_early_phase_session(self, session)
 
-        if not incomplete_sessions:
-            logger.info("No incomplete sessions found for recovery")
-            return 0
+    async def _update_recovered_state(self, session):
+        from .runner_recovery import update_recovered_state
 
-        logger.info(f"Found {len(incomplete_sessions)} incomplete sessions for recovery")
+        await update_recovered_state(self, session)
 
-        recovered_count = 0
+    def is_duplicate_transaction(self, tx_hash=None, nonce=None, strategy_id=None):
+        from .runner_recovery import is_duplicate_transaction
 
-        for session in incomplete_sessions:
-            try:
-                recovered = await self._recover_session(session)
-                if recovered:
-                    recovered_count += 1
-            except Exception as e:
-                logger.error(
-                    f"Recovery failed for session {session.session_id}: {e}",
-                    extra={"session_id": session.session_id},
-                )
-                # Mark session as failed to prevent infinite recovery attempts
-                session.set_error(f"Recovery failed: {e}")
-                session.mark_complete(success=False)
-                self._session_store.save(session)
-
-        logger.info(f"Recovered {recovered_count}/{len(incomplete_sessions)} sessions")
-        return recovered_count
-
-    async def _recover_session(self, session: ExecutionSession) -> bool:
-        """Recover a single incomplete execution session.
-
-        Args:
-            session: The session to recover
-
-        Returns:
-            True if session was successfully recovered
-        """
-        logger.info(
-            f"Recovering session {session.session_id} "
-            f"(strategy={session.strategy_id}, phase={session.phase.value}, "
-            f"attempt={session.attempt_number})"
-        )
-
-        # Track nonces from this session for duplicate prevention
-        strategy_id = session.strategy_id
-        if strategy_id not in self._recovered_nonces:
-            self._recovered_nonces[strategy_id] = set()
-
-        for tx_state in session.transactions:
-            if tx_state.tx_hash:
-                self._recovered_tx_hashes.add(tx_state.tx_hash)
-            if tx_state.nonce > 0:
-                self._recovered_nonces[strategy_id].add(tx_state.nonce)
-
-        # Handle based on session phase
-        if session.phase in (SessionPhase.SUBMITTED, SessionPhase.CONFIRMING):
-            # Transaction was submitted - poll for receipt
-            return await self._recover_submitted_session(session)
-        elif session.phase in (SessionPhase.PREPARING, SessionPhase.SIGNING):
-            # No on-chain activity yet - safe to abandon
-            return await self._recover_early_phase_session(session)
-        else:
-            logger.warning(f"Unknown phase {session.phase.value} for session {session.session_id}")
-            return False
-
-    async def _recover_submitted_session(self, session: ExecutionSession) -> bool:
-        """Recover a session that was in SUBMITTED or CONFIRMING phase.
-
-        For submitted transactions, we poll for receipts to determine
-        the final outcome. The transaction may have:
-        - Succeeded (CONFIRMED)
-        - Failed/reverted (FAILED)
-        - Been dropped from mempool (not found)
-
-        Args:
-            session: Session with submitted transactions
-
-        Returns:
-            True if recovery completed successfully
-        """
-        if self._session_store is None:
-            return False
-
-        # Get tx_hashes to poll
-        tx_hashes = [tx.tx_hash for tx in session.transactions if tx.tx_hash]
-
-        if not tx_hashes:
-            logger.warning(
-                f"Session {session.session_id} in {session.phase.value} but no tx_hashes found - marking as failed"
-            )
-            session.set_error("No transaction hashes found for submitted session")
-            session.mark_complete(success=False)
-            self._session_store.save(session)
-            return True
-
-        logger.info(f"Polling {len(tx_hashes)} transactions for session {session.session_id}")
-
-        # Poll for receipts via the submitter
-        # Note: Session recovery currently only supports single-chain mode
-        # Multi-chain recovery would require additional chain tracking in sessions
-        if self._is_multi_chain:
-            logger.warning(
-                f"Session recovery not yet supported in multi-chain mode. "
-                f"Marking session {session.session_id} as failed."
-            )
-            session.set_error("Session recovery not supported in multi-chain mode")
-            session.mark_complete(success=False)
-            self._session_store.save(session)
-            return True
-
-        # Single-chain mode - get submitter from orchestrator
-        single_chain_orch = cast(ExecutionOrchestrator, self.execution_orchestrator)
-        submitter = single_chain_orch.submitter
-
-        try:
-            # Poll with a shorter timeout for recovery (30s instead of 120s)
-            receipts = await submitter.get_receipts(tx_hashes, timeout=30.0)
-
-            # Update session with receipt results
-            all_confirmed = True
-            any_failed = False
-
-            for receipt in receipts:
-                tx_status = TransactionStatus.CONFIRMED if receipt.success else TransactionStatus.FAILED
-
-                session.update_transaction(
-                    tx_hash=receipt.tx_hash,
-                    status=tx_status,
-                    gas_used=receipt.gas_used,
-                    block_number=receipt.block_number,
-                )
-
-                if receipt.success:
-                    logger.info(
-                        f"Recovered tx {receipt.tx_hash}: CONFIRMED in block {receipt.block_number}",
-                        extra={"session_id": session.session_id, "tx_hash": receipt.tx_hash},
-                    )
-                else:
-                    logger.warning(
-                        f"Recovered tx {receipt.tx_hash}: FAILED/REVERTED",
-                        extra={"session_id": session.session_id, "tx_hash": receipt.tx_hash},
-                    )
-                    all_confirmed = False
-                    any_failed = True
-
-            # Mark session complete based on results
-            success = all_confirmed and not any_failed
-            session.mark_complete(success=success)
-            self._session_store.save(session)
-
-            logger.info(
-                f"Session {session.session_id} recovery complete: success={success}",
-                extra={"session_id": session.session_id},
-            )
-
-            # Update strategy state if recovery was successful
-            if success:
-                await self._update_recovered_state(session)
-
-            return True
-
-        except TimeoutError:
-            # Transaction not found in time - may have been dropped
-            logger.warning(
-                f"Timeout polling receipts for session {session.session_id} - transactions may have been dropped",
-                extra={"session_id": session.session_id},
-            )
-            session.set_error("Timeout waiting for transaction receipts during recovery")
-            session.mark_complete(success=False)
-            self._session_store.save(session)
-            return True
-
-        except Exception as e:
-            logger.error(
-                f"Error polling receipts for session {session.session_id}: {e}",
-                extra={"session_id": session.session_id},
-            )
-            raise
-
-    async def _recover_early_phase_session(self, session: ExecutionSession) -> bool:
-        """Recover a session that was in PREPARING or SIGNING phase.
-
-        These sessions haven't submitted any transactions on-chain,
-        so it's safe to simply mark them as failed and let the
-        strategy retry from scratch on the next iteration.
-
-        Args:
-            session: Session in early phase
-
-        Returns:
-            True if recovery completed
-        """
-        if self._session_store is None:
-            return False
-
-        logger.info(
-            f"Session {session.session_id} was in {session.phase.value} phase - "
-            f"no on-chain activity, marking as failed for retry",
-            extra={"session_id": session.session_id},
-        )
-
-        session.set_error(f"Session interrupted in {session.phase.value} phase - no on-chain activity, safe to retry")
-        session.mark_complete(success=False)
-        self._session_store.save(session)
-
-        return True
-
-    async def _update_recovered_state(self, session: ExecutionSession) -> None:
-        """Update strategy state after successful session recovery.
-
-        This ensures the strategy's state reflects the recovered execution,
-        preventing the strategy from retrying already-completed actions.
-
-        Args:
-            session: Successfully recovered session
-        """
-        try:
-            state = await self.state_manager.load_state(session.strategy_id)
-            # GatewayStateManager returns None instead of raising StateNotFoundError
-            if state is None:
-                logger.debug(f"No state found for {session.strategy_id} during recovery marking")
-                return
-
-            # Record the recovered session in state
-            recovered_sessions = state.state.get("recovered_sessions", [])
-            recovered_sessions.append(
-                {
-                    "session_id": session.session_id,
-                    "intent_id": session.intent_id,
-                    "recovered_at": datetime.now(UTC).isoformat(),
-                    "transactions": [{"tx_hash": tx.tx_hash, "status": tx.status.value} for tx in session.transactions],
-                }
-            )
-            state.state["recovered_sessions"] = recovered_sessions
-
-            await self.state_manager.save_state(state, expected_version=state.version)
-
-            logger.debug(
-                f"Updated state for strategy {session.strategy_id} with recovered session {session.session_id}"
-            )
-
-        except Exception as e:
-            logger.error(
-                f"Failed to update state after session recovery: {e}",
-                extra={"session_id": session.session_id},
-            )
-
-    def is_duplicate_transaction(
-        self,
-        tx_hash: str | None = None,
-        nonce: int | None = None,
-        strategy_id: str | None = None,
-    ) -> bool:
-        """Check if a transaction would be a duplicate of a recovered session.
-
-        This is used to prevent re-submitting transactions that were
-        already submitted before a crash.
-
-        Args:
-            tx_hash: Transaction hash to check
-            nonce: Transaction nonce to check
-            strategy_id: Strategy ID for nonce check
-
-        Returns:
-            True if transaction would be a duplicate
-        """
-        if tx_hash and tx_hash in self._recovered_tx_hashes:
-            logger.warning(f"Transaction {tx_hash} was already recovered - skipping to prevent duplicate")
-            return True
-
-        if nonce is not None and strategy_id:
-            recovered_nonces = self._recovered_nonces.get(strategy_id, set())
-            if nonce in recovered_nonces:
-                logger.warning(
-                    f"Nonce {nonce} for strategy {strategy_id} was already used "
-                    f"in a recovered session - skipping to prevent duplicate"
-                )
-                return True
-
-        return False
+        return is_duplicate_transaction(self, tx_hash, nonce, strategy_id)
 
     # =========================================================================
     # Execution Progress Management (for resuming after restart)
     # =========================================================================
 
-    def _compute_intents_hash(self, intents: list[AnyIntent]) -> str:
-        """Compute a hash of intents to detect if they changed.
+    def _compute_intents_hash(self, intents):
+        from .runner_recovery import compute_intents_hash
 
-        Args:
-            intents: List of intents to hash
+        return compute_intents_hash(self, intents)
 
-        Returns:
-            SHA256 hash of serialized intents
-        """
-        # Serialize intents to JSON-like string
-        serialized = []
-        for intent in intents:
-            serialized.append(intent.serialize() if hasattr(intent, "serialize") else str(intent))
-        intent_str = json.dumps(serialized, sort_keys=True, default=str)
-        return hashlib.sha256(intent_str.encode()).hexdigest()[:16]
+    async def _load_execution_progress(self, strategy_id):
+        from .runner_recovery import load_execution_progress
 
-    async def _load_execution_progress(self, strategy_id: str) -> ExecutionProgress | None:
-        """Load execution progress from persisted state.
+        return await load_execution_progress(self, strategy_id)
 
-        Args:
-            strategy_id: Strategy identifier
+    async def _save_execution_progress(self, strategy_id, progress):
+        from .runner_recovery import save_execution_progress
 
-        Returns:
-            ExecutionProgress if found, None otherwise
-        """
-        try:
-            state = await self.state_manager.load_state(strategy_id)
-            # GatewayStateManager returns None instead of raising StateNotFoundError
-            if state is None:
-                return None
-            progress_data = state.state.get("execution_progress")
-            if progress_data:
-                return ExecutionProgress.from_dict(progress_data)
-        except Exception as e:
-            logger.debug(f"No execution progress found for {strategy_id}: {e}")
-        return None
+        await save_execution_progress(self, strategy_id, progress)
 
-    async def _save_execution_progress(self, strategy_id: str, progress: ExecutionProgress) -> None:
-        """Save execution progress to persisted state.
+    async def _clear_execution_progress(self, strategy_id):
+        from .runner_recovery import clear_execution_progress
 
-        Args:
-            strategy_id: Strategy identifier
-            progress: Execution progress to save
-        """
-        try:
-            # Try to load existing state, create if it doesn't exist
-            try:
-                state = await self.state_manager.load_state(strategy_id)
-                # GatewayStateManager returns None instead of raising StateNotFoundError
-                if state is None:
-                    raise StateNotFoundError(strategy_id)
-                expected_version = state.version
-            except StateNotFoundError:
-                # Create initial state for this strategy
-                state = StateData(
-                    strategy_id=strategy_id,
-                    version=1,
-                    state={},
-                )
-                expected_version = None  # No version check for new state
-                logger.debug(f"Creating initial state for {strategy_id}")
+        await clear_execution_progress(self, strategy_id)
 
-            progress.last_updated = datetime.now(UTC)
-            state.state["execution_progress"] = progress.to_dict()
-            await self.state_manager.save_state(state, expected_version=expected_version)
-            logger.debug(
-                f"Saved execution progress for {strategy_id}: "
-                f"step {progress.completed_step_index + 1}/{progress.total_steps}"
-            )
-        except Exception as e:
-            logger.error(f"Failed to save execution progress: {e}")
-
-    async def _clear_execution_progress(self, strategy_id: str) -> None:
-        """Clear execution progress from state (after completion or abort).
-
-        Args:
-            strategy_id: Strategy identifier
-        """
-        try:
-            state = await self.state_manager.load_state(strategy_id)
-            # GatewayStateManager returns None instead of raising StateNotFoundError
-            if state is None:
-                return
-            if "execution_progress" in state.state:
-                del state.state["execution_progress"]
-                await self.state_manager.save_state(state, expected_version=state.version)
-                logger.debug(f"Cleared execution progress for {strategy_id}")
-        except Exception as e:
-            logger.debug(f"Could not clear execution progress: {e}")
-
-
-# =============================================================================
-# Exports
-# =============================================================================
 
 __all__ = [
     "StrategyRunner",

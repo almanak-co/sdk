@@ -37,6 +37,12 @@ from enum import Enum
 from typing import Any
 
 from almanak.framework.connectors.base import EventRegistry, HexDecoder
+from almanak.framework.execution.extract_result import (
+    ExtractError,
+    ExtractMissing,
+    ExtractOk,
+    ExtractResult,
+)
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash, format_usd
 
 logger = logging.getLogger(__name__)
@@ -1082,6 +1088,77 @@ class GMXv2ReceiptParser:
     # =========================================================================
     # Extraction Methods for Result Enrichment
     # =========================================================================
+
+    # ---- VIB-3159: tagged-variant wrappers ----------------------------------
+    # See uniswap_v3/receipt_parser.py for rationale. The legacy raw methods
+    # below keep their return types for direct callers.
+
+    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
+        """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
+        reports a crash. See uniswap_v3 equivalent for rationale (VIB-3159)."""
+        try:
+            parsed = self.parse_receipt(receipt)
+        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if not parsed.success:
+            return ExtractError(error=parsed.error or "parse_receipt reported failure")
+        return None
+
+    def _wrap_extract(
+        self,
+        fn: Any,
+        receipt: dict[str, Any],
+        missing_reason: str,
+    ) -> ExtractResult[Any]:
+        """Calls ``parse_receipt`` first so actual parse crashes propagate as
+        ``ExtractError`` rather than being silently swallowed by the legacy
+        extractor's ``except Exception: return None`` (VIB-3159)."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = fn(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason=missing_reason)
+        return ExtractOk(value=value)
+
+    def extract_swap_amounts_result(self, receipt: dict[str, Any]) -> ExtractResult[Any]:
+        """Fail-closed variant of :meth:`extract_swap_amounts` — see VIB-3159."""
+        return self._wrap_extract(self.extract_swap_amounts, receipt, "no swap order event")
+
+    def extract_position_id_result(self, receipt: dict[str, Any]) -> ExtractResult[str]:
+        """Fail-closed variant of :meth:`extract_position_id` — see VIB-3159."""
+        return self._wrap_extract(self.extract_position_id, receipt, "no OrderCreated key")
+
+    def extract_size_delta_result(self, receipt: dict[str, Any]) -> ExtractResult[Decimal]:
+        """Fail-closed variant of :meth:`extract_size_delta` — see VIB-3159."""
+        return self._wrap_extract(self.extract_size_delta, receipt, "no size_delta_usd in order")
+
+    def extract_collateral_result(self, receipt: dict[str, Any]) -> ExtractResult[Decimal]:
+        """Fail-closed variant of :meth:`extract_collateral` — see VIB-3159."""
+        return self._wrap_extract(self.extract_collateral, receipt, "no collateral_delta_amount in order")
+
+    def extract_entry_price_result(self, receipt: dict[str, Any]) -> ExtractResult[Decimal]:
+        """Fail-closed variant of :meth:`extract_entry_price` — see VIB-3159."""
+        return self._wrap_extract(self.extract_entry_price, receipt, "no PositionIncrease event")
+
+    def extract_leverage_result(self, receipt: dict[str, Any]) -> ExtractResult[Decimal]:
+        """Fail-closed variant of :meth:`extract_leverage` — see VIB-3159."""
+        return self._wrap_extract(self.extract_leverage, receipt, "insufficient data for leverage")
+
+    def extract_realized_pnl_result(self, receipt: dict[str, Any]) -> ExtractResult[Decimal]:
+        """Fail-closed variant of :meth:`extract_realized_pnl` — see VIB-3159."""
+        return self._wrap_extract(self.extract_realized_pnl, receipt, "no PositionDecrease with PnL event")
+
+    def extract_exit_price_result(self, receipt: dict[str, Any]) -> ExtractResult[Decimal]:
+        """Fail-closed variant of :meth:`extract_exit_price` — see VIB-3159."""
+        return self._wrap_extract(self.extract_exit_price, receipt, "no PositionDecrease event")
+
+    def extract_fees_paid_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_fees_paid` — see VIB-3159."""
+        return self._wrap_extract(self.extract_fees_paid, receipt, "no fees_paid in order")
 
     def extract_swap_amounts(self, receipt: dict[str, Any]) -> Any:
         """Extract swap amounts from transaction receipt.

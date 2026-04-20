@@ -18,6 +18,8 @@ from .constants import (
     DRIFT_PROGRAM_ID,
     PERP_MARKET_SYMBOL_TO_INDEX,
     PERP_MARKETS,
+    SPOT_MARKET_SYMBOL_TO_INDEX,
+    SPOT_MARKETS,
 )
 from .exceptions import (
     DriftAccountNotFoundError,
@@ -26,6 +28,11 @@ from .exceptions import (
     DriftError,
     DriftMarketError,
     DriftValidationError,
+)
+from .market_rules import (
+    ALLOWED_COLLATERAL_MINTS,
+    is_supported_collateral,
+    validate_drift_collateral,
 )
 from .models import (
     DriftConfig,
@@ -61,6 +68,12 @@ __all__ = [
     "DRIFT_DATA_API_BASE_URL",
     "PERP_MARKETS",
     "PERP_MARKET_SYMBOL_TO_INDEX",
+    "SPOT_MARKETS",
+    "SPOT_MARKET_SYMBOL_TO_INDEX",
+    # Market rules
+    "ALLOWED_COLLATERAL_MINTS",
+    "is_supported_collateral",
+    "validate_drift_collateral",
     # Exceptions
     "DriftError",
     "DriftAPIError",

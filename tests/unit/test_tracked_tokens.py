@@ -223,6 +223,68 @@ class TestDeriveTokensFromConfig:
         tokens = strategy._derive_tokens_from_config()
         assert tokens == ["WAVAX", "USDC"]
 
+    def test_market_id_not_treated_as_token(self):
+        """Compound V3 market IDs like 'usdc_e' must NOT leak as token symbols.
+
+        Regression test for VIB-2675: market field without "/" is a market ID,
+        not a pool descriptor. Passing it to the token resolver causes 90s
+        timeout loops on Polygon.
+        """
+        @dataclass
+        class CompoundV3Config:
+            market: str = "usdc_e"
+            collateral_token: str = "WETH"
+            borrow_token: str = "USDC"
+            strategy_id: str = "test"
+            chain: str = "polygon"
+            def to_dict(self):
+                return {
+                    "market": self.market,
+                    "collateral_token": self.collateral_token,
+                    "borrow_token": self.borrow_token,
+                }
+            def update(self, **kwargs):
+                pass
+
+        strategy = _make_strategy(CompoundV3Config())
+        tokens = strategy._derive_tokens_from_config()
+        assert "usdc_e" not in tokens
+        assert "WETH" in tokens
+        assert "USDC" in tokens
+
+    def test_market_id_usdc_not_treated_as_token(self):
+        """Single-word market IDs like 'usdc' are also excluded."""
+        @dataclass
+        class CompoundV3SimpleConfig:
+            market: str = "usdc"
+            base_token: str = "USDC"
+            strategy_id: str = "test"
+            chain: str = "arbitrum"
+            def to_dict(self):
+                return {"market": self.market, "base_token": self.base_token}
+            def update(self, **kwargs):
+                pass
+
+        strategy = _make_strategy(CompoundV3SimpleConfig())
+        tokens = strategy._derive_tokens_from_config()
+        assert tokens == ["USDC"]
+
+    def test_market_field_with_slash_still_parsed(self):
+        """Market field with '/' format should still be parsed as a pool."""
+        @dataclass
+        class MarketPoolConfig:
+            market: str = "WETH/USDC"
+            strategy_id: str = "test"
+            chain: str = "arbitrum"
+            def to_dict(self):
+                return {"market": self.market}
+            def update(self, **kwargs):
+                pass
+
+        strategy = _make_strategy(MarketPoolConfig())
+        tokens = strategy._derive_tokens_from_config()
+        assert tokens == ["WETH", "USDC"]
+
 
 class TestGetTrackedTokens:
     """Test _get_tracked_tokens returns derived tokens or fallback."""

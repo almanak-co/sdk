@@ -169,8 +169,9 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
             default_chain=config.get("chain", "avalanche"),
         )
 
-        # 3. Get OpenAI tool definitions from catalog
-        tools_openai = catalog.to_openai_tools()
+        # 3. Get OpenAI tool definitions filtered by policy's allowed_tools
+        tools_openai = executor.get_filtered_openai_tools()
+        logger.info("Tool catalog: %d/%d tools (filtered by policy)", len(tools_openai), len(catalog))
 
         # 4. Create LLM client
         if use_mock:
@@ -194,6 +195,7 @@ async def run_once(config: dict, *, use_mock: bool = False) -> None:
                 system_prompt=system_prompt,
                 user_prompt=USER_PROMPT,
                 max_rounds=config.get("max_tool_rounds", 10),
+                strategy_id=config.get("strategy_id", "agent-lp"),
             )
             logger.info("Agent result: %s", result)
         finally:

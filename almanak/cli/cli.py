@@ -2,7 +2,6 @@ import json
 import os
 import platform
 import stat
-import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -19,7 +18,9 @@ from almanak.core.redaction import install_redaction
 from almanak.framework.cli import backtest as framework_backtest_group
 from almanak.framework.cli import new_strategy as framework_new_strategy_cmd
 from almanak.framework.cli.ax import ax as framework_ax_group
+from almanak.framework.cli.check import check as framework_check_cmd
 from almanak.framework.cli.demo import demo as framework_demo_cmd
+from almanak.framework.cli.export import export as framework_export_cmd
 from almanak.framework.cli.permissions import permissions as framework_permissions_cmd
 from almanak.framework.cli.run import run as framework_run_cmd
 from almanak.framework.cli.status import (
@@ -27,6 +28,12 @@ from almanak.framework.cli.status import (
 )
 from almanak.framework.cli.status import (
     strategy_logs as framework_logs_cmd,
+)
+from almanak.framework.cli.status import (
+    strategy_pause as framework_pause_cmd,
+)
+from almanak.framework.cli.status import (
+    strategy_resume as framework_resume_cmd,
 )
 from almanak.framework.cli.status import (
     strategy_status as framework_status_cmd,
@@ -85,21 +92,47 @@ def _resolve_native_binary() -> Path:
     return Path(__file__).resolve().parent.parent / "bin" / binary_name
 
 
-@click.group(invoke_without_command=True)
+class _NativeFallbackGroup(click.Group):
+    """Click group that forwards unrecognized commands to the native binary."""
+
+    def resolve_command(self, ctx, args):
+        """Try normal resolution first; on failure, fall through to native binary."""
+        try:
+            return super().resolve_command(ctx, args)
+        except click.UsageError:
+            return "native", self._make_native_cmd(), args
+
+    def _make_native_cmd(self):
+        """Create a synthetic Click command that execv's the native binary."""
+
+        @click.command("native", hidden=True, context_settings={"ignore_unknown_options": True})
+        @click.argument("native_args", nargs=-1, type=click.UNPROCESSED)
+        @click.pass_context
+        def _native(ctx, native_args):
+            _exec_native_binary(list(ctx.parent.params.get("args", [])) + list(native_args))
+
+        return _native
+
+
+def _exec_native_binary(extra_args=None):
+    """Replace the current process with the native almanak-code binary."""
+    binary_path = _resolve_native_binary()
+    if not binary_path.exists():
+        click.echo(f"Error: no binary for this platform at {binary_path}", err=True)
+        sys.exit(1)
+    if not os.access(binary_path, os.X_OK):
+        binary_path.chmod(binary_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    args = extra_args or sys.argv[1:]
+    os.execv(str(binary_path), [str(binary_path)] + args)
+
+
+@click.group(cls=_NativeFallbackGroup, invoke_without_command=True)
 @click.version_option(__version__)
 @click.pass_context
 def almanak(ctx):
     """Almanak CLI for managing strategies."""
     if ctx.invoked_subcommand is None:
-        binary_path = _resolve_native_binary()
-        if not binary_path.exists():
-            click.echo(f"Error: no binary for this platform at {binary_path}", err=True)
-            sys.exit(1)
-        # Ensure the binary is executable (pip may strip permissions from wheel installs)
-        if not os.access(binary_path, os.X_OK):
-            binary_path.chmod(binary_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        result = subprocess.run([str(binary_path)])
-        sys.exit(result.returncode)
+        _exec_native_binary()
 
 
 @almanak.group()
@@ -129,10 +162,16 @@ strat.add_command(framework_permissions_cmd, name="permissions")
 # Add demo command to strat
 strat.add_command(framework_demo_cmd, name="demo")
 
+# Add check (pre-flight validation) command to strat
+strat.add_command(framework_check_cmd, name="check")
+
 # Add monitoring commands to strat
+strat.add_command(framework_export_cmd, name="export")
 strat.add_command(framework_list_cmd, name="list")
 strat.add_command(framework_status_cmd, name="status")
 strat.add_command(framework_logs_cmd, name="logs")
+strat.add_command(framework_pause_cmd, name="pause")
+strat.add_command(framework_resume_cmd, name="resume")
 
 
 def _load_cli_config(path: str) -> dict:
@@ -765,8 +804,10 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure):
 
     if session_auth_token:
         click.echo()
-        click.echo(click.style("Session auth token (pass to clients via GATEWAY_AUTH_TOKEN env var):", fg="yellow"))
-        click.echo(f"  export GATEWAY_AUTH_TOKEN={session_auth_token}")
+        click.echo(
+            click.style("Session auth token (pass to clients via ALMANAK_GATEWAY_AUTH_TOKEN env var):", fg="yellow")
+        )
+        click.echo(f"  export ALMANAK_GATEWAY_AUTH_TOKEN={session_auth_token}")
 
     click.echo()
     click.echo("Press Ctrl+C to stop the gateway.")
@@ -1274,11 +1315,11 @@ def strategy_run(
     Examples:
 
         # Run from strategy directory (auto-starts gateway)
-        cd strategies/demo/uniswap_rsi
+        cd almanak/demo_strategies/uniswap_rsi
         almanak strat run --once
 
         # Run with explicit working directory
-        almanak strat run -d strategies/demo/uniswap_rsi --once
+        almanak strat run -d almanak/demo_strategies/uniswap_rsi --once
 
         # Connect to an existing gateway
         almanak strat run --no-gateway --once
@@ -1296,7 +1337,7 @@ def strategy_run(
         almanak strat run --fresh --once
 
         # Run with live dashboard
-        almanak strat run -d strategies/demo/uniswap_lp --network anvil --dashboard
+        almanak strat run -d almanak/demo_strategies/uniswap_lp --network anvil --dashboard
     """
     # Look for config.json or config.yaml in working directory if not specified
     if config_file is None:

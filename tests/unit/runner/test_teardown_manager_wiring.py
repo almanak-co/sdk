@@ -257,6 +257,8 @@ class TestTeardownFallback:
 
         strategy = _make_teardown_strategy()
         runner = _make_runner()
+        # Enable unsafe fallback for this test (VIB-2926: disabled by default)
+        runner.config = RunnerConfig(allow_unsafe_teardown_fallback=True)
 
         # Make compiler building fail -> should fallback to inline
         runner._build_teardown_compiler = MagicMock(return_value=None)
@@ -333,7 +335,7 @@ class TestTeardownCompilerCreation:
         strategy.chain = "arbitrum"
         strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
 
-        with patch("almanak.framework.runner.strategy_runner.IntentCompiler", side_effect=RuntimeError("bad")):
+        with patch("almanak.framework.runner.runner_teardown.IntentCompiler", side_effect=RuntimeError("bad")):
             compiler = runner._build_teardown_compiler(strategy, None)
 
         assert compiler is None

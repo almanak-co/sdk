@@ -1,0 +1,17 @@
+{
+    "strategy_id": "sushiswap_v3_swap_avalanche",
+    "strategy_name": "sushiswap_v3_swap_avalanche",
+    "description": "SushiSwap V3 swap lifecycle on Avalanche: BUY (USDC->WAVAX) + SELL (WAVAX->USDC). FAIL: insufficient pool liquidity.",
+    "chain": "avalanche",
+    "base_token": "WAVAX",
+    "quote_token": "USDC",
+    "trade_size_usd": 100,
+    "max_slippage_pct": 2.0,
+    "fee_tier": 3000,
+    "swap_protocol": "sushiswap_v3",
+    "anvil_funding": {
+        "AVAX": 500,
+        "WAVAX": 200,
+        "USDC": 10000
+    }
+}

@@ -31,6 +31,7 @@ from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,22 @@ CURVE_ADDRESSES: dict[str, dict[str, str]] = {
         "stableswap_factory": "0x9AF14D26075f142eb3F292D5065EB3faa646167b",
         "twocrypto_factory": "0x98EE851a00abeE0d95D08cF4CA2BdCE32aeaAF7F",
         "tricrypto_factory": "0xbC0797015fcFc47d9C1856639CaE50D0e69FbEE8",
+    },
+    "base": {
+        "router": "0xd6681e74eEA20d196c15038C580f721EF2aB6320",  # CurveRouterNG on Base
+        "address_provider": "0x5ffe7FB82894076ECB99A30D6A32e969e6e35E98",  # Same across all EVM chains
+        "stableswap_factory": "0x3093f9B57A428F3EB6285a589cb35bEA6e78c336",  # StableswapFactory NG
+        "twocrypto_factory": "0xc9FE0c63AF9a39402E8a5514F9c21af076813f1b",  # TwocryptoFactory NG
+        "tricrypto_factory": "0xa5961898d4539B95e3B8571c74f86D5E5b48DB25",  # TricryptoFactory NG
+    },
+    "optimism": {
+        "router": "0xF0d4c12A5768D806021F80a262B4d39d26C58b8D",  # CurveRouterNG on Optimism
+        "address_provider": "0x5ffe7FB82894076ECB99A30D6A32e969e6e35E98",  # Universal
+        "stableswap_factory": "0xA9B52d3CfB60073b7cC3D53dD3f25a8C619Afd78",
+    },
+    "polygon": {
+        "address_provider": "0x5ffe7FB82894076ECB99A30D6A32e969e6e35E98",  # Universal across EVM chains
+        "stableswap_factory": "0x722272D36ef0Da72FF51c5A65Db7b870E2e8D4ee",  # Polygon StableSwap factory
     },
 }
 
@@ -144,6 +161,114 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
             "virtual_price": Decimal("1.0"),
         },
     },
+    "base": {
+        # WETH/cbETH Twocrypto pool — ETH liquid staking yield, ~3% APY
+        # Pool: 0x11C1fBd4b3De66bC0565779b35171a6CF3E71f59 (old Twocrypto, NOT NG)
+        # LP token: 0x98244d93D42b42aB3E3A4D12A5dc0B3e7f8F32f9 (SEPARATE from pool — old-style Twocrypto)
+        # NOTE: This pool uses an OLD Twocrypto factory (not TwocryptoNG), so the LP token
+        # is a separate ERC20 contract, not the pool address itself.
+        # Verified on-chain 2026-03-19: pool.token() = 0x98244d93...F32f9
+        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.virtual_price() at runtime for accuracy.
+        # Queried on-chain 2026-03-19: pool.virtual_price() = 1017035434756947721 -> 1.0170
+        # Pool reserves (2026-03-19): 3804.66 WETH + 3223.99 cbETH, LP supply: 3445 LP tokens
+        "weth_cbeth": {
+            "address": "0x11C1fBd4b3De66bC0565779b35171a6CF3E71f59",
+            "lp_token": "0x98244d93D42b42aB3E3A4D12A5dc0B3e7f8F32f9",  # Separate LP token (old-style Twocrypto)
+            "coins": ["WETH", "cbETH"],
+            "coin_addresses": [
+                "0x4200000000000000000000000000000000000006",  # WETH on Base
+                "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",  # cbETH on Base
+            ],
+            "pool_type": "cryptoswap",
+            "n_coins": 2,
+            "virtual_price": Decimal("1.017"),
+        },
+        # StableSwap NG 4pool on Base: USDC / USDbC / axlUSDC / crvUSD
+        # First 4-coin pool in the Curve adapter. StableSwap NG: LP token IS the pool address.
+        # Coin order verified on-chain 2026-03-23 via cast call coins(0..3):
+        #   coins(0) = USDC (0x8335..., 6 dec), coins(1) = USDbC (0xd9aA..., 6 dec)
+        #   coins(2) = axlUSDC (0xEB46..., 6 dec), coins(3) = crvUSD (0x417A..., 18 dec)
+        # Pool reserves (2026-03-23): ~$50K USDC, ~$50K USDbC, ~$50K axlUSDC, ~$91K crvUSD
+        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.virtual_price() at runtime.
+        # Queried on-chain 2026-03-23: pool.get_virtual_price() = 1019566780337011070 -> 1.0196
+        "4pool": {
+            "address": "0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f",
+            "lp_token": "0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f",  # StableSwap NG: LP = pool
+            "coins": ["USDC", "USDbC", "axlUSDC", "crvUSD"],
+            "coin_addresses": [
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",  # USDC (native) on Base
+                "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",  # USDbC (bridged) on Base
+                "0xEB466342C4d449BC9f53A865D5Cb90586f405215",  # axlUSDC (Axelar bridged)
+                "0x417Ac0e078398C154EdFadD9Ef675d30Be60Af93",  # crvUSD on Base
+            ],
+            "pool_type": "stableswap",
+            "n_coins": 4,
+            "virtual_price": Decimal("1.0196"),
+        },
+    },
+    "optimism": {
+        "3pool": {
+            # Curve 3pool on Optimism (DAI/USDC.e/USDT)
+            # USDC.e = bridged USDC (0x7F5...); native USDC (0x0b2...) is in a separate pool
+            "address": "0x1337BedC9D22ecbe766dF105c9623922A27963EC",
+            "lp_token": "0x1337BedC9D22ecbe766dF105c9623922A27963EC",
+            "coins": ["DAI", "USDC.e", "USDT"],
+            "coin_addresses": [
+                "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1",  # DAI on Optimism
+                "0x7F5c764cBc14f9669B88837ca1490cCa17c31607",  # USDC.e (bridged) on Optimism
+                "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58",  # USDT on Optimism
+            ],
+            "pool_type": "stableswap",
+            "n_coins": 3,
+            "virtual_price": Decimal("1.02"),
+        },
+        # crvUSD/USDC StableSwap NG pool on Optimism (VIB-1587)
+        # Contains NATIVE USDC (0x0b2C639c...) — the key missing piece vs 3pool (which uses USDC.e)
+        # StableSwap NG: LP token IS the pool address.
+        # Pool verified on Optimism Etherscan: CurveStableSwapNG "crvUSDC Pool"
+        # Coin order verified from on-chain contract via cast call (iter 114):
+        #   coins(0) = crvUSD (0xC52D...), coins(1) = USDC (0x0b2C...)
+        # BUG FIX (iter 114): previous config had coins reversed, causing approve
+        # to target wrong token -> "ERC20: insufficient allowance" on every swap.
+        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.virtual_price() at runtime for accuracy.
+        "crvusd_usdc": {
+            "address": "0x03771e24b7C9172d163Bf447490B142a15be3485",
+            "lp_token": "0x03771e24b7C9172d163Bf447490B142a15be3485",  # StableSwap NG: LP = pool
+            "coins": ["crvUSD", "USDC"],
+            "coin_addresses": [
+                "0xC52D7F23a2e460248Db6eE192Cb23dD12bDDCbf6",  # crvUSD on Optimism (coins[0])
+                "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",  # USDC (native) on Optimism (coins[1])
+            ],
+            "pool_type": "stableswap",
+            "n_coins": 2,
+            "virtual_price": Decimal("1.0"),
+        },
+    },
+    "polygon": {
+        # Curve am3pool on Polygon (aave lending pool variant)
+        # Pool address: 0x445FE580eF8d70FF569aB36e898ed8631406Db5f
+        # LP token (am3CRV): 0xE7a24EF0C5e95Ffb0f6684b813A78F2a3AD7D171
+        # This is an aave-type pool: internally holds aDAI/aUSDC/aUSDT (interest-bearing tokens).
+        # Users swap UNDERLYING tokens (DAI/USDC.e/USDT) via exchange_underlying().
+        # coin_addresses are the UNDERLYING token addresses (not aTokens) since users
+        # approve/receive the underlying tokens.
+        # Coin order: coins(0)=DAI, coins(1)=USDC.e, coins(2)=USDT
+        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.virtual_price() at runtime.
+        "3pool": {
+            "address": "0x445Fe580Ef8d70Ff569ab36e898ed8631406dB5f",
+            "lp_token": "0xE7a24EF0C5e95Ffb0f6684b813A78F2a3AD7D171",  # am3CRV LP token
+            "coins": ["DAI", "USDC.e", "USDT"],
+            "coin_addresses": [
+                "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",  # DAI on Polygon
+                "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",  # USDC.e (bridged USDC) on Polygon
+                "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",  # USDT on Polygon
+            ],
+            "pool_type": "stableswap",
+            "n_coins": 3,
+            "virtual_price": Decimal("1.02"),
+            "use_underlying": True,  # exchange_underlying() required for non-aToken swaps
+        },
+    },
 }
 
 
@@ -154,6 +279,7 @@ CURVE_GAS_ESTIMATES: dict[str, int] = {
     "exchange_underlying": 300000,
     "add_liquidity_2": 250000,
     "add_liquidity_3": 350000,
+    "add_liquidity_4": 450000,
     "remove_liquidity": 200000,
     "remove_liquidity_one_coin": 250000,
     "remove_liquidity_imbalance": 300000,
@@ -166,8 +292,10 @@ EXCHANGE_UINT256_SELECTOR = "0x5b41b908"  # exchange(uint256,uint256,uint256,uin
 EXCHANGE_UNDERLYING_SELECTOR = "0xa6417ed6"  # exchange_underlying(int128,int128,uint256,uint256)
 ADD_LIQUIDITY_2_SELECTOR = "0x0b4c7e4d"  # add_liquidity(uint256[2],uint256)
 ADD_LIQUIDITY_3_SELECTOR = "0x4515cef3"  # add_liquidity(uint256[3],uint256)
+ADD_LIQUIDITY_4_SELECTOR = "0x029b2f34"  # add_liquidity(uint256[4],uint256)
 REMOVE_LIQUIDITY_2_SELECTOR = "0x5b36389c"  # remove_liquidity(uint256,uint256[2])
 REMOVE_LIQUIDITY_3_SELECTOR = "0xecb586a5"  # remove_liquidity(uint256,uint256[3])
+REMOVE_LIQUIDITY_4_SELECTOR = "0x7d49d875"  # remove_liquidity(uint256,uint256[4])
 REMOVE_LIQUIDITY_ONE_SELECTOR = "0x1a4d01d2"  # remove_liquidity_one_coin(uint256,int128,uint256)
 GET_DY_SELECTOR = "0x5e0d443f"  # get_dy(int128,int128,uint256)
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"  # approve(address,uint256)
@@ -203,12 +331,19 @@ class CurveConfig:
         wallet_address: Address executing transactions
         default_slippage_bps: Default slippage tolerance in basis points (default 50 = 0.5%)
         deadline_seconds: Transaction deadline in seconds (default 300 = 5 minutes)
+        rpc_url: Optional JSON-RPC URL for on-chain state queries (e.g., pool balances
+            for accurate remove_liquidity slippage estimates). When provided, the adapter
+            queries pool.balances(i) and lp_token.totalSupply() to compute proportional
+            min_amounts rather than returning zeros. When absent or on RPC failure,
+            min_amounts fall back to [0, 0, ..., 0] with a warning.
     """
 
     chain: str
     wallet_address: str
     default_slippage_bps: int = 50
     deadline_seconds: int = 300
+    rpc_url: str | None = None  # DEPRECATED — use gateway_client
+    gateway_client: "GatewayClient | None" = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -225,6 +360,7 @@ class CurveConfig:
             "wallet_address": self.wallet_address,
             "default_slippage_bps": self.default_slippage_bps,
             "deadline_seconds": self.deadline_seconds,
+            "rpc_url": self.rpc_url,
         }
 
 
@@ -253,6 +389,7 @@ class PoolInfo:
     n_coins: int
     name: str = ""
     virtual_price: Decimal = field(default_factory=lambda: Decimal("1.0"))
+    use_underlying: bool = False  # When True, use exchange_underlying() (aave-type pools)
 
     def get_coin_index(self, coin: str) -> int:
         """Get the index of a coin in the pool.
@@ -289,6 +426,7 @@ class PoolInfo:
             "n_coins": self.n_coins,
             "name": self.name,
             "virtual_price": str(self.virtual_price),
+            "use_underlying": self.use_underlying,
         }
 
 
@@ -444,6 +582,8 @@ class CurveAdapter:
         self.config = config
         self.chain = config.chain
         self.wallet_address = config.wallet_address
+        self._rpc_url = config.rpc_url
+        self._gateway_client = config.gateway_client
 
         # Load contract addresses
         self.addresses = CURVE_ADDRESSES[self.chain]
@@ -486,6 +626,7 @@ class CurveAdapter:
                     n_coins=pool_data["n_coins"],
                     name=name,
                     virtual_price=pool_data.get("virtual_price", Decimal("1.0")),
+                    use_underlying=pool_data.get("use_underlying", False),
                 )
         return None
 
@@ -509,6 +650,7 @@ class CurveAdapter:
                 n_coins=pool_data["n_coins"],
                 name=name,
                 virtual_price=pool_data.get("virtual_price", Decimal("1.0")),
+                use_underlying=pool_data.get("use_underlying", False),
             )
         return None
 
@@ -608,6 +750,7 @@ class CurveAdapter:
                 token_in_symbol=token_in_symbol,
                 token_out_symbol=pool_info.coins[j],
                 pool_type=pool_info.pool_type,
+                use_underlying=pool_info.use_underlying,
             )
             transactions.append(swap_tx)
 
@@ -759,17 +902,25 @@ class CurveAdapter:
             # Convert LP amount to wei (18 decimals)
             lp_amount_wei = int(lp_amount * Decimal(10**18))
 
-            # Estimate output amounts (simplified)
+            # Estimate output amounts via on-chain query (or fallback to zeros)
+            self._last_estimation_error: str | None = None
             min_amounts = self._estimate_remove_liquidity(pool_info, lp_amount_wei)
             min_amounts = [int(a * (10000 - slippage_bps) // 10000) for a in min_amounts]
 
-            # Guard: very small LP amounts can produce all-zero min_amounts via integer division.
-            # _estimate_remove_liquidity returns a 1% floor but it can still round to 0 for tiny positions.
+            # Guard: fail closed when min_amounts are all zero — proceeding without slippage
+            # protection would expose the full withdrawal to sandwich attacks.
+            # This can happen when: (a) rpc_url is not configured and LP amount is very small
+            # (1% floor rounds to 0 via integer division), or (b) on-chain estimation fails
+            # and the fallback also rounds to 0. Either way, refusing is safer than proceeding.
             if all(a == 0 for a in min_amounts):
-                logger.warning(
-                    "remove_liquidity has zero min_amounts (no slippage protection) -- "
-                    "LP amount may be too small for the 1% floor estimate, or use on-chain "
-                    "calc_token_amount for production strategies"
+                reason = self._last_estimation_error or "unknown"
+                return LiquidityResult(
+                    success=False,
+                    error=(
+                        f"remove_liquidity: cannot compute slippage protection (min_amounts are all zero). "
+                        f"Cause: {reason}. "
+                        f"Set CurveConfig.rpc_url for on-chain estimation."
+                    ),
                 )
 
             # Build transactions
@@ -912,13 +1063,19 @@ class CurveAdapter:
         token_in_symbol: str = "",
         token_out_symbol: str = "",
         pool_type: PoolType = PoolType.STABLESWAP,
+        use_underlying: bool = False,
     ) -> TransactionData:
         """Build exchange transaction.
 
-        StableSwap:          exchange(int128 i, int128 j, uint256 dx, uint256 min_dy)
+        StableSwap:           exchange(int128 i, int128 j, uint256 dx, uint256 min_dy)
         CryptoSwap/Tricrypto: exchange(uint256 i, uint256 j, uint256 dx, uint256 min_dy)
+        Aave-type (underlying): exchange_underlying(int128 i, int128 j, uint256 dx, uint256 min_dy)
         """
-        if pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO):
+        if use_underlying:
+            # Aave-type pools (e.g. Polygon am3pool): swap underlying tokens via exchange_underlying()
+            selector = EXCHANGE_UNDERLYING_SELECTOR
+            pad_index = self._pad_int128
+        elif pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO):
             # CryptoSwap and Tricrypto pools use uint256 indices
             selector = EXCHANGE_UINT256_SELECTOR
             pad_index = self._pad_uint256
@@ -935,7 +1092,7 @@ class CurveAdapter:
             to=pool_address,
             value=value,
             data=calldata,
-            gas_estimate=CURVE_GAS_ESTIMATES["exchange"],
+            gas_estimate=CURVE_GAS_ESTIMATES["exchange_underlying" if use_underlying else "exchange"],
             description=f"Curve swap {token_in_symbol} -> {token_out_symbol}",
             tx_type="swap",
         )
@@ -957,9 +1114,14 @@ class CurveAdapter:
         if n_coins == 2:
             selector = ADD_LIQUIDITY_2_SELECTOR
             gas_estimate = CURVE_GAS_ESTIMATES["add_liquidity_2"]
-        else:  # n_coins == 3
+        elif n_coins == 3:
             selector = ADD_LIQUIDITY_3_SELECTOR
             gas_estimate = CURVE_GAS_ESTIMATES["add_liquidity_3"]
+        elif n_coins == 4:
+            selector = ADD_LIQUIDITY_4_SELECTOR
+            gas_estimate = CURVE_GAS_ESTIMATES["add_liquidity_4"]
+        else:
+            raise ValueError(f"Unsupported n_coins={n_coins} for add_liquidity (expected 2, 3, or 4)")
 
         # Encode amounts array
         calldata = selector
@@ -991,8 +1153,12 @@ class CurveAdapter:
         # Select correct selector based on n_coins
         if n_coins == 2:
             selector = REMOVE_LIQUIDITY_2_SELECTOR
-        else:  # n_coins == 3
+        elif n_coins == 3:
             selector = REMOVE_LIQUIDITY_3_SELECTOR
+        elif n_coins == 4:
+            selector = REMOVE_LIQUIDITY_4_SELECTOR
+        else:
+            raise ValueError(f"Unsupported n_coins={n_coins} for remove_liquidity (expected 2, 3, or 4)")
 
         # Encode calldata
         calldata = selector + self._pad_uint256(lp_amount)
@@ -1150,13 +1316,29 @@ class CurveAdapter:
     def _estimate_add_liquidity(self, pool_info: PoolInfo, amounts: list[int]) -> int:
         """Estimate LP tokens from add_liquidity.
 
-        Mature Curve pools have virtual_price > 1.0 because accumulated fees
-        increase the value of each LP token relative to the underlying assets.
-        A naive sum of deposit amounts overestimates LP tokens minted, causing
-        add_liquidity to revert when min_lp exceeds actual minted amount.
+        For StableSwap pools: divides total deposit by virtual_price.
+        Mature pools have virtual_price > 1.0 because fees increase LP token value.
+        The sum/virtual_price formula works for stablecoin pools because deposit
+        value is proportional to LP supply.
 
-        We divide by virtual_price to get a realistic estimate.
+        For CryptoSwap/Tricrypto pools: returns 0 (no LP slippage protection).
+        Volatile-asset pools track LP tokens as a share of D-invariant, not deposit
+        value. Accurate estimation requires querying calc_token_amount() on-chain
+        (which depends on pool reserves, A, gamma, and current prices). Without that
+        data, any static estimate risks setting min_lp higher than actual minted
+        tokens, causing the add_liquidity to revert with "Slippage".
+        TECH_DEBT(VIB-581): Add on-chain calc_token_amount query for production use.
         """
+        if pool_info.pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO):
+            # Cannot accurately estimate LP tokens for volatile pools without on-chain query.
+            # Return 0 to accept any minted amount — production strategies should use
+            # calc_token_amount() on-chain for proper slippage protection.
+            logger.debug(
+                f"CryptoSwap/Tricrypto pool {pool_info.name}: returning min_lp=0 "
+                "(no slippage protection — use calc_token_amount on-chain for production)"
+            )
+            return 0
+
         total = 0
         for i, amount in enumerate(amounts):
             decimals = self._get_token_decimals(pool_info.coins[i])
@@ -1170,26 +1352,166 @@ class CurveAdapter:
         return total
 
     def _estimate_remove_liquidity(self, pool_info: PoolInfo, lp_amount: int) -> list[int]:
-        """Estimate min_amounts for remove_liquidity (proportional).
+        """Estimate expected per-coin amounts for proportional remove_liquidity.
 
-        Returns a conservative lower bound: 1% of the equal-distribution estimate
-        per coin. This is intentionally very loose to avoid reverts on imbalanced
-        pools (e.g., 3pool where DAI is ~7% of pool, not 33%). It provides a floor
-        against near-total MEV extraction while tolerating pools up to ~99% imbalance.
+        When rpc_url is configured, queries on-chain pool.balances(i) and
+        lp_token.totalSupply() to compute accurate proportional amounts:
+            expected_i = pool.balances(i) * lp_amount / lp_token.totalSupply()
 
-        Production strategies requiring precise slippage control should call
-        calc_token_amount on-chain for accurate min_amounts before executing.
+        This is the only correct approach for imbalanced pools (e.g., Curve 3pool
+        where DAI is ~7% of pool, not 33%). A slippage tolerance is then applied by
+        the caller: min_amount_i = expected_i * (10000 - slippage_bps) / 10000
+
+        When rpc_url is not configured or the RPC call fails, returns [0, ..., 0] and
+        logs a warning. Callers that receive all-zeros should log an additional warning
+        about absent slippage protection.
+
+        Args:
+            pool_info: Pool configuration including address, lp_token, and coin list
+            lp_amount: LP token amount to burn (in wei, 18 decimals)
+
+        Returns:
+            List of expected token amounts (in native token decimals), one per coin.
+            Returns [0, ..., 0] when on-chain estimation is unavailable.
         """
-        # Total underlying value at fair price (in 18-decimal units)
-        total_18 = int(Decimal(lp_amount) * pool_info.virtual_price)
-        # Equal share per coin, then take 1% as the conservative floor
-        per_coin_18 = total_18 // pool_info.n_coins // 100
+        zero_amounts = [0] * pool_info.n_coins
+        if self._gateway_client is None and not self._rpc_url:
+            logger.warning(
+                f"remove_liquidity: no gateway_client or rpc_url configured for {pool_info.name} -- "
+                "min_amounts will be [0, ..., 0] (no slippage protection). "
+                "Set CurveConfig.gateway_client to enable on-chain estimation."
+            )
+            self._last_estimation_error = "gateway_client or rpc_url not configured"
+            return zero_amounts
+
+        try:
+            return self._query_proportional_amounts_onchain(pool_info, lp_amount)
+        except Exception as e:
+            logger.warning(
+                f"remove_liquidity: on-chain estimation failed for {pool_info.name}: {e} -- "
+                "falling back to [0, ..., 0] (no slippage protection)"
+            )
+            self._last_estimation_error = str(e)
+            return zero_amounts
+
+    def _query_proportional_amounts_onchain(self, pool_info: PoolInfo, lp_amount: int) -> list[int]:
+        """Query on-chain pool balances and LP totalSupply to compute proportional amounts.
+
+        Makes synchronous JSON-RPC eth_call requests:
+        1. lp_token.totalSupply() -> total LP supply
+        2. pool.balances(i) for each coin -> current pool reserves
+
+        Proportional amount for coin i:
+            expected_i = pool.balances(i) * lp_amount / totalSupply
+
+        This is exact for proportional remove_liquidity because Curve V1 StableSwap
+        pools charge no fee on proportional withdrawals (only imbalanced ones do).
+
+        Args:
+            pool_info: Pool configuration
+            lp_amount: LP token amount in wei
+
+        Returns:
+            List of expected token amounts in native decimals
+
+        Raises:
+            ValueError: If RPC returns unexpected data
+            Exception: On network or parsing errors (caller handles fallback)
+        """
+        import json as _json
+
+        # ABI selectors
+        TOTAL_SUPPLY_SELECTOR = "18160ddd"  # totalSupply() -> uint256
+        BALANCES_UINT256_SELECTOR = "4903b0d1"  # balances(uint256) -> uint256 (factory/newer pools)
+        BALANCES_INT128_SELECTOR = "065a80d8"  # balances(int128) -> uint256 (old Vyper pools, e.g. 3pool)
+
+        def _encode_uint256_arg(value: int) -> str:
+            """Encode a single uint256 argument (32 bytes, no 0x prefix)."""
+            return hex(value)[2:].zfill(64)
+
+        def _eth_call(to: str, data: str) -> int:
+            """Make a synchronous eth_call and return the result as int.
+
+            Routes through the gateway when gateway_client is configured.
+            Falls back to direct httpx POST only for ad-hoc script usage.
+            """
+            if self._gateway_client is not None:
+                from almanak.gateway.proto import gateway_pb2
+
+                rpc_request = gateway_pb2.RpcRequest(
+                    chain=self.chain,
+                    method="eth_call",
+                    params=_json.dumps([{"to": to, "data": data}, "latest"]),
+                    id="curve_remove_liquidity",
+                )
+                response = self._gateway_client.rpc.Call(rpc_request, timeout=10.0)
+                if not response.success:
+                    raise ValueError(f"eth_call error: {response.error or 'gateway returned failure'}")
+                hex_result = _json.loads(response.result) if response.result else "0x"
+                if not hex_result or hex_result == "0x":
+                    raise ValueError("eth_call returned empty result")
+                return int(hex_result, 16)
+
+            # Fallback: direct RPC (deprecated, ad-hoc use only)
+            import httpx
+
+            assert self._rpc_url is not None
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [{"to": to, "data": data}, "latest"],
+                "id": 1,
+            }
+            response = httpx.post(
+                self._rpc_url, json=payload, timeout=10.0
+            )  # vib-2986-exempt: gateway-internal fallback
+            response.raise_for_status()
+            result = response.json()
+            if "error" in result:
+                raise ValueError(f"eth_call error: {result['error'].get('message', result['error'])}")
+            hex_result = result.get("result", "0x0")
+            if not hex_result or hex_result == "0x":
+                raise ValueError("eth_call returned empty result")
+            return int(hex_result, 16)
+
+        # 1. Query LP totalSupply
+        total_supply = _eth_call(
+            pool_info.lp_token,
+            f"0x{TOTAL_SUPPLY_SELECTOR}",
+        )
+        if total_supply == 0:
+            raise ValueError(f"LP totalSupply is zero for pool {pool_info.name}")
+
+        # 2. Query balances for each coin
+        # Try balances(uint256) first (newer/factory pools), fall back to balances(int128)
+        # (old Vyper pools like Ethereum 3pool). We detect the correct selector on the
+        # first coin query and reuse it for the rest.
         amounts = []
+        balances_selector = BALANCES_UINT256_SELECTOR
         for i in range(pool_info.n_coins):
-            decimals = self._get_token_decimals(pool_info.coins[i])
-            # Convert from 18 decimals to token decimals
-            amount = per_coin_18 // (10 ** (18 - decimals))
-            amounts.append(amount)
+            try:
+                balance_raw = _eth_call(
+                    pool_info.address,
+                    f"0x{balances_selector}{_encode_uint256_arg(i)}",
+                )
+            except (ValueError, Exception):
+                if i == 0 and balances_selector == BALANCES_UINT256_SELECTOR:
+                    # First call failed with uint256 selector, retry with int128
+                    balances_selector = BALANCES_INT128_SELECTOR
+                    balance_raw = _eth_call(
+                        pool_info.address,
+                        f"0x{balances_selector}{_encode_uint256_arg(i)}",
+                    )
+                else:
+                    raise
+            # Proportional share: balance * lp_amount / total_supply
+            expected = balance_raw * lp_amount // total_supply
+            amounts.append(expected)
+
+        logger.debug(
+            f"remove_liquidity on-chain estimate for {pool_info.name}: "
+            f"lp={lp_amount}, total_supply={total_supply}, amounts={amounts}"
+        )
         return amounts
 
     def _estimate_remove_liquidity_one(self, pool_info: PoolInfo, lp_amount: int, coin_index: int) -> int:
@@ -1234,11 +1556,14 @@ class CurveAdapter:
         Falls back to truncated address if token is not in registry
         (e.g., Curve LP tokens like 3Crv). This is used only for log
         descriptions, not for transaction logic.
+
+        Uses skip_gateway=True to avoid 30-second gateway timeouts for
+        LP pool addresses that are valid ERC-20s but not in the static registry.
         """
         if not address.startswith("0x"):
             return address
         try:
-            resolved = self._token_resolver.resolve(address, self.chain)
+            resolved = self._token_resolver.resolve(address, self.chain, skip_gateway=True, log_errors=False)
             return resolved.symbol
         except TokenResolutionError:
             logger.debug(f"Cannot resolve symbol for {address}, using truncated address")

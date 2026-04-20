@@ -80,7 +80,7 @@ Edit `config.json` to customize:
     "borrow_token": "USDC",            // Token to borrow
     "ltv_target": 0.5,                 // Target LTV (50%)
     "min_health_factor": 2.0,          // Minimum HF to maintain
-    "interest_rate_mode": "variable"   // "variable" or "stable"
+    "interest_rate_mode": "variable"   // only "variable" (stable deprecated)
 }
 ```
 

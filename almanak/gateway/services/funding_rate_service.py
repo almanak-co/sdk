@@ -218,7 +218,9 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
         try:
             network = self.settings.network
             rpc_url = get_rpc_url(chain, network=network)
-            web3 = AsyncWeb3(AsyncHTTPProvider(rpc_url))
+            from almanak.gateway.utils.ssl_context import build_ssl_context
+
+            web3 = AsyncWeb3(AsyncHTTPProvider(rpc_url, request_kwargs={"ssl": build_ssl_context()}))
             self._web3_cache[chain] = web3
             return web3
         except ValueError as e:

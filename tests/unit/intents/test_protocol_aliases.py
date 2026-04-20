@@ -47,6 +47,19 @@ class TestNormalizeProtocol:
         assert normalize_protocol("ethereum", "agni") == "agni"
         assert normalize_protocol("base", "agni") == "agni"
 
+    def test_velodrome_resolves_to_aerodrome_on_optimism(self):
+        """Velodrome alias should resolve to aerodrome on Optimism."""
+        assert normalize_protocol("optimism", "velodrome") == "aerodrome"
+
+    def test_velodrome_alias_is_chain_scoped(self):
+        """Velodrome alias should NOT resolve on non-Optimism chains."""
+        assert normalize_protocol("base", "velodrome") == "velodrome"
+        assert normalize_protocol("arbitrum", "velodrome") == "velodrome"
+
+    def test_aerodrome_canonical_on_optimism(self):
+        """aerodrome should remain canonical on Optimism (not re-aliased)."""
+        assert normalize_protocol("optimism", "aerodrome") == "aerodrome"
+
     def test_canonical_protocol_passes_through(self):
         """Already-canonical protocol names should pass through unchanged."""
         assert normalize_protocol("base", "aerodrome") == "aerodrome"
@@ -98,10 +111,17 @@ class TestDisplayProtocol:
         """Passing an alias should also resolve to display name."""
         assert display_protocol("mantle", "agni") == "Agni Finance"
 
+    def test_display_name_for_velodrome_on_optimism(self):
+        """aerodrome on Optimism should display as 'Velodrome V2'."""
+        assert display_protocol("optimism", "aerodrome") == "Velodrome V2"
+
+    def test_display_name_via_velodrome_alias(self):
+        """velodrome alias on Optimism should display as 'Velodrome V2'."""
+        assert display_protocol("optimism", "velodrome") == "Velodrome V2"
+
     def test_fallback_to_canonical_key(self):
         """No display name registered -> falls back to canonical key."""
         assert display_protocol("arbitrum", "uniswap_v3") == "uniswap_v3"
-        assert display_protocol("base", "aerodrome") == "aerodrome"
 
     def test_unknown_protocol_fallback(self):
         """Unknown protocols should return the lowercased key."""
@@ -189,6 +209,101 @@ class TestCompilerResolveProtocol:
             config=IntentCompilerConfig(allow_placeholder_prices=True),
         )
         assert compiler.default_protocol == "agni_finance"
+
+
+class TestVelodromeCompilerIntegration:
+    """Test Velodrome/Aerodrome compiler routing on Optimism."""
+
+    @pytest.fixture()
+    def optimism_compiler(self):
+        return IntentCompiler(
+            chain="optimism",
+            price_oracle={"ETH": Decimal("3000"), "USDC": Decimal("1"), "WETH": Decimal("3000")},
+            config=IntentCompilerConfig(allow_placeholder_prices=True),
+        )
+
+    @pytest.fixture()
+    def base_compiler(self):
+        return IntentCompiler(
+            chain="base",
+            price_oracle={"ETH": Decimal("3000"), "USDC": Decimal("1"), "WETH": Decimal("3000")},
+            config=IntentCompilerConfig(allow_placeholder_prices=True),
+        )
+
+    def test_resolve_velodrome_to_aerodrome_on_optimism(self, optimism_compiler):
+        """Compiler should resolve 'velodrome' to 'aerodrome' on Optimism."""
+        assert optimism_compiler._resolve_protocol("velodrome") == "aerodrome"
+
+    def test_aerodrome_swap_compiles_on_optimism(self, optimism_compiler):
+        """Aerodrome swap should compile on Optimism (not blocked by Base-only check)."""
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="WETH",
+            amount=Decimal("100"),
+            protocol="aerodrome",
+        )
+        result = optimism_compiler.compile(intent)
+        assert result.status.value == "SUCCESS", f"Expected SUCCESS but got {result.status}: {result.error}"
+
+    def test_velodrome_swap_routes_to_aerodrome_path(self, optimism_compiler):
+        """protocol='velodrome' should route through Aerodrome swap path on Optimism."""
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="WETH",
+            amount=Decimal("100"),
+            protocol="velodrome",
+        )
+        result = optimism_compiler.compile(intent)
+        assert result.status.value == "SUCCESS", f"Expected SUCCESS but got {result.status}: {result.error}"
+
+    def test_aerodrome_swap_unsupported_chain_fails(self):
+        """Aerodrome swap should fail on chains without AERODROME addresses."""
+        compiler = IntentCompiler(
+            chain="ethereum",
+            price_oracle={"ETH": Decimal("3000"), "USDC": Decimal("1"), "WETH": Decimal("3000")},
+            config=IntentCompilerConfig(allow_placeholder_prices=True),
+        )
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="WETH",
+            amount=Decimal("100"),
+            protocol="aerodrome",
+        )
+        result = compiler.compile(intent)
+        assert result.status.value == "FAILED"
+        assert "not supported on ethereum" in (result.error or "").lower()
+
+    def test_base_aerodrome_defaults_to_cl(self, base_compiler):
+        """On Base, Aerodrome swap should default to CL routing (has cl_router)."""
+        from almanak.core.contracts import AERODROME as AERODROME_ADDRESSES
+
+        chain_addrs = AERODROME_ADDRESSES["base"]
+        assert "cl_router" in chain_addrs
+        assert "cl_factory" in chain_addrs
+
+    def test_optimism_velodrome_defaults_to_classic(self):
+        """On Optimism, Velodrome should default to classic routing (no cl_router)."""
+        from almanak.core.contracts import AERODROME as AERODROME_ADDRESSES
+
+        chain_addrs = AERODROME_ADDRESSES["optimism"]
+        assert "cl_router" not in chain_addrs
+        assert "cl_factory" not in chain_addrs
+
+    def test_optimism_compiles_with_classic_default(self):
+        """Optimism compilation should succeed using classic (non-CL) routing."""
+        compiler = IntentCompiler(
+            chain="optimism",
+            price_oracle={"ETH": Decimal("3000"), "USDC": Decimal("1"), "WETH": Decimal("3000")},
+            config=IntentCompilerConfig(allow_placeholder_prices=True),
+        )
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="WETH",
+            amount=Decimal("100"),
+            protocol="aerodrome",
+        )
+        result = compiler.compile(intent)
+        assert result.status.value == "SUCCESS", f"Expected SUCCESS but got {result.status}: {result.error}"
 
 
 class TestWrappedNativeMNT:

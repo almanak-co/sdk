@@ -32,6 +32,7 @@ from .sdk import (
 if TYPE_CHECKING:
     from almanak.framework.data.pendle.api_client import PendleAPIClient
     from almanak.framework.data.pendle.on_chain_reader import PendleOnChainReader
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -176,29 +177,34 @@ class PendleAdapter:
 
     def __init__(
         self,
-        rpc_url: str,
+        rpc_url: str | None = None,
         chain: str = "arbitrum",
         wallet_address: str | None = None,
         api_client: "PendleAPIClient | None" = None,
         on_chain_reader: "PendleOnChainReader | None" = None,
+        gateway_client: "GatewayClient | None" = None,
     ):
         """
         Initialize the Pendle adapter.
 
         Args:
-            rpc_url: RPC endpoint URL
+            rpc_url: DEPRECATED — direct RPC URL. Prefer gateway_client for
+                any code path running in a strategy container.
             chain: Target chain (arbitrum, ethereum)
             wallet_address: Optional default wallet address for transactions
             api_client: Optional PendleAPIClient for REST API quotes
             on_chain_reader: Optional PendleOnChainReader for on-chain fallback
+            gateway_client: Gateway client for routing eth_call through the
+                gateway. Preferred over rpc_url.
         """
         self.chain = chain
         self.wallet_address = wallet_address
-        self.sdk = get_pendle_sdk(rpc_url, chain)
+        self.sdk = get_pendle_sdk(rpc_url=rpc_url, chain=chain, gateway_client=gateway_client)
         self.addresses = PENDLE_ADDRESSES.get(chain, {})
         self._api_client = api_client
         self._on_chain_reader = on_chain_reader
         self._rpc_url = rpc_url
+        self._gateway_client = gateway_client
 
         logger.info(f"PendleAdapter initialized: chain={chain}")
 
@@ -485,7 +491,10 @@ class PendleAdapter:
             if self._on_chain_reader is None:
                 from almanak.framework.data.pendle.on_chain_reader import PendleOnChainReader
 
-                self._on_chain_reader = PendleOnChainReader(rpc_url=self._rpc_url, chain=self.chain)
+                if self._gateway_client is not None:
+                    self._on_chain_reader = PendleOnChainReader(gateway_client=self._gateway_client, chain=self.chain)
+                else:
+                    self._on_chain_reader = PendleOnChainReader(rpc_url=self._rpc_url, chain=self.chain)
 
             if swap_type == "token_to_pt":
                 estimated = self._on_chain_reader.estimate_pt_output(market, amount_in)
@@ -520,12 +529,18 @@ class PendleAdapter:
 
 
 def get_pendle_adapter(
-    rpc_url: str,
+    rpc_url: str | None = None,
     chain: str = "arbitrum",
     wallet_address: str | None = None,
+    gateway_client: "GatewayClient | None" = None,
 ) -> PendleAdapter:
     """Factory function to create a PendleAdapter instance."""
-    return PendleAdapter(rpc_url, chain, wallet_address)
+    return PendleAdapter(
+        rpc_url=rpc_url,
+        chain=chain,
+        wallet_address=wallet_address,
+        gateway_client=gateway_client,
+    )
 
 
 __all__ = [

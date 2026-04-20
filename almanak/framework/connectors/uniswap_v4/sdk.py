@@ -1,8 +1,23 @@
-"""Uniswap V4 SDK — pool key computation, quote interface, swap encoding.
+"""Uniswap V4 SDK — pool key computation, quote interface, swap & LP encoding.
 
 Uniswap V4 uses a singleton PoolManager contract that manages all pools.
 Pool keys include (currency0, currency1, fee, tickSpacing, hooks).
 Native ETH is supported directly (address(0) for currency).
+
+Swaps are routed through the canonical UniversalRouter which uses Permit2
+for token transfers. LP operations use the PositionManager with
+flash accounting (modifyLiquidities + Actions-encoded bytes).
+
+Swap flow:
+  1. ERC-20 approve input token to Permit2
+  2. Permit2.approve(universalRouter, token, amount, expiration)
+  3. UniversalRouter.execute([V4_SWAP], [abi.encode(actions, params)], deadline)
+     where actions = [SWAP_EXACT_IN_SINGLE, SETTLE, TAKE]
+
+LP flow (mint):
+  1. ERC-20 approve token0 + token1 to Permit2
+  2. Permit2.approve(positionManager, token0/token1, amount, expiration)
+  3. PositionManager.modifyLiquidities([MINT_POSITION, SETTLE_PAIR], deadline)
 
 Example:
     from almanak.framework.connectors.uniswap_v4.sdk import UniswapV4SDK
@@ -11,12 +26,19 @@ Example:
     pool_key = sdk.compute_pool_key(token0, token1, fee=3000)
 """
 
+import json
 import logging
 import math
+import time
+import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from almanak.core.contracts import UNISWAP_V4
+
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -52,24 +74,112 @@ FEE_TIERS: list[int] = [100, 500, 3000, 10000]
 # Zero address represents native ETH in V4
 NATIVE_CURRENCY = "0x0000000000000000000000000000000000000000"
 
-# V4SwapRouter function selectors
+# address(2) = ADDRESS_THIS in the UniversalRouter (used as intermediate recipient
+# when the router needs to hold tokens temporarily, e.g. for WRAP_ETH/SWEEP)
+ADDRESS_THIS = "0x0000000000000000000000000000000000000002"
+
+# Canonical Permit2 address (CREATE2, same on all EVM chains)
+PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+
+# --- Function selectors ---
+
+# V4SwapRouter function selector (standalone router, NOT the UniversalRouter).
 # swap(PoolKey,IPoolManager.SwapParams,uint256,uint256,bytes)
+# NOTE: The v4_swap_router address in contracts.py needs on-chain verification.
+# The UniversalRouter is the canonical Uniswap-deployed swap entry point for V4.
 SWAP_SELECTOR = "0xf3cd914c"
+
+# PositionManager function selectors (canonical V4 periphery)
+# keccak256("modifyLiquidities(bytes,uint256)")[:4]
+MODIFY_LIQUIDITIES_SELECTOR = "0xdd46508f"
+# keccak256("modifyLiquiditiesWithoutUnlock(bytes,bytes[])")[:4]
+MODIFY_LIQUIDITIES_WITHOUT_UNLOCK_SELECTOR = "0x4afe393c"
+
+# UniversalRouter.execute(bytes commands, bytes[] inputs, uint256 deadline)
+UNIVERSAL_ROUTER_EXECUTE_SELECTOR = "0x3593564c"
+
+# Permit2.approve(address token, address spender, uint160 amount, uint48 expiration)
+PERMIT2_APPROVE_SELECTOR = "0x87517c45"
+
+# UniversalRouter command bytes
+# Source: https://github.com/Uniswap/universal-router/blob/main/contracts/base/Dispatcher.sol
+PERMIT2_TRANSFER_FROM = 0x02  # abi.decode(inputs, (address token, address recipient, uint160 amount))
+_UR_SWEEP = 0x04  # sweep(address token, address recipient, uint256 amountMin)
+_UR_WRAP_ETH = 0x0B  # wrap ETH to WETH: abi.decode(inputs, (address recipient, uint256 amountMin))
+_UR_UNWRAP_WETH = 0x0C  # unwrap WETH to ETH: abi.decode(inputs, (address recipient, uint256 amountMin))
+V4_SWAP = 0x10  # V4 swap via two-layer encoding: abi.encode(bytes actions, bytes[] params)
+# Aliases for backward compat with existing code
+V4_SWAP_EXACT_IN_SINGLE = V4_SWAP
+V4_SWAP_EXACT_IN = V4_SWAP
+V4_SWAP_EXACT_OUT_SINGLE = V4_SWAP
+V4_SWAP_EXACT_OUT = V4_SWAP
+
+# --- V4 Action bytes (v4-periphery Actions.sol) ---
+# Shared between PositionManager and V4Router (same Actions.sol library).
+# Source: https://github.com/Uniswap/v4-periphery/blob/main/src/libraries/Actions.sol
+# Verified against on-chain transactions on Ethereum mainnet (2026-03-29).
+#
+# Liquidity actions
+PM_INCREASE_LIQUIDITY = 0x00
+PM_DECREASE_LIQUIDITY = 0x01
+PM_MINT_POSITION = 0x02
+PM_BURN_POSITION = 0x03
+# Swap actions (used inside V4_SWAP two-layer encoding)
+ACTION_SWAP_EXACT_IN_SINGLE = 0x06
+ACTION_SWAP_EXACT_IN = 0x07
+ACTION_SWAP_EXACT_OUT_SINGLE = 0x08
+ACTION_SWAP_EXACT_OUT = 0x09
+# Settlement actions
+ACTION_SETTLE = 0x0B
+ACTION_SETTLE_ALL = 0x0C
+ACTION_SETTLE_PAIR = 0x0D
+ACTION_TAKE = 0x0E
+ACTION_TAKE_ALL = 0x0F
+ACTION_TAKE_PORTION = 0x10
+ACTION_TAKE_PAIR = 0x11
+ACTION_CLOSE_CURRENCY = 0x12
+ACTION_CLEAR_OR_TAKE = 0x13
+ACTION_SWEEP = 0x14
+# Legacy aliases (deprecated -- use ACTION_* constants above)
+PM_CLOSE_CURRENCY = ACTION_CLOSE_CURRENCY
+PM_CLEAR_OR_TAKE = ACTION_CLEAR_OR_TAKE
+PM_SWEEP = ACTION_SWEEP
+PM_SETTLE = ACTION_SETTLE
+PM_SETTLE_ALL = ACTION_SETTLE_ALL
+PM_SETTLE_PAIR = ACTION_SETTLE_PAIR
+PM_TAKE = ACTION_TAKE
+PM_TAKE_ALL = ACTION_TAKE_ALL
+PM_TAKE_PAIR = ACTION_TAKE_PAIR
+PM_TAKE_PORTION = ACTION_TAKE_PORTION
 
 # Gas estimates
 UNISWAP_V4_GAS_ESTIMATES = {
-    "approve": 50_000,
-    "swap": 200_000,
-    "swap_with_hooks": 350_000,
+    "approve": 65_000,  # Must cover proxy ERC-20s (e.g. Ethereum USDC ~56K gas)
+    "permit2_approve": 55_000,
+    "swap": 250_000,  # Higher than V3 due to PoolManager unlock callback overhead
+    "swap_with_hooks": 400_000,
+    "lp_mint": 450_000,  # Mint new LP position via PositionManager
+    "lp_decrease": 300_000,  # Decrease liquidity
+    "lp_burn": 200_000,  # Burn empty position NFT
+    "lp_collect_fees": 250_000,  # Collect fees only (decrease with 0 liquidity + take)
 }
 
 # PoolManager addresses per chain
 POOL_MANAGER_ADDRESSES: dict[str, str] = {chain: addrs["pool_manager"] for chain, addrs in UNISWAP_V4.items()}
 
-ROUTER_ADDRESSES: dict[str, str] = {chain: addrs["v4_swap_router"] for chain, addrs in UNISWAP_V4.items()}
+# UniversalRouter addresses (canonical V4 swap entry point)
+ROUTER_ADDRESSES: dict[str, str] = {chain: addrs["universal_router"] for chain, addrs in UNISWAP_V4.items()}
 
 QUOTER_ADDRESSES: dict[str, str] = {chain: addrs["quoter"] for chain, addrs in UNISWAP_V4.items()}
 
+# PositionManager addresses per chain
+POSITION_MANAGER_ADDRESSES: dict[str, str] = {chain: addrs["position_manager"] for chain, addrs in UNISWAP_V4.items()}
+
+# Wrapped native token addresses per chain (for WETH <-> native ETH routing in V4).
+# V4's primary liquidity uses native ETH (address(0)), not WETH. When users swap
+# to/from WETH, we route through the native ETH pool and add WRAP/UNWRAP commands.
+# Imported from the canonical token defaults to avoid address duplication.
+from almanak.framework.data.tokens.defaults import WRAPPED_NATIVE as WRAPPED_NATIVE_ADDRESSES
 
 # =============================================================================
 # Data Models
@@ -115,13 +225,38 @@ class SwapQuote:
 
 @dataclass
 class SwapTransaction:
-    """Encoded swap transaction data."""
+    """Encoded swap or LP transaction data."""
 
     to: str
     value: int
     data: str
     gas_estimate: int
     description: str
+
+
+@dataclass
+class LPMintParams:
+    """Parameters for minting a new V4 LP position."""
+
+    pool_key: PoolKey
+    tick_lower: int
+    tick_upper: int
+    liquidity: int
+    amount0_max: int
+    amount1_max: int
+    owner: str
+    hook_data: bytes = b""
+
+
+@dataclass
+class LPDecreaseParams:
+    """Parameters for decreasing liquidity from a V4 LP position."""
+
+    token_id: int
+    liquidity: int
+    amount0_min: int = 0
+    amount1_min: int = 0
+    hook_data: bytes = b""
 
 
 # =============================================================================
@@ -132,14 +267,27 @@ class SwapTransaction:
 class UniswapV4SDK:
     """Uniswap V4 SDK for pool operations and swap encoding.
 
+    Routes swaps through the canonical UniversalRouter with Permit2 flow.
+
     Args:
         chain: Chain name (e.g. "arbitrum", "ethereum").
-        rpc_url: Optional RPC URL for on-chain queries.
+        rpc_url: Optional RPC URL for on-chain queries (direct HTTP fallback).
+        gateway_client: Optional GatewayClient. When provided, on-chain
+            ``eth_call`` queries go through ``gateway_client.rpc.Call`` instead
+            of direct urllib/HTTP. Strategy containers in production have no
+            outbound HTTP so the gateway is required there; local dev and
+            gateway-internal execution may still pass ``rpc_url`` instead.
     """
 
-    def __init__(self, chain: str, rpc_url: str | None = None) -> None:
+    def __init__(
+        self,
+        chain: str,
+        rpc_url: str | None = None,
+        gateway_client: "GatewayClient | None" = None,
+    ) -> None:
         self.chain = chain.lower()
         self.rpc_url = rpc_url
+        self._gateway_client = gateway_client
 
         if self.chain not in UNISWAP_V4:
             raise ValueError(
@@ -148,8 +296,220 @@ class UniswapV4SDK:
 
         self.addresses = UNISWAP_V4[self.chain]
         self.pool_manager = self.addresses["pool_manager"]
-        self.router = self.addresses["v4_swap_router"]
+        self.position_manager = self.addresses["position_manager"]
+        self.router = self.addresses["universal_router"]
         self.quoter = self.addresses["quoter"]
+
+    def _eth_call_via_gateway(self, to: str, data: str, call_id: str) -> str | None:
+        """Issue eth_call through the gateway. Returns the hex result or None on failure."""
+        if self._gateway_client is None:
+            raise RuntimeError("_eth_call_via_gateway called without gateway_client")
+        from almanak.gateway.proto import gateway_pb2
+
+        rpc_request = gateway_pb2.RpcRequest(
+            chain=self.chain,
+            method="eth_call",
+            params=json.dumps([{"to": to, "data": data}, "latest"]),
+            id=call_id,
+        )
+        response = self._gateway_client.rpc.Call(rpc_request, timeout=10.0)
+        if not response.success:
+            return None
+        if not response.result:
+            return None
+        # gateway returns result as JSON-encoded string ("0x..." wrapped in quotes)
+        try:
+            decoded = json.loads(response.result)
+            return decoded if isinstance(decoded, str) else None
+        except json.JSONDecodeError:
+            return None
+
+    # =========================================================================
+    # On-Chain Queries
+    # =========================================================================
+
+    def get_position_liquidity(self, token_id: int, rpc_url: str | None = None) -> int:
+        """Query on-chain liquidity for a V4 LP position via PositionManager.getPositionLiquidity(uint256).
+
+        Args:
+            token_id: NFT token ID of the LP position.
+            rpc_url: RPC URL to use. Falls back to self.rpc_url.
+
+        Returns:
+            Liquidity amount (uint128) for the position.
+
+        Raises:
+            ValueError: If no RPC URL is available or the call fails.
+        """
+        # getPositionLiquidity(uint256) selector = 0x1efeed33
+        # Verified: keccak256("getPositionLiquidity(uint256)")[:4] == 0x1efeed33
+        selector = "1efeed33"
+        token_id_hex = format(token_id, "064x")
+        calldata = "0x" + selector + token_id_hex
+
+        # Prefer gateway when available (production containers have no HTTP egress).
+        if self._gateway_client is not None:
+            hex_result = self._eth_call_via_gateway(self.position_manager, calldata, "v4_get_position_liquidity")
+            if hex_result is None:
+                raise ValueError("Gateway eth_call for getPositionLiquidity returned no result")
+            try:
+                liquidity = int(hex_result, 16)
+            except (TypeError, ValueError) as e:
+                raise ValueError(
+                    f"Malformed liquidity hex for position {token_id} on {self.chain}: {hex_result!r}"
+                ) from e
+            logger.info("V4 position %d liquidity: %d (chain=%s, via=gateway)", token_id, liquidity, self.chain)
+            return liquidity
+
+        url = rpc_url or self.rpc_url
+        if not url:
+            raise ValueError("RPC URL required to query on-chain position liquidity")
+
+        if not url.startswith(("http://", "https://")):
+            raise ValueError(f"RPC URL must use http:// or https:// scheme, got: {url[:20]}")
+
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_call",
+                "params": [{"to": self.position_manager, "data": calldata}, "latest"],
+            }
+        ).encode()
+
+        # Direct urllib fallback for trusted contexts only (gateway-internal / local dev).
+        req = urllib.request.Request(  # vib-2986-exempt: gateway-internal fallback
+            url, data=payload, headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310  # vib-2986-exempt: gateway-internal fallback
+                result = json.loads(resp.read())
+        except Exception as e:
+            raise ValueError(f"RPC call to getPositionLiquidity failed: {e}") from e
+
+        if "error" in result:
+            raise ValueError(f"getPositionLiquidity reverted: {result['error']}")
+
+        if "result" not in result or not isinstance(result["result"], str):
+            raise ValueError(
+                f"Malformed RPC response for position {token_id} on {self.chain}: missing or invalid 'result' field"
+            )
+        hex_result = result["result"]
+        try:
+            liquidity = int(hex_result, 16)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"Malformed liquidity hex for position {token_id} on {self.chain}: {hex_result!r}") from e
+        logger.info("V4 position %d liquidity: %d (chain=%s)", token_id, liquidity, self.chain)
+        return liquidity
+
+    def get_pool_sqrt_price(
+        self,
+        pool_key: PoolKey,
+        rpc_url: str | None = None,
+    ) -> int | None:
+        """Query on-chain sqrtPriceX96 for a V4 pool via StateView.getSlot0().
+
+        Args:
+            pool_key: V4 PoolKey identifying the pool.
+            rpc_url: RPC URL to use. Falls back to self.rpc_url.
+
+        Returns:
+            sqrtPriceX96 (int) if successful, None if query fails or no RPC available.
+        """
+        state_view = self.addresses.get("state_view")
+        if not state_view:
+            return None
+
+        from almanak.framework.connectors.uniswap_v4.hooks import build_get_slot0_calldata, decode_slot0_response
+
+        calldata = build_get_slot0_calldata(pool_key)
+
+        # Prefer gateway when available. Returns None on any failure to preserve
+        # the existing "fall back to estimated sqrtPrice" semantics.
+        if self._gateway_client is not None:
+            hex_result = self._eth_call_via_gateway(state_view, calldata, "v4_get_pool_sqrt_price")
+            if hex_result is None:
+                logger.warning(
+                    "V4 StateView.getSlot0 via gateway failed on %s — falling back to estimated sqrtPrice",
+                    self.chain,
+                )
+                return None
+            try:
+                pool_state = decode_slot0_response(hex_result)
+            except Exception:
+                logger.warning(
+                    "V4 StateView.getSlot0 decode failed on %s, falling back to estimated sqrtPrice", self.chain
+                )
+                return None
+            if not pool_state.exists or pool_state.sqrt_price_x96 == 0:
+                logger.warning("V4 pool not initialized on %s, falling back to estimated sqrtPrice", self.chain)
+                return None
+            logger.info(
+                "V4 on-chain sqrtPriceX96=%d tick=%d (chain=%s, via=gateway)",
+                pool_state.sqrt_price_x96,
+                pool_state.tick,
+                self.chain,
+            )
+            return pool_state.sqrt_price_x96
+
+        url = rpc_url or self.rpc_url
+        if not url:
+            return None
+
+        if not url.startswith(("http://", "https://")):
+            logger.warning("RPC URL must use http:// or https:// scheme, got: %s", url[:20])
+            return None
+
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_call",
+                "params": [{"to": state_view, "data": calldata}, "latest"],
+            }
+        ).encode()
+
+        # Direct urllib fallback for trusted contexts only (gateway-internal / local dev).
+        req = urllib.request.Request(  # vib-2986-exempt: gateway-internal fallback
+            url, data=payload, headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310  # vib-2986-exempt: gateway-internal fallback
+                result = json.loads(resp.read())
+        except Exception as e:
+            logger.warning(
+                "V4 StateView.getSlot0 RPC call failed on %s: %s — falling back to estimated sqrtPrice",
+                self.chain,
+                e,
+            )
+            return None
+
+        if "error" in result or "result" not in result:
+            error_detail = result.get("error", "missing 'result' field")
+            logger.warning(
+                "V4 StateView.getSlot0 returned error on %s: %s — falling back to estimated sqrtPrice",
+                self.chain,
+                error_detail,
+            )
+            return None
+
+        try:
+            pool_state = decode_slot0_response(result["result"])
+        except Exception:
+            logger.warning("V4 StateView.getSlot0 decode failed on %s, falling back to estimated sqrtPrice", self.chain)
+            return None
+
+        if not pool_state.exists or pool_state.sqrt_price_x96 == 0:
+            logger.warning("V4 pool not initialized on %s, falling back to estimated sqrtPrice", self.chain)
+            return None
+
+        logger.info(
+            "V4 on-chain sqrtPriceX96=%d tick=%d (chain=%s)",
+            pool_state.sqrt_price_x96,
+            pool_state.tick,
+            self.chain,
+        )
+        return pool_state.sqrt_price_x96
 
     def compute_pool_key(
         self,
@@ -244,7 +604,7 @@ class UniswapV4SDK:
 
         Args:
             token_address: Token contract address.
-            spender: Address to approve (typically the router).
+            spender: Address to approve (Permit2 for V4 flow).
             amount: Amount to approve.
 
         Returns:
@@ -263,6 +623,53 @@ class UniswapV4SDK:
             description=f"Approve {spender[:10]}... to spend {amount} tokens",
         )
 
+    def build_permit2_approve_tx(
+        self,
+        token_address: str,
+        spender: str,
+        amount: int,
+        expiration: int = 0,
+    ) -> SwapTransaction:
+        """Build a Permit2.approve transaction to grant the UniversalRouter allowance.
+
+        Args:
+            token_address: Token address to approve.
+            spender: Address to grant allowance to (UniversalRouter).
+            amount: Amount to approve (uint160 max = 2^160-1).
+            expiration: Expiration timestamp (0 = default 30 days from now).
+
+        Returns:
+            SwapTransaction targeting the Permit2 contract.
+        """
+        if expiration == 0:
+            expiration = int(time.time()) + 30 * 86400  # 30 days
+
+        # Permit2.approve(address token, address spender, uint160 amount, uint48 expiration)
+        # Clamp amount to uint160 max
+        uint160_max = (1 << 160) - 1
+        amount = min(amount, uint160_max)
+
+        data = (
+            PERMIT2_APPROVE_SELECTOR
+            + _pad_address(token_address)
+            + _pad_address(spender)
+            + _pad_uint(amount)
+            + _pad_uint(expiration)
+        )
+
+        return SwapTransaction(
+            to=PERMIT2_ADDRESS,
+            value=0,
+            data=data,
+            gas_estimate=UNISWAP_V4_GAS_ESTIMATES["permit2_approve"],
+            description=f"Permit2 approve {spender[:10]}... for {token_address[:10]}...",
+        )
+
+    def _is_wrapped_native(self, token: str) -> bool:
+        """Check if a token is the wrapped native token (WETH/WMATIC/etc) for this chain."""
+        wrapped = WRAPPED_NATIVE_ADDRESSES.get(self.chain)
+        return wrapped is not None and token.lower() == wrapped.lower()
+
     def build_swap_tx(
         self,
         quote: SwapQuote,
@@ -270,79 +677,506 @@ class UniswapV4SDK:
         slippage_bps: int = 50,
         deadline: int = 0,
     ) -> SwapTransaction:
-        """Build a V4 swap transaction via the V4SwapRouter.
+        """Build a V4 swap transaction via the UniversalRouter.
 
-        Encodes an exactInputSingle swap through the V4 swap router.
+        Uses the two-layer V4_SWAP encoding verified against real Ethereum mainnet txns:
+          Outer: UniversalRouter.execute([V4_SWAP], [v4_input], deadline)
+          Inner: v4_input = abi.encode(bytes actions, bytes[] params)
+                 actions = [SWAP_EXACT_IN_SINGLE, SETTLE, TAKE]
+
+        WETH routing: V4 pools primarily use native ETH (address(0)), not WETH.
+        When token_in or token_out is WETH, the swap routes through the native ETH
+        pool and adds UNWRAP_WETH or WRAP_ETH commands at the UniversalRouter level.
 
         Args:
             quote: Swap quote with amounts.
             recipient: Address to receive output tokens.
             slippage_bps: Slippage tolerance in basis points.
-            deadline: Transaction deadline (0 = no deadline).
+            deadline: Transaction deadline (0 = 30 minutes from now).
 
         Returns:
             SwapTransaction with encoded calldata.
         """
-        amount_out_minimum = int(quote.amount_out * (10000 - slippage_bps) / 10000)
-        is_native_in = quote.token_in.lower() == NATIVE_CURRENCY
+        amount_out_minimum = quote.amount_out * (10000 - slippage_bps) // 10000
 
-        # Encode exactInputSingle parameters
-        # The V4SwapRouter uses a different encoding than V3:
-        # exactInputSingle(ExactInputSingleParams)
-        # struct ExactInputSingleParams {
-        #   PoolKey poolKey;
-        #   bool zeroForOne;
-        #   uint128 amountIn;
-        #   uint128 amountOutMinimum;
-        #   uint160 sqrtPriceLimitX96;
-        #   bytes hookData;
-        # }
+        # Detect WETH and substitute native ETH for the V4 pool
+        weth_in = self._is_wrapped_native(quote.token_in)
+        weth_out = self._is_wrapped_native(quote.token_out)
+        if weth_in and weth_out:
+            raise ValueError("Cannot swap wrapped native token to itself")
+        pool_token_in = NATIVE_CURRENCY if weth_in else quote.token_in
+        pool_token_out = NATIVE_CURRENCY if weth_out else quote.token_out
 
-        # Determine swap direction
+        is_native_in = pool_token_in.lower() == NATIVE_CURRENCY
+        is_native_out = pool_token_out.lower() == NATIVE_CURRENCY
+
+        if deadline == 0:
+            deadline = int(time.time()) + 1800  # 30 minutes
+
+        # Build a modified quote that uses native ETH for the pool key
+        pool_quote = SwapQuote(
+            token_in=pool_token_in,
+            token_out=pool_token_out,
+            amount_in=quote.amount_in,
+            amount_out=quote.amount_out,
+            fee_tier=quote.fee_tier,
+        )
+
+        # 1. Encode the ExactInputSingleParams for the swap action
+        swap_params = self._encode_exact_input_single_params(
+            quote=pool_quote,
+            amount_out_minimum=amount_out_minimum,
+        )
+
+        # 2. Encode SETTLE params: (Currency currency, uint256 maxAmount, bool payerIsUser)
+        #    maxAmount=0 means "settle entire debt", payerIsUser=true for user-funded swaps
+        settle_params = _pad_address(pool_token_in) + _pad_uint(0) + _pad_bool(True)
+
+        # 3. Encode TAKE params: (Currency currency, address recipient, uint256 amount)
+        #    For native ETH output: recipient = address(2) (ADDRESS_THIS = the UniversalRouter),
+        #    then use outer SWEEP/WRAP_ETH to forward to the actual recipient.
+        #    For ERC-20 output: recipient = actual wallet address.
+        #    amount=0 means "take all available".
+        take_recipient = ADDRESS_THIS if is_native_out else recipient
+        take_params = _pad_address(pool_token_out) + _pad_address(take_recipient) + _pad_uint(0)
+
+        # 4. Build the two-layer V4_SWAP input: abi.encode(bytes actions, bytes[] params)
+        inner_actions = bytes([ACTION_SWAP_EXACT_IN_SINGLE, ACTION_SETTLE, ACTION_TAKE])
+        v4_swap_input = _encode_v4_actions(inner_actions, [swap_params, settle_params, take_params])
+
+        # 5. Build UniversalRouter commands with WETH wrap/unwrap if needed
+        ur_commands_list: list[int] = []
+        ur_inputs_list: list[str] = []
+
+        if weth_in:
+            # WETH input: transfer WETH to router via Permit2, then unwrap to ETH.
+            # Step 1: PERMIT2_TRANSFER_FROM pulls WETH from user to router
+            # Step 2: UNWRAP_WETH converts WETH to ETH in the router
+            # The V4_SWAP's SETTLE then uses the router's ETH balance.
+            transfer_params = (
+                _pad_address(quote.token_in)  # WETH address
+                + _pad_address(ADDRESS_THIS)  # recipient = ADDRESS_THIS
+                + _pad_uint(min(quote.amount_in, (1 << 160) - 1))  # uint160 amount
+            )
+            ur_commands_list.append(PERMIT2_TRANSFER_FROM)
+            ur_inputs_list.append(transfer_params)
+
+            unwrap_params = (
+                _pad_address(ADDRESS_THIS)  # recipient = ADDRESS_THIS
+                + _pad_uint(quote.amount_in)
+            )
+            ur_commands_list.append(_UR_UNWRAP_WETH)
+            ur_inputs_list.append(unwrap_params)
+
+        ur_commands_list.append(V4_SWAP)
+        ur_inputs_list.append(v4_swap_input)
+
+        if is_native_out and weth_out:
+            # WETH output: ETH comes out of pool -> WRAP to WETH -> send to recipient
+            # WRAP_ETH params: (address recipient, uint256 amountMin)
+            wrap_params = _pad_address(recipient) + _pad_uint(amount_out_minimum)
+            ur_commands_list.append(_UR_WRAP_ETH)
+            ur_inputs_list.append(wrap_params)
+        elif is_native_out and not weth_out:
+            # Pure native ETH output: SWEEP to forward ETH from router to recipient
+            sweep_params = _pad_address(NATIVE_CURRENCY) + _pad_address(recipient) + _pad_uint(amount_out_minimum)
+            ur_commands_list.append(_UR_SWEEP)
+            ur_inputs_list.append(sweep_params)
+
+        ur_commands = bytes(ur_commands_list)
+        ur_inputs = ur_inputs_list
+
+        # 6. Wrap in UniversalRouter.execute()
+        calldata = _encode_execute(
+            commands=ur_commands,
+            inputs=ur_inputs,
+            deadline=deadline,
+        )
+
+        # Native ETH value: only when token_in is actually native ETH (not WETH)
+        # WETH-in uses Permit2 transfer (no ETH value needed)
+        native_value = quote.amount_in if (is_native_in and not weth_in) else 0
+
+        return SwapTransaction(
+            to=self.router,
+            value=native_value,
+            data=calldata,
+            gas_estimate=UNISWAP_V4_GAS_ESTIMATES["swap"],
+            description=(f"Uniswap V4 swap {quote.token_in[:10]}... -> {quote.token_out[:10]}..."),
+        )
+
+    def _encode_exact_input_single_params(
+        self,
+        quote: SwapQuote,
+        amount_out_minimum: int,
+    ) -> str:
+        """Encode ExactInputSingleParams struct for V4 SWAP_EXACT_IN_SINGLE action.
+
+        Deployed struct layout (v4-periphery IV4Router.sol):
+            struct ExactInputSingleParams {
+                PoolKey poolKey;        // (currency0, currency1, fee, tickSpacing, hooks)
+                bool zeroForOne;
+                uint128 amountIn;
+                uint128 amountOutMinimum;
+                bytes hookData;         // dynamic
+            }
+
+        Note: sqrtPriceLimitX96 was removed in the deployed V4 contracts.
+        The V4Router hardcodes it internally (MIN_SQRT_PRICE+1 or MAX_SQRT_PRICE-1).
+
+        Returns:
+            Hex string (no 0x prefix) of ABI-encoded params.
+        """
         pool_key = self.compute_pool_key(quote.token_in, quote.token_out, quote.fee_tier)
         zero_for_one = quote.token_in.lower() == pool_key.currency0
 
-        # Encode PoolKey struct
-        pool_key_encoded = (
+        # Clamp amounts to uint128 (V4 uses uint128 not uint256)
+        uint128_max = (1 << 128) - 1
+        amount_in = min(quote.amount_in, uint128_max)
+        amount_out_min = min(amount_out_minimum, uint128_max)
+
+        # Head: 8 static fields + 1 offset for hookData = 9 words
+        # hookData offset from start of struct: 9 * 32 = 288 = 0x120
+        head = (
             _pad_address(pool_key.currency0)
             + _pad_address(pool_key.currency1)
             + _pad_uint24(pool_key.fee)
             + _pad_int24(pool_key.tick_spacing)
             + _pad_address(pool_key.hooks)
+            + _pad_bool(zero_for_one)
+            + _pad_uint(amount_in)
+            + _pad_uint(amount_out_min)
+            + _pad_uint(0x120)  # offset to hookData
         )
 
-        # Encode swap params
-        zero_for_one_encoded = _pad_bool(zero_for_one)
-        amount_in_encoded = _pad_uint(quote.amount_in)
-        amount_out_min_encoded = _pad_uint(amount_out_minimum)
+        # Tail: hookData = empty bytes
+        tail = _pad_uint(0)  # hookData length = 0
 
-        # sqrtPriceLimitX96: must be within bounds per PoolManager requirements
-        # zeroForOne: MIN_SQRT_PRICE + 1, !zeroForOne: MAX_SQRT_PRICE - 1
-        sqrt_price_limit_value = (MIN_SQRT_PRICE + 1) if zero_for_one else (MAX_SQRT_PRICE - 1)
-        sqrt_price_limit = _pad_uint(sqrt_price_limit_value)
+        return head + tail
 
-        # hookData: empty bytes (offset + length + no data)
-        hook_data_offset = _pad_uint(7 * 32)  # offset to hookData
-        hook_data_length = _pad_uint(0)  # empty bytes
+    # =========================================================================
+    # LP Methods — PositionManager encoding
+    # =========================================================================
 
-        calldata = (
-            SWAP_SELECTOR
-            + pool_key_encoded
-            + zero_for_one_encoded
-            + amount_in_encoded
-            + amount_out_min_encoded
-            + sqrt_price_limit
-            + hook_data_offset
-            + hook_data_length
-        )
+    def build_mint_position_tx(
+        self,
+        params: LPMintParams,
+        deadline: int = 0,
+    ) -> SwapTransaction:
+        """Build a PositionManager.modifyLiquidities TX to mint a new LP position.
+
+        Encodes actions [MINT_POSITION, SETTLE_PAIR] to:
+        1. Create the position NFT with the specified liquidity
+        2. Settle (pay) both currencies via Permit2
+
+        Args:
+            params: LPMintParams with pool key, tick range, liquidity, etc.
+            deadline: TX deadline (0 = 30 minutes from now).
+
+        Returns:
+            SwapTransaction targeting PositionManager.
+        """
+        if deadline == 0:
+            deadline = int(time.time()) + 1800
+
+        position_manager = self.addresses["position_manager"]
+
+        # Encode MINT_POSITION params
+        mint_params = self._encode_mint_position_params(params)
+
+        # Encode SETTLE_PAIR params: abi.encode(currency0, currency1)
+        settle_params = _pad_address(params.pool_key.currency0) + _pad_address(params.pool_key.currency1)
+
+        # Build modifyLiquidities calldata
+        actions = bytes([PM_MINT_POSITION, PM_SETTLE_PAIR])
+        calldata = _encode_modify_liquidities(actions, [mint_params, settle_params], deadline)
+
+        # Native ETH: when one currency is address(0), send native value
+        native_value = 0
+        if params.pool_key.currency0 == NATIVE_CURRENCY:
+            native_value = params.amount0_max
+        elif params.pool_key.currency1 == NATIVE_CURRENCY:
+            native_value = params.amount1_max
 
         return SwapTransaction(
-            to=self.router,
-            value=quote.amount_in if is_native_in else 0,
+            to=position_manager,
+            value=native_value,
             data=calldata,
-            gas_estimate=UNISWAP_V4_GAS_ESTIMATES["swap"],
-            description=(f"Uniswap V4 swap {quote.token_in[:10]}... -> {quote.token_out[:10]}..."),
+            gas_estimate=UNISWAP_V4_GAS_ESTIMATES["lp_mint"],
+            description="Uniswap V4 mint LP position",
         )
+
+    def build_decrease_liquidity_tx(
+        self,
+        params: LPDecreaseParams,
+        currency0: str,
+        currency1: str,
+        recipient: str,
+        deadline: int = 0,
+        burn: bool = True,
+    ) -> SwapTransaction:
+        """Build a PositionManager.modifyLiquidities TX to decrease/close an LP position.
+
+        Encodes actions [DECREASE_LIQUIDITY, TAKE_PAIR] and optionally [BURN_POSITION].
+
+        Args:
+            params: LPDecreaseParams with token ID, liquidity, minimums.
+            currency0: Token0 address (sorted).
+            currency1: Token1 address (sorted).
+            recipient: Address to receive withdrawn tokens.
+            deadline: TX deadline (0 = 30 minutes from now).
+            burn: Whether to burn the NFT after withdrawal.
+
+        Returns:
+            SwapTransaction targeting PositionManager.
+        """
+        if deadline == 0:
+            deadline = int(time.time()) + 1800
+
+        position_manager = self.addresses["position_manager"]
+
+        # Encode DECREASE_LIQUIDITY params
+        decrease_params = self._encode_decrease_liquidity_params(params)
+
+        # Encode TAKE_PAIR params: abi.encode(currency0, currency1, address recipient)
+        take_params = _pad_address(currency0) + _pad_address(currency1) + _pad_address(recipient)
+
+        actions_list = [PM_DECREASE_LIQUIDITY, PM_TAKE_PAIR]
+        params_list = [decrease_params, take_params]
+
+        if burn:
+            # Encode BURN_POSITION params: abi.encode(uint256 tokenId, address owner, bytes hookData)
+            burn_params = self._encode_burn_position_params(params.token_id, recipient, params.hook_data)
+            actions_list.append(PM_BURN_POSITION)
+            params_list.append(burn_params)
+
+        actions = bytes(actions_list)
+        calldata = _encode_modify_liquidities(actions, params_list, deadline)
+
+        return SwapTransaction(
+            to=position_manager,
+            value=0,
+            data=calldata,
+            gas_estimate=UNISWAP_V4_GAS_ESTIMATES["lp_decrease"],
+            description=f"Uniswap V4 {'close' if burn else 'decrease'} LP position #{params.token_id}",
+        )
+
+    def build_collect_fees_tx(
+        self,
+        token_id: int,
+        currency0: str,
+        currency1: str,
+        recipient: str,
+        hook_data: bytes = b"",
+        deadline: int = 0,
+    ) -> SwapTransaction:
+        """Build a PositionManager.modifyLiquidities TX to collect fees only.
+
+        Decreases liquidity by 0 (triggers fee accrual update) then takes pair.
+
+        Args:
+            token_id: Position NFT token ID.
+            currency0: Token0 address (sorted).
+            currency1: Token1 address (sorted).
+            recipient: Address to receive fees.
+            hook_data: Optional hook data for hooked pools.
+            deadline: TX deadline (0 = 30 minutes from now).
+
+        Returns:
+            SwapTransaction targeting PositionManager.
+        """
+        if deadline == 0:
+            deadline = int(time.time()) + 1800
+
+        position_manager = self.addresses["position_manager"]
+
+        # Decrease by 0 to trigger fee update
+        decrease_params = self._encode_decrease_liquidity_params(
+            LPDecreaseParams(token_id=token_id, liquidity=0, hook_data=hook_data)
+        )
+
+        # Take the accrued fees
+        take_params = _pad_address(currency0) + _pad_address(currency1) + _pad_address(recipient)
+
+        actions = bytes([PM_DECREASE_LIQUIDITY, PM_TAKE_PAIR])
+        calldata = _encode_modify_liquidities(actions, [decrease_params, take_params], deadline)
+
+        return SwapTransaction(
+            to=position_manager,
+            value=0,
+            data=calldata,
+            gas_estimate=UNISWAP_V4_GAS_ESTIMATES["lp_collect_fees"],
+            description=f"Uniswap V4 collect fees for position #{token_id}",
+        )
+
+    # =========================================================================
+    # LP Encoding Helpers
+    # =========================================================================
+
+    def _encode_mint_position_params(self, params: LPMintParams) -> str:
+        """Encode MINT_POSITION action params.
+
+        Layout:
+            PoolKey(currency0, currency1, fee, tickSpacing, hooks), // 5 fields
+            int24 tickLower,
+            int24 tickUpper,
+            uint256 liquidity,
+            uint128 amount0Max,
+            uint128 amount1Max,
+            address owner,
+            bytes hookData  // dynamic
+
+        Returns:
+            Hex string (no 0x prefix).
+        """
+        pk = params.pool_key
+        # 5 PoolKey fields + 6 more static + 1 offset for hookData = 12 words
+        # hookData offset = 12 * 32 = 384 = 0x180
+        hook_data_offset = 12 * 32
+
+        head = (
+            _pad_address(pk.currency0)
+            + _pad_address(pk.currency1)
+            + _pad_uint24(pk.fee)
+            + _pad_int24(pk.tick_spacing)
+            + _pad_address(pk.hooks)
+            + _pad_int24(params.tick_lower)
+            + _pad_int24(params.tick_upper)
+            + _pad_uint(params.liquidity)
+            + _pad_uint(params.amount0_max)
+            + _pad_uint(params.amount1_max)
+            + _pad_address(params.owner)
+            + _pad_uint(hook_data_offset)
+        )
+
+        # hookData tail
+        tail = _encode_bytes(params.hook_data)
+
+        return head + tail
+
+    def _encode_decrease_liquidity_params(self, params: LPDecreaseParams) -> str:
+        """Encode DECREASE_LIQUIDITY action params.
+
+        Layout:
+            uint256 tokenId,
+            uint256 liquidity,
+            uint128 amount0Min,
+            uint128 amount1Min,
+            bytes hookData  // dynamic
+
+        Returns:
+            Hex string (no 0x prefix).
+        """
+        # 4 static fields + 1 offset = 5 words
+        hook_data_offset = 5 * 32
+
+        head = (
+            _pad_uint(params.token_id)
+            + _pad_uint(params.liquidity)
+            + _pad_uint(params.amount0_min)
+            + _pad_uint(params.amount1_min)
+            + _pad_uint(hook_data_offset)
+        )
+
+        tail = _encode_bytes(params.hook_data)
+
+        return head + tail
+
+    @staticmethod
+    def _encode_burn_position_params(token_id: int, owner: str, hook_data: bytes = b"") -> str:
+        """Encode BURN_POSITION action params.
+
+        Layout:
+            uint256 tokenId,
+            address owner,
+            bytes hookData  // dynamic
+        """
+        hook_data_offset = 3 * 32
+
+        head = _pad_uint(token_id) + _pad_address(owner) + _pad_uint(hook_data_offset)
+        tail = _encode_bytes(hook_data)
+
+        return head + tail
+
+    @staticmethod
+    def compute_liquidity_from_amounts(
+        sqrt_price_x96: int,
+        tick_lower: int,
+        tick_upper: int,
+        amount0: int,
+        amount1: int,
+    ) -> int:
+        """Compute liquidity from token amounts and price range.
+
+        Uses the same math as Uniswap V3/V4:
+        - If current price is below range: liquidity from amount0 only
+        - If current price is above range: liquidity from amount1 only
+        - If current price is in range: min(liquidity from amount0, liquidity from amount1)
+
+        Args:
+            sqrt_price_x96: Current pool sqrtPriceX96 (or estimate).
+            tick_lower: Lower tick boundary.
+            tick_upper: Upper tick boundary.
+            amount0: Desired amount of token0 (in smallest units).
+            amount1: Desired amount of token1 (in smallest units).
+
+        Returns:
+            Estimated liquidity value.
+        """
+        if tick_lower == tick_upper:
+            raise ValueError(
+                f"tick_lower ({tick_lower}) must not equal tick_upper ({tick_upper}). "
+                "This would create a zero-width range causing division by zero."
+            )
+
+        sqrt_ratio_a = _tick_to_sqrt_ratio_x96(tick_lower)
+        sqrt_ratio_b = _tick_to_sqrt_ratio_x96(tick_upper)
+
+        if sqrt_ratio_a > sqrt_ratio_b:
+            sqrt_ratio_a, sqrt_ratio_b = sqrt_ratio_b, sqrt_ratio_a
+
+        if sqrt_price_x96 <= sqrt_ratio_a:
+            # Current price below range — all token0
+            if amount0 == 0:
+                return 0
+            return _get_liquidity_for_amount0(sqrt_ratio_a, sqrt_ratio_b, amount0)
+        elif sqrt_price_x96 >= sqrt_ratio_b:
+            # Current price above range — all token1
+            if amount1 == 0:
+                return 0
+            return _get_liquidity_for_amount1(sqrt_ratio_a, sqrt_ratio_b, amount1)
+        else:
+            # Current price in range — use min
+            liq0 = _get_liquidity_for_amount0(sqrt_price_x96, sqrt_ratio_b, amount0) if amount0 > 0 else 0
+            liq1 = _get_liquidity_for_amount1(sqrt_ratio_a, sqrt_price_x96, amount1) if amount1 > 0 else 0
+            if liq0 == 0:
+                return liq1
+            if liq1 == 0:
+                return liq0
+            return min(liq0, liq1)
+
+    @staticmethod
+    def estimate_sqrt_price_x96(price: Decimal, decimals0: int = 18, decimals1: int = 18) -> int:
+        """Estimate sqrtPriceX96 from a human-readable price (token1 per token0).
+
+        Args:
+            price: Price of token0 in terms of token1.
+            decimals0: Decimals of token0.
+            decimals1: Decimals of token1.
+
+        Returns:
+            Estimated sqrtPriceX96 value.
+        """
+        import decimal
+
+        if price <= 0:
+            raise ValueError("Price must be positive")
+        with decimal.localcontext() as ctx:
+            ctx.prec = 78  # Enough precision for full uint256 range
+            decimal_adjustment = Decimal(10 ** (decimals1 - decimals0))
+            adjusted = price * decimal_adjustment
+            sqrt_price = adjusted.sqrt() * Decimal(2**96)
+            return int(sqrt_price)
 
     @staticmethod
     def tick_to_price(tick: int, decimals0: int = 18, decimals1: int = 18) -> Decimal:
@@ -400,16 +1234,210 @@ def _pad_bool(value: bool) -> str:
     return "0" * 63 + ("1" if value else "0")
 
 
+def _encode_bytes(data: bytes) -> str:
+    """Encode a dynamic `bytes` value (length + padded data)."""
+    length = len(data)
+    hex_data = data.hex() if data else ""
+    # Pad to 32-byte boundary
+    if len(hex_data) % 64 != 0:
+        hex_data = hex_data + "0" * (64 - len(hex_data) % 64)
+    if not hex_data:
+        hex_data = ""
+    return _pad_uint(length) + hex_data
+
+
+def _encode_v4_actions(actions: bytes, params: list[str]) -> str:
+    """Encode V4 two-layer action data: abi.encode(bytes actions, bytes[] params).
+
+    Used as input for both V4_SWAP (UniversalRouter command 0x10) and
+    PositionManager.modifyLiquidities unlockData.
+
+    Args:
+        actions: Packed action bytes (each byte is a v4-periphery action type).
+        params: List of hex-encoded param blobs (no 0x prefix) for each action.
+
+    Returns:
+        Hex string (no 0x prefix) of the ABI-encoded (bytes, bytes[]) tuple.
+    """
+    # Actions section: at offset 0x40 (2 words for the two offsets)
+    actions_hex = actions.hex()
+    actions_padded = actions_hex
+    if len(actions_padded) % 64 != 0:
+        actions_padded = actions_padded + "0" * (64 - len(actions_padded) % 64)
+    actions_section = _pad_uint(len(actions)) + actions_padded
+
+    # Params section: bytes[] array
+    num_params = len(params)
+    offsets_area = num_params * 32
+    element_data = ""
+    offsets = []
+    current_offset = offsets_area
+
+    for p in params:
+        offsets.append(current_offset)
+        byte_len = len(p) // 2
+        padded = p
+        if len(padded) % 64 != 0:
+            padded = padded + "0" * (64 - len(padded) % 64)
+        element_data += _pad_uint(byte_len) + padded
+        current_offset += 32 + len(padded) // 2
+
+    params_section = _pad_uint(num_params)
+    for off in offsets:
+        params_section += _pad_uint(off)
+    params_section += element_data
+
+    offset_actions = 0x40
+    offset_params = offset_actions + len(actions_section) // 2
+
+    return _pad_uint(offset_actions) + _pad_uint(offset_params) + actions_section + params_section
+
+
+def _encode_modify_liquidities(actions: bytes, params: list[str], deadline: int) -> str:
+    """Encode PositionManager.modifyLiquidities(bytes unlockData, uint256 deadline).
+
+    The unlockData is abi.encode(bytes actions, bytes[] params).
+
+    Args:
+        actions: Packed action bytes (each byte is an action type).
+        params: List of hex-encoded param blobs (no 0x prefix) for each action.
+        deadline: Transaction deadline timestamp.
+
+    Returns:
+        Full calldata hex string with 0x prefix.
+    """
+    unlock_data_hex = _encode_v4_actions(actions, params)
+
+    # Now encode the outer call: modifyLiquidities(bytes unlockData, uint256 deadline)
+    unlock_data_bytes_len = len(unlock_data_hex) // 2
+    unlock_data_padded = unlock_data_hex
+    if len(unlock_data_padded) % 64 != 0:
+        unlock_data_padded = unlock_data_padded + "0" * (64 - len(unlock_data_padded) % 64)
+
+    outer_head = _pad_uint(0x40) + _pad_uint(deadline)
+    outer_data = _pad_uint(unlock_data_bytes_len) + unlock_data_padded
+
+    return "0x" + MODIFY_LIQUIDITIES_SELECTOR[2:] + outer_head + outer_data
+
+
+def _tick_to_sqrt_ratio_x96(tick: int) -> int:
+    """Convert a tick to sqrtRatioX96 using Decimal arithmetic for precision."""
+    import decimal
+
+    with decimal.localcontext() as ctx:
+        ctx.prec = 78  # Enough precision for full uint256 range
+        sqrt_price = Decimal("1.0001") ** (Decimal(tick) / 2) * Decimal(Q96)
+        return int(sqrt_price)
+
+
+def _get_liquidity_for_amount0(sqrt_ratio_a: int, sqrt_ratio_b: int, amount0: int) -> int:
+    """Compute liquidity from amount0 given two sqrt ratios."""
+    if sqrt_ratio_a > sqrt_ratio_b:
+        sqrt_ratio_a, sqrt_ratio_b = sqrt_ratio_b, sqrt_ratio_a
+    intermediate = sqrt_ratio_a * sqrt_ratio_b // Q96
+    return amount0 * intermediate // (sqrt_ratio_b - sqrt_ratio_a)
+
+
+def _get_liquidity_for_amount1(sqrt_ratio_a: int, sqrt_ratio_b: int, amount1: int) -> int:
+    """Compute liquidity from amount1 given two sqrt ratios."""
+    if sqrt_ratio_a > sqrt_ratio_b:
+        sqrt_ratio_a, sqrt_ratio_b = sqrt_ratio_b, sqrt_ratio_a
+    return amount1 * Q96 // (sqrt_ratio_b - sqrt_ratio_a)
+
+
+def _encode_execute(commands: bytes, inputs: list[str], deadline: int) -> str:
+    """Encode UniversalRouter.execute(bytes commands, bytes[] inputs, uint256 deadline).
+
+    Args:
+        commands: Command bytes (each byte is a command ID).
+        inputs: List of hex-encoded input data (no 0x prefix) for each command.
+        deadline: Transaction deadline timestamp.
+
+    Returns:
+        Full calldata hex string with 0x prefix.
+    """
+    # Head: 3 slots (offset_commands, offset_inputs, deadline)
+    # commands starts at 3 * 32 = 96 = 0x60
+
+    # Commands section: length (32 bytes) + data (padded to 32 bytes)
+    commands_hex = commands.hex()
+    commands_padded = commands_hex.ljust(64, "0")  # right-pad to 32 bytes
+    commands_section = _pad_uint(len(commands)) + commands_padded
+
+    # Offset to inputs = 0x60 + len(commands_section in bytes)
+    # commands_section is 2 words = 64 bytes
+    offset_inputs = 0x60 + 64  # = 0xa0
+
+    # Inputs section: array length + offsets + elements
+    num_inputs = len(inputs)
+    # After array length, there are num_inputs offset words
+    # First element data starts at num_inputs * 32 bytes after offsets start
+    offsets_area_size = num_inputs * 32
+    element_data = ""
+    offsets = []
+    current_offset = offsets_area_size
+
+    for inp in inputs:
+        offsets.append(current_offset)
+        # Each element: length (32 bytes) + data (padded to 32-byte boundary)
+        byte_len = len(inp) // 2
+        padded_data = inp
+        # Pad data to 32-byte boundary
+        if len(padded_data) % 64 != 0:
+            padded_data = padded_data + "0" * (64 - len(padded_data) % 64)
+        element_data += _pad_uint(byte_len) + padded_data
+        current_offset += 32 + len(padded_data) // 2  # length word + data bytes
+
+    inputs_section = _pad_uint(num_inputs)
+    for off in offsets:
+        inputs_section += _pad_uint(off)
+    inputs_section += element_data
+
+    # Assemble
+    head = _pad_uint(0x60) + _pad_uint(offset_inputs) + _pad_uint(deadline)
+
+    return "0x" + UNIVERSAL_ROUTER_EXECUTE_SELECTOR[2:] + head + commands_section + inputs_section
+
+
 __all__ = [
+    "ACTION_SETTLE",
+    "ACTION_SETTLE_ALL",
+    "ACTION_SETTLE_PAIR",
+    "ACTION_SWAP_EXACT_IN",
+    "ACTION_SWAP_EXACT_IN_SINGLE",
+    "ACTION_SWAP_EXACT_OUT",
+    "ACTION_SWAP_EXACT_OUT_SINGLE",
+    "ACTION_TAKE",
+    "ACTION_TAKE_ALL",
+    "ACTION_TAKE_PAIR",
     "FEE_TIERS",
+    "LPDecreaseParams",
+    "LPMintParams",
+    "MODIFY_LIQUIDITIES_SELECTOR",
+    "MODIFY_LIQUIDITIES_WITHOUT_UNLOCK_SELECTOR",
     "NATIVE_CURRENCY",
+    "PERMIT2_ADDRESS",
+    "PERMIT2_APPROVE_SELECTOR",
+    "PM_BURN_POSITION",
+    "PM_DECREASE_LIQUIDITY",
+    "PM_INCREASE_LIQUIDITY",
+    "PM_MINT_POSITION",
+    "PM_SETTLE_PAIR",
+    "PM_TAKE_PAIR",
     "POOL_MANAGER_ADDRESSES",
+    "POSITION_MANAGER_ADDRESSES",
     "PoolKey",
     "QUOTER_ADDRESSES",
     "ROUTER_ADDRESSES",
+    "SWAP_SELECTOR",
     "SwapQuote",
     "SwapTransaction",
     "TICK_SPACING",
     "UNISWAP_V4_GAS_ESTIMATES",
+    "UNIVERSAL_ROUTER_EXECUTE_SELECTOR",
     "UniswapV4SDK",
+    "V4_SWAP_EXACT_IN",
+    "V4_SWAP_EXACT_IN_SINGLE",
+    "V4_SWAP_EXACT_OUT",
+    "V4_SWAP_EXACT_OUT_SINGLE",
 ]

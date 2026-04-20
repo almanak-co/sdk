@@ -16,7 +16,7 @@ import pytest
 
 @pytest.fixture
 def strategy():
-    from strategies.demo.traderjoe_paper_trade_lp.strategy import TraderJoePaperTradeLPStrategy
+    from almanak.demo_strategies.traderjoe_paper_trade_lp.strategy import TraderJoePaperTradeLPStrategy
 
     strat = TraderJoePaperTradeLPStrategy.__new__(TraderJoePaperTradeLPStrategy)
     strat.config = {}

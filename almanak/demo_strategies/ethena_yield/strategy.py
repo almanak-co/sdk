@@ -151,23 +151,16 @@ class EthenaYieldStrategy(IntentStrategy):
         # Extract configuration
         # =====================================================================
 
-        def get_config(key: str, default: Any) -> Any:
-            if isinstance(self.config, dict):
-                return self.config.get(key, default)
-            if hasattr(self.config, "get"):
-                return self.config.get(key, default)
-            return getattr(self.config, key, default)
-
         # Staking configuration
-        self.min_stake_amount = Decimal(str(get_config("min_stake_amount", "100")))
+        self.min_stake_amount = Decimal(str(self.get_config("min_stake_amount", "100")))
 
         # USDC -> USDe swap configuration (optional)
-        self.swap_usdc_to_usde = bool(get_config("swap_usdc_to_usde", False))
-        self.min_usdc_amount = Decimal(str(get_config("min_usdc_amount", "100")))
-        self.max_slippage_pct = float(get_config("max_slippage_pct", 0.5))
+        self.swap_usdc_to_usde = bool(self.get_config("swap_usdc_to_usde", False))
+        self.min_usdc_amount = Decimal(str(self.get_config("min_usdc_amount", "100")))
+        self.max_slippage_pct = float(self.get_config("max_slippage_pct", 0.5))
 
         # Force action for testing
-        self.force_action = str(get_config("force_action", "")).lower()
+        self.force_action = str(self.get_config("force_action", "")).lower()
 
         # Internal state tracking
         self._swapped = False
@@ -200,79 +193,74 @@ class EthenaYieldStrategy(IntentStrategy):
         Returns:
             Intent: SWAP, STAKE, or HOLD
         """
+        # =================================================================
+        # STEP 1: Handle forced actions (for testing)
+        # =================================================================
+
+        if self.force_action == "stake":
+            logger.info("Forced action: STAKE USDe")
+            return self._create_stake_intent(self.min_stake_amount)
+
+        if self.force_action == "swap":
+            logger.info("Forced action: SWAP USDC -> USDe")
+            return self._create_swap_intent(self.min_usdc_amount)
+
+        # =================================================================
+        # STEP 2: Check if already staked
+        # =================================================================
+
+        if self._staked:
+            return Intent.hold(reason=f"Already staked {self._staked_amount} USDe -> sUSDe")
+
+        # =================================================================
+        # STEP 3: Check USDe balance first
+        # =================================================================
+
+        usde_balance_value = Decimal("0")
         try:
-            # =================================================================
-            # STEP 1: Handle forced actions (for testing)
-            # =================================================================
+            usde_balance = market.balance("USDe")
+            usde_balance_value = usde_balance.balance if hasattr(usde_balance, "balance") else usde_balance
+            logger.debug(f"USDe balance: {usde_balance_value}")
+        except (ValueError, KeyError) as e:
+            logger.debug(f"Could not get USDe balance: {e}")
 
-            if self.force_action == "stake":
-                logger.info("Forced action: STAKE USDe")
-                return self._create_stake_intent(self.min_stake_amount)
+        # =================================================================
+        # STEP 4: If USDe sufficient, stake directly
+        # =================================================================
 
-            if self.force_action == "swap":
-                logger.info("Forced action: SWAP USDC -> USDe")
-                return self._create_swap_intent(self.min_usdc_amount)
+        if usde_balance_value >= self.min_stake_amount:
+            logger.info(f"USDe balance ({usde_balance_value}) >= min_stake ({self.min_stake_amount}), staking")
+            return self._create_stake_intent(usde_balance_value)
 
-            # =================================================================
-            # STEP 2: Check if already staked
-            # =================================================================
+        # =================================================================
+        # STEP 5: If swap enabled and USDC sufficient, swap USDC -> USDe
+        # =================================================================
 
-            if self._staked:
-                return Intent.hold(reason=f"Already staked {self._staked_amount} USDe -> sUSDe")
-
-            # =================================================================
-            # STEP 3: Check USDe balance first
-            # =================================================================
-
-            usde_balance_value = Decimal("0")
+        if self.swap_usdc_to_usde and not self._swapped:
             try:
-                usde_balance = market.balance("USDe")
-                usde_balance_value = usde_balance.balance if hasattr(usde_balance, "balance") else usde_balance
-                logger.debug(f"USDe balance: {usde_balance_value}")
+                usdc_balance = market.balance("USDC")
+                usdc_balance_value = usdc_balance.balance if hasattr(usdc_balance, "balance") else usdc_balance
+                logger.debug(f"USDC balance: {usdc_balance_value}")
+
+                if usdc_balance_value >= self.min_usdc_amount:
+                    logger.info(
+                        f"USDC balance ({usdc_balance_value}) >= min_usdc ({self.min_usdc_amount}), swapping to USDe via Enso"
+                    )
+                    return self._create_swap_intent(usdc_balance_value)
+
             except (ValueError, KeyError) as e:
-                logger.debug(f"Could not get USDe balance: {e}")
+                logger.debug(f"Could not get USDC balance: {e}")
 
-            # =================================================================
-            # STEP 4: If USDe sufficient, stake directly
-            # =================================================================
+        # =================================================================
+        # STEP 6: Insufficient balance - hold
+        # =================================================================
 
-            if usde_balance_value >= self.min_stake_amount:
-                logger.info(f"USDe balance ({usde_balance_value}) >= min_stake ({self.min_stake_amount}), staking")
-                return self._create_stake_intent(usde_balance_value)
+        if self.swap_usdc_to_usde:
+            return Intent.hold(
+                reason=f"Insufficient balance: USDe={usde_balance_value} < {self.min_stake_amount}, swap_usdc_to_usde enabled but no USDC"
+            )
 
-            # =================================================================
-            # STEP 5: If swap enabled and USDC sufficient, swap USDC -> USDe
-            # =================================================================
-
-            if self.swap_usdc_to_usde and not self._swapped:
-                try:
-                    usdc_balance = market.balance("USDC")
-                    usdc_balance_value = usdc_balance.balance if hasattr(usdc_balance, "balance") else usdc_balance
-                    logger.debug(f"USDC balance: {usdc_balance_value}")
-
-                    if usdc_balance_value >= self.min_usdc_amount:
-                        logger.info(
-                            f"USDC balance ({usdc_balance_value}) >= min_usdc ({self.min_usdc_amount}), swapping to USDe via Enso"
-                        )
-                        return self._create_swap_intent(usdc_balance_value)
-
-                except (ValueError, KeyError) as e:
-                    logger.debug(f"Could not get USDC balance: {e}")
-
-            # =================================================================
-            # STEP 6: Insufficient balance - hold
-            # =================================================================
-
-            if self.swap_usdc_to_usde:
-                return Intent.hold(
-                    reason=f"Insufficient balance: USDe={usde_balance_value} < {self.min_stake_amount}, swap_usdc_to_usde enabled but no USDC"
-                )
-
-            return Intent.hold(reason=f"Insufficient USDe balance: {usde_balance_value} < {self.min_stake_amount}")
-
-        except Exception as e:
-            logger.exception(f"Error in decide(): {e}")
-            return Intent.hold(reason=f"Error: {str(e)}")
+        return Intent.hold(reason=f"Insufficient USDe balance: {usde_balance_value} < {self.min_stake_amount}")
 
     # =========================================================================
     # INTENT CREATION HELPERS
@@ -447,9 +435,9 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"\nStrategy Name: {EthenaYieldStrategy.STRATEGY_NAME}")
     print(f"Version: {EthenaYieldStrategy.STRATEGY_METADATA.version}")
-    print(f"Supported Chains: {EthenaYieldStrategy.SUPPORTED_CHAINS}")
-    print(f"Supported Protocols: {EthenaYieldStrategy.SUPPORTED_PROTOCOLS}")
-    print(f"Intent Types: {EthenaYieldStrategy.INTENT_TYPES}")
+    print(f"Supported Chains: {EthenaYieldStrategy.STRATEGY_METADATA.supported_chains}")
+    print(f"Supported Protocols: {EthenaYieldStrategy.STRATEGY_METADATA.supported_protocols}")
+    print(f"Intent Types: {EthenaYieldStrategy.STRATEGY_METADATA.intent_types}")
     print(f"\nDescription: {EthenaYieldStrategy.STRATEGY_METADATA.description}")
     print("\nTo run this strategy:")
     print("  python -m src.cli.run --strategy demo_ethena_yield --once")

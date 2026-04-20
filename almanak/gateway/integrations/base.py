@@ -264,6 +264,8 @@ class BaseIntegration(ABC):
     # Subclasses must define these
     name: str = ""
     rate_limit_requests: int = 60  # requests per minute
+    rate_limit_max_retries: int = 2  # retry up to N times on HTTP 429
+    rate_limit_max_wait: float = 120.0  # cap per-retry wait (seconds)
     default_cache_ttl: int = 30  # seconds
 
     def __init__(
@@ -377,7 +379,11 @@ class BaseIntegration(ABC):
         params: dict[str, Any] | None = None,
         json_data: dict[str, Any] | None = None,
     ) -> Any:
-        """Make an API request with rate limiting.
+        """Make an API request with rate limiting and automatic 429 retry.
+
+        On HTTP 429, waits for the Retry-After period (capped at
+        ``rate_limit_max_wait``) and retries up to ``rate_limit_max_retries``
+        times before raising ``IntegrationRateLimitError``.
 
         Args:
             path: API path (appended to base_url)
@@ -390,84 +396,105 @@ class BaseIntegration(ABC):
 
         Raises:
             IntegrationError: On API errors
-            IntegrationRateLimitError: When rate limited
+            IntegrationRateLimitError: When rate limited after all retries exhausted
         """
         self._metrics.total_requests += 1
-        start_time = time.time()
-
-        # Apply rate limiting
-        wait_time = await self._rate_limiter.acquire()
-        if wait_time > 0:
-            logger.debug(
-                "Rate limiter wait for %s: %.2fs",
-                self.name,
-                wait_time,
-            )
-
         url = f"{self._base_url}{path}"
 
-        try:
-            session = await self._get_session()
-            headers = self._get_headers()
+        for attempt in range(1 + self.rate_limit_max_retries):
+            start_time = time.time()
 
-            async with session.request(
-                method,
-                url,
-                params=params,
-                json=json_data,
-                headers=headers,
-            ) as response:
-                latency_ms = (time.time() - start_time) * 1000
-
-                # Handle rate limiting from API
-                if response.status == 429:
-                    self._metrics.rate_limited_requests += 1
-                    retry_after = float(response.headers.get("Retry-After", "60"))
-                    raise IntegrationRateLimitError(self.name, retry_after)
-
-                # Handle errors
-                if response.status >= 400:
-                    error_text = await response.text()
-                    self._metrics.failed_requests += 1
-                    self._metrics.last_error = f"HTTP {response.status}: {error_text}"
-                    self._metrics.last_error_time = datetime.now(UTC)
-                    raise IntegrationError(
-                        self.name,
-                        f"HTTP {response.status}: {error_text}",
-                        code=f"HTTP_{response.status}",
-                    )
-
-                # Parse response
-                data = await response.json()
-
-                # Update metrics
-                self._metrics.successful_requests += 1
-                self._metrics.total_latency_ms += latency_ms
-
+            # Apply rate limiting
+            wait_time = await self._rate_limiter.acquire()
+            if wait_time > 0:
                 logger.debug(
-                    "%s API call: %s (latency: %.2fms)",
+                    "Rate limiter wait for %s: %.2fs",
                     self.name,
-                    path,
-                    latency_ms,
+                    wait_time,
                 )
 
-                return data
+            try:
+                session = await self._get_session()
+                headers = self._get_headers()
 
-        except aiohttp.ClientError as e:
-            self._metrics.failed_requests += 1
-            self._metrics.last_error = str(e)
-            self._metrics.last_error_time = datetime.now(UTC)
-            raise IntegrationError(self.name, str(e), code="NETWORK_ERROR") from e
+                async with session.request(
+                    method,
+                    url,
+                    params=params,
+                    json=json_data,
+                    headers=headers,
+                ) as response:
+                    latency_ms = (time.time() - start_time) * 1000
 
-        except TimeoutError:
-            self._metrics.failed_requests += 1
-            self._metrics.last_error = f"Timeout after {self._request_timeout}s"
-            self._metrics.last_error_time = datetime.now(UTC)
-            raise IntegrationError(
-                self.name,
-                f"Timeout after {self._request_timeout}s",
-                code="TIMEOUT",
-            ) from None
+                    # Handle rate limiting from API — retry with backoff
+                    if response.status == 429:
+                        try:
+                            retry_after = float(response.headers.get("Retry-After", "5"))
+                        except (ValueError, TypeError):
+                            retry_after = 5.0
+                        retry_after = min(max(retry_after, 0), self.rate_limit_max_wait)
+
+                        if attempt < self.rate_limit_max_retries:
+                            logger.info(
+                                "%s rate limited on %s, retrying in %.1fs (attempt %d/%d)",
+                                self.name,
+                                path,
+                                retry_after,
+                                attempt + 1,
+                                self.rate_limit_max_retries,
+                            )
+                            await asyncio.sleep(retry_after)
+                            continue
+
+                        self._metrics.rate_limited_requests += 1
+                        self._metrics.failed_requests += 1
+                        self._metrics.last_error = f"Rate limited after {self.rate_limit_max_retries} retries"
+                        self._metrics.last_error_time = datetime.now(UTC)
+                        raise IntegrationRateLimitError(self.name, retry_after)
+
+                    # Handle errors
+                    if response.status >= 400:
+                        error_text = await response.text()
+                        self._metrics.failed_requests += 1
+                        self._metrics.last_error = f"HTTP {response.status}: {error_text}"
+                        self._metrics.last_error_time = datetime.now(UTC)
+                        raise IntegrationError(
+                            self.name,
+                            f"HTTP {response.status}: {error_text}",
+                            code=f"HTTP_{response.status}",
+                        )
+
+                    # Parse response
+                    data = await response.json()
+
+                    # Update metrics
+                    self._metrics.successful_requests += 1
+                    self._metrics.total_latency_ms += latency_ms
+
+                    logger.debug(
+                        "%s API call: %s (latency: %.2fms)",
+                        self.name,
+                        path,
+                        latency_ms,
+                    )
+
+                    return data
+
+            except aiohttp.ClientError as e:
+                self._metrics.failed_requests += 1
+                self._metrics.last_error = str(e)
+                self._metrics.last_error_time = datetime.now(UTC)
+                raise IntegrationError(self.name, str(e), code="NETWORK_ERROR") from e
+
+            except TimeoutError:
+                self._metrics.failed_requests += 1
+                self._metrics.last_error = f"Timeout after {self._request_timeout}s"
+                self._metrics.last_error_time = datetime.now(UTC)
+                raise IntegrationError(
+                    self.name,
+                    f"Timeout after {self._request_timeout}s",
+                    code="TIMEOUT",
+                ) from None
 
     async def _cached_fetch(
         self,
@@ -511,6 +538,13 @@ class BaseIntegration(ABC):
             Dictionary of health metrics
         """
         return self._metrics.to_dict()
+
+    def supports_portfolio(self) -> bool:
+        """Whether this integration supports wallet portfolio queries.
+
+        Override to return True in portfolio-capable integrations.
+        """
+        return False
 
     def clear_cache(self) -> None:
         """Clear the response cache."""

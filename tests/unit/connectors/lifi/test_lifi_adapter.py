@@ -252,9 +252,16 @@ class TestCompileSwapIntent:
         assert swap_tx["tx_type"] == "bridge_deferred"
 
     @patch.object(LiFiClient, "get_quote")
-    def test_compile_with_amount_usd(self, mock_get_quote, adapter):
-        """Compile swap intent with USD amount."""
+    def test_compile_with_amount_usd(self, mock_get_quote):
+        """Compile swap intent with USD amount uses the oracle (no placeholder fallback)."""
         from almanak.framework.intents.vocabulary import SwapIntent
+
+        config = LiFiConfig(chain_id=42161, wallet_address=WALLET_ADDRESS, api_key="test-key")
+        adapter = LiFiAdapter(
+            config=config,
+            price_provider={"USDC": Decimal("1"), "WETH": Decimal("3400")},
+            token_resolver=_mock_token_resolver(),
+        )
 
         mock_get_quote.return_value = _make_lifi_step(
             tool="1inch", step_type="swap",
@@ -273,6 +280,25 @@ class TestCompileSwapIntent:
         assert bundle.intent_type == "SWAP"
         assert len(bundle.transactions) >= 1
         assert "error" not in bundle.metadata
+
+    def test_compile_with_amount_usd_missing_oracle_raises(self, adapter):
+        """amount_usd without a price in the oracle must raise PriceUnavailableError.
+
+        Guards against VIB-3134 regression: the adapter must NOT silently fall back
+        to hardcoded placeholder prices and proceed with a live tx.
+        """
+        from almanak.framework.data import PriceUnavailableError
+        from almanak.framework.intents.vocabulary import SwapIntent
+
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="WETH",
+            amount_usd=Decimal("1000"),
+            max_slippage=Decimal("0.005"),
+        )
+
+        with pytest.raises(PriceUnavailableError, match="USDC"):
+            adapter.compile_swap_intent(intent)
 
     @patch.object(LiFiClient, "get_quote")
     def test_compile_native_token_no_approve(self, mock_get_quote, adapter):

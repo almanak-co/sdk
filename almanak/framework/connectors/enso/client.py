@@ -4,6 +4,16 @@ This module provides the EnsoClient class for interacting with the Enso Finance 
 Enso is a routing and composable transaction protocol that aggregates liquidity
 across multiple DEXs and lending protocols.
 
+Transport (VIB-2986, Phase 5):
+    When ``EnsoConfig.gateway_client`` is provided the client routes every API
+    call through the gateway's ``EnsoService`` gRPC stubs, keeping the Enso API
+    key inside the gateway process. When no gateway_client is provided the
+    client falls back to direct HTTPS to ``api.enso.finance``. The direct path
+    is only reachable from trusted contexts (gateway-internal execution and
+    local paper-trading), not from deployed strategy containers — production
+    strategy containers have no outbound network except the gateway channel,
+    so the fallback is moot there.
+
 Example:
     from almanak.framework.connectors.enso import EnsoClient, EnsoConfig
 
@@ -25,8 +35,8 @@ Example:
 
 import logging
 import os
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -45,6 +55,9 @@ from .models import (
     RouteTransaction,
     RoutingStrategy,
 )
+
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -109,12 +122,16 @@ class EnsoConfig:
     """Configuration for Enso client.
 
     Attributes:
-        api_key: Enso API key (or set ENSO_API_KEY env var)
         chain: Chain name (e.g., "arbitrum", "ethereum") or chain ID
         wallet_address: Default wallet address for transactions
-        base_url: Enso API base URL
+        api_key: Enso API key (or set ENSO_API_KEY env var). Not required when
+            ``gateway_client`` is provided — the gateway holds the credential.
+        base_url: Enso API base URL (used by the direct HTTP fallback)
         routing_strategy: Default routing strategy
         timeout: Request timeout in seconds
+        gateway_client: Optional GatewayClient. When provided the client routes
+            every API call through the gateway's EnsoService gRPC stubs and
+            never constructs a requests.Session. See module docstring.
     """
 
     chain: str
@@ -123,15 +140,18 @@ class EnsoConfig:
     base_url: str = "https://api.enso.finance"
     routing_strategy: RoutingStrategy = RoutingStrategy.ROUTER
     timeout: int = 30
+    gateway_client: "GatewayClient | None" = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate configuration and resolve API key."""
-        # Resolve API key from env if not provided
-        if self.api_key is None:
+        # API key lives in the gateway when gateway_client is provided. Only the
+        # direct HTTP fallback needs a local credential.
+        if self.gateway_client is None and self.api_key is None:
             self.api_key = os.environ.get("ENSO_API_KEY")
             if not self.api_key:
                 raise EnsoConfigError(
-                    "API key is required. Set ENSO_API_KEY env var or pass api_key.",
+                    "API key is required. Set ENSO_API_KEY env var, pass api_key, "
+                    "or pass gateway_client to route through the gateway.",
                     parameter="api_key",
                 )
 
@@ -150,6 +170,24 @@ class EnsoConfig:
         if isinstance(self.chain, int):
             return self.chain
         return CHAIN_MAPPING[self.chain.lower()]
+
+    @property
+    def chain_name(self) -> str:
+        """Get canonical chain name (e.g., "arbitrum").
+
+        The gateway's ``EnsoService`` expects chain names, not numeric IDs, so
+        gateway-path callers must resolve numeric chain values back to names
+        before constructing protobuf requests.
+        """
+        if isinstance(self.chain, int):
+            try:
+                return CHAIN_ID_TO_NAME[self.chain]
+            except KeyError as e:
+                raise EnsoConfigError(
+                    f"Unknown chain ID: {self.chain}. Known: {sorted(CHAIN_ID_TO_NAME.keys())}",
+                    parameter="chain",
+                ) from e
+        return self.chain.lower()
 
 
 class EnsoClient:
@@ -181,16 +219,32 @@ class EnsoClient:
         """Initialize the Enso client.
 
         Args:
-            config: Enso client configuration
+            config: Enso client configuration. When ``config.gateway_client`` is
+                set, no HTTP session is created — every API call uses the
+                gateway's EnsoService gRPC stubs instead.
         """
         self.config = config
-        self._setup_session()
+        self.session: requests.Session | None = None
+        if config.gateway_client is None:
+            self._setup_session()
 
-        logger.info(f"EnsoClient initialized for chain={config.chain} (chain_id={config.chain_id})")
+        transport = "gateway" if config.gateway_client is not None else "direct-http"
+        logger.info(
+            f"EnsoClient initialized for chain={config.chain} (chain_id={config.chain_id}, transport={transport})"
+        )
+
+    @property
+    def _via_gateway(self) -> bool:
+        """True when API calls should be routed through the gateway."""
+        return self.config.gateway_client is not None
 
     def _setup_session(self) -> None:
-        """Set up requests session with retry logic."""
-        self.session = requests.Session()
+        """Set up requests session with retry logic.
+
+        Only used by the direct HTTP fallback. See the module docstring for
+        the gateway vs direct transport policy.
+        """
+        self.session = requests.Session()  # vib-2986-exempt: gateway-internal fallback
         self.session.headers.update(
             {
                 "Authorization": f"Bearer {self.config.api_key}",
@@ -237,9 +291,10 @@ class EnsoClient:
         logger.debug(f"API Request: {method} {endpoint}")
         logger.debug(f"Params: {params}")
 
+        assert self.session is not None, "Direct HTTP request on gateway-only client"
         try:
             if json_data is not None:
-                response = self.session.request(
+                response = self.session.request(  # vib-2986-exempt: gateway-internal fallback
                     method,
                     url,
                     params=params,
@@ -247,7 +302,7 @@ class EnsoClient:
                     timeout=self.config.timeout,
                 )
             else:
-                response = self.session.request(
+                response = self.session.request(  # vib-2986-exempt: gateway-internal fallback
                     method,
                     url,
                     params=params,
@@ -335,39 +390,62 @@ class EnsoClient:
         strategy = routing_strategy or self.config.routing_strategy
         is_cross_chain = destination_chain_id is not None and destination_chain_id != self.config.chain_id
 
-        params = {
-            "fromAddress": from_addr,
-            "tokenIn": [token_in],
-            "tokenOut": [token_out],
-            "amountIn": [str(amount_in)],
-            "chainId": self.config.chain_id,
-            "slippage": str(slippage_bps),
-            "routingStrategy": strategy.value,
-            "disableRFQs": "false",
-        }
-
-        if receiver:
-            params["receiver"] = receiver
-
-        # Cross-chain parameters
+        # Normalize routing params once so gateway and direct paths agree:
+        # - treat destination_chain_id == source as same-chain
+        # - inherit from_addr into receiver/refund_receiver on cross-chain
+        effective_destination_chain_id = destination_chain_id if is_cross_chain else None
+        effective_receiver = receiver
+        effective_refund_receiver = refund_receiver
         if is_cross_chain:
-            params["destinationChainId"] = destination_chain_id
-            # receiver and refundReceiver are required for cross-chain operations
-            params["receiver"] = receiver or from_addr
-            params["refundReceiver"] = refund_receiver or from_addr
-            logger.info(
-                f"Cross-chain route: {self.config.chain} (chainId={self.config.chain_id}) -> "
-                f"chainId={destination_chain_id}"
+            effective_receiver = receiver or from_addr
+            effective_refund_receiver = refund_receiver or from_addr
+
+        if self._via_gateway:
+            route_tx = self._get_route_via_gateway(
+                token_in=token_in,
+                token_out=token_out,
+                amount_in=amount_in,
+                slippage_bps=slippage_bps,
+                from_addr=from_addr,
+                receiver=effective_receiver,
+                strategy=strategy,
+                destination_chain_id=effective_destination_chain_id,
+                refund_receiver=effective_refund_receiver,
             )
+        else:
+            params = {
+                "fromAddress": from_addr,
+                "tokenIn": [token_in],
+                "tokenOut": [token_out],
+                "amountIn": [str(amount_in)],
+                "chainId": self.config.chain_id,
+                "slippage": str(slippage_bps),
+                "routingStrategy": strategy.value,
+                "disableRFQs": "false",
+            }
 
-        logger.debug(f"Route API params: {params}")
+            if receiver:
+                params["receiver"] = receiver
 
-        response = self._make_request("GET", "/api/v1/shortcuts/route", params=params)
-        response["chainId"] = self.config.chain_id
-        if is_cross_chain:
-            response["destinationChainId"] = destination_chain_id
+            # Cross-chain parameters
+            if is_cross_chain:
+                params["destinationChainId"] = destination_chain_id
+                # receiver and refundReceiver are required for cross-chain operations
+                params["receiver"] = receiver or from_addr
+                params["refundReceiver"] = refund_receiver or from_addr
+                logger.info(
+                    f"Cross-chain route: {self.config.chain} (chainId={self.config.chain_id}) -> "
+                    f"chainId={destination_chain_id}"
+                )
 
-        route_tx = RouteTransaction.from_api_response(response)
+            logger.debug(f"Route API params: {params}")
+
+            response = self._make_request("GET", "/api/v1/shortcuts/route", params=params)
+            response["chainId"] = self.config.chain_id
+            if is_cross_chain:
+                response["destinationChainId"] = destination_chain_id
+
+            route_tx = RouteTransaction.from_api_response(response)
 
         # Validate price impact if threshold provided
         if max_price_impact_bps is not None and route_tx.price_impact is not None:
@@ -445,6 +523,16 @@ class EnsoClient:
         strategy = routing_strategy or self.config.routing_strategy
         is_cross_chain = destination_chain_id is not None and destination_chain_id != self.config.chain_id
 
+        if self._via_gateway:
+            return self._get_quote_via_gateway(
+                token_in=token_in,
+                token_out=token_out,
+                amount_in=amount_in,
+                from_addr=from_addr,
+                strategy=strategy,
+                destination_chain_id=destination_chain_id if is_cross_chain else None,
+            )
+
         params = {
             "fromAddress": from_addr,
             "tokenIn": [token_in],
@@ -489,6 +577,14 @@ class EnsoClient:
         from_addr = from_address or self.config.wallet_address
         strategy = routing_strategy or self.config.routing_strategy
 
+        if self._via_gateway:
+            return self._get_bundle_via_gateway(
+                bundle_actions=bundle_actions,
+                from_addr=from_addr,
+                strategy=strategy,
+                skip_quote=skip_quote,
+            )
+
         params: dict[str, Any] = {
             "chainId": self.config.chain_id,
             "fromAddress": from_addr,
@@ -512,7 +608,7 @@ class EnsoClient:
             "Accept": "application/json",
         }
 
-        response = requests.post(
+        response = requests.post(  # vib-2986-exempt: gateway-internal fallback
             url,
             headers=headers,
             params=params,
@@ -562,6 +658,14 @@ class EnsoClient:
 
         # Use max uint256 for unlimited approval
         approve_amount = amount if amount is not None else (2**256 - 1)
+
+        if self._via_gateway:
+            return self._get_approval_via_gateway(
+                token_address=token_address,
+                approve_amount=approve_amount,
+                from_addr=from_addr,
+                strategy=strategy,
+            )
 
         params = {
             "chainId": self.config.chain_id,
@@ -689,3 +793,238 @@ class EnsoClient:
             destination_chain_id=destination_chain_id,
             refund_receiver=self.config.wallet_address,
         )
+
+    # =========================================================================
+    # Gateway transport (VIB-2986, Phase 5)
+    #
+    # These helpers invoke the gateway's EnsoService gRPC. They run when
+    # ``config.gateway_client`` is set, which keeps the Enso API key inside
+    # the gateway process (production strategy containers have no outbound
+    # HTTPS and cannot reach api.enso.finance directly).
+    # =========================================================================
+
+    @staticmethod
+    def _call_enso_stub(method, request, *, timeout: float, endpoint: str, method_name: str):
+        """Invoke a gateway Enso stub, translating transport errors to ``EnsoAPIError``.
+
+        Direct-HTTP mode always raises ``EnsoAPIError`` on failure. Mirror that
+        contract for gateway transport so callers can rely on a single
+        exception type regardless of the route.
+        """
+        try:
+            return method(request, timeout=timeout)
+        except EnsoAPIError:
+            raise
+        except Exception as e:
+            raise EnsoAPIError(
+                message=f"Gateway Enso {method_name} transport error: {e}",
+                status_code=0,
+                endpoint=endpoint,
+            ) from e
+
+    def _get_route_via_gateway(
+        self,
+        *,
+        token_in: str,
+        token_out: str,
+        amount_in: int,
+        slippage_bps: int,
+        from_addr: str,
+        receiver: str | None,
+        strategy: RoutingStrategy,
+        destination_chain_id: int | None,
+        refund_receiver: str | None,
+    ) -> RouteTransaction:
+        """Fetch a swap route via the gateway's EnsoService.GetRoute."""
+        from almanak.gateway.proto import gateway_pb2
+
+        assert self.config.gateway_client is not None
+        request = gateway_pb2.EnsoRouteRequest(
+            chain=self.config.chain_name,
+            token_in=token_in,
+            token_out=token_out,
+            amount_in=str(amount_in),
+            from_address=from_addr,
+            slippage_bps=slippage_bps,
+            routing_strategy=strategy.value,
+            destination_chain_id=destination_chain_id or 0,
+            receiver=receiver or "",
+            refund_receiver=refund_receiver or "",
+        )
+        response = self._call_enso_stub(
+            self.config.gateway_client.enso.GetRoute,
+            request,
+            timeout=float(self.config.timeout),
+            endpoint="/api/v1/shortcuts/route",
+            method_name="GetRoute",
+        )
+        if not response.success:
+            raise EnsoAPIError(
+                message=f"Gateway Enso GetRoute failed: {response.error}",
+                status_code=0,
+                endpoint="/api/v1/shortcuts/route",
+            )
+        gas_str = response.gas or response.gas_estimate
+        return RouteTransaction.from_api_response(
+            {
+                "tx": {"to": response.to, "data": response.data, "value": response.value},
+                "gas": str(gas_str) if gas_str else "0",
+                "amountOut": response.amount_out,
+                "priceImpact": response.price_impact,
+                "chainId": self.config.chain_id,
+                "destinationChainId": destination_chain_id,
+                "bridgeFee": response.bridge_fee if response.is_cross_chain else None,
+                "estimatedTime": response.estimated_time if response.is_cross_chain else None,
+            }
+        )
+
+    def _get_quote_via_gateway(
+        self,
+        *,
+        token_in: str,
+        token_out: str,
+        amount_in: int,
+        from_addr: str,
+        strategy: RoutingStrategy,
+        destination_chain_id: int | None,
+    ) -> Quote:
+        """Fetch a quote via the gateway's EnsoService.GetQuote."""
+        from almanak.gateway.proto import gateway_pb2
+
+        assert self.config.gateway_client is not None
+        request = gateway_pb2.EnsoQuoteRequest(
+            chain=self.config.chain_name,
+            token_in=token_in,
+            token_out=token_out,
+            amount_in=str(amount_in),
+            from_address=from_addr,
+            routing_strategy=strategy.value,
+            destination_chain_id=destination_chain_id or 0,
+        )
+        response = self._call_enso_stub(
+            self.config.gateway_client.enso.GetQuote,
+            request,
+            timeout=float(self.config.timeout),
+            endpoint="/api/v1/shortcuts/quote",
+            method_name="GetQuote",
+        )
+        if not response.success:
+            raise EnsoAPIError(
+                message=f"Gateway Enso GetQuote failed: {response.error}",
+                status_code=0,
+                endpoint="/api/v1/shortcuts/quote",
+            )
+        return Quote.from_api_response(
+            {
+                "amountOut": response.amount_out,
+                "gas": str(response.gas_estimate) if response.gas_estimate else None,
+                "priceImpact": response.price_impact,
+                "chainId": self.config.chain_id,
+            }
+        )
+
+    def _get_approval_via_gateway(
+        self,
+        *,
+        token_address: str,
+        approve_amount: int,
+        from_addr: str,
+        strategy: RoutingStrategy,
+    ) -> dict[str, Any]:
+        """Fetch approval tx data via the gateway's EnsoService.GetApproval."""
+        from almanak.gateway.proto import gateway_pb2
+
+        assert self.config.gateway_client is not None
+        request = gateway_pb2.EnsoApprovalRequest(
+            chain=self.config.chain_name,
+            from_address=from_addr,
+            token_address=token_address,
+            amount=str(approve_amount),
+            routing_strategy=strategy.value,
+        )
+        response = self._call_enso_stub(
+            self.config.gateway_client.enso.GetApproval,
+            request,
+            timeout=float(self.config.timeout),
+            endpoint="/api/v1/wallet/approve",
+            method_name="GetApproval",
+        )
+        if not response.success:
+            raise EnsoAPIError(
+                message=f"Gateway Enso GetApproval failed: {response.error}",
+                status_code=0,
+                endpoint="/api/v1/wallet/approve",
+            )
+        return {
+            "tx": {"to": response.to, "data": response.data},
+            "to": response.to,
+            "data": response.data,
+            "gas": response.gas,
+        }
+
+    def _get_bundle_via_gateway(
+        self,
+        *,
+        bundle_actions: list[BundleAction],
+        from_addr: str,
+        strategy: RoutingStrategy,
+        skip_quote: bool,
+    ) -> dict[str, Any]:
+        """Fetch a bundle tx via the gateway's EnsoService.GetBundle."""
+        import json
+
+        from almanak.gateway.proto import gateway_pb2
+
+        assert self.config.gateway_client is not None
+        proto_actions = []
+        for action in bundle_actions:
+            api_payload = action.to_api_format()
+            # Gateway proto uses map<string,string>; JSON-encode every arg
+            # value so the gateway can round-trip back to native types
+            # (bools/numbers/lists/dicts) before forwarding to the Enso API.
+            # Encoding strings yields quoted JSON strings so decode is
+            # unambiguous on the gateway side.
+            str_args = {k: json.dumps(v) for k, v in (api_payload.get("args") or {}).items()}
+            proto_actions.append(
+                gateway_pb2.EnsoBundleAction(
+                    protocol=str(api_payload.get("protocol", "")),
+                    action=str(api_payload.get("action", "")),
+                    args=str_args,
+                )
+            )
+        request = gateway_pb2.EnsoBundleRequest(
+            chain=self.config.chain_name,
+            from_address=from_addr,
+            actions=proto_actions,
+            routing_strategy=strategy.value,
+            skip_quote=skip_quote,
+        )
+        response = self._call_enso_stub(
+            self.config.gateway_client.enso.GetBundle,
+            request,
+            timeout=float(self.config.timeout),
+            endpoint="/api/v1/shortcuts/bundle",
+            method_name="GetBundle",
+        )
+        if not response.success:
+            raise EnsoAPIError(
+                message=f"Gateway Enso GetBundle failed: {response.error}",
+                status_code=0,
+                endpoint="/api/v1/shortcuts/bundle",
+            )
+        # Bundle responses are consumed as raw dicts by callers; re-inflate
+        # the JSON the gateway already validated so downstream parsing stays
+        # identical between transports.
+        if response.bundle_json:
+            try:
+                return json.loads(response.bundle_json)
+            except json.JSONDecodeError:
+                logger.warning("Gateway returned malformed bundle_json; using tx fields")
+        return {
+            "tx": {
+                "to": response.to,
+                "data": response.data,
+                "value": response.value,
+                "gas": response.gas,
+            },
+        }

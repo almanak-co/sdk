@@ -1,0 +1,7 @@
+{
+    "chain": "solana",
+    "from_token": "USDC",
+    "to_token": "SOL",
+    "amount": "0.10",
+    "max_slippage_pct": 1.0
+}

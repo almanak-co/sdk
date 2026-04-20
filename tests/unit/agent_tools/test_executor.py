@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.agent_tools.executor import ToolExecutor
+from almanak.framework.agent_tools.executor import ToolExecutor, _decode_int24
 from almanak.framework.agent_tools.policy import AgentPolicy
 from almanak.framework.agent_tools.schemas import ToolResponse
 
@@ -161,6 +161,17 @@ class TestDataToolDispatch:
         assert result.status == "error"
 
     @pytest.mark.asyncio
+    async def test_get_pool_state_unknown_protocol_returns_error(self, executor, mock_gateway):
+        """get_pool_state must return a validation_error for unknown protocol instead of silently falling back."""
+        result = await executor.execute(
+            "get_pool_state",
+            {"token_a": "WETH", "token_b": "USDC", "chain": "arbitrum", "protocol": "totally_unknown_dex"},
+        )
+        assert result.status == "error"
+        assert result.error["error_code"] == "validation_error"
+        assert "totally_unknown_dex" in result.error["message"]
+
+    @pytest.mark.asyncio
     async def test_get_risk_metrics_returns_portfolio_value(self, executor, mock_gateway):
         """get_risk_metrics returns portfolio value from gateway balances."""
         mock_batch_resp = MagicMock()
@@ -248,6 +259,30 @@ class TestPlanningToolDispatch:
             {"intent_type": "swap", "params": {"from_token": "USDC", "to_token": "ETH", "amount": "1000"}},
         )
         assert result.status == "simulated"
+
+    @pytest.mark.asyncio
+    async def test_simulate_intent_coerces_float_params(self, executor, mock_gateway):
+        """simulate_intent on-the-fly compile path must coerce float params to strings."""
+        compile_resp = MagicMock()
+        compile_resp.success = True
+        compile_resp.action_bundle = json.dumps({"actions": []}).encode()
+        mock_gateway.execution.CompileIntent.return_value = compile_resp
+
+        exec_resp = MagicMock()
+        exec_resp.success = True
+        exec_resp.error = ""
+        mock_gateway.execution.Execute.return_value = exec_resp
+
+        # max_slippage as raw float -- should not cause SafeDecimal rejection
+        result = await executor.execute(
+            "simulate_intent",
+            {"intent_type": "swap", "params": {"from_token": "USDC", "to_token": "ETH", "max_slippage": 0.03}},
+        )
+        assert result.status == "simulated"
+        # Verify the compile call received coerced string, not raw float
+        call_args = mock_gateway.execution.CompileIntent.call_args
+        sent_data = json.loads(call_args[0][0].intent_data.decode())
+        assert sent_data["max_slippage"] == "0.03", "float should be coerced to string before CompileIntent"
 
     @pytest.mark.asyncio
     async def test_estimate_gas_returns_gas_units(self, executor):
@@ -356,6 +391,298 @@ class TestActionToolDispatch:
         assert result.status == "error"
         assert result.error["error_code"] == "validation_error"
         assert "not found" in result.error["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_execute_compiled_bundle_across_process_boundary(self, mock_gateway, tmp_path):
+        """VIB-2996 regression: compile in one executor, execute in a brand new one.
+
+        Mirrors the real-world ``ax`` usage where ``compile_intent`` and
+        ``execute_compiled_bundle`` run in different CLI invocations and thus
+        different Python processes. The persistent disk cache has to bridge
+        that gap.
+        """
+        from almanak.framework.agent_tools.bundle_cache import BundleCache
+        from almanak.framework.agent_tools.executor import ToolExecutor
+
+        cache_dir = tmp_path / "bundles"
+
+        compile_resp = MagicMock()
+        compile_resp.success = True
+        compile_resp.action_bundle = b'{"actions": []}'
+        compile_resp.error = ""
+        mock_gateway.execution.CompileIntent.return_value = compile_resp
+
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+            max_single_trade_usd=Decimal("999999999"),
+            max_daily_spend_usd=Decimal("999999999"),
+            max_position_size_usd=Decimal("999999999"),
+            require_human_approval_above_usd=Decimal("999999999"),
+            require_rebalance_check=False,
+        )
+
+        first = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address="0x1234567890abcdef1234567890abcdef12345678",
+            strategy_id="test-strategy",
+            bundle_cache=BundleCache(cache_dir=cache_dir),
+        )
+        compile_result = await first.execute(
+            "compile_intent", {"intent_type": "swap", "params": {}}
+        )
+        bundle_id = compile_result.data["bundle_id"]
+
+        # Completely new executor, same cache dir -> should resolve the bundle.
+        exec_resp = MagicMock()
+        exec_resp.success = True
+        exec_resp.tx_hashes = ["0xabc"]
+        exec_resp.error = ""
+        mock_gateway.execution.Execute.return_value = exec_resp
+
+        second = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address="0x1234567890abcdef1234567890abcdef12345678",
+            strategy_id="test-strategy",
+            bundle_cache=BundleCache(cache_dir=cache_dir),
+        )
+        result = await second.execute(
+            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
+        )
+        assert result.status == "success"
+        assert result.data["tx_hashes"] == ["0xabc"]
+
+    @pytest.mark.asyncio
+    async def test_execute_compiled_bundle_consumes_before_gateway_call(
+        self, mock_gateway, tmp_path
+    ):
+        """VIB-2996 TOCTOU (Claude auditor item #2): the bundle must be
+        popped BEFORE the Execute gateway call so two concurrent
+        ``ax run execute_compiled_bundle`` invocations can never both
+        submit transactions from the same bundle_id.
+        """
+        from almanak.framework.agent_tools.bundle_cache import BundleCache
+        from almanak.framework.agent_tools.executor import ToolExecutor
+
+        cache_dir = tmp_path / "bundles"
+
+        compile_resp = MagicMock()
+        compile_resp.success = True
+        compile_resp.action_bundle = b'{"actions": []}'
+        compile_resp.error = ""
+        mock_gateway.execution.CompileIntent.return_value = compile_resp
+
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+            max_single_trade_usd=Decimal("999999999"),
+            max_daily_spend_usd=Decimal("999999999"),
+            max_position_size_usd=Decimal("999999999"),
+            require_human_approval_above_usd=Decimal("999999999"),
+            require_rebalance_check=False,
+        )
+
+        shared_cache = BundleCache(cache_dir=cache_dir)
+        wallet = "0x1234567890abcdef1234567890abcdef12345678"
+        executor = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address=wallet,
+            strategy_id="t",
+            bundle_cache=shared_cache,
+        )
+        compile_result = await executor.execute(
+            "compile_intent", {"intent_type": "swap", "params": {}}
+        )
+        bundle_id = compile_result.data["bundle_id"]
+
+        # Inside the Execute mock, assert the cache no longer contains the
+        # bundle_id — i.e., pop happened before the gateway call.
+        def assert_consumed_before_exec(_req):
+            from almanak.framework.agent_tools.bundle_cache import BundleCache as _BC
+
+            fresh = _BC(cache_dir=cache_dir)
+            assert fresh.get(bundle_id) is None, "bundle must be popped BEFORE Execute()"
+            resp = MagicMock()
+            resp.success = True
+            resp.tx_hashes = ["0xok"]
+            resp.error = ""
+            return resp
+
+        mock_gateway.execution.Execute.side_effect = assert_consumed_before_exec
+
+        result = await executor.execute(
+            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
+        )
+        assert result.status == "success"
+
+    @pytest.mark.asyncio
+    async def test_execute_compiled_bundle_rejects_wrong_wallet(self, mock_gateway, tmp_path):
+        """VIB-2996 P1 (Codex + CodeRabbit high-confidence): a bundle compiled
+        under wallet A must NOT execute under wallet B, even if they share a
+        per-user cache dir.
+        """
+        from almanak.framework.agent_tools.bundle_cache import BundleCache
+        from almanak.framework.agent_tools.executor import ToolExecutor
+
+        cache_dir = tmp_path / "bundles"
+
+        compile_resp = MagicMock()
+        compile_resp.success = True
+        compile_resp.action_bundle = b'{"actions": []}'
+        compile_resp.error = ""
+        mock_gateway.execution.CompileIntent.return_value = compile_resp
+
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+            max_single_trade_usd=Decimal("999999999"),
+            max_daily_spend_usd=Decimal("999999999"),
+            max_position_size_usd=Decimal("999999999"),
+            require_human_approval_above_usd=Decimal("999999999"),
+            require_rebalance_check=False,
+        )
+
+        wallet_a = "0x1111111111111111111111111111111111111111"
+        wallet_b = "0x2222222222222222222222222222222222222222"
+
+        compiler = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address=wallet_a,
+            strategy_id="strat-a",
+            bundle_cache=BundleCache(cache_dir=cache_dir),
+        )
+        compile_result = await compiler.execute(
+            "compile_intent", {"intent_type": "swap", "params": {}}
+        )
+        bundle_id = compile_result.data["bundle_id"]
+
+        # Different wallet, same cache dir.
+        attacker = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address=wallet_b,
+            strategy_id="strat-a",
+            bundle_cache=BundleCache(cache_dir=cache_dir),
+        )
+        result = await attacker.execute(
+            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
+        )
+        assert result.status == "error"
+        assert result.error["error_code"] == "validation_error"
+        assert "wallet" in result.error["message"].lower()
+        # And gateway.Execute must NOT have been called — hard gate.
+        mock_gateway.execution.Execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_compiled_bundle_rejects_wrong_strategy(self, mock_gateway, tmp_path):
+        """VIB-2996 P1: same wallet but different strategy_id must also reject."""
+        from almanak.framework.agent_tools.bundle_cache import BundleCache
+        from almanak.framework.agent_tools.executor import ToolExecutor
+
+        cache_dir = tmp_path / "bundles"
+
+        compile_resp = MagicMock()
+        compile_resp.success = True
+        compile_resp.action_bundle = b'{"actions": []}'
+        compile_resp.error = ""
+        mock_gateway.execution.CompileIntent.return_value = compile_resp
+
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+            max_single_trade_usd=Decimal("999999999"),
+            max_daily_spend_usd=Decimal("999999999"),
+            max_position_size_usd=Decimal("999999999"),
+            require_human_approval_above_usd=Decimal("999999999"),
+            require_rebalance_check=False,
+        )
+
+        wallet = "0x1234567890abcdef1234567890abcdef12345678"
+
+        compiler = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address=wallet,
+            strategy_id="strat-a",
+            bundle_cache=BundleCache(cache_dir=cache_dir),
+        )
+        compile_result = await compiler.execute(
+            "compile_intent", {"intent_type": "swap", "params": {}}
+        )
+        bundle_id = compile_result.data["bundle_id"]
+
+        attacker = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address=wallet,
+            strategy_id="strat-b",
+            bundle_cache=BundleCache(cache_dir=cache_dir),
+        )
+        result = await attacker.execute(
+            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
+        )
+        assert result.status == "error"
+        assert result.error["error_code"] == "validation_error"
+        assert "strategy" in result.error["message"].lower()
+        mock_gateway.execution.Execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_compiled_bundle_expired_returns_friendly_error(
+        self, mock_gateway, tmp_path
+    ):
+        """Expired bundles surface a clear 'expired' message, not a generic 'not found'."""
+        from almanak.framework.agent_tools.bundle_cache import BundleCache
+        from almanak.framework.agent_tools.executor import ToolExecutor
+
+        cache_dir = tmp_path / "bundles"
+
+        compile_resp = MagicMock()
+        compile_resp.success = True
+        compile_resp.action_bundle = b'{"actions": []}'
+        compile_resp.error = ""
+        mock_gateway.execution.CompileIntent.return_value = compile_resp
+
+        policy = AgentPolicy(
+            allowed_chains={"arbitrum"},
+            max_tool_calls_per_minute=100,
+            cooldown_seconds=0,
+            max_single_trade_usd=Decimal("999999999"),
+            max_daily_spend_usd=Decimal("999999999"),
+            max_position_size_usd=Decimal("999999999"),
+            require_human_approval_above_usd=Decimal("999999999"),
+            require_rebalance_check=False,
+        )
+
+        executor = ToolExecutor(
+            mock_gateway,
+            policy=policy,
+            wallet_address="0x1234567890abcdef1234567890abcdef12345678",
+            strategy_id="test-strategy",
+            bundle_cache=BundleCache(cache_dir=cache_dir, default_ttl_seconds=1),
+        )
+        compile_result = await executor.execute(
+            "compile_intent", {"intent_type": "swap", "params": {}}
+        )
+        bundle_id = compile_result.data["bundle_id"]
+
+        import time as _time
+
+        _time.sleep(1.2)
+
+        result = await executor.execute(
+            "execute_compiled_bundle", {"bundle_id": bundle_id, "chain": "arbitrum"}
+        )
+        assert result.status == "error"
+        assert result.error["error_code"] == "validation_error"
+        assert "expired" in result.error["message"].lower()
 
     @pytest.mark.asyncio
     async def test_execute_compiled_bundle_removes_from_cache(self, executor, mock_gateway):
@@ -1744,3 +2071,448 @@ class TestValidateRisk:
         )
         assert "blocked" in result.explanation.lower()
         assert "violation" in result.explanation.lower()
+
+
+class TestDecodeInt24:
+    """Tests for _decode_int24 helper used in Uniswap V3 tick decoding."""
+
+    def test_zero_tick(self):
+        """Zero tick from a 32-byte ABI word of all zeros."""
+        word = "0" * 64
+        assert _decode_int24(word) == 0
+
+    def test_positive_tick(self):
+        """Positive tick 100 (0x64) in low 3 bytes."""
+        word = "0" * 58 + "000064"
+        assert _decode_int24(word) == 100
+
+    def test_negative_tick_small(self):
+        """Negative tick -100. ABI sign-extends to 256 bits (ff-padded).
+
+        int24(-100) = 0xFFFF9C. When ABI-encoded as int24, the full 32-byte
+        word is sign-extended: 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff9c.
+        The function must extract only the low 3 bytes (ff9c -> with leading ff = ffff9c)
+        and apply int24 two's complement to get -100.
+        """
+        # ABI-encoded int24(-100): sign-extended to 256 bits
+        word = "ff" * 29 + "ffff9c"
+        assert _decode_int24(word) == -100
+
+    def test_negative_tick_typical_uniswap(self):
+        """Typical negative tick -887272 used in Uniswap V3 full-range positions."""
+        # int24(-887272) = 0xF2C068 (low 3 bytes)
+        # Verify: 0xF2C068 = 15908968, 15908968 - 2^24 = 15908968 - 16777216 = -868248
+        # Actually -887272 in hex: 887272 = 0x0D8A08, -887272 two's complement int24 = 0xF275F8
+        val_24 = (-887272) & 0xFFFFFF  # = 0xF275F8
+        word = "ff" * 29 + f"{val_24:06x}"
+        assert _decode_int24(word) == -887272
+
+    def test_max_positive_int24(self):
+        """Max positive int24: 2^23 - 1 = 8388607."""
+        word = "0" * 58 + "7fffff"
+        assert _decode_int24(word) == 8388607
+
+    def test_min_negative_int24(self):
+        """Min negative int24: -2^23 = -8388608."""
+        word = "ff" * 29 + "800000"
+        assert _decode_int24(word) == -8388608
+
+    def test_negative_one(self):
+        """Tick -1: ABI-encoded as all ff bytes."""
+        word = "ff" * 32
+        assert _decode_int24(word) == -1
+
+    def test_positive_large_tick(self):
+        """Positive tick 887272 (max tick for Uniswap V3 1-tick spacing)."""
+        val = 887272  # 0x0D8A08
+        word = "0" * 58 + f"{val:06x}"
+        assert _decode_int24(word) == 887272
+
+
+class TestWithdrawLendingIntentMapping:
+    """_action_to_intent gates Morpho-specific fields so direct agent-tool
+    invocations can't bypass the CLI-layer guard on non-Morpho withdraws.
+
+    Regression: CodeRabbit PR #1535 round 4 — is_collateral used to leak
+    into Aave/Compound/etc. withdraw params when an agent called the tool
+    directly (not via the CLI).
+    """
+
+    def test_withdraw_on_aave_v3_does_not_set_is_collateral(self, executor):
+        intent_type, params = executor._action_to_intent(
+            "withdraw_lending",
+            {"token": "USDC", "amount": "all", "protocol": "aave_v3", "is_collateral": True},
+        )
+        assert intent_type == "withdraw"
+        assert "is_collateral" not in params
+        assert params["withdraw_all"] is True
+
+    def test_withdraw_on_morpho_blue_sets_is_collateral(self, executor):
+        intent_type, params = executor._action_to_intent(
+            "withdraw_lending",
+            {
+                "token": "USDC",
+                "amount": "all",
+                "protocol": "morpho_blue",
+                "is_collateral": False,
+                "market_id": "0xabc",
+            },
+        )
+        assert intent_type == "withdraw"
+        assert params["is_collateral"] is False
+        assert params["market_id"] == "0xabc"
+
+    def test_withdraw_on_morpho_blue_alias_normalizes(self, executor):
+        """`morpho-blue` and `morpho blue` aliases must take the Morpho path."""
+        for alias in ("morpho-blue", "Morpho Blue", "MORPHO_BLUE"):
+            _, params = executor._action_to_intent(
+                "withdraw_lending",
+                {
+                    "token": "USDC",
+                    "amount": "all",
+                    "protocol": alias,
+                    "is_collateral": True,
+                    "market_id": "0xabc",
+                },
+            )
+            assert params["is_collateral"] is True, f"alias {alias!r} missed the gate"
+
+    def test_withdraw_compound_v3_does_not_set_is_collateral(self, executor):
+        """Compound V3 is not Morpho-like; is_collateral must not leak."""
+        _, params = executor._action_to_intent(
+            "withdraw_lending",
+            {"token": "USDC", "amount": "100", "protocol": "compound_v3", "is_collateral": True},
+        )
+        assert "is_collateral" not in params
+
+
+class TestListReadCommands:
+    """VIB-2995: list_lp_positions + list_lending_positions + get_portfolio.
+
+    The LP tests mock whatever ``discover_lp_positions`` returns, since that
+    module has its own battery of tests (`tests/unit/teardown/test_discovery.py`).
+    We focus here on the executor's envelope contract: wallet validation,
+    unsupported-chain handling, and forwarding the discovered positions.
+
+    The lending / portfolio tests still mock ``mock_gateway.rpc.Call``
+    directly because those paths use the executor's own ``_rpc_call`` helper.
+    """
+
+    @staticmethod
+    def _pack_uint256(value: int) -> str:
+        return hex(value)[2:].zfill(64)
+
+    @staticmethod
+    def _pack_address(addr: str) -> str:
+        return addr.lower().removeprefix("0x").zfill(64)
+
+    def _rpc_result(self, hex_payload: str):
+        """Build a MagicMock that mimics the gateway RpcResponse shape."""
+        resp = MagicMock()
+        resp.success = True
+        resp.result = f'"0x{hex_payload}"'
+        resp.error = ""
+        return resp
+
+    def _rpc_error(self, msg: str):
+        resp = MagicMock()
+        resp.success = False
+        resp.result = ""
+        resp.error = msg
+        return resp
+
+    def _discovered(self, token_id, token0, token1, fee=500, liquidity=10**20, protocol="uniswap_v3"):
+        from almanak.framework.teardown.discovery import DiscoveredPosition
+
+        return DiscoveredPosition(
+            token_id=token_id,
+            npm_address="0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+            chain="arbitrum",
+            protocol=protocol,
+            token0=token0.lower(),
+            token1=token1.lower(),
+            fee=fee,
+            tick_lower=0,
+            tick_upper=10000,
+            liquidity=liquidity,
+        )
+
+    @pytest.mark.asyncio
+    async def test_list_lp_positions_rejects_unsupported_protocol(self, executor):
+        resp = await executor.execute("list_lp_positions", {"chain": "arbitrum", "protocol": "curve"})
+        assert resp.status == "error"
+        # New message lists supported protocols explicitly; no ticket reference.
+        assert "uniswap_v3" in resp.error["message"]
+        assert "VIB-" not in resp.error["message"], "error message must not reference a ticket"
+
+    @pytest.mark.asyncio
+    async def test_list_lp_positions_requires_wallet(self, mock_gateway):
+        """No explicit wallet AND no default wallet on executor → clear error."""
+        from almanak.framework.agent_tools.executor import ToolExecutor
+        from almanak.framework.agent_tools.policy import AgentPolicy
+
+        executor = ToolExecutor(
+            mock_gateway,
+            policy=AgentPolicy(allowed_chains={"arbitrum"}, max_tool_calls_per_minute=100, cooldown_seconds=0),
+            wallet_address="",
+            strategy_id="test",
+        )
+        resp = await executor.execute("list_lp_positions", {"chain": "arbitrum"})
+        assert resp.status == "error"
+        assert "wallet_address" in resp.error["message"]
+
+    @pytest.mark.asyncio
+    async def test_list_lp_positions_rejects_malformed_wallet(self, executor):
+        """Audit Important #4: nonsense wallet input must fail fast at VALIDATION_ERROR."""
+        resp = await executor.execute(
+            "list_lp_positions",
+            {"chain": "arbitrum", "wallet_address": "not-an-address"},
+        )
+        assert resp.status == "error"
+        assert resp.error["error_code"] == "validation_error"
+        assert "Invalid wallet address" in resp.error["message"]
+
+    @pytest.mark.asyncio
+    async def test_list_lp_positions_unsupported_chain(self, mock_gateway):
+        """Chain with no registered V3 NPM returns unsupported_chain.
+
+        Uses a dedicated executor whose policy allows 'sonic' (absent from
+        every protocol's NPM registry) so the error comes from the tool, not
+        from PolicyEngine's allowed_chains gate.
+        """
+        from almanak.framework.agent_tools.executor import ToolExecutor
+        from almanak.framework.agent_tools.policy import AgentPolicy
+
+        executor = ToolExecutor(
+            mock_gateway,
+            policy=AgentPolicy(
+                allowed_chains={"sonic"},
+                max_tool_calls_per_minute=100,
+                cooldown_seconds=0,
+                max_single_trade_usd=Decimal("999999999"),
+                max_daily_spend_usd=Decimal("999999999"),
+                max_position_size_usd=Decimal("999999999"),
+                require_human_approval_above_usd=Decimal("999999999"),
+                require_rebalance_check=False,
+            ),
+            wallet_address="0xabc0000000000000000000000000000000000000",
+            strategy_id="test",
+        )
+        resp = await executor.execute("list_lp_positions", {"chain": "sonic"})
+        assert resp.status == "error"
+        assert resp.error["error_code"] == "unsupported_chain"
+
+    @pytest.mark.asyncio
+    async def test_list_lp_positions_delegates_to_discover(self, executor):
+        """Happy path: whatever discover_lp_positions returns gets surfaced.
+
+        Regression for the audit finding that we used to reinvent the walker
+        — tests that we now delegate and preserve protocol + npm_address.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        usdc = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        weth = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+        discovered = [
+            self._discovered(token_id=42, token0=usdc, token1=weth, fee=500, liquidity=10**20),
+            self._discovered(
+                token_id=99, token0=usdc, token1=weth, fee=3000, liquidity=500, protocol="sushiswap_v3"
+            ),
+        ]
+        with patch(
+            "almanak.framework.teardown.discovery.discover_lp_positions",
+            new=AsyncMock(return_value=discovered),
+        ):
+            resp = await executor.execute(
+                "list_lp_positions",
+                {"chain": "arbitrum", "wallet_address": "0xabc0000000000000000000000000000000000000"},
+            )
+        assert resp.status == "success", resp.error
+        assert resp.data["count"] == 2
+        ids = {p["position_id"] for p in resp.data["positions"]}
+        assert ids == {"42", "99"}
+        protocols = {p["protocol"] for p in resp.data["positions"]}
+        assert protocols == {"uniswap_v3", "sushiswap_v3"}
+        # The cap gets surfaced so operators know the upper bound
+        assert resp.data["max_positions_per_npm"] == 256
+
+    @pytest.mark.asyncio
+    async def test_list_lp_positions_empty_delegation(self, executor):
+        """Wallet with no positions returns count=0 (not an error)."""
+        from unittest.mock import AsyncMock, patch
+
+        with patch(
+            "almanak.framework.teardown.discovery.discover_lp_positions",
+            new=AsyncMock(return_value=[]),
+        ):
+            resp = await executor.execute(
+                "list_lp_positions",
+                {"chain": "arbitrum", "wallet_address": "0xabc0000000000000000000000000000000000000"},
+            )
+        assert resp.status == "success"
+        assert resp.data["count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_list_lp_positions_discovery_incomplete_surfaces(self, executor):
+        """When the walker raises DiscoveryIncomplete the tool returns RPC_FAILED."""
+        from unittest.mock import AsyncMock, patch
+
+        from almanak.framework.teardown.discovery import DiscoveryIncomplete
+
+        err = DiscoveryIncomplete(chain="arbitrum", npm="0xC36442b4a4522E871399CD717aBDD847Ab11FE88", missing=[3])
+        with patch(
+            "almanak.framework.teardown.discovery.discover_lp_positions",
+            new=AsyncMock(side_effect=err),
+        ):
+            resp = await executor.execute(
+                "list_lp_positions",
+                {"chain": "arbitrum", "wallet_address": "0xabc0000000000000000000000000000000000000"},
+            )
+        assert resp.status == "error"
+        assert resp.error["error_code"] == "rpc_failed"
+
+    @pytest.mark.asyncio
+    async def test_list_lending_positions_unsupported_protocol(self, executor):
+        """Protocol gate must fire even when wallet address is valid — otherwise
+        the test would falsely pass on chains where the validation order
+        changes. (CodeRabbit PR #1536 round 4 minor.)"""
+        resp = await executor.execute(
+            "list_lending_positions",
+            {
+                "chain": "arbitrum",
+                "protocol": "compound_v3",
+                "wallet_address": "0xabc0000000000000000000000000000000000000",
+            },
+        )
+        assert resp.status == "error"
+        assert "aave_v3" in resp.error["message"]
+
+    @pytest.mark.asyncio
+    async def test_list_lending_positions_decodes_account_data(self, executor, mock_gateway):
+        """Aave V3 Pool.getUserAccountData returns 6 uint256 words.
+
+        Values chosen: $2000 collateral, $500 debt, $1000 available, LT=80%,
+        LTV=75%, HF=3.2 (1e18-scaled). Collateral/debt use 8 decimals.
+        """
+        words = [
+            self._pack_uint256(2000 * 10**8),  # totalCollateralBase
+            self._pack_uint256(500 * 10**8),  # totalDebtBase
+            self._pack_uint256(1000 * 10**8),  # availableBorrowsBase
+            self._pack_uint256(8000),  # LT bps
+            self._pack_uint256(7500),  # LTV bps
+            self._pack_uint256(32 * 10**17),  # HF = 3.2e18
+        ]
+        mock_gateway.rpc.Call.return_value = self._rpc_result("".join(words))
+
+        resp = await executor.execute(
+            "list_lending_positions",
+            {"chain": "arbitrum", "wallet_address": "0xabc0000000000000000000000000000000000000"},
+        )
+        assert resp.status == "success", resp.error
+        assert resp.data["total_collateral_usd"] == "2000"
+        assert resp.data["total_debt_usd"] == "500"
+        assert resp.data["available_borrows_usd"] == "1000"
+        assert resp.data["current_liquidation_threshold_bps"] == 8000
+        assert resp.data["ltv_bps"] == 7500
+        assert resp.data["health_factor"] == "3.2"
+
+    @pytest.mark.asyncio
+    async def test_list_lending_positions_no_debt_health_factor_infinity(self, executor, mock_gateway):
+        """MAX_UINT256 health factor → '∞' rendering."""
+        max_uint = (1 << 256) - 1
+        words = [
+            self._pack_uint256(1000 * 10**8),
+            self._pack_uint256(0),
+            self._pack_uint256(0),
+            self._pack_uint256(8000),
+            self._pack_uint256(7500),
+            self._pack_uint256(max_uint),
+        ]
+        mock_gateway.rpc.Call.return_value = self._rpc_result("".join(words))
+
+        resp = await executor.execute(
+            "list_lending_positions",
+            {"chain": "arbitrum", "wallet_address": "0xabc0000000000000000000000000000000000000"},
+        )
+        assert resp.status == "success"
+        assert resp.data["health_factor"] == "∞"
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Audit-blocker regression coverage (PR #1536 round 1)
+    # ─────────────────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_portfolio_returns_partial_status_on_rpc_failure(self, executor, mock_gateway):
+        """Blocker #3: any section failure → status='partial' + warnings entry.
+
+        Previously the tool logged at DEBUG and returned status='success' with
+        an empty native_balance — operators couldn't tell "wallet is empty"
+        from "RPC died". Now the warnings list makes failures explicit.
+        """
+        # eth_getBalance fails; everything else also uses the same rpc.Call
+        # mock, but we only care that the failure surfaces.
+        mock_gateway.rpc.Call.return_value = self._rpc_error("simulated rpc outage")
+
+        resp = await executor.execute(
+            "get_portfolio",
+            {"chain": "arbitrum", "wallet_address": "0xabc0000000000000000000000000000000000000"},
+        )
+        assert resp.status == "partial"
+        warnings = resp.data.get("warnings", [])
+        sections = {w["section"] for w in warnings}
+        assert "native_balance" in sections
+        # native_balance must stay "" so the operator sees "failed", not "0"
+        assert resp.data["native_balance"] == ""
+
+    @pytest.mark.asyncio
+    async def test_portfolio_erc20_uses_eth_call_not_batch(self, executor, mock_gateway):
+        """Codex P2 x2: ERC20 lookup must honor network + bypass nested policy.
+
+        The new path calls balanceOf via _rpc_call (eth_call) rather than
+        re-entering self.execute('batch_get_balances'). We verify the RPC
+        method is eth_call and the network override is forwarded.
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        # Native balance + ERC20 balance both use rpc.Call; return a
+        # neutral "0" for any eth_* call so both succeed.
+        mock_gateway.rpc.Call.return_value = self._rpc_result(self._pack_uint256(0))
+
+        resp = await executor.execute(
+            "get_portfolio",
+            {
+                "chain": "arbitrum",
+                "wallet_address": "0xabc0000000000000000000000000000000000000",
+                "tokens": ["USDC"],
+                "network": "anvil",
+            },
+        )
+        assert resp.status in ("success", "partial"), resp.error
+        # The ERC20 lookup MUST use eth_call (not batch_get_balances), AND
+        # must forward network='anvil' so portfolio data is coherent across
+        # sections. eth_getBalance is also fine (native balance section).
+        erc20_call_seen = False
+        for call in mock_gateway.rpc.Call.call_args_list:
+            request = call.args[0]
+            assert isinstance(request, gateway_pb2.RpcRequest)
+            assert request.network == "anvil", f"network not forwarded to {request.method}"
+            assert request.method in ("eth_call", "eth_getBalance"), (
+                f"portfolio must use eth_call for ERC20 balances, not {request.method}"
+            )
+            if request.method == "eth_call" and "portfolio_erc20_" in request.id:
+                erc20_call_seen = True
+        assert erc20_call_seen, "portfolio did not issue an ERC20 eth_call for USDC"
+
+    @pytest.mark.asyncio
+    async def test_rpc_call_extracts_revert_message_from_dict(self, executor, mock_gateway):
+        """Audit Potential #9: JSON-RPC error envelopes must surface the revert message."""
+        resp = MagicMock()
+        resp.success = True
+        # Gateway returns a dict error envelope instead of a hex string
+        resp.result = '{"error": {"code": -32000, "message": "execution reverted: INSUFFICIENT_LIQUIDITY"}}'
+        resp.error = ""
+        mock_gateway.rpc.Call.return_value = resp
+
+        ok, msg = executor._rpc_call("arbitrum", "0xabc", "0x70a08231", "test")
+        assert ok is False
+        assert "INSUFFICIENT_LIQUIDITY" in msg

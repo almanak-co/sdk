@@ -99,6 +99,96 @@ SPOT_MARKET_SOL_INDEX = 1
 # USDC mint on Solana mainnet
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
+# -------------------------------------------------------------------------
+# Spot Market Registry (index -> symbol)
+# -------------------------------------------------------------------------
+#
+# Drift is a cross-margin protocol: the assets users can deposit as
+# collateral are exactly the assets that appear in Drift's on-chain spot
+# markets. Any Drift spot-market asset can back a position in ANY Drift
+# perp market (the margin engine nets across all registered spot positions).
+# As a result there is no per-perp-market collateral rule — only a single
+# global allow-list of supported collateral mints.
+#
+# Source: Drift protocol-v2 SDK, ``sdk/src/constants/spotMarkets.ts``
+# (https://github.com/drift-labs/protocol-v2). Indexes below are the stable,
+# long-lived mainnet-beta spot markets as of DRIFT_LAYOUT_VERSION. New spot
+# markets are onboarded periodically by Drift DAO governance; when a new
+# market is added on-chain it MUST be appended here (and verified against
+# the SDK) so compile-time collateral validation stays in sync.
+#
+# Symbols use Drift's canonical casing (e.g. ``mSOL``, ``wBTC``, ``USDC``).
+# Case-insensitive comparison is the responsibility of the validator, not
+# the table. Consumers that need the uppercase form for lookup should call
+# ``symbol.upper()`` at the call site.
+SPOT_MARKETS: dict[int, str] = {
+    0: "USDC",
+    1: "SOL",
+    2: "mSOL",
+    3: "wBTC",
+    4: "wETH",
+    5: "USDT",
+    6: "jitoSOL",
+    7: "PYTH",
+    8: "bSOL",
+    9: "JTO",
+    10: "WIF",
+    11: "JUP",
+    12: "RENDER",
+    13: "W",
+    14: "TNSR",
+    15: "DRIFT",
+    16: "INF",
+    17: "dSOL",
+    18: "USDY",
+    19: "JLP",
+    20: "POPCAT",
+    21: "CLOUD",
+    22: "PYUSD",
+    23: "USDe",
+    24: "sUSDe",
+}
+
+
+# Reverse mapping: symbol (canonical casing) -> spot market index.
+#
+# Fail fast on duplicate / case-collision symbols. If two distinct spot-market
+# indexes ever map to the same symbol (or to symbols that differ only in
+# case, e.g. ``"SOL"`` vs ``"sol"``), the reverse map would silently clobber
+# one entry — which would then propagate to ``ALLOWED_COLLATERAL_MINTS`` and
+# subtly break collateral validation. Raising at import time forces the
+# ambiguity to be resolved in the source table before it can ship.
+def _build_spot_market_symbol_to_index() -> dict[str, int]:
+    seen_canonical: dict[str, int] = {}
+    seen_upper: dict[str, int] = {}
+    collisions_canonical: list[tuple[str, int, int]] = []
+    collisions_upper: list[tuple[str, int, int]] = []
+    for idx, symbol in SPOT_MARKETS.items():
+        if symbol in seen_canonical:
+            collisions_canonical.append((symbol, seen_canonical[symbol], idx))
+        else:
+            seen_canonical[symbol] = idx
+        upper = symbol.upper()
+        if upper in seen_upper:
+            collisions_upper.append((upper, seen_upper[upper], idx))
+        else:
+            seen_upper[upper] = idx
+    problems: list[str] = []
+    if collisions_canonical:
+        problems.extend(f"symbol {sym!r} at indexes {a} and {b}" for sym, a, b in collisions_canonical)
+    if collisions_upper:
+        # Only report case-collisions that aren't already flagged as exact
+        # duplicates above (to keep the error message tight).
+        exact = {sym.upper() for sym, _a, _b in collisions_canonical}
+        case_only = [c for c in collisions_upper if c[0] not in exact]
+        problems.extend(f"case-collision on {sym!r} at indexes {a} and {b}" for sym, a, b in case_only)
+    if problems:
+        raise ValueError(f"Duplicate spot market symbols detected in SPOT_MARKETS: {'; '.join(problems)}")
+    return {v: k for k, v in SPOT_MARKETS.items()}
+
+
+SPOT_MARKET_SYMBOL_TO_INDEX: dict[str, int] = _build_spot_market_symbol_to_index()
+
 # =========================================================================
 # Precision Constants
 # =========================================================================

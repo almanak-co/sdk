@@ -391,6 +391,90 @@ class TestAerodromeReceiptParser:
         assert lp_close.amount0_collected == weth_amount
         assert lp_close.amount1_collected == usdc_amount
 
+    def test_unresolved_decimals_parse_receipt_returns_none_swap_result(self):
+        """parse_receipt returns swap_result=None when parser has no token metadata.
+
+        Regression: _build_swap_result must not return fabricated zero decimals.
+        """
+        parser = AerodromeReceiptParser(chain="base")  # No token metadata
+
+        amount_in = 1_000_000_000  # 1000 USDC (raw)
+        amount_out = 500_000_000_000_000_000  # 0.5 WETH (raw)
+
+        receipt = {
+            "transactionHash": "0xregression",
+            "blockNumber": 12345,
+            "status": 1,
+            "logs": [create_swap_log(USER_ADDRESS, USER_ADDRESS, amount_in, 0, 0, amount_out)],
+            "gasUsed": 150000,
+        }
+
+        result = parser.parse_receipt(receipt)
+
+        assert result.success is True
+        assert len(result.swap_events) == 1, "raw swap event should still be parsed"
+        assert result.swap_result is None, (
+            "swap_result must be None when decimals are unresolved — "
+            "returning Decimal(0) would fabricate data for downstream consumers"
+        )
+
+    def test_extract_swap_amounts_succeeds_without_token_metadata(self):
+        """extract_swap_amounts resolves decimals from Transfer events even
+        when the parser has no token metadata (the enrichment path).
+
+        Regression: extract_swap_amounts must fall back to raw swap_events
+        when _build_swap_result returns None due to unresolved decimals.
+        """
+        from decimal import Decimal
+
+        parser = AerodromeReceiptParser(chain="base")  # No token metadata
+
+        amount_in = 1_000_000_000  # 1000 USDC (6 decimals)
+        amount_out = 500_000_000_000_000_000  # 0.5 WETH (18 decimals)
+        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+        receipt = {
+            "transactionHash": "0xregression2",
+            "blockNumber": 12345,
+            "status": 1,
+            "from": USER_ADDRESS,
+            "logs": [
+                {
+                    "address": USDC_ADDRESS,
+                    "topics": [
+                        transfer_topic,
+                        f"0x000000000000000000000000{USER_ADDRESS[2:].lower()}",
+                        f"0x000000000000000000000000{POOL_ADDRESS[2:].lower()}",
+                    ],
+                    "data": f"0x{amount_in:064x}",
+                    "logIndex": 0,
+                },
+                create_swap_log(USER_ADDRESS, USER_ADDRESS, amount_in, 0, 0, amount_out),
+                {
+                    "address": WETH_ADDRESS,
+                    "topics": [
+                        transfer_topic,
+                        f"0x000000000000000000000000{POOL_ADDRESS[2:].lower()}",
+                        f"0x000000000000000000000000{USER_ADDRESS[2:].lower()}",
+                    ],
+                    "data": f"0x{amount_out:064x}",
+                    "logIndex": 2,
+                },
+            ],
+            "gasUsed": 150000,
+        }
+
+        swap_amounts = parser.extract_swap_amounts(receipt)
+
+        assert swap_amounts is not None, (
+            "extract_swap_amounts should succeed by falling back to raw "
+            "swap_events when swap_result is None"
+        )
+        assert swap_amounts.amount_in == amount_in
+        assert swap_amounts.amount_out == amount_out
+        assert swap_amounts.amount_in_decimal == Decimal("1000")
+        assert swap_amounts.amount_out_decimal == Decimal("0.5")
+
     def test_backward_compatibility(self):
         parser = AerodromeReceiptParser()
 

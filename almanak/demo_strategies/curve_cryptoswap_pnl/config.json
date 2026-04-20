@@ -1,0 +1,30 @@
+{
+    "chain": "ethereum",
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "chain": "ethereum",
+            "amount": "0.5",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDT",
+            "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+            "chain": "ethereum",
+            "amount": "1000",
+            "amount_type": "usd"
+        }
+    ],
+    "trade_size_usd": 100,
+    "rsi_period": 14,
+    "rsi_oversold": 40,
+    "rsi_overbought": 70,
+    "max_slippage_bps": 100,
+    "base_token": "WETH",
+    "quote_token": "USDT",
+    "anvil_funding": {
+        "ETH": 100,
+        "USDT": 50000
+    }
+}

@@ -144,8 +144,11 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
         if self._session is None or self._session.closed:
+            from almanak.gateway.utils.ssl_context import build_ssl_context
+
             timeout = aiohttp.ClientTimeout(total=30.0)
-            self._session = aiohttp.ClientSession(timeout=timeout)
+            connector = aiohttp.TCPConnector(ssl=build_ssl_context())
+            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
         return self._session
 
     async def close(self) -> None:
@@ -162,14 +165,36 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             self._rate_limiters[chain] = ChainRateLimiter(limit)
         return self._rate_limiters[chain]
 
-    def _get_rpc_url(self, chain: str) -> str | None:
+    def _chain_not_configured_error(self, chain: str) -> str | None:
+        """Return an error message if chain is not in the gateway's configured list.
+
+        When settings.chains is non-empty, reject RPC calls to other chains —
+        otherwise a gateway started with ``--chains zerog`` would silently
+        forward calls to whatever chain the CLI default happens to name
+        (e.g. "arbitrum"), returning data from the wrong chain. Empty
+        settings.chains = accept any chain (on-demand mode).
+        """
+        if not self.settings.chains or chain in self.settings.chains:
+            return None
+        configured = ", ".join(sorted(self.settings.chains))
+        return (
+            f"Chain '{chain}' is not configured on this gateway. "
+            f"Configured chains: [{configured}]. "
+            f"Pass --chain {next(iter(sorted(self.settings.chains)))} "
+            f"or start the gateway with --chains {chain}."
+        )
+
+    def _get_rpc_url(self, chain: str, network_override: str | None = None) -> str | None:
         """Get RPC URL for a chain.
 
         This function looks up the RPC URL with the API key from settings.
-        Uses the network setting from GatewaySettings (mainnet or anvil).
+        Uses the network setting from GatewaySettings (mainnet or anvil),
+        unless a per-request network_override is provided.
 
         Args:
             chain: Chain name
+            network_override: Optional per-request network override. When set,
+                takes precedence over the gateway's default network setting.
 
         Returns:
             RPC URL or None if chain not configured
@@ -181,8 +206,8 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         from almanak.gateway.utils import get_rpc_url
 
         try:
-            # Use network from settings (default: mainnet, can be set to anvil for testing)
-            network = self.settings.network
+            # Per-request override takes precedence over gateway default
+            network = network_override or self.settings.network
             return get_rpc_url(chain, network=network)
         except ValueError as e:
             # ValueError is raised for unsupported chains or missing API keys
@@ -193,6 +218,29 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             logger.exception("Unexpected error getting RPC URL for %s", chain)
             raise
 
+    # Retry policy for transient upstream RPC failures.
+    # VIB-2984: the original bug was a single Alchemy RPC hiccup crashing a
+    # strategy. Retry 429 + 5xx + network errors with small exponential
+    # backoff. Total worst case ~3.5s — fits under the 30s decide timeout.
+    _RETRY_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+    _RETRY_MAX_ATTEMPTS: int = 3
+    _RETRY_BASE_DELAY: float = 0.5
+    _RETRY_MAX_AFTER: float = 5.0  # cap honored Retry-After header to avoid stalling decide loop
+
+    # Transaction-submission methods are NOT idempotent at the upstream layer.
+    # Even if we get a 5xx back, the node may have already accepted and propagated
+    # the signed tx. On EVM the nonce prevents replay cost (other than a wasted
+    # second submission); on Solana the same signed blob is valid within the
+    # recent-blockhash window (~2 min) and a retry can double-broadcast. Let
+    # these errors surface to the tx submitter, which has nonce-aware retry.
+    _NON_RETRYABLE_WRITE_METHODS: frozenset[str] = frozenset(
+        {
+            "eth_sendRawTransaction",
+            "eth_sendTransaction",
+            "sendTransaction",  # Solana
+        }
+    )
+
     async def _make_rpc_call(
         self,
         rpc_url: str,
@@ -200,7 +248,18 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         params: list | dict,
         request_id: str,
     ) -> tuple[Any, dict | None]:
-        """Make a single JSON-RPC call.
+        """Make a single JSON-RPC call with bounded retries on transients.
+
+        Retries HTTP 429 / 5xx responses and network errors (client disconnect,
+        connection reset, timeout) with 0.5s base exponential backoff + jitter.
+        Honors upstream ``Retry-After`` headers (capped to ``_RETRY_MAX_AFTER``).
+        Does NOT retry on JSON-RPC-level errors (the call reached the upstream
+        and got a meaningful response) — those propagate back as typed errors.
+
+        Transaction-submission methods (``eth_sendRawTransaction``,
+        ``eth_sendTransaction``, Solana ``sendTransaction``) are never retried:
+        they are not idempotent at the upstream layer and a retry after a 5xx
+        may double-broadcast the same signed transaction.
 
         Args:
             rpc_url: RPC endpoint URL
@@ -220,30 +279,107 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             "id": request_id,
         }
 
+        # Non-idempotent tx-submission methods get a single attempt.
+        max_attempts = 1 if method in self._NON_RETRYABLE_WRITE_METHODS else self._RETRY_MAX_ATTEMPTS
+
+        last_error: dict | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with session.post(
+                    rpc_url,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                ) as response:
+                    if response.status in self._RETRY_STATUSES:
+                        error_text = await response.text()
+                        last_error = {
+                            "code": -32603,
+                            "message": f"HTTP {response.status}: {error_text}",
+                        }
+                        if attempt < max_attempts:
+                            retry_after = self._parse_retry_after(response.headers.get("Retry-After"))
+                            await self._retry_sleep(attempt, retry_after=retry_after)
+                            continue
+                        return None, last_error
+
+                    if response.status != 200:
+                        error_text = await response.text()
+                        return None, {"code": -32603, "message": f"HTTP {response.status}: {error_text}"}
+
+                    try:
+                        data = await response.json()
+                    except (aiohttp.ContentTypeError, json.JSONDecodeError) as e:
+                        return None, {"code": -32700, "message": f"Invalid JSON response: {e!s}"}
+
+                    if "error" in data:
+                        return None, data["error"]
+
+                    return data.get("result"), None
+
+            except aiohttp.ClientError as e:
+                # Detect connections to localhost specifically so the error message is
+                # actionable rather than a generic "Cannot connect".
+                from urllib.parse import urlparse
+
+                _hostname = urlparse(rpc_url).hostname or ""
+                if _hostname in {"127.0.0.1", "localhost", "::1"}:
+                    # Local Anvil not running — don't retry, the user needs to
+                    # start it; retrying just delays the clear error message.
+                    return None, {
+                        "code": -32603,
+                        "message": (
+                            f"Cannot connect to local RPC at {rpc_url}. "
+                            "The local node process (Anvil or other) may not be running. "
+                            f"Original error: {e!s}"
+                        ),
+                    }
+                last_error = {"code": -32603, "message": f"Network error: {e!s}"}
+                if attempt < max_attempts:
+                    await self._retry_sleep(attempt)
+                    continue
+                return None, last_error
+            except TimeoutError:
+                last_error = {"code": -32603, "message": "Request timeout"}
+                if attempt < max_attempts:
+                    await self._retry_sleep(attempt)
+                    continue
+                return None, last_error
+
+        return None, last_error or {"code": -32603, "message": "RPC call failed after retries"}
+
+    @staticmethod
+    def _parse_retry_after(header: str | None) -> float | None:
+        """Parse a ``Retry-After`` HTTP header value (delta-seconds form).
+
+        Returns the delay in seconds, or ``None`` if the header is absent or
+        unparseable. HTTP-date form is not supported — upstream RPC providers
+        (Alchemy, QuickNode, Infura) all emit delta-seconds.
+        """
+        if not header:
+            return None
         try:
-            async with session.post(
-                rpc_url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    return None, {"code": -32603, "message": f"HTTP {response.status}: {error_text}"}
+            value = float(header.strip())
+        except ValueError:
+            return None
+        return value if value >= 0 else None
 
-                try:
-                    data = await response.json()
-                except (aiohttp.ContentTypeError, json.JSONDecodeError) as e:
-                    return None, {"code": -32700, "message": f"Invalid JSON response: {e!s}"}
+    async def _retry_sleep(self, attempt: int, *, retry_after: float | None = None) -> None:
+        """Sleep between retry attempts.
 
-                if "error" in data:
-                    return None, data["error"]
+        Honors an upstream-supplied ``Retry-After`` when present (clamped to
+        ``_RETRY_MAX_AFTER`` to keep total backoff bounded). Otherwise uses
+        exponential backoff with 50%–150% jitter to avoid thundering-herd
+        retries across a portfolio of strategies hitting the same upstream.
+        """
+        import asyncio
+        import random
 
-                return data.get("result"), None
-
-        except aiohttp.ClientError as e:
-            return None, {"code": -32603, "message": f"Network error: {e!s}"}
-        except TimeoutError:
-            return None, {"code": -32603, "message": "Request timeout"}
+        if retry_after is not None:
+            delay = min(retry_after, self._RETRY_MAX_AFTER)
+        else:
+            base = self._RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            delay = base * random.uniform(0.5, 1.5)
+        await asyncio.sleep(delay)
 
     async def Call(
         self,
@@ -274,9 +410,24 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                 id=request.id,
             )
 
-        # Validate RPC method against allowlist (chain-aware: Solana vs EVM)
+        msg = self._chain_not_configured_error(chain)
+        if msg is not None:
+            self._metrics.failed_requests += 1
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(msg)
+            return gateway_pb2.RpcResponse(
+                success=False,
+                error=json.dumps({"code": -32603, "message": msg}),
+                id=request.id,
+            )
+
+        # Resolve effective network so validation and execution use the same policy
+        network_override = request.network if request.network else None
+        effective_network = network_override or self.settings.network
+
+        # Validate RPC method against allowlist (chain-aware: Solana vs EVM, network-aware: Anvil)
         try:
-            validate_rpc_method(request.method, chain=chain)
+            validate_rpc_method(request.method, chain=chain, network=effective_network)
         except ValidationError as e:
             self._metrics.failed_requests += 1
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -300,8 +451,8 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                 id=request.id,
             )
 
-        # Get RPC URL
-        rpc_url = self._get_rpc_url(chain)
+        # Get RPC URL (per-request network override takes precedence over gateway default)
+        rpc_url = self._get_rpc_url(chain, network_override=network_override)
         if not rpc_url:
             self._metrics.failed_requests += 1
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
@@ -384,6 +535,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.RpcBatchResponse(responses=[])
 
+        msg = self._chain_not_configured_error(chain)
+        if msg is not None:
+            self._metrics.failed_requests += num_requests
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(msg)
+            return gateway_pb2.RpcBatchResponse(responses=[])
+
         # Validate batch size
         try:
             validate_batch_size(list(request.requests))
@@ -393,10 +551,20 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.RpcBatchResponse(responses=[])
 
-        # Validate all RPC methods in batch (chain-aware: Solana vs EVM)
+        # Resolve effective network for the batch (reject mixed per-request overrides)
+        batch_networks = {r.network.strip().lower() for r in request.requests if r.network}
+        if len(batch_networks) > 1:
+            self._metrics.failed_requests += num_requests
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("All requests in a batch must use the same network override")
+            return gateway_pb2.RpcBatchResponse(responses=[])
+        network_override = next(iter(batch_networks), None)
+        effective_network = network_override or self.settings.network
+
+        # Validate all RPC methods in batch (chain-aware: Solana vs EVM, network-aware: Anvil)
         for rpc_request in request.requests:
             try:
-                validate_rpc_method(rpc_request.method, chain=chain)
+                validate_rpc_method(rpc_request.method, chain=chain, network=effective_network)
             except ValidationError as e:
                 self._metrics.failed_requests += num_requests
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -412,8 +580,8 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_details(f"Rate limited, retry after {wait_time:.2f}s")
             return gateway_pb2.RpcBatchResponse(responses=[])
 
-        # Get RPC URL
-        rpc_url = self._get_rpc_url(chain)
+        # Get RPC URL using the resolved network override
+        rpc_url = self._get_rpc_url(chain, network_override=network_override)
         if not rpc_url:
             self._metrics.failed_requests += num_requests
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
@@ -518,6 +686,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.AllowanceResponse(success=False, error=str(e))
 
+        msg = self._chain_not_configured_error(chain)
+        if msg is not None:
+            self._metrics.failed_requests += 1
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(msg)
+            return gateway_pb2.AllowanceResponse(success=False, error=msg)
+
         # Solana SPL tokens don't use ERC-20 allowances — return max (always approved)
         if is_solana_chain(chain):
             self._metrics.successful_requests += 1
@@ -617,6 +792,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.BalanceQueryResponse(success=False, error=str(e))
 
+        msg = self._chain_not_configured_error(chain)
+        if msg is not None:
+            self._metrics.failed_requests += 1
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(msg)
+            return gateway_pb2.BalanceQueryResponse(success=False, error=msg)
+
         # Solana doesn't support ERC-20 eth_call queries — use MarketService.GetBalance()
         if is_solana_chain(chain):
             self._metrics.successful_requests += 1
@@ -714,6 +896,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.PositionLiquidityResponse(success=False, error=str(e))
+
+        msg = self._chain_not_configured_error(chain)
+        if msg is not None:
+            self._metrics.failed_requests += 1
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(msg)
+            return gateway_pb2.PositionLiquidityResponse(success=False, error=msg)
 
         # Solana LP positions don't use Uniswap V3 position manager
         if is_solana_chain(chain):
@@ -836,6 +1025,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.PositionTokensOwedResponse(success=False, error=str(e))
+
+        msg = self._chain_not_configured_error(chain)
+        if msg is not None:
+            self._metrics.failed_requests += 1
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(msg)
+            return gateway_pb2.PositionTokensOwedResponse(success=False, error=msg)
 
         # Solana LP positions don't use Uniswap V3 position manager
         if is_solana_chain(chain):

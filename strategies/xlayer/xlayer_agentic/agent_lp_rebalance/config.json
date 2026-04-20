@@ -1,0 +1,18 @@
+{
+    "chain": "xlayer",
+    "wallet_address": "0x062678Adef2Ffc999296f86D4ed40Ce24359976d",
+    "pool": "WOKB/USDT/3000",
+    "amount_token0": "0.05",
+    "amount_token1": "5.0",
+    "range_width_pct": "0.10",
+    "rebalance_threshold_pct": "0.05",
+    "interval_seconds": 1800,
+    "max_tool_rounds": 12,
+    "strategy_id": "agent-xlayer-lp-rebalance",
+    "anvil_funding": {
+        "OKB": 100,
+        "WOKB": 10,
+        "USDT": 10000,
+        "USDC": 10000
+    }
+}

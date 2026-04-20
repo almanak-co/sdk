@@ -1,0 +1,31 @@
+{
+    "chain": "bsc",
+    "token_funding": [
+        {
+            "symbol": "WBNB",
+            "address": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+            "chain": "bsc",
+            "amount": "0.1",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDT",
+            "address": "0x55d398326f99059ff775485246999027b3197955",
+            "chain": "bsc",
+            "amount": "50",
+            "amount_type": "usd"
+        }
+    ],
+    "trade_size_usd": 5,
+    "rsi_period": 14,
+    "rsi_oversold": 30,
+    "rsi_overbought": 70,
+    "max_slippage_bps": 100,
+    "base_token": "WBNB",
+    "quote_token": "USDT",
+    "anvil_funding": {
+        "BNB": 100,
+        "WBNB": 5,
+        "USDT": 50000
+    }
+}

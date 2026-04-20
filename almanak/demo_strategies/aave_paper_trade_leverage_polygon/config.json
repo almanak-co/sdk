@@ -1,0 +1,30 @@
+{
+    "chain": "polygon",
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0x7ceb23fd6bc0add59e62ac25578270cff1b9f619",
+            "chain": "polygon",
+            "amount": "0.05",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+            "chain": "polygon",
+            "amount": "1000",
+            "amount_type": "usd"
+        }
+    ],
+    "collateral_token": "USDC",
+    "collateral_amount": "500",
+    "borrow_token": "WETH",
+    "swap_to_token": "WMATIC",
+    "ltv_target": "0.3",
+    "swap_protocol": "uniswap_v3",
+    "anvil_funding": {
+        "MATIC": 1000,
+        "USDC": 5000,
+        "WETH": 1
+    }
+}

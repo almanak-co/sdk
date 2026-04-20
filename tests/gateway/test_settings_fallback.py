@@ -63,3 +63,113 @@ class TestSettingsFallback:
         with patch.dict(os.environ, env, clear=False):
             settings = GatewaySettings()
             assert settings.private_key == "0xKEY"
+
+    # --- Third-party API key fallbacks (bare name -> Pydantic field) ---
+
+    def test_alchemy_api_key_bare_fallback(self):
+        """ALCHEMY_API_KEY populates alchemy_api_key when prefixed var is unset."""
+        env = {"ALCHEMY_API_KEY": "alchemy-test-key", "ALMANAK_GATEWAY_ALCHEMY_API_KEY": ""}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.alchemy_api_key == "alchemy-test-key"
+
+    def test_coingecko_api_key_bare_fallback(self):
+        """COINGECKO_API_KEY populates coingecko_api_key when prefixed var is unset."""
+        env = {"COINGECKO_API_KEY": "cg-test-key", "ALMANAK_GATEWAY_COINGECKO_API_KEY": ""}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.coingecko_api_key == "cg-test-key"
+
+    def test_prefixed_alchemy_key_takes_precedence(self):
+        """ALMANAK_GATEWAY_ALCHEMY_API_KEY takes priority over bare ALCHEMY_API_KEY."""
+        env = {
+            "ALMANAK_GATEWAY_ALCHEMY_API_KEY": "prefixed-key",
+            "ALCHEMY_API_KEY": "bare-key",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.alchemy_api_key == "prefixed-key"
+
+    def test_enso_api_key_bare_fallback(self):
+        """ENSO_API_KEY populates enso_api_key when prefixed var is unset."""
+        env = {"ENSO_API_KEY": "enso-test-key", "ALMANAK_GATEWAY_ENSO_API_KEY": ""}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.enso_api_key == "enso-test-key"
+
+    def test_prefixed_enso_key_takes_precedence(self):
+        """ALMANAK_GATEWAY_ENSO_API_KEY takes priority over bare ENSO_API_KEY."""
+        env = {
+            "ALMANAK_GATEWAY_ENSO_API_KEY": "prefixed-enso-key",
+            "ENSO_API_KEY": "bare-enso-key",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.enso_api_key == "prefixed-enso-key"
+
+    def test_portfolio_api_key_fallback(self):
+        """ALMANAK_PORTFOLIO_API_KEY populates portfolio_api_key when gateway var is unset."""
+        env = {"ALMANAK_PORTFOLIO_API_KEY": "portfolio-test-key", "ALMANAK_GATEWAY_PORTFOLIO_API_KEY": ""}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.portfolio_api_key == "portfolio-test-key"
+
+    def test_zerion_api_key_fallback(self):
+        """ZERION_API_KEY also populates portfolio_api_key for local experiments."""
+        env = {"ZERION_API_KEY": "zerion-test-key", "ALMANAK_GATEWAY_PORTFOLIO_API_KEY": "", "ALMANAK_PORTFOLIO_API_KEY": ""}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.portfolio_api_key == "zerion-test-key"
+
+    def test_api_keys_empty_when_neither_set(self):
+        """Third-party API key fields remain empty when no env vars are set."""
+        env = {
+            "ALMANAK_GATEWAY_ALCHEMY_API_KEY": "",
+            "ALCHEMY_API_KEY": "",
+            "ALMANAK_GATEWAY_COINGECKO_API_KEY": "",
+            "COINGECKO_API_KEY": "",
+            "ALMANAK_GATEWAY_ENSO_API_KEY": "",
+            "ENSO_API_KEY": "",
+            "ALMANAK_GATEWAY_PORTFOLIO_API_KEY": "",
+            "ALMANAK_PORTFOLIO_API_KEY": "",
+            "ZERION_API_KEY": "",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert not settings.alchemy_api_key
+            assert not settings.coingecko_api_key
+            assert not settings.enso_api_key
+            assert not settings.portfolio_api_key
+
+
+class TestAuthTokenInitKwargPrecedence:
+    """VIB-3032: explicit auth_token kwarg must win over ALMANAK_GATEWAY_AUTH_TOKEN env.
+
+    On test networks (anvil/sepolia) the managed-gateway path in
+    ``almanak/framework/cli/run.py`` passes ``auth_token=None`` so the server
+    does not attach AuthInterceptor while the client runs with
+    ``allow_insecure=True``. If pydantic ever re-picked the env value as a
+    fallback, every gRPC call would fail UNAUTHENTICATED.
+    """
+
+    def test_explicit_none_overrides_env_auth_token(self):
+        """Passing auth_token=None as kwarg must win over ALMANAK_GATEWAY_AUTH_TOKEN."""
+        env = {"ALMANAK_GATEWAY_AUTH_TOKEN": "from-env-should-lose"}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings(auth_token=None, allow_insecure=True)
+            assert settings.auth_token is None
+            assert settings.allow_insecure is True
+
+    def test_explicit_token_overrides_env_auth_token(self):
+        """Passing a session token kwarg (mainnet path) overrides env token."""
+        env = {"ALMANAK_GATEWAY_AUTH_TOKEN": "from-env"}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings(auth_token="session-token-xyz")
+            assert settings.auth_token == "session-token-xyz"
+
+    def test_env_still_used_when_no_kwarg_passed(self):
+        """Regression sanity: without kwarg, env token is still honoured (non-test paths)."""
+        env = {"ALMANAK_GATEWAY_AUTH_TOKEN": "env-token"}
+        with patch.dict(os.environ, env, clear=False):
+            settings = GatewaySettings()
+            assert settings.auth_token == "env-token"

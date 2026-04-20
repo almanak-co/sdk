@@ -8,17 +8,18 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 |---------|---------|-------------|
 | Health | 3 | Standard gRPC health checks and chain registration |
 | MarketService | 4 | Price data, balances, batch balances, and technical indicators |
-| StateService | 3 | Strategy state persistence with optimistic locking |
+| StateService | 8 | Strategy state persistence and portfolio snapshots/metrics |
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
 | RpcService | 6 | JSON-RPC proxy to blockchains with typed queries |
-| IntegrationService | 9 | Third-party data (Binance, CoinGecko, TheGraph) |
-| DashboardService | 10 | Operator dashboard data and actions |
+| IntegrationService | 12 | Third-party data (Binance, CoinGecko, TheGraph, GeckoTerminal, Zerion) |
+| DashboardService | 11 | Operator dashboard data, actions, and transaction ledger |
 | FundingRateService | 2 | Perpetual funding rates and spreads |
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
 | PolymarketService | 18 | Polymarket CLOB API proxy (market data, orders, positions) |
 | EnsoService | 4 | Enso Finance routing and bundling |
 | TokenService | 4 | Token resolution and on-chain metadata |
+| LifecycleService | 6 | Agent state management, heartbeat, and commands |
 
 ## Health
 
@@ -61,6 +62,7 @@ message RegisterChainsResponse {
   repeated string initialized_chains = 2;  // Chains successfully initialized
   string wallet_address = 3;               // Wallet address derived from gateway private key
   string error = 4;
+  map<string, string> chain_wallets = 5;   // Per-chain wallet addresses resolved from wallet registry
 }
 ```
 
@@ -77,9 +79,8 @@ rpc GetPrice(PriceRequest) returns (PriceResponse)
 **Request:**
 ```protobuf
 message PriceRequest {
-  string chain = 1;      // e.g., "arbitrum", "ethereum"
-  string token = 2;      // Token symbol or address
-  string quote = 3;      // Quote currency (default: "USD")
+  string token = 1;      // Token symbol or address
+  string quote = 2;      // Quote currency (default: "USD")
 }
 ```
 
@@ -113,18 +114,23 @@ rpc GetBalance(BalanceRequest) returns (BalanceResponse)
 **Request:**
 ```protobuf
 message BalanceRequest {
-  string chain = 1;
-  string wallet_address = 2;
-  string token_address = 3;  // Optional, empty for native token
+  string token = 1;            // Token symbol or address
+  string chain = 2;
+  string wallet_address = 3;
 }
 ```
 
 **Response:**
 ```protobuf
 message BalanceResponse {
-  string balance = 1;      // Balance as string (precision preserved)
-  int32 decimals = 2;
-  string symbol = 3;
+  string balance = 1;          // Human-readable units as string
+  string balance_usd = 2;
+  string address = 3;
+  int32 decimals = 4;
+  string raw_balance = 5;      // Wei/raw units as string
+  int64 timestamp = 6;
+  bool stale = 7;
+  string error = 8;
 }
 ```
 
@@ -173,16 +179,20 @@ rpc LoadState(LoadStateRequest) returns (StateData)
 ```protobuf
 message LoadStateRequest {
   string strategy_id = 1;
-  string key = 2;          // Optional key within state
 }
 ```
 
 **Response:**
 ```protobuf
 message StateData {
-  bytes data = 1;          // Serialized state data
+  string strategy_id = 1;
   int64 version = 2;
-  int64 timestamp = 3;
+  bytes data = 3;              // JSON-serialized state
+  int32 schema_version = 4;
+  string checksum = 5;         // SHA-256 hex
+  int64 created_at = 6;
+  int64 updated_at = 7;
+  string loaded_from = 8;      // "hot", "warm"
 }
 ```
 
@@ -198,8 +208,19 @@ rpc SaveState(SaveStateRequest) returns (SaveStateResponse)
 ```protobuf
 message SaveStateRequest {
   string strategy_id = 1;
-  bytes data = 2;          // Max 1MB
-  string key = 3;          // Optional key
+  int64 expected_version = 2;  // For optimistic locking (0 = new state)
+  bytes data = 3;              // JSON-serialized state
+  int32 schema_version = 4;
+}
+```
+
+**Response:**
+```protobuf
+message SaveStateResponse {
+  bool success = 1;
+  int64 new_version = 2;
+  string error = 3;
+  string checksum = 4;
 }
 ```
 
@@ -211,51 +232,83 @@ Delete strategy state.
 rpc DeleteState(DeleteStateRequest) returns (DeleteStateResponse)
 ```
 
+### SavePortfolioSnapshot
+
+Save a portfolio snapshot for tracking valuation over time.
+
+```protobuf
+rpc SavePortfolioSnapshot(SaveSnapshotRequest) returns (SaveSnapshotResponse)
+```
+
+### GetLatestSnapshot
+
+Get the most recent portfolio snapshot.
+
+```protobuf
+rpc GetLatestSnapshot(GetLatestSnapshotRequest) returns (SnapshotData)
+```
+
+### GetSnapshotsSince
+
+Get all portfolio snapshots since a given timestamp.
+
+```protobuf
+rpc GetSnapshotsSince(GetSnapshotsSinceRequest) returns (SnapshotList)
+```
+
+### SavePortfolioMetrics
+
+Save computed portfolio metrics (PnL, Sharpe, drawdown, etc.).
+
+```protobuf
+rpc SavePortfolioMetrics(SaveMetricsRequest) returns (SaveMetricsResponse)
+```
+
+### GetPortfolioMetrics
+
+Retrieve stored portfolio metrics.
+
+```protobuf
+rpc GetPortfolioMetrics(GetMetricsRequest) returns (PortfolioMetricsData)
+```
+
 ## ExecutionService
 
 ### CompileIntent
 
-Compile a strategy intent into executable transactions.
+Compile a strategy intent into an action bundle.
 
 ```protobuf
-rpc CompileIntent(IntentRequest) returns (IntentResponse)
+rpc CompileIntent(CompileIntentRequest) returns (CompilationResult)
 ```
 
 **Request:**
 ```protobuf
-message IntentRequest {
-  string chain = 1;
-  string wallet_address = 2;
-  string intent_json = 3;   // Serialized intent
-}
-```
-
-### Execute
-
-Execute a compiled intent.
-
-```protobuf
-rpc Execute(ExecuteRequest) returns (ExecutionResult)
-```
-
-**Request:**
-```protobuf
-message ExecuteRequest {
-  string chain = 1;
-  string wallet_address = 2;
-  string transaction_json = 3;
-  bool simulate = 4;        // Dry run without execution
+message CompileIntentRequest {
+  string intent_type = 1;          // Case-insensitive with aliases: "swap", "lp_open", etc.
+  bytes intent_data = 2;           // JSON-serialized intent
+  string chain = 3;
+  string wallet_address = 4;
+  map<string, string> price_map = 5;  // Token symbol -> USD price string (empty = use placeholder prices)
 }
 ```
 
 **Response:**
 ```protobuf
-message ExecutionResult {
+message CompilationResult {
   bool success = 1;
-  string tx_hash = 2;
+  bytes action_bundle = 2;     // JSON-serialized ActionBundle
   string error = 3;
-  string receipt_json = 4;
+  string error_code = 4;       // Structured error code
 }
+```
+
+### Execute
+
+Execute an action bundle (sign, submit, confirm).
+
+```protobuf
+rpc Execute(ExecuteRequest) returns (ExecutionResult)
 ```
 
 ### GetTransactionStatus
@@ -263,7 +316,7 @@ message ExecutionResult {
 Get the status of a submitted transaction.
 
 ```protobuf
-rpc GetTransactionStatus(TxStatusRequest) returns (TxStatusResponse)
+rpc GetTransactionStatus(TxStatusRequest) returns (TxStatus)
 ```
 
 ## ObserveService
@@ -273,17 +326,7 @@ rpc GetTransactionStatus(TxStatusRequest) returns (TxStatusResponse)
 Send log entries to the platform.
 
 ```protobuf
-rpc Log(LogRequest) returns (LogResponse)
-```
-
-**Request:**
-```protobuf
-message LogRequest {
-  string level = 1;        // debug, info, warning, error
-  string message = 2;
-  string strategy_id = 3;
-  map<string, string> metadata = 4;
-}
+rpc Log(LogEntry) returns (Empty)
 ```
 
 ### Alert
@@ -342,14 +385,6 @@ message RecordTimelineEventResponse {
 }
 ```
 
-### RecordTimelineEvent
-
-Record a timeline event for strategy execution history.
-
-```protobuf
-rpc RecordTimelineEvent(RecordTimelineEventRequest) returns (RecordTimelineEventResponse)
-```
-
 ## RpcService
 
 ### Call
@@ -384,7 +419,7 @@ message RpcResponse {
 
 EVM chains:
 
-- ethereum, arbitrum, base, optimism, polygon, avalanche, bsc, bnb, sonic, plasma, linea, blast, mantle, berachain
+- ethereum, arbitrum, base, optimism, polygon, avalanche, bsc, bnb, sonic, plasma, linea, blast, mantle, berachain, monad, xlayer, zerog
 
 Non-EVM chains:
 
@@ -614,6 +649,30 @@ Get price chart data for a date range.
 rpc CoinGeckoGetMarketChartRange(CoinGeckoMarketChartRangeRequest) returns (CoinGeckoMarketChartRangeResponse)
 ```
 
+### GeckoTerminalGetOHLCV
+
+Get DEX OHLCV data from GeckoTerminal for on-chain pool pricing.
+
+```protobuf
+rpc GeckoTerminalGetOHLCV(GeckoTerminalOHLCVRequest) returns (GeckoTerminalOHLCVResponse)
+```
+
+### GetWalletPortfolio
+
+Get aggregated wallet portfolio valuation via Zerion.
+
+```protobuf
+rpc GetWalletPortfolio(WalletPortfolioRequest) returns (WalletPortfolioResponse)
+```
+
+### GetWalletPositions
+
+Get detailed wallet positions (DeFi protocol positions) via Zerion.
+
+```protobuf
+rpc GetWalletPositions(WalletPortfolioRequest) returns (WalletPortfolioResponse)
+```
+
 ## DashboardService
 
 Provides data and actions for the operator dashboard.
@@ -725,6 +784,14 @@ Permanently remove a strategy instance from the registry.
 
 ```protobuf
 rpc PurgeStrategyInstance(PurgeInstanceRequest) returns (PurgeInstanceResponse)
+```
+
+### GetTransactionLedger
+
+Retrieve the transaction ledger for a strategy instance.
+
+```protobuf
+rpc GetTransactionLedger(GetTransactionLedgerRequest) returns (GetTransactionLedgerResponse)
 ```
 
 ## FundingRateService
@@ -943,6 +1010,58 @@ Resolve multiple tokens in a single call.
 
 ```protobuf
 rpc BatchResolveTokens(BatchResolveTokensRequest) returns (BatchResolveTokensResponse)
+```
+
+## LifecycleService
+
+Agent state management and command dispatch for V2 deployments.
+
+### WriteState
+
+Write the current agent state (INITIALIZING, RUNNING, PAUSED, ERROR, STOPPING, TERMINATED).
+
+```protobuf
+rpc WriteState(WriteAgentStateRequest) returns (WriteAgentStateResponse)
+```
+
+### ReadState
+
+Read the current agent state.
+
+```protobuf
+rpc ReadState(ReadAgentStateRequest) returns (ReadAgentStateResponse)
+```
+
+### Heartbeat
+
+Send a heartbeat to update the last activity timestamp and increment the iteration count.
+
+```protobuf
+rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse)
+```
+
+### ReadCommand
+
+Read the most recent unprocessed command for an agent (PAUSE, RESUME, STOP).
+
+```protobuf
+rpc ReadCommand(ReadAgentCommandRequest) returns (ReadAgentCommandResponse)
+```
+
+### AckCommand
+
+Acknowledge (mark processed) a command.
+
+```protobuf
+rpc AckCommand(AckAgentCommandRequest) returns (AckAgentCommandResponse)
+```
+
+### WriteCommand
+
+Write a command to an agent.
+
+```protobuf
+rpc WriteCommand(WriteAgentCommandRequest) returns (WriteAgentCommandResponse)
 ```
 
 ## Error Codes

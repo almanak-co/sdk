@@ -1,15 +1,36 @@
 {
-    "strategy_id": "demo_mantle_swap",
-    "strategy_name": "demo_mantle_swap",
-    "description": "Basic swap demo on Mantle - USDT0 to WMNT via Agni Finance",
-    "trade_size_usd": 5.0,
-    "from_token": "USDT0",
-    "to_token": "WMNT",
-    "max_slippage_bps": 300,
     "chain": "mantle",
+    "token_funding": [
+        {
+            "symbol": "USDC",
+            "address": "0x09bc4e0d864854c6afb6eb9a9cdf58ac190d0df9",
+            "chain": "mantle",
+            "amount": "50",
+            "amount_type": "usd"
+        },
+        {
+            "symbol": "WETH",
+            "address": "0xdeaddeaddeaddeaddeaddeaddeaddeaddead1111",
+            "chain": "mantle",
+            "amount": "0.05",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "WMNT",
+            "address": "0x78c1b0c915c4faa5fffa6cabf0219da63d7f4cb8",
+            "chain": "mantle",
+            "amount": "100",
+            "amount_type": "token"
+        }
+    ],
+    "trade_size_usd": 5.0,
+    "from_token": "USDC",
+    "to_token": "WETH",
+    "max_slippage_bps": 300,
     "anvil_funding": {
         "MNT": 1000,
         "WMNT": 10,
-        "USDT0": 100
+        "USDC": 10000,
+        "WETH": 1
     }
 }

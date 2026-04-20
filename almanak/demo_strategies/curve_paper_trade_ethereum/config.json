@@ -1,0 +1,28 @@
+{
+    "chain": "ethereum",
+    "token_funding": [
+        {
+            "symbol": "USDC",
+            "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "chain": "ethereum",
+            "amount": "500",
+            "amount_type": "usd"
+        },
+        {
+            "symbol": "DAI",
+            "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+            "chain": "ethereum",
+            "amount": "100",
+            "amount_type": "usd"
+        }
+    ],
+    "pool": "3pool",
+    "deposit_token": "USDC",
+    "deposit_amount": "100",
+    "hold_ticks": 3,
+    "anvil_funding": {
+        "ETH": 10,
+        "USDC": 10000,
+        "DAI": 10000
+    }
+}

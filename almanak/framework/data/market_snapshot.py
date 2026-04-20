@@ -48,6 +48,9 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol, runtime_chec
 
 import pandas as pd
 
+from almanak.framework.data.tokens import get_token_resolver
+from almanak.framework.data.tokens.exceptions import TokenResolutionError
+
 from .interfaces import (
     AllDataSourcesFailed,
     BalanceProvider,
@@ -69,6 +72,29 @@ StablecoinMode = Literal["market", "pegged", "hybrid"]
 
 # Default stablecoins that are commonly used in DeFi
 DEFAULT_STABLECOINS: frozenset[str] = frozenset({"USDC", "USDT", "DAI"})
+
+
+# =============================================================================
+# Per-protocol token variant registry (VIB-3138)
+# =============================================================================
+#
+# Some protocols only accept a specific token variant. Polymarket settles in
+# USDC.e on Polygon, NOT native USDC -- a strategy calling
+# ``market.balance("USDC")`` without protocol context returns native USDC and
+# the CLOB later rejects the order with "insufficient balance". This registry
+# lets callers disambiguate: ``market.balance("USDC", protocol="polymarket")``
+# returns the USDC.e balance on Polygon.
+#
+# Shape: ``{chain: {protocol: {generic_symbol: preferred_variant_symbol}}}``
+# Extend this when a protocol has a non-default settlement-token variant.
+# Keep the keys lowercase; inputs are normalized before lookup.
+PROTOCOL_TOKEN_VARIANTS: dict[str, dict[str, dict[str, str]]] = {
+    "polygon": {
+        "polymarket": {
+            "USDC": "USDC.e",
+        },
+    },
+}
 
 
 @dataclass
@@ -274,6 +300,7 @@ class FreshnessConfig:
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
+    from almanak.framework.strategies.intent_strategy import RSIData
 
     from .defi.gas import GasOracle, GasPrice
     from .defi.pools import PoolReserves, UniswapV3PoolReader
@@ -712,7 +739,7 @@ class MarketSnapshot:
         # Internal caches to avoid redundant async calls within same snapshot
         self._price_cache: dict[str, Decimal] = {}
         self._balance_cache: dict[str, Decimal] = {}
-        self._rsi_cache: dict[str, float] = {}
+        self._rsi_cache: dict[str, Any] = {}  # float (legacy) or RSIData
         self._sma_cache: dict[str, float] = {}
         self._ema_cache: dict[str, float] = {}
         self._bollinger_cache: dict[str, BollingerBandsResult] = {}
@@ -726,6 +753,10 @@ class MarketSnapshot:
         self._macd_calculator: MACDCalculator | None = None
         self._stochastic_calculator: StochasticCalculator | None = None
         self._atr_calculator: ATRCalculator | None = None
+
+        # Fork RPC URL for paper trading on-chain reads (VIB-1956)
+        self._fork_rpc_url: str | None = None
+        self._fork_block: int | None = None
 
         # Gas price cache with timestamp for TTL (12 seconds = 1 block)
         self._gas_cache: dict[str, tuple[GasPrice, datetime]] = {}
@@ -759,6 +790,36 @@ class MarketSnapshot:
     def timestamp(self) -> datetime:
         """Get the snapshot creation timestamp."""
         return self._timestamp
+
+    @property
+    def fork_rpc_url(self) -> str | None:
+        """Get the Anvil fork RPC URL for on-chain reads (paper trading only).
+
+        Returns the fork's JSON-RPC endpoint when running in paper trading mode,
+        allowing strategies to perform protocol-level reads (e.g., Aave
+        getReserveData, pool state queries) directly against the fork.
+
+        Returns None when not in paper trading mode.
+
+        VIB-1956: Previously, strategies couldn't access on-chain data during
+        paper trading because no gateway client was available.
+
+        Example:
+            def decide(self, market: MarketSnapshot) -> Intent:
+                if market.fork_rpc_url:
+                    from web3 import Web3
+                    w3 = Web3(Web3.HTTPProvider(market.fork_rpc_url))
+                    # Read Aave pool data, DEX reserves, etc.
+        """
+        return self._fork_rpc_url
+
+    @property
+    def fork_block(self) -> int | None:
+        """Get the current fork block number (paper trading only).
+
+        Returns None when not in paper trading mode.
+        """
+        return self._fork_block
 
     def wallet_activity(
         self,
@@ -794,6 +855,9 @@ class MarketSnapshot:
         """Run an async coroutine synchronously.
 
         Handles event loop creation/reuse for async-to-sync bridge.
+        When called from within a running event loop (e.g., paper trading subprocess),
+        runs the coroutine in a separate thread to avoid deadlocking aiohttp with
+        nested run_until_complete (nest_asyncio + aiohttp is unreliable).
 
         Args:
             coro: Coroutine to run
@@ -802,27 +866,31 @@ class MarketSnapshot:
             Result from the coroutine
         """
         try:
-            # Check if there's an existing event loop
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
+            has_running_loop = True
         except RuntimeError:
-            # No running loop, create new one
-            loop = None
+            has_running_loop = False
 
-        if loop is not None:
-            # We're inside an async context - need to create a nested loop
-            # This handles the case where MarketSnapshot is used inside async code
-            import nest_asyncio
+        if has_running_loop:
+            # We're inside an async context (e.g., paper trading subprocess).
+            # Use a thread with its own event loop to avoid nest_asyncio + aiohttp
+            # deadlocks. The OHLCV provider will create a fresh aiohttp session
+            # on the new loop automatically via lazy _get_session().
+            import concurrent.futures
 
+            _ASYNC_TIMEOUT = 60
+
+            async def _with_timeout():
+                return await asyncio.wait_for(coro, timeout=_ASYNC_TIMEOUT)
+
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(asyncio.run, _with_timeout())
             try:
-                nest_asyncio.apply()
-                return asyncio.get_event_loop().run_until_complete(coro)
-            except ImportError:
-                # nest_asyncio not available, try using asyncio.run in new thread
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, coro)
-                    return future.result()
+                return future.result(timeout=_ASYNC_TIMEOUT + 5)  # grace for loop overhead
+            except concurrent.futures.TimeoutError as e:
+                raise TimeoutError(f"Async operation timed out after {_ASYNC_TIMEOUT}s") from e
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
         else:
             # No running loop - simple case
             return asyncio.run(coro)
@@ -936,13 +1004,20 @@ class MarketSnapshot:
         except Exception as e:
             raise PriceUnavailableError(token, f"Unexpected error: {e}") from e
 
-    def balance(self, token: str) -> Decimal:
+    def balance(self, token: str, protocol: str | None = None) -> Decimal:
         """Get the wallet balance for a token.
 
         Queries the balance from the configured BalanceProvider.
 
         Args:
             token: Token symbol (e.g., "WETH", "USDC") or "ETH" for native
+            protocol: Optional protocol name for variant disambiguation (VIB-3138).
+                When set, resolves generic symbols through ``PROTOCOL_TOKEN_VARIANTS``
+                to the protocol's preferred variant -- e.g.,
+                ``balance("USDC", protocol="polymarket")`` on Polygon returns the
+                USDC.e balance specifically. When unset, returns the balance for
+                the symbol as given (which may or may not match what the protocol
+                actually settles in).
 
         Returns:
             Balance as a Decimal in human-readable units (not wei)
@@ -954,28 +1029,93 @@ class MarketSnapshot:
         Example:
             usdc_balance = snapshot.balance("USDC")
             # Returns: Decimal("1000.50")
+
+            polymarket_usdc = snapshot.balance("USDC", protocol="polymarket")
+            # On Polygon: returns USDC.e balance (what Polymarket actually settles in)
         """
+        # VIB-3138: If a protocol was specified, translate the symbol to the
+        # variant that protocol settles in (e.g., USDC -> USDC.e on polymarket).
+        resolved_token = self._resolve_protocol_variant(token, protocol)
+
         # Return cached value if available
-        if token in self._balance_cache:
-            return self._balance_cache[token]
+        if resolved_token in self._balance_cache:
+            return self._balance_cache[resolved_token]
 
         if self._balance_provider is None:
             raise ValueError("No balance provider configured for MarketSnapshot")
 
         try:
-            result: BalanceResult = self._run_async(self._balance_provider.get_balance(token))
-            self._balance_cache[token] = result.balance
-            return result.balance
+            result: BalanceResult = self._run_async(self._balance_provider.get_balance(resolved_token))
         except DataSourceError as e:
-            raise BalanceUnavailableError(token, str(e)) from e
+            raise BalanceUnavailableError(resolved_token, str(e)) from e
         except Exception as e:
-            raise BalanceUnavailableError(token, f"Unexpected error: {e}") from e
+            raise BalanceUnavailableError(resolved_token, f"Unexpected error: {e}") from e
 
-    def rsi(self, token: str, period: int = 14, timeframe: str = "4h") -> float:
+        balance = result.balance
+
+        # Guard against silent-zero for unrecognized address-based tokens.
+        # If the gateway returns 0 for an address that isn't in the registry,
+        # log a warning but return 0 -- a strategy that holds zero of an exotic
+        # token should keep running, not crash.  The warning gives visibility.
+        if balance == Decimal(0) and resolved_token.startswith("0x") and len(resolved_token) == 42:
+            try:
+                get_token_resolver().resolve(resolved_token, self._chain, skip_gateway=True, log_errors=False)
+            except TokenResolutionError:
+                logger.warning(
+                    "balance_zero_unregistered_token: token %s on %s returned 0 and is not in the "
+                    "SDK registry. If you expect a non-zero balance, add the token to "
+                    "almanak/framework/data/tokens/defaults.py or use the token symbol.",
+                    resolved_token,
+                    self._chain,
+                )
+
+        self._balance_cache[resolved_token] = balance
+        return balance
+
+    def _resolve_protocol_variant(self, token: str, protocol: str | None) -> str:
+        """Translate a generic symbol to the protocol's preferred variant.
+
+        VIB-3138: Some protocols only accept a specific token variant (e.g.,
+        Polymarket on Polygon settles in USDC.e, not native USDC). When a
+        caller passes ``protocol=``, look up the variant in
+        ``PROTOCOL_TOKEN_VARIANTS`` and return the resolved symbol. When there
+        is no mapping, return the original symbol unchanged.
+
+        Lookups are case-insensitive on chain, protocol, and token symbol;
+        the registry stores canonical uppercase symbols.
+        """
+        if protocol is None:
+            return token
+        chain_key = (self._chain or "").lower()
+        protocol_key = protocol.lower()
+        chain_map = PROTOCOL_TOKEN_VARIANTS.get(chain_key)
+        if chain_map is None:
+            return token
+        protocol_map = chain_map.get(protocol_key)
+        if protocol_map is None:
+            return token
+        # Registry keys are canonical uppercase; normalize the caller's symbol
+        # for lookup so "usdc" and "USDC" both resolve. Preserve the original
+        # symbol when no mapping exists (passthrough contract).
+        resolved = protocol_map.get(token.upper())
+        if resolved is None:
+            return token
+        if resolved != token:
+            logger.debug(
+                "Protocol variant: %s on %s/%s -> %s",
+                token,
+                chain_key,
+                protocol_key,
+                resolved,
+            )
+        return resolved
+
+    def rsi(self, token: str, period: int = 14, timeframe: str = "4h") -> "RSIData":
         """Get the RSI (Relative Strength Index) for a token.
 
         Calculates RSI using the configured RSI calculator with
-        historical price data.
+        historical price data. Returns RSIData for compatibility with
+        strategies that use .value attribute.
 
         Args:
             token: Token symbol (e.g., "WETH", "ETH")
@@ -985,7 +1125,7 @@ class MarketSnapshot:
                 Note: 1m/5m/15m may return 30-min candles (CoinGecko limitation)
 
         Returns:
-            RSI value from 0 to 100 as a float
+            RSIData object with .value (Decimal, 0-100), .period, .signal, .is_oversold, .is_overbought
 
         Raises:
             RSIUnavailableError: If RSI cannot be calculated
@@ -1006,19 +1146,25 @@ class MarketSnapshot:
                 # Short-term oversold, long-term not overbought
                 return SwapIntent(...)
         """
+        from almanak.framework.strategies.intent_strategy import RSIData
+
         cache_key = f"{token}:{period}:{timeframe}"
 
         # Return cached value if available
         if cache_key in self._rsi_cache:
-            return self._rsi_cache[cache_key]
+            cached = self._rsi_cache[cache_key]
+            if isinstance(cached, RSIData):
+                return cached
+            return RSIData(value=Decimal(str(cached)), period=period)
 
         if self._rsi_calculator is None:
             raise ValueError("No RSI calculator configured for MarketSnapshot")
 
         try:
             rsi_value = self._run_async(self._rsi_calculator.calculate_rsi(token, period, timeframe))
-            self._rsi_cache[cache_key] = rsi_value
-            return rsi_value
+            rsi_data = RSIData(value=Decimal(str(rsi_value)), period=period)
+            self._rsi_cache[cache_key] = rsi_data
+            return rsi_data
         except InsufficientDataError as e:
             raise RSIUnavailableError(
                 token, f"Insufficient historical data: need {e.required}, have {e.available}"
@@ -1598,6 +1744,123 @@ class MarketSnapshot:
             raise GasUnavailableError(target_chain, str(e)) from e
         except Exception as e:
             raise GasUnavailableError(target_chain, f"Unexpected error: {e}") from e
+
+    def estimate_swap_gas_cost_usd(self, chain: str | None = None) -> Decimal:
+        """Estimate the USD cost of a typical DEX swap on the given chain.
+
+        Uses live gas price from ``gas_price()`` (already cached per block) and
+        scales the 21,000-gas baseline cost to the typical swap gas estimate
+        from the framework's chain-aware gas config
+        (``compiler_constants.get_gas_estimate(chain, "swap_simple")``).
+
+        This is a best-effort estimate meant for gas-worthiness gating in
+        strategy ``decide()`` methods. It is intentionally simple and does not
+        attempt per-route simulation — actual gas for a specific swap is
+        determined at compile/simulation time. For L2 chains the cost already
+        includes L1 data-posting component via ``GasPrice.estimated_cost_usd``.
+
+        Args:
+            chain: Chain identifier (e.g., "ethereum", "arbitrum"). Defaults to
+                the snapshot's primary chain.
+
+        Returns:
+            Estimated USD cost of a single typical swap as a ``Decimal``.
+            Returns ``Decimal("0")`` if the gas oracle is not configured or the
+            underlying ``estimated_cost_usd`` is zero (e.g., no price oracle
+            wired into the gas oracle).
+
+        Raises:
+            GasUnavailableError: If the gas oracle is configured but fails to
+                return a gas price for the target chain.
+
+        Example:
+            >>> snapshot.estimate_swap_gas_cost_usd("arbitrum")
+            Decimal('0.15')
+            >>> snapshot.estimate_swap_gas_cost_usd("ethereum")
+            Decimal('12.4000')
+        """
+        # Lazy import to avoid framework->intents circular dependency on cold import.
+        from almanak.framework.data.defi.gas import STANDARD_GAS_UNITS as _ERC20_TRANSFER_GAS
+        from almanak.framework.intents.compiler_constants import get_gas_estimate
+
+        target_chain = (chain or self._chain).lower()
+
+        # If the gas oracle isn't configured, signal "unknown" with 0. Callers
+        # that need a hard guarantee should use ``gas_price()`` directly.
+        if self._gas_oracle is None:
+            return Decimal("0")
+
+        gp = self.gas_price(target_chain)
+
+        # estimated_cost_usd is computed for STANDARD_GAS_UNITS (21000 -
+        # ERC-20 transfer baseline). Scale to the typical swap gas from the
+        # chain-aware config. We use "swap_simple" as the canonical
+        # single-hop swap estimate; multi-hop would be a strict upper bound.
+        baseline_gas = _ERC20_TRANSFER_GAS
+        swap_gas = get_gas_estimate(target_chain, "swap_simple")
+
+        if baseline_gas <= 0 or swap_gas <= 0 or gp.estimated_cost_usd <= 0:
+            return Decimal("0")
+
+        scale = Decimal(swap_gas) / Decimal(baseline_gas)
+        return (gp.estimated_cost_usd * scale).quantize(Decimal("0.0001"))
+
+    def is_trade_worthwhile(
+        self,
+        amount_usd: Decimal,
+        chain: str | None = None,
+        max_gas_ratio: Decimal = Decimal("0.05"),
+    ) -> bool:
+        """Check whether a trade of ``amount_usd`` is worth paying gas for.
+
+        A trade is considered worthwhile only if estimated swap gas cost is
+        below ``max_gas_ratio`` of the trade value. This gate is meant to be
+        invoked by strategy authors inside ``decide()`` BEFORE returning a
+        swap intent — it is deliberately NOT enforced in the compiler so the
+        decision remains visible to the strategy author.
+
+        Note: This method only covers the dynamic gas-ratio check. Strategies
+        that also want an absolute floor (``min_trade_value_usd``) should
+        evaluate that directly in ``decide()`` — keeping both checks on the
+        author side makes the short-circuit and ``Intent.hold()`` reason
+        explicit.
+
+        Args:
+            amount_usd: Intended trade size in USD.
+            chain: Chain identifier. Defaults to the snapshot's primary chain.
+            max_gas_ratio: Maximum tolerated ``gas_cost_usd / amount_usd``
+                ratio (default 0.05 = 5%).
+
+        Returns:
+            True if ``amount_usd > 0`` and estimated gas cost is below
+            ``max_gas_ratio`` of the trade. When a gas estimate cannot be
+            obtained — oracle missing, returns 0, or raises
+            ``GasUnavailableError`` (e.g., transient RPC failure) — returns
+            True (fail-open). Callers that need a fail-closed gate should
+            use ``estimate_swap_gas_cost_usd()`` directly and enforce locally.
+
+        Example:
+            >>> if not market.is_trade_worthwhile(Decimal("50"), "arbitrum"):
+            ...     return Intent.hold(reason="gas cost too high")
+        """
+        if amount_usd <= 0:
+            return False
+        if max_gas_ratio <= 0:
+            return False
+
+        # Fail-open on any estimation failure (missing oracle, RPC flake,
+        # zero result). Strategy authors who need a fail-closed gate should
+        # call ``estimate_swap_gas_cost_usd()`` directly and handle the
+        # ``GasUnavailableError`` themselves.
+        try:
+            gas_cost_usd = self.estimate_swap_gas_cost_usd(chain)
+        except GasUnavailableError:
+            return True
+
+        if gas_cost_usd <= 0:
+            return True
+
+        return (gas_cost_usd / amount_usd) < max_gas_ratio
 
     # =========================================================================
     # On-chain Pool Price Methods (Quant Data Layer)
@@ -2429,7 +2692,7 @@ class MarketSnapshot:
             overall_status=overall_status,
         )
 
-    def balance_usd(self, token: str) -> Decimal:
+    def balance_usd(self, token: str, protocol: str | None = None) -> Decimal:
         """Get the wallet balance value in USD terms.
 
         Calculates the USD value by multiplying the token balance
@@ -2437,6 +2700,10 @@ class MarketSnapshot:
 
         Args:
             token: Token symbol (e.g., "WETH", "USDC")
+            protocol: Optional protocol name for variant disambiguation (VIB-3138).
+                Forwarded to :meth:`balance` so that, e.g.,
+                ``balance_usd("USDC", protocol="polymarket")`` on Polygon is
+                computed from the USDC.e balance (what Polymarket settles in).
 
         Returns:
             Balance value in USD as a Decimal
@@ -2449,7 +2716,9 @@ class MarketSnapshot:
             eth_value = snapshot.balance_usd("WETH")
             # If balance is 2 WETH at $2500, returns: Decimal("5000.00")
         """
-        token_balance = self.balance(token)
+        token_balance = self.balance(token, protocol=protocol)
+        # Price lookups follow the generic symbol -- USDC.e and USDC share
+        # the same USD peg, so pricing on the resolved variant is unnecessary.
         token_price = self.price(token)
         return token_balance * token_price
 
@@ -3864,11 +4133,14 @@ class MarketSnapshot:
         """Get health factor for a lending position.
 
         Reads on-chain position data and computes health factor for
-        Morpho Blue or Aave V3 positions.
+        Aave V3, Morpho Blue, or Compound V3 positions.
 
         Args:
-            protocol: "morpho_blue" or "aave_v3"
-            market_id: Protocol-specific market identifier
+            protocol: "aave_v3", "morpho_blue", or "compound_v3"
+            market_id: Protocol-specific market identifier. For Aave V3
+                this is informational (one pool per chain). For Morpho Blue
+                this is the bytes32 market id. For Compound V3 this is the
+                Comet market key (e.g. "usdc", "weth").
             rpc_url: RPC endpoint (uses default if not provided)
             collateral_price_usd: Optional override for collateral price
             debt_price_usd: Optional override for debt token price

@@ -47,6 +47,7 @@ import logging
 import multiprocessing
 import os
 import signal
+import socket
 import sys
 import time
 from dataclasses import dataclass, field
@@ -57,6 +58,17 @@ from typing import Any
 
 from almanak.core.redaction import install_redaction
 from almanak.framework.backtesting.paper.config import PaperTraderConfig
+
+_DEFAULT_ANVIL_PORT = 8546
+
+
+def _find_free_port() -> int:
+    """Find a free TCP port by binding to port 0 and reading the OS-assigned port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 from almanak.framework.backtesting.paper.models import (
     PaperTrade,
     PaperTradeError,
@@ -280,7 +292,7 @@ class TradeHistoryWriter:
         }
         try:
             with open(self.path, "a") as f:
-                f.write(json.dumps(record) + "\n")
+                f.write(json.dumps(record, default=str) + "\n")
             self._trade_count += 1
             logger.debug(f"Wrote trade {self._trade_count} to {self.path}")
         except OSError as e:
@@ -306,7 +318,7 @@ class TradeHistoryWriter:
         }
         try:
             with open(self.path, "a") as f:
-                f.write(json.dumps(record) + "\n")
+                f.write(json.dumps(record, default=str) + "\n")
             self._error_count += 1
             logger.debug(f"Wrote error {self._error_count} to {self.path}")
         except OSError as e:
@@ -403,6 +415,11 @@ class PaperTraderState:
         is_resumed: Whether this session was resumed from saved state
         resume_count: Number of times this session has been resumed
         last_resume_time: When the session was last resumed (if resumed)
+        ticks_with_fork: Ticks where fork was healthy (VIB-1957)
+        ticks_with_indicators: Ticks where indicators computed successfully (VIB-1957)
+        ticks_with_action: Ticks where strategy returned a non-HOLD actionable intent (VIB-1957)
+        last_successful_decision_at: Timestamp of last non-HOLD decision (VIB-1957)
+        last_trade_at: Timestamp of last successful trade execution (VIB-1957)
     """
 
     strategy_id: str
@@ -413,13 +430,19 @@ class PaperTraderState:
     errors: list[PaperTradeError]
     current_balances: dict[str, Decimal]
     initial_balances: dict[str, Decimal]
-    equity_curve: list[tuple[datetime, Decimal]]
+    equity_curve: list[tuple[datetime, Decimal, Decimal | None]]  # (timestamp, value_usd, eth_price_usd)
     config: dict[str, Any]
     pid: int
-    status: str = "running"  # running, stopped, error, resumed
+    status: str = "running"  # running, stopped, stopped_clean, error, completed, resumed
     is_resumed: bool = False
     resume_count: int = 0
     last_resume_time: datetime | None = None
+    # Health telemetry (VIB-1957)
+    ticks_with_fork: int = 0
+    ticks_with_indicators: int = 0
+    ticks_with_action: int = 0
+    last_successful_decision_at: datetime | None = None
+    last_trade_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize state to dictionary.
@@ -436,16 +459,31 @@ class PaperTraderState:
             "errors": [e.to_dict() for e in self.errors],
             "current_balances": {k: str(v) for k, v in self.current_balances.items()},
             "initial_balances": {k: str(v) for k, v in self.initial_balances.items()},
-            "equity_curve": [{"timestamp": ts.isoformat(), "value": str(val)} for ts, val in self.equity_curve],
+            "equity_curve": [
+                {
+                    "timestamp": ts.isoformat(),
+                    "value": str(val),
+                    **({"eth_price_usd": str(ep)} if ep is not None else {}),
+                }
+                for ts, val, ep in self.equity_curve
+            ],
             "config": self.config,
             "pid": self.pid,
             "status": self.status,
             "is_resumed": self.is_resumed,
             "resume_count": self.resume_count,
+            # Health telemetry (VIB-1957)
+            "ticks_with_fork": self.ticks_with_fork,
+            "ticks_with_indicators": self.ticks_with_indicators,
+            "ticks_with_action": self.ticks_with_action,
         }
-        # Optional field
+        # Optional fields
         if self.last_resume_time is not None:
             result["last_resume_time"] = self.last_resume_time.isoformat()
+        if self.last_successful_decision_at is not None:
+            result["last_successful_decision_at"] = self.last_successful_decision_at.isoformat()
+        if self.last_trade_at is not None:
+            result["last_trade_at"] = self.last_trade_at.isoformat()
         return result
 
     @classmethod
@@ -458,10 +496,18 @@ class PaperTraderState:
         Returns:
             PaperTraderState instance
         """
-        # Parse optional last_resume_time
+        # Parse optional datetime fields
         last_resume_time = None
         if data.get("last_resume_time"):
             last_resume_time = datetime.fromisoformat(data["last_resume_time"])
+
+        last_successful_decision_at = None
+        if data.get("last_successful_decision_at"):
+            last_successful_decision_at = datetime.fromisoformat(data["last_successful_decision_at"])
+
+        last_trade_at = None
+        if data.get("last_trade_at"):
+            last_trade_at = datetime.fromisoformat(data["last_trade_at"])
 
         return cls(
             strategy_id=data["strategy_id"],
@@ -473,7 +519,12 @@ class PaperTraderState:
             current_balances={k: Decimal(v) for k, v in data.get("current_balances", {}).items()},
             initial_balances={k: Decimal(v) for k, v in data.get("initial_balances", {}).items()},
             equity_curve=[
-                (datetime.fromisoformat(p["timestamp"]), Decimal(p["value"])) for p in data.get("equity_curve", [])
+                (
+                    datetime.fromisoformat(p["timestamp"]),
+                    Decimal(p["value"]),
+                    Decimal(p["eth_price_usd"]) if "eth_price_usd" in p else None,
+                )
+                for p in data.get("equity_curve", [])
             ],
             config=data.get("config", {}),
             pid=data["pid"],
@@ -481,6 +532,12 @@ class PaperTraderState:
             is_resumed=data.get("is_resumed", False),
             resume_count=data.get("resume_count", 0),
             last_resume_time=last_resume_time,
+            # Health telemetry (VIB-1957) — defaults for backward compat with old state files
+            ticks_with_fork=data.get("ticks_with_fork", 0),
+            ticks_with_indicators=data.get("ticks_with_indicators", 0),
+            ticks_with_action=data.get("ticks_with_action", 0),
+            last_successful_decision_at=last_successful_decision_at,
+            last_trade_at=last_trade_at,
         )
 
     def save(self, path: Path) -> None:
@@ -502,7 +559,7 @@ class PaperTraderState:
         temp_path = path.with_suffix(".tmp")
         try:
             with open(temp_path, "w") as f:
-                json.dump(self.to_dict(), f, indent=2)
+                json.dump(self.to_dict(), f, indent=2, default=str)
             temp_path.replace(path)
             logger.debug(f"Saved state to {path}")
         except OSError as e:
@@ -732,7 +789,17 @@ class BackgroundPaperTrader:
             existing_pid = pid_file.get_pid()
             raise RuntimeError(f"Paper Trader for {self.config.strategy_id} already running (PID: {existing_pid})")
 
+        # Fix SSL cert resolution for spawned subprocess (macOS multiprocessing)
+        import os
+
+        if "SSL_CERT_FILE" not in os.environ:
+            for cert_path in ["/private/etc/ssl/cert.pem", "/etc/ssl/cert.pem"]:
+                if os.path.exists(cert_path):
+                    os.environ["SSL_CERT_FILE"] = cert_path
+                    break
+
         # Create the background process
+        # Pass raw rpc_url separately since to_dict() masks it for display
         self._process = multiprocessing.Process(
             target=_run_background_paper_trader,
             args=(
@@ -742,7 +809,7 @@ class BackgroundPaperTrader:
                 str(self.state_dir),
                 self.save_interval_seconds,
             ),
-            kwargs={"strategy_config": strategy_config},
+            kwargs={"strategy_config": strategy_config, "raw_rpc_url": self.config.rpc_url},
             daemon=False,  # Not daemon so it can continue after parent exits
         )
 
@@ -950,7 +1017,7 @@ class BackgroundPaperTrader:
                 str(self.state_dir),
                 self.save_interval_seconds,
             ),
-            kwargs={"resume": True, "strategy_config": strategy_config},
+            kwargs={"resume": True, "strategy_config": strategy_config, "raw_rpc_url": self.config.rpc_url},
             daemon=False,
         )
 
@@ -1022,6 +1089,7 @@ def _run_background_paper_trader(
     save_interval_seconds: int,
     resume: bool = False,
     strategy_config: dict[str, Any] | None = None,
+    raw_rpc_url: str | None = None,
 ) -> None:
     """Entry point for the background Paper Trader process.
 
@@ -1041,11 +1109,23 @@ def _run_background_paper_trader(
         save_interval_seconds: Interval between state saves
         resume: Whether to resume from saved state (default: False)
         strategy_config: Strategy configuration dict (from config.json).
+        raw_rpc_url: Unmasked RPC URL (to_dict masks it for display).
     """
     import asyncio
+    import os
+
+    # Fix SSL cert resolution in spawned subprocess (macOS multiprocessing issue)
+    if "SSL_CERT_FILE" not in os.environ:
+        for cert_path in ["/private/etc/ssl/cert.pem", "/etc/ssl/cert.pem"]:
+            if os.path.exists(cert_path):
+                os.environ["SSL_CERT_FILE"] = cert_path
+                break
 
     # Convert paths
     state_path = Path(state_dir)
+    # Restore unmasked RPC URL before deserializing (to_dict masks it for display)
+    if raw_rpc_url:
+        config_dict["rpc_url"] = raw_rpc_url
     config = PaperTraderConfig.from_dict(config_dict)
 
     # Set up logging to file
@@ -1179,11 +1259,20 @@ def _run_background_paper_trader(
         from almanak.framework.backtesting.paper.engine import PaperTrader
         from almanak.framework.backtesting.paper.portfolio_tracker import PaperPortfolioTracker
 
+        # Auto-assign a free port when using the default to avoid contention
+        # between concurrent paper trading sessions
+        anvil_port = config.anvil_port
+        if anvil_port == _DEFAULT_ANVIL_PORT:
+            anvil_port = _find_free_port()
+            bg_logger.info(
+                f"Auto-assigned Anvil port {anvil_port} (default {_DEFAULT_ANVIL_PORT} avoided for concurrency)"
+            )
+
         # Create components
         fork_manager = RollingForkManager(
             rpc_url=config.rpc_url,
             chain=config.chain,
-            anvil_port=config.anvil_port,
+            anvil_port=anvil_port,
         )
 
         portfolio_tracker = PaperPortfolioTracker(
@@ -1213,6 +1302,12 @@ def _run_background_paper_trader(
                 trader._tick_count = state.tick_count
                 trader._trades = list(state.trades)  # Copy to avoid mutations
                 trader._errors = list(state.errors)
+                # Restore health telemetry (VIB-1957)
+                trader._ticks_with_fork = state.ticks_with_fork
+                trader._ticks_with_indicators = state.ticks_with_indicators
+                trader._ticks_with_action = state.ticks_with_action
+                trader._last_successful_decision_at = state.last_successful_decision_at
+                trader._last_trade_at = state.last_trade_at
                 # Restore balances to portfolio tracker
                 for token, amount in state.current_balances.items():
                     portfolio_tracker.current_balances[token] = amount
@@ -1227,6 +1322,12 @@ def _run_background_paper_trader(
                 trader._tick_count = 0
                 trader._trades = []
                 trader._errors = []
+                # Initialize health telemetry (VIB-1957)
+                trader._ticks_with_fork = 0
+                trader._ticks_with_indicators = 0
+                trader._ticks_with_action = 0
+                trader._last_successful_decision_at = None
+                trader._last_trade_at = None
 
             last_save_time = time.time()
             # Track number of trades/errors for incremental saving
@@ -1273,6 +1374,15 @@ def _run_background_paper_trader(
                 state.trades = trader._trades
                 state.errors = trader._errors
                 state.current_balances = dict(portfolio_tracker.current_balances)
+                state.equity_curve = [
+                    (p.timestamp, p.value_usd, getattr(p, "eth_price_usd", None)) for p in trader._equity_curve
+                ]
+                # Health telemetry (VIB-1957)
+                state.ticks_with_fork = getattr(trader, "_ticks_with_fork", 0)
+                state.ticks_with_indicators = getattr(trader, "_ticks_with_indicators", 0)
+                state.ticks_with_action = getattr(trader, "_ticks_with_action", 0)
+                state.last_successful_decision_at = getattr(trader, "_last_successful_decision_at", None)
+                state.last_trade_at = getattr(trader, "_last_trade_at", None)
 
                 # Periodic save of full state
                 current_time = time.time()
@@ -1281,8 +1391,12 @@ def _run_background_paper_trader(
                     last_save_time = current_time
                     bg_logger.debug(f"Saved state: tick={state.tick_count}, trades={len(state.trades)}")
 
-                # Sleep until next tick
-                await asyncio.sleep(config.tick_interval_seconds)
+                # Sleep until next tick (interruptible by shutdown signal)
+                sleep_remaining: float = config.tick_interval_seconds
+                while sleep_remaining > 0 and not shutdown_requested:
+                    chunk = min(sleep_remaining, 2.0)
+                    await asyncio.sleep(chunk)
+                    sleep_remaining -= chunk
 
         except asyncio.CancelledError:
             bg_logger.info("Trading loop cancelled")
@@ -1290,20 +1404,110 @@ def _run_background_paper_trader(
             bg_logger.exception(f"Trading loop error: {e}")
             state.status = "error"
         finally:
-            # Final cleanup
+            # ── Teardown phase: close positions before cleanup ──
+            # Only meaningful on persistent forks where positions survive ticks.
+            # On rolling_reset forks, positions are destroyed each tick anyway.
+            teardown_ok = False
+            from almanak.framework.backtesting.paper.config import ForkLifecycle
+
+            fork_is_persistent = getattr(config, "fork_lifecycle", None) == ForkLifecycle.PERSISTENT
+            fork_running = trader.fork_manager.is_running if trader.fork_manager else False
+
+            if fork_is_persistent and fork_running and trader._orchestrator is not None:
+                bg_logger.info("Teardown phase: closing positions on persistent fork...")
+                try:
+                    from almanak.framework.teardown.models import TeardownMode
+
+                    teardown_intents = strategy.generate_teardown_intents(
+                        TeardownMode.SOFT, market=trader._last_market_snapshot
+                    )
+
+                    if teardown_intents:
+                        bg_logger.info(f"Teardown: {len(teardown_intents)} intent(s) to execute")
+                        snapshot = trader._last_market_snapshot
+                        if snapshot is None:
+                            bg_logger.warning("Teardown: no market snapshot available, skipping")
+                            teardown_ok = False
+                            raise ValueError("No market snapshot for teardown")
+                        teardown_failures = 0
+                        for i, intent in enumerate(teardown_intents):
+                            intent_type = trader._get_intent_type(intent)
+                            bg_logger.info(f"Teardown [{i + 1}/{len(teardown_intents)}]: {intent_type.value}")
+                            try:
+                                # _execute_intent already appends to trader._trades
+                                trade = await trader._execute_intent(intent, strategy, snapshot)
+                                if trade is not None:
+                                    # Write teardown trade to JSONL
+                                    try:
+                                        trade_history.write_trade(trade)
+                                    except OSError as write_err:
+                                        bg_logger.warning(f"Failed to write teardown trade to history: {write_err}")
+                                    bg_logger.info(f"Teardown [{i + 1}]: {intent_type.value} executed successfully")
+                                    # Notify strategy so it can update internal state
+                                    trader._notify_strategy_callback(strategy, intent, trade)
+                                else:
+                                    teardown_failures += 1
+                                    bg_logger.warning(f"Teardown [{i + 1}]: {intent_type.value} returned no trade")
+                            except Exception as te:
+                                teardown_failures += 1
+                                bg_logger.error(f"Teardown [{i + 1}]: {intent_type.value} failed: {te}")
+
+                        # Record final equity point after teardown
+                        await trader._record_equity_point()
+                        teardown_ok = teardown_failures == 0
+                        bg_logger.info(
+                            f"Teardown complete: {len(teardown_intents)} intent(s) processed, "
+                            f"{teardown_failures} failure(s)"
+                        )
+                    else:
+                        bg_logger.info("Teardown: no open positions to close")
+                        teardown_ok = True
+                except Exception as e:
+                    bg_logger.error(f"Teardown failed: {e}")
+            elif not fork_is_persistent:
+                bg_logger.debug("Skipping teardown: rolling_reset fork (positions don't persist)")
+                teardown_ok = True
+
+            # ── Resource cleanup ──
             trader._running = False
             await trader._cleanup()
 
-            # Save final state
-            if not shutdown_requested:
-                state.status = "completed"
-            else:
-                state.status = "stopped"
+            # Update state with any teardown trades
+            state.tick_count = trader._tick_count
+            state.trades = trader._trades
+            state.errors = trader._errors
+            state.current_balances = dict(portfolio_tracker.current_balances)
+            state.equity_curve = [
+                (p.timestamp, p.value_usd, getattr(p, "eth_price_usd", None)) for p in trader._equity_curve
+            ]
+            # Health telemetry (VIB-1957)
+            state.ticks_with_fork = getattr(trader, "_ticks_with_fork", 0)
+            state.ticks_with_indicators = getattr(trader, "_ticks_with_indicators", 0)
+            state.ticks_with_action = getattr(trader, "_ticks_with_action", 0)
+            state.last_successful_decision_at = getattr(trader, "_last_successful_decision_at", None)
+            state.last_trade_at = getattr(trader, "_last_trade_at", None)
+
+            # Save final state (preserve error status from exception handler)
+            if state.status != "error":
+                if not shutdown_requested:
+                    state.status = "completed"
+                elif teardown_ok:
+                    state.status = "stopped_clean"
+                else:
+                    state.status = "stopped"
             state.save(state_file)
+
+            if not fork_is_persistent:
+                teardown_status = "skipped"
+            elif teardown_ok:
+                teardown_status = "ok"
+            else:
+                teardown_status = "failed"
 
             bg_logger.info(
                 f"Trading session ended: {state.tick_count} ticks, "
-                f"{len(state.trades)} trades, resume_count={state.resume_count}"
+                f"{len(state.trades)} trades, teardown={teardown_status}, "
+                f"resume_count={state.resume_count}"
             )
 
     # Run the async loop

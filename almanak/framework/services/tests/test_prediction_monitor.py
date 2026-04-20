@@ -991,8 +991,10 @@ class TestGenerateSellIntent:
 
         assert sell_intent is not None
         assert isinstance(sell_intent, PredictionSellIntent)
-        # Pre-resolution exit uses market order (no min_price)
-        assert sell_intent.min_price is None
+        # Pre-resolution exit uses an explicit floor (0.01 = CLOB tick floor)
+        # so the adapter's mandatory-anchor check passes; the LIMIT+IOC path
+        # still fills at any available price (PM Exp 14 / VIB-3131).
+        assert sell_intent.min_price == Decimal("0.01")
         assert sell_intent.order_type == "market"
         assert sell_intent.time_in_force == "IOC"
 
@@ -1103,8 +1105,9 @@ class TestGenerateSellIntent:
 
         assert sell_intent is not None
         assert isinstance(sell_intent, PredictionSellIntent)
-        # Without exit conditions, uses market order
-        assert sell_intent.min_price is None
+        # Without exit conditions, falls back to the CLOB floor (0.01) so
+        # the adapter's mandatory-anchor check passes.
+        assert sell_intent.min_price == Decimal("0.01")
         assert sell_intent.order_type == "market"
 
 

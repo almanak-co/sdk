@@ -318,6 +318,7 @@ class ExecutionContext:
     chain: str = "arbitrum"
     wallet_address: str = ""
     correlation_id: str = ""
+    cycle_id: str = ""  # Forensic correlation ID for the decide->execute cycle
     session_id: str = ""
     simulation_enabled: bool = False
     intent_description: str = ""  # Human-readable description of the intent
@@ -345,8 +346,26 @@ class TransactionRiskConfig:
     All checks are enforced BEFORE transactions are submitted to prevent
     unauthorized or excessive operations.
 
+    Enforcement note: this config is read only by the local
+    ``ExecutionOrchestrator``. Gateway-hosted deployments enforce equivalent
+    caps server-side, so ``MultiChainOrchestrator`` (which wires
+    ``GatewayExecutionOrchestrator`` per chain) bypasses these fields.
+
     Attributes:
-        max_value_eth: Maximum ETH value per transaction (default 10 ETH)
+        max_value_usd: Maximum USD value per transaction. ``0`` (default)
+            disables the USD cap — the CLI opts in via
+            ``ALMANAK_MAX_VALUE_USD`` / ``MAX_VALUE_USD``. When non-zero,
+            the validator converts ``tx.value`` via ``native_token_price_usd``
+            and fails closed if the price is missing. Off by default because
+            not every orchestrator caller hydrates the native price
+            (``ExecutionService``, ``PaperTrader``), and a default-on cap
+            would fail-close every native-value tx on those paths.
+        max_value_eth: Maximum native-token value per transaction in 1e18 wei
+            units (0 = no limit, default). Despite the historical name, this
+            is enforced on the raw `tx.value` and therefore caps native units
+            (POL on Polygon, AVAX on Avalanche, etc.) — not USD-equivalent.
+            Kept for opt-in backwards-compatibility. New deployments should
+            use max_value_usd instead.
         max_value_per_token: Per-token maximum values in token units
         allowed_contracts: Whitelist of contract addresses (None = allow all)
         block_contract_deployment: Whether to block contract deployments
@@ -355,15 +374,19 @@ class TransactionRiskConfig:
         max_gas_cost_usd: Max gas cost in USD per tx (0 = no limit).
             Requires native_token_price_usd to be set for conversion.
         native_token_price_usd: Current native token price in USD, set by
-            the runner before execution. Required for max_gas_cost_usd check.
+            the runner before execution. Required for max_value_usd and
+            max_gas_cost_usd checks.
         max_slippage_bps: Maximum acceptable slippage in basis points for swap
             executions (0 = no limit). Checked post-execution against actual
             slippage extracted from swap receipts. Acts as a circuit breaker
             independent of protocol-level minOut parameters.
-        max_daily_volume_eth: Maximum daily volume in ETH (0 = no limit)
+        max_daily_volume_eth: Maximum daily volume in 1e18 wei units of the
+            chain's native token (0 = no limit). Same token-agnostic caveat
+            as max_value_eth.
     """
 
-    max_value_eth: Decimal = Decimal("10")  # 10 ETH per tx default
+    max_value_usd: Decimal = Decimal("0")  # opt-in USD cap (CLI sets via env)
+    max_value_eth: Decimal = Decimal("0")  # opt-in legacy wei cap
     max_value_per_token: dict[str, Decimal] = field(default_factory=dict)
     allowed_contracts: set[str] | None = None  # None = allow all
     block_contract_deployment: bool = True
@@ -380,12 +403,16 @@ class TransactionRiskConfig:
 
     @classmethod
     def default(cls) -> "TransactionRiskConfig":
-        """Create default risk configuration suitable for production."""
+        """Create default risk configuration suitable for production.
+
+        max_value_usd is OFF (0) — opt in at the call site. The CLI does this
+        via ALMANAK_MAX_VALUE_USD; gateway / paper-trading paths do not, so
+        defaulting it on would fail-close every native-value tx there.
+        """
         return cls(
-            max_value_eth=Decimal("10"),  # 10 ETH per transaction
             block_contract_deployment=True,
             max_gas_price_gwei=DEFAULT_GAS_PRICE_CAP_GWEI,
-            max_daily_volume_eth=Decimal("100"),  # 100 ETH daily limit
+            max_daily_volume_eth=Decimal("100"),  # 100 native units daily limit
         )
 
     @classmethod
@@ -393,14 +420,14 @@ class TransactionRiskConfig:
         """Create chain-specific risk configuration with recommended defaults.
 
         Uses CHAIN_GAS_PRICE_CAPS_GWEI and CHAIN_GAS_COST_CAPS_NATIVE for
-        the specified chain, falling back to generic defaults.
+        the specified chain, falling back to generic defaults. As with
+        ``default()``, ``max_value_usd`` is opt-in (off by default).
 
         Args:
             chain: Chain name (e.g., "arbitrum", "ethereum")
         """
         chain_lower = chain.lower()
         return cls(
-            max_value_eth=Decimal("10"),
             block_contract_deployment=True,
             max_gas_price_gwei=CHAIN_GAS_PRICE_CAPS_GWEI.get(chain_lower, DEFAULT_GAS_PRICE_CAP_GWEI),
             max_gas_cost_native=CHAIN_GAS_COST_CAPS_NATIVE.get(chain_lower, 0.0),
@@ -411,15 +438,17 @@ class TransactionRiskConfig:
     def permissive(cls) -> "TransactionRiskConfig":
         """Create permissive configuration for testing."""
         return cls(
-            max_value_eth=Decimal("1000"),  # 1000 ETH
+            max_value_usd=Decimal("0"),  # no USD cap
+            max_value_eth=Decimal("0"),  # no wei cap
             block_contract_deployment=False,
-            max_gas_price_gwei=0,  # No limit
-            max_daily_volume_eth=Decimal("0"),  # No daily limit
+            max_gas_price_gwei=0,
+            max_daily_volume_eth=Decimal("0"),
         )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
+            "max_value_usd": str(self.max_value_usd),
             "max_value_eth": str(self.max_value_eth),
             "max_value_per_token": {k: str(v) for k, v in self.max_value_per_token.items()},
             "allowed_contracts": list(self.allowed_contracts) if self.allowed_contracts else None,
@@ -809,7 +838,9 @@ class ExecutionOrchestrator:
         """Get or create Web3 instance."""
         if self._web3 is None:
             if self.rpc_url:
-                self._web3 = AsyncWeb3(AsyncHTTPProvider(self.rpc_url))
+                from almanak.gateway.utils.ssl_context import build_ssl_context
+
+                self._web3 = AsyncWeb3(AsyncHTTPProvider(self.rpc_url, request_kwargs={"ssl": build_ssl_context()}))
                 # Inject POA middleware for chains like Polygon, Avalanche, BSC
                 from almanak.gateway.utils.rpc_provider import is_poa_chain
 
@@ -1067,7 +1098,7 @@ class ExecutionOrchestrator:
             # Step 0: Refresh deferred transactions (LiFi, Enso) with fresh route data
             from .deferred_refresh import refresh_deferred_bundle
 
-            action_bundle = refresh_deferred_bundle(action_bundle, context.wallet_address)
+            action_bundle = refresh_deferred_bundle(action_bundle, context.wallet_address, rpc_url=self.rpc_url)
 
             # Step 1: Build unsigned transactions from ActionBundle
             # Gas prices are set as placeholders; _update_gas_prices() sets final values.
@@ -1075,8 +1106,15 @@ class ExecutionOrchestrator:
 
             if not unsigned_txs:
                 intent_type = (action_bundle.intent_type or "").upper()
-                # HOLD intents legitimately produce 0 transactions
-                if intent_type == "HOLD":
+                # HOLD intents legitimately produce 0 transactions.
+                # No-op bundles (e.g., withdraw_all on zero collateral) are also legitimate.
+                is_no_op = bool(action_bundle.metadata and action_bundle.metadata.get("no_op"))
+                if intent_type == "HOLD" or is_no_op:
+                    no_op_reason = (
+                        action_bundle.metadata.get("reason", "No-op bundle")
+                        if is_no_op
+                        else "No transactions to execute (HOLD intent)"
+                    )
                     result.success = True
                     result.phase = ExecutionPhase.COMPLETE
                     result.completed_at = datetime.now(UTC)
@@ -1084,7 +1122,7 @@ class ExecutionOrchestrator:
                     self._emit_event(
                         ExecutionEventType.EXECUTION_SUCCESS,
                         context,
-                        {"message": "No transactions to execute (HOLD intent)", "intent_type": intent_type},
+                        {"message": no_op_reason, "intent_type": intent_type},
                     )
                     return result
 
@@ -1703,6 +1741,20 @@ class ExecutionOrchestrator:
         violations: list[str] = []
         config = self.tx_risk_config
 
+        # Reject misconfiguration up front: a negative cap is never meaningful
+        # and silently disabling enforcement on bad config would be a
+        # foot-gun (CodeRabbit catch on PR #1568).
+        if config.max_value_usd < 0 or config.max_value_eth < 0:
+            return RiskGuardResult(
+                passed=False,
+                violations=[
+                    "TransactionRiskConfig misconfigured: max_value_usd "
+                    f"({config.max_value_usd}) and max_value_eth "
+                    f"({config.max_value_eth}) must each be >= 0 "
+                    "(use 0 to disable, positive to enforce)."
+                ],
+            )
+
         # Get today's date for daily volume tracking
         from datetime import date
 
@@ -1713,15 +1765,41 @@ class ExecutionOrchestrator:
             config._daily_volume_date = today
 
         total_value_wei = 0
+        check_value_usd = config.max_value_usd > 0
 
         for i, tx in enumerate(unsigned_txs):
-            # 1. Check maximum value per transaction
-            max_value_wei = int(config.max_value_eth * 10**18)
-            if tx.value > max_value_wei:
-                value_eth = Decimal(tx.value) / Decimal(10**18)
-                violations.append(
-                    f"Transaction {i}: value {value_eth:.4f} ETH exceeds limit {config.max_value_eth} ETH"
-                )
+            # 1a. USD-denominated per-tx cap (preferred, cross-chain).
+            #     Fail-closed if oracle price unavailable — same pattern as
+            #     max_gas_cost_usd guard below.
+            if check_value_usd and tx.value > 0:
+                if config.native_token_price_usd <= 0:
+                    violations.append(
+                        f"Transaction {i}: max_value_usd is set but "
+                        "native_token_price_usd is not available; cannot "
+                        "evaluate per-tx value cap (fail-closed)."
+                    )
+                else:
+                    value_native = Decimal(tx.value) / Decimal(10**18)
+                    value_usd = value_native * Decimal(str(config.native_token_price_usd))
+                    if value_usd > config.max_value_usd:
+                        violations.append(
+                            f"Transaction {i}: value ${value_usd:,.2f} exceeds "
+                            f"limit ${config.max_value_usd:,.2f} "
+                            f"(native={value_native:.6f} * price="
+                            f"${config.native_token_price_usd:,.4f})"
+                        )
+
+            # 1b. Legacy wei-denominated per-tx cap (opt-in).
+            #     Token-agnostic — caps native units (POL, AVAX, ETH...) the
+            #     same. Disabled by default (max_value_eth=0). Prefer max_value_usd.
+            if config.max_value_eth > 0:
+                max_value_wei = int(config.max_value_eth * 10**18)
+                if tx.value > max_value_wei:
+                    value_native = Decimal(tx.value) / Decimal(10**18)
+                    violations.append(
+                        f"Transaction {i}: value {value_native:.4f} native units "
+                        f"exceeds limit {config.max_value_eth} (max_value_eth)"
+                    )
 
             total_value_wei += tx.value
 
@@ -1877,7 +1955,7 @@ class ExecutionOrchestrator:
 
         # Protocols that store lending amounts as wei in metadata.
         # All others (morpho, morpho_blue, compound_v3) use human-readable.
-        _WEI_LENDING_PROTOCOLS = {"aave_v3", "spark"}
+        _WEI_LENDING_PROTOCOLS = {"aave_v3", "spark", "radiant_v2"}
 
         # Extract required tokens and amounts from metadata based on intent type
         # Each requirement: (symbol, address, amount_wei, decimals or None, is_native)
@@ -1928,7 +2006,13 @@ class ExecutionOrchestrator:
 
         try:
             if intent_type == "SWAP":
-                _add_requirement(metadata.get("from_token", {}), metadata.get("amount_in"))
+                # For multi-step bundles (e.g., Pendle pre-swap routing), the metadata
+                # from_token/amount_in reflect the intermediate token (e.g., sUSDe) which
+                # won't exist in the wallet until the pre-swap TX runs.  Check the
+                # original input token instead when present (VIB-2533).
+                swap_token = metadata.get("original_from_token") or metadata.get("from_token", {})
+                swap_amount = metadata.get("original_amount_in") or metadata.get("amount_in")
+                _add_requirement(swap_token, swap_amount)
 
             elif intent_type == "LP_OPEN":
                 token0 = metadata.get("token0") or metadata.get("token_x") or {}
@@ -2189,24 +2273,18 @@ class ExecutionOrchestrator:
         except ExecutionError:
             return unsigned_txs, gas_warnings
 
-        is_multi_tx_bundle = len(unsigned_txs) > 1
-
         updated: list[UnsignedTransaction] = []
         for idx, tx in enumerate(unsigned_txs):
             if not tx.to:
                 updated.append(tx)
                 continue
 
-            # For multi-TX bundles, only estimate gas for the first transaction.
-            # Subsequent TXs depend on state changes from prior TXs (e.g., approve must
-            # execute before addLiquidity), so eth_estimateGas against the current
-            # chain state will always revert. The compiler-provided gas limit is the
-            # correct estimate for dependent transactions (approve ~65k, action uses
-            # connector defaults). Attempting estimation wastes an RPC round-trip.
-            if is_multi_tx_bundle and idx > 0:
-                updated.append(tx)
-                continue
-
+            # For multi-TX bundles, non-first TXs may depend on state changes from
+            # prior TXs (e.g., approve must execute before addLiquidity). Gas estimation
+            # may revert for these — the exception handler below gracefully falls back
+            # to the compiler-provided gas limit. However, some non-first TXs (like
+            # bridge deposits after approvals) may be estimatable if the wallet already
+            # has sufficient allowance from a previous attempt.
             try:
                 tx_params: dict[str, Any] = {
                     "from": web3.to_checksum_address(context.wallet_address),
@@ -2381,8 +2459,11 @@ class ExecutionOrchestrator:
             return
 
         metadata = action_bundle.metadata or {}
-        from_token = metadata.get("from_token", {})
-        amount_in_str = metadata.get("amount_in")
+        # For multi-step bundles (e.g., Pendle pre-swap routing), use the
+        # original input token/amount instead of the intermediate token
+        # that won't exist until the pre-swap TX runs (VIB-2559).
+        from_token = metadata.get("original_from_token") or metadata.get("from_token", {})
+        amount_in_str = metadata.get("original_amount_in") or metadata.get("amount_in")
 
         if not from_token or not amount_in_str:
             return  # Can't check without metadata

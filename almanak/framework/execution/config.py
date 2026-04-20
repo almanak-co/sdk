@@ -57,6 +57,20 @@ from almanak.framework.execution.gas.constants import (
 )
 from almanak.framework.execution.interfaces import Chain
 
+
+# Imported here so callers can reference without touching chain_executor directly.
+# Populated after chain_executor module is available (lazy import to avoid circular deps).
+def _default_receipt_timeout(chain: str) -> int:
+    """Return the default receipt timeout in seconds for a given chain.
+
+    Slow chains (BSC, Avalanche) need longer timeouts on Anvil forks.
+    Users can still override per-strategy with TX_TIMEOUT_SECONDS.
+    """
+    from almanak.framework.execution.chain_executor import CHAIN_RECEIPT_TIMEOUTS, DEFAULT_RECEIPT_TIMEOUT
+
+    return CHAIN_RECEIPT_TIMEOUTS.get(chain.lower(), DEFAULT_RECEIPT_TIMEOUT)
+
+
 if TYPE_CHECKING:
     from almanak.framework.execution.signer.safe import SafeSigner
 
@@ -134,11 +148,13 @@ CHAIN_IDS: dict[str, int] = {
     "solana": 0,  # Non-EVM chain, no EVM chain ID
     "sonic": 146,
     "monad": 143,
+    "xlayer": 196,
+    "zerog": 16661,
 }
 
 # Supported protocols and which chains they are available on
 SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
-    "aave_v3": {"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "linea", "plasma", "blast"},
+    "aave_v3": {"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "linea", "plasma", "xlayer"},
     "uniswap_v3": {
         "ethereum",
         "arbitrum",
@@ -150,6 +166,8 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
         "linea",
         "blast",
         "monad",
+        "xlayer",
+        "zerog",  # JAINE DEX (Uniswap V3 fork on 0G Chain)
     },
     "agni_finance": {"mantle"},  # Agni Finance (Uniswap V3 fork, primary DEX on Mantle)
     "gmx_v2": {"arbitrum", "avalanche"},
@@ -173,6 +191,20 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
     "pancakeswap_v3": {"bsc", "ethereum", "arbitrum"},  # PancakeSwap V3 DEX
     "lido": {"ethereum", "arbitrum", "optimism", "polygon"},  # Lido liquid staking
     "ethena": {"ethereum"},  # Ethena synthetic dollar (USDe/sUSDe)
+    "radiant_v2": {"ethereum"},  # Radiant V2 (Aave V2 fork) — Arbitrum pool frozen post-hack
+    "sushiswap_v3": {
+        "ethereum",
+        "arbitrum",
+        "optimism",
+        "polygon",
+        "base",
+        "bsc",
+    },  # SushiSwap V3 DEX — avalanche excluded: zero usable liquidity (VIB-2069)
+    "benqi": {"avalanche"},  # BENQI (Compound V2 fork) on Avalanche
+    "joelend": {"avalanche"},  # Joe Lend / Banker Joe (Compound V2 fork) on Avalanche
+    "euler_v2": {"avalanche", "ethereum"},  # Euler V2 (ERC-4626 vaults + EVC)
+    "silo_v2": {"avalanche"},  # Silo V2 isolated lending on Avalanche
+    "gimo": {"zerog"},  # Gimo Finance liquid staking on 0G Chain
 }
 
 
@@ -278,7 +310,8 @@ class LocalRuntimeConfig:
         chain_id: Numeric chain ID derived from chain name
 
     Optional Fields:
-        max_gas_price_gwei: Maximum gas price in gwei (default 100)
+        max_gas_price_gwei: Maximum gas price in gwei (default: 100 when constructed directly;
+            from_env() uses chain-specific defaults, and Anvil mode always uses 9999)
         tx_timeout_seconds: Transaction confirmation timeout (default 120)
         simulation_enabled: Whether to simulate transactions before submission (default True)
         max_tx_value_eth: Maximum value per transaction in ETH (default 10.0)
@@ -404,6 +437,12 @@ class LocalRuntimeConfig:
         # comes from the Safe signer's EOA address instead.
         if not self.private_key and self.safe_signer is not None and self.safe_signer.mode == "zodiac":
             self.wallet_address = self.safe_signer.eoa_address
+            return
+
+        # Gateway wallets mode: wallet addresses come from the gateway's WalletRegistry
+        # at RegisterChains time, not from local env vars.
+        if not self.private_key and os.environ.get("ALMANAK_GATEWAY_WALLETS"):
+            self.wallet_address = ""  # Resolved later by register_chains()
             return
 
         if not self.private_key:
@@ -580,7 +619,7 @@ class LocalRuntimeConfig:
             {prefix}CHAIN: Blockchain network (e.g., "arbitrum") - optional if chain param provided
             {prefix}RPC_URL: RPC endpoint URL - optional if ALCHEMY_API_KEY is set
             ALCHEMY_API_KEY: Alchemy API key for dynamic URL building (recommended)
-            {prefix}MAX_GAS_PRICE_GWEI: Optional, max gas price (default 100)
+            {prefix}MAX_GAS_PRICE_GWEI: Optional, max gas price (default: chain-specific; Anvil: always 9999)
             {prefix}MAX_GAS_COST_NATIVE: Optional, max gas cost per tx in native token (default 0 = no limit)
             {prefix}MAX_GAS_COST_USD: Optional, max gas cost per tx in USD (default 0 = no limit)
             {prefix}MAX_SLIPPAGE_BPS: Optional, max acceptable swap slippage in basis points (default 0 = no limit)
@@ -716,17 +755,35 @@ class LocalRuntimeConfig:
                         reason=f"Could not build RPC URL: {e}. Set {prefix}RPC_URL, {prefix}{resolved_chain.upper()}_RPC_URL, ALCHEMY_API_KEY, or TENDERLY_API_KEY_{resolved_chain.upper()}.",
                     ) from None
 
-        # VIB-303 + VIB-304: Use chain-specific gas price cap as default (not 100 gwei hardcoded).
-        # In Anvil mode, gas costs no real money -- use ANVIL_GAS_PRICE_CAP_GWEI to prevent cap errors during dev.
-        # On mainnet, use the chain-specific cap (Polygon=500, Ethereum=300, Arbitrum=10, etc.).
+        # VIB-303 + VIB-304 + VIB-1719: Chain-aware gas price cap defaults.
+        # In Anvil mode, gas costs no real money -- always use ANVIL_GAS_PRICE_CAP_GWEI
+        # to prevent false-positive cap errors on high-gas chains like Polygon.
+        # If a user's .env has ALMANAK_MAX_GAS_PRICE_GWEI=100 (from .env.example),
+        # we override it in Anvil mode and warn, because 100 gwei breaks Polygon forks.
         if network.lower() == "anvil":
             default_gas_cap = ANVIL_GAS_PRICE_CAP_GWEI
+            user_gas_cap = get_optional_int("MAX_GAS_PRICE_GWEI", default_gas_cap)
+            if user_gas_cap < ANVIL_GAS_PRICE_CAP_GWEI:
+                logger.warning(
+                    "ALMANAK_MAX_GAS_PRICE_GWEI=%d is too low for Anvil mode "
+                    "(gas costs no real money). Overriding to %d gwei to prevent "
+                    "false-positive gas cap errors on high-gas chains (e.g. Polygon).",
+                    user_gas_cap,
+                    ANVIL_GAS_PRICE_CAP_GWEI,
+                )
+            # Always use Anvil cap in Anvil mode -- env var is ignored entirely
+            gas_cap_override = ANVIL_GAS_PRICE_CAP_GWEI
         else:
             default_gas_cap = CHAIN_GAS_PRICE_CAPS_GWEI.get(resolved_chain, DEFAULT_GAS_PRICE_CAP_GWEI)
+            gas_cap_override = None  # Let env var take effect normally
 
         # Get execution mode and create Safe signer if needed
         mode_str = get_optional("EXECUTION_MODE", "eoa") or "eoa"
         execution_mode = ExecutionMode.from_string(mode_str)
+
+        # When ALMANAK_GATEWAY_WALLETS is set, the gateway's WalletRegistry handles
+        # signer creation per chain. No local private key or SAFE_ADDRESS needed.
+        gateway_wallets_configured = bool(os.environ.get("ALMANAK_GATEWAY_WALLETS"))
 
         # Solana uses a separate key env var (base58 Ed25519 instead of hex secp256k1)
         if resolved_chain == "solana":
@@ -734,10 +791,13 @@ class LocalRuntimeConfig:
         elif execution_mode == ExecutionMode.SAFE_ZODIAC:
             # Zodiac mode: private key is held by remote signer service, not needed locally
             private_key = get_optional("PRIVATE_KEY", "") or ""
+        elif gateway_wallets_configured:
+            # Gateway wallets mode: private key is optional (gateway handles signing)
+            private_key = get_optional("PRIVATE_KEY", "") or ""
         else:
             private_key = get_required("PRIVATE_KEY")
         safe_signer = None
-        if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC):
+        if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC) and not gateway_wallets_configured:
             safe_signer = _create_safe_signer_from_env(
                 execution_mode=execution_mode,
                 private_key=private_key,
@@ -748,11 +808,13 @@ class LocalRuntimeConfig:
             chain=resolved_chain,
             rpc_url=rpc_url,
             private_key=private_key,
-            max_gas_price_gwei=get_optional_int("MAX_GAS_PRICE_GWEI", default_gas_cap),
+            max_gas_price_gwei=gas_cap_override
+            if gas_cap_override is not None
+            else get_optional_int("MAX_GAS_PRICE_GWEI", default_gas_cap),
             max_gas_cost_native=get_optional_float("MAX_GAS_COST_NATIVE", 0.0),
             max_gas_cost_usd=get_optional_float("MAX_GAS_COST_USD", 0.0),
             max_slippage_bps=get_optional_int("MAX_SLIPPAGE_BPS", 0),
-            tx_timeout_seconds=get_optional_int("TX_TIMEOUT_SECONDS", 120),
+            tx_timeout_seconds=get_optional_int("TX_TIMEOUT_SECONDS", _default_receipt_timeout(resolved_chain)),
             simulation_enabled=get_optional_bool("SIMULATION_ENABLED", True),
             max_tx_value_eth=get_optional_float("MAX_TX_VALUE_ETH", 10.0),
             base_retry_delay=get_optional_float("BASE_RETRY_DELAY", 1.0),
@@ -808,15 +870,16 @@ class LocalRuntimeConfig:
                 reason="private_key must be provided in data dictionary",
             )
 
+        chain_str = data.get("chain", "").lower()
         return cls(
-            chain=data.get("chain", ""),
+            chain=chain_str,
             rpc_url=data.get("rpc_url", ""),
             private_key=data["private_key"],
             max_gas_price_gwei=data.get("max_gas_price_gwei", 100),
             max_gas_cost_native=data.get("max_gas_cost_native", 0.0),
             max_gas_cost_usd=data.get("max_gas_cost_usd", 0.0),
             max_slippage_bps=data.get("max_slippage_bps", 0),
-            tx_timeout_seconds=data.get("tx_timeout_seconds", 120),
+            tx_timeout_seconds=data.get("tx_timeout_seconds", _default_receipt_timeout(chain_str)),
             simulation_enabled=data.get("simulation_enabled", True),
             max_tx_value_eth=data.get("max_tx_value_eth", 10.0),
             base_retry_delay=data.get("base_retry_delay", 1.0),
@@ -1171,6 +1234,17 @@ class MultiChainRuntimeConfig:
             self.wallet_address = self.safe_signer.eoa_address
             return
 
+        # Gateway wallets mode: wallet addresses come from the gateway's WalletRegistry
+        # at RegisterChains time, not from local env vars. Set a placeholder that will
+        # be overridden after register_chains() returns per-chain wallets.
+        if not self.private_key and os.environ.get("ALMANAK_GATEWAY_WALLETS"):
+            self.wallet_address = ""  # Resolved later by register_chains()
+            logger.info(
+                "Gateway wallets configured — wallet address will be resolved "
+                "from WalletRegistry at RegisterChains time"
+            )
+            return
+
         if not self.private_key:
             raise ConfigurationError(
                 field="private_key",
@@ -1210,6 +1284,12 @@ class MultiChainRuntimeConfig:
         Args:
             network: Network environment ("mainnet", "sepolia", "anvil"). Default: "mainnet"
         """
+        # Gateway wallets mode: the gateway handles all RPC access, no local URLs needed.
+        # Wallet addresses are resolved at RegisterChains time from the WalletRegistry.
+        if not self.private_key and os.environ.get("ALMANAK_GATEWAY_WALLETS"):
+            logger.info("Gateway wallets mode — skipping local RPC URL loading (gateway handles RPC)")
+            return
+
         from almanak.gateway.utils.rpc_provider import get_rpc_url
 
         load_dotenv()
@@ -1514,7 +1594,7 @@ class MultiChainRuntimeConfig:
                     field="zodiac_address",
                     reason="zodiac_address is required for safe_zodiac mode",
                 )
-            # Derive EOA from private key when available, fall back to explicit eoa_address
+            # Prefer explicit eoa_address; derive from private key only as fallback
             if not eoa_address and private_key:
                 try:
                     eoa_address = Account.from_key(private_key).address
@@ -1573,7 +1653,7 @@ class MultiChainRuntimeConfig:
             {prefix}ZODIAC_ADDRESS: Zodiac Roles module address (required for safe_zodiac)
             {prefix}SIGNER_SERVICE_URL: Remote signer URL (required for safe_zodiac)
             {prefix}SIGNER_SERVICE_JWT: JWT for signer service (required for safe_zodiac)
-            {prefix}MAX_GAS_PRICE_GWEI: Optional, max gas price (default 100)
+            {prefix}MAX_GAS_PRICE_GWEI: Optional, max gas price (default: 500 gwei global cap; Anvil: always 9999)
             {prefix}MAX_GAS_COST_NATIVE: Optional, max gas cost per tx in native token (default 0 = no limit)
             {prefix}MAX_GAS_COST_USD: Optional, max gas cost per tx in USD (default 0 = no limit)
             {prefix}MAX_SLIPPAGE_BPS: Optional, max acceptable swap slippage in basis points (default 0 = no limit)
@@ -1672,28 +1752,48 @@ class MultiChainRuntimeConfig:
         mode_str = get_optional("EXECUTION_MODE", "eoa") or "eoa"
         execution_mode = ExecutionMode.from_string(mode_str)
 
+        # When ALMANAK_GATEWAY_WALLETS is set, the gateway's WalletRegistry handles
+        # signer creation per chain. The framework does not need a local private key
+        # or SAFE_ADDRESS — those are resolved from the registry at RegisterChains time.
+        gateway_wallets_configured = bool(os.environ.get("ALMANAK_GATEWAY_WALLETS"))
+
         # Zodiac mode: private key is held by remote signer service, not needed locally
         if execution_mode == ExecutionMode.SAFE_ZODIAC:
+            private_key = get_optional("PRIVATE_KEY", "") or ""
+        elif gateway_wallets_configured:
+            # Gateway wallets mode: private key is optional (gateway handles signing)
             private_key = get_optional("PRIVATE_KEY", "") or ""
         else:
             private_key = get_required("PRIVATE_KEY")
 
-        # Create Safe signer if needed
+        # Create Safe signer if needed — skip when gateway wallets are configured
+        # (the gateway creates signers per chain from the WalletRegistry)
         safe_signer = None
-        if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC):
+        if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC) and not gateway_wallets_configured:
             safe_signer = _create_safe_signer_from_env(
                 execution_mode=execution_mode,
                 private_key=private_key,
                 prefix=prefix,
             )
 
-        # VIB-303 + VIB-304: Use chain-aware gas price cap as default.
-        # In Anvil mode, gas costs no real money -- use ANVIL_GAS_PRICE_CAP_GWEI to prevent cap errors during dev.
-        # For multi-chain mainnet, use DEFAULT_GAS_PRICE_CAP_GWEI (conservative but correct for all chains).
+        # VIB-303 + VIB-304 + VIB-1719: Chain-aware gas price cap defaults.
+        # In Anvil mode, gas costs no real money -- always use ANVIL_GAS_PRICE_CAP_GWEI
+        # to prevent false-positive cap errors on high-gas chains like Polygon.
         if network.lower() == "anvil":
             multi_default_gas_cap = ANVIL_GAS_PRICE_CAP_GWEI
+            user_gas_cap = get_optional_int("MAX_GAS_PRICE_GWEI", multi_default_gas_cap)
+            if user_gas_cap < ANVIL_GAS_PRICE_CAP_GWEI:
+                logger.warning(
+                    "ALMANAK_MAX_GAS_PRICE_GWEI=%d is too low for Anvil mode "
+                    "(gas costs no real money). Overriding to %d gwei to prevent "
+                    "false-positive gas cap errors on high-gas chains (e.g. Polygon).",
+                    user_gas_cap,
+                    ANVIL_GAS_PRICE_CAP_GWEI,
+                )
+            multi_gas_cap_override = ANVIL_GAS_PRICE_CAP_GWEI
         else:
             multi_default_gas_cap = DEFAULT_GAS_PRICE_CAP_GWEI
+            multi_gas_cap_override = None
 
         return cls(
             chains=chains,
@@ -1701,7 +1801,9 @@ class MultiChainRuntimeConfig:
             private_key=private_key,
             safe_signer=safe_signer,
             network=network,
-            max_gas_price_gwei=get_optional_int("MAX_GAS_PRICE_GWEI", multi_default_gas_cap),
+            max_gas_price_gwei=multi_gas_cap_override
+            if multi_gas_cap_override is not None
+            else get_optional_int("MAX_GAS_PRICE_GWEI", multi_default_gas_cap),
             max_gas_cost_native=get_optional_float("MAX_GAS_COST_NATIVE", 0.0),
             max_gas_cost_usd=get_optional_float("MAX_GAS_COST_USD", 0.0),
             max_slippage_bps=get_optional_int("MAX_SLIPPAGE_BPS", 0),
@@ -2008,9 +2110,13 @@ def _create_safe_signer_from_env(
     safe_address = get_required("SAFE_ADDRESS")
 
     if execution_mode == ExecutionMode.SAFE_ZODIAC:
-        # Derive EOA from private key when available, fall back to explicit EOA_ADDRESS
-        # (platform deployments use remote signer with no local key)
-        if private_key:
+        # Zodiac mode: prefer explicit EOA_ADDRESS (platform deployments use
+        # remote signer with no local key). Fall back to deriving from private
+        # key only when EOA_ADDRESS is not set.
+        explicit_eoa = get_optional("EOA_ADDRESS")
+        if explicit_eoa:
+            eoa_address = explicit_eoa
+        elif private_key:
             try:
                 account = Account.from_key(private_key)
                 eoa_address = account.address
@@ -2020,7 +2126,7 @@ def _create_safe_signer_from_env(
                     reason="Invalid private key format for safe_zodiac mode",
                 ) from None
         else:
-            eoa_address = get_required("EOA_ADDRESS")
+            raise MissingEnvironmentVariableError(f"{prefix}EOA_ADDRESS")
     else:
         # Direct mode: derive EOA from private key
         account = Account.from_key(private_key)

@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from almanak.gateway.validation import resolve_agent_id as _resolve_agent_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,6 +35,8 @@ class StrategyInstance:
     protocol: str
     wallet_address: str
     config_json: str
+    chains: str  # Comma-separated chain list (e.g., "arbitrum,base")
+    chain_wallets: str  # JSON-encoded per-chain wallet map (e.g., '{"arbitrum":"0x..."}')
     status: str  # RUNNING | INACTIVE | ERROR | PAUSED | STALE
     archived: bool  # Hidden from dashboard, data retained
     created_at: datetime
@@ -110,6 +114,15 @@ class InstanceRegistry:
                     version TEXT NOT NULL DEFAULT ''
                 )
             """)
+            # Migration: add chains and chain_wallets columns if missing
+            try:
+                conn.execute("ALTER TABLE strategy_instances ADD COLUMN chains TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+            try:
+                conn.execute("ALTER TABLE strategy_instances ADD COLUMN chain_wallets TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # column already exists
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_instances_status
                 ON strategy_instances(status)
@@ -130,7 +143,8 @@ class InstanceRegistry:
             cursor = conn.execute("""
                 SELECT strategy_id, strategy_name, template_name, chain, protocol,
                        wallet_address, config_json, status, archived,
-                       created_at, updated_at, last_heartbeat_at, version
+                       created_at, updated_at, last_heartbeat_at, version,
+                       chains, chain_wallets
                 FROM strategy_instances
             """)
 
@@ -143,6 +157,8 @@ class InstanceRegistry:
                     protocol=row["protocol"] or "",
                     wallet_address=row["wallet_address"] or "",
                     config_json=row["config_json"] or "",
+                    chains=row["chains"] or "",
+                    chain_wallets=row["chain_wallets"] or "",
                     status=row["status"],
                     archived=bool(row["archived"]),
                     created_at=datetime.fromisoformat(row["created_at"]),
@@ -169,8 +185,34 @@ class InstanceRegistry:
         if not self._initialized:
             self.initialize()
 
+        # In deployed mode, normalise the instance key to AGENT_ID
+        instance.strategy_id = _resolve_agent_id(instance.strategy_id)
+
         with self._lock:
             already_existed = instance.strategy_id in self._cache
+
+            # Auto-archive older instances of the same strategy_name to prevent
+            # duplicate cards after gateway restarts (new instance ID suffix).
+            if instance.strategy_name:
+                archived_count = 0
+                for sid, existing in list(self._cache.items()):
+                    if (
+                        sid != instance.strategy_id
+                        and existing.strategy_name == instance.strategy_name
+                        and not existing.archived
+                    ):
+                        existing.archived = True
+                        existing.status = "INACTIVE"
+                        existing.updated_at = instance.updated_at
+                        self._persist_instance(existing)
+                        archived_count += 1
+                if archived_count:
+                    logger.info(
+                        "Auto-archived %d older instance(s) of '%s' on re-register",
+                        archived_count,
+                        instance.strategy_name,
+                    )
+
             self._cache[instance.strategy_id] = instance
             self._persist_instance(instance)
 
@@ -188,8 +230,9 @@ class InstanceRegistry:
                 INSERT OR REPLACE INTO strategy_instances
                 (strategy_id, strategy_name, template_name, chain, protocol,
                  wallet_address, config_json, status, archived,
-                 created_at, updated_at, last_heartbeat_at, version)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 created_at, updated_at, last_heartbeat_at, version,
+                 chains, chain_wallets)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     instance.strategy_id,
@@ -205,6 +248,8 @@ class InstanceRegistry:
                     instance.updated_at.isoformat(),
                     instance.last_heartbeat_at.isoformat(),
                     instance.version,
+                    instance.chains,
+                    instance.chain_wallets,
                 ),
             )
             conn.commit()
@@ -222,6 +267,8 @@ class InstanceRegistry:
         """
         if not self._initialized:
             self.initialize()
+
+        strategy_id = _resolve_agent_id(strategy_id)
 
         with self._lock:
             instance = self._cache.get(strategy_id)
@@ -248,6 +295,8 @@ class InstanceRegistry:
         """
         if not self._initialized:
             self.initialize()
+
+        strategy_id = _resolve_agent_id(strategy_id)
 
         recovered = False
         with self._lock:
@@ -508,6 +557,8 @@ class InstanceRegistry:
         """
         if not self._initialized:
             self.initialize()
+
+        strategy_id = _resolve_agent_id(strategy_id)
 
         with self._lock:
             return self._cache.get(strategy_id)

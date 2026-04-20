@@ -465,8 +465,8 @@ class TestSellDirectionMinAmountDiscount:
 class TestPreSwapErrors:
     """Error handling for pre-swap routing edge cases."""
 
-    def test_missing_price_data_fails_gracefully(self, compiler_arbitrum):
-        """If price oracle can't price the SY token, compilation should fail cleanly."""
+    def test_missing_price_data_uses_fallback(self, compiler_arbitrum):
+        """If price oracle can't price the SY token, compilation uses 1:1 decimal fallback (VIB-2561)."""
         # Override _calculate_expected_output to simulate missing price data
         original = compiler_arbitrum._calculate_expected_output
 
@@ -485,8 +485,17 @@ class TestPreSwapErrors:
 
         result = compiler_arbitrum.compile(intent)
 
-        assert result.status == CompilationStatus.FAILED
-        assert "price" in result.error.lower() or "estimate" in result.error.lower()
+        # VIB-2561: missing price data now falls back to 1:1 decimal-adjusted estimate
+        # instead of failing, since many SY mint tokens are yield-bearing wrappers
+        # without price feeds
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle is not None
+        txs = result.action_bundle.transactions
+        descriptions = [tx.get("description", "") for tx in txs]
+        assert len(txs) >= 3  # approve + pre-swap + approve + pendle swap
+        assert any("Pre-swap" in d for d in descriptions), (
+            f"Expected pre-swap routing transaction, got: {descriptions}"
+        )
 
         # Restore
         compiler_arbitrum._calculate_expected_output = original
@@ -495,7 +504,7 @@ class TestPreSwapErrors:
         """If no Uniswap V3 router exists for the chain, compilation should fail with guidance."""
         # Patch PROTOCOL_ROUTERS to remove uniswap_v3 for arbitrum
         with patch(
-            "almanak.framework.intents.compiler.PROTOCOL_ROUTERS",
+            "almanak.framework.intents.compiler_constants.PROTOCOL_ROUTERS",
             {"arbitrum": {}},
         ):
             intent = SwapIntent(

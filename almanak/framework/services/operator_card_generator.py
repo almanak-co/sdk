@@ -480,6 +480,10 @@ class OperatorCardGenerator:
         if strategy_state.last_successful_action:
             context["last_successful_action"] = strategy_state.last_successful_action.isoformat()
 
+        # Wallet context (MULTI-WALLET: surface per-chain wallet info when available)
+        # This section is a placeholder for future multi-wallet operator card enrichment.
+        # When wallet_registry data is propagated to StrategyState, populate here.
+
         # Error details
         if error_context:
             context["error"] = {

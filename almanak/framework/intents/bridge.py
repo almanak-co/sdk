@@ -167,8 +167,19 @@ class BridgeIntent(AlmanakImmutableModel):
     to_chain: str
     max_slippage: SafeDecimal = Field(default=Decimal("0.005"))
     preferred_bridge: str | None = None
+    destination_address: str | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
+
+    @field_validator("destination_address", mode="before")
+    @classmethod
+    def validate_destination_address(cls, v: str | None) -> str | None:
+        """Validate destination_address is non-empty when provided."""
+        if v is None:
+            return None
+        if not isinstance(v, str) or not v.strip():
+            raise InvalidBridgeError("destination_address must be a non-empty string when provided")
+        return v.strip()
 
     @field_validator("token", mode="before")
     @classmethod

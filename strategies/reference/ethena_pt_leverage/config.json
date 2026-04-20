@@ -1,0 +1,20 @@
+{
+    "strategy_id": "ethena_pt_leverage",
+    "strategy_name": "ethena_pt_leverage",
+    "description": "Leveraged fixed yield via Pendle PT-sUSDe and Morpho Blue flash loans",
+    "morpho_market_id": "0xd174bb7b8dd6ef16b116753b56679932ee13382b94f81bf66a2b37962cb41f56",
+    "pt_token": "PT-sUSDe-7MAY2026",
+    "pt_token_address": "0x3de0ff76e8b528c092d47b9dac775931cef80f49",
+    "pendle_market": "0x8dae8ece668cf80d348873f23d456448e8694883",
+    "borrow_token": "USDC",
+    "target_leverage": "3.0",
+    "lltv": "0.915",
+    "min_health_factor": "1.3",
+    "max_slippage": "0.01",
+    "exit_days_before_maturity": 7,
+    "chain": "ethereum",
+    "anvil_funding": {
+        "ETH": 100,
+        "USDC": 50000
+    }
+}

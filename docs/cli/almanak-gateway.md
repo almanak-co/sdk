@@ -86,8 +86,8 @@ These are separate from the CLI options above.
 
 | Variable | Description |
 |----------|-------------|
-| `ALMANAK_GATEWAY_ALCHEMY_API_KEY` | Alchemy API key for RPC access. Optional fallback for blockchain operations (not needed if `RPC_URL` or per-chain RPC URLs are set). |
-| `ALMANAK_GATEWAY_COINGECKO_API_KEY` | CoinGecko API key. Optional - falls back to free tier (30 req/min). |
+| `ALCHEMY_API_KEY` | Alchemy API key for RPC access. Optional fallback for blockchain operations (not needed if `RPC_URL` or per-chain RPC URLs are set). |
+| `COINGECKO_API_KEY` | CoinGecko API key. Optional - falls back to free tier (30 req/min). |
 | `ALMANAK_GATEWAY_PRIVATE_KEY` | Private key for transaction signing. Falls back to `ALMANAK_PRIVATE_KEY` if not set. |
 
 ### Persistence

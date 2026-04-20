@@ -79,7 +79,7 @@ class TestSwapExactInput:
             slippage_bps=50,
         )
         assert result.success is True
-        assert len(result.transactions) == 2  # approve + swap
+        assert len(result.transactions) == 3  # approve Permit2 + Permit2 approve router + swap
         assert result.amount_in > 0
         assert result.amount_out_minimum > 0
 
@@ -247,8 +247,8 @@ class TestCompileSwapIntent:
 class TestIntentCompilerV4Routing:
     """Test that IntentCompiler routes protocol='uniswap_v4' to V4 adapter."""
 
-    def test_compiler_v4_quarantined(self):
-        """Verify V4 compilation is blocked with clear quarantine error (VIB-1462)."""
+    def test_compiler_v4_routes_to_adapter(self):
+        """Verify V4 compilation routes through UniswapV4Adapter and succeeds."""
         from almanak.framework.intents import SwapIntent
         from almanak.framework.intents.compiler import IntentCompiler
 
@@ -267,7 +267,8 @@ class TestIntentCompilerV4Routing:
         )
 
         result = compiler.compile(intent)
-        assert result.status.value == "FAILED"
-        assert "quarantined" in result.error.lower()
-        assert "VIB-1462" in result.error
-        assert "uniswap_v3" in result.error  # Should suggest V3 alternative
+        assert result.status.value == "SUCCESS"
+        assert result.action_bundle is not None
+        assert result.action_bundle.metadata["protocol"] == "uniswap_v4"
+        from almanak.core.contracts import UNISWAP_V4
+        assert result.action_bundle.metadata["router"] == UNISWAP_V4["arbitrum"]["universal_router"]

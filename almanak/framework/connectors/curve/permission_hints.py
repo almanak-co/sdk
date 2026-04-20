@@ -17,5 +17,10 @@ PERMISSION_HINTS = PermissionHints(
             "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",  # USDC.e
             "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",  # USDT
         ),
+        # base: weth_cbeth pool is the only Curve pool on Base
+        "base": (
+            "0x4200000000000000000000000000000000000006",  # WETH on Base
+            "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",  # cbETH on Base
+        ),
     },
 )

@@ -38,6 +38,9 @@ PROTOCOL_ALIASES: dict[tuple[str, str], str] = {
     # It is a first-class protocol; "uniswap_v3" on Mantle resolves to it.
     ("mantle", "agni"): "agni_finance",
     ("mantle", "uniswap_v3"): "agni_finance",
+    # Optimism — Velodrome V2 is the same Solidly-fork interface as Aerodrome on Base.
+    # Normalizing to "aerodrome" lets all Solidly-fork compiler paths handle both.
+    ("optimism", "velodrome"): "aerodrome",
 }
 
 # ---------------------------------------------------------------------------
@@ -56,6 +59,7 @@ _GLOBAL_ALIASES: dict[str, str] = {
 
 PROTOCOL_DISPLAY_NAMES: dict[tuple[str, str], str] = {
     ("mantle", "agni_finance"): "Agni Finance",
+    ("optimism", "aerodrome"): "Velodrome V2",
 }
 
 

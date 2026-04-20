@@ -26,7 +26,11 @@ class TestGatewayClientConfig:
         assert config.timeout == 30.0
 
     def test_config_from_env(self, monkeypatch):
-        """Config loads from environment variables."""
+        """Config loads from legacy GATEWAY_* environment variables."""
+        # Must unset ALMANAK_GATEWAY_* to test legacy fallback behavior
+        monkeypatch.delenv("ALMANAK_GATEWAY_HOST", raising=False)
+        monkeypatch.delenv("ALMANAK_GATEWAY_PORT", raising=False)
+        monkeypatch.delenv("ALMANAK_GATEWAY_TIMEOUT", raising=False)
         monkeypatch.setenv("GATEWAY_HOST", "gateway.local")
         monkeypatch.setenv("GATEWAY_PORT", "50052")
         monkeypatch.setenv("GATEWAY_TIMEOUT", "60.0")
@@ -37,18 +41,77 @@ class TestGatewayClientConfig:
         assert config.port == 50052
         assert config.timeout == 60.0
 
+    def test_config_prefers_almanak_host(self, monkeypatch):
+        """Config prefers ALMANAK_GATEWAY_HOST over GATEWAY_HOST."""
+        # Clean all related env vars to ensure deterministic test
+        monkeypatch.delenv("ALMANAK_GATEWAY_HOST", raising=False)
+        monkeypatch.delenv("GATEWAY_HOST", raising=False)
+        monkeypatch.setenv("ALMANAK_GATEWAY_HOST", "almanak.local")
+        monkeypatch.setenv("GATEWAY_HOST", "gateway.local")
+
+        config = GatewayClientConfig.from_env()
+
+        assert config.host == "almanak.local"
+
+    def test_config_prefers_almanak_port(self, monkeypatch):
+        """Config prefers ALMANAK_GATEWAY_PORT over GATEWAY_PORT."""
+        # Clean all related env vars to ensure deterministic test
+        monkeypatch.delenv("ALMANAK_GATEWAY_PORT", raising=False)
+        monkeypatch.delenv("GATEWAY_PORT", raising=False)
+        monkeypatch.setenv("ALMANAK_GATEWAY_PORT", "60051")
+        monkeypatch.setenv("GATEWAY_PORT", "50052")
+
+        config = GatewayClientConfig.from_env()
+
+        assert config.port == 60051
+
+    def test_config_prefers_almanak_timeout(self, monkeypatch):
+        """Config prefers ALMANAK_GATEWAY_TIMEOUT over GATEWAY_TIMEOUT."""
+        # Clean all related env vars to ensure deterministic test
+        monkeypatch.delenv("ALMANAK_GATEWAY_TIMEOUT", raising=False)
+        monkeypatch.delenv("GATEWAY_TIMEOUT", raising=False)
+        monkeypatch.setenv("ALMANAK_GATEWAY_TIMEOUT", "120.0")
+        monkeypatch.setenv("GATEWAY_TIMEOUT", "60.0")
+
+        config = GatewayClientConfig.from_env()
+
+        assert config.timeout == 120.0
+
     def test_config_auth_token_default_none(self):
         """Config auth_token defaults to None."""
         config = GatewayClientConfig()
         assert config.auth_token is None
 
-    def test_config_auth_token_from_env(self, monkeypatch):
-        """Config loads auth_token from environment."""
+    def test_config_auth_token_from_almanak_env(self, monkeypatch):
+        """Config loads auth_token from ALMANAK_GATEWAY_AUTH_TOKEN (preferred)."""
+        monkeypatch.delenv("ALMANAK_GATEWAY_AUTH_TOKEN", raising=False)
+        monkeypatch.setenv("ALMANAK_GATEWAY_AUTH_TOKEN", "my-almanak-token")
+
+        config = GatewayClientConfig.from_env()
+
+        assert config.auth_token == "my-almanak-token"
+
+    def test_config_auth_token_from_legacy_env(self, monkeypatch):
+        """Config loads auth_token from GATEWAY_AUTH_TOKEN (legacy fallback)."""
+        # Must unset ALMANAK_GATEWAY_AUTH_TOKEN to test fallback behavior
+        monkeypatch.delenv("ALMANAK_GATEWAY_AUTH_TOKEN", raising=False)
         monkeypatch.setenv("GATEWAY_AUTH_TOKEN", "my-secret-token")
 
         config = GatewayClientConfig.from_env()
 
         assert config.auth_token == "my-secret-token"
+
+    def test_config_auth_token_prefers_almanak_over_legacy(self, monkeypatch):
+        """Config prefers ALMANAK_GATEWAY_AUTH_TOKEN over GATEWAY_AUTH_TOKEN."""
+        # Clean all related env vars to ensure deterministic test
+        monkeypatch.delenv("ALMANAK_GATEWAY_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("GATEWAY_AUTH_TOKEN", raising=False)
+        monkeypatch.setenv("ALMANAK_GATEWAY_AUTH_TOKEN", "almanak-token")
+        monkeypatch.setenv("GATEWAY_AUTH_TOKEN", "legacy-token")
+
+        config = GatewayClientConfig.from_env()
+
+        assert config.auth_token == "almanak-token"
 
     def test_config_auth_token_custom(self):
         """Config accepts custom auth_token."""
@@ -123,7 +186,7 @@ class TestGatewayClient:
             assert client.is_connected
 
     def test_client_connect_without_auth_token(self):
-        """Client uses base channel directly when no auth token."""
+        """Client wraps channel with cycle_id interceptor even without auth."""
         config = GatewayClientConfig(host="localhost", port=50052, auth_token=None)
         client = GatewayClient(config)
 
@@ -133,15 +196,18 @@ class TestGatewayClient:
         ):
             mock_base_channel = MagicMock()
             mock_channel.return_value = mock_base_channel
+            mock_intercept.return_value = mock_base_channel
 
             client.connect()
 
             # Base channel should be created
             mock_channel.assert_called_once_with("localhost:50052")
-            # intercept_channel should NOT be called
-            mock_intercept.assert_not_called()
-            # The client channel should be the base channel
-            assert client._channel is mock_base_channel
+            # intercept_channel is called (cycle_id interceptor always active)
+            mock_intercept.assert_called_once()
+            # Only cycle_id interceptor, no auth interceptor
+            args = mock_intercept.call_args
+            interceptors = args[0][1:]  # Skip base_channel arg
+            assert len(interceptors) == 1
 
     def test_client_disconnect(self):
         """Client closes connection."""

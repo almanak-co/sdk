@@ -1,0 +1,14 @@
+{
+    "chain": "base",
+    "pool": "WETH/USDC/500",
+    "amount0": "0.0004",
+    "amount1": "0.75",
+    "range_width_pct": 0.50,
+    "protocol": "uniswap_v3",
+    "max_slippage_pct": 1.0,
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

@@ -1,0 +1,31 @@
+{
+    "chain": "base",
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0x4200000000000000000000000000000000000006",
+            "chain": "base",
+            "amount": "0.5",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "chain": "base",
+            "amount": "1000",
+            "amount_type": "usd"
+        }
+    ],
+    "base_token": "WETH",
+    "quote_token": "USDC",
+    "trade_size_usd": 100,
+    "rsi_period": 14,
+    "rsi_oversold": 30,
+    "rsi_overbought": 70,
+    "max_slippage_bps": 100,
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

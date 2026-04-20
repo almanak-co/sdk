@@ -30,7 +30,7 @@ def _make_strategy(
     force_action: str = "",
 ) -> Any:
     """Create an EthenaYieldStrategy with mocked framework wiring."""
-    from strategies.demo.ethena_yield.strategy import EthenaYieldStrategy
+    from almanak.demo_strategies.ethena_yield.strategy import EthenaYieldStrategy
 
     with patch.object(EthenaYieldStrategy, "__init__", lambda self, *a, **kw: None):
         strat = EthenaYieldStrategy.__new__(EthenaYieldStrategy)

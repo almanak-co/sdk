@@ -16,6 +16,7 @@ STATUS_COLORS: dict[StrategyStatus, str] = {
     StrategyStatus.STUCK: "#ffc107",  # Yellow/Amber
     StrategyStatus.PAUSED: "#9e9e9e",  # Gray
     StrategyStatus.ERROR: "#f44336",  # Red
+    StrategyStatus.PAPER_TRADING: "#2196f3",  # Blue
 }
 
 # Severity colors

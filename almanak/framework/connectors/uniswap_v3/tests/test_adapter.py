@@ -544,8 +544,15 @@ class TestUniswapV3AdapterIntentCompilation:
         assert bundle.metadata["chain"] == "arbitrum"
         assert "error" not in bundle.metadata
 
-    def test_compile_swap_intent_with_usd_amount(self, adapter: UniswapV3Adapter) -> None:
-        """Test compiling SwapIntent with USD amount."""
+    def test_compile_swap_intent_with_usd_amount(self) -> None:
+        """Test compiling SwapIntent with USD amount against a real oracle."""
+        config = UniswapV3Config(
+            chain="arbitrum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            price_provider={"USDC": Decimal("1"), "WETH": Decimal("3400")},
+        )
+        adapter = UniswapV3Adapter(config)
+
         intent = SwapIntent(
             from_token="USDC",
             to_token="WETH",
@@ -558,6 +565,23 @@ class TestUniswapV3AdapterIntentCompilation:
         assert bundle.intent_type == "SWAP"
         assert len(bundle.transactions) >= 1
         assert bundle.metadata["from_token"] == "USDC"
+
+    def test_compile_swap_intent_with_usd_amount_no_oracle_raises(self, adapter: UniswapV3Adapter) -> None:
+        """amount_usd without a price in the oracle must raise PriceUnavailableError.
+
+        Guards against VIB-3134 regression: the adapter must NOT silently fall back
+        to hardcoded placeholder prices and proceed with a live tx.
+        """
+        from almanak.framework.data import PriceUnavailableError
+
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="WETH",
+            amount_usd=Decimal("1000"),
+            max_slippage=Decimal("0.005"),
+        )
+        with pytest.raises(PriceUnavailableError, match="USDC"):
+            adapter.compile_swap_intent(intent)
 
     def test_compile_swap_intent_error(self, adapter: UniswapV3Adapter) -> None:
         """Test compiling SwapIntent with invalid tokens."""
@@ -784,10 +808,11 @@ class TestUniswapV3AdapterHelpers:
         assert symbol == "USDC"
 
     def test_get_token_symbol_unknown(self, adapter: UniswapV3Adapter) -> None:
-        """Test getting symbol for unknown address."""
+        """Test getting symbol for unknown address returns truncated address."""
         symbol = adapter._get_token_symbol("0x0000000000000000000000000000000000000000")
 
-        assert symbol == "UNKNOWN"
+        # Unknown addresses return truncated format (skip_gateway=True avoids 30s timeout)
+        assert symbol == "0x0000...0000"
 
     def test_get_default_price_oracle(self, adapter: UniswapV3Adapter) -> None:
         """Test default price oracle."""

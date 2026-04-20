@@ -16,7 +16,7 @@ import pytest
 
 @pytest.fixture
 def strategy():
-    from strategies.demo.curve_cryptoswap_pnl.strategy import CurveCryptoSwapPnLStrategy
+    from almanak.demo_strategies.curve_cryptoswap_pnl.strategy import CurveCryptoSwapPnLStrategy
 
     strat = CurveCryptoSwapPnLStrategy.__new__(CurveCryptoSwapPnLStrategy)
     strat.config = {}

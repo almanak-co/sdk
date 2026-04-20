@@ -1,0 +1,42 @@
+{
+    "chain": "ethereum",
+    "token_funding": [
+        {
+            "symbol": "USDC",
+            "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "chain": "ethereum",
+            "amount": "100",
+            "amount_type": "usd"
+        },
+        {
+            "symbol": "wstETH",
+            "address": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+            "chain": "ethereum",
+            "amount": "0.05",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "WETH",
+            "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "chain": "ethereum",
+            "amount": "0.05",
+            "amount_type": "token"
+        }
+    ],
+    "market_id": "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
+    "collateral_token": "wstETH",
+    "borrow_token": "USDC",
+    "collateral_amount": "0.014",
+    "target_ltv": "0.50",
+    "min_health_factor": "1.5",
+    "lp_pool": "WETH/USDC/500",
+    "lp_range_width_pct": "0.20",
+    "swap_slippage": "0.005",
+    "force_action": "supply",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 0.01,
+        "wstETH": 0.1,
+        "USDC": 5000
+    }
+}

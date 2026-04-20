@@ -126,3 +126,75 @@ class TestBatchGetBalances:
 
         assert len(response.responses) == 1
         assert response.responses[0].error != ""
+
+
+class TestMNTNativeBalance:
+    """Verify that MNT (Mantle native token) routes to get_native_balance(), not get_balance()."""
+
+    def _make_mock_result(self):
+        mock_result = MagicMock()
+        mock_result.balance = 500.0
+        mock_result.address = "0x0000000000000000000000000000000000000000"
+        mock_result.decimals = 18
+        mock_result.raw_balance = 500 * 10**18
+        mock_result.timestamp = MagicMock()
+        mock_result.timestamp.timestamp.return_value = 1234567890
+        mock_result.stale = False
+        return mock_result
+
+    @pytest.mark.asyncio
+    async def test_get_balance_mnt_calls_get_native_balance(self, market_service, mock_context):
+        """GetBalance for MNT must invoke get_native_balance(), not get_balance()."""
+        mock_provider = AsyncMock()
+        mock_result = self._make_mock_result()
+        mock_provider.get_native_balance = AsyncMock(return_value=mock_result)
+        mock_provider.get_balance = AsyncMock(side_effect=AssertionError("get_balance must not be called for MNT"))
+
+        mock_price = MagicMock()
+        mock_price.price = 1.0
+        mock_aggregator = AsyncMock()
+        mock_aggregator.get_aggregated_price = AsyncMock(return_value=mock_price)
+
+        market_service._initialized = True
+        market_service._price_aggregator = mock_aggregator
+
+        with patch.object(market_service, "_get_balance_provider", return_value=mock_provider):
+            request = gateway_pb2.BalanceRequest(
+                token="MNT",
+                chain="mantle",
+                wallet_address="0x1234567890abcdef1234567890abcdef12345678",
+            )
+            response = await market_service.GetBalance(request, mock_context)
+
+        mock_provider.get_native_balance.assert_awaited_once()
+        assert response.balance == "500.0"
+
+    @pytest.mark.asyncio
+    async def test_batch_get_balances_mnt_calls_get_native_balance(self, market_service, mock_context):
+        """BatchGetBalances with MNT token must invoke get_native_balance()."""
+        mock_provider = AsyncMock()
+        mock_result = self._make_mock_result()
+        mock_provider.get_native_balance = AsyncMock(return_value=mock_result)
+        mock_provider.get_balance = AsyncMock(side_effect=AssertionError("get_balance must not be called for MNT"))
+
+        mock_aggregator = AsyncMock()
+        mock_aggregator.get_aggregated_price = AsyncMock(side_effect=Exception("no price"))
+
+        market_service._initialized = True
+        market_service._price_aggregator = mock_aggregator
+
+        with patch.object(market_service, "_get_balance_provider", return_value=mock_provider):
+            request = gateway_pb2.BatchBalanceRequest(
+                requests=[
+                    gateway_pb2.BalanceRequest(
+                        token="MNT",
+                        chain="mantle",
+                        wallet_address="0x1234567890abcdef1234567890abcdef12345678",
+                    )
+                ]
+            )
+            response = await market_service.BatchGetBalances(request, mock_context)
+
+        assert len(response.responses) == 1
+        mock_provider.get_native_balance.assert_awaited_once()
+        assert response.responses[0].balance == "500.0"

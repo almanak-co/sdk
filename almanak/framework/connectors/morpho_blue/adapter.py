@@ -12,6 +12,9 @@ Morpho Blue is a permissionless lending protocol that allows:
 Supported chains:
 - Ethereum
 - Base
+- Arbitrum
+- Polygon
+- Monad
 
 Example:
     from almanak.framework.connectors.morpho_blue import MorphoBlueAdapter, MorphoBlueConfig
@@ -37,7 +40,7 @@ Example:
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any
@@ -46,6 +49,7 @@ from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
+    from almanak.framework.gateway_client import GatewayClient
 
 from almanak.core.contracts import MORPHO_BLUE as _MORPHO_BLUE_REGISTRY
 
@@ -229,6 +233,75 @@ MORPHO_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
             "is_pt_market": True,
         },
     },
+    "arbitrum": {
+        # Arbitrum Morpho Blue markets use a chain-specific AdaptiveCurveIRM at
+        # 0x66F30587FB8D4206918deb78ecA7d5eBbafD06DA (different from the Ethereum IRM).
+        # Market IDs sourced from blue-api.morpho.org and verified on-chain 2026-04-17.
+        # wstETH/USDC market (86% LLTV) - top-TVL Arbitrum market (~$12M supply)
+        "0x33e0c8ab132390822b07e5dc95033cf250c963153320b7ffca73220664da2ea0": {
+            "name": "wstETH/USDC",
+            "loan_token": "USDC",
+            "loan_token_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "collateral_token": "wstETH",
+            "collateral_token_address": "0x5979D7b546E38E414F7E9822514be443A4800529",
+            "oracle": "0x8e02a9b9Cc29d783b2fCB71C3a72651B591cae31",
+            "irm": "0x66F30587FB8D4206918deb78ecA7d5eBbafD06DA",
+            "lltv": 860000000000000000,  # 86%
+        },
+        # WBTC/USDC market (86% LLTV) - top-TVL WBTC market on Arbitrum (~$3.2M supply)
+        "0xe6392ff19d10454b099d692b58c361ef93e31af34ed1ef78232e07c78fe99169": {
+            "name": "WBTC/USDC",
+            "loan_token": "USDC",
+            "loan_token_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "collateral_token": "WBTC",
+            "collateral_token_address": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
+            "oracle": "0x88193FcB705d29724A40Bb818eCAA47dD5F014d9",
+            "irm": "0x66F30587FB8D4206918deb78ecA7d5eBbafD06DA",
+            "lltv": 860000000000000000,  # 86%
+        },
+    },
+    "polygon": {
+        # Polygon Morpho Blue markets use the chain-specific AdaptiveCurveIRM at
+        # 0xe675A2161D4a6E2de2eeD70ac98EEBf257FBF0B0. Market IDs sourced from
+        # blue-api.morpho.org (chainId=137, sorted by supply TVL) and verified
+        # on-chain 2026-04-17.
+        #
+        # WBTC/WPOL market (77% LLTV) — top-TVL Polygon Morpho market (~$3.2M supply).
+        "0x96e62bd75493006b81dae51d5db3c5af4b3ced65133dab60e70df9dc8e38bf2c": {
+            "name": "WBTC/WPOL",
+            "loan_token": "WPOL",
+            "loan_token_address": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+            "collateral_token": "WBTC",
+            "collateral_token_address": "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",
+            "oracle": "0x624d826C5233A7426C98d1BE789E70583A296b24",
+            "irm": "0xe675A2161D4a6E2de2eeD70ac98EEBf257FBF0B0",
+            "lltv": 770000000000000000,  # 77%
+        },
+        # WBTC/USDC market (86% LLTV) — ~$1.7M supply. Used by the intent test because
+        # USDC is the loan token (well-known storage slot 9) and WBTC has a clean
+        # storage slot 0 on Polygon.
+        "0x1cfe584af3db05c7f39d60e458a87a8b2f6b5d8c6125631984ec489f1d13553b": {
+            "name": "WBTC/USDC",
+            "loan_token": "USDC",
+            "loan_token_address": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+            "collateral_token": "WBTC",
+            "collateral_token_address": "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",
+            "oracle": "0x15B4e0eE3DC3D20D9d261da2D3E0d2a86A6A6291",
+            "irm": "0xe675A2161D4a6E2de2eeD70ac98EEBf257FBF0B0",
+            "lltv": 860000000000000000,  # 86%
+        },
+        # wstETH/WETH market (91.5% LLTV) — ~$1.1M supply. High-LLTV correlated pair.
+        "0xb8ae474af3b91c8143303723618b31683b52e9c86566aa54c06f0bc27906bcae": {
+            "name": "wstETH/WETH",
+            "loan_token": "WETH",
+            "loan_token_address": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+            "collateral_token": "wstETH",
+            "collateral_token_address": "0x03b54A6e9a984069379fae1a4fC4dBAE93B3bCCD",
+            "oracle": "0x1Dc2444b54945064c131145cD6b8701e3454C63a",
+            "irm": "0xe675A2161D4a6E2de2eeD70ac98EEBf257FBF0B0",
+            "lltv": 915000000000000000,  # 91.5%
+        },
+    },
     "base": {
         # cbETH/USDC market (86% LLTV)
         "0xdba352d93a64b17c71104cbddc6aef85cd432322a1446b5b65163cbbc615cd0c": {
@@ -237,7 +310,7 @@ MORPHO_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
             "loan_token_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
             "collateral_token": "cbETH",
             "collateral_token_address": "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
-            "oracle": "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c",
+            "oracle": "0x4756c26E01E61c7c2F86b10f4316e179db8F9425",
             "irm": "0x46415998764C29aB2a25CbeA6254146D50D22687",
             "lltv": 860000000000000000,  # 86%
         },
@@ -250,6 +323,34 @@ MORPHO_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
             "collateral_token_address": "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452",
             "oracle": "0xD7A1abA119a236Fea5BBC5cAC6836465cbe9289A",
             "irm": "0x46415998764C29aB2a25CbeA6254146D50D22687",
+            "lltv": 860000000000000000,  # 86%
+        },
+    },
+    "monad": {
+        # Markets sourced from Morpho GraphQL API (blue-api.morpho.org) for chainId 143,
+        # sorted by supply TVL. All markets use AdaptiveCurveIRM
+        # 0x09475a3D6eA8c314c592b1a3799bDE044E2F400F.
+        #
+        # WETH/wstETH market (94.5% LLTV) — largest Monad Morpho market (~$61.8M supply).
+        "0x8bdb7d2c5024d349772884afb3c5c409bc8de58ed63d79618bf48fb57b595060": {
+            "name": "wstETH/WETH",
+            "loan_token": "WETH",
+            "loan_token_address": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",
+            "collateral_token": "wstETH",
+            "collateral_token_address": "0x10Aeaf63194db8d453d4D85a06E5eFE1dd0b5417",
+            "oracle": "0xBB16f6B3c5422209ee1d9b0f63761F159C136694",
+            "irm": "0x09475a3D6eA8c314c592b1a3799bDE044E2F400F",
+            "lltv": 945000000000000000,  # 94.5%
+        },
+        # WBTC/AUSD market (86% LLTV) — BTC-backed lending (~$13.2M supply).
+        "0x0ce0a3398925f5112360db21750912f2a834c5cb90ecf03f461b2e2561320955": {
+            "name": "WBTC/AUSD",
+            "loan_token": "AUSD",
+            "loan_token_address": "0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a",
+            "collateral_token": "WBTC",
+            "collateral_token_address": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
+            "oracle": "0xda77Cf67fFEECC7fc64a4767837D1fFEad1Bc73C",
+            "irm": "0x09475a3D6eA8c314c592b1a3799bDE044E2F400F",
             "lltv": 860000000000000000,  # 86%
         },
     },
@@ -281,7 +382,7 @@ class MorphoBlueConfig:
     """Configuration for Morpho Blue adapter.
 
     Attributes:
-        chain: Blockchain network (ethereum, base)
+        chain: Blockchain network (ethereum, base, arbitrum, monad)
         wallet_address: User wallet address
         default_slippage_bps: Default slippage tolerance in basis points
         rpc_url: Optional RPC URL. If not provided, uses ALCHEMY_API_KEY.
@@ -296,10 +397,11 @@ class MorphoBlueConfig:
     chain: str
     wallet_address: str
     default_slippage_bps: int = 50  # 0.5%
-    rpc_url: str | None = None
+    rpc_url: str | None = None  # DEPRECATED — use gateway_client
     price_provider: dict[str, Decimal] | None = None
     allow_placeholder_prices: bool = False
     enable_sdk: bool = True  # Enable SDK by default for production use
+    gateway_client: "GatewayClient | None" = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -648,6 +750,7 @@ class MorphoBlueAdapter:
             self._sdk = MorphoBlueSDK(
                 chain=self.chain,
                 rpc_url=self.config.rpc_url,
+                gateway_client=self.config.gateway_client,
             )
 
         return self._sdk

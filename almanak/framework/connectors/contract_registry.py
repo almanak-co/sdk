@@ -20,6 +20,7 @@ from almanak.core.contracts import (
     SUSHISWAP_V3,
     TRADERJOE_V2,
     UNISWAP_V3,
+    UNISWAP_V4,
 )
 
 
@@ -157,6 +158,23 @@ _PROTOCOL_DEFS: tuple[_ProtocolDef, ...] = (
         "almanak.framework.connectors.pendle.receipt_parser",
         "PendleReceiptParser",
         ("SWAP", "LP_OPEN", "LP_CLOSE"),
+    ),
+    # Uniswap V4 — singleton PoolManager handles swaps, PositionManager handles LP
+    _ProtocolDef(
+        UNISWAP_V4,
+        "pool_manager",
+        "uniswap_v4",
+        "almanak.framework.connectors.uniswap_v4.receipt_parser",
+        "UniswapV4ReceiptParser",
+        ("SWAP",),
+    ),
+    _ProtocolDef(
+        UNISWAP_V4,
+        "position_manager",
+        "uniswap_v4",
+        "almanak.framework.connectors.uniswap_v4.receipt_parser",
+        "UniswapV4ReceiptParser",
+        ("LP_OPEN", "LP_CLOSE"),
     ),
     # LP managers
     _ProtocolDef(

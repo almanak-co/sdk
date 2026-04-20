@@ -21,7 +21,7 @@ import pytest
 from tests.intents.solana.conftest import CHAIN_NAME
 
 # Strategy root
-DEMO_DIR = Path(__file__).resolve().parents[3] / "strategies" / "demo"
+DEMO_DIR = Path(__file__).resolve().parents[3] / "almanak" / "demo_strategies"
 
 
 def _make_mock_market() -> MagicMock:
@@ -64,7 +64,7 @@ class TestSolanaSwapDemoStrategy:
     @pytest.mark.asyncio
     async def test_decide_returns_swap_intent(self):
         """SolanaSwapStrategy.decide() returns a SwapIntent from config."""
-        from strategies.demo.solana_swap.strategy import SolanaSwapStrategy
+        from almanak.demo_strategies.solana_swap.strategy import SolanaSwapStrategy
 
         config = _load_config("solana_swap")
         strategy = SolanaSwapStrategy(config=config, chain="solana", wallet_address="test_wallet")
@@ -81,7 +81,7 @@ class TestSolanaSwapDemoStrategy:
     @pytest.mark.asyncio
     async def test_compile_swap_intent(self, solana_compiler):
         """SwapIntent from demo strategy compiles to a valid ActionBundle."""
-        from strategies.demo.solana_swap.strategy import SolanaSwapStrategy
+        from almanak.demo_strategies.solana_swap.strategy import SolanaSwapStrategy
 
         config = _load_config("solana_swap")
         strategy = SolanaSwapStrategy(config=config, chain="solana", wallet_address="test_wallet")
@@ -102,7 +102,7 @@ class TestSolanaSwapDemoStrategy:
     @pytest.mark.asyncio
     async def test_strategy_metadata(self):
         """SolanaSwapStrategy has correct decorator metadata."""
-        from strategies.demo.solana_swap.strategy import SolanaSwapStrategy
+        from almanak.demo_strategies.solana_swap.strategy import SolanaSwapStrategy
 
         assert SolanaSwapStrategy.STRATEGY_NAME == "solana_swap"
         metadata = SolanaSwapStrategy.STRATEGY_METADATA
@@ -118,7 +118,7 @@ class TestSolanaLendDemoStrategy:
     @pytest.mark.asyncio
     async def test_decide_returns_supply_intent(self):
         """SolanaLendStrategy.decide() returns a SupplyIntent from config."""
-        from strategies.demo.solana_lend.strategy import SolanaLendStrategy
+        from almanak.demo_strategies.solana_lend.strategy import SolanaLendStrategy
 
         config = _load_config("solana_lend")
         strategy = SolanaLendStrategy(config=config, chain="solana", wallet_address="test_wallet")
@@ -135,7 +135,7 @@ class TestSolanaLendDemoStrategy:
     @pytest.mark.asyncio
     async def test_compile_supply_intent(self, solana_compiler):
         """SupplyIntent from demo strategy compiles to a valid ActionBundle."""
-        from strategies.demo.solana_lend.strategy import SolanaLendStrategy
+        from almanak.demo_strategies.solana_lend.strategy import SolanaLendStrategy
 
         config = _load_config("solana_lend")
         strategy = SolanaLendStrategy(config=config, chain="solana", wallet_address="test_wallet")
@@ -156,7 +156,7 @@ class TestSolanaLendDemoStrategy:
     @pytest.mark.asyncio
     async def test_strategy_metadata(self):
         """SolanaLendStrategy has correct decorator metadata."""
-        from strategies.demo.solana_lend.strategy import SolanaLendStrategy
+        from almanak.demo_strategies.solana_lend.strategy import SolanaLendStrategy
 
         assert SolanaLendStrategy.STRATEGY_NAME == "solana_lend"
         metadata = SolanaLendStrategy.STRATEGY_METADATA
@@ -172,7 +172,7 @@ class TestSolanaLPDemoStrategy:
     @pytest.mark.asyncio
     async def test_decide_returns_lp_open_intent(self):
         """SolanaLPStrategy.decide() returns an LPOpenIntent from config."""
-        from strategies.demo.solana_lp.strategy import SolanaLPStrategy
+        from almanak.demo_strategies.solana_lp.strategy import SolanaLPStrategy
 
         config = _load_config("solana_lp")
         strategy = SolanaLPStrategy(config=config, chain="solana", wallet_address="test_wallet")
@@ -190,7 +190,7 @@ class TestSolanaLPDemoStrategy:
     @pytest.mark.asyncio
     async def test_compile_lp_open_intent(self, solana_compiler):
         """LPOpenIntent from demo strategy compiles to a valid ActionBundle."""
-        from strategies.demo.solana_lp.strategy import SolanaLPStrategy
+        from almanak.demo_strategies.solana_lp.strategy import SolanaLPStrategy
 
         config = _load_config("solana_lp")
         strategy = SolanaLPStrategy(config=config, chain="solana", wallet_address="test_wallet")
@@ -225,7 +225,7 @@ class TestSolanaLPDemoStrategy:
     @pytest.mark.asyncio
     async def test_strategy_metadata(self):
         """SolanaLPStrategy has correct decorator metadata."""
-        from strategies.demo.solana_lp.strategy import SolanaLPStrategy
+        from almanak.demo_strategies.solana_lp.strategy import SolanaLPStrategy
 
         assert SolanaLPStrategy.STRATEGY_NAME == "solana_lp"
         metadata = SolanaLPStrategy.STRATEGY_METADATA

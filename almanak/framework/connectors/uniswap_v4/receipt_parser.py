@@ -1,8 +1,10 @@
 """Uniswap V4 Receipt Parser.
 
-Parses transaction receipts for V4 swap events emitted by the PoolManager.
-V4 uses a different Swap event signature than V3 since all swaps go through
-the singleton PoolManager contract.
+Parses transaction receipts for V4 events emitted by PoolManager and
+PositionManager:
+- Swap events (PoolManager)
+- ModifyLiquidity events (PoolManager)
+- ERC-721 Transfer events (PositionManager, for position ID extraction)
 
 V4 Swap event:
     event Swap(
@@ -14,6 +16,16 @@ V4 Swap event:
         uint128 liquidity,
         int24 tick,
         uint24 fee
+    )
+
+V4 ModifyLiquidity event:
+    event ModifyLiquidity(
+        PoolId indexed id,
+        address indexed sender,
+        int24 tickLower,
+        int24 tickUpper,
+        int256 liquidityDelta,
+        bytes32 salt
     )
 """
 
@@ -28,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 from almanak.framework.connectors.base import HexDecoder
 
 if TYPE_CHECKING:
-    from almanak.framework.execution.extracted_data import SwapAmounts
+    from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +64,7 @@ EVENT_TOPICS: dict[str, str] = {
 }
 
 SWAP_EVENT_TOPIC = EVENT_TOPICS["Swap"]
+MODIFY_LIQUIDITY_TOPIC = EVENT_TOPICS["ModifyLiquidity"]
 TRANSFER_EVENT_TOPIC = EVENT_TOPICS["Transfer"]
 
 
@@ -90,8 +103,20 @@ class SwapEventData:
 
 
 @dataclass
+class ModifyLiquidityEventData:
+    """Decoded V4 ModifyLiquidity event data."""
+
+    pool_id: str
+    sender: str
+    tick_lower: int
+    tick_upper: int
+    liquidity_delta: int
+    salt: str
+
+
+@dataclass
 class TransferEventData:
-    """Decoded ERC-20 Transfer event."""
+    """Decoded ERC-20/ERC-721 Transfer event."""
 
     token: str
     from_address: str
@@ -121,6 +146,7 @@ class ParseResult:
     """Full parse result from a V4 transaction receipt."""
 
     swap_events: list[SwapEventData] = field(default_factory=list)
+    modify_liquidity_events: list[ModifyLiquidityEventData] = field(default_factory=list)
     transfer_events: list[TransferEventData] = field(default_factory=list)
     swap_result: ParsedSwapResult | None = None
     error: str | None = None
@@ -146,16 +172,24 @@ class UniswapV4ReceiptParser:
         self,
         chain: str = "ethereum",
         pool_manager_address: str | None = None,
+        position_manager_address: str | None = None,
         token_resolver: Any | None = None,
     ) -> None:
         self.chain = chain.lower()
         self._token_resolver = token_resolver
+
+        from almanak.core.contracts import UNISWAP_V4
+
+        chain_addrs = UNISWAP_V4.get(self.chain, {})
         if pool_manager_address:
             self.pool_manager = pool_manager_address.lower()
         else:
-            from almanak.core.contracts import UNISWAP_V4
+            self.pool_manager = chain_addrs.get("pool_manager", "").lower()
 
-            self.pool_manager = UNISWAP_V4.get(self.chain, {}).get("pool_manager", "").lower()
+        if position_manager_address:
+            self.position_manager = position_manager_address.lower()
+        else:
+            self.position_manager = chain_addrs.get("position_manager", "").lower()
 
     def parse_receipt(
         self,
@@ -185,6 +219,11 @@ class UniswapV4ReceiptParser:
                 swap_event = self._decode_swap_event(log)
                 if swap_event:
                     result.swap_events.append(swap_event)
+
+            elif topic0 == MODIFY_LIQUIDITY_TOPIC.lower():
+                ml_event = self._decode_modify_liquidity_event(log)
+                if ml_event:
+                    result.modify_liquidity_events.append(ml_event)
 
             elif topic0 == TRANSFER_EVENT_TOPIC.lower():
                 transfer = self._decode_transfer_event(log)
@@ -229,7 +268,222 @@ class UniswapV4ReceiptParser:
             token_out=sr.token_out,
         )
 
+    def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
+        """Extract LP position NFT tokenId from ERC-721 Transfer event.
+
+        Looks for a Transfer event emitted by the PositionManager contract
+        where from_address is the zero address (indicating a mint).
+
+        Falls back to ERC-721 mint Transfers from other known V4 PositionManager
+        addresses if no exact chain match is found (handles address mismatches
+        or proxy patterns). Rejects mints from unknown contracts to fail closed.
+
+        Called by ResultEnricher for LP_OPEN intents.
+
+        Args:
+            receipt: Transaction receipt dict.
+
+        Returns:
+            Position ID (tokenId) or None if not found.
+        """
+        logs = receipt.get("logs", [])
+        tx_hash = receipt.get("transactionHash", "unknown")
+
+        # Build set of known V4 PositionManager addresses for fallback constraint
+        from almanak.core.contracts import UNISWAP_V4
+
+        known_pm_addresses = {
+            addrs["position_manager"].lower() for addrs in UNISWAP_V4.values() if addrs.get("position_manager")
+        }
+
+        # Collect ERC-721 mint Transfer candidates as fallback
+        fallback_candidates: list[tuple[int, str]] = []  # (token_id, emitting_address)
+
+        for log in logs:
+            topics = log.get("topics", [])
+            if len(topics) < 4:
+                continue
+
+            topic0 = topics[0].lower() if isinstance(topics[0], str) else hex(topics[0])
+            if topic0 != TRANSFER_EVENT_TOPIC.lower():
+                continue
+
+            # ERC-721 Transfer: topic[1]=from, topic[2]=to, topic[3]=tokenId
+            from_addr = topics[1] if isinstance(topics[1], str) else hex(topics[1])
+
+            # Only consider mint events (from = zero address)
+            try:
+                if int(from_addr, 16) != 0:
+                    continue
+            except (ValueError, TypeError):
+                continue
+
+            token_id_hex = topics[3] if isinstance(topics[3], str) else hex(topics[3])
+            try:
+                token_id = int(token_id_hex, 16)
+            except (ValueError, TypeError):
+                continue
+
+            # Check if emitted by PositionManager (preferred match)
+            log_address = log.get("address", "")
+            log_address_lower = log_address.lower() if isinstance(log_address, str) else ""
+            if self.position_manager and log_address_lower == self.position_manager:
+                return token_id
+
+            # Only consider known V4 PositionManager addresses as fallback candidates
+            if log_address_lower in known_pm_addresses:
+                fallback_candidates.append((token_id, log_address_lower))
+
+        if len(fallback_candidates) == 1:
+            token_id, emitter = fallback_candidates[0]
+            logger.warning(
+                "V4 extract_position_id: no exact PositionManager match (%s), using fallback tokenId=%d "
+                "from known V4 PM %s. tx=%s, chain=%s",
+                self.position_manager,
+                token_id,
+                emitter,
+                tx_hash,
+                self.chain,
+            )
+            return token_id
+
+        if len(fallback_candidates) > 1:
+            logger.error(
+                "V4 extract_position_id: %d ambiguous ERC-721 mint candidates from known V4 PMs "
+                "(expected 1). Failing closed to avoid storing wrong position_id. "
+                "candidates=%s, position_manager=%s, chain=%s, tx=%s",
+                len(fallback_candidates),
+                [(tid, addr) for tid, addr in fallback_candidates],
+                self.position_manager,
+                self.chain,
+                tx_hash,
+            )
+            return None
+
+        # Log diagnostic info when extraction fails completely
+        transfer_count = sum(
+            1
+            for log in logs
+            if len(log.get("topics", [])) >= 4
+            and (log["topics"][0].lower() if isinstance(log["topics"][0], str) else "") == TRANSFER_EVENT_TOPIC.lower()
+        )
+        logger.warning(
+            "V4 extract_position_id: no position ID found. "
+            "total_logs=%d, erc721_transfer_events=%d, position_manager=%s, chain=%s, tx=%s",
+            len(logs),
+            transfer_count,
+            self.position_manager,
+            self.chain,
+            tx_hash,
+        )
+        return None
+
+    def extract_liquidity(self, receipt: dict[str, Any]) -> int | None:
+        """Extract liquidity delta from ModifyLiquidity event.
+
+        Called by ResultEnricher for LP_OPEN intents.
+
+        Args:
+            receipt: Transaction receipt dict.
+
+        Returns:
+            Liquidity amount or None if not found.
+        """
+        parsed = self.parse_receipt(receipt)
+        if not parsed.modify_liquidity_events:
+            return None
+
+        # Return the first positive (mint) liquidity delta
+        for event in parsed.modify_liquidity_events:
+            if event.liquidity_delta > 0:
+                return event.liquidity_delta
+
+        return None
+
+    def extract_lp_close_data(self, receipt: dict[str, Any]) -> LPCloseData | None:
+        """Extract LP close data from ModifyLiquidity and Transfer events.
+
+        Called by ResultEnricher for LP_CLOSE intents.
+
+        Args:
+            receipt: Transaction receipt dict.
+
+        Returns:
+            LPCloseData with collected amounts, or None if not found.
+        """
+        from almanak.framework.execution.extracted_data import LPCloseData
+
+        parsed = self.parse_receipt(receipt)
+
+        # Find the decrease event (negative liquidity delta)
+        liquidity_removed = None
+        for event in parsed.modify_liquidity_events:
+            if event.liquidity_delta < 0:
+                liquidity_removed = abs(event.liquidity_delta)
+                break
+
+        if liquidity_removed is None and not parsed.modify_liquidity_events:
+            return None
+
+        # Sum Transfer events FROM the pool manager TO the wallet (tokens collected)
+        amount0_collected = 0
+        amount1_collected = 0
+
+        # Group transfers from PoolManager by token address
+        collected_by_token: dict[str, int] = {}
+        for transfer in parsed.transfer_events:
+            if transfer.from_address.lower() == self.pool_manager:
+                token = transfer.token.lower()
+                collected_by_token[token] = collected_by_token.get(token, 0) + transfer.amount
+
+        # Assign to amount0/amount1 by sorted token address order
+        sorted_tokens = sorted(collected_by_token.keys())
+        if len(sorted_tokens) >= 1:
+            amount0_collected = collected_by_token[sorted_tokens[0]]
+        if len(sorted_tokens) >= 2:
+            amount1_collected = collected_by_token[sorted_tokens[1]]
+
+        return LPCloseData(
+            amount0_collected=amount0_collected,
+            amount1_collected=amount1_collected,
+            liquidity_removed=liquidity_removed,
+        )
+
     # -- Decoding helpers -----------------------------------------------------
+
+    def _decode_modify_liquidity_event(self, log: dict[str, Any]) -> ModifyLiquidityEventData | None:
+        """Decode a V4 ModifyLiquidity event from a log entry."""
+        topics = log.get("topics", [])
+        data = log.get("data", "0x")
+
+        if len(topics) < 3:
+            return None
+
+        try:
+            pool_id = topics[1] if isinstance(topics[1], str) else hex(topics[1])
+            sender = (
+                HexDecoder.decode_address_from_data(topics[2][2:]) if isinstance(topics[2], str) else hex(topics[2])
+            )
+
+            # Data layout: int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt
+            clean_data = data[2:] if data.startswith("0x") else data
+
+            tick_lower = HexDecoder.decode_int24(clean_data[0:64])
+            tick_upper = HexDecoder.decode_int24(clean_data[64:128])
+            liquidity_delta = HexDecoder.decode_int256(clean_data[128:192])
+            salt = "0x" + clean_data[192:256] if len(clean_data) >= 256 else "0x0"
+
+            return ModifyLiquidityEventData(
+                pool_id=pool_id,
+                sender=sender,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                liquidity_delta=liquidity_delta,
+                salt=salt,
+            )
+        except Exception as e:
+            logger.warning("Failed to decode V4 ModifyLiquidity event: %s", e)
+            return None
 
     def _decode_swap_event(self, log: dict[str, Any]) -> SwapEventData | None:
         """Decode a V4 Swap event from a log entry."""
@@ -307,14 +561,21 @@ class UniswapV4ReceiptParser:
         # Use the first swap event (single-hop)
         swap = swap_events[0]
 
-        # In V4 Swap events: positive = tokens entering the pool, negative = leaving
-        # For exactInput: amount0 > 0 means token0 was input, amount1 < 0 means token1 was output
+        # V4 Swap event sign convention (from swapper's perspective):
+        #   positive = tokens RECEIVED by the swapper from the pool
+        #   negative = tokens PAID by the swapper to the pool
+        # Verified against real mainnet transactions (2026-03-29).
         if swap.amount0 > 0:
-            amount_in = swap.amount0
-            amount_out = abs(swap.amount1)
+            # Swapper received token0, paid token1
+            amount_in = abs(swap.amount1)
+            amount_out = swap.amount0
         else:
-            amount_in = swap.amount1
-            amount_out = abs(swap.amount0)
+            # Swapper paid token0, received token1
+            amount_in = abs(swap.amount0)
+            amount_out = swap.amount1
+
+        if amount_out <= 0 or amount_in <= 0:
+            logger.warning("V4 Swap event has unexpected signs: amount0=%s, amount1=%s", swap.amount0, swap.amount1)
 
         # Calculate slippage vs quote
         slippage_bps = None
@@ -336,6 +597,55 @@ class UniswapV4ReceiptParser:
                 token_in_addr = transfer.token
             elif transfer.from_address.lower() == pool_manager:
                 token_out_addr = transfer.token
+
+        # Fallback: V4 flash accounting routes tokens through UniversalRouter/Permit2,
+        # so Transfers may not be directly to/from PoolManager. Match by amount instead.
+        # Skip transfers for tokens already identified to avoid mismatches when
+        # amount_in == amount_out (e.g. stablecoin-to-stablecoin swaps).
+        if (token_in_addr is None or token_out_addr is None) and transfer_events:
+            for transfer in transfer_events:
+                # Skip transfers for tokens already assigned to the other side
+                if token_in_addr is None and transfer.amount == amount_in and transfer.token != token_out_addr:
+                    token_in_addr = transfer.token
+                elif token_out_addr is None and transfer.amount == amount_out and transfer.token != token_in_addr:
+                    token_out_addr = transfer.token
+
+        # Fallback 2: For WETH-routed swaps, amounts may differ due to WRAP_ETH/UNWRAP_WETH.
+        # Identify tokens by transfer direction relative to known infrastructure addresses.
+        if (token_in_addr is None or token_out_addr is None) and transfer_events:
+            # Known addresses: PoolManager and common router patterns
+            infra = {pool_manager}
+            seen_tokens = set()
+            if token_in_addr:
+                seen_tokens.add(token_in_addr.lower())
+            if token_out_addr:
+                seen_tokens.add(token_out_addr.lower())
+            for transfer in transfer_events:
+                token_lower = transfer.token.lower()
+                if token_lower in seen_tokens:
+                    continue
+                from_lower = transfer.from_address.lower()
+                to_lower = transfer.to_address.lower()
+                # Token sent FROM infrastructure TO non-infra = output (user receives)
+                if token_out_addr is None and from_lower in infra:
+                    token_out_addr = transfer.token
+                    seen_tokens.add(token_lower)
+                # Token sent TO infrastructure FROM non-infra = input (user pays)
+                elif token_in_addr is None and to_lower in infra:
+                    token_in_addr = transfer.token
+                    seen_tokens.add(token_lower)
+            # Last resort: assign remaining unseen tokens by elimination
+            if token_in_addr is None or token_out_addr is None:
+                for transfer in transfer_events:
+                    token_lower = transfer.token.lower()
+                    if token_lower in seen_tokens:
+                        continue
+                    if token_out_addr is None:
+                        token_out_addr = transfer.token
+                        seen_tokens.add(token_lower)
+                    elif token_in_addr is None:
+                        token_in_addr = transfer.token
+                        seen_tokens.add(token_lower)
 
         # Resolve decimals via token_resolver (lazy-load if not injected)
         resolver = self._token_resolver
@@ -401,6 +711,7 @@ class UniswapV4ReceiptParser:
 
 __all__ = [
     "EVENT_TOPICS",
+    "ModifyLiquidityEventData",
     "ParsedSwapResult",
     "ParseResult",
     "SwapEventData",

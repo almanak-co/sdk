@@ -24,8 +24,13 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.contracts import UNISWAP_V3 as UNISWAP_V3_ADDRESSES
+from almanak.framework.data.market_snapshot import PriceUnavailableError
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
+from ...intents.compiler_constants import (
+    SWAP_ROUTER_V1_CHAIN_OVERRIDES,
+    SWAP_ROUTER_V1_PROTOCOLS,
+)
 from ...intents.vocabulary import IntentType, SwapIntent
 from ...models.reproduction_bundle import ActionBundle
 
@@ -65,6 +70,14 @@ UNISWAP_V3_GAS_ESTIMATES: dict[str, int] = {
 EXACT_INPUT_SINGLE_SELECTOR = "0x04e45aaf"
 EXACT_OUTPUT_SINGLE_SELECTOR = "0x5023b4df"
 MULTICALL_SELECTOR = "0xac9650d8"
+
+# Function selectors for the original SwapRouter V1 (8-param struct WITH deadline).
+# Some Uniswap V3 forks only expose this legacy interface (e.g. Jaine on 0G Chain).
+# The intent compiler picks V1 vs V2 via SWAP_ROUTER_V1_CHAIN_OVERRIDES in
+# almanak/framework/intents/compiler_constants.py; this adapter mirrors that
+# selection so direct UniswapV3Adapter.swap_* calls work on those chains too.
+EXACT_INPUT_SINGLE_V1_SELECTOR = "0x414bf389"
+EXACT_OUTPUT_SINGLE_V1_SELECTOR = "0xdb3e2198"
 
 # ERC20 approve selector
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"
@@ -320,15 +333,17 @@ class UniswapV3Adapter:
 
             self._token_resolver = get_token_resolver()
 
-        # Price provider - use provided or fall back to placeholders (only if allowed)
+        # Price provider - use provided or empty dict (only if allowed for testing).
+        # When empty, amount_usd swaps will raise PriceUnavailableError instead of
+        # silently falling back to a fake price.
         self._using_placeholders = config.price_provider is None
         if self._using_placeholders:
             logger.warning(
-                "UniswapV3Adapter using PLACEHOLDER PRICES. "
-                "Slippage calculations will be INCORRECT. "
+                "UniswapV3Adapter initialized without price_provider. "
+                "amount_usd swaps will raise PriceUnavailableError. "
                 "This is only acceptable for unit tests."
             )
-            self._price_provider = self._get_placeholder_prices()
+            self._price_provider = {}
         else:
             self._price_provider = config.price_provider if config.price_provider is not None else {}
 
@@ -412,9 +427,9 @@ class UniswapV3Adapter:
             actual_token_in = token_in_address
 
             if is_native_input:
-                # Use WETH for the swap - resolve WETH address
-                weth_address = self._resolve_token("WETH")
-                actual_token_in = weth_address if weth_address else token_in_address
+                # Use chain's wrapped native (WETH/WMATIC/WAVAX/W0G/...) for the swap path
+                wrapped = self._token_resolver.resolve_for_swap(token_in, self.chain)
+                actual_token_in = wrapped.address
 
             # Build approve transaction if needed (skip for native token)
             if not is_native_input:
@@ -527,9 +542,9 @@ class UniswapV3Adapter:
             actual_token_in = token_in_address
 
             if is_native_input:
-                # Use WETH for the swap - resolve WETH address
-                weth_address = self._resolve_token("WETH")
-                actual_token_in = weth_address if weth_address else token_in_address
+                # Use chain's wrapped native (WETH/WMATIC/WAVAX/W0G/...) for the swap path
+                wrapped = self._token_resolver.resolve_for_swap(token_in, self.chain)
+                actual_token_in = wrapped.address
 
             # Build approve transaction if needed
             if not is_native_input:
@@ -616,9 +631,13 @@ class UniswapV3Adapter:
             # Convert USD to token amount
             from_price = price_oracle.get(intent.from_token.upper())
             if not from_price:
-                raise ValueError(
-                    f"Price unavailable for '{intent.from_token}' -- cannot convert amount_usd "
-                    "to token amount. Ensure the price oracle includes this token."
+                raise PriceUnavailableError(
+                    token=intent.from_token,
+                    reason=(
+                        f"[UniswapV3Adapter chain={self.chain}] Price oracle returned "
+                        f"no price for '{intent.from_token}'; cannot convert amount_usd "
+                        "to token amount. Ensure the price oracle includes this token."
+                    ),
                 )
             amount_in = intent.amount_usd / from_price
         else:
@@ -690,18 +709,37 @@ class UniswapV3Adapter:
 
         Note: SwapRouter02 doesn't have deadline in the struct.
         Deadline is handled via multicall wrapper if needed.
+
+        On chains whose router only exposes the legacy V1 interface (see
+        SWAP_ROUTER_V1_CHAIN_OVERRIDES), encode the V1 8-param struct instead
+        with an inline deadline.
         """
-        # Encode parameters for SwapRouter02 (no deadline in struct)
-        calldata = (
-            EXACT_INPUT_SINGLE_SELECTOR
-            + self._pad_address(token_in)
-            + self._pad_address(token_out)
-            + self._pad_uint24(fee)
-            + self._pad_address(recipient)
-            + self._pad_uint256(amount_in)
-            + self._pad_uint256(amount_out_minimum)
-            + self._pad_uint256(0)  # sqrtPriceLimitX96 = 0 (no limit)
-        )
+        if self._uses_v1_router():
+            # V1 selector + tokenIn, tokenOut, fee, recipient, deadline,
+            # amountIn, amountOutMinimum, sqrtPriceLimitX96.
+            deadline = int(datetime.now(UTC).timestamp()) + 600
+            calldata = (
+                EXACT_INPUT_SINGLE_V1_SELECTOR
+                + self._pad_address(token_in)
+                + self._pad_address(token_out)
+                + self._pad_uint24(fee)
+                + self._pad_address(recipient)
+                + self._pad_uint256(deadline)
+                + self._pad_uint256(amount_in)
+                + self._pad_uint256(amount_out_minimum)
+                + self._pad_uint256(0)  # sqrtPriceLimitX96 = 0 (no limit)
+            )
+        else:
+            calldata = (
+                EXACT_INPUT_SINGLE_SELECTOR
+                + self._pad_address(token_in)
+                + self._pad_address(token_out)
+                + self._pad_uint24(fee)
+                + self._pad_address(recipient)
+                + self._pad_uint256(amount_in)
+                + self._pad_uint256(amount_out_minimum)
+                + self._pad_uint256(0)  # sqrtPriceLimitX96 = 0 (no limit)
+            )
 
         # Format amounts for description
         token_in_symbol = self._get_token_symbol(token_in)
@@ -746,19 +784,34 @@ class UniswapV3Adapter:
         - uint160 sqrtPriceLimitX96
 
         Note: SwapRouter02 doesn't have deadline in the struct.
-        Deadline is handled via multicall wrapper if needed.
+        Deadline is handled via multicall wrapper if needed. V1-router chains
+        (see SWAP_ROUTER_V1_CHAIN_OVERRIDES) encode an 8-param struct with
+        deadline inline.
         """
-        # Encode parameters for SwapRouter02 (no deadline in struct)
-        calldata = (
-            EXACT_OUTPUT_SINGLE_SELECTOR
-            + self._pad_address(token_in)
-            + self._pad_address(token_out)
-            + self._pad_uint24(fee)
-            + self._pad_address(recipient)
-            + self._pad_uint256(amount_out)
-            + self._pad_uint256(amount_in_maximum)
-            + self._pad_uint256(0)  # sqrtPriceLimitX96 = 0 (no limit)
-        )
+        if self._uses_v1_router():
+            deadline = int(datetime.now(UTC).timestamp()) + 600
+            calldata = (
+                EXACT_OUTPUT_SINGLE_V1_SELECTOR
+                + self._pad_address(token_in)
+                + self._pad_address(token_out)
+                + self._pad_uint24(fee)
+                + self._pad_address(recipient)
+                + self._pad_uint256(deadline)
+                + self._pad_uint256(amount_out)
+                + self._pad_uint256(amount_in_maximum)
+                + self._pad_uint256(0)  # sqrtPriceLimitX96 = 0 (no limit)
+            )
+        else:
+            calldata = (
+                EXACT_OUTPUT_SINGLE_SELECTOR
+                + self._pad_address(token_in)
+                + self._pad_address(token_out)
+                + self._pad_uint24(fee)
+                + self._pad_address(recipient)
+                + self._pad_uint256(amount_out)
+                + self._pad_uint256(amount_in_maximum)
+                + self._pad_uint256(0)  # sqrtPriceLimitX96 = 0 (no limit)
+            )
 
         # Format amounts for description
         token_in_symbol = self._get_token_symbol(token_in)
@@ -947,19 +1000,19 @@ class UniswapV3Adapter:
             ) from e
 
     def _get_token_symbol(self, address: str) -> str:
-        """Get token symbol from address using TokenResolver."""
+        """Get token symbol from address using TokenResolver.
+
+        Uses skip_gateway=True to avoid 30-second gateway timeouts for
+        addresses not in the static registry (cosmetic usage only).
+        """
         if not address.startswith("0x"):
             return address
         try:
-            resolved = self._token_resolver.resolve(address, self.chain)
+            resolved = self._token_resolver.resolve(address, self.chain, skip_gateway=True, log_errors=False)
             return resolved.symbol
-        except TokenResolutionError as e:
-            raise TokenResolutionError(
-                token=address,
-                chain=str(self.chain),
-                reason=f"[UniswapV3Adapter] Cannot resolve symbol: {e.reason}",
-                suggestions=e.suggestions,
-            ) from e
+        except TokenResolutionError:
+            logger.debug(f"Token symbol lookup failed for {address} on {self.chain}, using truncated address")
+            return f"{address[:6]}...{address[-4:]}"
 
     def _get_token_decimals(self, symbol: str) -> int:
         """Get token decimals from symbol using TokenResolver."""
@@ -974,9 +1027,28 @@ class UniswapV3Adapter:
                 suggestions=e.suggestions,
             ) from e
 
+    def _uses_v1_router(self) -> bool:
+        """Return True when this chain/protocol must use the legacy V1 SwapRouter ABI.
+
+        Jaine on 0G Chain is the canonical example: it exposes only the
+        8-param exactInputSingle/exactOutputSingle with deadline. The intent
+        compiler uses SWAP_ROUTER_V1_CHAIN_OVERRIDES for the same decision;
+        we key off the same source of truth here.
+        """
+        chain_key = str(self.chain).lower()
+        if "uniswap_v3" in SWAP_ROUTER_V1_CHAIN_OVERRIDES.get(chain_key, frozenset()):
+            return True
+        return "uniswap_v3" in SWAP_ROUTER_V1_PROTOCOLS
+
     def _is_native_token(self, token: str) -> bool:
-        """Check if token is the native token (ETH, MATIC, AVAX, BNB, MNT, etc.)."""
-        native_tokens = {"ETH", "MATIC", "AVAX", "BNB", "MNT"}
+        """Check if token is the native token (ETH, MATIC, AVAX, BNB, MNT, A0GI, etc.).
+
+        "0G" is intentionally NOT in this set: the canonical native symbol for
+        0G Chain is A0GI (matches the token registry). Accepting "0G" here
+        would make _is_native_token advertise a symbol that resolve_for_swap
+        cannot resolve, causing a TokenNotFoundError at the wrap step.
+        """
+        native_tokens = {"ETH", "MATIC", "AVAX", "BNB", "MNT", "A0GI"}
         if token.upper() in native_tokens:
             return True
         # Check native placeholder address
@@ -984,45 +1056,6 @@ class UniswapV3Adapter:
         if token.lower() == native_placeholder:
             return True
         return False
-
-    def _get_placeholder_prices(self) -> dict[str, Decimal]:
-        """Get placeholder price data for testing only.
-
-        WARNING: These prices are HARDCODED and OUTDATED.
-        DO NOT USE IN PRODUCTION - they will cause:
-        - Incorrect slippage calculations
-        - Swap reverts (amountOutMinimum too high)
-
-        Real prices as of 2026-01: ETH ~$3400, BTC ~$105,000
-        These placeholders show ETH at $2000, BTC at $45,000 - 40-60% wrong!
-        """
-        logger.warning(
-            "PLACEHOLDER PRICES being used - NOT SAFE FOR PRODUCTION. "
-            "ETH=$2000 (real ~$3400), BTC=$45000 (real ~$105000)"
-        )
-        return {
-            "ETH": Decimal("2000"),
-            "WETH": Decimal("2000"),
-            "WETH.e": Decimal("2000"),
-            "USDC": Decimal("1"),
-            "USDC.e": Decimal("1"),
-            "USDT": Decimal("1"),
-            "DAI": Decimal("1"),
-            "DAI.e": Decimal("1"),
-            "WBTC": Decimal("45000"),
-            "WBTC.e": Decimal("45000"),
-            "BTCB": Decimal("45000"),
-            "ARB": Decimal("1.20"),
-            "OP": Decimal("2.50"),
-            "MATIC": Decimal("0.80"),
-            "WMATIC": Decimal("0.80"),
-            "AVAX": Decimal("35"),
-            "WAVAX": Decimal("35"),
-            "BNB": Decimal("300"),
-            "WBNB": Decimal("300"),
-            "MNT": Decimal("1"),
-            "WMNT": Decimal("1"),
-        }
 
     def _get_default_price_oracle(self) -> dict[str, Decimal]:
         """Get price oracle data (uses instance price provider).

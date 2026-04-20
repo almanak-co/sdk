@@ -920,10 +920,11 @@ class StargateBridgeAdapter(BridgeAdapter):
         token: str,
         amount_wei: int,
     ) -> Decimal:
-        """Estimate LayerZero messaging fee.
+        """Estimate LayerZero messaging fee in the source chain's native token.
 
-        This is an approximate calculation. In production, the actual fee
-        would be queried from the LayerZero endpoint contract.
+        TODO: Replace with on-chain ``quoteSend()`` call to the Stargate pool
+        contract for exact fees. The current hardcoded estimates are conservative
+        overestimates (3x safety multiplier) to prevent transaction reverts.
 
         Args:
             from_chain: Source chain name
@@ -932,28 +933,55 @@ class StargateBridgeAdapter(BridgeAdapter):
             amount_wei: Amount in wei
 
         Returns:
-            Estimated fee in ETH
+            Estimated fee in source chain native token (e.g. ETH, AVAX)
         """
-        # Base fee varies by destination chain
-        # These are approximate values in ETH
-        base_fees: dict[str, Decimal] = {
-            "ethereum": Decimal("0.001"),
-            "arbitrum": Decimal("0.0003"),
-            "optimism": Decimal("0.0003"),
-            "polygon": Decimal("0.0005"),
-            "base": Decimal("0.0003"),
-            "avalanche": Decimal("0.0005"),
-            "bsc": Decimal("0.0003"),
+        # Observed LZ messaging fees by (source, destination) pair.
+        # Values are in the source chain's native token.
+        # Measured 2026-03-31; fees fluctuate with gas prices.
+        route_fees: dict[tuple[str, str], Decimal] = {
+            # Avalanche routes (fee paid in AVAX)
+            ("avalanche", "base"): Decimal("0.007"),
+            ("avalanche", "arbitrum"): Decimal("0.007"),
+            ("avalanche", "ethereum"): Decimal("0.01"),
+            ("avalanche", "optimism"): Decimal("0.007"),
+            ("avalanche", "polygon"): Decimal("0.008"),
+            ("avalanche", "bsc"): Decimal("0.008"),
+            # Polygon routes (fee paid in MATIC/POL)
+            ("polygon", "base"): Decimal("0.5"),
+            ("polygon", "arbitrum"): Decimal("0.5"),
+            ("polygon", "ethereum"): Decimal("0.8"),
+            ("polygon", "avalanche"): Decimal("0.5"),
+            # BSC routes (fee paid in BNB)
+            ("bsc", "base"): Decimal("0.001"),
+            ("bsc", "arbitrum"): Decimal("0.001"),
+            ("bsc", "ethereum"): Decimal("0.002"),
+            ("bsc", "avalanche"): Decimal("0.001"),
         }
 
-        # Get base fee for destination
-        base_fee = base_fees.get(to_chain, Decimal("0.0005"))
+        # Fallback: base fee by source chain (native token)
+        source_base_fees: dict[str, Decimal] = {
+            "ethereum": Decimal("0.003"),
+            "arbitrum": Decimal("0.001"),
+            "optimism": Decimal("0.001"),
+            "base": Decimal("0.001"),
+            "avalanche": Decimal("0.008"),
+            "polygon": Decimal("0.6"),
+            "bsc": Decimal("0.001"),
+        }
+
+        # Try route-specific fee first, then source-chain default
+        route_key = (from_chain.lower(), to_chain.lower())
+        base_fee = route_fees.get(route_key, source_base_fees.get(from_chain.lower(), Decimal("0.003")))
+
+        # 3x safety multiplier — conservative overestimate is better than a revert
+        safety_multiplier = Decimal("3")
+        fee = base_fee * safety_multiplier
 
         # Add small amount for larger transfers (gas cost scales slightly)
-        if amount_wei > 10**24:  # > ~1M in smallest unit
-            base_fee *= Decimal("1.2")
+        if amount_wei > 10**24:
+            fee *= Decimal("1.2")
 
-        return base_fee
+        return fee
 
 
 # =============================================================================

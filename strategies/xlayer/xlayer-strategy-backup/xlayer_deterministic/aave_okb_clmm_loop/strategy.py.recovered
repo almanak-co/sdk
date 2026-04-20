@@ -1,0 +1,85 @@
+Unsupported Node type: 12
+# Source Generated with Decompyle++
+# File: strategy.cpython-312.pyc (Python 3.12)
+
+'''Aave OKB Supply-Borrow Loop on X-Layer.
+
+Full lifecycle implementation of the spec at
+``playground/xlayer/aave-uniswap/specs.md`` (ID cmnt8k6v2005saopppn2hx9bx).
+
+Thesis
+------
+Lending protocols on new chains often offer implicit yield on native tokens.
+Borrowing OKB against stable collateral is a capital-efficient way to gain
+exposure to X-Layer\'s ecosystem yield opportunities, assuming the yield from
+deploying OKB exceeds its borrow cost.
+
+Mechanism
+---------
+1. Supply stable collateral to Aave V3.6 on X-Layer
+2. Borrow a borrowable Aave reserve at 60% LTV (health factor target >= 1.6)
+3. If the borrowed asset is neither LP leg, swap it 100% into ``lp_token1``
+   (the stable side of the LP, default USDT). Using ``lp_token1`` as the
+   conversion target lets the subsequent split reuse the WOKB/USDT pool
+   we are about to LP into, avoiding exotic multi-hop route lookups.
+4. Split into both LP legs:
+     - If we now hold ``lp_token1`` (USDT): swap half to ``lp_token0`` (WOKB)
+     - If we now hold ``lp_token0`` (WOKB): swap half to ``lp_token1`` (USDT)
+5. Deposit WOKB + USDT into the Uniswap V3 WOKB/USDT/3000 CLMM pool
+   around the current pair price with a configurable range width
+
+Risks
+-----
+* Liquidation: a large OKB/collateral relative price move at 60% LTV
+  triggers liquidation. The strategy holds ~40% headroom by default
+  (``min_health_factor`` = 1.6).
+* Impermanent Loss: OKB moves outside the CLMM range. Mitigated by the
+  ``lp_range_width_pct`` setting (default +/-10%).
+* Rate spikes: if OKB borrow APR exceeds CLMM fee APR, net yield can go
+  negative. The spec calls for an exit when the spread drops below 5% for
+  24 consecutive hours; the runner/operator is expected to trigger teardown
+  when that external signal fires.
+
+Deviations from spec on X-Layer
+-------------------------------
+1. The spec calls for supplying **WETH** as collateral. On X-Layer\'s Aave V3.6
+   deployment, the ETH-equivalent reserve is ``xETH`` (address
+   ``0xE7B000003A45145decf8a28FC755aD5eC5EA025A``) and it has very limited
+   pool liquidity on Anvil forks. Default ``supply_token`` is **USDT0** (LTV=70%).
+   Override to ``xETH`` or ``xBTC`` in ``config.json`` if you have live-chain
+   access with sufficient liquidity.
+
+2. The spec calls for **borrowing OKB**. On X-Layer\'s Aave V3.6 deployment,
+   ``WOKB`` is listed as a reserve but has ``borrowingEnabled=false`` (verified
+   on-chain: BORROW reverts with ``BorrowingNotEnabled()`` selector 0x53587745).
+   The default ``borrow_token`` is therefore **USDG** (Gravity USD, borrow-side
+   enabled), and the strategy adds a debt-asset conversion step that swaps the
+   borrowed USDG into WOKB before the 50/50 LP split. If Aave governance later
+   enables WOKB borrowing on X-Layer, set ``borrow_token: "WOKB"`` in
+   ``config.json`` and the conversion step is automatically skipped.
+
+X-Layer Aave V3.6 reserves (verified on-chain, iter 165):
+  - USDT0 (USD_T0 0x779Ded...): LTV=70%, borrowingEnabled=true
+  - xETH (0xE7B000...): LTV=70%, borrowingEnabled=true (limited liquidity)
+  - xBTC (0xb7C000...): LTV=70%, borrowingEnabled=true
+  - WOKB: LTV=0, borrowingEnabled=false (not usable as collateral or debt)
+  - GHO, USDG: borrow-side only (LTV=0, borrowingEnabled=true)
+
+Usage
+-----
+::
+
+    almanak strat run -d strategies/xlayer/aave_okb_clmm_loop --network anvil --once
+'''
+import logging
+import math
+import time
+from datetime import UTC, datetime
+from decimal import ROUND_DOWN, Decimal
+from typing import TYPE_CHECKING, Any
+from almanak.framework.intents import Intent
+from almanak.framework.strategies import IntentStrategy, MarketSnapshot, almanak_strategy
+logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
+XLayerAaveOkbClmmLoopStrategy = <NODE:12>()

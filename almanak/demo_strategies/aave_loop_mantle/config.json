@@ -1,7 +1,21 @@
 {
-    "strategy_id": "demo_aave_loop_mantle",
-    "strategy_name": "demo_aave_loop_mantle",
-    "description": "Aave V3 looping strategy on Mantle - supply WETH, borrow USDC, swap back to WETH, re-supply",
+    "chain": "mantle",
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0xdeaddeaddeaddeaddeaddeaddeaddeaddead1111",
+            "chain": "mantle",
+            "amount": "0.05",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0x09bc4e0d864854c6afb6eb9a9cdf58ac190d0df9",
+            "chain": "mantle",
+            "amount": "50",
+            "amount_type": "usd"
+        }
+    ],
     "supply_token": "WETH",
     "borrow_token": "USDC",
     "initial_supply_amount": "0.01",
@@ -10,7 +24,6 @@
     "min_health_factor": 1.5,
     "max_slippage_bps": 300,
     "interest_rate_mode": "variable",
-    "chain": "mantle",
     "anvil_funding": {
         "MNT": 100,
         "WETH": 0.02,

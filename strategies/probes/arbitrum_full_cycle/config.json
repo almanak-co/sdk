@@ -1,0 +1,14 @@
+{
+    "chain": "base",
+    "chains": ["base", "arbitrum"],
+    "target_chain": "arbitrum",
+    "budget_usd": 2,
+    "relay_token": "USDC",
+    "intermediate_token": "WETH",
+    "max_slippage_pct": 1.0,
+    "swap_protocols": ["uniswap_v3", "pancakeswap_v3"],
+    "swap_amount_per_protocol_usd": 0.25,
+    "lending_protocol": "aave_v3",
+    "lending_supply_amount": "0.0002",
+    "lending_borrow_usd": 0.15
+}

@@ -14,6 +14,7 @@ import pytest
 from almanak.gateway.validation import (
     ALLOWED_RPC_METHODS,
     ALLOWED_SOLANA_RPC_METHODS,
+    ANVIL_ONLY_RPC_METHODS,
     SOLANA_TX_SIGNATURE_PATTERN,
     ValidationError,
     is_solana_chain,
@@ -240,3 +241,54 @@ class TestEvmRpcUnchanged:
     def test_evm_tx_hash_still_works(self):
         result = validate_tx_hash(VALID_EVM_TX_HASH)
         assert result == VALID_EVM_TX_HASH
+
+
+class TestAnvilOnlyRpcMethods:
+    """validate_rpc_method() Anvil-only method gating (VIB-1530)."""
+
+    def test_anvil_methods_allowed_on_anvil_network(self):
+        """Anvil test methods are accepted when network='anvil'."""
+        for method in ("evm_increaseTime", "evm_mine", "evm_snapshot", "evm_revert"):
+            result = validate_rpc_method(method, network="anvil")
+            assert result == method
+
+    def test_all_anvil_methods_allowed_on_anvil_network(self):
+        """Every method in ANVIL_ONLY_RPC_METHODS passes when network='anvil'."""
+        for method in ANVIL_ONLY_RPC_METHODS:
+            result = validate_rpc_method(method, network="anvil")
+            assert result == method
+
+    def test_anvil_methods_blocked_on_mainnet(self):
+        """Anvil test methods are rejected when network='mainnet'."""
+        for method in ("evm_increaseTime", "evm_mine", "evm_snapshot"):
+            with pytest.raises(ValidationError, match="not allowed"):
+                validate_rpc_method(method, network="mainnet")
+
+    def test_anvil_methods_blocked_without_network(self):
+        """Anvil test methods are rejected when no network is specified (default mainnet)."""
+        for method in ("evm_increaseTime", "evm_mine"):
+            with pytest.raises(ValidationError, match="not allowed"):
+                validate_rpc_method(method)
+
+    def test_anvil_network_does_not_allow_debug_methods(self):
+        """Even on Anvil, dangerous debug_* methods remain blocked."""
+        with pytest.raises(ValidationError, match="not allowed"):
+            validate_rpc_method("debug_traceTransaction", network="anvil")
+
+    def test_anvil_network_still_accepts_evm_methods(self):
+        """Normal EVM methods still work when network='anvil'."""
+        for method in ("eth_call", "eth_getBalance", "eth_blockNumber"):
+            result = validate_rpc_method(method, network="anvil")
+            assert result == method
+
+    def test_anvil_methods_blocked_on_solana_chain(self):
+        """Anvil methods should be blocked for Solana chains regardless of network."""
+        with pytest.raises(ValidationError, match="not allowed for Solana"):
+            validate_rpc_method("evm_increaseTime", chain="solana", network="anvil")
+
+    def test_anvil_only_methods_not_in_evm_allowlist(self):
+        """Anvil-only methods must NOT be in the standard EVM allowlist."""
+        for method in ANVIL_ONLY_RPC_METHODS:
+            assert method not in ALLOWED_RPC_METHODS, (
+                f"'{method}' should only be available on Anvil, not in the main EVM allowlist"
+            )

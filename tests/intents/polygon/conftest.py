@@ -34,6 +34,7 @@ from tests.intents.conftest import (
     get_token_balance,
     get_token_decimals,
     make_intent_test_web3,
+    reset_fork_to_pristine,
     seed_wallet_state_with_recovery,
 )
 
@@ -154,7 +155,11 @@ def funded_wallet(web3: Web3, anvil_rpc_url: str, anvil_instance: AnvilFixture) 
     Polygon-specific: WETH and USDT are PoS-bridged UChildERC20Proxy tokens.
     They cannot be wrapped from native MATIC, so we use storage slot manipulation
     and verify the resulting balance.
+
+    Reverts the fork to session pristine state first so each test module gets a
+    clean slate independent of prior modules on the same chain (VIB-3059).
     """
+    reset_fork_to_pristine(web3)
     return seed_wallet_state_with_recovery(
         seed_wallet_state=_seed_wallet_state,
         web3=web3,

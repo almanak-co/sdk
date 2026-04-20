@@ -1,0 +1,31 @@
+{
+    "chain": "arbitrum",
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+            "chain": "arbitrum",
+            "amount": "0.05",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            "chain": "arbitrum",
+            "amount": "50",
+            "amount_type": "usd"
+        }
+    ],
+    "supply_token": "WETH",
+    "borrow_token": "USDC",
+    "supply_amount": "0.01",
+    "ltv_target": "0.4",
+    "price_drop_threshold": "0.02",
+    "price_rise_threshold": "0.03",
+    "max_borrow_cycles": 3,
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 2,
+        "USDC": 10000
+    }
+}

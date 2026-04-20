@@ -1,0 +1,34 @@
+{
+    "chain": "avalanche",
+    "token_funding": [
+        {
+            "symbol": "WAVAX",
+            "address": "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7",
+            "chain": "avalanche",
+            "amount": "2",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
+            "chain": "avalanche",
+            "amount": "50",
+            "amount_type": "usd"
+        }
+    ],
+    "pool": "WAVAX/USDC/20",
+    "range_width_pct": "0.10",
+    "amount_x": "0.5",
+    "amount_y": "15",
+    "num_bins": 11,
+    "rsi_period": 14,
+    "rsi_oversold": "30",
+    "rsi_overbought": "70",
+    "reentry_cooldown": 2,
+    "max_lp_cycles": 5,
+    "anvil_funding": {
+        "AVAX": 100,
+        "WAVAX": 50,
+        "USDC": 10000
+    }
+}

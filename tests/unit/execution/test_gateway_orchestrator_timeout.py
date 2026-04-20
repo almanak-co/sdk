@@ -117,3 +117,53 @@ class TestExecuteUsesExecuteTimeout:
         assert call_kwargs.kwargs.get("timeout") == 600.0 or (
             call_kwargs.args and call_kwargs.args[-1] == 600.0
         ), f"Expected timeout=600.0, got call args: {call_kwargs}"
+
+
+class TestChainReceiptTimeouts:
+    """Per-chain receipt timeout defaults (VIB-1580)."""
+
+    def test_bsc_gets_longer_default_timeout(self):
+        """BSC should default to 300s receipt timeout, not 120s."""
+        from almanak.framework.execution.chain_executor import ChainExecutorConfig
+
+        cfg = ChainExecutorConfig(
+            chain="bsc",
+            rpc_url="http://localhost:8545",
+            private_key="0x" + "a" * 64,
+        )
+        assert cfg.tx_timeout_seconds == 300
+
+    def test_avalanche_gets_longer_default_timeout(self):
+        """Avalanche should default to 180s receipt timeout."""
+        from almanak.framework.execution.chain_executor import ChainExecutorConfig
+
+        cfg = ChainExecutorConfig(
+            chain="avalanche",
+            rpc_url="http://localhost:8545",
+            private_key="0x" + "a" * 64,
+        )
+        assert cfg.tx_timeout_seconds == 180
+
+    def test_arbitrum_keeps_default_timeout(self):
+        """Fast chains should keep the default 120s timeout."""
+        from almanak.framework.execution.chain_executor import ChainExecutorConfig
+
+        cfg = ChainExecutorConfig(
+            chain="arbitrum",
+            rpc_url="http://localhost:8545",
+            private_key="0x" + "a" * 64,
+        )
+        assert cfg.tx_timeout_seconds == 120
+
+    def test_explicit_timeout_is_respected_for_bsc(self):
+        """Explicit tx_timeout_seconds overrides the per-chain default."""
+        from almanak.framework.execution.chain_executor import ChainExecutorConfig
+
+        cfg = ChainExecutorConfig(
+            chain="bsc",
+            rpc_url="http://localhost:8545",
+            private_key="0x" + "a" * 64,
+            tx_timeout_seconds=60,
+        )
+        # User explicitly set 60s -- should NOT be overridden by the BSC default (300s)
+        assert cfg.tx_timeout_seconds == 60

@@ -366,7 +366,13 @@ class AlchemySimulator(Simulator):
                     )
                 continue
 
-            # Check each call for errors
+            # Alchemy returns ALL internal sub-calls in the `calls` array for each
+            # transaction. We must sum gas across all sub-calls to get the total
+            # gas used by the outer transaction. Previously, each sub-call was
+            # appended individually, causing a count mismatch (e.g., 27 gas estimates
+            # for a 3-TX bundle) and assigning wrong sub-call gas to transactions.
+            tx_total_gas = 0
+
             for call in calls:
                 if "error" in call:
                     error_msg = call.get("error", "Unknown error")
@@ -391,23 +397,27 @@ class AlchemySimulator(Simulator):
                             revert_reason=revert_reason,
                         )
 
-                # Extract gas used - return raw value without buffer.
+                # Extract gas used from each sub-call and accumulate for the transaction.
                 # The orchestrator applies the gas buffer exactly once in _update_gas_estimate().
                 gas_used_hex = call.get("gasUsed", "0x0")
                 gas_used = int(gas_used_hex, 16) if gas_used_hex.startswith("0x") else int(gas_used_hex)
+                tx_total_gas += gas_used
 
-                if gas_used == 0:
-                    logger.warning(f"Transaction {i}: returned 0 gas_used")
-                    gas_used = 100000  # Conservative default
-
-                gas_estimates.append(gas_used)
-
-                logger.debug(f"Transaction {i}: gas_used={gas_used}")
+                logger.debug(f"Transaction {i}, sub-call: gas_used={gas_used}")
 
                 # Collect logs
                 call_logs = call.get("logs", [])
                 if call_logs:
                     logs.extend(call_logs)
+
+            # Use the total gas across all sub-calls for this transaction.
+            # If the total is 0 (all sub-calls returned 0), use a conservative default.
+            if tx_total_gas == 0:
+                logger.warning(f"Transaction {i}: all sub-calls returned 0 gas_used")
+                tx_total_gas = 100000  # Conservative default
+
+            gas_estimates.append(tx_total_gas)
+            logger.debug(f"Transaction {i}: total gas_used={tx_total_gas} ({len(calls)} sub-calls)")
 
         # Verify we got estimates for all transactions
         if len(gas_estimates) != expected_count:

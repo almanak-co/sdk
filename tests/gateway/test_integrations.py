@@ -16,10 +16,17 @@ from almanak.gateway.integrations.base import (
 from almanak.gateway.integrations.binance import BinanceIntegration
 from almanak.gateway.integrations.coingecko import CoinGeckoIntegration
 from almanak.gateway.integrations.thegraph import TheGraphIntegration
+from almanak.gateway.integrations.zerion import ZerionIntegration
 
 # =============================================================================
 # Base Integration Tests
 # =============================================================================
+
+
+@pytest.fixture
+def thegraph():
+    """Module-level TheGraph fixture for tests outside the original class."""
+    return TheGraphIntegration()
 
 
 class TestRateLimiter:
@@ -295,3 +302,79 @@ class TestTheGraphIntegration:
                 subgraph_id="unknown-subgraph",
                 query="{ _meta { block { number } } }",
             )
+
+
+# =============================================================================
+# Zerion Integration Tests
+# =============================================================================
+
+
+class TestZerionIntegration:
+    """Tests for ZerionIntegration."""
+
+    @pytest.fixture
+    def zerion(self):
+        """Create Zerion integration."""
+        return ZerionIntegration(api_key="test-portfolio-key", cache_ttl=60)
+
+    def test_initialization(self, zerion):
+        """Zerion integration initializes correctly."""
+        assert zerion.name == "zerion"
+        assert zerion.default_cache_ttl == 60
+
+    def test_auth_header_uses_basic_prefix(self, zerion):
+        """Zerion uses the expected Authorization header shape (base64 encoded)."""
+        import base64
+
+        headers = zerion._get_headers()
+        expected = base64.b64encode(b"test-portfolio-key:").decode()
+        assert headers["Authorization"] == f"Basic {expected}"
+
+    @pytest.mark.asyncio
+    async def test_get_wallet_positions_normalizes_and_caches(self, zerion):
+        """Wallet positions are normalized and cached per wallet+chain."""
+        mock_payload = {
+            "data": [
+                {
+                    "id": "pos-1",
+                    "type": "liquidity_position",
+                    "attributes": {
+                        "protocol_name": "traderjoe_v2",
+                        "name": "WAVAX/USDT LB",
+                        "value": "4.70",
+                        "pool_address": "0xpool",
+                        "tokens": [{"symbol": "WAVAX"}, {"symbol": "USDT"}],
+                    },
+                }
+            ]
+        }
+
+        with patch.object(zerion, "_fetch", return_value=mock_payload) as fetch_mock:
+            first = await zerion.get_wallet_positions("0x1234567890123456789012345678901234567890", "avalanche")
+            second = await zerion.get_wallet_positions("0x1234567890123456789012345678901234567890", "avalanche")
+
+        assert first.total_value_usd == "4.70"
+        assert len(first.positions) == 1
+        assert first.positions[0].protocol == "traderjoe_v2"
+        assert first.positions[0].pool_address == "0xpool"
+        assert first.positions[0].token_symbols == ["WAVAX", "USDT"]
+        assert second.cache_hit is True
+        fetch_mock.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_wallet_portfolio_extracts_embedded_total(self, zerion):
+        """Wallet portfolio total is extracted from Zerion payload."""
+        mock_payload = {
+            "data": {
+                "attributes": {
+                    "total_value": "152.25",
+                }
+            }
+        }
+
+        with patch.object(zerion, "_fetch", return_value=mock_payload):
+            snapshot = await zerion.get_wallet_portfolio("0x1234567890123456789012345678901234567890", "base")
+
+        assert snapshot.total_value_usd == "152.25"
+        assert snapshot.chain == "base"
+

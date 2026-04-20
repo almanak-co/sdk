@@ -1,0 +1,30 @@
+{
+    "chain": "sonic",
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0x50c42deacd8fc9773493ed674b675be577f2634b",
+            "chain": "sonic",
+            "amount": "0.05",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0x29219dd400f2bf60e5a23d13be72b486d4038894",
+            "chain": "sonic",
+            "amount": "250",
+            "amount_type": "usd"
+        }
+    ],
+    "collateral_token": "USDC",
+    "collateral_amount": "100",
+    "borrow_token": "WETH",
+    "ltv_target": 0.3,
+    "borrow_amount_override": "0.01",
+    "force_action": "lifecycle",
+    "anvil_funding": {
+        "S": 100,
+        "WETH": 10,
+        "USDC": 10000
+    }
+}

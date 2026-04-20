@@ -18,14 +18,20 @@ Reference: https://github.com/drift-labs/protocol-v2
 
 from __future__ import annotations
 
+import binascii
+import json
 import logging
 import struct
+from typing import TYPE_CHECKING
 
 import requests
 from requests.adapters import HTTPAdapter
 from solders.instruction import AccountMeta, Instruction
 from solders.pubkey import Pubkey
 from urllib3.util.retry import Retry
+
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
 
 from .constants import (
     ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -85,6 +91,7 @@ class DriftSDK:
         wallet_address: str,
         rpc_url: str = "",
         timeout: int = 30,
+        gateway_client: GatewayClient | None = None,
     ) -> None:
         if not wallet_address:
             raise DriftConfigError("wallet_address is required", parameter="wallet_address")
@@ -92,9 +99,23 @@ class DriftSDK:
         self.wallet_address = wallet_address
         self.rpc_url = rpc_url
         self.timeout = timeout
+        self._gateway_client = gateway_client
         self._authority = Pubkey.from_string(wallet_address)
         self._program_id = Pubkey.from_string(DRIFT_PROGRAM_ID)
-        self._setup_session()
+        # True when we have any transport for account reads — either a
+        # gateway client (preferred) or a direct RPC URL (deprecated).
+        # Used by public read helpers to gate on-chain queries.
+        self._has_rpc_transport = gateway_client is not None or bool(rpc_url)
+        # Only set up the direct-RPC session when there's no gateway client
+        # AND we actually have an rpc_url to talk to. With the gateway, all
+        # RPC goes through gRPC — no retry session needed (retry/backoff is
+        # the gateway's concern — Phase 6 / VIB-2984). When neither
+        # transport is configured we tolerate construction so offline unit
+        # tests (instruction building, PDA derivation, etc.) still work;
+        # _fetch_account_data guards the actual call path.
+        self.session: requests.Session | None = None
+        if gateway_client is None and rpc_url:
+            self._setup_session()
 
         logger.info(f"DriftSDK initialized for wallet={wallet_address[:8]}...")
 
@@ -186,7 +207,7 @@ class DriftSDK:
         Returns:
             DriftUserAccount with parsed positions, or exists=False if not found
         """
-        if not self.rpc_url:
+        if not self._has_rpc_transport:
             return DriftUserAccount(exists=False)
 
         user_pda = self.get_user_pda(sub_account_id=sub_account_id)
@@ -210,7 +231,7 @@ class DriftSDK:
         Returns:
             Oracle Pubkey or None if not found
         """
-        if not self.rpc_url:
+        if not self._has_rpc_transport:
             return None
 
         market_pda = self.get_perp_market_pda(market_index)
@@ -234,7 +255,7 @@ class DriftSDK:
 
     def fetch_spot_market_oracle(self, market_index: int) -> Pubkey | None:
         """Fetch the oracle pubkey from a spot market account."""
-        if not self.rpc_url:
+        if not self._has_rpc_transport:
             return None
 
         market_pda = self.get_spot_market_pda(market_index)
@@ -268,12 +289,40 @@ class DriftSDK:
             ],
         }
 
-        try:
-            response = self.session.post(self.rpc_url, json=payload, timeout=self.timeout)
-            response.raise_for_status()
-            result = response.json()
+        if self._gateway_client is None and not self.rpc_url:
+            logger.warning(f"Cannot fetch account data for {address}: no gateway_client or rpc_url")
+            return None
 
-            value = result.get("result", {}).get("value")
+        try:
+            if self._gateway_client is not None:
+                # Route through gateway RpcService (chain="solana" allowlist
+                # covers getAccountInfo — verified in Phase 0).
+                import json as _json
+
+                from almanak.gateway.proto import gateway_pb2
+
+                rpc_request = gateway_pb2.RpcRequest(
+                    chain="solana",
+                    method="getAccountInfo",
+                    params=_json.dumps(payload["params"]),
+                    id=str(payload["id"]),
+                )
+                response = self._gateway_client.rpc.Call(rpc_request, timeout=self.timeout)
+                if not response.success:
+                    logger.warning(f"Gateway RPC call failed for {address}: {response.error}")
+                    return None
+                result = _json.loads(response.result) if response.result else {}
+                # Gateway returns the raw JSON-RPC "result" field (i.e., the
+                # RpcResponse context, not the full envelope), so value is nested.
+                value = result.get("value") if isinstance(result, dict) else None
+            else:
+                # session is always set when gateway_client is None (see __init__)
+                assert self.session is not None, "session must be initialized when no gateway_client"
+                response = self.session.post(self.rpc_url, json=payload, timeout=self.timeout)
+                response.raise_for_status()
+                full_result = response.json()
+                value = full_result.get("result", {}).get("value")
+
             if value is None:
                 return None
 
@@ -287,6 +336,11 @@ class DriftSDK:
 
         except requests.exceptions.RequestException as e:
             logger.warning(f"RPC request failed for {address}: {e}")
+            return None
+        except (ValueError, KeyError, TypeError, binascii.Error, json.JSONDecodeError) as e:
+            # Narrow to parser/decoder errors so programming bugs (AttributeError,
+            # NameError, etc.) surface instead of being silently logged.
+            logger.warning(f"RPC response parse failed for {address}: {e}")
             return None
 
     def _parse_user_account(self, data: bytes, sub_account_id: int) -> DriftUserAccount:
@@ -416,8 +470,8 @@ class DriftSDK:
         perp_indexes: set[int] = {market_index}
         spot_indexes: set[int] = {0}  # Always include USDC (spot market 0)
 
-        # If we have RPC, fetch user account to find existing positions
-        if self.rpc_url:
+        # If we have any RPC transport, fetch user account to find existing positions
+        if self._has_rpc_transport:
             user_account = self.fetch_user_account(sub_account_id)
             if user_account.exists:
                 perp_indexes.update(user_account.active_perp_market_indexes)
@@ -622,8 +676,8 @@ class DriftSDK:
         """
         instructions: list[Instruction] = []
 
-        if not self.rpc_url:
-            # Without RPC we can't check, assume accounts exist
+        if not self._has_rpc_transport:
+            # Without any RPC transport we can't check, assume accounts exist
             return instructions
 
         # Check if user stats account exists

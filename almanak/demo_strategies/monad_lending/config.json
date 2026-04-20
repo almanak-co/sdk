@@ -1,0 +1,44 @@
+{
+    "strategy_name": "monad_lending",
+    "description": "Curvance full lending lifecycle on Monad: supply WMON -> borrow USDC -> repay -> redeem collateral",
+    "chain": "monad",
+    "network": "anvil",
+    "tokens": [
+        "WMON",
+        "USDC",
+        "MON"
+    ],
+    "market_id": "0xa6A2A92F126b79Ee0804845ee6B52899b4491093",
+    "collateral_token": "WMON",
+    "collateral_amount": "30",
+    "borrow_token": "USDC",
+    "borrow_amount_override": "15",
+    "ltv_target": "0.25",
+    "anvil_funding": {
+        "MON": 100,
+        "WMON": 50,
+        "USDC": 100
+    },
+    "token_funding": [
+        {
+            "symbol": "MON",
+            "chain": "monad",
+            "amount": "100",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "WMON",
+            "address": "0x3bd359c1119da7da1d913d1c4d2b7c461115433a",
+            "chain": "monad",
+            "amount": "50",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0x754704bc059f8c67012fed69bc8a327a5aafb603",
+            "chain": "monad",
+            "amount": "100",
+            "amount_type": "usd"
+        }
+    ]
+}

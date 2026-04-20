@@ -8,12 +8,15 @@ Tests cover:
 - Clearing events
 - Persistence and reload from SQLite
 - Thread safety with concurrent operations
+- Deployed-mode AGENT_ID resolution
 """
 
+import os
 import tempfile
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -561,6 +564,131 @@ class TestTimelineStoreThreadSafety:
         assert errors == [], f"Errors during concurrent operations: {errors}"
         # All reads should have gotten some events
         assert all(count > 0 for count in read_counts)
+
+
+class TestTimelineStoreAgentIdResolution:
+    """Tests for deployed-mode AGENT_ID resolution.
+
+    In deployed mode (PostgreSQL backend), the TimelineStore resolves
+    SDK strategy_id to the platform AGENT_ID env var. This ensures
+    timeline data is keyed consistently with lifecycle tables.
+    """
+
+    def test_resolve_agent_id_passthrough_without_env(self):
+        """Without AGENT_ID env var, strategy_id is returned as-is."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AGENT_ID", None)
+            assert TimelineStore._resolve_agent_id("uniswap_rsi:abc123") == "uniswap_rsi:abc123"
+
+    def test_resolve_agent_id_with_env(self):
+        """With AGENT_ID env var, the platform ID is returned."""
+        with patch.dict(os.environ, {"AGENT_ID": "platform-uuid-123"}):
+            assert TimelineStore._resolve_agent_id("uniswap_rsi:abc123") == "platform-uuid-123"
+
+    def test_resolve_agent_id_blank_env_falls_back(self):
+        """With blank AGENT_ID env var, strategy_id is returned."""
+        with patch.dict(os.environ, {"AGENT_ID": "  "}):
+            assert TimelineStore._resolve_agent_id("uniswap_rsi:abc123") == "uniswap_rsi:abc123"
+
+    def test_inmemory_store_ignores_agent_id(self):
+        """In-memory store (no PG) does NOT resolve AGENT_ID — local mode."""
+        with patch.dict(os.environ, {"AGENT_ID": "platform-uuid-123"}):
+            store = TimelineStore(db_path=None)  # No database_url → not PG
+            store.initialize()
+
+            event = TimelineEvent(
+                event_id="test-1",
+                strategy_id="uniswap_rsi:abc123",
+                timestamp=datetime.now(UTC),
+                event_type="TRADE",
+                description="Test",
+            )
+            store.add_event(event)
+
+            # In-memory store should cache under SDK strategy_id (no resolution)
+            assert "uniswap_rsi:abc123" in store.get_strategy_ids()
+            assert len(store.get_events("uniswap_rsi:abc123")) == 1
+
+    def test_sqlite_store_ignores_agent_id(self):
+        """SQLite store does NOT resolve AGENT_ID — local mode."""
+        with patch.dict(os.environ, {"AGENT_ID": "platform-uuid-123"}):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = Path(tmpdir) / "timeline.db"
+                store = TimelineStore(db_path=db_path)
+                store.initialize()
+
+                event = TimelineEvent(
+                    event_id="test-1",
+                    strategy_id="uniswap_rsi:abc123",
+                    timestamp=datetime.now(UTC),
+                    event_type="TRADE",
+                    description="Test",
+                )
+                store.add_event(event)
+
+                # SQLite store should cache under SDK strategy_id (no resolution)
+                assert "uniswap_rsi:abc123" in store.get_strategy_ids()
+                assert len(store.get_events("uniswap_rsi:abc123")) == 1
+
+    def test_postgres_flag_enables_resolution_in_cache(self):
+        """When database_url is set, add_event resolves IDs for cache keys.
+
+        We can't actually connect to PostgreSQL in unit tests, so we test
+        that the resolution logic applies to cache operations by mocking
+        the PG persistence layer.
+        """
+        with patch.dict(os.environ, {"AGENT_ID": "platform-uuid-123"}):
+            store = TimelineStore(database_url="postgres://fake:5432/test")
+            # Manually mark as initialized and mock PG to avoid real connection
+            store._initialized = True
+            store._pg_pool = True  # Truthy sentinel — we'll mock the persist call
+
+            event = TimelineEvent(
+                event_id="test-1",
+                strategy_id="uniswap_rsi:abc123",
+                timestamp=datetime.now(UTC),
+                event_type="TRADE",
+                description="Test",
+            )
+
+            # Mock PG persistence to avoid real DB call
+            with patch.object(store, "_persist_event_postgres"):
+                store.add_event(event)
+
+            # Cache should be keyed by resolved AGENT_ID, not SDK strategy_id
+            assert "platform-uuid-123" in store.get_strategy_ids()
+            assert "uniswap_rsi:abc123" not in store.get_strategy_ids()
+
+            # get_events with SDK ID should resolve to AGENT_ID and find data
+            events = store.get_events("uniswap_rsi:abc123")
+            assert len(events) == 1
+            assert events[0].event_id == "test-1"
+
+    def test_postgres_clear_events_resolves_id(self):
+        """clear_events resolves strategy_id when using PostgreSQL backend."""
+        with patch.dict(os.environ, {"AGENT_ID": "platform-uuid-123"}):
+            store = TimelineStore(database_url="postgres://fake:5432/test")
+            store._initialized = True
+            store._pg_pool = True
+
+            event = TimelineEvent(
+                event_id="test-1",
+                strategy_id="uniswap_rsi:abc123",
+                timestamp=datetime.now(UTC),
+                event_type="TRADE",
+                description="Test",
+            )
+
+            with patch.object(store, "_persist_event_postgres"):
+                store.add_event(event)
+
+            # Clear by SDK ID should resolve and clear the AGENT_ID-keyed cache
+            with patch.object(store, "_clear_events_postgres") as mock_clear:
+                store.clear_events("uniswap_rsi:abc123")
+                # Should have been called with resolved ID
+                mock_clear.assert_called_once_with("platform-uuid-123")
+
+            assert store.get_events("uniswap_rsi:abc123") == []
 
 
 class TestTimelineStoreSingleton:

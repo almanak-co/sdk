@@ -923,3 +923,80 @@ class TestExtractionMethods:
         assert parser.extract_tick_upper(empty_receipt) is None
         assert parser.extract_liquidity(empty_receipt) is None
         assert parser.extract_lp_close_data(empty_receipt) is None
+
+    def test_unresolved_decimals_parse_receipt_returns_none_swap_result(self):
+        """parse_receipt returns swap_result=None when parser has no token metadata.
+
+        Regression: _build_swap_result must not return fabricated zero decimals.
+        Direct callers of parse_receipt (vault lifecycle, copy signal engine)
+        would otherwise see amount_in_decimal=0 on a real swap.
+        """
+        parser = SushiSwapV3ReceiptParser(chain="arbitrum")  # No token metadata
+
+        amount_in = 1_000_000_000  # 1000 USDC (raw)
+        amount_out = 500_000_000_000_000_000  # 0.5 WETH (raw)
+
+        receipt = {
+            "transactionHash": "0xregression",
+            "blockNumber": 12345,
+            "status": 1,
+            "logs": [
+                create_swap_log(
+                    USER_ADDRESS, USER_ADDRESS,
+                    amount_in, -amount_out,
+                    1461446703485210103287273052203988822378723970341,
+                    1000000000000000000, 0,
+                ),
+            ],
+            "gasUsed": 150000,
+        }
+
+        result = parser.parse_receipt(receipt)
+
+        assert result.success is True
+        assert len(result.swap_events) == 1, "raw swap event should still be parsed"
+        assert result.swap_result is None, (
+            "swap_result must be None when decimals are unresolved — "
+            "returning Decimal(0) would fabricate data for downstream consumers"
+        )
+
+    def test_extract_swap_amounts_succeeds_without_token_metadata(self):
+        """extract_swap_amounts resolves decimals from Transfer events even
+        when the parser has no token metadata (the enrichment path).
+
+        Regression: extract_swap_amounts must fall back to raw swap_events
+        when _build_swap_result returns None due to unresolved decimals.
+        """
+        parser = SushiSwapV3ReceiptParser(chain="arbitrum")  # No token metadata
+
+        amount_in = 1_000_000_000  # 1000 USDC (6 decimals)
+        amount_out = 500_000_000_000_000_000  # 0.5 WETH (18 decimals)
+
+        receipt = {
+            "transactionHash": "0xregression2",
+            "blockNumber": 12345,
+            "status": 1,
+            "from": USER_ADDRESS,
+            "logs": [
+                create_transfer_log(USER_ADDRESS, POOL_ADDRESS, amount_in, USDC_ADDRESS),
+                create_swap_log(
+                    USER_ADDRESS, USER_ADDRESS,
+                    amount_in, -amount_out,
+                    1461446703485210103287273052203988822378723970341,
+                    1000000000000000000, 0,
+                ),
+                create_transfer_log(POOL_ADDRESS, USER_ADDRESS, amount_out, WETH_ADDRESS),
+            ],
+            "gasUsed": 150000,
+        }
+
+        swap_amounts = parser.extract_swap_amounts(receipt)
+
+        assert swap_amounts is not None, (
+            "extract_swap_amounts should succeed by falling back to raw "
+            "swap_events when swap_result is None"
+        )
+        assert swap_amounts.amount_in == amount_in
+        assert swap_amounts.amount_out == amount_out
+        assert swap_amounts.amount_in_decimal == Decimal("1000")
+        assert swap_amounts.amount_out_decimal == Decimal("0.5")

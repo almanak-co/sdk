@@ -1,0 +1,31 @@
+{
+    "chain": "arbitrum",
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+            "chain": "arbitrum",
+            "amount": "0.01",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            "chain": "arbitrum",
+            "amount": "50",
+            "amount_type": "usd"
+        }
+    ],
+    "trade_size_usd": 3,
+    "rsi_period": 14,
+    "rsi_oversold": 30,
+    "rsi_overbought": 70,
+    "max_slippage_bps": 100,
+    "base_token": "WETH",
+    "quote_token": "USDC",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}

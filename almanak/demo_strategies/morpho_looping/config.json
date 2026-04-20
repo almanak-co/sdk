@@ -1,16 +1,33 @@
 {
+    "chain": "ethereum",
+    "token_funding": [
+        {
+            "symbol": "USDC",
+            "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "chain": "ethereum",
+            "amount": "50",
+            "amount_type": "usd"
+        },
+        {
+            "symbol": "wstETH",
+            "address": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+            "chain": "ethereum",
+            "amount": "0.05",
+            "amount_type": "token"
+        }
+    ],
     "market_id": "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
     "collateral_token": "wstETH",
     "borrow_token": "USDC",
-    "initial_collateral": "0.1",
+    "initial_collateral": "0.014",
     "target_loops": 2,
     "target_ltv": "0.70",
     "min_health_factor": "1.5",
     "swap_slippage": "0.005",
-    "force_action": "",
+    "force_action": "supply",
     "anvil_funding": {
         "ETH": 100,
-        "wstETH": 1,
-        "USDC": 10000
+        "wstETH": 0.1,
+        "USDC": 500
     }
 }

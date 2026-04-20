@@ -1,0 +1,18 @@
+{
+    "chain": "ethereum",
+    "token_funding": [
+        {
+            "symbol": "USDC",
+            "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "chain": "ethereum",
+            "amount": "2500",
+            "amount_type": "usd"
+        }
+    ],
+    "supply_token": "USDC",
+    "supply_amount": "1000",
+    "anvil_funding": {
+        "ETH": 1,
+        "USDC": 10000
+    }
+}

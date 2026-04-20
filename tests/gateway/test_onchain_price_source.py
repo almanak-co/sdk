@@ -428,6 +428,102 @@ class TestChainIdValidation:
         await source.close()
 
 
+class TestBSCRouting:
+    """BSC token routing and chain-id validation (PR #883)."""
+
+    @pytest.mark.asyncio
+    async def test_bnb_routes_to_bsc_feed(self):
+        """BNB resolves to BNB/USD feed on BSC."""
+        import time as _time
+
+        source = OnChainPriceSource(chain="bsc")
+
+        answer = 60000000000  # $600.00
+        now = int(_time.time())
+        mock_response = _build_chainlink_response(answer, now)
+
+        with patch.object(source, "_eth_call", new_callable=AsyncMock, return_value=mock_response):
+            result = await source.get_price("BNB", "USD")
+
+        assert result.price == Decimal("600.00000000")
+        assert result.source == "onchain_chainlink"
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_wbnb_routes_to_bnb_usd_feed(self):
+        """WBNB maps to BNB/USD feed (same as BNB)."""
+        import time as _time
+
+        source = OnChainPriceSource(chain="bsc")
+
+        answer = 60000000000  # $600.00
+        now = int(_time.time())
+        mock_response = _build_chainlink_response(answer, now)
+
+        with patch.object(source, "_eth_call", new_callable=AsyncMock, return_value=mock_response):
+            result = await source.get_price("WBNB", "USD")
+
+        assert result.price == Decimal("600.00000000")
+        assert result.source == "onchain_chainlink"
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_cake_routes_to_bsc_feed(self):
+        """CAKE resolves to CAKE/USD feed on BSC."""
+        import time as _time
+
+        source = OnChainPriceSource(chain="bsc")
+
+        answer = 250000000  # $2.50
+        now = int(_time.time())
+        mock_response = _build_chainlink_response(answer, now)
+
+        with patch.object(source, "_eth_call", new_callable=AsyncMock, return_value=mock_response):
+            result = await source.get_price("CAKE", "USD")
+
+        assert result.price == Decimal("2.50000000")
+        assert result.source == "onchain_chainlink"
+        await source.close()
+
+    def test_bsc_supported_tokens(self):
+        """BSC source includes BNB, WBNB, CAKE in supported tokens."""
+        source = OnChainPriceSource(chain="bsc")
+        tokens = source.supported_tokens
+        assert "BNB" in tokens
+        assert "WBNB" in tokens
+        assert "CAKE" in tokens
+
+    @pytest.mark.asyncio
+    async def test_bsc_chain_id_validation_matching(self):
+        """Correct chain ID (56) keeps BSC RPC enabled."""
+        source = OnChainPriceSource(chain="bsc")
+
+        mock_session = AsyncMock()
+        mock_session.post = lambda *a, **kw: _MockChainIdResponse(56)
+
+        with patch.object(source, "_get_session", new_callable=AsyncMock, return_value=mock_session):
+            await source._validate_chain_id()
+
+        assert source._rpc_url is not None
+        assert source._chain_id_validated is True
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_bsc_chain_id_validation_mismatch_disables_rpc(self):
+        """Wrong chain ID (1 instead of 56) disables BSC RPC."""
+        source = OnChainPriceSource(chain="bsc")
+
+        mock_session = AsyncMock()
+        mock_session.post = lambda *a, **kw: _MockChainIdResponse(1)  # Ethereum, not BSC
+
+        with patch.object(source, "_get_session", new_callable=AsyncMock, return_value=mock_session):
+            await source._validate_chain_id()
+
+        assert source._rpc_url is None
+        assert source._chain_id_validated is True
+        await source.close()
+
+
 class TestSourceProperties:
     """Source metadata properties."""
 

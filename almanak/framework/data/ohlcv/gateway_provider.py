@@ -91,7 +91,7 @@ class CacheEntry:
     """Cache entry for OHLCV data."""
 
     candles: list[OHLCVCandle]
-    timestamp: float = field(default_factory=time.time)
+    timestamp: float = field(default_factory=time.monotonic)
 
 
 class GatewayOHLCVProvider:
@@ -192,7 +192,7 @@ class GatewayOHLCVProvider:
         if entry is None:
             return None
 
-        age = time.time() - entry.timestamp
+        age = time.monotonic() - entry.timestamp
         if age > ttl:
             # Cache expired
             del self._cache[cache_key]
@@ -326,7 +326,138 @@ class GatewayOHLCVProvider:
         logger.debug("OHLCV cache cleared")
 
 
+class GatewayGeckoTerminalOHLCVProvider:
+    """Gateway-backed GeckoTerminal OHLCV provider.
+
+    Proxies GeckoTerminal OHLCV requests through the gateway's
+    GeckoTerminalGetOHLCV gRPC endpoint. This allows deployed strategy
+    containers (which have no internet) to access DEX OHLCV data.
+
+    Mirrors the GatewayOHLCVProvider pattern but targets GeckoTerminal
+    instead of Binance.
+    """
+
+    _SUPPORTED_TIMEFRAMES: ClassVar[list[str]] = ["1m", "5m", "15m", "1h", "4h", "1d"]
+    _LIVE_TIMEFRAMES: ClassVar[set[str]] = {"1m", "5m"}
+
+    def __init__(
+        self,
+        gateway_client: "GatewayClient",
+        chain: str = "ethereum",
+        cache_ttl_live: float = 15.0,
+        cache_ttl_historical: float = 60.0,
+    ) -> None:
+        self._gateway_client = gateway_client
+        self._chain = chain
+        self._metrics = OHLCVHealthMetrics()
+        self._cache: dict[tuple[str, str, str, int], CacheEntry] = {}
+        self._cache_ttl_live = cache_ttl_live
+        self._cache_ttl_historical = cache_ttl_historical
+
+    async def get_ohlcv(
+        self,
+        token: str,
+        quote: str = "USD",
+        timeframe: str = "1h",
+        limit: int = 100,
+        *,
+        pool_address: str | None = None,
+        chain: str | None = None,
+    ) -> list[OHLCVCandle]:
+        """Get DEX OHLCV data through the gateway's GeckoTerminal proxy.
+
+        Args:
+            token: Token symbol (e.g., "ALMANAK", "WETH")
+            quote: Quote currency (default "USD")
+            timeframe: Candle timeframe (1m, 5m, 15m, 1h, 4h, 1d)
+            limit: Number of candles (max 1000)
+            pool_address: Explicit pool address (optional)
+            chain: Chain override (defaults to constructor chain)
+
+        Returns:
+            List of OHLCVCandle sorted by timestamp ascending.
+        """
+        validate_timeframe(timeframe)
+        self._metrics.total_requests += 1
+        target_chain = chain or self._chain
+
+        cache_key = (f"{token}:{target_chain}:{pool_address or ''}", quote, timeframe, limit)
+        ttl = self._cache_ttl_live if timeframe in self._LIVE_TIMEFRAMES else self._cache_ttl_historical
+        entry = self._cache.get(cache_key)
+        if entry is not None and (time.monotonic() - entry.timestamp) < ttl:
+            self._metrics.cache_hits += 1
+            self._metrics.successful_requests += 1
+            return entry.candles
+
+        try:
+            from almanak.gateway.proto import gateway_pb2
+
+            request = gateway_pb2.GeckoTerminalOHLCVRequest(
+                token=token,
+                chain=target_chain,
+                timeframe=timeframe,
+                limit=min(limit, 1000),
+                pool_address=pool_address or "",
+                quote=quote,
+            )
+            response = await asyncio.to_thread(
+                self._gateway_client.integration.GeckoTerminalGetOHLCV,
+                request,
+                self._gateway_client.config.timeout,
+            )
+
+            if not response.candles:
+                self._metrics.errors += 1
+                raise DataSourceUnavailable(
+                    source="gateway_geckoterminal",
+                    reason=f"No OHLCV data for {token} on {target_chain}",
+                )
+
+            candles = []
+            for c in response.candles:
+                candles.append(
+                    OHLCVCandle(
+                        timestamp=datetime.fromtimestamp(c.timestamp, tz=UTC),
+                        open=Decimal(c.open) if c.open else Decimal(0),
+                        high=Decimal(c.high) if c.high else Decimal(0),
+                        low=Decimal(c.low) if c.low else Decimal(0),
+                        close=Decimal(c.close) if c.close else Decimal(0),
+                        volume=Decimal(c.volume) if c.volume else None,
+                    )
+                )
+
+            candles.sort(key=lambda x: x.timestamp)
+            self._cache[cache_key] = CacheEntry(candles=candles)
+            self._metrics.successful_requests += 1
+            return candles
+
+        except DataSourceUnavailable:
+            raise
+        except Exception as e:
+            self._metrics.errors += 1
+            raise DataSourceUnavailable(
+                source="gateway_geckoterminal",
+                reason=str(e),
+            ) from e
+
+    def get_health_metrics(self) -> dict[str, Any]:
+        """Return health metrics."""
+        return {
+            "total_requests": self._metrics.total_requests,
+            "successful_requests": self._metrics.successful_requests,
+            "cache_hits": self._metrics.cache_hits,
+            "errors": self._metrics.errors,
+            "success_rate": round(self._metrics.success_rate, 2),
+        }
+
+    def clear_cache(self) -> None:
+        """Clear the GeckoTerminal OHLCV cache."""
+        self._cache.clear()
+        logger.debug("GeckoTerminal OHLCV cache cleared")
+
+
 __all__ = [
+    "GatewayGeckoTerminalOHLCVProvider",
     "GatewayOHLCVProvider",
     "OHLCVHealthMetrics",
     "TOKEN_TO_BINANCE_SYMBOL",

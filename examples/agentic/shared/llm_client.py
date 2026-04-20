@@ -122,7 +122,17 @@ class LLMClient:
                 if resp.status_code >= 400:
                     logger.error("LLM API error %d: %s", resp.status_code, resp.text)
                 resp.raise_for_status()
-                return resp.json()
+                data = resp.json()
+                # Log token usage if available
+                usage = data.get("usage")
+                if usage:
+                    logger.debug(
+                        "LLM usage: prompt=%d completion=%d total=%d",
+                        usage.get("prompt_tokens", 0),
+                        usage.get("completion_tokens", 0),
+                        usage.get("total_tokens", 0),
+                    )
+                return data
             except (httpx.TimeoutException, httpx.ConnectError) as e:
                 last_error = e
                 if attempt >= max_retries:
@@ -200,7 +210,7 @@ async def validate_llm_config(config: LLMConfig) -> None:
             "Set it via environment variable:\n\n"
             "  export AGENT_LLM_API_KEY=sk-...\n\n"
             "Any OpenAI-compatible provider works (OpenAI, Anthropic, Ollama, etc.).\n"
-            "See: https://docs.almanak.co/agentic/"
+            "See: https://sdk.docs.almanak.co/agentic/"
         )
     client = LLMClient(config)
     try:
@@ -231,6 +241,14 @@ class MockLLMClient:
             )
         response = self._responses[self._index]
         self._index += 1
+        # Inject mock usage data if not already present (enables telemetry testing)
+        if "usage" not in response:
+            num_tools = len(tools or [])
+            response["usage"] = {
+                "prompt_tokens": 500 + num_tools * 200,
+                "completion_tokens": 150,
+                "total_tokens": 650 + num_tools * 200,
+            }
         return response
 
 
@@ -282,7 +300,16 @@ class DynamicMockLLMClient:
 
         round_fn = self._rounds[self._round_idx]
         self._round_idx += 1
-        return round_fn(self._context)
+        response = round_fn(self._context)
+        # Inject mock usage data if not already present (enables telemetry testing)
+        if "usage" not in response:
+            num_tools = len(tools or [])
+            response["usage"] = {
+                "prompt_tokens": 500 + num_tools * 200,
+                "completion_tokens": 150,
+                "total_tokens": 650 + num_tools * 200,
+            }
+        return response
 
     def _extract_context(self, messages: list[dict[str, Any]]) -> None:
         """Parse tool result messages and accumulate key values in context."""

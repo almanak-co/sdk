@@ -4,8 +4,11 @@ Contains formatting helpers and other utility functions.
 """
 
 import html
+import logging
 import re
 from decimal import Decimal
+
+logger = logging.getLogger(__name__)
 
 # CSS color pattern: hex colors (#RGB, #RRGGBB, #RRGGBBAA), named colors, rgb/rgba
 # Note: rgba() restricted to digits, commas, dots, spaces, and % to prevent attribute injection
@@ -44,6 +47,7 @@ def get_status_icon(status: StrategyStatus) -> str:
         StrategyStatus.STUCK: "\U0001f7e1",  # Yellow circle
         StrategyStatus.PAUSED: "\u23f8\ufe0f",  # Pause button
         StrategyStatus.ERROR: "\U0001f534",  # Red circle
+        StrategyStatus.PAPER_TRADING: "\U0001f535",  # Blue circle
     }
     return icons.get(status, "\u26aa")  # White circle default
 
@@ -108,7 +112,11 @@ def get_timeline_event_icon(event_type: TimelineEventType) -> str:
 
 def get_block_explorer_url(chain: str, tx_hash: str) -> str:
     """Get block explorer URL for a transaction."""
-    base_url = BLOCK_EXPLORER_URLS.get(chain.lower(), "https://etherscan.io/tx/")
+    chain_lower = chain.lower()
+    base_url = BLOCK_EXPLORER_URLS.get(chain_lower)
+    if base_url is None:
+        logger.warning("No block explorer configured for chain '%s', falling back to etherscan", chain)
+        base_url = "https://etherscan.io/tx/"
     return f"{base_url}{tx_hash}"
 
 

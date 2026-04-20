@@ -1,0 +1,37 @@
+{
+    "chain": "bsc",
+    "token_funding": [
+        {
+            "symbol": "USDC",
+            "address": "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
+            "chain": "bsc",
+            "amount": "10",
+            "amount_type": "usd"
+        },
+        {
+            "symbol": "WBNB",
+            "address": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+            "chain": "bsc",
+            "amount": "1",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDT",
+            "address": "0x55d398326f99059ff775485246999027b3197955",
+            "chain": "bsc",
+            "amount": "10",
+            "amount_type": "usd"
+        }
+    ],
+    "collateral_token": "WBNB",
+    "collateral_amount": "0.5",
+    "borrow_token": "USDC",
+    "swap_to_token": "USDT",
+    "ltv_target": "0.3",
+    "anvil_funding": {
+        "BNB": 10,
+        "WBNB": 5,
+        "USDC": 10000,
+        "USDT": 10000
+    }
+}

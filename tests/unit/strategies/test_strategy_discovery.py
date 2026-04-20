@@ -13,10 +13,10 @@ from almanak.framework.strategies import _try_import_strategy
 @pytest.fixture()
 def strategy_dir(tmp_path):
     """Create a temporary strategy directory with a valid strategy module."""
-    pkg = tmp_path / "strategies" / "demo" / "test_strat"
+    pkg = tmp_path / "almanak" / "demo_strategies" / "test_strat"
     pkg.mkdir(parents=True)
-    (tmp_path / "strategies" / "__init__.py").touch()
-    (tmp_path / "strategies" / "demo" / "__init__.py").touch()
+    (tmp_path / "almanak" / "__init__.py").touch()
+    (tmp_path / "almanak" / "demo_strategies" / "__init__.py").touch()
     (pkg / "__init__.py").touch()
     (pkg / "strategy.py").write_text(
         textwrap.dedent("""\
@@ -40,8 +40,8 @@ class TestTryImportStrategyFilePath:
     """Tests for file_path-based loading in _try_import_strategy."""
 
     def test_loads_module_via_file_path(self, strategy_dir):
-        module_name = "strategies.demo.test_strat.strategy"
-        file_path = strategy_dir / "strategies" / "demo" / "test_strat" / "strategy.py"
+        module_name = "almanak.demo_strategies.test_strat.strategy"
+        file_path = strategy_dir / "almanak" / "demo_strategies" / "test_strat" / "strategy.py"
 
         _try_import_strategy(module_name, file_path=file_path)
 
@@ -49,14 +49,14 @@ class TestTryImportStrategyFilePath:
         assert sys.modules[module_name].LOADED is True
 
     def test_creates_parent_packages_in_sys_modules(self, strategy_dir):
-        module_name = "strategies.demo.test_strat.strategy"
-        file_path = strategy_dir / "strategies" / "demo" / "test_strat" / "strategy.py"
+        module_name = "almanak.demo_strategies.test_strat.strategy"
+        file_path = strategy_dir / "almanak" / "demo_strategies" / "test_strat" / "strategy.py"
 
         _try_import_strategy(module_name, file_path=file_path)
 
-        assert "strategies" in sys.modules
-        assert "strategies.demo" in sys.modules
-        assert "strategies.demo.test_strat" in sys.modules
+        assert "almanak" in sys.modules
+        assert "almanak.demo_strategies" in sys.modules
+        assert "almanak.demo_strategies.test_strat" in sys.modules
 
     def test_namespace_package_without_init(self, tmp_path):
         """Parent dirs without __init__.py get namespace package placeholders."""
@@ -93,8 +93,8 @@ class TestTryImportStrategyFilePath:
 
     def test_idempotent_when_already_loaded(self, strategy_dir):
         """If leaf module is already in sys.modules, skip re-execution."""
-        module_name = "strategies.demo.test_strat.strategy"
-        file_path = strategy_dir / "strategies" / "demo" / "test_strat" / "strategy.py"
+        module_name = "almanak.demo_strategies.test_strat.strategy"
+        file_path = strategy_dir / "almanak" / "demo_strategies" / "test_strat" / "strategy.py"
 
         # First import loads the module
         _try_import_strategy(module_name, file_path=file_path)

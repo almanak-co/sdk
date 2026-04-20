@@ -2,11 +2,12 @@
 
 Tests cover:
 - _strip_schema_param URL parsing
+- deployed strategy_state DDL shape
 """
 
-import pytest
+import re
 
-from almanak.gateway.database import _strip_schema_param
+from almanak.gateway.database import POSTGRES_SCHEMA, _strip_schema_param
 
 
 class TestStripSchemaParam:
@@ -43,3 +44,13 @@ class TestStripSchemaParam:
         assert "timeout=30" in clean
         assert "pool_size=5" in clean
         assert "schema" not in clean
+
+
+class TestPostgresSchema:
+    def test_strategy_state_uses_agent_id_primary_key(self):
+        start = POSTGRES_SCHEMA.index("CREATE TABLE IF NOT EXISTS strategy_state")
+        end = POSTGRES_SCHEMA.index(");", start)
+        ddl = POSTGRES_SCHEMA[start:end]
+
+        assert re.search(r"\bagent_id\s+TEXT\s+PRIMARY\s+KEY\b", ddl)
+        assert not re.search(r"\bstrategy_id\s+UUID\s+PRIMARY\s+KEY\b", ddl)

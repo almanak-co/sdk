@@ -12,6 +12,12 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.connectors.base import EventRegistry, HexDecoder
+from almanak.framework.execution.extract_result import (
+    ExtractError,
+    ExtractMissing,
+    ExtractOk,
+    ExtractResult,
+)
 
 if TYPE_CHECKING:
     from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
@@ -31,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 EVENT_TOPICS: dict[str, str] = {
     "Swap": "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822",
+    "SwapCL": "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
     "Mint": "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f",
     "Burn": "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496",
     "Sync": "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1",
@@ -65,6 +72,7 @@ class AerodromeEventType(Enum):
 
 EVENT_NAME_TO_TYPE: dict[str, AerodromeEventType] = {
     "Swap": AerodromeEventType.SWAP,
+    "SwapCL": AerodromeEventType.SWAP,
     "Mint": AerodromeEventType.MINT,
     "Burn": AerodromeEventType.BURN,
     "Sync": AerodromeEventType.SYNC,
@@ -365,8 +373,8 @@ class AerodromeReceiptParser:
         token1_address: str | None = None,
         token0_symbol: str | None = None,
         token1_symbol: str | None = None,
-        token0_decimals: int = 18,
-        token1_decimals: int = 18,
+        token0_decimals: int | None = None,
+        token1_decimals: int | None = None,
         quoted_price: Decimal | None = None,
         **kwargs: Any,
     ) -> None:
@@ -408,14 +416,20 @@ class AerodromeReceiptParser:
                 self.token1_decimals = decimals
 
         # If symbols were provided but decimals weren't, resolve decimals
-        if self.token0_symbol and self.token0_decimals == 18:
+        if self.token0_symbol and self.token0_decimals is None:
             _, decimals = self._resolve_token_info(self.token0_symbol)
             if decimals is not None:
                 self.token0_decimals = decimals
-        if self.token1_symbol and self.token1_decimals == 18:
+        if self.token1_symbol and self.token1_decimals is None:
             _, decimals = self._resolve_token_info(self.token1_symbol)
             if decimals is not None:
                 self.token1_decimals = decimals
+
+        # Log warning if decimals remain unresolved — do NOT default to 18.
+        if self.token0_decimals is None:
+            logger.debug(f"token0 decimals unresolved for chain={self.chain} (address={self.token0_address})")
+        if self.token1_decimals is None:
+            logger.debug(f"token1 decimals unresolved for chain={self.chain} (address={self.token1_address})")
 
     def _resolve_token_info(self, token: str) -> tuple[str, int | None]:
         """Resolve token symbol and decimals via TokenResolver.
@@ -434,6 +448,22 @@ class AerodromeReceiptParser:
             return resolved.symbol, resolved.decimals
         except Exception:
             return "", None
+
+    def _resolve_decimals(self, token_address: str) -> int | None:
+        """Resolve token decimals via the token resolver.
+
+        Returns None if the resolver is unavailable or the token is unknown.
+        """
+        if not token_address:
+            return None
+        try:
+            from almanak.framework.data.tokens.resolver import get_token_resolver
+
+            resolver = get_token_resolver()
+            resolved = resolver.resolve(token_address, self.chain)
+            return resolved.decimals
+        except Exception:
+            return None
 
     def parse_receipt(
         self,
@@ -658,6 +688,8 @@ class AerodromeReceiptParser:
         """
         if event_name == "Swap":
             return self._decode_swap_data(topics, data, address)
+        elif event_name == "SwapCL":
+            return self._decode_cl_swap_data(topics, data, address)
         elif event_name == "Mint":
             return self._decode_mint_data(topics, data, address)
         elif event_name == "Burn":
@@ -706,6 +738,49 @@ class AerodromeReceiptParser:
         except Exception as e:
             logger.warning(f"Failed to decode Swap data: {e}")
             return {"raw_data": data}
+
+    def _decode_cl_swap_data(
+        self,
+        topics: list[Any],
+        data: str,
+        address: str,
+    ) -> dict[str, Any]:
+        """Decode Slipstream CL Swap event data (Uniswap V3-style).
+
+        SwapCL event structure:
+        - topic1: sender (indexed)
+        - topic2: recipient (indexed)
+        - data: amount0 (int256), amount1 (int256), sqrtPriceX96 (uint160),
+                liquidity (uint128), tick (int24)
+
+        Amount sign convention (pool perspective):
+        - positive = tokens flowing INTO the pool (user pays)
+        - negative = tokens flowing OUT of the pool (user receives)
+        """
+        sender = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
+        to = HexDecoder.topic_to_address(topics[2]) if len(topics) > 2 else ""
+
+        amount0 = HexDecoder.decode_int256(data, 0)
+        amount1 = HexDecoder.decode_int256(data, 32)
+
+        pool_address = address.lower() if isinstance(address, str) else ""
+
+        # Convert signed amounts to the V1-style amount_in/amount_out format:
+        # positive = user pays (amount_in), negative = user receives (amount_out)
+        amount0_in = amount0 if amount0 > 0 else 0
+        amount1_in = amount1 if amount1 > 0 else 0
+        amount0_out = abs(amount0) if amount0 < 0 else 0
+        amount1_out = abs(amount1) if amount1 < 0 else 0
+
+        return {
+            "sender": sender,
+            "to": to,
+            "amount0_in": amount0_in,
+            "amount1_in": amount1_in,
+            "amount0_out": amount0_out,
+            "amount1_out": amount1_out,
+            "pool_address": pool_address,
+        }
 
     def _decode_mint_data(
         self,
@@ -872,7 +947,7 @@ class AerodromeReceiptParser:
         swap_event: SwapEventData,
         transfer_events: list[TransferEventData],
         quoted_amount_out: int | None,
-    ) -> ParsedSwapResult:
+    ) -> ParsedSwapResult | None:
         """Build high-level swap result from events.
 
         Args:
@@ -881,7 +956,7 @@ class AerodromeReceiptParser:
             quoted_amount_out: Expected output for slippage calc
 
         Returns:
-            ParsedSwapResult with full swap details
+            ParsedSwapResult with full swap details, or None if decimals unresolved
         """
         # Determine which token is in/out
         if swap_event.token0_is_input:
@@ -902,9 +977,29 @@ class AerodromeReceiptParser:
         amount_in = swap_event.amount_in
         amount_out = swap_event.amount_out
 
-        # Convert to decimal with proper decimals
-        amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
-        amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
+        # Try to resolve decimals if not already known
+        if token_in_decimals is None and token_in:
+            token_in_decimals = self._resolve_decimals(token_in)
+        if token_out_decimals is None and token_out:
+            token_out_decimals = self._resolve_decimals(token_out)
+
+        # Convert to decimal with proper decimals.
+        # Return None when decimals are unresolved to avoid leaking fabricated
+        # zero values to direct callers of parse_receipt().
+        # extract_swap_amounts() handles this by falling back to raw swap_events.
+        if token_in_decimals is not None and token_out_decimals is not None:
+            amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
+            amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
+        else:
+            # DEBUG not WARNING: this is expected in the enrichment path where the
+            # parser is constructed without token metadata.  extract_swap_amounts()
+            # has its own fallback that resolves decimals from Transfer events.
+            logger.debug(
+                "Token decimals unresolved (in=%s, out=%s); omitting swap_result",
+                token_in_decimals,
+                token_out_decimals,
+            )
+            return None
 
         # Calculate effective price
         if amount_in_decimal > 0:
@@ -957,9 +1052,13 @@ class AerodromeReceiptParser:
         amount0 = liquidity_event.amount0
         amount1 = liquidity_event.amount1
 
-        # Convert to decimal
-        amount0_decimal = Decimal(str(amount0)) / Decimal(10**self.token0_decimals)
-        amount1_decimal = Decimal(str(amount1)) / Decimal(10**self.token1_decimals)
+        # Resolve decimals, falling back to resolver if constructor value is None
+        t0_dec = self.token0_decimals if self.token0_decimals is not None else self._resolve_decimals(token0)
+        t1_dec = self.token1_decimals if self.token1_decimals is not None else self._resolve_decimals(token1)
+
+        # Convert to decimal (zero if decimals still unknown)
+        amount0_decimal = Decimal(str(amount0)) / Decimal(10**t0_dec) if t0_dec is not None else Decimal(0)
+        amount1_decimal = Decimal(str(amount1)) / Decimal(10**t1_dec) if t1_dec is not None else Decimal(0)
 
         return ParsedLiquidityResult(
             operation=operation,
@@ -978,11 +1077,82 @@ class AerodromeReceiptParser:
     # Extraction Methods (for Result Enrichment)
     # =============================================================================
 
+    # ---- VIB-3159: tagged-variant wrappers ------------------------------------
+    # See uniswap_v3/receipt_parser.py for the rationale. The raw methods
+    # preserve their legacy return types so direct callers keep working.
+
+    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
+        """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
+        reports a crash. See uniswap_v3 equivalent for rationale (VIB-3159)."""
+        try:
+            parsed = self.parse_receipt(receipt)
+        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if not parsed.success:
+            return ExtractError(error=parsed.error or "parse_receipt reported failure")
+        return None
+
+    def extract_swap_amounts_result(self, receipt: dict[str, Any]) -> ExtractResult["SwapAmounts"]:
+        """Fail-closed variant of :meth:`extract_swap_amounts` — see VIB-3159."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = self.extract_swap_amounts(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no Swap event in receipt")
+        return ExtractOk(value=value)
+
+    def extract_lp_close_data_result(self, receipt: dict[str, Any]) -> ExtractResult["LPCloseData"]:
+        """Fail-closed variant of :meth:`extract_lp_close_data` — see VIB-3159."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = self.extract_lp_close_data(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no Burn event in receipt")
+        return ExtractOk(value=value)
+
+    def extract_position_id_result(self, receipt: dict[str, Any]) -> ExtractResult[str]:
+        """Fail-closed variant of :meth:`extract_position_id` — see VIB-3159."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = self.extract_position_id(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no LP position Transfer event")
+        return ExtractOk(value=value)
+
+    def extract_liquidity_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_liquidity` — see VIB-3159."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = self.extract_liquidity(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no Mint event in receipt")
+        return ExtractOk(value=value)
+
     def extract_swap_amounts(self, receipt: dict[str, Any]) -> "SwapAmounts | None":
         """Extract swap amounts from a transaction receipt.
 
+        Resolves token decimals independently from ERC-20 Transfer events in the
+        receipt, so it produces correct human-readable amounts even when the parser
+        was constructed without token metadata (the enrichment path).
+
         Args:
-            receipt: Transaction receipt dict with 'logs' field
+            receipt: Transaction receipt dict with 'logs' and 'from' fields
 
         Returns:
             SwapAmounts dataclass if swap event found, None otherwise
@@ -990,25 +1160,177 @@ class AerodromeReceiptParser:
         from almanak.framework.execution.extracted_data import SwapAmounts
 
         try:
-            result = self.parse_receipt(receipt)
-            if not result.swap_result:
+            parse_result = self.parse_receipt(receipt)
+
+            # Extract raw amounts from swap_result if available, otherwise
+            # fall back to raw swap_events (swap_result may be None when
+            # _build_swap_result fails closed due to unresolved decimals).
+            sr = parse_result.swap_result
+            if sr:
+                raw_in = sr.amount_in
+                raw_out = sr.amount_out
+                token_in_hint = sr.token_in
+                token_out_hint = sr.token_out
+                token_in_symbol = sr.token_in_symbol
+                token_out_symbol = sr.token_out_symbol
+                slippage_bps = sr.slippage_bps if sr.slippage_bps else None
+            elif parse_result.swap_events:
+                se = parse_result.swap_events[0]
+                raw_in = se.amount_in
+                raw_out = se.amount_out
+                token_in_hint = (self.token0_address or "") if se.token0_is_input else (self.token1_address or "")
+                token_out_hint = (self.token1_address or "") if se.token0_is_input else (self.token0_address or "")
+                token_in_symbol = (self.token0_symbol or "") if se.token0_is_input else (self.token1_symbol or "")
+                token_out_symbol = (self.token1_symbol or "") if se.token0_is_input else (self.token0_symbol or "")
+                slippage_bps = None
+            else:
                 return None
 
-            sr = result.swap_result
+            # Resolve token addresses from Transfer events in the receipt.
+            token_in_addr, token_out_addr, _, _ = self._extract_swap_tokens_from_transfers(receipt)
+
+            # Fallback: identify tokens by pool address from the Swap event.
+            # In Solidly V2, the pool always receives token_in and sends token_out.
+            # Only safe for single-hop swaps; multi-hop would pick the intermediate token.
+            if (not token_in_addr or not token_out_addr) and len(parse_result.swap_events) == 1:
+                pool_addr = parse_result.swap_events[0].pool_address
+                if pool_addr:
+                    p_in, p_out = self._extract_tokens_by_pool(receipt, pool_addr)
+                    if not token_in_addr and p_in:
+                        token_in_addr = p_in
+                    if not token_out_addr and p_out:
+                        token_out_addr = p_out
+
+            if not token_in_addr:
+                token_in_addr = token_in_hint
+            if not token_out_addr:
+                token_out_addr = token_out_hint
+
+            in_decimals = self._resolve_decimals(token_in_addr) if token_in_addr else None
+            out_decimals = self._resolve_decimals(token_out_addr) if token_out_addr else None
+
+            if in_decimals is None or out_decimals is None:
+                logger.warning(
+                    f"Cannot compute swap amounts: token decimals unknown "
+                    f"(in={token_in_addr}:{in_decimals}, out={token_out_addr}:{out_decimals})"
+                )
+                return None
+
+            amount_in_decimal = Decimal(str(raw_in)) / Decimal(10**in_decimals)
+            amount_out_decimal = Decimal(str(raw_out)) / Decimal(10**out_decimals)
+            effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal("0")
+
             return SwapAmounts(
-                amount_in=sr.amount_in,
-                amount_out=sr.amount_out,
-                amount_in_decimal=sr.amount_in_decimal,
-                amount_out_decimal=sr.amount_out_decimal,
-                effective_price=sr.effective_price,
-                slippage_bps=sr.slippage_bps if sr.slippage_bps else None,
-                token_in=sr.token_in_symbol or sr.token_in,
-                token_out=sr.token_out_symbol or sr.token_out,
+                amount_in=raw_in,
+                amount_out=raw_out,
+                amount_in_decimal=amount_in_decimal,
+                amount_out_decimal=amount_out_decimal,
+                effective_price=effective_price,
+                slippage_bps=slippage_bps,
+                token_in=token_in_symbol or token_in_addr or token_in_hint,
+                token_out=token_out_symbol or token_out_addr or token_out_hint,
             )
 
         except Exception as e:
             logger.warning(f"Failed to extract swap amounts: {e}")
             return None
+
+    def _extract_swap_tokens_from_transfers(self, receipt: dict[str, Any]) -> tuple[str, str, int, int]:
+        """Extract token addresses and amounts from ERC-20 Transfer events.
+
+        Returns:
+            Tuple of (token_in_addr, token_out_addr, amount_in, amount_out).
+            Empty strings / 0 for fields that could not be determined.
+        """
+        raw_wallet = receipt.get("from") or receipt.get("from_address") or ""
+        wallet = str(raw_wallet).lower() if raw_wallet else ""
+        if not wallet:
+            return "", "", 0, 0
+
+        transfer_topic = EVENT_TOPICS["Transfer"].lower()
+        transfers_from: list[tuple[str, int]] = []
+        transfers_to: list[tuple[str, int]] = []
+
+        for log in receipt.get("logs", []):
+            topics = log.get("topics", [])
+            if not topics or len(topics) < 3:
+                continue
+
+            topic0 = HexDecoder.normalize_hex(topics[0])
+            if not topic0:
+                continue
+            if not topic0.startswith("0x"):
+                topic0 = "0x" + topic0
+            if topic0.lower() != transfer_topic:
+                continue
+
+            log_from = HexDecoder.topic_to_address(topics[1])
+            log_to = HexDecoder.topic_to_address(topics[2])
+            data = HexDecoder.normalize_hex(log.get("data", ""))
+            if not data:
+                continue
+            try:
+                amount = HexDecoder.decode_uint256(data, 0)
+            except (ValueError, IndexError):
+                continue
+
+            raw_token = log.get("address") or ""
+            token_address = str(raw_token).lower() if raw_token else ""
+            if log_from == wallet:
+                transfers_from.append((token_address, amount))
+            if log_to == wallet:
+                transfers_to.append((token_address, amount))
+
+        token_in_addr, amount_in = transfers_from[0] if transfers_from else ("", 0)
+        token_out_addr, amount_out = transfers_to[-1] if transfers_to else ("", 0)
+        return token_in_addr, token_out_addr, amount_in, amount_out
+
+    def _extract_tokens_by_pool(self, receipt: dict[str, Any], pool_address: str) -> tuple[str, str]:
+        """Identify token_in and token_out from Transfer events using the pool address.
+
+        In Solidly V2 swaps, the pool receives token_in and sends token_out.
+        We find Transfers TO the pool (token_in) and FROM the pool (token_out).
+
+        Args:
+            receipt: Transaction receipt dict
+            pool_address: Pool contract address (lowercase)
+
+        Returns:
+            Tuple of (token_in_addr, token_out_addr), empty strings if not found.
+        """
+        pool = pool_address.lower()
+        transfer_topic = EVENT_TOPICS["Transfer"].lower()
+        token_in = ""
+        token_out = ""
+
+        for log in receipt.get("logs", []):
+            topics = log.get("topics", [])
+            if not topics or len(topics) < 3:
+                continue
+
+            topic0 = HexDecoder.normalize_hex(topics[0])
+            if not topic0:
+                continue
+            if not topic0.startswith("0x"):
+                topic0 = "0x" + topic0
+            if topic0.lower() != transfer_topic:
+                continue
+
+            log_to = HexDecoder.topic_to_address(topics[2])
+            log_from = HexDecoder.topic_to_address(topics[1])
+
+            raw_token = log.get("address") or ""
+            token_address = str(raw_token).lower() if raw_token else ""
+
+            if log_to == pool and not token_in:
+                token_in = token_address
+            if log_from == pool and not token_out:
+                token_out = token_address
+
+            if token_in and token_out:
+                break
+
+        return token_in, token_out
 
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> "LPCloseData | None":
         """Extract LP close data from transaction receipt.
@@ -1134,6 +1456,51 @@ class AerodromeReceiptParser:
                 )
 
         return None
+
+    def extract_position_id(self, receipt: dict[str, Any]) -> str | None:
+        """Extract position ID from LP mint transaction receipt.
+
+        For Aerodrome (Solidly fork), LP tokens are fungible ERC-20s (not NFTs).
+        The position ID is the pool address that emitted the Mint event, which
+        is also the LP token contract address.
+
+        Called by ResultEnricher for LP_OPEN intents.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            Pool address (LP token address) as hex string, or None if not found
+        """
+        try:
+            logs = receipt.get("logs", [])
+            mint_topic = EVENT_TOPICS["Mint"]
+            for log in logs:
+                topics = log.get("topics", [])
+                if not topics:
+                    continue
+                topic0 = topics[0]
+                if isinstance(topic0, bytes | bytearray):
+                    topic0 = "0x" + bytes(topic0).hex()
+                else:
+                    topic0 = str(topic0)
+                if not topic0.startswith("0x"):
+                    topic0 = "0x" + topic0
+                if topic0.lower() == mint_topic.lower():
+                    # The Mint event is emitted by the pool contract
+                    pool_address = log.get("address", "")
+                    if isinstance(pool_address, bytes | bytearray):
+                        pool_address = "0x" + bytes(pool_address).hex()
+                    else:
+                        pool_address = str(pool_address)
+                    if pool_address and not pool_address.startswith("0x"):
+                        pool_address = "0x" + pool_address
+                    if pool_address:
+                        return str(pool_address).lower()
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to extract position_id: {e}")
+            return None
 
     def extract_liquidity(self, receipt: dict[str, Any]) -> int | None:
         """Extract liquidity from LP mint transaction receipt.

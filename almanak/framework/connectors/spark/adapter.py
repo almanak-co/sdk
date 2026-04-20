@@ -343,6 +343,7 @@ class SparkAdapter:
             )
 
             amount_desc = "full debt" if repay_all else str(amount)
+            rate_mode_str = "variable" if interest_rate_mode == SPARK_VARIABLE_RATE_MODE else "stable"
             return TransactionResult(
                 success=True,
                 tx_data={
@@ -351,7 +352,7 @@ class SparkAdapter:
                     "data": calldata,
                 },
                 gas_estimate=DEFAULT_GAS_ESTIMATES["repay"],
-                description=f"Repay {amount_desc} {asset} to Spark",
+                description=f"Repay {amount_desc} {asset} to Spark ({rate_mode_str} rate)",
             )
 
         except Exception as e:

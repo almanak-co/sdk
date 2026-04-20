@@ -10,11 +10,29 @@ concurrent updates.  Each agent has exactly one row in the WARM tier
 
 Important: Each strategy uses exactly one gateway and vice versa.
 No two strategies share a gateway.
+
+Durability invariant (VIB-3156):
+    A successful ``save_state()`` call guarantees durability or raises.
+
+    Operationally, every file-backed WARM backend writes the new version,
+    state_data, and checksum in a single atomic transaction with full
+    fsync durability (``synchronous = FULL`` for SQLite).  The new row
+    is only made visible to readers after the transaction commits to
+    stable storage; therefore state rows never exist on disk with a
+    version bump but a state_data/checksum mismatch.  Checksum
+    consistency is validated BEFORE the row is written so that an
+    invalid serialization never lands on disk at the real path.
+
+    For gateway-backed backends (``GatewayStateManager``) atomicity is
+    the gateway server's responsibility -- the client's ``SaveState``
+    RPC is all-or-nothing from the caller's perspective.
 """
 
+import copy
 import hashlib
 import json
 import logging
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -24,7 +42,13 @@ from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from almanak.framework.execution.clob_handler import ClobFill, ClobOrderState, ClobOrderStatus
+    from almanak.framework.observability.ledger import LedgerEntry
     from almanak.framework.portfolio import PortfolioMetrics, PortfolioSnapshot
+
+from .exceptions import (  # noqa: E402 (re-exported for callers)
+    AccountingPersistenceError,
+    AccountingWriteKind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -311,7 +335,7 @@ class SQLiteConfigLight:
         wal_mode: Enable WAL mode for better concurrent read performance.
     """
 
-    db_path: str = "./almanak_state.db"
+    db_path: str = field(default_factory=lambda: os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db")
     wal_mode: bool = True
 
 
@@ -379,7 +403,9 @@ class HotCache:
     def get(self, strategy_id: str) -> StateData | None:
         """Get state from cache.
 
-        Returns None if not found or expired.
+        Returns None if not found or expired. Returns a deep copy so callers
+        cannot mutate the cached StateData; a failed CAS save must leave the
+        cache on its prior value.
         """
         entry = self._cache.get(strategy_id)
         if entry is None:
@@ -393,18 +419,20 @@ class HotCache:
                 del self._cache[strategy_id]
                 return None
 
-        return data
+        return copy.deepcopy(data)
 
     def set(self, state: StateData) -> None:
         """Store state in cache.
 
-        Evicts oldest entry if cache is full.
+        Evicts oldest entry if cache is full. Stores a deep copy so subsequent
+        caller mutation of the passed-in object cannot retroactively alter
+        cached state.
         """
         # Evict oldest if at capacity
         if len(self._cache) >= self._max_size and state.strategy_id not in self._cache:
             self._evict_oldest()
 
-        self._cache[state.strategy_id] = (state, time.time())
+        self._cache[state.strategy_id] = (copy.deepcopy(state), time.time())
 
     def delete(self, strategy_id: str) -> bool:
         """Delete state from cache.
@@ -517,7 +545,7 @@ class PostgresStore:
                 """
                 SELECT version, state_data, schema_version,
                        checksum, created_at
-                FROM v2_strategy_state
+                FROM strategy_state
                 WHERE agent_id = $1
                 """,
                 strategy_id,
@@ -542,6 +570,15 @@ class PostgresStore:
         Single-row-per-agent model: uses UPSERT when *expected_version* is
         ``None``, or a version-guarded UPDATE for CAS.
 
+        Durability (VIB-3156):
+            The write runs in a single transaction so the version, state_data,
+            and checksum columns are updated atomically. PostgreSQL's default
+            ``synchronous_commit = on`` guarantees the transaction is flushed
+            to WAL before the call returns, so on success the caller has the
+            durability guarantee: a crash after this function returns will
+            either see the full new row or the prior row -- never a torn
+            state with version bumped but stale checksum.
+
         Returns:
             True if save succeeded.
 
@@ -553,17 +590,17 @@ class PostgresStore:
 
         state_json = json.dumps(state.state, default=str)
 
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
             if expected_version is None:
                 # UPSERT: insert new or overwrite existing (version increments)
                 await conn.execute(
                     """
-                    INSERT INTO v2_strategy_state
+                    INSERT INTO strategy_state
                         (agent_id, version, state_data, schema_version, checksum,
                          created_at, updated_at)
                     VALUES ($1, $2, $3::jsonb, $4, $5, now(), now())
                     ON CONFLICT (agent_id) DO UPDATE SET
-                        version = v2_strategy_state.version + 1,
+                        version = strategy_state.version + 1,
                         state_data = EXCLUDED.state_data,
                         schema_version = EXCLUDED.schema_version,
                         checksum = EXCLUDED.checksum,
@@ -580,7 +617,7 @@ class PostgresStore:
                 # CAS update -- inline version check
                 result = await conn.execute(
                     """
-                    UPDATE v2_strategy_state
+                    UPDATE strategy_state
                     SET version = version + 1,
                         state_data = $3::jsonb,
                         schema_version = $4,
@@ -597,9 +634,12 @@ class PostgresStore:
                 )
 
                 if result == "UPDATE 0":
-                    # Version mismatch -- get actual version for the error
+                    # Version mismatch -- read the actual version inside the
+                    # same transaction so the error message reflects a
+                    # consistent snapshot. The surrounding transaction will
+                    # be rolled back by the raised exception.
                     actual = await conn.fetchval(
-                        "SELECT version FROM v2_strategy_state WHERE agent_id = $1",
+                        "SELECT version FROM strategy_state WHERE agent_id = $1",
                         state.strategy_id,
                     )
                     raise StateConflictError(
@@ -620,7 +660,7 @@ class PostgresStore:
 
         async with self._pool.acquire() as conn:
             result = await conn.execute(
-                "DELETE FROM v2_strategy_state WHERE agent_id = $1",
+                "DELETE FROM strategy_state WHERE agent_id = $1",
                 strategy_id,
             )
             return result != "DELETE 0"
@@ -631,7 +671,7 @@ class PostgresStore:
             await self.initialize()
 
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("SELECT agent_id FROM v2_strategy_state")
+            rows = await conn.fetch("SELECT agent_id FROM strategy_state")
             return [row["agent_id"] for row in rows]
 
 
@@ -952,7 +992,11 @@ class StateManager:
         if expected_version is None and state.version > 1:
             expected_version = state.version - 1
 
-        # Recalculate checksum
+        # Recalculate checksum. The WARM backend computes its own canonical
+        # checksum from the serialized state body before committing (see
+        # SQLiteStore.save and PostgresStore.save), and writes state_data +
+        # checksum in the same atomic transaction -- so the on-disk row is
+        # always self-consistent. See module docstring -- VIB-3156.
         state.checksum = state._calculate_checksum()
         state.created_at = datetime.now(UTC)
 
@@ -1297,18 +1341,31 @@ class StateManager:
             snapshot: PortfolioSnapshot to persist.
 
         Returns:
-            Snapshot ID if save succeeded, 0 if no WARM backend or error.
+            Snapshot ID on success. Raises :class:`AccountingPersistenceError`
+            on backend write failure, missing WARM backend, or unsupported
+            backend so the runner can halt the cycle in live mode (VIB-3157).
+            Paper/dry-run suppression is handled upstream by the runner.
         """
         if not self._initialized:
             await self.initialize()
 
+        strategy_id = getattr(snapshot, "strategy_id", "") or ""
+
         if not self._warm:
-            logger.warning("Cannot save portfolio snapshot: no WARM backend configured")
-            return 0
+            logger.error("Cannot save portfolio snapshot: no WARM backend configured")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.SNAPSHOT,
+                strategy_id=strategy_id,
+                message="No WARM backend configured for portfolio snapshot",
+            )
 
         if not hasattr(self._warm, "save_portfolio_snapshot"):
-            logger.warning("WARM backend does not support portfolio snapshot storage")
-            return 0
+            logger.error("WARM backend does not support portfolio snapshot storage")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.SNAPSHOT,
+                strategy_id=strategy_id,
+                message="WARM backend does not support portfolio snapshot storage",
+            )
 
         start = time.perf_counter()
         try:
@@ -1316,11 +1373,22 @@ class StateManager:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "save_portfolio_snapshot", latency, True)
             return result
+        except AccountingPersistenceError:
+            # Backend already raised a typed accounting error -- don't double-wrap.
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(
+                StateTier.WARM, "save_portfolio_snapshot", latency, False, "AccountingPersistenceError"
+            )
+            raise
         except Exception as e:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "save_portfolio_snapshot", latency, False, str(e))
             logger.error(f"Failed to save portfolio snapshot: {e}")
-            return 0
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.SNAPSHOT,
+                strategy_id=strategy_id,
+                cause=e,
+            ) from e
 
     async def get_latest_snapshot(self, strategy_id: str) -> "PortfolioSnapshot | None":
         """Get most recent portfolio snapshot for a strategy.
@@ -1440,30 +1508,80 @@ class StateManager:
             metrics: PortfolioMetrics to persist.
 
         Returns:
-            True if save succeeded, False if no WARM backend or error.
+            ``True`` on success. Raises :class:`AccountingPersistenceError`
+            on backend write failure, missing WARM backend, or unsupported
+            backend so the runner can halt the cycle in live mode (VIB-3157).
+            Paper/dry-run suppression is handled upstream by the runner.
         """
         if not self._initialized:
             await self.initialize()
 
+        strategy_id = getattr(metrics, "strategy_id", "") or ""
+
         if not self._warm:
-            logger.warning("Cannot save portfolio metrics: no WARM backend configured")
-            return False
+            logger.error("Cannot save portfolio metrics: no WARM backend configured")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=strategy_id,
+                message="No WARM backend configured for portfolio metrics",
+            )
 
         if not hasattr(self._warm, "save_portfolio_metrics"):
-            logger.warning("WARM backend does not support portfolio metrics storage")
-            return False
+            logger.error("WARM backend does not support portfolio metrics storage")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=strategy_id,
+                message="WARM backend does not support portfolio metrics storage",
+            )
 
         start = time.perf_counter()
         try:
             result = await self._warm.save_portfolio_metrics(metrics)  # type: ignore[attr-defined]
+        except AccountingPersistenceError:
+            # Backend already raised a typed accounting error -- don't
+            # double-wrap, but still record the failure in tier metrics so
+            # observability matches save_ledger_entry / save_portfolio_snapshot.
             latency = (time.perf_counter() - start) * 1000
-            self._record_metrics(StateTier.WARM, "save_portfolio_metrics", latency, True)
-            return result
+            self._record_metrics(
+                StateTier.WARM,
+                "save_portfolio_metrics",
+                latency,
+                False,
+                "AccountingPersistenceError",
+            )
+            raise
         except Exception as e:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "save_portfolio_metrics", latency, False, str(e))
             logger.error(f"Failed to save portfolio metrics: {e}")
-            return False
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=strategy_id,
+                cause=e,
+            ) from e
+
+        # VIB-3157: a ``False`` return from the backend is a write failure.
+        # Done OUTSIDE the try-except so the raise here doesn't get caught
+        # by the AccountingPersistenceError passthrough above (which would
+        # double-record the failure metric). The old path returned the raw
+        # bool; downstream (runner_state) only escalates typed accounting
+        # errors, so a silent False would have slipped through.
+        latency = (time.perf_counter() - start) * 1000
+        if not result:
+            self._record_metrics(
+                StateTier.WARM,
+                "save_portfolio_metrics",
+                latency,
+                False,
+                "backend_returned_false",
+            )
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=strategy_id,
+                message="WARM backend save_portfolio_metrics returned False",
+            )
+        self._record_metrics(StateTier.WARM, "save_portfolio_metrics", latency, True)
+        return True
 
     async def get_portfolio_metrics(self, strategy_id: str) -> "PortfolioMetrics | None":
         """Get portfolio metrics for a strategy.
@@ -1528,3 +1646,101 @@ class StateManager:
             self._record_metrics(StateTier.WARM, "cleanup_old_snapshots", latency, False, str(e))
             logger.error(f"Failed to cleanup old snapshots: {e}")
             return 0
+
+    # =========================================================================
+    # Transaction Ledger (VIB-2402)
+    # =========================================================================
+
+    async def save_ledger_entry(self, entry: "LedgerEntry") -> None:
+        """Save a transaction ledger entry to the WARM backend.
+
+        Raises :class:`AccountingPersistenceError` on backend write failure,
+        missing WARM backend, or unsupported backend so the runner can halt
+        the cycle in live mode (VIB-3157). Paper/dry-run suppression is
+        handled upstream by the runner.
+
+        Args:
+            entry: LedgerEntry to persist.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        strategy_id = getattr(entry, "strategy_id", "") or ""
+
+        if not self._warm:
+            logger.error("Cannot save ledger entry: no WARM backend configured")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.LEDGER,
+                strategy_id=strategy_id,
+                message="No WARM backend configured for transaction ledger",
+            )
+
+        if not hasattr(self._warm, "save_ledger_entry"):
+            logger.error("WARM backend does not support transaction ledger")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.LEDGER,
+                strategy_id=strategy_id,
+                message="WARM backend does not support transaction ledger",
+            )
+
+        start = time.perf_counter()
+        try:
+            await self._warm.save_ledger_entry(entry)  # type: ignore[attr-defined]
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "save_ledger_entry", latency, True)
+        except AccountingPersistenceError:
+            # Backend already raised a typed accounting error -- don't double-wrap.
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "save_ledger_entry", latency, False, "AccountingPersistenceError")
+            raise
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "save_ledger_entry", latency, False, str(e))
+            # VIB-3157: surface as typed error so the runner can halt the cycle in live
+            # mode. Mode-aware suppression (paper/dry-run) happens upstream, never here
+            # -- the backend write either completed or it didn't.
+            logger.error("Failed to save ledger entry for %s: %s", strategy_id, e)
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.LEDGER,
+                strategy_id=strategy_id,
+                cause=e,
+            ) from e
+
+    async def get_ledger_entries(
+        self,
+        strategy_id: str,
+        since: "datetime | None" = None,
+        intent_type: str | None = None,
+        limit: int = 100,
+    ) -> list:
+        """Query transaction ledger entries.
+
+        Args:
+            strategy_id: Strategy to query.
+            since: Only entries after this timestamp.
+            intent_type: Filter by intent type.
+            limit: Maximum entries to return.
+
+        Returns:
+            List of LedgerEntry objects, newest first.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        if not self._warm:
+            return []
+
+        if not hasattr(self._warm, "get_ledger_entries"):
+            return []
+
+        start = time.perf_counter()
+        try:
+            result = await self._warm.get_ledger_entries(strategy_id, since, intent_type, limit)  # type: ignore[attr-defined]
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_ledger_entries", latency, True)
+            return result
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_ledger_entries", latency, False, str(e))
+            logger.error(f"Failed to get ledger entries: {e}")
+            return []

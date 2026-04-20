@@ -1,5 +1,7 @@
 """Tests for MarketService gateway implementation."""
 
+import logging
+import os
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -84,8 +86,12 @@ class TestMarketServiceGetPrice:
             request = gateway_pb2.PriceRequest(token="WBTC")  # No quote specified
             await market_service.GetPrice(request, mock_context)
 
-            # Verify USD was used as default
-            mock_aggregator.get_aggregated_price.assert_called_once_with("WBTC", "USD")
+            # Verify USD was used as default. `resolved_token=None` is
+            # always forwarded since the aggregator supports address-based
+            # price lookups for unknown tokens.
+            mock_aggregator.get_aggregated_price.assert_called_once_with(
+                "WBTC", "USD", resolved_token=None
+            )
 
     @pytest.mark.asyncio
     async def test_get_price_error_handling(self, market_service, mock_context):
@@ -155,6 +161,132 @@ class TestMarketServiceGetBalance:
                 assert response.balance == "10.5"
                 assert response.decimals == 18
 
+    @pytest.mark.asyncio
+    async def test_get_balance_unknown_address_dynamic_resolution(
+        self, market_service, mock_context
+    ):
+        """GetBalance resolves an unknown ERC20 address on-chain and returns the balance.
+
+        Direct regression for the OPENAGENTS staging bug: a strategy passes a raw
+        ERC20 address that isn't in DEFAULT_TOKENS, and we expect the gateway to
+        fetch decimals on-chain via OnChainLookup rather than raising
+        "Use add_token()".
+        """
+        from almanak.framework.data.tokens.exceptions import (
+            TokenNotFoundError as FrameworkTokenNotFoundError,
+        )
+        from almanak.gateway.data.balance.web3_provider import Web3BalanceProvider
+        from almanak.gateway.services.onchain_lookup import (
+            TokenMetadata as OnChainTokenMetadata,
+        )
+
+        unknown_address = "0xcb5ff7331193c45f61f05b035ddabe08f13f6ba3"
+        wallet_address = "0x1234567890123456789012345678901234567890"
+
+        # Isolate the test from the global TokenResolver singleton (which has a
+        # persistent disk cache) so prior runs can't pollute state. We replace it
+        # with a mock that always misses statically and swallows register() calls.
+        isolated_resolver = MagicMock()
+        isolated_resolver.resolve.side_effect = FrameworkTokenNotFoundError(
+            token=unknown_address, chain="base"
+        )
+
+        # OnChainLookup returns valid ERC20 metadata for the unknown address.
+        fake_lookup = MagicMock()
+        fake_lookup.lookup = AsyncMock(
+            return_value=OnChainTokenMetadata(
+                address=unknown_address,
+                symbol="OPENAGENTS",
+                decimals=18,
+                name="OpenAgents",
+                is_native=False,
+            )
+        )
+
+        # 3.14 OPENAGENTS in raw base units (18 decimals).
+        raw_balance = 3_140_000_000_000_000_000
+
+        # Patch at the class level so the real Web3BalanceProvider (built by
+        # MarketServiceServicer._get_balance_provider) picks them up.
+        with patch(
+            "almanak.framework.data.tokens.resolver.get_token_resolver",
+            return_value=isolated_resolver,
+        ), patch.object(
+            Web3BalanceProvider, "_get_onchain_lookup", return_value=fake_lookup
+        ), patch.object(
+            Web3BalanceProvider,
+            "_get_erc20_balance_with_retry",
+            new=AsyncMock(return_value=raw_balance),
+        ):
+            market_service._initialized = True
+            # Skip the USD-conversion pricing branch.
+            with patch.object(market_service, "_price_aggregator") as mock_aggregator:
+                mock_aggregator.get_aggregated_price = AsyncMock(
+                    side_effect=Exception("Skip USD")
+                )
+
+                request = gateway_pb2.BalanceRequest(
+                    token=unknown_address,
+                    chain="base",
+                    wallet_address=wallet_address,
+                )
+                response = await market_service.GetBalance(request, mock_context)
+
+            # Response success: status code was never overridden to an error.
+            mock_context.set_code.assert_not_called()
+
+            assert response.balance == "3.14"
+            assert response.decimals == 18
+            assert response.address == unknown_address
+            assert response.raw_balance == str(raw_balance)
+
+        fake_lookup.lookup.assert_awaited_once_with("base", unknown_address)
+        # SECURITY: register() must NOT be called -- the contract-reported symbol
+        # is untrusted, and persisting (chain, SYMBOL) -> address into the shared
+        # TokenResolver cache would create a symbol-squatting surface across
+        # providers. The balance provider's own BalanceCacheEntry TTL handles
+        # repeat-call efficiency; after TTL expiry we pay one more ~150ms
+        # OnChainLookup call, which is acceptable.
+        isolated_resolver.register.assert_not_called()
+
+
+class TestMarketServiceBatchGetBalances:
+    """Tests for MarketService.BatchGetBalances."""
+
+    @pytest.mark.asyncio
+    async def test_batch_get_balances_partial_failure_logs_debug(self, market_service, mock_context, caplog):
+        """BatchGetBalances logs per-token failures at DEBUG, not WARNING."""
+        valid_address = "0x1234567890123456789012345678901234567890"
+
+        mock_provider = MagicMock()
+        mock_provider.get_balance = AsyncMock(side_effect=Exception("token not found on chain"))
+
+        with patch.object(market_service, "_get_balance_provider", return_value=mock_provider):
+            market_service._initialized = True
+
+            request = gateway_pb2.BatchBalanceRequest(
+                requests=[
+                    gateway_pb2.BalanceRequest(
+                        token="USDT",
+                        chain="base",
+                        wallet_address=valid_address,
+                    )
+                ]
+            )
+
+            with caplog.at_level(logging.DEBUG, logger="almanak.gateway.services.market_service"):
+                response = await market_service.BatchGetBalances(request, mock_context)
+
+        # Partial failure is returned in response, not raised
+        assert len(response.responses) == 1
+        assert response.responses[0].error != ""
+
+        # Failure is logged at DEBUG, not WARNING
+        debug_msgs = [r for r in caplog.records if r.levelno == logging.DEBUG and "BatchGetBalances" in r.message]
+        warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING and "BatchGetBalances" in r.message]
+        assert len(debug_msgs) >= 1
+        assert len(warning_msgs) == 0
+
 
 class TestMarketServiceInitialization:
     """Tests for MarketService price source initialization."""
@@ -162,7 +294,13 @@ class TestMarketServiceInitialization:
     @pytest.mark.asyncio
     async def test_evm_chain_has_four_sources(self):
         """EVM chain gets 4-source pricing: Chainlink + Binance + DexScreener + CoinGecko."""
-        settings = GatewaySettings(coingecko_api_key=None, chains=["arbitrum"])
+        env = os.environ.copy()
+        env.pop("COINGECKO_API_KEY", None)
+        env.pop("ALMANAK_GATEWAY_COINGECKO_API_KEY", None)
+        # Must also mock load_dotenv to prevent .env file from re-populating
+        # COINGECKO_API_KEY into os.environ during GatewaySettings model validation.
+        with patch.dict(os.environ, env, clear=True), patch("dotenv.load_dotenv"):
+            settings = GatewaySettings(coingecko_api_key=None, chains=["arbitrum"])
         service = MarketServiceServicer(settings)
 
         try:
@@ -171,9 +309,15 @@ class TestMarketServiceInitialization:
 
             assert service._price_aggregator is not None
             sources = service._price_aggregator.sources
+            # 4 real data sources in the median-voting aggregator. The
+            # manual_override source is kept OUT of this list (held as
+            # service._manual_price_override) so a low-confidence override
+            # never corrupts the median of real feeds — see GetPrice's
+            # AllDataSourcesFailed fallback path. Off by default.
             assert len(sources) == 4
             source_names = [s.source_name for s in sources]
             assert source_names == ["onchain", "binance", "dexscreener", "coingecko"]
+            assert service._manual_price_override is None  # opt-in
 
             coingecko_sources = [source for source in sources if source.source_name == "coingecko"]
             assert len(coingecko_sources) == 1
@@ -183,7 +327,7 @@ class TestMarketServiceInitialization:
 
     @pytest.mark.asyncio
     async def test_evm_chain_with_cg_key_has_four_sources(self):
-        """EVM chain with CG key still gets 4-source pricing."""
+        """EVM chain with CG key still gets 4-source pricing; override off by default."""
         settings = GatewaySettings(coingecko_api_key="test-key-123", chains=["arbitrum"])
         service = MarketServiceServicer(settings)
 
@@ -197,6 +341,7 @@ class TestMarketServiceInitialization:
             assert source_names == ["onchain", "binance", "dexscreener", "coingecko"]
             cg = [s for s in sources if s.source_name == "coingecko"][0]
             assert cg._api_key == "test-key-123"
+            assert service._manual_price_override is None
         finally:
             await service.close()
 
@@ -204,7 +349,7 @@ class TestMarketServiceInitialization:
     @pytest.mark.parametrize("chain", ["arbitrum", "mantle"])
     @pytest.mark.parametrize("cg_key", [None, "key-123"])
     async def test_all_evm_chains_get_four_sources(self, chain, cg_key):
-        """Aggregator has 4 sources for any EVM chain, regardless of CG key."""
+        """Aggregator has 4 real sources for any EVM chain; override off by default."""
         settings = GatewaySettings(coingecko_api_key=cg_key, chains=[chain])
         service = MarketServiceServicer(settings)
 
@@ -213,6 +358,28 @@ class TestMarketServiceInitialization:
                 await service._ensure_initialized()
 
             assert len(service._price_aggregator.sources) == 4
+            assert service._manual_price_override is None
+        finally:
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_manual_override_opt_in_via_settings_flag(self):
+        """enable_manual_price_overrides=True wires the fallback source in."""
+        settings = GatewaySettings(
+            chains=["arbitrum"],
+            enable_manual_price_overrides=True,
+        )
+        service = MarketServiceServicer(settings)
+
+        try:
+            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+                await service._ensure_initialized()
+
+            # Override still stays OUT of the median aggregator
+            assert len(service._price_aggregator.sources) == 4
+            # But it's available as a last-resort fallback
+            assert service._manual_price_override is not None
+            assert service._manual_price_override.source_name == "manual_override"
         finally:
             await service.close()
 
@@ -242,11 +409,83 @@ class TestMarketServiceInitialization:
         try:
             await service._ensure_initialized()
 
-            # Only CoinGecko source when no chain is configured
+            # Only CoinGecko in the aggregator when no chain is configured.
+            # The manual_override safety valve is held separately and only
+            # consulted when enable_manual_price_overrides=True (off here).
             assert len(service._price_aggregator.sources) == 1
             assert service._price_aggregator.sources[0].source_name == "coingecko"
+            assert service._manual_price_override is None
         finally:
             await service.close()
+
+
+class TestMarketServicePriceAlias:
+    """Tests for native->wrapped price alias fallback."""
+
+    @pytest.mark.asyncio
+    async def test_mnt_falls_back_to_wmnt(self, market_service, mock_context):
+        """GetPrice for MNT falls back to WMNT when MNT lookup fails."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.interfaces import AllDataSourcesFailed, PriceResult
+
+        wmnt_result = PriceResult(
+            price=Decimal("0.85"),
+            source="binance",
+            timestamp=datetime.now(UTC),
+            confidence=0.90,
+            stale=False,
+        )
+
+        call_count = 0
+
+        async def mock_get_price(token, quote, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if token == "MNT":
+                raise AllDataSourcesFailed(errors={"all": "no sources"})
+            return wmnt_result
+
+        market_service._price_aggregator = MagicMock()
+        market_service._price_aggregator.get_aggregated_price = AsyncMock(side_effect=mock_get_price)
+        market_service._price_aggregator.get_last_details = MagicMock(return_value=None)
+        market_service._initialized = True
+
+        request = gateway_pb2.PriceRequest(token="MNT", quote="USD")
+        response = await market_service.GetPrice(request, mock_context)
+
+        assert response.price == "0.85"
+        assert response.source == "binance"
+        assert call_count == 2  # MNT failed, then WMNT succeeded
+
+    @pytest.mark.asyncio
+    async def test_no_alias_for_known_token(self, market_service, mock_context):
+        """GetPrice for ETH succeeds directly without alias fallback."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.interfaces import PriceResult
+
+        eth_result = PriceResult(
+            price=Decimal("3000.00"),
+            source="binance",
+            timestamp=datetime.now(UTC),
+            confidence=0.95,
+            stale=False,
+        )
+
+        market_service._price_aggregator = MagicMock()
+        market_service._price_aggregator.get_aggregated_price = AsyncMock(return_value=eth_result)
+        market_service._price_aggregator.get_last_details = MagicMock(return_value=None)
+        market_service._initialized = True
+
+        request = gateway_pb2.PriceRequest(token="ETH", quote="USD")
+        response = await market_service.GetPrice(request, mock_context)
+
+        assert response.price == "3000.00"
+        # Should only call once - no fallback needed.
+        market_service._price_aggregator.get_aggregated_price.assert_called_once_with(
+            "ETH", "USD", resolved_token=None
+        )
 
 
 class TestMarketServiceGetIndicator:
@@ -263,3 +502,117 @@ class TestMarketServiceGetIndicator:
 
         mock_context.set_code.assert_called()
         assert "not supported" in str(mock_context.set_details.call_args)
+
+
+class TestGetPriceManualOverrideFallback:
+    """Tests for GetPrice's AllDataSourcesFailed fallback to the manual override
+    source. This is the core Bug 3 fix path — the override must kick in ONLY
+    when every real oracle source failed, must NOT perturb the price when real
+    sources succeeded, and must cleanly fall through to INTERNAL when the
+    operator hasn't configured an override for the token.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fallback_returns_override_when_aggregator_fails(self, mock_context):
+        """AllDataSourcesFailed → manual override is consulted and returned."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.interfaces import AllDataSourcesFailed, PriceResult
+
+        settings = GatewaySettings(chains=["zerog"], enable_manual_price_overrides=True)
+        service = MarketServiceServicer(settings)
+
+        try:
+            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+                await service._ensure_initialized()
+
+            # Aggregator fails for W0G (no oracle coverage)
+            service._price_aggregator.get_aggregated_price = AsyncMock(
+                side_effect=AllDataSourcesFailed(errors={"onchain": "no feed", "coingecko": "unknown"})
+            )
+            service._price_aggregator.get_last_details = MagicMock(return_value=None)
+
+            # Override has a price for it
+            override_result = PriceResult(
+                price=Decimal("0.12"),
+                source="manual_override",
+                timestamp=datetime.now(UTC),
+                confidence=0.5,
+                stale=False,
+            )
+            service._manual_price_override.get_price = AsyncMock(return_value=override_result)
+
+            response = await service.GetPrice(
+                gateway_pb2.PriceRequest(token="W0G", quote="USD"),
+                mock_context,
+            )
+
+            assert response.price == "0.12"
+            assert response.source == "manual_override"
+            assert response.confidence == 0.5
+            service._manual_price_override.get_price.assert_awaited_once_with("W0G", "USD")
+        finally:
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_fallback_falls_through_to_internal_when_no_override(self, mock_context):
+        """Aggregator fails AND override has no value → INTERNAL error path."""
+        import grpc as grpc_mod
+        from almanak.framework.data.interfaces import AllDataSourcesFailed, DataSourceUnavailable
+
+        settings = GatewaySettings(chains=["zerog"], enable_manual_price_overrides=True)
+        service = MarketServiceServicer(settings)
+
+        try:
+            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+                await service._ensure_initialized()
+
+            service._price_aggregator.get_aggregated_price = AsyncMock(
+                side_effect=AllDataSourcesFailed(errors={"onchain": "no feed"})
+            )
+            service._price_aggregator.get_last_details = MagicMock(return_value=None)
+            service._manual_price_override.get_price = AsyncMock(
+                side_effect=DataSourceUnavailable(source="manual_override", reason="no override")
+            )
+
+            response = await service.GetPrice(
+                gateway_pb2.PriceRequest(token="UNKNOWN_TOKEN", quote="USD"),
+                mock_context,
+            )
+
+            # Empty response, INTERNAL code
+            assert response.price == ""
+            mock_context.set_code.assert_called_with(grpc_mod.StatusCode.INTERNAL)
+        finally:
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_fallback_not_used_when_override_disabled(self, mock_context):
+        """With enable_manual_price_overrides=False (default), aggregator
+        failure goes straight to INTERNAL — override is never consulted."""
+        import grpc as grpc_mod
+        from almanak.framework.data.interfaces import AllDataSourcesFailed
+
+        settings = GatewaySettings(chains=["zerog"])  # default: override off
+        service = MarketServiceServicer(settings)
+
+        try:
+            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+                await service._ensure_initialized()
+
+            assert service._manual_price_override is None
+
+            service._price_aggregator.get_aggregated_price = AsyncMock(
+                side_effect=AllDataSourcesFailed(errors={"onchain": "no feed"})
+            )
+            service._price_aggregator.get_last_details = MagicMock(return_value=None)
+
+            response = await service.GetPrice(
+                gateway_pb2.PriceRequest(token="W0G", quote="USD"),
+                mock_context,
+            )
+
+            assert response.price == ""
+            mock_context.set_code.assert_called_with(grpc_mod.StatusCode.INTERNAL)
+        finally:
+            await service.close()

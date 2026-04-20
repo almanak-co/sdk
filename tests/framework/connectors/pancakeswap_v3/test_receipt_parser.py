@@ -259,3 +259,116 @@ class TestPancakeSwapV3ParseResult:
 
         assert dict_result["success"] is False
         assert dict_result["error"] == "Transaction reverted"
+
+
+class TestPancakeSwapV3ExtractSwapAmounts:
+    """Tests for extract_swap_amounts using Transfer events + token resolver."""
+
+    def _make_transfer_log(self, token_addr: str, from_addr: str, to_addr: str, amount: int) -> dict:
+        """Helper to build a Transfer log entry."""
+        return {
+            "address": token_addr,
+            "topics": [
+                EVENT_TOPICS["Transfer"],
+                "0x000000000000000000000000" + from_addr.lower().replace("0x", ""),
+                "0x000000000000000000000000" + to_addr.lower().replace("0x", ""),
+            ],
+            "data": "0x" + hex(amount)[2:].zfill(64),
+        }
+
+    def test_extract_swap_amounts_uses_correct_decimals(self):
+        """Test that USDC (6 decimals) is scaled correctly, not divided by 1e18."""
+        from unittest.mock import MagicMock, patch
+
+        parser = PancakeSwapV3ReceiptParser(chain="arbitrum")
+        wallet = "0x" + "ab" * 20
+        usdc_addr = "0x" + "cc" * 20
+        weth_addr = "0x" + "dd" * 20
+
+        # Wallet sends 1 WETH (18 decimals), receives 5 USDC (6 decimals)
+        receipt = {
+            "from": wallet,
+            "status": 1,
+            "logs": [
+                self._make_transfer_log(weth_addr, wallet, "0x" + "ee" * 20, 10**18),
+                self._make_transfer_log(usdc_addr, "0x" + "ee" * 20, wallet, 5_000_000),
+            ],
+        }
+
+        mock_resolver = MagicMock()
+
+        def mock_resolve(addr, chain):
+            result = MagicMock()
+            if addr == usdc_addr:
+                result.decimals = 6
+            else:
+                result.decimals = 18
+            return result
+
+        mock_resolver.resolve = mock_resolve
+
+        with patch(
+            "almanak.framework.data.tokens.get_token_resolver",
+            return_value=mock_resolver,
+        ):
+            swap = parser.extract_swap_amounts(receipt)
+
+        assert swap is not None
+        assert swap.amount_out == 5_000_000
+        assert swap.amount_out_decimal == 5  # 5_000_000 / 10^6 = 5, NOT 5e-12
+        assert swap.amount_in_decimal == 1  # 10^18 / 10^18 = 1
+        assert swap.token_in == weth_addr
+        assert swap.token_out == usdc_addr
+
+    def test_extract_swap_amounts_no_wallet(self):
+        """Test that missing wallet address returns None."""
+        parser = PancakeSwapV3ReceiptParser(chain="arbitrum")
+        receipt = {"status": 1, "logs": []}
+        assert parser.extract_swap_amounts(receipt) is None
+
+    def test_extract_swap_amounts_no_transfers(self):
+        """Test that receipt with no Transfer events returns None."""
+        parser = PancakeSwapV3ReceiptParser(chain="arbitrum")
+        receipt = {"from": "0x" + "ab" * 20, "status": 1, "logs": []}
+        assert parser.extract_swap_amounts(receipt) is None
+
+    def test_extract_swap_amounts_reverted_receipt(self):
+        """Test that a reverted receipt (status=0) returns None even with Transfer events."""
+        parser = PancakeSwapV3ReceiptParser(chain="arbitrum")
+        wallet = "0x" + "ab" * 20
+        receipt = {
+            "from": wallet,
+            "status": 0,
+            "logs": [
+                self._make_transfer_log("0x" + "cc" * 20, "0x" + "ee" * 20, wallet, 5_000_000),
+            ],
+        }
+        assert parser.extract_swap_amounts(receipt) is None
+
+    def test_extract_swap_amounts_resolver_failure(self):
+        """Test that unknown output token (resolver raises) returns None."""
+        from unittest.mock import MagicMock, patch
+
+        parser = PancakeSwapV3ReceiptParser(chain="arbitrum")
+        wallet = "0x" + "ab" * 20
+        unknown_token = "0x" + "ff" * 20
+
+        receipt = {
+            "from": wallet,
+            "status": 1,
+            "logs": [
+                self._make_transfer_log("0x" + "dd" * 20, wallet, "0x" + "ee" * 20, 10**18),
+                self._make_transfer_log(unknown_token, "0x" + "ee" * 20, wallet, 5_000_000),
+            ],
+        }
+
+        mock_resolver = MagicMock()
+        mock_resolver.resolve.side_effect = Exception("Token not found")
+
+        with patch(
+            "almanak.framework.data.tokens.get_token_resolver",
+            return_value=mock_resolver,
+        ):
+            swap = parser.extract_swap_amounts(receipt)
+
+        assert swap is None

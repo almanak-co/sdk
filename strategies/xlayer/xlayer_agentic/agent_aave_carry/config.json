@@ -1,0 +1,21 @@
+{
+    "chain": "xlayer",
+    "wallet_address": "0x6BA553d60E8515E9b4026e377da72Dd379E78daD",
+    "supply_token": "USDT0",
+    "borrow_token": "USDG",
+    "initial_supply_amount": "5.0",
+    "ltv_target": "0.5",
+    "min_health_factor": "1.5",
+    "collateral_factor": "0.70",
+    "interest_rate_mode": "variable",
+    "interval_seconds": 1800,
+    "max_tool_rounds": 12,
+    "strategy_id": "agent-xlayer-aave-carry",
+    "skip_llm_enabled": true,
+    "skip_llm_when_hf_above": "2.0",
+    "anvil_funding": {
+        "OKB": 100,
+        "WOKB": 10,
+        "USDT0": 10000
+    }
+}

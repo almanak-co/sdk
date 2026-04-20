@@ -214,14 +214,14 @@ class TestDeprecatedDictsRemoved:
 
 
 class TestTraderJoeV2SwapGuard:
-    """Verify TraderJoe V2 swap is blocked at compiler level (VIB-1406).
+    """Verify TraderJoe V2 swap routes to dedicated compilation path (VIB-1928).
 
     LBRouter2 uses a bin-based AMM interface incompatible with DefaultSwapAdapter's
-    Uniswap V3 exactInputSingle calldata. Swaps must fail-closed with clear error.
+    Uniswap V3 exactInputSingle calldata. Swaps route to _compile_swap_traderjoe_v2().
     """
 
-    def test_traderjoe_v2_swap_blocked(self):
-        """SwapIntent(protocol='traderjoe_v2') fails with clear error."""
+    def test_traderjoe_v2_swap_not_blocked(self):
+        """SwapIntent(protocol='traderjoe_v2') no longer returns VIB-1406 error (VIB-1928)."""
         from decimal import Decimal
 
         from almanak.framework.intents import SwapIntent
@@ -242,10 +242,18 @@ class TestTraderJoeV2SwapGuard:
         )
 
         result = compiler.compile(intent)
-        assert result.status.value == "FAILED"
-        assert "VIB-1406" in result.error
-        assert "LBRouter2" in result.error
-        assert "uniswap_v3" in result.error  # Suggests alternative
+        # VIB-1928: TJ V2 swaps now route to dedicated compilation path.
+        # May fail for RPC/pool reasons in unit test, but NOT with VIB-1406 error.
+        if result.status.value == "FAILED":
+            assert "VIB-1406" not in (result.error or ""), (
+                "TraderJoe V2 swap still blocked by VIB-1406 guard!"
+            )
+            assert "not yet supported" not in (result.error or ""), (
+                "TraderJoe V2 swap still returns 'not yet supported' error!"
+            )
+        elif result.status.value == "SUCCESS":
+            assert result.action_bundle is not None
+            assert result.action_bundle.metadata["protocol"] == "traderjoe_v2"
 
     def test_traderjoe_v2_removed_from_protocol_routers(self):
         """Verify traderjoe_v2 is not in PROTOCOL_ROUTERS (swap routing)."""

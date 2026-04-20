@@ -199,14 +199,14 @@ class TestGetTokenSymbolWithResolver:
         result = adapter._get_token_symbol("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
         assert result == "USDC"
 
-    def test_get_symbol_unknown_address_raises_error(self, enso_config, mock_resolver):
-        """Test unknown address raises TokenResolutionError."""
+    def test_get_symbol_unknown_address_returns_truncated(self, enso_config, mock_resolver):
+        """Test unknown address returns truncated address (skip_gateway=True avoids 30s timeout)."""
         mock_resolver.resolve.side_effect = TokenResolutionError(
             token="0x0000000000000000000000000000000000000001", chain="arbitrum", reason="Not found"
         )
         adapter = _make_adapter(enso_config, token_resolver=mock_resolver)
-        with pytest.raises(TokenResolutionError):
-            adapter._get_token_symbol("0x0000000000000000000000000000000000000001")
+        result = adapter._get_token_symbol("0x0000000000000000000000000000000000000001")
+        assert result == "0x0000...0001"
 
 
 class TestMultiChainResolution:

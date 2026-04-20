@@ -6,7 +6,7 @@ and on-chain account state.
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .constants import (
     DIRECTION_LONG,
@@ -16,6 +16,9 @@ from .constants import (
     TRIGGER_CONDITION_ABOVE,
 )
 from .exceptions import DriftConfigError
+
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
 
 
 @dataclass
@@ -31,10 +34,11 @@ class DriftConfig:
     """
 
     wallet_address: str
-    rpc_url: str = ""
+    rpc_url: str = ""  # DEPRECATED — use gateway_client
     sub_account_id: int = 0
     data_api_base_url: str = "https://data.api.drift.trade"
     timeout: int = 30
+    gateway_client: "GatewayClient | None" = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.wallet_address:

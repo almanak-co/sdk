@@ -14,6 +14,9 @@ Morpho Blue Features:
 Supported Chains:
 - Ethereum
 - Base
+- Arbitrum (uses a chain-specific Morpho Blue deployment, not the universal address)
+- Polygon (uses a chain-specific Morpho Blue deployment, not the universal address)
+- Monad (uses a chain-specific Morpho Blue deployment, not the universal address)
 
 Example:
     from almanak.framework.connectors.morpho_blue import (

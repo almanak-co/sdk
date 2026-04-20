@@ -1,0 +1,21 @@
+{
+    "strategy_id": "morpho_aave_yield_rotation",
+    "strategy_name": "morpho_aave_yield_rotation",
+    "description": "Cross-protocol yield rotation - moves wstETH to highest-yielding protocol",
+    "token": "wstETH",
+    "morpho_market_id": "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
+    "deploy_amount": "0.5",
+    "min_spread_bps": 50,
+    "cooldown_seconds": 3600,
+    "estimated_gas_cost_usd": "15",
+    "max_consecutive_losses": 3,
+    "morpho_apy_override": null,
+    "aave_apy_override": null,
+    "force_protocol": "",
+    "chain": "ethereum",
+    "anvil_funding": {
+        "ETH": 100,
+        "wstETH": 2,
+        "USDC": 10000
+    }
+}

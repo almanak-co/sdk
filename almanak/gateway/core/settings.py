@@ -38,6 +38,15 @@ class GatewaySettings(BaseSettings):
     # Pre-initialize chains (comma-separated). Empty = accept any chain on-demand.
     chains: list[str] = []
 
+    # Enable the ManualPriceOverrideSource last-resort fallback. When True, the
+    # gateway consults ``ALMANAK_PRICE_OVERRIDE_<TOKEN>`` env vars for tokens
+    # that every real oracle source failed to price (e.g. W0G on 0G Chain).
+    # Off by default because a mis-set env var can feed a wrong price into
+    # slippage / teardown decisions. Operators with long-tail tokens should
+    # enable it explicitly via ``ALMANAK_GATEWAY_ENABLE_MANUAL_PRICE_OVERRIDES=true``
+    # alongside the per-token ``ALMANAK_PRICE_OVERRIDE_<TOKEN>`` values.
+    enable_manual_price_overrides: bool = False
+
     # Metrics settings
     metrics_enabled: bool = True
     metrics_port: int = 9090
@@ -49,7 +58,16 @@ class GatewaySettings(BaseSettings):
     # Platform secrets - only gateway has access to these
     alchemy_api_key: str | None = None
     coingecko_api_key: str | None = None
+    enso_api_key: str | None = None
     pendle_api_key: str | None = None
+    portfolio_api_key: str | None = None
+    portfolio_api_provider: str = "zerion"
+    portfolio_api_cache_ttl: int = 300
+
+    # Multi-provider portfolio valuation (takes precedence over single portfolio_api_key).
+    # Comma-separated provider names in priority order, e.g. "zerion,moralis".
+    # Each provider reads its API key from {NAME}_API_KEY env var.
+    portfolio_providers: str | None = None
 
     # Pendle API settings
     pendle_api_cache_ttl: float = 15.0  # seconds
@@ -137,6 +155,32 @@ class GatewaySettings(BaseSettings):
             fallback = os.environ.get("ALMANAK_SIGNER_SERVICE_JWT")
             if fallback:
                 self.signer_service_jwt = fallback
+
+        # Third-party API keys: the deployer and docker-compose inject these
+        # under their bare names (e.g. ALCHEMY_API_KEY, not
+        # ALMANAK_GATEWAY_ALCHEMY_API_KEY).  Fall back to the bare name so
+        # both Pydantic settings consumers and direct os.environ readers
+        # (like rpc_provider.py) work from the same env var.
+        if not self.alchemy_api_key:
+            fallback = os.environ.get("ALCHEMY_API_KEY")
+            if fallback:
+                self.alchemy_api_key = fallback
+        if not self.coingecko_api_key:
+            fallback = os.environ.get("COINGECKO_API_KEY")
+            if fallback:
+                self.coingecko_api_key = fallback
+        if not self.enso_api_key:
+            fallback = os.environ.get("ENSO_API_KEY")
+            if fallback:
+                self.enso_api_key = fallback
+        if not self.portfolio_api_key:
+            fallback = os.environ.get("ALMANAK_PORTFOLIO_API_KEY") or os.environ.get("ZERION_API_KEY")
+            if fallback:
+                self.portfolio_api_key = fallback
+        if not self.portfolio_providers:
+            fallback = os.environ.get("PORTFOLIO_PROVIDERS")
+            if fallback:
+                self.portfolio_providers = fallback
 
         return self
 

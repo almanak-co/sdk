@@ -1,6 +1,6 @@
 site_name: Almanak SDK
 site_description: Python SDK for developing and deploying autonomous DeFi agents
-site_url: https://docs.almanak.co
+site_url: https://sdk.docs.almanak.co
 repo_url: https://github.com/almanak-co/sdk
 repo_name: almanak-co/sdk
 use_directory_urls: false
@@ -98,6 +98,7 @@ plugins:
 
 extra:
   generator: false
+  homepage: https://sdk.docs.almanak.co
   alternate:
     - name: English
       link: /
@@ -142,17 +143,12 @@ markdown_extensions:
   - tables
 
 nav:
-  - Home: index.md
-  - Getting Started:
-    - getting-started.md
-  - Environment Variables:
-    - environment-variables.md
-  - Agent Skills:
-    - agent-skills.md
-  - Agentic Trading:
-    - agentic/index.md
-    - agentic/agent-tools.md
-    - agentic/adapters.md
+  - Home:
+    - index.md
+    - Getting Started: getting-started.md
+    - Environment Variables: environment-variables.md
+    - Agent Skills: agent-skills.md
+    - Agentic Trading: agentic/index.md
   - CLI Reference:
     - cli/almanak.md
     - cli/almanak-ax.md
@@ -181,17 +177,25 @@ nav:
     - Connectors:
       - api/connectors/index.md
       - api/connectors/uniswap_v3.md
+      - api/connectors/uniswap_v4.md
       - api/connectors/aave_v3.md
       - api/connectors/morpho_blue.md
+      - api/connectors/curvance.md
       - api/connectors/gmx_v2.md
+      - api/connectors/aster_perps.md
+      - api/connectors/pancakeswap_perps.md
       - api/connectors/aerodrome.md
       - api/connectors/traderjoe_v2.md
       - api/connectors/pancakeswap_v3.md
       - api/connectors/sushiswap_v3.md
       - api/connectors/curve.md
       - api/connectors/balancer.md
+      - api/connectors/benqi.md
       - api/connectors/compound_v3.md
+      - api/connectors/silo_v2.md
       - api/connectors/enso.md
+      - api/connectors/joelend.md
+      - api/connectors/euler_v2.md
       - api/connectors/polymarket.md
       - api/connectors/hyperliquid.md
       - api/connectors/lido.md
@@ -199,6 +203,18 @@ nav:
       - api/connectors/spark.md
       - api/connectors/pendle.md
       - api/connectors/kraken.md
+      - api/connectors/drift.md
+      - api/connectors/fluid.md
+      - api/connectors/lagoon.md
+      - api/connectors/meteora.md
+      - api/connectors/morpho_vault.md
+      - api/connectors/orca.md
+      - api/connectors/raydium.md
+      - api/connectors/gimo.md
+      - api/connectors/jupiter.md
+      - api/connectors/jupiter_lend.md
+      - api/connectors/kamino.md
+      - api/connectors/lifi.md
       - api/connectors/bridges.md
       - api/connectors/flash_loan.md
       - api/connectors/base.md

@@ -18,6 +18,8 @@ Multi-chain example:
 """
 
 import asyncio
+import dataclasses
+import inspect
 import json
 import logging
 import os
@@ -63,9 +65,8 @@ from ..data.indicators.sync_wrappers import (
 )
 from ..data.interfaces import BalanceProvider as BalanceProviderInterface
 from ..data.interfaces import PriceOracle
-from ..data.ohlcv.gateway_data_adapter import GatewayOHLCVDataProvider
-from ..data.ohlcv.gateway_provider import GatewayOHLCVProvider
-from ..data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
+from ..data.ohlcv.gateway_data_adapter import GatewayOHLCVDataProvider, GeckoTerminalGatewayDataProvider
+from ..data.ohlcv.gateway_provider import GatewayGeckoTerminalOHLCVProvider, GatewayOHLCVProvider
 from ..data.ohlcv.ohlcv_router import OHLCVRouter
 from ..data.ohlcv.routing_provider import RoutingOHLCVProvider
 from ..data.price.gateway_oracle import GatewayPriceOracle
@@ -202,7 +203,7 @@ def find_strategy_dir(strategy_name: str) -> Path | None:
     # Handle demo_ prefix -> demo/<name> directory structure (backward compat)
     if strategy_name.startswith("demo_"):
         subdir_name = strategy_name[5:]  # Remove "demo_" prefix
-        search_paths.insert(0, Path("strategies/demo") / subdir_name)
+        search_paths.insert(0, Path("almanak/demo_strategies") / subdir_name)
 
     # Handle test_ prefix -> tests/<subdir>/<name> for LP and TA strategies
     if strategy_name.startswith("test_"):
@@ -227,6 +228,21 @@ def find_strategy_dir(strategy_name: str) -> Path | None:
             return path
 
     return None
+
+
+def _warn_missing_token_funding(config: dict[str, Any], config_path: Path) -> None:
+    """Emit a warning if the config lacks a ``token_funding`` field."""
+    if "token_funding" in config:
+        return
+    # Skip for intentionally dynamic strategies (e.g. copy_trader)
+    if "copy_trading" in config:
+        return
+    click.echo(
+        f'  Warning: {config_path.name} is missing a "token_funding" field. '
+        "This will be required in a future release. "
+        "Run `almanak strat new` to see the expected format.",
+        err=True,
+    )
 
 
 def load_strategy_config(
@@ -256,6 +272,7 @@ def load_strategy_config(
             with open(config_path) as f:
                 config = json.load(f)
         click.echo(f"Loaded config from: {config_path}")
+        _warn_missing_token_funding(config, config_path)
         return config
 
     # Search for config in standard locations
@@ -267,6 +284,7 @@ def load_strategy_config(
             with open(config_path) as f:
                 config = json.load(f)
             click.echo(f"Loaded config from: {config_path}")
+            _warn_missing_token_funding(config, config_path)
             return config
 
         # Try YAML
@@ -278,6 +296,7 @@ def load_strategy_config(
                 with open(config_path) as f:
                     config = yaml.safe_load(f)
                 click.echo(f"Loaded config from: {config_path}")
+                _warn_missing_token_funding(config, config_path)
                 return config
 
     # Return minimal default config with generated UUID
@@ -303,6 +322,57 @@ def get_default_chain(strategy_class: type) -> str:
     if supported:
         return supported[0]
     return "arbitrum"
+
+
+def resolve_strategy_chain(
+    strategy_class: type,
+    strategy_config: dict,
+    *,
+    env_chain: str | None = None,
+    multi_chain: bool = False,
+) -> str | None:
+    """Resolve the runtime chain for a single-chain strategy.
+
+    Priority: ALMANAK_CHAIN env > config.json "chain" > decorator default.
+
+    The env override exists so the same strategy can be retargeted at a
+    different supported chain (e.g. by the multi-chain demo smoke harness)
+    without rewriting config.json. Production deployments leave the env unset
+    and config.json is the source of truth.
+
+    Args:
+        strategy_class: The strategy class (used to read decorator metadata).
+        strategy_config: The loaded config.json dict.
+        env_chain: The ALMANAK_CHAIN env value, already lowercased and trimmed
+            (None / empty = no override).
+        multi_chain: True for multi-chain strategies — they bypass single-chain
+            resolution entirely (chain comes from MultiChainRuntimeConfig).
+
+    Returns:
+        Resolved chain name (lowercased), or None for multi-chain when neither
+        env nor config supplies one.
+
+    Raises:
+        click.ClickException: If env override is set but the chain isn't in the
+            strategy's declared supported_chains.
+    """
+    env = (env_chain or "").strip().lower() or None
+    cfg_raw = strategy_config.get("chain")
+    cfg_chain = cfg_raw.strip().lower() if isinstance(cfg_raw, str) and cfg_raw.strip() else None
+
+    if env and not multi_chain:
+        supported = [c.lower() for c in get_strategy_chains(strategy_class)]
+        if supported and env not in supported:
+            raise click.ClickException(
+                f"ALMANAK_CHAIN={env} is not in this strategy's supported_chains "
+                f"({', '.join(supported)}). Update the strategy decorator or unset the env var."
+            )
+
+    resolved = env or cfg_chain
+    if not resolved and not multi_chain:
+        default = get_default_chain(strategy_class)
+        resolved = default.lower() if isinstance(default, str) else None
+    return resolved
 
 
 def create_price_oracle(
@@ -441,19 +511,103 @@ def create_routing_ohlcv_provider(
     """
     gateway_provider = GatewayOHLCVProvider(gateway_client=gateway_client)
     binance_adapter = GatewayOHLCVDataProvider(gateway_provider)
-    gecko_provider = GeckoTerminalOHLCVProvider()
+
+    gecko_provider = GatewayGeckoTerminalOHLCVProvider(gateway_client=gateway_client, chain=chain)
+    gecko_adapter = GeckoTerminalGatewayDataProvider(gecko_provider)
 
     router = OHLCVRouter(default_chain=chain)
     router.register_provider(binance_adapter)
-    router.register_provider(gecko_provider)
+    router.register_provider(gecko_adapter)
 
     pool_address = strategy_config.get("pool_address")
     return RoutingOHLCVProvider(
         router=router,
         chain=chain,
         pool_address=str(pool_address) if pool_address else None,
-        closeable_providers=[gecko_provider],
+        closeable_providers=[],
     )
+
+
+def _get_orca_pool_accounts(strategy_config: dict) -> list[str]:
+    """Fetch Orca Whirlpool accounts to pre-clone for local fork testing.
+
+    Returns the pool's vault accounts and all tick array PDAs covering the
+    expected LP range (plus one buffer array on each side).
+
+    Returns an empty list on any error so fork startup is never blocked.
+
+    Note: Direct HTTP call to Orca API is acceptable here because this runs
+    during CLI fork setup, before the gateway is started.
+    """
+    if strategy_config.get("protocol") != "orca_whirlpools":
+        return []
+    pool_address = strategy_config.get("pool_address")
+    tick_spacing = int(strategy_config.get("tick_spacing", 64))
+    range_pct = float(strategy_config.get("range_pct", 20))
+    if not pool_address:
+        return []
+
+    accounts: list[str] = []
+    try:
+        import math
+
+        import requests as _req
+        from solders.pubkey import Pubkey  # noqa: F811
+    except ImportError:
+        return []
+
+    try:
+        orca_api = os.environ.get("ORCA_API_BASE_URL") or "https://api.orca.so/v2/solana"
+        resp = _req.get(f"{orca_api}/pools/{pool_address}", timeout=10)
+        if resp.status_code != 200:
+            return []
+        raw = resp.json()
+        data = raw.get("data", raw) if isinstance(raw, dict) else raw
+        tick_current = int(data.get("tickCurrentIndex", 0))
+        # Use tickSpacing from API if present (more reliable than config)
+        tick_spacing = int(data.get("tickSpacing", tick_spacing))
+
+        # Add pool vault accounts (SPL token accounts that receive deposited tokens)
+        vault_a = data.get("tokenVaultA")
+        vault_b = data.get("tokenVaultB")
+        if vault_a:
+            accounts.append(vault_a)
+        if vault_b:
+            accounts.append(vault_b)
+    except Exception as _e:
+        click.echo(f"  Warning: could not fetch Orca pool state for pre-clone: {_e}")
+        return []
+
+    try:
+        tick_delta = int(math.log(1 + range_pct / 100) / math.log(1.0001))
+        tick_lower = tick_current - tick_delta
+        tick_upper = tick_current + tick_delta
+        array_size = 88 * tick_spacing
+
+        def _start(tick: int) -> int:
+            if tick >= 0:
+                return (tick // array_size) * array_size
+            else:
+                return -(((-tick - 1) // array_size + 1) * array_size)
+
+        # Collect start indexes: lower, current, upper + 1 buffer on each side
+        starts: set[int] = set()
+        for t in [tick_lower, tick_current, tick_upper]:
+            s = _start(t)
+            starts.update([s - array_size, s, s + array_size])
+
+        program_id = Pubkey.from_string("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc")
+        pool_pk = Pubkey.from_string(pool_address)
+        for s in sorted(starts):
+            pda, _ = Pubkey.find_program_address(
+                [b"tick_array", bytes(pool_pk), str(s).encode()],
+                program_id,
+            )
+            accounts.append(str(pda))
+    except Exception as _e:
+        click.echo(f"  Warning: could not derive Orca tick array PDAs: {_e}")
+
+    return accounts
 
 
 def _validate_safe_mode_preflight(execution_address: str) -> str | None:
@@ -536,6 +690,64 @@ def _wire_indicators(
         click.echo("  Providers injected into strategy (RSI + full indicator suite incl. ADX/OBV/CCI/Ichimoku)")
 
 
+_POLYMARKET_REQUIRED_ENV_VARS = ("POLYMARKET_WALLET_ADDRESS", "POLYMARKET_PRIVATE_KEY")
+
+
+def _init_prediction_provider(strategy_instance: Any, chain: str | None = None) -> None:
+    """Wire the Polymarket prediction provider onto a strategy instance.
+
+    Strategies that declare ``polymarket`` in their ``supported_protocols``
+    must abort startup if the provider can't initialize — silently HOLDing
+    a polymarket-trading strategy because env vars were missing was the
+    failure mode that drove PM Exp 14 / VIB-3132. Strategies that merely
+    *might* consume prediction data (any Polygon strategy) get a WARNING
+    so the absence is visible without ``--verbose``.
+
+    The helper gates itself: it runs unconditionally for strategies that
+    declare polymarket support (any chain — multi-chain strategies that
+    target Polygon among others would otherwise bypass fail-fast), and
+    opportunistically when ``chain == "polygon"`` for non-declarers.
+    Other strategies skip the helper entirely. (Per CodeRabbit on PR #1567.)
+    """
+    strategy_metadata = getattr(strategy_instance, "STRATEGY_METADATA", None)
+    # Use getattr on supported_protocols as well: STRATEGY_METADATA is normally
+    # set by the @almanak_strategy decorator, but custom subclasses or partial
+    # mocks may construct the metadata directly without that field (Gemini).
+    supported_protocols = getattr(strategy_metadata, "supported_protocols", None) or []
+    requires_polymarket = "polymarket" in supported_protocols
+
+    # Skip entirely if the strategy neither declares polymarket nor runs on
+    # Polygon — the polymarket import is unnecessary and would otherwise
+    # warn for every non-polygon non-polymarket strategy.
+    on_polygon = chain is not None and chain.lower() == "polygon"
+    if not requires_polymarket and not on_polygon:
+        return
+
+    try:
+        from ..connectors.polymarket import ClobClient, PolymarketConfig
+        from ..data.prediction_provider import PredictionMarketDataProvider
+
+        pm_config = PolymarketConfig.from_env()
+        clob_client = ClobClient(pm_config)
+        strategy_instance._prediction_provider = PredictionMarketDataProvider(clob_client)
+        click.echo("  Prediction market provider initialized")
+    except Exception as e:
+        missing_vars = [var for var in _POLYMARKET_REQUIRED_ENV_VARS if not os.environ.get(var)]
+        env_hint = f" Missing required env vars: {', '.join(missing_vars)}." if missing_vars else ""
+        # NOTE: deliberately omit str(e) from the user-facing message — pydantic
+        # ValidationError on PolymarketConfig can echo the (partial) value of
+        # POLYMARKET_PRIVATE_KEY in its repr. The original exception is still
+        # chained via ``from e`` for stack-trace debugging.
+        err_kind = type(e).__name__
+        if requires_polymarket:
+            strategy_name = strategy_metadata.name if strategy_metadata else "<unknown>"
+            raise RuntimeError(
+                f"Polymarket strategy '{strategy_name}' requires the prediction "
+                f"market provider but initialization failed ({err_kind}).{env_hint}"
+            ) from e
+        logger.warning("Prediction market provider not available (%s).%s", err_kind, env_hint)
+
+
 def create_balance_provider(
     config: LocalRuntimeConfig,
 ) -> BalanceProviderInterface:
@@ -602,6 +814,26 @@ def create_execution_orchestrator(
     if os.environ.get("ALMANAK_MAX_SLIPPAGE_BPS") or os.environ.get("MAX_SLIPPAGE_BPS"):
         tx_risk_config.max_slippage_bps = config.max_slippage_bps
 
+    # Per-tx USD cap. The CLI path hydrates native_token_price_usd via
+    # StrategyRunner before each execute(), so it's safe to enable a default
+    # cap here. Other orchestrator callers (gateway, paper trading) leave
+    # this off — see TransactionRiskConfig docstring.
+    from decimal import Decimal as _Decimal
+    from decimal import InvalidOperation as _InvalidOperation
+
+    max_value_usd_env = os.environ.get("ALMANAK_MAX_VALUE_USD") or os.environ.get("MAX_VALUE_USD")
+    if max_value_usd_env:
+        try:
+            tx_risk_config.max_value_usd = _Decimal(max_value_usd_env)
+        except _InvalidOperation as exc:
+            raise ValueError(
+                "ALMANAK_MAX_VALUE_USD / MAX_VALUE_USD must be a plain decimal "
+                "number (no commas, no units). Got: "
+                f"{max_value_usd_env!r}"
+            ) from exc
+    else:
+        tx_risk_config.max_value_usd = _Decimal("50000")
+
     return ExecutionOrchestrator(
         signer=signer,
         submitter=submitter,
@@ -612,15 +844,58 @@ def create_execution_orchestrator(
     )
 
 
-def is_multi_chain_strategy(strategy_class: type) -> bool:
-    """Check if a strategy class supports multiple chains.
+def is_multi_chain_strategy(strategy_class: type, config: dict | None = None) -> bool:
+    """Check if a strategy should run in multi-chain mode.
+
+    Multi-chain mode means the strategy executes intents across multiple chains
+    simultaneously (e.g., bridge + swap on destination chain). This is different
+    from a portable strategy that supports multiple chains but runs on one at a time.
+
+    The signal is a "chains" list with >1 entry in either:
+    1. config.json (highest priority)
+    2. The strategy's config dataclass defaults (for strategies without config.json)
+    3. Legacy SUPPORTED_CHAINS class attribute
+
+    The decorator's supported_chains is NOT used — it's portability metadata,
+    not a runtime multi-chain signal.
 
     Args:
         strategy_class: The strategy class to check
+        config: Strategy config dict (from config.json). If provided and contains
+            a "chains" list with >1 entry, the strategy is multi-chain.
 
     Returns:
-        True if strategy has SUPPORTED_CHAINS with multiple chains
+        True if strategy should use MultiChainOrchestrator
     """
+    # Primary signal: config "chains" list with >1 entry
+    if config:
+        config_chains = config.get("chains")
+        if isinstance(config_chains, list) and len(config_chains) > 1:
+            return True
+
+    # Check config dataclass defaults (for strategies using Python config classes)
+    # e.g., cross_chain_arbitrage has chains: list[str] = ["arbitrum", "optimism", "base"]
+    from typing import get_args
+
+    for base in getattr(strategy_class, "__orig_bases__", []):
+        args = get_args(base)
+        if args and hasattr(args[0], "__dataclass_fields__"):
+            config_class = args[0]
+            if "chains" in config_class.__dataclass_fields__:
+                default = config_class.__dataclass_fields__["chains"].default
+                if default is not dataclasses.MISSING and isinstance(default, list) and len(default) > 1:
+                    return True
+                # Check default_factory
+                factory = config_class.__dataclass_fields__["chains"].default_factory
+                if factory is not dataclasses.MISSING:
+                    try:
+                        default_val = factory()
+                        if isinstance(default_val, list) and len(default_val) > 1:
+                            return True
+                    except Exception:
+                        pass
+
+    # Legacy: SUPPORTED_CHAINS class attribute (set manually, not by decorator)
     supported_chains = getattr(strategy_class, "SUPPORTED_CHAINS", None)
     if supported_chains and isinstance(supported_chains, list | tuple):
         return len(supported_chains) > 1
@@ -942,11 +1217,11 @@ def run(
     Examples:
 
         # Run from strategy directory (auto-starts gateway)
-        cd strategies/demo/uniswap_rsi
+        cd almanak/demo_strategies/uniswap_rsi
         almanak strat run --once
 
         # Run with explicit working directory
-        almanak strat run -d strategies/demo/uniswap_rsi --once
+        almanak strat run -d almanak/demo_strategies/uniswap_rsi --once
 
         # Run on local Anvil fork (auto-starts Anvil + gateway)
         almanak strat run --network anvil --once
@@ -1020,6 +1295,13 @@ def run(
 
     managed_gateway: ManagedGateway | None = None
     _early_strategy_class: type[IntentStrategy[Any]] | None = None
+    external_anvil_ports: dict[str, int] = {}
+
+    # Resolve network mode early because later runner setup uses the same value
+    # for both managed and pre-existing gateway flows.
+    if anvil_ports and not network and not no_gateway:
+        network = "anvil"
+    gateway_network = network or "mainnet"
 
     # --wallet isolated requires a managed gateway (derives wallet + funds Anvil fork)
     if wallet == "isolated" and no_gateway:
@@ -1042,7 +1324,8 @@ def run(
 
         # --no-gateway: connect to an existing gateway, fail if unavailable
         click.echo(f"Connecting to existing gateway at {effective_host}:{gateway_port}...")
-        auth_token = os.environ.get("GATEWAY_AUTH_TOKEN")
+        # Read ALMANAK_GATEWAY_AUTH_TOKEN with fallback to GATEWAY_AUTH_TOKEN for backward compatibility
+        auth_token = os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN") or os.environ.get("GATEWAY_AUTH_TOKEN")
         gateway_config = GatewayClientConfig(host=effective_host, port=gateway_port, auth_token=auth_token)
         gateway_client = GatewayClient(gateway_config)
         gateway_client.connect()
@@ -1080,7 +1363,6 @@ def run(
             raise click.ClickException(str(e)) from None
 
         # Parse --anvil-port values into dict
-        external_anvil_ports: dict[str, int] = {}
         for entry in anvil_ports:
             if "=" not in entry:
                 raise click.ClickException(
@@ -1099,12 +1381,6 @@ def run(
             if chain_name in external_anvil_ports:
                 raise click.ClickException(f"Duplicate --anvil-port for chain '{chain_name}'.")
             external_anvil_ports[chain_name] = port
-
-        # Resolve network for the managed gateway (CLI flag only, default mainnet)
-        # Auto-infer anvil network when --anvil-port is provided
-        if external_anvil_ports and not network:
-            network = "anvil"
-        gateway_network = network or "mainnet"
 
         if keep_anvil and gateway_network != "anvil":
             click.echo("Warning: --keep-anvil has no effect without --network anvil or --anvil-port.")
@@ -1252,7 +1528,13 @@ def run(
             "audit_enabled": False,
             "chains": gateway_chains,
         }
-        if session_auth_token:
+        # On test networks, force auth_token=None as an explicit kwarg so it wins
+        # over any ALMANAK_GATEWAY_AUTH_TOKEN loaded from .env. Without this, the
+        # server attaches AuthInterceptor while the client (allow_insecure=True)
+        # sends no token, producing UNAUTHENTICATED on every gRPC call (VIB-3032).
+        if is_test_network:
+            gateway_kwargs["auth_token"] = None
+        elif session_auth_token:
             gateway_kwargs["auth_token"] = session_auth_token
         if gateway_private_key:
             gateway_kwargs["private_key"] = gateway_private_key
@@ -1450,7 +1732,7 @@ def run(
         click.echo(f"Error: No strategy.py found in {working_dir}", err=True)
         click.echo()
         click.echo("Make sure you're in a strategy directory or use --working-dir:")
-        click.echo("  almanak strat run -d strategies/demo/uniswap_rsi --once")
+        click.echo("  almanak strat run -d almanak/demo_strategies/uniswap_rsi --once")
         sys.exit(1)
 
     if _early_strategy_class is not None:
@@ -1469,9 +1751,9 @@ def run(
     # Use provided instance ID if given
     provided_instance_id = strategy_id_override
 
-    # Check if strategy is multi-chain
-    multi_chain = is_multi_chain_strategy(strategy_class)
+    # Preliminary: get strategy chains from decorator (may be refined after config load)
     strategy_chains = get_strategy_chains(strategy_class)
+    multi_chain = False  # Determined after config load
     strategy_protocols = get_strategy_protocols(strategy_class)
 
     # Auto-discover config file from working directory if not explicitly provided
@@ -1488,6 +1770,16 @@ def run(
     except Exception as e:
         click.echo(f"Error loading strategy config: {e}", err=True)
         sys.exit(1)
+
+    # Now determine multi-chain mode from config (not decorator supported_chains,
+    # which is portability metadata). A "chains" list with >1 entry in config.json
+    # signals the strategy should execute across multiple chains simultaneously.
+    multi_chain = is_multi_chain_strategy(strategy_class, config=strategy_config)
+    if multi_chain:
+        # Use chains from config if specified, else fall back to decorator
+        config_chains = strategy_config.get("chains", [])
+        if isinstance(config_chains, list) and len(config_chains) > 1:
+            strategy_chains = config_chains
 
     normalized_copy_mode = copy_mode.lower() if copy_mode is not None else None
 
@@ -1516,38 +1808,33 @@ def run(
 
     effective_dry_run = dry_run or copy_shadow or (normalized_copy_mode in {"shadow", "replay"})
 
-    # Ensure strategy_id is always unique per instance.
-    # The config's strategy_id (or strategy_name) becomes the display name.
-    # A unique runtime ID is always generated unless resuming with --id.
-    strategy_id_generated = False
-    if provided_instance_id:
-        # User provided an ID to resume - use it exactly (format: name:id)
-        if ":" in provided_instance_id:
-            strategy_config["strategy_id"] = provided_instance_id
-            strategy_config["strategy_display_name"] = provided_instance_id.split(":")[0]
-        else:
-            strategy_config["strategy_id"] = f"{strategy_name}:{provided_instance_id}"
-            strategy_config["strategy_display_name"] = strategy_name
-    else:
-        # Strip any existing UUID suffix from config (load_strategy_config may generate one).
-        config_display_name = strategy_config.get("strategy_id", strategy_name)
-        if ":" in config_display_name:
-            config_display_name = config_display_name.split(":")[0]
+    # --- Three-tier identity model (VIB-2764) ---
+    # strategy_name: human/code reference (display name).
+    # deployment_id: stable primary key for all DB tables (survives restarts).
+    # run_id: per-process ephemeral UUID (forensics only).
+    from almanak.framework.runner.identity import generate_run_id, resolve_deployment_id
 
-        if once:
-            # For --once runs, use a stable ID so state persists across reruns.
-            strategy_config["strategy_id"] = config_display_name
-        else:
-            # For continuous runs, generate a unique runtime ID to prevent collisions.
-            strategy_config["strategy_id"] = f"{config_display_name}:{uuid.uuid4().hex[:12]}"
-            strategy_id_generated = True
-        strategy_config["strategy_display_name"] = config_display_name
+    config_display_name = strategy_config.get("strategy_id", strategy_name)
+    if ":" in config_display_name:
+        config_display_name = config_display_name.split(":")[0]
+    strategy_config["strategy_display_name"] = config_display_name
 
-    # Determine chain: config.json (explicit override) > decorator default_chain > supported_chains[0]
-    # Config.json chain wins when present so users can override without editing code.
-    config_chain = strategy_config.get("chain")
-    if not config_chain and not multi_chain:
-        config_chain = get_default_chain(strategy_class)
+    # deployment_id is resolved after wallet/chain are known (below).
+    # For now, stash the cli_id for the resolver.
+    _cli_id_override = provided_instance_id
+
+    # See resolve_strategy_chain(): env > config.json > decorator default.
+    env_chain = (os.environ.get("ALMANAK_CHAIN") or "").strip().lower() or None
+    config_chain = resolve_strategy_chain(
+        strategy_class,
+        strategy_config,
+        env_chain=env_chain,
+        multi_chain=multi_chain,
+    )
+    _cfg_chain_raw = strategy_config.get("chain")
+    _cfg_chain_norm = _cfg_chain_raw.strip().lower() if isinstance(_cfg_chain_raw, str) else ""
+    if env_chain and env_chain != _cfg_chain_norm:
+        click.echo(f"Chain override: ALMANAK_CHAIN={env_chain} (config.json: {_cfg_chain_raw or 'unset'})")
 
     # Determine network: CLI flag > config.json > default "mainnet"
     # Priority: --network flag (highest) > config "network" field > "mainnet" (default)
@@ -1561,11 +1848,9 @@ def run(
 
     # Sidecar deployment mode: --no-gateway without a local private key.
     # The gateway handles all signing and RPC; we only need chain + wallet address.
-    if no_gateway and not os.environ.get("ALMANAK_PRIVATE_KEY"):
-        if multi_chain:
-            raise click.ClickException(
-                "Multi-chain sidecar mode is not supported yet; set ALMANAK_PRIVATE_KEY or run a single-chain strategy."
-            )
+    # Multi-chain sidecar is handled by the `elif multi_chain` branch below,
+    # which supports ALMANAK_GATEWAY_WALLETS for per-chain wallet resolution.
+    if no_gateway and not os.environ.get("ALMANAK_PRIVATE_KEY") and not multi_chain:
         resolved_chain = config_chain or None
         if not resolved_chain:
             raise click.ClickException(
@@ -1574,11 +1859,14 @@ def run(
 
         safe_address = os.environ.get("ALMANAK_SAFE_ADDRESS")
         wallet_address = safe_address or os.environ.get("ALMANAK_EOA_ADDRESS")
-        if not wallet_address:
+        if not wallet_address and not os.environ.get("ALMANAK_GATEWAY_WALLETS"):
             raise click.ClickException(
                 "Sidecar mode (--no-gateway without ALMANAK_PRIVATE_KEY) requires "
-                "ALMANAK_SAFE_ADDRESS or ALMANAK_EOA_ADDRESS to be set."
+                "ALMANAK_SAFE_ADDRESS, ALMANAK_EOA_ADDRESS, or ALMANAK_GATEWAY_WALLETS to be set."
             )
+        # When ALMANAK_GATEWAY_WALLETS is set, wallet_address is resolved later
+        # by register_chains() from the gateway's WalletRegistry.
+        wallet_address = wallet_address or ""
 
         default_gas_cap = CHAIN_GAS_PRICE_CAPS_GWEI.get(resolved_chain, DEFAULT_GAS_PRICE_CAP_GWEI)
         runtime_config = GatewayRuntimeConfig(
@@ -1616,6 +1904,16 @@ def run(
                     click.echo(f"Error loading configuration after setting default key: {retry_err}", err=True)
                     sys.exit(1)
                 click.echo(f"Multi-chain config loaded for: {', '.join(strategy_chains)}")
+            elif no_gateway and e.var_name.endswith("PRIVATE_KEY"):
+                click.echo(
+                    "Error: Multi-chain sidecar mode requires ALMANAK_GATEWAY_WALLETS or ALMANAK_PRIVATE_KEY.",
+                    err=True,
+                )
+                click.echo(
+                    "Set ALMANAK_GATEWAY_WALLETS with per-chain wallet config, or provide ALMANAK_PRIVATE_KEY.",
+                    err=True,
+                )
+                sys.exit(1)
             else:
                 if e.var_name.endswith("PRIVATE_KEY"):
                     click.echo("Error: ALMANAK_PRIVATE_KEY is required for mainnet execution.", err=True)
@@ -1679,7 +1977,7 @@ def run(
                     click.echo("  ALCHEMY_API_KEY              - Alchemy API key (fallback)")
                     click.echo()
                     click.echo("Optional environment variables:")
-                    click.echo("  ALMANAK_MAX_GAS_PRICE_GWEI - Max gas price (default: 100)")
+                    click.echo("  ALMANAK_MAX_GAS_PRICE_GWEI - Max gas price (default: chain-specific; Anvil: 9999)")
                     click.echo("  ALMANAK_TX_TIMEOUT_SECONDS - Tx timeout (default: 120)")
                     click.echo("  ALMANAK_SIMULATION_ENABLED - Enable simulation (default: false)")
                 sys.exit(1)
@@ -1696,7 +1994,7 @@ def run(
             click.echo("  ALCHEMY_API_KEY              - Alchemy API key (fallback)")
             click.echo()
             click.echo("Optional environment variables:")
-            click.echo("  ALMANAK_MAX_GAS_PRICE_GWEI - Max gas price (default: 100)")
+            click.echo("  ALMANAK_MAX_GAS_PRICE_GWEI - Max gas price (default: chain-specific; Anvil: 9999)")
             click.echo("  ALMANAK_TX_TIMEOUT_SECONDS - Tx timeout (default: 120)")
             click.echo("  ALMANAK_SIMULATION_ENABLED - Enable simulation (default: false)")
             sys.exit(1)
@@ -1704,42 +2002,148 @@ def run(
     # Preflight checks for Safe mode consistency between framework and gateway
     # Only check when the CLI manages the gateway (env vars are local).
     # With --no-gateway the env vars may live on a remote host.
-    if runtime_config.is_safe_mode and not no_gateway:
+    # Skip when ALMANAK_GATEWAY_WALLETS is set — the gateway's WalletRegistry
+    # handles wallet/signer configuration per chain, not local env vars.
+    gateway_wallets_configured = bool(os.environ.get("ALMANAK_GATEWAY_WALLETS"))
+    if runtime_config.is_safe_mode and not no_gateway and not gateway_wallets_configured:
         error = _validate_safe_mode_preflight(runtime_config.execution_address)
         if error:
             click.secho(f"ERROR: {error}", fg="red", err=True)
             sys.exit(1)
 
-    # Ensure chain and wallet_address are set in strategy config
+    # ---- Register chains with gateway to resolve per-chain wallet addresses ----
+    # When ALMANAK_GATEWAY_WALLETS is set, the gateway's WalletRegistry provides
+    # per-chain wallet addresses. Call register_chains() to pre-warm orchestrators
+    # and get the resolved wallet map.
+    chain_wallets: dict[str, str] = {}
+    if gateway_wallets_configured:
+        try:
+            register_chain_list = strategy_chains if multi_chain else [str(config_chain)]
+            chain_wallets = gateway_client.register_chains(register_chain_list)
+
+            if chain_wallets:
+                primary_chain = register_chain_list[0]
+                primary_wallet = chain_wallets.get(primary_chain, "")
+
+                # Update runtime_config with resolved wallet address
+                runtime_config.wallet_address = primary_wallet
+
+                unique_addrs = {v.lower() for v in chain_wallets.values()}
+                is_uniform = len(unique_addrs) <= 1
+
+                if is_uniform:
+                    click.echo(
+                        f"Gateway wallet registry: uniform wallet {primary_wallet[:12]}... on {len(chain_wallets)} chain(s)"
+                    )
+                else:
+                    click.echo("Gateway wallet registry: non-uniform wallets")
+                    for ch, addr in chain_wallets.items():
+                        click.echo(f"  {ch}: {addr}")
+        except Exception as e:
+            click.secho(f"WARNING: register_chains() failed: {e}", fg="yellow", err=True)
+            click.echo("Falling back to legacy wallet resolution.", err=True)
+            logger.warning("register_chains() failed: %s", e)
+
+    # Ensure chain and wallet_address are set in strategy config.
+    # When ALMANAK_CHAIN env override is in play we also rewrite a pre-existing
+    # config.json chain so the strategy class itself sees the override (its
+    # MarketSnapshot, balance lookups, and on-chain queries all key off
+    # strategy_config["chain"], not runtime_config alone).
     if "chain" not in strategy_config:
         if multi_chain:
             strategy_config["chain"] = strategy_chains[0]
         else:
             assert isinstance(runtime_config, LocalRuntimeConfig | GatewayRuntimeConfig)
             strategy_config["chain"] = runtime_config.chain
+    elif env_chain and not multi_chain:
+        _existing = strategy_config.get("chain")
+        _existing_norm = _existing.strip().lower() if isinstance(_existing, str) else ""
+        if _existing_norm != env_chain:
+            strategy_config["chain"] = env_chain
     if "wallet_address" not in strategy_config:
-        strategy_config["wallet_address"] = runtime_config.execution_address
+        # Use per-chain wallet from registry if available, else fall back to runtime_config
+        if chain_wallets:
+            primary = strategy_chains[0] if multi_chain else str(config_chain)
+            strategy_config["wallet_address"] = chain_wallets.get(primary, runtime_config.execution_address)
+        else:
+            strategy_config["wallet_address"] = runtime_config.execution_address
 
-    # Handle --fresh flag: clear state for this strategy only
+    # --- Resolve deployment_id now that wallet + chain are known (VIB-2764) ---
+    # For multi-chain strategies, hash all chains so different chain combinations
+    # produce distinct deployment_ids (e.g., [arbitrum,base] vs [arbitrum,optimism]).
+    identity_chain = str(strategy_config.get("chain", ""))
+    if multi_chain and strategy_chains:
+        identity_chain = ",".join(sorted(str(c).lower() for c in strategy_chains))
+    deployment_id = resolve_deployment_id(
+        strategy_name=config_display_name,
+        wallet_address=strategy_config.get("wallet_address", ""),
+        chain=identity_chain,
+        cli_id=_cli_id_override,
+    )
+    strategy_config["strategy_id"] = deployment_id
+    run_id = generate_run_id()
+    strategy_config["run_id"] = run_id
+
+    # Backfill: migrate data from bare strategy name to deployment_id (VIB-2767).
+    # This ensures historical data from --once runs (which used bare names) is
+    # accessible under the new deterministic deployment_id.
+    # Uses the centralized SQLiteStore.backfill_deployment_id helper so that ALL
+    # tables (including timeline_events) are migrated consistently with _db_lock.
+    if deployment_id != config_display_name:
+        state_db_path = Path(os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db")
+        if state_db_path.exists():
+            try:
+                import asyncio as _asyncio_backfill
+
+                from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+
+                backfill_config = SQLiteConfig(db_path=str(state_db_path))
+                backfill_store = SQLiteStore(backfill_config)
+                loop = _asyncio_backfill.new_event_loop()
+                try:
+                    total_migrated = loop.run_until_complete(
+                        backfill_store.backfill_deployment_id(config_display_name, deployment_id)
+                    )
+                    if total_migrated > 0:
+                        click.echo(f"Migrated {total_migrated} rows from '{config_display_name}' to '{deployment_id}'")
+                finally:
+                    loop.run_until_complete(backfill_store.close())
+                    loop.close()
+            except Exception as e:
+                logger.debug("Backfill migration skipped: %s", e)
+
+    # Handle --fresh flag: clear state to prevent cross-strategy contamination
+    # VIB-2573: On Anvil, clear ALL strategy state (not just current strategy)
+    # to prevent TokenNotFoundError from stale state referencing wrong-chain tokens.
+    # On mainnet, only clear the current strategy's state (preserve other strategies).
     strategy_id = strategy_config["strategy_id"]
     if fresh:
-        state_db_path = Path("./almanak_state.db")
+        state_db_path = Path(os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db")
         if state_db_path.exists():
             try:
                 import sqlite3
 
+                is_anvil = gateway_network == "anvil"
                 with sqlite3.connect(str(state_db_path)) as conn:
-                    cursor = conn.execute(
-                        "DELETE FROM v2_strategy_state WHERE strategy_id = ?",
-                        (strategy_id,),
-                    )
-                    deleted = cursor.rowcount
-                    # Also clear teardown requests for this strategy
-                    try:
-                        teardown_cursor = conn.execute(
-                            "DELETE FROM teardown_requests WHERE strategy_id = ?",
+                    if is_anvil:
+                        # Clear ALL state on Anvil — previous strategy runs on
+                        # different chains leave state that can contaminate the gateway
+                        cursor = conn.execute("DELETE FROM strategy_state")
+                    else:
+                        cursor = conn.execute(
+                            "DELETE FROM strategy_state WHERE strategy_id = ?",
                             (strategy_id,),
                         )
+                    deleted = cursor.rowcount
+                    # Also clear teardown requests
+                    try:
+                        if is_anvil:
+                            teardown_cursor = conn.execute("DELETE FROM teardown_requests")
+                        else:
+                            teardown_cursor = conn.execute(
+                                "DELETE FROM teardown_requests WHERE strategy_id = ?",
+                                (strategy_id,),
+                            )
                         teardown_deleted = teardown_cursor.rowcount
                     except sqlite3.OperationalError:
                         teardown_deleted = 0  # Table may not exist
@@ -1749,8 +2153,9 @@ def run(
                         parts.append("state")
                     if teardown_deleted > 0:
                         parts.append("teardown requests")
+                    scope = "all strategies" if is_anvil else f"strategy '{strategy_id}'"
                     click.secho(
-                        f"Cleared {' and '.join(parts)} for strategy '{strategy_id}' (--fresh flag)",
+                        f"Cleared {' and '.join(parts)} for {scope} (--fresh flag)",
                         fg="yellow",
                     )
                 else:
@@ -1765,14 +2170,14 @@ def run(
     existing_state_info = None
     try:
         # Quick check of state DB for existing strategy state
-        state_db_path = Path("./almanak_state.db")
+        state_db_path = Path(os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db")
         if state_db_path.exists():
             import sqlite3
 
             conn = sqlite3.connect(str(state_db_path))
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
-                "SELECT strategy_id, version, state_data FROM v2_strategy_state WHERE strategy_id = ? AND is_active = 1",
+                "SELECT strategy_id, version, state_data FROM strategy_state WHERE strategy_id = ?",
                 (strategy_id,),
             )
             row = cursor.fetchone()
@@ -1795,11 +2200,19 @@ def run(
     click.echo("ALMANAK STRATEGY RUNNER")
     click.echo("=" * 60)
     click.echo(f"Strategy: {strategy_name}")
-    click.echo(f"Instance ID: {strategy_id}" + (" (generated)" if strategy_id_generated else ""))
+    click.echo(f"Deployment ID: {strategy_id}")
+    click.echo(f"Run ID: {run_id}")
     if is_resume:
         click.secho("Mode: RESUME (existing state found)", fg="yellow", bold=True)
         if existing_state_info:
             click.echo(f"  State version: {existing_state_info['version']}, keys: {existing_state_info['keys']}")
+        if once and not fresh:
+            click.secho(
+                "WARNING: Loading state from a previous run. "
+                "If this is unexpected, re-run with --fresh to start clean.",
+                fg="red",
+                bold=True,
+            )
     else:
         click.secho("Mode: FRESH START (no existing state)", fg="green", bold=True)
     if multi_chain:
@@ -1894,11 +2307,41 @@ def run(
                 config_instance = DictConfigWrapper(config_instance)
                 click.echo("  Config wrapped in DictConfigWrapper")
 
-            strategy_instance = strategy_class(
-                config=config_instance,
-                chain=primary_chain,
-                wallet_address=runtime_config.execution_address,
-            )
+            # Resolve wallet for strategy construction
+            strat_wallet = runtime_config.execution_address
+            if chain_wallets:
+                strat_wallet = chain_wallets.get(primary_chain, strat_wallet)
+
+            # Build kwargs, then filter to only those the strategy __init__ accepts.
+            # This prevents TypeError for user strategies that don't accept **kwargs
+            # or newer framework params like chains/chain_wallets.
+            # Base kwargs are always safe (IntentStrategy.__init__ requires them).
+            base_kwargs: dict[str, Any] = {
+                "config": config_instance,
+                "chain": primary_chain,
+                "wallet_address": strat_wallet,
+            }
+            # Optional kwargs only included when non-None (multi-chain mode).
+            optional_kwargs: dict[str, Any] = {}
+            if chain_wallets:
+                optional_kwargs["chains"] = list(chain_wallets.keys())
+                optional_kwargs["chain_wallets"] = chain_wallets
+            init_kwargs = {**base_kwargs, **optional_kwargs}
+            try:
+                sig = inspect.signature(strategy_class.__init__)
+                params = sig.parameters
+                # If __init__ accepts **kwargs, pass everything
+                has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+                if not has_var_keyword:
+                    # Filter to only accepted parameter names
+                    init_kwargs = {k: v for k, v in init_kwargs.items() if k in params}
+            except (ValueError, TypeError) as exc:
+                # Introspection failed — fall back to base kwargs only to avoid
+                # injecting unexpected kwargs like 'chains' (VIB-1987).
+                logger.debug("Strategy __init__ introspection failed, using base kwargs only: %s", exc)
+                init_kwargs = base_kwargs
+
+            strategy_instance = strategy_class(**init_kwargs)
         else:
             # Try dict config first, then no config
             try:
@@ -1952,25 +2395,38 @@ def run(
             from ..data.balance.gateway_multichain import MultiChainGatewayBalanceProvider
             from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
 
+            # Resolve effective wallet address (from chain_wallets or runtime_config)
+            effective_wallet = runtime_config.execution_address
+            if chain_wallets:
+                effective_wallet = chain_wallets.get(strategy_chains[0], effective_wallet)
+
+            if not effective_wallet:
+                raise click.ClickException(
+                    "No wallet address resolved for multi-chain execution. "
+                    "Ensure ALMANAK_GATEWAY_WALLETS is configured correctly and the gateway is reachable."
+                )
+
             click.echo("  Using gateway-backed providers for multi-chain...")
             price_oracle = GatewayPriceOracle(gateway_client)
             balance_provider = GatewayBalanceProvider(
                 client=gateway_client,
-                wallet_address=runtime_config.execution_address,
+                wallet_address=effective_wallet,
                 chain=strategy_chains[0],
             )
             execution_orchestrator = MultiChainOrchestrator.from_gateway(
                 gateway_client=gateway_client,
                 chains=strategy_chains,
-                wallet_address=runtime_config.execution_address,
+                wallet_address=effective_wallet,
                 max_gas_price_gwei=runtime_config.max_gas_price_gwei,
+                chain_wallets=chain_wallets or None,
             )
 
             # Create multi-chain balance provider for the strategy
             multi_chain_balance_provider = MultiChainGatewayBalanceProvider(
                 client=gateway_client,
-                wallet_address=runtime_config.execution_address,
+                wallet_address=effective_wallet,
                 chains=strategy_chains,
+                chain_wallets=chain_wallets or None,
             )
 
             # Set multi-chain providers on strategy if it's an IntentStrategy
@@ -2030,11 +2486,16 @@ def run(
 
             from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
 
+            # Resolve effective wallet address (from chain_wallets or runtime_config)
+            sc_effective_wallet = runtime_config.execution_address
+            if chain_wallets:
+                sc_effective_wallet = chain_wallets.get(runtime_config.chain, sc_effective_wallet)
+
             click.echo("  Using gateway-backed providers...")
             price_oracle = GatewayPriceOracle(gateway_client)
             balance_provider = GatewayBalanceProvider(
                 client=gateway_client,
-                wallet_address=runtime_config.execution_address,
+                wallet_address=sc_effective_wallet,
                 chain=runtime_config.chain,
             )
 
@@ -2043,9 +2504,24 @@ def run(
                 from ..anvil.solana_fork_manager import SolanaForkManager
 
                 solana_rpc_url = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+                # Clone any pool/account addresses declared in the strategy config
+                _extra_clone = []
+                if strategy_config and isinstance(strategy_config, dict):
+                    for _key in ("pool_address", "pool_a_address", "pool_b_address"):
+                        _addr = strategy_config.get(_key)
+                        if _addr and isinstance(_addr, str):
+                            _extra_clone.append(_addr)
+                    # For Orca Whirlpool strategies, also pre-clone vault + tick array accounts
+                    _orca_accounts = _get_orca_pool_accounts(strategy_config)
+                    if _orca_accounts:
+                        click.echo(f"  Pre-cloning {len(_orca_accounts)} Orca pool accounts (vaults + tick arrays)")
+                        _extra_clone.extend(_orca_accounts)
+                if _extra_clone:
+                    click.echo(f"  Cloning {len(_extra_clone)} account(s) from mainnet")
                 solana_fork_mgr = SolanaForkManager(
                     rpc_url=solana_rpc_url,
                     validator_port=int(os.environ.get("SOLANA_VALIDATOR_PORT", "8899")),
+                    clone_accounts=_extra_clone,
                 )
                 click.echo("  Starting local solana-test-validator...")
                 import asyncio as _aio
@@ -2076,7 +2552,7 @@ def run(
             execution_orchestrator = GatewayExecutionOrchestrator(
                 client=gateway_client,
                 chain=runtime_config.chain,
-                wallet_address=runtime_config.execution_address,
+                wallet_address=sc_effective_wallet,
                 max_gas_price_gwei=runtime_config.max_gas_price_gwei,
             )
             click.echo("  Gateway-backed providers created")
@@ -2089,18 +2565,12 @@ def run(
             )
             _wire_indicators(strategy_instance, ohlcv_provider, price_oracle, balance_provider)
 
-            # Initialize prediction market provider for Polygon strategies
-            if runtime_config.chain.lower() == "polygon" and hasattr(strategy_instance, "_prediction_provider"):
-                try:
-                    from ..connectors.polymarket import ClobClient, PolymarketConfig
-                    from ..data.prediction_provider import PredictionMarketDataProvider
-
-                    pm_config = PolymarketConfig.from_env()
-                    clob_client = ClobClient(pm_config)
-                    strategy_instance._prediction_provider = PredictionMarketDataProvider(clob_client)
-                    click.echo("  Prediction market provider initialized")
-                except Exception as e:
-                    logger.debug(f"Prediction market provider not available: {e}")
+            # Initialize prediction market provider — helper self-gates by
+            # strategy metadata + chain. Multi-chain strategies declaring
+            # polymarket fail-fast on any chain; non-declarers on Polygon
+            # get an opportunistic init with WARNING fallback.
+            if hasattr(strategy_instance, "_prediction_provider"):
+                _init_prediction_provider(strategy_instance, chain=runtime_config.chain)
 
             # Initialize lending rate monitor
             if hasattr(strategy_instance, "_rate_monitor"):
@@ -2282,14 +2752,11 @@ def run(
         state_manager = GatewayStateManager(gateway_client)
         click.echo("  Using gateway-backed state manager")
 
-        # Inject state manager into strategy for persistence
+        # Inject state manager into strategy for persistence.
+        # State loading is deferred to the async setup phase (run_once_with_cleanup /
+        # run_loop_with_cleanup) so that load_state_async() can be awaited properly.
         if hasattr(strategy_instance, "set_state_manager"):
             strategy_instance.set_state_manager(state_manager, strategy_id)
-            # Try to load existing state (for resume)
-            if strategy_instance.load_state():
-                click.secho("  Strategy state restored from persistence", fg="yellow")
-            else:
-                click.echo("  No previous state found (fresh start)")
 
         # Wire vault lifecycle if vault config is present
         vault_lifecycle = None
@@ -2325,13 +2792,27 @@ def run(
             vault_adapter = LagoonVaultAdapter(vault_sdk)
 
             # Extract initial vault state from persisted strategy state.
-            # StrategyBase uses persistent_state (dict); check both for compatibility.
+            # State loading is deferred to the async phase for IntentStrategy, so we
+            # load the raw state here directly from the state manager (safe to use
+            # asyncio.run() because we are still in the sync Click command, before any
+            # event loop is started).
             initial_vault_state = None
-            for attr in ("persistent_state", "state"):
-                store = getattr(strategy_instance, attr, None)
-                if isinstance(store, dict):
-                    initial_vault_state = store.get(VAULT_STATE_KEY)
-                    break
+            try:
+                import asyncio as _asyncio
+
+                _raw_state_data = _asyncio.run(state_manager.load_state(strategy_id))
+                if _raw_state_data and _raw_state_data.state:
+                    initial_vault_state = _raw_state_data.state.get(VAULT_STATE_KEY)
+            except Exception as _e:  # noqa: BLE001
+                logger.debug("Could not load persisted state for vault init (strategy_id=%s): %s", strategy_id, _e)
+                # No persisted state — VaultLifecycleManager uses defaults
+            # Fallback: also check in-memory strategy state (for StrategyBase subclasses)
+            if initial_vault_state is None:
+                for attr in ("persistent_state", "state"):
+                    store = getattr(strategy_instance, attr, None)
+                    if isinstance(store, dict):
+                        initial_vault_state = store.get(VAULT_STATE_KEY)
+                        break
 
             # Wire persistence callback: vault state changes are saved into the
             # strategy's persistent_state dict and persisted via the gateway state manager.
@@ -2410,6 +2891,13 @@ def run(
             """Run single iteration, optional teardown, and cleanup resources."""
             runner.setup_gateway_integration(strategy_instance)
             try:
+                # Restore persisted strategy state (e.g. position_id after restart)
+                if hasattr(strategy_instance, "load_state_async"):
+                    if await strategy_instance.load_state_async():
+                        click.secho("  Strategy state restored from persistence", fg="yellow")
+                    else:
+                        click.echo("  No previous state found (fresh start)")
+
                 # Restore copy trading cursor state (mirrors run_loop pattern)
                 activity_provider = getattr(strategy_instance, "_wallet_activity_provider", None)
                 if activity_provider is not None:
@@ -2421,6 +2909,14 @@ def run(
                         logger.warning(f"Failed to restore copy trading state: {e}")
 
                 result = await runner.run_iteration(strategy_instance)
+
+                # Capture portfolio snapshot after --once iteration
+                # (run_loop does this automatically but run_iteration does not)
+                if runner.config.enable_state_persistence:
+                    await runner._capture_portfolio_snapshot(
+                        strategy=strategy_instance,
+                        iteration_number=runner._total_iterations,
+                    )
 
                 # Emit structured iteration summary for JSONL log analysis
                 runner._emit_iteration_summary(result, chain=getattr(strategy_instance, "chain", None))
@@ -2556,6 +3052,13 @@ def run(
         async def run_loop_with_cleanup() -> None:
             """Run loop and cleanup resources."""
             try:
+                # Restore persisted strategy state (e.g. position_id after restart)
+                if hasattr(strategy_instance, "load_state_async"):
+                    if await strategy_instance.load_state_async():
+                        click.secho("  Strategy state restored from persistence", fg="yellow")
+                    else:
+                        click.echo("  No previous state found (fresh start)")
+
                 await runner.run_loop(
                     strategy=strategy_instance,
                     interval_seconds=interval,

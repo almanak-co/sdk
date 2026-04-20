@@ -58,6 +58,17 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 
+def _get_gateway_api_key(name: str) -> str | None:
+    """Get an API key, checking the ALMANAK_GATEWAY_ prefixed var first.
+
+    In V2 deployed containers, the deployer injects keys with the
+    ALMANAK_GATEWAY_ prefix (e.g. ALMANAK_GATEWAY_ALCHEMY_API_KEY).
+    In local dev, users set the bare name (e.g. ALCHEMY_API_KEY).
+    Check prefixed first so deployed containers resolve correctly.
+    """
+    return os.environ.get(f"ALMANAK_GATEWAY_{name}") or os.environ.get(name)
+
+
 # =============================================================================
 # Enums
 # =============================================================================
@@ -173,7 +184,7 @@ _BUILTIN_CHAINS: dict[str, dict] = {
         "poa": False,
     },
     "monad": {
-        "chain_id": 10143,
+        "chain_id": 143,
         "public_rpc": "https://rpc.monad.xyz",
         "alchemy_prefix": "monad",
         "anvil_port": 8555,
@@ -184,6 +195,18 @@ _BUILTIN_CHAINS: dict[str, dict] = {
         "public_rpc": "https://api.mainnet-beta.solana.com",
         "alchemy_prefix": "solana",
         "anvil_port": 8899,
+        "poa": False,
+    },
+    "xlayer": {
+        "chain_id": 196,
+        "public_rpc": "https://rpc.xlayer.tech",
+        "anvil_port": 8557,
+        "poa": False,
+    },
+    "zerog": {
+        "chain_id": 16661,
+        "public_rpc": "https://0g-rpc.publicnode.com",
+        "anvil_port": 8558,
         "poa": False,
     },
 }
@@ -473,7 +496,7 @@ def _auto_select_provider(chain: str) -> NodeProvider:
         return NodeProvider.CUSTOM
 
     # 2. Alchemy (API key set, chain supported)
-    if os.environ.get("ALCHEMY_API_KEY"):
+    if _get_gateway_api_key("ALCHEMY_API_KEY"):
         if chain in ALCHEMY_CHAIN_KEYS:
             return NodeProvider.ALCHEMY
 
@@ -557,7 +580,7 @@ def _get_alchemy_url(chain: str, network: str = "mainnet") -> str:
         supported = ", ".join(sorted(ALCHEMY_CHAIN_KEYS.keys()))
         raise ValueError(f"Chain '{chain}' not supported by Alchemy. Supported chains: {supported}")
 
-    api_key = os.environ.get("ALCHEMY_API_KEY")
+    api_key = _get_gateway_api_key("ALCHEMY_API_KEY")
     if not api_key:
         raise ValueError(
             "ALCHEMY_API_KEY environment variable not set. Get your API key from https://dashboard.alchemy.com/"
@@ -697,7 +720,7 @@ def has_api_key_configured() -> bool:
             if os.environ.get(f"{variant}_RPC_URL"):
                 return True
 
-    if os.environ.get("ALCHEMY_API_KEY"):
+    if _get_gateway_api_key("ALCHEMY_API_KEY"):
         return True
 
     # Check for any Tenderly key

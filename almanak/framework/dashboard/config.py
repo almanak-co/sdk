@@ -29,6 +29,15 @@ BLOCK_EXPLORER_URLS: dict[str, str] = {
     "optimism": "https://optimistic.etherscan.io/tx/",
     "polygon": "https://polygonscan.com/tx/",
     "base": "https://basescan.org/tx/",
+    "avalanche": "https://snowscan.xyz/tx/",
+    "bsc": "https://bscscan.com/tx/",
+    "sonic": "https://sonicscan.org/tx/",
+    "blast": "https://blastscan.io/tx/",
+    "mantle": "https://mantlescan.xyz/tx/",
+    "berachain": "https://berascan.com/tx/",
+    "solana": "https://solscan.io/tx/",
+    "monad": "https://explorer.monad.xyz/tx/",
+    "plasma": "https://plasmascan.io/tx/",
 }
 
 # API configuration

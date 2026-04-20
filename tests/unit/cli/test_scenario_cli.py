@@ -196,7 +196,7 @@ class TestScenarioParameterParsing:
 
     def test_missing_scenario_shows_error(self, cli_runner: CliRunner) -> None:
         """Test that missing scenario shows error."""
-        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test"]):
+        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
             result = cli_runner.invoke(backtest, [
                 "scenario",
                 "--strategy", "test",
@@ -206,7 +206,7 @@ class TestScenarioParameterParsing:
 
     def test_unknown_scenario_shows_error(self, cli_runner: CliRunner) -> None:
         """Test that unknown scenario shows error with available options."""
-        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test"]):
+        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
             result = cli_runner.invoke(backtest, [
                 "scenario",
                 "--strategy", "test",
@@ -217,7 +217,7 @@ class TestScenarioParameterParsing:
 
     def test_custom_scenario_requires_dates(self, cli_runner: CliRunner) -> None:
         """Test that custom scenario requires start and end dates."""
-        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test"]):
+        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
             result = cli_runner.invoke(backtest, [
                 "scenario",
                 "--strategy", "test",
@@ -228,7 +228,7 @@ class TestScenarioParameterParsing:
 
     def test_custom_scenario_with_dates_is_valid(self, cli_runner: CliRunner) -> None:
         """Test that custom scenario with dates passes validation."""
-        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test"]):
+        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
             result = cli_runner.invoke(backtest, [
                 "scenario",
                 "--strategy", "test",
@@ -251,7 +251,7 @@ class TestScenarioDryRun:
 
     def test_dry_run_shows_configuration(self, cli_runner: CliRunner) -> None:
         """Test that dry run shows configuration without running."""
-        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test"]):
+        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
             result = cli_runner.invoke(backtest, [
                 "scenario",
                 "--strategy", "test",
@@ -265,7 +265,7 @@ class TestScenarioDryRun:
 
     def test_dry_run_shows_scenario_details(self, cli_runner: CliRunner) -> None:
         """Test that dry run shows scenario details."""
-        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test"]):
+        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
             result = cli_runner.invoke(backtest, [
                 "scenario",
                 "--strategy", "test",
@@ -278,7 +278,7 @@ class TestScenarioDryRun:
 
     def test_dry_run_shows_mev_setting(self, cli_runner: CliRunner) -> None:
         """Test that dry run shows MEV simulation setting."""
-        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test"]):
+        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
             result = cli_runner.invoke(backtest, [
                 "scenario",
                 "--strategy", "test",
@@ -292,7 +292,7 @@ class TestScenarioDryRun:
 
     def test_dry_run_no_mev_setting(self, cli_runner: CliRunner) -> None:
         """Test that dry run shows MEV disabled when --no-mev."""
-        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test"]):
+        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
             result = cli_runner.invoke(backtest, [
                 "scenario",
                 "--strategy", "test",
@@ -306,7 +306,7 @@ class TestScenarioDryRun:
 
     def test_dry_run_shows_compare_normal_setting(self, cli_runner: CliRunner) -> None:
         """Test that dry run shows compare-normal setting."""
-        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test"]):
+        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
             result = cli_runner.invoke(backtest, [
                 "scenario",
                 "--strategy", "test",
@@ -320,7 +320,7 @@ class TestScenarioDryRun:
 
     def test_dry_run_shows_custom_scenario_name(self, cli_runner: CliRunner) -> None:
         """Test that dry run shows custom scenario name."""
-        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test"]):
+        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
             result = cli_runner.invoke(backtest, [
                 "scenario",
                 "--strategy", "test",
@@ -466,7 +466,7 @@ class TestScenarioErrorHandling:
 
     def test_unknown_strategy_shows_error(self, cli_runner: CliRunner) -> None:
         """Test that unknown strategy shows error with available options."""
-        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["valid_strat"]):
+        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["valid_strat"]):
             result = cli_runner.invoke(backtest, [
                 "scenario",
                 "--strategy", "unknown_strategy",
@@ -478,7 +478,7 @@ class TestScenarioErrorHandling:
 
     def test_invalid_date_format_shows_error(self, cli_runner: CliRunner) -> None:
         """Test that invalid date format shows error."""
-        with patch("almanak.framework.cli.backtest.list_strategies_fn", return_value=["test"]):
+        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
             result = cli_runner.invoke(backtest, [
                 "scenario",
                 "--strategy", "test",

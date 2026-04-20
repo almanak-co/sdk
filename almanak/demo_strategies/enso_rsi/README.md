@@ -236,4 +236,4 @@ Real strategies would include:
 ## Support
 
 - Issues: https://github.com/almanak/stack/issues
-- Docs: https://docs.almanak.co
+- Docs: https://sdk.docs.almanak.co

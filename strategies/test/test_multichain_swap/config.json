@@ -1,0 +1,9 @@
+{
+    "chains": ["base", "arbitrum"],
+    "swap_amount_usdc": "0.55",
+    "max_slippage_bps": 100,
+    "force_action": "execute",
+    "anvil_funding": {
+        "USDC": 5
+    }
+}

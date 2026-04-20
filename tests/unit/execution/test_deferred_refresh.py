@@ -8,7 +8,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.execution.deferred_refresh import refresh_deferred_bundle
+from almanak.framework.execution.deferred_refresh import (
+    _ANVIL_MIN_SLIPPAGE_BPS,
+    refresh_deferred_bundle,
+)
+from almanak.framework.execution.simulator.config import is_local_rpc
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
 WALLET = "0x1234567890abcdef1234567890abcdef12345678"
@@ -81,7 +85,7 @@ def _make_enso_bundle() -> ActionBundle:
         "route_params": {
             "token_in": "0xUSDC",
             "token_out": "0xWETH",
-            "amount_in": 100000000,
+            "amount_in": "100000000",
             "slippage_bps": 500,
         },
     }
@@ -196,6 +200,106 @@ class TestDeferredRefresh:
         assert result is bundle
         assert result.transactions[1]["data"] == "0xstale_lifi_calldata"
 
+    @patch("almanak.framework.execution.deferred_refresh._refresh_enso")
+    def test_anvil_widens_enso_slippage(self, mock_refresh_enso):
+        """On Anvil forks, slippage_bps is widened to _ANVIL_MIN_SLIPPAGE_BPS."""
+        mock_refresh_enso.return_value = {
+            "to": "0xEnsoRouter",
+            "value": 0,
+            "data": "0xfresh_calldata",
+            "gas_estimate": 180000,
+            "tx_type": "swap",
+        }
+
+        bundle = _make_enso_bundle()
+        # Set tight slippage (50 bps = 0.5%)
+        bundle.metadata["route_params"]["slippage_bps"] = 50
+
+        result = refresh_deferred_bundle(
+            bundle, WALLET, rpc_url="http://localhost:8545"
+        )
+
+        # Slippage should have been widened in the result
+        assert result.metadata["route_params"]["slippage_bps"] == _ANVIL_MIN_SLIPPAGE_BPS
+        # Original bundle must NOT be mutated
+        assert bundle.metadata["route_params"]["slippage_bps"] == 50
+        mock_refresh_enso.assert_called_once()
+        # Verify widened slippage was passed to the API call (not applied after)
+        called_metadata = mock_refresh_enso.call_args[0][0]
+        assert called_metadata["route_params"]["slippage_bps"] == _ANVIL_MIN_SLIPPAGE_BPS
+
+    @patch("almanak.framework.execution.deferred_refresh._refresh_enso")
+    def test_anvil_keeps_wide_slippage_unchanged(self, mock_refresh_enso):
+        """If slippage is already >= _ANVIL_MIN_SLIPPAGE_BPS, don't change it."""
+        mock_refresh_enso.return_value = {
+            "to": "0xEnsoRouter",
+            "value": 0,
+            "data": "0xfresh_calldata",
+            "gas_estimate": 180000,
+            "tx_type": "swap",
+        }
+
+        bundle = _make_enso_bundle()
+        # Already wide slippage (1000 bps = 10%)
+        bundle.metadata["route_params"]["slippage_bps"] = 1000
+
+        result = refresh_deferred_bundle(
+            bundle, WALLET, rpc_url="http://127.0.0.1:8545"
+        )
+
+        # Should not widen further
+        assert result.metadata["route_params"]["slippage_bps"] == 1000
+        # Verify original wide slippage was passed to API call unchanged
+        called_metadata = mock_refresh_enso.call_args[0][0]
+        assert called_metadata["route_params"]["slippage_bps"] == 1000
+
+    @patch("almanak.framework.execution.deferred_refresh._refresh_enso")
+    def test_mainnet_rpc_does_not_widen_slippage(self, mock_refresh_enso):
+        """Mainnet RPC URLs should NOT trigger slippage widening."""
+        mock_refresh_enso.return_value = {
+            "to": "0xEnsoRouter",
+            "value": 0,
+            "data": "0xfresh_calldata",
+            "gas_estimate": 180000,
+            "tx_type": "swap",
+        }
+
+        bundle = _make_enso_bundle()
+        bundle.metadata["route_params"]["slippage_bps"] = 50
+
+        result = refresh_deferred_bundle(
+            bundle, WALLET, rpc_url="https://arb-mainnet.g.alchemy.com/v2/key"
+        )
+
+        # Slippage should NOT have been widened
+        assert result.metadata["route_params"]["slippage_bps"] == 50
+        # Verify original tight slippage was passed to API call unchanged
+        called_metadata = mock_refresh_enso.call_args[0][0]
+        assert called_metadata["route_params"]["slippage_bps"] == 50
+
+    @patch("almanak.framework.execution.deferred_refresh._refresh_lifi")
+    def test_lifi_on_anvil_does_not_widen_slippage(self, mock_refresh_lifi):
+        """LiFi bundles on Anvil should NOT trigger Enso slippage widening."""
+        mock_refresh_lifi.return_value = {
+            "to": "0xLiFiRouter",
+            "value": 0,
+            "data": "0xfresh_lifi_calldata",
+            "gas_estimate": 200000,
+            "tx_type": "swap",
+        }
+
+        bundle = _make_lifi_bundle(deferred=True)
+        # LiFi uses "slippage" not "slippage_bps"
+        bundle.metadata["route_params"]["slippage"] = 0.005
+
+        result = refresh_deferred_bundle(
+            bundle, WALLET, rpc_url="http://localhost:8545"
+        )
+
+        # Should succeed without crashing; slippage unchanged
+        assert result.metadata["route_params"]["slippage"] == 0.005
+        assert "slippage_bps" not in result.metadata["route_params"]
+
     @patch("almanak.framework.execution.deferred_refresh._refresh_lifi")
     def test_bridge_deferred_tx_type_is_handled(self, mock_refresh_lifi):
         """Bridge transactions with _deferred suffix are also refreshed."""
@@ -215,3 +319,31 @@ class TestDeferredRefresh:
         swap_tx = result.transactions[1]
         assert swap_tx["tx_type"] == "bridge"  # _deferred suffix stripped
         assert swap_tx["data"] == "0xfresh_bridge_calldata"
+
+
+class TestIsLocalRpc:
+    """Tests for is_local_rpc() — canonical local-RPC detector used by deferred refresh."""
+
+    def test_localhost(self):
+        assert is_local_rpc("http://localhost:8545") is True
+
+    def test_localhost_with_path(self):
+        assert is_local_rpc("http://localhost:8545/some/path") is True
+
+    def test_127_0_0_1(self):
+        assert is_local_rpc("http://127.0.0.1:8545") is True
+
+    def test_0_0_0_0(self):
+        assert is_local_rpc("http://0.0.0.0:8545") is True
+
+    def test_alchemy_url(self):
+        assert is_local_rpc("https://arb-mainnet.g.alchemy.com/v2/key") is False
+
+    def test_infura_url(self):
+        assert is_local_rpc("https://mainnet.infura.io/v3/key") is False
+
+    def test_none(self):
+        assert is_local_rpc(None) is False
+
+    def test_empty(self):
+        assert is_local_rpc("") is False

@@ -57,6 +57,7 @@ from .framework import (
     CompilationStatus,
     # Config
     ConfigSnapshot,
+    ConfigValidationError,
     CooldownTracker,
     CreateTestResult,
     DataClassification,
@@ -225,6 +226,7 @@ __all__ = [
     "unregister_strategy",
     # V2 Framework - Config
     "ConfigSnapshot",
+    "ConfigValidationError",
     "NotificationCallback",
     "RiskGuard",
     "RiskGuardConfig",

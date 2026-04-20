@@ -252,6 +252,25 @@ class TestExtractSwapAmountsBytesTopics:
         assert result is not None
         assert result.amount_out == 100
 
+    def test_uses_from_address_fallback(self):
+        """receipt['from_address'] should be accepted when 'from' is absent."""
+        parser = EnsoReceiptParser()
+        receipt = _make_receipt(
+            logs=[
+                _transfer_log(TOKEN_IN, WALLET, ROUTER, 1000),
+                _transfer_log(TOKEN_OUT, ROUTER, WALLET, 900),
+            ]
+        )
+        del receipt["from"]
+        receipt["from_address"] = WALLET
+
+        with patch.object(parser, "_resolve_decimals", return_value=18):
+            result = parser.extract_swap_amounts(receipt)
+
+        assert result is not None
+        assert result.amount_in == 1000
+        assert result.amount_out == 900
+
 
 class TestResolveDecimals:
     """Test _resolve_decimals behavior."""

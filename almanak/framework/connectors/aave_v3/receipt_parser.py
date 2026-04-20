@@ -36,14 +36,53 @@ from enum import Enum
 from typing import Any
 
 from almanak.framework.connectors.base import EventRegistry, HexDecoder
+from almanak.framework.execution.extract_result import (
+    ExtractError,
+    ExtractMissing,
+    ExtractOk,
+    ExtractResult,
+)
 from almanak.framework.utils.log_formatters import format_address, format_gas_cost, format_tx_hash
 
 logger = logging.getLogger(__name__)
 
 
+def _format_token_amount(raw_amount: Decimal, token_address: str, chain: str) -> str:
+    """Format a raw token amount into a human-readable string.
+
+    Looks up decimals for the token via the token resolver. Falls back to
+    raw amount formatting if decimals cannot be determined.
+
+    Args:
+        raw_amount: Raw uint256 amount from the event
+        token_address: Token contract address
+        chain: Chain name (e.g., "arbitrum", "ethereum")
+
+    Returns:
+        Human-readable amount string (e.g., "0.0027" or "1,500.50")
+    """
+    try:
+        from almanak.framework.data.tokens import get_token_resolver
+
+        resolver = get_token_resolver()
+        resolved = resolver.resolve(token_address, chain)
+        decimals = resolved.decimals
+        human_amount = raw_amount / Decimal(10**decimals)
+        # Use up to 6 significant digits for readability
+        if human_amount == 0:
+            return "0"
+        return f"{human_amount:,.6f}".rstrip("0").rstrip(".")
+    except Exception:
+        # Fallback to raw amount if resolver fails
+        return f"{raw_amount:,.0f} (raw)"
+
+
 # =============================================================================
 # Event Topic Signatures
 # =============================================================================
+
+# Null address constant used for ERC-20 Transfer mint/burn detection
+_ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 # Aave V3 event topic signatures (keccak256 hashes of event signatures)
 # These are the actual topic hashes from Aave V3 contracts
@@ -504,6 +543,104 @@ class IsolationModeDebtUpdatedEventData:
 
 
 @dataclass
+class SupplyAmountsResult:
+    """Aggregated supply extraction result for ResultEnricher.
+
+    Returned by extract_supply_amounts() to provide a structured view
+    of all supply-related data from a single transaction receipt.
+
+    Attributes:
+        supply_amount: Raw amount supplied (in token's smallest unit)
+        a_token_received: Amount of aTokens minted (if available)
+        supply_rate: Supply APY at time of supply (if available)
+    """
+
+    supply_amount: int
+    a_token_received: int | None = None
+    supply_rate: "Decimal | None" = None
+
+    def to_dict(self) -> "dict[str, Any]":
+        """Convert to dictionary."""
+        return {
+            "supply_amount": self.supply_amount,
+            "a_token_received": self.a_token_received,
+            "supply_rate": str(self.supply_rate) if self.supply_rate is not None else None,
+        }
+
+
+@dataclass
+class BorrowAmountsResult:
+    """Aggregated borrow extraction result for ResultEnricher.
+
+    Returned by extract_borrow_amounts() to provide a structured view
+    of all borrow-related data from a single transaction receipt.
+
+    Attributes:
+        borrow_amount: Raw amount borrowed (in token's smallest unit)
+        borrow_rate: Borrow APY at time of borrow (if available)
+        debt_token: Debt token address (if available)
+    """
+
+    borrow_amount: int
+    borrow_rate: "Decimal | None" = None
+    debt_token: str | None = None
+
+    def to_dict(self) -> "dict[str, Any]":
+        """Convert to dictionary."""
+        return {
+            "borrow_amount": self.borrow_amount,
+            "borrow_rate": str(self.borrow_rate) if self.borrow_rate is not None else None,
+            "debt_token": self.debt_token,
+        }
+
+
+@dataclass
+class RepayAmountsResult:
+    """Aggregated repay extraction result for ResultEnricher.
+
+    Returned by extract_repay_amounts() to provide a structured view
+    of all repay-related data from a single transaction receipt.
+
+    Attributes:
+        repay_amount: Raw amount repaid (in token's smallest unit)
+        remaining_debt: Remaining debt after repay (if available)
+    """
+
+    repay_amount: int
+    remaining_debt: int | None = None
+
+    def to_dict(self) -> "dict[str, Any]":
+        """Convert to dictionary."""
+        return {
+            "repay_amount": self.repay_amount,
+            "remaining_debt": self.remaining_debt,
+        }
+
+
+@dataclass
+class WithdrawAmountsResult:
+    """Aggregated withdraw extraction result for ResultEnricher.
+
+    Returned by extract_withdraw_amounts() to provide a structured view
+    of all withdraw-related data from a single transaction receipt.
+
+    Attributes:
+        withdraw_amount: Raw amount withdrawn (in token's smallest unit)
+        a_token_burned: Amount of aTokens burned (if available)
+    """
+
+    withdraw_amount: int
+    a_token_burned: int | None = None
+
+    def to_dict(self) -> "dict[str, Any]":
+        """Convert to dictionary."""
+        return {
+            "withdraw_amount": self.withdraw_amount,
+            "a_token_burned": self.a_token_burned,
+        }
+
+
+@dataclass
 class ParseResult:
     """Result of parsing a receipt.
 
@@ -579,10 +716,15 @@ class AaveV3ReceiptParser:
     SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset(
         {
             "supply_amount",
+            "supply_amounts",
             "withdraw_amount",
+            "withdraw_amounts",
             "borrow_amount",
+            "borrow_amounts",
             "repay_amount",
+            "repay_amounts",
             "a_token_received",
+            "a_token_burned",
             "borrow_rate",
             "debt_token",
             "supply_rate",
@@ -594,9 +736,10 @@ class AaveV3ReceiptParser:
         """Initialize the parser.
 
         Args:
-            **kwargs: Additional arguments (ignored for compatibility)
+            **kwargs: Additional arguments. Accepts 'chain' for token decimal lookup.
         """
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
+        self._chain = kwargs.get("chain", "ethereum")
 
     def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:
         """Parse a transaction receipt.
@@ -698,17 +841,25 @@ class AaveV3ReceiptParser:
             actions = []
             if supplies:
                 for s in supplies:
-                    actions.append(f"SUPPLY {s.amount:,.0f} to {format_address(s.reserve)}")
+                    actions.append(
+                        f"SUPPLY {_format_token_amount(s.amount, s.reserve, self._chain)} to {format_address(s.reserve)}"
+                    )
             if withdraws:
                 for w in withdraws:
-                    actions.append(f"WITHDRAW {w.amount:,.0f} from {format_address(w.reserve)}")
+                    actions.append(
+                        f"WITHDRAW {_format_token_amount(w.amount, w.reserve, self._chain)} from {format_address(w.reserve)}"
+                    )
             if borrows:
                 for b in borrows:
                     rate_type = "variable" if b.is_variable_rate else "stable"
-                    actions.append(f"BORROW {b.amount:,.0f} ({rate_type}) from {format_address(b.reserve)}")
+                    actions.append(
+                        f"BORROW {_format_token_amount(b.amount, b.reserve, self._chain)} ({rate_type}) from {format_address(b.reserve)}"
+                    )
             if repays:
                 for r in repays:
-                    actions.append(f"REPAY {r.amount:,.0f} to {format_address(r.reserve)}")
+                    actions.append(
+                        f"REPAY {_format_token_amount(r.amount, r.reserve, self._chain)} to {format_address(r.reserve)}"
+                    )
             if liquidations:
                 for liq in liquidations:
                     actions.append(f"LIQUIDATION on {format_address(liq.user)}")
@@ -1263,6 +1414,63 @@ class AaveV3ReceiptParser:
     # Extraction Methods (for Result Enrichment)
     # =============================================================================
 
+    # ---- VIB-3159: tagged-variant wrappers ------------------------------------
+    # See uniswap_v3/receipt_parser.py for rationale.
+
+    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
+        """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
+        reports a crash. See uniswap_v3 equivalent for rationale (VIB-3159)."""
+        try:
+            parsed = self.parse_receipt(receipt)
+        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if not parsed.success:
+            return ExtractError(error=parsed.error or "parse_receipt reported failure")
+        return None
+
+    def _wrap_amount(
+        self,
+        fn: Any,
+        receipt: dict[str, Any],
+        missing_reason: str,
+    ) -> ExtractResult[int]:
+        """Shared wrapper for integer-amount extract methods.
+
+        Calls ``parse_receipt`` first so actual parse crashes propagate as
+        ``ExtractError`` rather than being silently swallowed by the legacy
+        extractor's ``except Exception: return None`` (VIB-3159).
+        """
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = fn(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason=missing_reason)
+        return ExtractOk(value=value)
+
+    def extract_supply_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_supply_amount` — see VIB-3159."""
+        return self._wrap_amount(self.extract_supply_amount, receipt, "no Supply event in receipt")
+
+    def extract_withdraw_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_withdraw_amount` — see VIB-3159."""
+        return self._wrap_amount(self.extract_withdraw_amount, receipt, "no Withdraw event in receipt")
+
+    def extract_borrow_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_borrow_amount` — see VIB-3159."""
+        return self._wrap_amount(self.extract_borrow_amount, receipt, "no Borrow event in receipt")
+
+    def extract_repay_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_repay_amount` — see VIB-3159."""
+        return self._wrap_amount(self.extract_repay_amount, receipt, "no Repay event in receipt")
+
+    def extract_a_token_received_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_a_token_received` — see VIB-3159."""
+        return self._wrap_amount(self.extract_a_token_received, receipt, "no aToken Mint Transfer event")
+
     def extract_supply_amount(self, receipt: dict[str, Any]) -> int | None:
         """Extract supply amount from a transaction receipt.
 
@@ -1361,7 +1569,6 @@ class AaveV3ReceiptParser:
                 return None
 
             transfer_topic = EVENT_TOPICS["Transfer"].lower()
-            zero_addr = "0x0000000000000000000000000000000000000000"
 
             for log in logs:
                 topics = log.get("topics", [])
@@ -1377,7 +1584,7 @@ class AaveV3ReceiptParser:
                     continue
 
                 from_addr = HexDecoder.topic_to_address(topics[1])
-                if from_addr.lower() == zero_addr:
+                if from_addr.lower() == _ZERO_ADDRESS:
                     data = HexDecoder.normalize_hex(log.get("data", ""))
                     amount = HexDecoder.decode_uint256(data, 0)
                     return amount
@@ -1434,7 +1641,6 @@ class AaveV3ReceiptParser:
                 return None
 
             transfer_topic = EVENT_TOPICS["Transfer"].lower()
-            zero_addr = "0x0000000000000000000000000000000000000000"
 
             for log in logs:
                 topics = log.get("topics", [])
@@ -1451,7 +1657,7 @@ class AaveV3ReceiptParser:
 
                 # Check if this is a mint (from 0x0)
                 from_addr = HexDecoder.topic_to_address(topics[1])
-                if from_addr.lower() != zero_addr:
+                if from_addr.lower() != _ZERO_ADDRESS:
                     continue
 
                 # Check if the minted amount matches the borrow amount
@@ -1497,6 +1703,163 @@ class AaveV3ReceiptParser:
 
         except Exception as e:
             logger.warning(f"Failed to extract supply rate: {e}")
+            return None
+
+    def extract_supply_amounts(self, receipt: dict[str, Any]) -> "SupplyAmountsResult | None":
+        """Extract aggregated supply data from a transaction receipt.
+
+        Returns a SupplyAmountsResult combining supply_amount, a_token_received,
+        and supply_rate into a single structured object. Called by ResultEnricher
+        for SUPPLY intents.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            SupplyAmountsResult if supply found, None otherwise
+        """
+        try:
+            supply_amount = self.extract_supply_amount(receipt)
+            if supply_amount is None:
+                return None
+            a_token_received = self.extract_a_token_received(receipt)
+            supply_rate = self.extract_supply_rate(receipt)
+            return SupplyAmountsResult(
+                supply_amount=supply_amount,
+                a_token_received=a_token_received,
+                supply_rate=supply_rate,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to extract supply amounts: {e}")
+            return None
+
+    def extract_borrow_amounts(self, receipt: dict[str, Any]) -> "BorrowAmountsResult | None":
+        """Extract aggregated borrow data from a transaction receipt.
+
+        Returns a BorrowAmountsResult combining borrow_amount, borrow_rate,
+        and debt_token into a single structured object. Called by ResultEnricher
+        for BORROW intents.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            BorrowAmountsResult if borrow found, None otherwise
+        """
+        try:
+            borrow_amount = self.extract_borrow_amount(receipt)
+            if borrow_amount is None:
+                return None
+            borrow_rate = self.extract_borrow_rate(receipt)
+            debt_token = self.extract_debt_token(receipt)
+            return BorrowAmountsResult(
+                borrow_amount=borrow_amount,
+                borrow_rate=borrow_rate,
+                debt_token=debt_token,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to extract borrow amounts: {e}")
+            return None
+
+    def extract_repay_amounts(self, receipt: dict[str, Any]) -> "RepayAmountsResult | None":
+        """Extract aggregated repay data from a transaction receipt.
+
+        Returns a RepayAmountsResult combining repay_amount and remaining_debt
+        into a single structured object. Called by ResultEnricher for REPAY intents.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            RepayAmountsResult if repay found, None otherwise
+        """
+        try:
+            repay_amount = self.extract_repay_amount(receipt)
+            if repay_amount is None:
+                return None
+            remaining_debt = self.extract_remaining_debt(receipt)
+            return RepayAmountsResult(
+                repay_amount=repay_amount,
+                remaining_debt=remaining_debt,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to extract repay amounts: {e}")
+            return None
+
+    def extract_withdraw_amounts(self, receipt: dict[str, Any]) -> "WithdrawAmountsResult | None":
+        """Extract aggregated withdraw data from a transaction receipt.
+
+        Returns a WithdrawAmountsResult combining withdraw_amount and a_token_burned
+        into a single structured object. Called by ResultEnricher for WITHDRAW intents.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            WithdrawAmountsResult if withdraw found, None otherwise
+        """
+        try:
+            withdraw_amount = self.extract_withdraw_amount(receipt)
+            if withdraw_amount is None:
+                return None
+            a_token_burned = self.extract_a_token_burned(receipt)
+            return WithdrawAmountsResult(
+                withdraw_amount=withdraw_amount,
+                a_token_burned=a_token_burned,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to extract withdraw amounts: {e}")
+            return None
+
+    def extract_a_token_burned(self, receipt: dict[str, Any]) -> int | None:
+        """Extract aToken amount burned from a WITHDRAW transaction receipt.
+
+        Looks for Transfer events TO the zero address (burning) in the receipt.
+        These are emitted by the aToken contract when tokens are burned on withdrawal.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            aToken amount burned if found, None otherwise
+        """
+        try:
+            parsed = self.parse_receipt(receipt)
+            if not parsed.withdraws:
+                return None
+            withdraw_user = parsed.withdraws[0].user.lower()
+
+            logs = receipt.get("logs", [])
+            if not logs:
+                return None
+
+            transfer_topic = EVENT_TOPICS["Transfer"].lower()
+
+            for log in logs:
+                topics = log.get("topics", [])
+                if len(topics) < 3:
+                    continue
+
+                first_topic = topics[0]
+                if isinstance(first_topic, bytes):
+                    first_topic = "0x" + first_topic.hex()
+                first_topic = str(first_topic).lower()
+
+                if first_topic != transfer_topic:
+                    continue
+
+                # Check if this is the withdraw user's burn (user -> 0x0)
+                from_addr = HexDecoder.topic_to_address(topics[1]).lower()
+                to_addr = HexDecoder.topic_to_address(topics[2]).lower()
+                if to_addr == _ZERO_ADDRESS and from_addr == withdraw_user:
+                    data = HexDecoder.normalize_hex(log.get("data", ""))
+                    amount = HexDecoder.decode_uint256(data, 0)
+                    return amount
+
+            return None
+
+        except Exception as e:
+            logger.warning(f"Failed to extract aToken burned: {e}")
             return None
 
     def extract_remaining_debt(self, receipt: dict[str, Any]) -> int | None:
@@ -1588,6 +1951,11 @@ __all__ = [
     "UserEModeSetEventData",
     "IsolationModeDebtUpdatedEventData",
     "ParseResult",
+    # Extraction result types
+    "SupplyAmountsResult",
+    "BorrowAmountsResult",
+    "RepayAmountsResult",
+    "WithdrawAmountsResult",
     # Constants
     "EVENT_TOPICS",
     "TOPIC_TO_EVENT",

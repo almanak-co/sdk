@@ -42,12 +42,15 @@ import os
 import time
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from web3 import Web3
 from web3.contract import Contract
 
 from almanak.core.contracts import TRADERJOE_V2 as TRADERJOE_V2_ADDRESSES
+
+if TYPE_CHECKING:
+    from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +76,10 @@ DEFAULT_GAS_ESTIMATES: dict[str, int] = {
 
 # TraderJoe V2 constants
 MAX_UINT256 = 2**256 - 1
-DEADLINE_100_DAYS = 8_640_000
+# VIB-2579: Reduced from 100 days (8_640_000) to 5 minutes. A loose deadline
+# combined with a tight id_slippage caused non-deterministic reverts on
+# Avalanche where the active bin shifts between TX simulation and execution.
+DEADLINE_SECONDS = 300  # 5 minutes
 
 # Bin ID offset (2^23)
 BIN_ID_OFFSET = 8388608
@@ -189,12 +195,14 @@ class TraderJoeV2SDK:
     def __init__(
         self,
         chain: str,
-        rpc_url: str,
+        rpc_url: str | None = None,
         wallet_address: str | None = None,
+        gateway_client: "GatewayClient | None" = None,
     ) -> None:
         self.chain = chain.lower()
         self.rpc_url = rpc_url
         self.wallet_address = wallet_address
+        self._gateway_client = gateway_client
 
         # Validate chain
         if self.chain not in TRADERJOE_V2_ADDRESSES:
@@ -202,12 +210,24 @@ class TraderJoeV2SDK:
                 f"Chain '{chain}' not supported. Supported: {list(TRADERJOE_V2_ADDRESSES.keys())}"
             )
 
-        # Initialize Web3
-        self.web3 = Web3(Web3.HTTPProvider(rpc_url))
-        if not self.web3.is_connected():
-            raise TraderJoeV2SDKError(f"Failed to connect to RPC: {rpc_url}")
+        if rpc_url is None and gateway_client is None:
+            raise TraderJoeV2SDKError("TraderJoeV2SDK requires either rpc_url (deprecated) or gateway_client")
 
-        # Inject POA middleware for chains with non-standard extraData (Avalanche, BSC, Polygon)
+        # Initialize Web3 — route through gateway when available; otherwise
+        # direct RPC (deprecated ad-hoc use).
+        if gateway_client is not None:
+            from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+
+            self.web3 = Web3(GatewayWeb3Provider(gateway_client, chain=self.chain))
+        else:
+            self.web3 = Web3(Web3.HTTPProvider(rpc_url))  # vib-2986-exempt: gateway-internal fallback
+            # Preflight only for direct-RPC path. The gateway sidecar runs on
+            # localhost and this round-trip adds no value over connecting lazily.
+            if not self.web3.is_connected():
+                raise TraderJoeV2SDKError(f"Failed to connect to RPC: {rpc_url}")
+
+        # Inject POA middleware for chains with non-standard extraData (Avalanche, BSC, Polygon).
+        # POA middleware is a client-side concern; the gateway forwards raw JSON-RPC unchanged.
         from almanak.gateway.utils.rpc_provider import is_poa_chain
 
         if is_poa_chain(self.chain):
@@ -252,7 +272,7 @@ class TraderJoeV2SDK:
         self._pool_address_cache: dict[tuple[str, str, int], str] = {}
 
         # Default deadline (100 days)
-        self.deadline = int(time.time()) + DEADLINE_100_DAYS
+        self.deadline = int(time.time()) + DEADLINE_SECONDS
 
         logger.debug(
             f"TraderJoe V2 SDK initialized for {chain}: Router={self.router_address}, Factory={self.factory_address}"
@@ -537,7 +557,7 @@ class TraderJoeV2SDK:
             Tuple of (transaction dict, estimated gas)
         """
         if deadline is None:
-            deadline = int(time.time()) + DEADLINE_100_DAYS
+            deadline = int(time.time()) + DEADLINE_SECONDS
 
         # Convert addresses
         path = [Web3.to_checksum_address(addr) for addr in path]
@@ -609,7 +629,7 @@ class TraderJoeV2SDK:
             Tuple of (transaction dict, estimated gas)
         """
         if deadline is None:
-            deadline = int(time.time()) + DEADLINE_100_DAYS
+            deadline = int(time.time()) + DEADLINE_SECONDS
 
         liquidity_params = {
             "tokenX": Web3.to_checksum_address(token_x),
@@ -670,7 +690,7 @@ class TraderJoeV2SDK:
             Tuple of (transaction dict, estimated gas)
         """
         if deadline is None:
-            deadline = int(time.time()) + DEADLINE_100_DAYS
+            deadline = int(time.time()) + DEADLINE_SECONDS
 
         to_addr = Web3.to_checksum_address(to)
 

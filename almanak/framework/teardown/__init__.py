@@ -43,7 +43,11 @@ from almanak.framework.teardown.models import (
 )
 from almanak.framework.teardown.safety_guard import SafetyGuard
 from almanak.framework.teardown.slippage_manager import EscalatingSlippageManager
-from almanak.framework.teardown.state_manager import TeardownStateManager, get_teardown_state_manager
+from almanak.framework.teardown.state_manager import (
+    TeardownStateAdapter,
+    TeardownStateManager,
+    get_teardown_state_manager,
+)
 from almanak.framework.teardown.teardown_manager import TeardownManager
 
 __all__ = [
@@ -77,5 +81,6 @@ __all__ = [
     "CancelWindowManager",
     "TeardownManager",
     "TeardownStateManager",
+    "TeardownStateAdapter",
     "get_teardown_state_manager",
 ]

@@ -1,0 +1,11 @@
+{
+    "chain": "base",
+    "budget_usd": 2,
+    "relay_token": "USDC",
+    "intermediate_token": "WETH",
+    "max_slippage_pct": 1.0,
+    "swap_protocols": ["aerodrome", "uniswap_v3", "pancakeswap_v3"],
+    "lending_protocol": "compound_v3",
+    "lending_market_id": "usdc",
+    "lending_supply_usd": 0.50
+}

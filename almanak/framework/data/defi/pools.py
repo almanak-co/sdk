@@ -464,7 +464,11 @@ class UniswapV3PoolReader:
             )
 
         if chain_lower not in self._web3_instances:
-            self._web3_instances[chain_lower] = AsyncWeb3(AsyncHTTPProvider(self._rpc_urls[chain_lower]))
+            from almanak.gateway.utils.ssl_context import build_ssl_context
+
+            self._web3_instances[chain_lower] = AsyncWeb3(
+                AsyncHTTPProvider(self._rpc_urls[chain_lower], request_kwargs={"ssl": build_ssl_context()})
+            )
 
         return self._web3_instances[chain_lower]
 

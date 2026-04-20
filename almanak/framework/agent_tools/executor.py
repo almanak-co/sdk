@@ -22,6 +22,10 @@ from almanak.framework.agent_tools.approval import (
     ApprovalStatus,
     HumanApprovalActuator,
 )
+from almanak.framework.agent_tools.bundle_cache import (
+    BundleCache,
+    BundleExpiredError,
+)
 from almanak.framework.agent_tools.catalog import (
     RiskTier,
     ToolCatalog,
@@ -47,6 +51,57 @@ if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
+
+# Native-token decimals for chains exposed through ``get_portfolio`` /
+# ``list_lp_positions``. Every currently-registered EVM chain uses 18 decimals
+# for its native currency (ETH, MATIC, AVAX, BNB, S, MNT, PLM, etc.), so the
+# default below is safe — but pull the value from this map explicitly rather
+# than hardcoding ``18`` at the call site so a future non-EVM chain (e.g., a
+# chain with a different native scale) surfaces as a one-line fix here rather
+# than a silent ×10^N rendering bug. (Gemini PR #1536 high-priority review.)
+_NATIVE_TOKEN_DECIMALS: dict[str, int] = {
+    # Populate only chains that need a non-18 override; everything else
+    # falls through to the default via ``.get(chain, 18)``.
+}
+
+
+def _coerce_floats_to_str(obj: Any) -> Any:
+    """Recursively coerce float values to strings for Pydantic SafeDecimal compatibility.
+
+    Prevents Pydantic's SafeDecimal rejection of raw float values (e.g., 0.03)
+    by converting them to strings before JSON serialization.
+
+    Args:
+        obj: Any JSON-serializable object (dict, list, float, or other).
+
+    Returns:
+        The same structure with all floats replaced by their string representation.
+    """
+    if isinstance(obj, float):
+        return str(obj)
+    if isinstance(obj, dict):
+        return {k: _coerce_floats_to_str(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_coerce_floats_to_str(v) for v in obj]
+    return obj
+
+
+def _decode_int24(word_hex: str) -> int:
+    """Decode an ABI-encoded int24 value from a 32-byte hex word.
+
+    ABI encoding sign-extends int24 to 256 bits. To recover the original
+    signed value, read only the low 3 bytes and apply int24 two's-complement.
+    Reading the full 32-byte word and subtracting 2**24 breaks for negative ticks
+    because the sign-extension fills all upper bytes with 0xff.
+
+    Args:
+        word_hex: 64-character hex string representing a 32-byte ABI word.
+
+    Returns:
+        Signed int24 value in the range [-8388608, 8388607].
+    """
+    value = int(word_hex[-6:], 16)  # extract low 3 bytes
+    return value - (1 << 24) if value >= (1 << 23) else value
 
 
 def _error_dict(code: AgentErrorCode, message: str, *, recoverable: bool = False) -> dict:
@@ -101,6 +156,7 @@ class ToolExecutor:
         max_retry_delay: float = 60.0,
         approval_config: ApprovalConfig | None = None,
         approval_notifier: ApprovalNotifier | None = None,
+        bundle_cache: BundleCache | None = None,
     ) -> None:
         self._client = gateway_client
         self._catalog = catalog or get_default_catalog()
@@ -139,12 +195,11 @@ class ToolExecutor:
                 notifier=approval_notifier,
             )
 
-        # Bundle cache for compile -> execute flow
-        # Each entry stores (chain, bundle_bytes, original_args) to prevent cross-chain
-        # execution and enable spend tracking on compiled bundle execution.
-        # Capped at 100 entries to prevent unbounded memory growth.
-        self._compiled_bundles: dict[str, tuple[str, bytes, dict]] = {}
-        self._max_compiled_bundles = 100
+        # Bundle cache for compile -> execute flow.
+        # Persists to ${XDG_CACHE_HOME:-~/.cache}/almanak/bundles/ so the
+        # one-shot ``ax`` CLI can span compile_intent + execute_compiled_bundle
+        # across shells (VIB-2996). In-memory LRU remains the hot layer.
+        self._bundle_cache = bundle_cache if bundle_cache is not None else BundleCache()
 
         # State version tracking for optimistic locking
         self._state_versions: dict[str, int] = {}
@@ -156,6 +211,21 @@ class ToolExecutor:
         self._settlement_proposed_assets: int = 0
         self._settlement_nonce: int = 0
         self._vault_epoch_counter: int = 0
+
+    def get_filtered_openai_tools(self) -> list[dict]:
+        """Return OpenAI tool definitions filtered by the policy's allowed_tools.
+
+        Combines the catalog with the agent policy to produce a minimal tool list
+        that only includes tools the agent is actually permitted to call. This
+        reduces LLM input tokens by excluding tool schemas the agent cannot use.
+
+        If the policy has no allowed_tools restriction (None), returns all tools.
+        An empty set means zero tools are allowed.
+        """
+        allowed = self._policy_engine.policy.allowed_tools
+        if allowed is None:
+            return self._catalog.to_openai_tools()
+        return self._catalog.to_openai_tools(allowed=allowed)
 
     def _lookup_token_price(self, token: str) -> Decimal | None:
         """Synchronous price lookup for spend-limit pre-checks.
@@ -416,6 +486,27 @@ class ToolExecutor:
             if "chain" in tool_def.request_schema.model_fields:
                 arguments = {**arguments, "chain": self._default_chain}
 
+        # Normalize token0/token1 aliases for pool tools.
+        # Reject conflicting values (e.g., token_a="WETH" and token0="USDC") rather than
+        # silently overwriting the canonical field with the alias value.
+        if tool_name in ("get_pool_state", "open_lp_position"):
+            normalized = dict(arguments)
+            if "token0" in normalized:
+                if "token_a" in normalized and str(normalized["token_a"]).lower() != str(normalized["token0"]).lower():
+                    raise ToolValidationError(
+                        f"Conflicting values for token_a ('{normalized['token_a']}') and token0 ('{normalized['token0']}').",
+                        tool_name=tool_name,
+                    )
+                normalized["token_a"] = normalized.pop("token0")
+            if "token1" in normalized:
+                if "token_b" in normalized and str(normalized["token_b"]).lower() != str(normalized["token1"]).lower():
+                    raise ToolValidationError(
+                        f"Conflicting values for token_b ('{normalized['token_b']}') and token1 ('{normalized['token1']}').",
+                        tool_name=tool_name,
+                    )
+                normalized["token_b"] = normalized.pop("token1")
+            arguments = normalized
+
         # 2. Validate input schema
         try:
             request = tool_def.request_schema(**arguments)
@@ -584,6 +675,15 @@ class ToolExecutor:
         if tool_name == "get_lp_position":
             return await self._execute_get_lp_position(args)
 
+        if tool_name == "list_lp_positions":
+            return await self._execute_list_lp_positions(args)
+
+        if tool_name == "list_lending_positions":
+            return await self._execute_list_lending_positions(args)
+
+        if tool_name == "get_portfolio":
+            return await self._execute_get_portfolio(args)
+
         if tool_name == "resolve_token":
             from almanak.framework.data.tokens import get_token_resolver
 
@@ -606,6 +706,12 @@ class ToolExecutor:
         if tool_name == "get_vault_state":
             return await self._execute_get_vault_state(args)
 
+        if tool_name == "get_wallet_overview":
+            return self._execute_get_wallet_overview(args)
+
+        if tool_name == "check_protocol_support":
+            return self._execute_check_protocol_support(args)
+
         raise ToolValidationError(f"Unknown data tool: {tool_name}", tool_name=tool_name)
 
     # ── PLANNING / SAFETY TOOLS ─────────────────────────────────────────
@@ -617,6 +723,10 @@ class ToolExecutor:
             chain = args.get("chain", self._default_chain)
             intent_type = args["intent_type"]
             params = args.get("params", {})
+
+            # Coerce float values to strings to prevent Pydantic SafeDecimal rejection
+            # (e.g., max_slippage=0.03 becomes "0.03" which Decimal() accepts)
+            params = _coerce_floats_to_str(params)
 
             resp = self._client.execution.CompileIntent(
                 gateway_pb2.CompileIntentRequest(
@@ -634,13 +744,24 @@ class ToolExecutor:
                 )
 
             # Cache the compiled bundle with chain metadata and original args for
-            # later execution and spend tracking
+            # later execution and spend tracking. The cache persists to disk so
+            # the one-shot CLI can execute a bundle compiled in a previous shell.
+            # wallet_address/strategy_id are recorded to reject cross-identity
+            # reuse — the cache is per-machine, so a bundle compiled under
+            # wallet A must not execute under wallet B (VIB-2996 P1).
+            # sanitize_args is applied defensively: callers that smuggle a
+            # secret field (``api_key``, ``private_key``, ...) into ``params``
+            # must not end up with it plaintext on disk (VIB-2996 P3 / Claude
+            # auditor item #3).
             bundle_id = str(uuid.uuid4())
-            # Evict oldest entries if cache is full
-            if len(self._compiled_bundles) >= self._max_compiled_bundles:
-                oldest_key = next(iter(self._compiled_bundles))
-                del self._compiled_bundles[oldest_key]
-            self._compiled_bundles[bundle_id] = (chain, resp.action_bundle, args)
+            self._bundle_cache.put(
+                bundle_id,
+                chain,
+                resp.action_bundle,
+                sanitize_args(args),
+                wallet_address=self._wallet_address,
+                strategy_id=self._strategy_id,
+            )
 
             # Parse actions for the response
             try:
@@ -661,13 +782,36 @@ class ToolExecutor:
 
         if tool_name == "simulate_intent":
             sim_bundle_id = args.get("bundle_id")
-            cached_chain = None
-            if sim_bundle_id and sim_bundle_id in self._compiled_bundles:
-                cached_chain, bundle_bytes, _original_args = self._compiled_bundles[sim_bundle_id]
-            elif args.get("intent_type"):
+            cached_chain: str | None = None
+            bundle_bytes: bytes | None = None
+            if sim_bundle_id:
+                try:
+                    cached_entry = self._bundle_cache.get(sim_bundle_id)
+                except BundleExpiredError as exc:
+                    return ToolResponse(
+                        status="error",
+                        error=_error_dict(
+                            AgentErrorCode.VALIDATION_ERROR,
+                            str(exc),
+                            recoverable=True,
+                        ),
+                    )
+                if cached_entry is not None:
+                    cached_chain = cached_entry.chain
+                    bundle_bytes = cached_entry.bundle_bytes
+
+            if bundle_bytes is None:
+                if not args.get("intent_type"):
+                    raise ToolValidationError(
+                        "Must provide either bundle_id or intent_type+params for simulation.",
+                        tool_name=tool_name,
+                    )
                 # Compile on the fly for simulation
                 chain = args.get("chain", self._default_chain)
                 params = args.get("params", {})
+                # Coerce float values to strings to prevent Pydantic SafeDecimal rejection
+                # (matches compile_intent behavior; e.g., max_slippage=0.03 becomes "0.03")
+                params = _coerce_floats_to_str(params)
                 compile_resp = self._client.execution.CompileIntent(
                     gateway_pb2.CompileIntentRequest(
                         intent_type=args["intent_type"],
@@ -682,11 +826,6 @@ class ToolExecutor:
                         error=_error_dict(AgentErrorCode.SIMULATION_FAILED, compile_resp.error, recoverable=True),
                     )
                 bundle_bytes = compile_resp.action_bundle
-            else:
-                raise ToolValidationError(
-                    "Must provide either bundle_id or intent_type+params for simulation.",
-                    tool_name=tool_name,
-                )
 
             # Use the cached chain from the bundle if available, otherwise fall back to args
             chain = cached_chain or args.get("chain", self._default_chain)
@@ -851,21 +990,50 @@ class ToolExecutor:
         dry_run = args.get("dry_run", False)
         chain = args.get("chain", self._default_chain)
 
-        cached = self._compiled_bundles.get(bundle_id)
+        try:
+            cached = self._bundle_cache.get(bundle_id)
+        except BundleExpiredError as exc:
+            raise ToolValidationError(
+                str(exc),
+                tool_name="execute_compiled_bundle",
+            ) from exc
         if cached is None:
             raise ToolValidationError(
-                f"Bundle '{bundle_id}' not found. It may have expired or was never compiled. "
-                "Use compile_intent first to create a bundle.",
+                f"Bundle '{bundle_id}' not found. Use compile_intent first to create a bundle "
+                "(bundles live under ${XDG_CACHE_HOME:-~/.cache}/almanak/bundles/).",
                 tool_name="execute_compiled_bundle",
             )
 
-        compiled_chain, bundle_bytes, original_args = cached
+        compiled_chain = cached.chain
+        bundle_bytes = cached.bundle_bytes
+        original_args = cached.args
 
         # Enforce chain match to prevent wrong-network execution
         if chain.lower() != compiled_chain.lower():
             raise ToolValidationError(
                 f"Bundle was compiled for chain '{compiled_chain}' but execution requested on '{chain}'. "
                 "Recompile the bundle for the target chain.",
+                tool_name="execute_compiled_bundle",
+            )
+
+        # Enforce wallet/strategy identity match. The persistent cache is
+        # per-machine, so a bundle compiled under wallet A must not execute
+        # under wallet B even if the bundle_id leaks (VIB-2996 P1). EVM
+        # addresses are compared case-insensitively; empty strings (legacy
+        # flows that never set a wallet) fall through without gating.
+        if cached.wallet_address and self._wallet_address:
+            if cached.wallet_address.lower() != self._wallet_address.lower():
+                raise ToolValidationError(
+                    f"Bundle was compiled under wallet '{cached.wallet_address}' but "
+                    f"execution requested under '{self._wallet_address}'. "
+                    "Recompile with compile_intent for the current wallet.",
+                    tool_name="execute_compiled_bundle",
+                )
+        if cached.strategy_id and self._strategy_id and cached.strategy_id != self._strategy_id:
+            raise ToolValidationError(
+                f"Bundle was compiled under strategy '{cached.strategy_id}' but "
+                f"execution requested under '{self._strategy_id}'. "
+                "Recompile with compile_intent for the current strategy.",
                 tool_name="execute_compiled_bundle",
             )
 
@@ -906,6 +1074,16 @@ class ToolExecutor:
             "require_simulation", True
         )
 
+        # Reserve the bundle one-shot BEFORE hitting the gateway. With the
+        # persistent cache, two concurrent ``ax`` invocations on the same
+        # machine could both ``get()`` the same entry and both submit
+        # transactions. Popping before Execute means at most one caller wins
+        # the pop; the other sees a cache miss and must recompile (VIB-2996
+        # / Claude PR auditor item #2). dry_run paths don't consume — they
+        # re-use the bundle.
+        if not dry_run:
+            self._bundle_cache.pop(bundle_id)
+
         exec_resp = self._client.execution.Execute(
             gateway_pb2.ExecuteRequest(
                 action_bundle=bundle_bytes,
@@ -935,9 +1113,6 @@ class ToolExecutor:
                 f"Execution of compiled bundle failed: {exec_resp.error}",
                 tool_name="execute_compiled_bundle",
             )
-
-        # Remove from cache after execution (one-shot)
-        self._compiled_bundles.pop(bundle_id, None)
 
         tx_hashes = list(exec_resp.tx_hashes) if exec_resp.tx_hashes else []
         status = "simulated" if dry_run else ("success" if exec_resp.success else "error")
@@ -1030,28 +1205,66 @@ class ToolExecutor:
             }
 
         if tool_name == "supply_lending":
-            return "supply", {
+            params = {
                 "token": args["token"],
                 "amount": args["amount"],
                 "protocol": args.get("protocol", "aave_v3"),
                 "use_as_collateral": args.get("use_as_collateral", True),
             }
+            if args.get("market_id"):
+                params["market_id"] = args["market_id"]
+            return "supply", params
 
         if tool_name == "borrow_lending":
-            return "borrow", {
+            params = {
                 "borrow_token": args["token"],
                 "borrow_amount": args["amount"],
                 "collateral_token": args["collateral_token"],
                 "collateral_amount": args["collateral_amount"],
                 "protocol": args.get("protocol", "aave_v3"),
             }
+            if args.get("market_id"):
+                params["market_id"] = args["market_id"]
+            return "borrow", params
 
         if tool_name == "repay_lending":
-            return "repay", {
+            params = {
                 "token": args["token"],
                 "amount": args["amount"],
                 "protocol": args.get("protocol", "aave_v3"),
             }
+            if args.get("market_id"):
+                params["market_id"] = args["market_id"]
+            return "repay", params
+
+        if tool_name == "withdraw_lending":
+            # The WithdrawIntent compiler already falls back to the withdraw_all
+            # path when amount=="all" (see compiler_lending.py). We set the flag
+            # explicitly here only to match repay_lending's intent shape (which
+            # uses repay_full) so response-enrichment and strategy-author code
+            # reading the intent see a consistent "full close" signal.
+            #
+            # is_collateral is a Morpho-specific field that selects loan-token
+            # vs collateral-token side. Gate it to Morpho-like protocols so
+            # direct agent-tool invocations (bypassing the CLI guard) can't
+            # silently send this flag through to Aave-style adapters that
+            # would ignore it. (CodeRabbit PR #1535 round 4.)
+            from almanak.framework.agent_tools.schemas import _normalize_protocol_key
+
+            protocol = args.get("protocol", "aave_v3")
+            params = {
+                "token": args["token"],
+                "amount": args["amount"],
+                "protocol": protocol,
+            }
+            if _normalize_protocol_key(protocol) in {"morpho", "morpho_blue"}:
+                params["is_collateral"] = args.get("is_collateral", True)
+            if str(args.get("amount", "")).lower() == "all":
+                params["withdraw_all"] = True
+            market_id = args.get("market_id")
+            if market_id:
+                params["market_id"] = market_id
+            return "withdraw", params
 
         if tool_name == "bridge_tokens":
             bridge_params: dict = {
@@ -1065,6 +1278,13 @@ class ToolExecutor:
             if preferred:
                 bridge_params["preferred_bridge"] = preferred
             return "bridge", bridge_params
+
+        if tool_name == "wrap_native":
+            return "wrap_native", {
+                "token": args["token"],
+                "amount": args["amount"],
+                "chain": args.get("chain", self._default_chain),
+            }
 
         if tool_name == "unwrap_native":
             return "unwrap_native", {
@@ -1109,7 +1329,13 @@ class ToolExecutor:
         if tool_name == "borrow_lending":
             return {**base, "amount_borrowed": args.get("amount", "")}
         if tool_name == "repay_lending":
-            return {**base, "amount_repaid": args.get("amount", "")}
+            requested = str(args.get("amount", ""))
+            # amount="all" is a sentinel, not a numeric value — don't leak it
+            # into a field downstream consumers will parse as a number.
+            return {**base, "amount_repaid": "" if requested.lower() == "all" else requested}
+        if tool_name == "withdraw_lending":
+            requested = str(args.get("amount", ""))
+            return {**base, "amount_withdrawn": "" if requested.lower() == "all" else requested}
 
         if tool_name == "bridge_tokens":
             return {
@@ -1120,6 +1346,14 @@ class ToolExecutor:
                 "bridge_used": args.get("preferred_bridge", ""),
                 "estimated_arrival_seconds": None,
                 "gas_usd": "",
+            }
+
+        if tool_name == "wrap_native":
+            return {
+                **base,
+                "amount_wrapped": args.get("amount", ""),
+                "token": args.get("token", ""),
+                "chain": args.get("chain", self._default_chain),
             }
 
         if tool_name == "unwrap_native":
@@ -1189,7 +1423,13 @@ class ToolExecutor:
         if tool_name == "borrow_lending":
             return {**base, "amount_borrowed": args.get("amount", "")}
         if tool_name == "repay_lending":
-            return {**base, "amount_repaid": args.get("amount", "")}
+            requested = str(args.get("amount", ""))
+            # amount="all" is a sentinel, not a numeric value — don't leak it
+            # into a field downstream consumers will parse as a number.
+            return {**base, "amount_repaid": "" if requested.lower() == "all" else requested}
+        if tool_name == "withdraw_lending":
+            requested = str(args.get("amount", ""))
+            return {**base, "amount_withdrawn": "" if requested.lower() == "all" else requested}
 
         if tool_name == "bridge_tokens":
             metadata = enriched.extracted_data or {}
@@ -1201,6 +1441,15 @@ class ToolExecutor:
                 "bridge_used": metadata.get("bridge", args.get("preferred_bridge", "")),
                 "estimated_arrival_seconds": metadata.get("estimated_time"),
                 "gas_usd": "",
+            }
+
+        if tool_name == "wrap_native":
+            metadata = enriched.extracted_data or {}
+            return {
+                **base,
+                "amount_wrapped": str(metadata.get("amount_wrapped", args.get("amount", ""))),
+                "token": metadata.get("token", args.get("token", "")),
+                "chain": metadata.get("chain", args.get("chain", self._default_chain)),
             }
 
         if tool_name == "unwrap_native":
@@ -1504,7 +1753,8 @@ class ToolExecutor:
 
     async def _execute_get_pool_state(self, args: dict) -> ToolResponse:
         """Read Uniswap V3 pool state via slot0() and liquidity() RPC calls."""
-        from almanak.framework.connectors.uniswap_v3.sdk import FACTORY_ADDRESSES, compute_pool_address
+        from almanak.core.contracts import AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, UNISWAP_V3
+        from almanak.framework.connectors.protocol_aliases import normalize_protocol
         from almanak.framework.data.tokens import get_token_resolver
         from almanak.gateway.proto import gateway_pb2
 
@@ -1512,21 +1762,80 @@ class ToolExecutor:
         token_a_sym = args["token_a"]
         token_b_sym = args["token_b"]
         fee_tier = args.get("fee_tier", 3000)
+        # Normalize protocol to canonical name (e.g., "uniswap_v3" on Mantle -> "agni_finance")
+        protocol = normalize_protocol(chain, args.get("protocol", "uniswap_v3"))
+
+        # Map canonical protocol names to their contract address registries
+        _PROTOCOL_REGISTRIES: dict[str, dict[str, dict[str, str]]] = {
+            "uniswap_v3": UNISWAP_V3,
+            "agni_finance": AGNI_FINANCE,
+            "pancakeswap_v3": PANCAKESWAP_V3,
+            "sushiswap_v3": SUSHISWAP_V3,
+        }
+        registry = _PROTOCOL_REGISTRIES.get(protocol)
+        if registry is None:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    f"Unsupported protocol '{protocol}' for pool lookup. Supported: {list(_PROTOCOL_REGISTRIES)}",
+                    recoverable=True,
+                ),
+            )
 
         # Resolve token addresses
         resolver = get_token_resolver()
         token_a = resolver.resolve_for_swap(token_a_sym, chain)
         token_b = resolver.resolve_for_swap(token_b_sym, chain)
 
-        # Use explicit pool_address if provided, otherwise compute from factory
+        # Use explicit pool_address if provided, otherwise query factory.getPool() via gateway RPC.
+        # Using getPool() instead of CREATE2 derivation handles forks with different init_code_hash
+        # values (e.g., Agni Finance on Mantle).
         pool_address = args.get("pool_address")
         if not pool_address:
-            if chain not in FACTORY_ADDRESSES:
+            chain_contracts = registry.get(chain, {})
+            factory_address = chain_contracts.get("factory")
+            if not factory_address:
                 return ToolResponse(
                     status="error",
-                    error=_error_dict(AgentErrorCode.UNSUPPORTED_CHAIN, f"No Uniswap V3 factory on {chain}"),
+                    error=_error_dict(AgentErrorCode.UNSUPPORTED_CHAIN, f"No {protocol} factory on {chain}"),
                 )
-            pool_address = compute_pool_address(FACTORY_ADDRESSES[chain], token_a.address, token_b.address, fee_tier)
+            # getPool(address,address,uint24) selector = 0x1698ee82
+            # Calldata: 4-byte selector + 32-byte padded token_a + 32-byte padded token_b + 32-byte padded fee
+            addr_a_padded = token_a.address.lower().removeprefix("0x").zfill(64)
+            addr_b_padded = token_b.address.lower().removeprefix("0x").zfill(64)
+            fee_padded = hex(fee_tier)[2:].zfill(64)
+            get_pool_calldata = "0x1698ee82" + addr_a_padded + addr_b_padded + fee_padded
+            get_pool_resp = self._client.rpc.Call(
+                gateway_pb2.RpcRequest(
+                    chain=chain,
+                    method="eth_call",
+                    params=json.dumps([{"to": factory_address, "data": get_pool_calldata}, "latest"]),
+                    id="factory_get_pool",
+                ),
+                timeout=30.0,
+            )
+            if not get_pool_resp.success:
+                return ToolResponse(
+                    status="error",
+                    error=_error_dict(
+                        AgentErrorCode.RPC_FAILED,
+                        f"factory.getPool() failed: {get_pool_resp.error}",
+                        recoverable=True,
+                    ),
+                )
+            raw_pool = json.loads(get_pool_resp.result).removeprefix("0x")
+            # Result is 32 bytes (64 hex chars); pool address is the last 20 bytes (40 hex chars)
+            pool_address = "0x" + raw_pool[-40:] if len(raw_pool) >= 40 else "0x" + "0" * 40
+            if pool_address == "0x" + "0" * 40:
+                return ToolResponse(
+                    status="error",
+                    error=_error_dict(
+                        AgentErrorCode.EMPTY_POOL,
+                        f"Pool not found: {protocol} {token_a_sym}/{token_b_sym} fee={fee_tier} on {chain}. "
+                        f"The factory returned a zero address — the pool may not exist.",
+                    ),
+                )
 
         # Read slot0: sqrtPriceX96 (uint160), tick (int24), ...
         slot0_selector = "0x3850c7bd"
@@ -1560,8 +1869,7 @@ class ToolExecutor:
             )
 
         sqrt_price_x96 = int(slot0_hex[0:64], 16)
-        raw_tick = int(slot0_hex[64:128], 16)
-        tick = raw_tick if raw_tick < 2**23 else raw_tick - 2**24
+        tick = _decode_int24(slot0_hex[64:128])
 
         # Read liquidity
         liq_selector = "0x1a686502"
@@ -1620,6 +1928,11 @@ class ToolExecutor:
         from almanak.gateway.proto import gateway_pb2
 
         chain = args.get("chain", self._default_chain)
+        # When called from the CLI (lp-info), the caller passes network="mainnet"
+        # explicitly so queries hit live chain state (VIB-1713). When called from
+        # internal executor paths (e.g., rebalance, teardown), network is omitted
+        # and we pass "" to let the gateway use its configured default.
+        network = args.get("network", "")
         position_id = int(args["position_id"])
 
         nft_manager = POSITION_MANAGER_ADDRESSES.get(chain)
@@ -1637,6 +1950,7 @@ class ToolExecutor:
                 method="eth_call",
                 params=json.dumps([{"to": nft_manager, "data": calldata}, "latest"]),
                 id="lp_position",
+                network=network,
             ),
             timeout=30.0,
         )
@@ -1657,37 +1971,77 @@ class ToolExecutor:
         token0 = "0x" + words[2][-40:]
         token1 = "0x" + words[3][-40:]
         fee = int(words[4], 16)
-        tick_lower_raw = int(words[5], 16)
-        tick_lower = tick_lower_raw if tick_lower_raw < 2**23 else tick_lower_raw - 2**24
-        tick_upper_raw = int(words[6], 16)
-        tick_upper = tick_upper_raw if tick_upper_raw < 2**23 else tick_upper_raw - 2**24
+        tick_lower = _decode_int24(words[5])
+        tick_upper = _decode_int24(words[6])
         liquidity = int(words[7], 16)
         tokens_owed_0 = int(words[10], 16)
         tokens_owed_1 = int(words[11], 16)
 
-        # Read current tick to determine if in range
-        # We need the pool address -- compute from token0/token1/fee
-        from almanak.framework.connectors.uniswap_v3.sdk import FACTORY_ADDRESSES, compute_pool_address
+        # Read current tick to determine if in range.
+        # We need the pool address -- query factory.getPool() via gateway RPC to avoid
+        # CREATE2 derivation which breaks on forks with different init_code_hash (e.g., Agni on Mantle).
+        from almanak.core.contracts import AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, UNISWAP_V3
+        from almanak.framework.connectors.protocol_aliases import normalize_protocol
 
-        in_range = True
+        lp_protocol = normalize_protocol(chain, args.get("protocol", "uniswap_v3"))
+        _LP_PROTOCOL_REGISTRIES: dict[str, dict[str, dict[str, str]]] = {
+            "uniswap_v3": UNISWAP_V3,
+            "agni_finance": AGNI_FINANCE,
+            "pancakeswap_v3": PANCAKESWAP_V3,
+            "sushiswap_v3": SUSHISWAP_V3,
+        }
+        lp_registry = _LP_PROTOCOL_REGISTRIES.get(lp_protocol)
+        if lp_registry is None:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    f"Unsupported protocol '{lp_protocol}' for LP position lookup. Supported: {list(_LP_PROTOCOL_REGISTRIES)}",
+                    recoverable=True,
+                ),
+            )
+        lp_factory_address = lp_registry.get(chain, {}).get("factory")
+
+        in_range: bool | None = None
         pool_current_tick = None
-        if chain in FACTORY_ADDRESSES:
-            pool_addr = compute_pool_address(FACTORY_ADDRESSES[chain], token0, token1, fee)
-            slot0_resp = self._client.rpc.Call(
+        if lp_factory_address:
+            # getPool(address,address,uint24) selector = 0x1698ee82
+            addr0_padded = token0.lower().removeprefix("0x").zfill(64)
+            addr1_padded = token1.lower().removeprefix("0x").zfill(64)
+            fee_hex_padded = hex(fee)[2:].zfill(64)
+            get_pool_cd = "0x1698ee82" + addr0_padded + addr1_padded + fee_hex_padded
+            gp_resp = self._client.rpc.Call(
                 gateway_pb2.RpcRequest(
                     chain=chain,
                     method="eth_call",
-                    params=json.dumps([{"to": pool_addr, "data": "0x3850c7bd"}, "latest"]),
-                    id="lp_pool_slot0",
+                    params=json.dumps([{"to": lp_factory_address, "data": get_pool_cd}, "latest"]),
+                    id="lp_factory_get_pool",
+                    network=network,
                 ),
                 timeout=30.0,
             )
-            if slot0_resp.success:
-                s0 = json.loads(slot0_resp.result).removeprefix("0x")
-                if len(s0) >= 128:
-                    current_tick_raw = int(s0[64:128], 16)
-                    pool_current_tick = current_tick_raw if current_tick_raw < 2**23 else current_tick_raw - 2**24
-                    in_range = tick_lower <= pool_current_tick < tick_upper
+            pool_addr: str | None = None
+            if gp_resp.success:
+                raw_gp = json.loads(gp_resp.result).removeprefix("0x")
+                candidate = "0x" + raw_gp[-40:] if len(raw_gp) >= 40 else None
+                if candidate and candidate != "0x" + "0" * 40:
+                    pool_addr = candidate
+            if pool_addr:
+                slot0_resp = self._client.rpc.Call(
+                    gateway_pb2.RpcRequest(
+                        chain=chain,
+                        method="eth_call",
+                        params=json.dumps([{"to": pool_addr, "data": "0x3850c7bd"}, "latest"]),
+                        id="lp_pool_slot0",
+                        network=network,
+                    ),
+                    timeout=30.0,
+                )
+                if slot0_resp.success:
+                    s0 = json.loads(slot0_resp.result).removeprefix("0x")
+                    if len(s0) >= 128:
+                        pool_current_tick = _decode_int24(s0[64:128])
+                        in_range = tick_lower <= pool_current_tick < tick_upper
 
         data: dict = {
             "position_id": str(position_id),
@@ -1704,7 +2058,527 @@ class ToolExecutor:
         if pool_current_tick is not None:
             data["current_tick"] = pool_current_tick
 
+        # USD-denominate uncollected fees (fail-open per token)
+        try:
+            from decimal import Decimal
+
+            from almanak.framework.data.tokens import get_token_resolver
+
+            resolver = get_token_resolver()
+            for token_addr, tokens_owed_raw, fee_key in [
+                (token0, tokens_owed_0, "fees_a_usd"),
+                (token1, tokens_owed_1, "fees_b_usd"),
+            ]:
+                if tokens_owed_raw <= 0:
+                    continue
+                try:
+                    resolved = resolver.resolve(token_addr, chain)
+                    price_resp = self._client.market.GetPrice(gateway_pb2.PriceRequest(token=token_addr, quote="USD"))
+                    token_price = Decimal(str(price_resp.price))
+                    if token_price > 0 and resolved:
+                        fee_usd = Decimal(tokens_owed_raw) / Decimal(10**resolved.decimals) * token_price
+                        data[fee_key] = float(round(fee_usd, 6))
+                except Exception as exc:
+                    logger.debug("fee_usd enrichment failed for %s (%s): %s", fee_key, token_addr, exc)
+            # Compute total from whichever individual fees are available
+            partial = [Decimal(str(data[k])) for k in ("fees_a_usd", "fees_b_usd") if k in data]
+            if partial:
+                data["total_fees_usd"] = float(round(sum(partial, Decimal(0)), 6))
+        except Exception as exc:
+            logger.warning("fee USD enrichment block failed, failing open: %s", exc)
+
         return ToolResponse(status="success", data=data)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Read-only list helpers (VIB-2995)
+    # ─────────────────────────────────────────────────────────────────────
+
+    # Named constants for ABI selectors used across the read-only list paths.
+    # Keeping them as class-level attributes so mocked gateway tests can
+    # inspect them and they're discoverable alongside the methods that use
+    # them. (Gemini PR #1536 review.)
+    _SELECTOR_BALANCE_OF = "0x70a08231"  # ERC20/ERC721 balanceOf(address)
+    _SELECTOR_GET_USER_ACCOUNT_DATA = "0xbf92857c"  # Aave V3 Pool.getUserAccountData(address)
+
+    def _rpc_call(self, chain: str, to: str, data: str, id_: str, network: str = "") -> tuple[bool, str]:
+        """Single eth_call helper used by list/portfolio read paths.
+
+        Returns (success, result_hex_without_0x | error_message). When the
+        gateway surfaces a JSON-RPC error envelope (``{"code": ..., "message":
+        ...}``), extract the revert message so callers get something useful
+        instead of ``"unexpected rpc result type: dict"``.
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        resp = self._client.rpc.Call(
+            gateway_pb2.RpcRequest(
+                chain=chain,
+                method="eth_call",
+                params=json.dumps([{"to": to, "data": data}, "latest"]),
+                id=id_,
+                network=network,
+            ),
+            timeout=30.0,
+        )
+        if not resp.success:
+            return False, resp.error or "rpc error"
+        try:
+            raw = json.loads(resp.result)
+        except (json.JSONDecodeError, TypeError) as exc:
+            return False, f"bad rpc result: {exc}"
+        if isinstance(raw, str):
+            return True, raw.removeprefix("0x")
+        if isinstance(raw, dict):
+            err = raw.get("error") if isinstance(raw.get("error"), dict) else raw
+            message = err.get("message") if isinstance(err, dict) else None
+            return False, f"rpc error: {message or raw}"
+        return False, f"unexpected rpc result type: {type(raw).__name__}"
+
+    def _resolve_wallet(self, args: dict, tool_name: str = "list_lp_positions") -> str | None:
+        """Pick the wallet address: explicit arg > executor default. None if neither.
+
+        Validates hex format before returning so downstream eth_call calldata
+        always has a known-good 40-char address — otherwise nonsense inputs
+        like ``"wallet1"`` or ``"0xABC"`` get padded into gibberish calldata
+        and surface as opaque RPC errors. ``tool_name`` is threaded through so
+        the resulting ToolValidationError gets attributed to the caller
+        (CodeRabbit PR #1536 round 3 review).
+        """
+        import re
+
+        addr = (args.get("wallet_address") or self._wallet_address or "").strip()
+        if not addr:
+            return None
+        if not re.fullmatch(r"0x[0-9a-fA-F]{40}", addr):
+            raise ToolValidationError(
+                f"Invalid wallet address '{addr}' — expected 0x-prefixed 40-char hex",
+                tool_name=tool_name,
+            )
+        return addr.lower()
+
+    async def _execute_list_lp_positions(self, args: dict) -> ToolResponse:
+        """Enumerate LP NFTs owned by a wallet across every registered V3-fork NPM.
+
+        Delegates to :func:`almanak.framework.teardown.discovery.discover_lp_positions`
+        — the canonical walker already used for teardown. That module handles:
+
+        * **Multi-protocol coverage**: walks Uniswap V3 + PancakeSwap V3 +
+          SushiSwap V3 + Agni Finance NPMs registered for the chain, so a
+          wallet that holds positions on several V3 forks on the same chain
+          gets all of them in one call.
+        * **DOS cap**: ``_MAX_POSITIONS_PER_NPM = 256`` caps the enumeration
+          loop so a hostile / buggy NPM returning ``2**256-1`` from
+          ``balanceOf`` can't DOS the gateway.
+        * **Retries + incomplete-discovery signalling**: per-position reads
+          are retried; unreadable positions are surfaced (in non-strict
+          mode via a logged warning, not silently dropped).
+
+        The ``protocol`` request field is accepted for forward compatibility
+        but currently only used to reject unsupported slugs — the walker
+        always reports the actual protocol per position. (CodeRabbit / Claude
+        pr-auditor PR #1536 round 1.)
+        """
+        from almanak.framework.data.tokens import TokenNotFoundError, get_token_resolver
+        from almanak.framework.teardown.discovery import (
+            _MAX_POSITIONS_PER_NPM,
+            DiscoveryIncomplete,
+            _npms_for_chain,
+            discover_lp_positions,
+        )
+
+        chain = args.get("chain", self._default_chain)
+        network = args.get("network", "")
+        protocol_arg = args.get("protocol", "")
+        include_empty = bool(args.get("include_empty", False))
+
+        # Accept the legacy "uniswap_v3" slug (matches the old behavior where
+        # the tool silently ignored other protocols). Anything else is a
+        # typo — report supported protocols explicitly, no external ticket
+        # reference (tickets get closed/renamed and leave stale pointers).
+        supported_protocols = sorted({p for p, _ in _npms_for_chain(chain)} | {"uniswap_v3"})
+        if protocol_arg and protocol_arg not in supported_protocols and protocol_arg != "uniswap_v3":
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    f"list_lp_positions: unsupported protocol '{protocol_arg}' on chain={chain}. "
+                    f"Supported on this chain: {supported_protocols}",
+                ),
+            )
+
+        wallet = self._resolve_wallet(args, tool_name="list_lp_positions")
+        if not wallet:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    "wallet_address is required (none passed and no default wallet configured)",
+                ),
+            )
+
+        if not _npms_for_chain(chain):
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.UNSUPPORTED_CHAIN,
+                    f"No V3-fork NonfungiblePositionManager registered for chain={chain}",
+                ),
+            )
+
+        # strict=False: log-and-continue on unreadable positions. Agent-callable
+        # tools must never raise — the response envelope carries status.
+        try:
+            discovered = await discover_lp_positions(
+                self._client,
+                chain,
+                wallet,
+                include_zero_liquidity=include_empty,
+                network=network,
+                strict=False,
+            )
+        except DiscoveryIncomplete as exc:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.RPC_FAILED,
+                    f"LP discovery failed: {exc}",
+                    recoverable=True,
+                ),
+            )
+
+        resolver = get_token_resolver()
+
+        def _resolve_symbol(addr: str) -> str:
+            try:
+                return resolver.resolve(addr, chain).symbol
+            except TokenNotFoundError:
+                return ""
+            except Exception as exc:
+                # Unexpected: log so we don't silently hide resolver bugs, but
+                # still return "" — a missing symbol shouldn't fail the whole
+                # portfolio query. (Gemini PR #1536 review.)
+                logger.warning(
+                    "list_lp_positions: unexpected error resolving symbol for %s on %s: %s",
+                    addr,
+                    chain,
+                    exc,
+                )
+                return ""
+
+        positions = [
+            {
+                "position_id": str(p.token_id),
+                "token0": p.token0.lower(),
+                "token1": p.token1.lower(),
+                "token0_symbol": _resolve_symbol(p.token0),
+                "token1_symbol": _resolve_symbol(p.token1),
+                "fee_tier": p.fee,
+                "liquidity": str(p.liquidity),
+                "protocol": p.protocol,
+                "npm_address": p.npm_address,
+            }
+            for p in discovered
+        ]
+
+        return ToolResponse(
+            status="success",
+            data={
+                "chain": chain,
+                "protocol": protocol_arg or "all",
+                "wallet_address": wallet,
+                "count": len(positions),
+                "positions": positions,
+                # Surface the cap so operators know if they might be hitting it.
+                "max_positions_per_npm": _MAX_POSITIONS_PER_NPM,
+            },
+        )
+
+    async def _execute_list_lending_positions(self, args: dict) -> ToolResponse:
+        """Summarize an Aave V3 account via Pool.getUserAccountData(user).
+
+        Returns the same fields Aave's UI shows at the top of the dashboard:
+        totals (in base currency units — 8 decimals on mainnet), liquidation
+        threshold, LTV, and health factor (1e18-scaled; MAX_UINT256 when the
+        account has no debt).
+        """
+        from almanak.framework.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
+
+        chain = args.get("chain", self._default_chain)
+        network = args.get("network", "")
+        protocol = args.get("protocol", "aave_v3")
+
+        if protocol != "aave_v3":
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    f"list_lending_positions: unsupported protocol '{protocol}'. Supported: ['aave_v3']",
+                ),
+            )
+
+        wallet = self._resolve_wallet(args, tool_name="list_lending_positions")
+        if not wallet:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    "wallet_address is required (none passed and no default wallet configured)",
+                ),
+            )
+
+        pool_addr = AAVE_V3_POOL_ADDRESSES.get(chain)
+        if not pool_addr:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(AgentErrorCode.UNSUPPORTED_CHAIN, f"Aave V3 not configured on {chain}"),
+            )
+
+        wallet_padded = wallet.removeprefix("0x").lower().zfill(64)
+        ok, raw = self._rpc_call(
+            chain, pool_addr, self._SELECTOR_GET_USER_ACCOUNT_DATA + wallet_padded, "aave_acct_data", network
+        )
+        if not ok:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(AgentErrorCode.RPC_FAILED, f"getUserAccountData() failed: {raw}", recoverable=True),
+            )
+        if len(raw) < 384:  # 6 words * 64 hex
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.RPC_FAILED,
+                    f"getUserAccountData() returned short payload: {len(raw)} hex chars",
+                    recoverable=True,
+                ),
+            )
+
+        words = [raw[i * 64 : (i + 1) * 64] for i in range(6)]
+        total_collateral_base = int(words[0], 16)
+        total_debt_base = int(words[1], 16)
+        available_borrows_base = int(words[2], 16)
+        current_liq_threshold = int(words[3], 16)  # bps
+        ltv = int(words[4], 16)  # bps
+        health_factor_raw = int(words[5], 16)
+
+        # Aave reports totals in its "base currency" with 8 decimals. On every
+        # currently-deployed Aave V3 chain the base currency is USD (verified
+        # against PriceOracle.BASE_CURRENCY() = 0x0, which maps to USD in
+        # Aave's convention), so we hardcode the scale here.
+        #
+        # TODO(VIB-3000+): once an Aave instance with a non-USD base currency
+        # is registered (e.g. sUSDe-denominated markets), switch to reading
+        # PriceOracle.BASE_CURRENCY_UNIT() + BASE_CURRENCY() on the chain's
+        # oracle and rename the response field from ``*_usd`` to ``*_base``.
+        def _base_to_usd(n: int) -> str:
+            return str(Decimal(n) / Decimal(10**8))
+
+        # Health factor is 1e18-scaled. MAX_UINT256 means "no debt" → infinity.
+        if health_factor_raw == (1 << 256) - 1:
+            hf_str = "∞"
+        else:
+            hf_str = str(Decimal(health_factor_raw) / Decimal(10**18))
+
+        return ToolResponse(
+            status="success",
+            data={
+                "chain": chain,
+                "protocol": protocol,
+                "wallet_address": wallet,
+                "total_collateral_usd": _base_to_usd(total_collateral_base),
+                "total_debt_usd": _base_to_usd(total_debt_base),
+                "available_borrows_usd": _base_to_usd(available_borrows_base),
+                "current_liquidation_threshold_bps": current_liq_threshold,
+                "ltv_bps": ltv,
+                "health_factor": hf_str,
+            },
+        )
+
+    async def _execute_get_portfolio(self, args: dict) -> ToolResponse:
+        """One-shot portfolio summary: native + ERC20 balances + LP + lending.
+
+        Read-only aggregate. Every section is queried independently and any
+        per-section failure is reported via a ``warnings`` list in the
+        response. The top-level ``status`` is set to ``"partial"`` (instead
+        of ``"success"``) whenever any section fails — callers must not
+        treat empty fields as authoritative without checking ``warnings``.
+
+        This fixes Blocker #3 from the PR #1536 audit: previously every
+        ``except`` logged at DEBUG and left the field empty, making RPC
+        failures indistinguishable from "no positions" on a $10M treasury
+        query.
+        """
+        from almanak.framework.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
+        from almanak.framework.teardown.discovery import _npms_for_chain
+        from almanak.gateway.proto import gateway_pb2
+
+        chain = args.get("chain", self._default_chain)
+        network = args.get("network", "")
+        wallet = self._resolve_wallet(args, tool_name="get_portfolio")
+        if not wallet:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    "wallet_address is required (none passed and no default wallet configured)",
+                ),
+            )
+
+        warnings: list[dict] = []
+        summary: dict = {
+            "chain": chain,
+            "wallet_address": wallet,
+            "native_balance": "",
+            "native_symbol": "",
+            "token_balances": [],
+            "lp_positions": [],
+            "lending": None,
+        }
+
+        def _warn(section: str, code: str, message: str) -> None:
+            logger.warning("portfolio %s failed (%s): %s", section, code, message)
+            warnings.append({"section": section, "code": code, "message": message})
+
+        # Native balance (eth_getBalance)
+        try:
+            from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
+
+            bal_resp = self._client.rpc.Call(
+                gateway_pb2.RpcRequest(
+                    chain=chain,
+                    method="eth_getBalance",
+                    params=json.dumps([wallet, "latest"]),
+                    id="portfolio_eth_balance",
+                    network=network,
+                ),
+                timeout=30.0,
+            )
+            if not bal_resp.success:
+                _warn("native_balance", "rpc_failed", bal_resp.error or "unknown rpc error")
+            else:
+                raw_bal = json.loads(bal_resp.result)
+                if not isinstance(raw_bal, str):
+                    _warn("native_balance", "bad_response", f"eth_getBalance returned {type(raw_bal).__name__}")
+                else:
+                    native_wei = int(raw_bal, 16)
+                    chain_key = chain.lower()
+                    native_symbol = NATIVE_TOKEN_SYMBOLS.get(chain_key)
+                    # Repo convention (VIB-2950): never silently default
+                    # decimals. If we don't know the native symbol for this
+                    # chain, we also don't know its decimals — surface the
+                    # gap via warnings rather than pretending 18. (CodeRabbit
+                    # PR #1536 round 3 major.)
+                    if not native_symbol:
+                        _warn(
+                            "native_balance",
+                            "unknown_chain",
+                            f"chain={chain} not in NATIVE_TOKEN_SYMBOLS; "
+                            f"register it in gateway/data/balance/web3_provider.py "
+                            f"to get native balance",
+                        )
+                    else:
+                        native_decimals = _NATIVE_TOKEN_DECIMALS.get(chain_key, 18)
+                        summary["native_balance"] = str(Decimal(native_wei) / Decimal(10**native_decimals))
+                        summary["native_symbol"] = native_symbol
+        except Exception as exc:
+            _warn("native_balance", "exception", str(exc))
+
+        # ERC20 balances: call balanceOf directly via eth_call so the
+        # ``network`` override is honored (BalanceRequest has no network
+        # field today) and we don't re-enter the policy engine for an
+        # already-approved portfolio read. (Codex PR #1536 P2 x2.)
+        tokens = list(args.get("tokens") or [])
+        if tokens:
+            from almanak.framework.data.tokens import TokenNotFoundError, get_token_resolver
+
+            resolver = get_token_resolver()
+            wallet_padded = wallet.removeprefix("0x").zfill(64)
+            token_balances: list[dict] = []
+            for sym in tokens:
+                try:
+                    resolved = resolver.resolve(sym, chain)
+                except TokenNotFoundError as exc:
+                    _warn("token_balances", "unknown_token", f"{sym}: {exc}")
+                    continue
+                except Exception as exc:
+                    _warn("token_balances", "resolver_error", f"{sym}: {exc}")
+                    continue
+
+                ok, raw = self._rpc_call(
+                    chain,
+                    resolved.address,
+                    self._SELECTOR_BALANCE_OF + wallet_padded,
+                    f"portfolio_erc20_{sym}",
+                    network,
+                )
+                if not ok:
+                    _warn("token_balances", "rpc_failed", f"{sym}: {raw}")
+                    continue
+                try:
+                    raw_units = int(raw, 16) if raw else 0
+                    human = Decimal(raw_units) / Decimal(10**resolved.decimals)
+                    token_balances.append(
+                        {
+                            "token": sym,
+                            "address": resolved.address,
+                            "balance": str(human),
+                            "raw_balance": str(raw_units),
+                            "decimals": resolved.decimals,
+                        }
+                    )
+                except (ArithmeticError, ValueError) as exc:
+                    _warn("token_balances", "decode_error", f"{sym}: {exc}")
+            summary["token_balances"] = token_balances
+
+        # LP positions: gate on the canonical discovery registry so we don't
+        # skip PancakeSwap V3 / SushiSwap V3 / Agni positions on chains where
+        # only those forks are registered (previously we checked only the
+        # Uniswap V3 receipt parser's POSITION_MANAGER_ADDRESSES — CodeRabbit
+        # PR #1536 round 3 major).
+        if _npms_for_chain(chain):
+            lp_resp = await self._execute_list_lp_positions(
+                {"chain": chain, "wallet_address": wallet, "network": network}
+            )
+            if lp_resp.status == "success" and lp_resp.data:
+                summary["lp_positions"] = lp_resp.data.get("positions", [])
+            else:
+                _warn(
+                    "lp_positions",
+                    (lp_resp.error or {}).get("error_code", "unknown"),
+                    (lp_resp.error or {}).get("message", "list_lp_positions returned no data"),
+                )
+
+        # Lending (Aave V3 only for v1).
+        if AAVE_V3_POOL_ADDRESSES.get(chain):
+            lend_resp = await self._execute_list_lending_positions(
+                {"chain": chain, "wallet_address": wallet, "network": network}
+            )
+            if lend_resp.status == "success" and lend_resp.data:
+                total_debt = lend_resp.data.get("total_debt_usd", "0")
+                total_collat = lend_resp.data.get("total_collateral_usd", "0")
+                try:
+                    if Decimal(total_debt) > 0 or Decimal(total_collat) > 0:
+                        summary["lending"] = {
+                            "protocol": "aave_v3",
+                            "total_collateral_usd": total_collat,
+                            "total_debt_usd": total_debt,
+                            "health_factor": lend_resp.data.get("health_factor", ""),
+                        }
+                except (ArithmeticError, ValueError) as exc:
+                    # Keep the lending field shape consistent — leave as None
+                    # and surface the decode error via warnings rather than
+                    # returning the raw lend_resp.data with a different
+                    # schema. (Gemini PR #1536 high-priority review.)
+                    _warn("lending", "decode_error", f"could not parse totals as Decimal: {exc}")
+            else:
+                _warn(
+                    "lending",
+                    (lend_resp.error or {}).get("error_code", "unknown"),
+                    (lend_resp.error or {}).get("message", "list_lending_positions returned no data"),
+                )
+
+        summary["warnings"] = warnings
+        status = "partial" if warnings else "success"
+        return ToolResponse(status=status, data=summary)
 
     async def _execute_compute_rebalance_candidate(self, args: dict) -> ToolResponse:
         """Deterministic economic viability check for LP rebalancing.
@@ -1778,6 +2652,162 @@ class ToolExecutor:
             },
         )
 
+    # ── WALLET OVERVIEW ────────────────────────────────────────────────
+
+    # Default tokens to query per chain for wallet overview
+    _CHAIN_DEFAULT_TOKENS: ClassVar[dict[str, list[str]]] = {
+        "arbitrum": ["ETH", "WETH", "USDC", "USDC.e", "USDT", "WBTC", "DAI", "ARB"],
+        "ethereum": ["ETH", "WETH", "USDC", "USDT", "WBTC", "DAI", "stETH", "wstETH"],
+        "base": ["ETH", "WETH", "USDC", "USDbC", "DAI", "cbETH"],
+        "optimism": ["ETH", "WETH", "USDC", "USDC.e", "USDT", "WBTC", "DAI", "OP"],
+        "polygon": ["MATIC", "WMATIC", "USDC", "USDC.e", "USDT", "WETH", "WBTC", "DAI"],
+        "avalanche": ["AVAX", "WAVAX", "USDC", "USDT", "WETH.e", "WBTC.e", "DAI.e"],
+        "bsc": ["BNB", "WBNB", "USDC", "USDT", "WETH", "BTCB", "DAI"],
+        "sonic": ["S", "WS", "USDC", "WETH"],
+        "mantle": ["MNT", "WMNT", "USDC", "USDT", "WETH", "mETH"],
+        "plasma": ["XPL", "WXPL", "USDC", "USDT", "WETH", "PENDLE"],
+    }
+    _FALLBACK_TOKENS: ClassVar[list[str]] = ["ETH", "WETH", "USDC", "USDT", "WBTC", "DAI"]
+
+    def _execute_get_wallet_overview(self, args: dict) -> ToolResponse:
+        """Get complete wallet balance overview in a single call."""
+        from almanak.gateway.proto import gateway_pb2
+
+        chain = args.get("chain", self._default_chain)
+        wallet = args.get("wallet_address") or self._wallet_address
+        min_usd = float(args.get("min_balance_usd", 0.01))
+        extra_tokens = args.get("extra_tokens", [])
+
+        # Build token list: chain defaults + extras, deduplicated
+        default_tokens = self._CHAIN_DEFAULT_TOKENS.get(chain, self._FALLBACK_TOKENS)
+        all_tokens = list(dict.fromkeys(default_tokens + extra_tokens))  # preserves order, dedupes
+
+        requests = [gateway_pb2.BalanceRequest(token=t, chain=chain, wallet_address=wallet) for t in all_tokens]
+        resp = self._client.market.BatchGetBalances(gateway_pb2.BatchBalanceRequest(requests=requests))
+
+        # Gateway must return one response per request in the same order
+        if len(resp.responses) != len(all_tokens):
+            return ToolResponse(
+                status="error",
+                data={
+                    "error": f"BatchGetBalances returned {len(resp.responses)} responses for {len(all_tokens)} requests"
+                },
+            )
+
+        tokens = []
+        total_usd = Decimal("0")
+        for i, r in enumerate(resp.responses):
+            if r.error:
+                continue
+            try:
+                bal_usd = Decimal(r.balance_usd) if r.balance_usd else Decimal("0")
+            except Exception:
+                bal_usd = Decimal("0")
+            if bal_usd < Decimal(str(min_usd)):
+                continue
+            tokens.append(
+                {
+                    "symbol": all_tokens[i],
+                    "balance": r.balance,
+                    "balance_usd": str(bal_usd),
+                }
+            )
+            total_usd += bal_usd
+
+        return ToolResponse(
+            status="success",
+            data={
+                "wallet_address": wallet,
+                "chain": chain,
+                "tokens": tokens,
+                "total_usd": str(total_usd),
+            },
+        )
+
+    # ── CHECK PROTOCOL SUPPORT ──────────────────────────────────────────
+
+    # Category → recommended strategy template
+    _CATEGORY_TEMPLATE_MAP: ClassVar[dict[str, str]] = {
+        "swap": "ta_swap",
+        "lp": "dynamic_lp",
+        "lending": "lending_loop",
+        "yield": "vault_yield",
+        "perps": "basis_trade",
+    }
+
+    def _execute_check_protocol_support(self, args: dict) -> ToolResponse:
+        """Check protocol support from the SDK's static registry."""
+        from almanak.framework.cli.support_matrix import _build_matrix
+
+        matrix = _build_matrix()
+        query_protocol = args["protocol"].lower().replace("-", "_").replace(" ", "_")
+        query_chain = args.get("chain", "").lower()
+
+        # Aggregate all rows for the protocol (may appear in multiple categories)
+        matched_rows: list[dict] = []
+        for proto in matrix["protocols"]:
+            name = proto["name"].lower().replace("-", "_").replace(" ", "_")
+            if name == query_protocol:
+                matched_rows.append(proto)
+
+        if not matched_rows:
+            return ToolResponse(
+                status="success",
+                data={
+                    "supported": False,
+                    "protocol": args["protocol"],
+                    "chain": query_chain,
+                    "supported_chains": [],
+                    "supported_actions": [],
+                    "sdk_template": None,
+                    "notes": f"Protocol '{args['protocol']}' is not integrated in the SDK.",
+                },
+            )
+
+        # Merge chains and categories across all rows
+        all_chains: set[str] = set()
+        all_categories: list[str] = []
+        display_name = matched_rows[0]["name"]
+        for row in matched_rows:
+            all_chains.update(row["chains"])
+            if row["category"] not in all_categories:
+                all_categories.append(row["category"])
+
+        supported_chains = sorted(all_chains)
+        # Pick template from the first category that has one
+        template = None
+        for cat in all_categories:
+            template = self._CATEGORY_TEMPLATE_MAP.get(cat)
+            if template:
+                break
+
+        if query_chain and query_chain not in [c.lower() for c in supported_chains]:
+            return ToolResponse(
+                status="success",
+                data={
+                    "supported": False,
+                    "protocol": display_name,
+                    "chain": query_chain,
+                    "supported_chains": supported_chains,
+                    "supported_actions": all_categories,
+                    "sdk_template": template,
+                    "notes": f"{display_name} is supported on {', '.join(supported_chains)} but not on {query_chain}.",
+                },
+            )
+
+        return ToolResponse(
+            status="success",
+            data={
+                "supported": True,
+                "protocol": display_name,
+                "chain": query_chain or "all",
+                "supported_chains": supported_chains,
+                "supported_actions": all_categories,
+                "sdk_template": template,
+                "notes": f"Use '{template}' template." if template else "",
+            },
+        )
+
     # ── VAULT TOOLS ──────────────────────────────────────────────────────
 
     # Common tokens for portfolio value estimation in get_risk_metrics
@@ -1796,6 +2826,8 @@ class ToolExecutor:
         "FLASH_LOAN": ["flash_loan"],
         "STAKE": ["approve", "swap_simple"],
         "UNSTAKE": ["swap_simple"],
+        "WRAP_NATIVE": ["unwrap_eth"],  # deposit() has similar gas to withdraw()
+        "UNWRAP_NATIVE": ["unwrap_eth"],
     }
 
     # Intent types that map to MEDIUM or HIGH risk actions for validation purposes.
@@ -1809,7 +2841,10 @@ class ToolExecutor:
         "supply": "supply_lending",
         "borrow": "borrow_lending",
         "repay": "repay_lending",
+        "withdraw": "withdraw_lending",
         "flash_loan": "flash_loan",
+        "wrap_native": "wrap_native",
+        "unwrap_native": "unwrap_native",
     }
 
     def _execute_validate_risk(self, args: dict) -> ToolResponse:

@@ -437,6 +437,9 @@ class TestConstants:
         # Arbitrum has fewer
         assert "morpho_blue" not in PROTOCOL_CHAINS["arbitrum"]
 
+        # Polygon has compound_v3 (VIB-2250: was missing, causing nightly failure)
+        assert "compound_v3" in PROTOCOL_CHAINS["polygon"]
+
     def test_supported_tokens(self) -> None:
         """Test supported tokens per chain."""
         assert "USDC" in SUPPORTED_TOKENS["ethereum"]

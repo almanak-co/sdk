@@ -7,10 +7,12 @@ and prevents injection attacks.
 import pytest
 
 from almanak.gateway.validation import (
+    ALLOWED_CHAINS,
     MAX_BATCH_SIZE,
     MAX_GRAPHQL_QUERY_LENGTH,
     MAX_STATE_SIZE_BYTES,
     ValidationError,
+    resolve_agent_id,
     validate_address,
     validate_batch_size,
     validate_chain,
@@ -30,8 +32,7 @@ class TestChainValidation:
 
     def test_valid_chains(self):
         """Test that valid chains pass validation."""
-        valid_chains = ["ethereum", "arbitrum", "base", "optimism", "polygon"]
-        for chain in valid_chains:
+        for chain in ALLOWED_CHAINS:
             assert validate_chain(chain) == chain.lower()
 
     def test_chain_normalization(self):
@@ -373,3 +374,37 @@ class TestPositiveIntValidation:
         with pytest.raises(ValidationError) as exc:
             validate_positive_int(101, "field", max_value=100)
         assert "exceeds maximum" in str(exc.value)
+
+
+class TestResolveAgentId:
+    """Tests for resolve_agent_id — deployed-mode AGENT_ID normalization."""
+
+    def test_no_env_var_passes_through(self, monkeypatch):
+        """Without AGENT_ID env var, strategy_id passes through unchanged."""
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        assert resolve_agent_id("uniswap_rsi") == "uniswap_rsi"
+
+    def test_env_var_overrides(self, monkeypatch):
+        """When AGENT_ID is set, it replaces the strategy_id."""
+        monkeypatch.setenv("AGENT_ID", "platform-uuid-1234")
+        assert resolve_agent_id("uniswap_rsi") == "platform-uuid-1234"
+
+    def test_empty_string_falls_back(self, monkeypatch):
+        """Empty AGENT_ID falls back to the original strategy_id."""
+        monkeypatch.setenv("AGENT_ID", "")
+        assert resolve_agent_id("uniswap_rsi") == "uniswap_rsi"
+
+    def test_whitespace_only_falls_back(self, monkeypatch):
+        """Whitespace-only AGENT_ID falls back to the original strategy_id."""
+        monkeypatch.setenv("AGENT_ID", "   ")
+        assert resolve_agent_id("uniswap_rsi") == "uniswap_rsi"
+
+    def test_env_var_with_whitespace_is_stripped(self, monkeypatch):
+        """AGENT_ID with surrounding whitespace is stripped."""
+        monkeypatch.setenv("AGENT_ID", "  uuid-with-spaces  ")
+        assert resolve_agent_id("uniswap_rsi") == "uuid-with-spaces"
+
+    def test_uuid_format_agent_id(self, monkeypatch):
+        """Typical deployed AGENT_ID is a UUID."""
+        monkeypatch.setenv("AGENT_ID", "abc-123-def-456")
+        assert resolve_agent_id("uniswap_rsi:a1b2c3") == "abc-123-def-456"

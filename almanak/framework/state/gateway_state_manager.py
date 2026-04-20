@@ -3,6 +3,12 @@
 This module provides a StateManager that persists state through the gateway
 sidecar instead of directly accessing the database. Used in strategy containers
 that have no access to database credentials.
+
+Portfolio snapshots are persisted via gateway gRPC (SavePortfolioSnapshot,
+GetLatestSnapshot, GetSnapshotsSince) which routes to PostgreSQL in deployed
+mode.  Portfolio metrics (PnL baseline) are persisted via SavePortfolioMetrics
+and GetPortfolioMetrics.  Local mode uses the regular StateManager with
+SQLiteStore.
 """
 
 import json
@@ -11,10 +17,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from almanak.framework.gateway_client import GatewayClient
+from almanak.framework.state.exceptions import AccountingPersistenceError, AccountingWriteKind
 from almanak.framework.state.state_manager import StateData
 from almanak.gateway.proto import gateway_pb2
 
 if TYPE_CHECKING:
+    from almanak.framework.observability.ledger import LedgerEntry
+    from almanak.framework.portfolio.models import PortfolioMetrics
     from almanak.framework.state.portfolio import PortfolioSnapshot
 
 logger = logging.getLogger(__name__)
@@ -58,12 +67,8 @@ class GatewayStateManager:
         logger.debug("Gateway state manager initialized (no-op)")
 
     async def close(self) -> None:
-        """Close the state manager.
-
-        For the gateway-backed version, this is a no-op since the actual
-        cleanup happens in the gateway.
-        """
-        logger.debug("Gateway state manager closed (no-op)")
+        """Close the state manager."""
+        logger.debug("Gateway state manager closed")
 
     async def load_state(self, strategy_id: str) -> StateData | None:
         """Load strategy state from gateway.
@@ -126,7 +131,7 @@ class GatewayStateManager:
         """
         try:
             # Serialize state to JSON bytes
-            state_bytes = json.dumps(state.state).encode("utf-8")
+            state_bytes = json.dumps(state.state, default=str, sort_keys=True).encode("utf-8")
 
             request = gateway_pb2.SaveStateRequest(
                 strategy_id=state.strategy_id,
@@ -198,19 +203,246 @@ class GatewayStateManager:
         logger.debug(f"Cache invalidation requested for {strategy_id or 'all'} (no-op)")
 
     async def save_portfolio_snapshot(self, snapshot: "PortfolioSnapshot") -> int:
-        """Save portfolio snapshot.
-
-        For the gateway-backed version, this is currently a no-op stub.
-        Portfolio snapshots are not yet supported via gRPC.
+        """Save portfolio snapshot via gateway gRPC → PostgreSQL.
 
         Args:
             snapshot: Portfolio snapshot to save
 
         Returns:
-            Snapshot ID (placeholder value)
+            Snapshot ID from the database
         """
-        logger.debug(
-            f"Portfolio snapshot save requested (not yet supported via gateway), strategy={snapshot.strategy_id}"
+        try:
+            # Pack positions, token_prices, and wallet_balances into the
+            # positions_json envelope. The state_service on the receiving end
+            # unpacks this and persists each field to its own column.
+            payload = snapshot.to_positions_payload()
+            if isinstance(payload, list):
+                # Convert bare list to envelope so we can attach extra data
+                payload = {"positions": payload, "metadata": {}}
+            # Attach accounting data to the envelope
+            if snapshot.token_prices:
+                payload["token_prices"] = snapshot.token_prices
+            if snapshot.wallet_balances:
+                payload["wallet_balances"] = [
+                    {
+                        "symbol": b.symbol,
+                        "balance": str(b.balance),
+                        "value_usd": str(b.value_usd),
+                        "address": b.address,
+                        "price_usd": str(b.price_usd) if b.price_usd is not None else None,
+                    }
+                    for b in snapshot.wallet_balances
+                ]
+
+            positions_bytes = json.dumps(payload, default=str, sort_keys=True).encode("utf-8")
+
+            request = gateway_pb2.SaveSnapshotRequest(
+                strategy_id=snapshot.strategy_id,
+                timestamp=int(snapshot.timestamp.timestamp()),
+                iteration_number=snapshot.iteration_number,
+                total_value_usd=str(snapshot.total_value_usd),
+                available_cash_usd=str(snapshot.available_cash_usd),
+                value_confidence=snapshot.value_confidence.value,
+                positions_json=positions_bytes,
+                chain=snapshot.chain or "",
+            )
+            response = self._client.state.SavePortfolioSnapshot(request, timeout=self._timeout)
+
+            if not response.success:
+                # VIB-3157: treat gateway-side write failure as a first-class accounting
+                # error. The previous "return 0" path caused silent accounting loss --
+                # on-chain trades with no durable snapshot.
+                logger.error("SavePortfolioSnapshot failed: %s", response.error)
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.SNAPSHOT,
+                    strategy_id=snapshot.strategy_id,
+                    message=f"SavePortfolioSnapshot failed: {response.error}",
+                )
+
+            logger.debug(
+                "Portfolio snapshot saved via gateway: strategy=%s, value=$%.2f, confidence=%s",
+                snapshot.strategy_id,
+                snapshot.total_value_usd,
+                snapshot.value_confidence.value,
+            )
+            return response.snapshot_id
+        except AccountingPersistenceError:
+            raise
+        except Exception as e:
+            logger.exception("Failed to save portfolio snapshot via gateway")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.SNAPSHOT,
+                strategy_id=getattr(snapshot, "strategy_id", "") or "",
+                cause=e,
+            ) from e
+
+    async def get_latest_snapshot(self, strategy_id: str) -> "PortfolioSnapshot | None":
+        """Get most recent portfolio snapshot via gateway gRPC."""
+        try:
+            request = gateway_pb2.GetLatestSnapshotRequest(strategy_id=strategy_id)
+            response = self._client.state.GetLatestSnapshot(request, timeout=self._timeout)
+
+            if not response.found:
+                return None
+
+            return self._proto_to_snapshot(response)
+        except Exception as e:
+            logger.debug("Failed to get latest snapshot via gateway: %s", e)
+            return None
+
+    async def get_snapshots_since(
+        self, strategy_id: str, since: datetime, limit: int = 168
+    ) -> list["PortfolioSnapshot"]:
+        """Get portfolio snapshots since a given time via gateway gRPC."""
+        try:
+            request = gateway_pb2.GetSnapshotsSinceRequest(
+                strategy_id=strategy_id,
+                since=int(since.timestamp()),
+                limit=limit,
+            )
+            response = self._client.state.GetSnapshotsSince(request, timeout=self._timeout)
+
+            return [self._proto_to_snapshot(s) for s in response.snapshots if s.found]
+        except Exception as e:
+            logger.debug("Failed to get snapshots via gateway: %s", e)
+            return []
+
+    async def save_ledger_entry(self, entry: "LedgerEntry") -> None:
+        """Save a transaction ledger entry via the gateway.
+
+        VIB-3157 known gap (tracked in follow-up): the gateway service does
+        not yet expose a ``SaveLedgerEntry`` RPC. The gateway's
+        ``transaction_ledger`` table has a read handler (``GetLedgerEntries``
+        via ``dashboard_service``) but no writer. Until the write RPC lands,
+        this method signals the gap explicitly with ``NotImplementedError``
+        rather than silently returning. ``StrategyRunner._write_ledger_entry``
+        catches ``NotImplementedError`` as a KNOWN GAP: it CRITICAL-logs but
+        does not halt the live iteration, so gateway-backed deployments keep
+        running while the ops team prioritises the write path.
+
+        See ``docs/internal/vib-3157-gateway-ledger-followup.md``.
+        """
+        raise NotImplementedError(
+            "Gateway-backed deployments do not yet support ledger writes. "
+            "Follow-up tracked in docs/internal/vib-3157-gateway-ledger-followup.md "
+            "— implement SaveLedgerEntry RPC to close the silent-accounting gap."
         )
-        # Return a placeholder ID - feature not yet implemented in gateway
-        return 0
+
+    async def save_portfolio_metrics(self, metrics: "PortfolioMetrics") -> bool:
+        """Save portfolio metrics via gateway gRPC.
+
+        Args:
+            metrics: PortfolioMetrics to persist.
+
+        Returns:
+            True if save succeeded.
+        """
+        try:
+            request = gateway_pb2.SaveMetricsRequest(
+                strategy_id=metrics.strategy_id,
+                initial_value_usd=str(metrics.initial_value_usd),
+                initial_timestamp=int(metrics.timestamp.timestamp()),
+                deposits_usd=str(metrics.deposits_usd),
+                withdrawals_usd=str(metrics.withdrawals_usd),
+                gas_spent_usd=str(metrics.gas_spent_usd),
+                # Phase 4 accounting identity fields (VIB-2835/2837/2839)
+                deployment_id=getattr(metrics, "deployment_id", "") or "",
+                cycle_id=getattr(metrics, "cycle_id", "") or "",
+                execution_mode=getattr(metrics, "execution_mode", "") or "",
+                is_complete=getattr(metrics, "is_complete", True),
+            )
+            response = self._client.state.SavePortfolioMetrics(request, timeout=self._timeout)
+
+            if not response.success:
+                # VIB-3157: mirror save_portfolio_snapshot -- silent False returns caused
+                # baseline drift between ledger and metrics tables.
+                logger.error("SavePortfolioMetrics failed: %s", response.error)
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.METRICS,
+                    strategy_id=metrics.strategy_id,
+                    message=f"SavePortfolioMetrics failed: {response.error}",
+                )
+
+            logger.debug("Portfolio metrics saved via gateway for strategy=%s", metrics.strategy_id)
+            return True
+        except AccountingPersistenceError:
+            raise
+        except Exception as e:
+            logger.exception("Failed to save portfolio metrics via gateway")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=getattr(metrics, "strategy_id", "") or "",
+                cause=e,
+            ) from e
+
+    async def get_portfolio_metrics(self, strategy_id: str) -> "PortfolioMetrics | None":
+        """Get portfolio metrics via gateway gRPC.
+
+        Args:
+            strategy_id: Strategy identifier.
+
+        Returns:
+            PortfolioMetrics or None if not found.
+        """
+        from decimal import Decimal
+
+        from almanak.framework.portfolio.models import PortfolioMetrics
+
+        try:
+            request = gateway_pb2.GetMetricsRequest(strategy_id=strategy_id)
+            response = self._client.state.GetPortfolioMetrics(request, timeout=self._timeout)
+
+            if not response.found:
+                return None
+
+            return PortfolioMetrics(
+                strategy_id=response.strategy_id,
+                timestamp=datetime.fromtimestamp(response.updated_at, tz=UTC)
+                if response.updated_at
+                else datetime.now(UTC),
+                total_value_usd=Decimal("0"),  # Not stored in metrics, get from latest snapshot
+                initial_value_usd=Decimal(response.initial_value_usd or "0"),
+                deposits_usd=Decimal(response.deposits_usd or "0"),
+                withdrawals_usd=Decimal(response.withdrawals_usd or "0"),
+                gas_spent_usd=Decimal(response.gas_spent_usd or "0"),
+                # Phase 4 accounting identity fields (VIB-2835/2837/2839)
+                deployment_id=response.deployment_id or "",
+                cycle_id=response.cycle_id or "",
+                execution_mode=response.execution_mode or "",
+                is_complete=response.is_complete,
+            )
+        except Exception as e:
+            logger.debug("Failed to get portfolio metrics via gateway: %s", e)
+            return None
+
+    @staticmethod
+    def _proto_to_snapshot(data: gateway_pb2.SnapshotData) -> "PortfolioSnapshot":
+        """Convert a SnapshotData protobuf message to a PortfolioSnapshot."""
+        from almanak.framework.portfolio.models import PortfolioSnapshot
+
+        positions_payload = json.loads(data.positions_json.decode("utf-8")) if data.positions_json else []
+        positions_list, snapshot_metadata = PortfolioSnapshot.unpack_positions_payload(positions_payload)
+
+        # Extract accounting data from envelope (Phase 1c)
+        token_prices: dict = {}
+        wallet_balances_raw: list[dict] = []
+        if isinstance(positions_payload, dict):
+            token_prices = positions_payload.get("token_prices", {})
+            wallet_balances_raw = positions_payload.get("wallet_balances", [])
+
+        snapshot_dict = {
+            "timestamp": datetime.fromtimestamp(data.timestamp, tz=UTC).isoformat(),
+            "strategy_id": data.strategy_id,
+            "total_value_usd": data.total_value_usd or "0",
+            "available_cash_usd": data.available_cash_usd or "0",
+            "value_confidence": data.value_confidence or "HIGH",
+            "error": None,
+            "positions": positions_list,
+            "wallet_balances": wallet_balances_raw,
+            "token_prices": token_prices,
+            "chain": data.chain or "",
+            "iteration_number": data.iteration_number,
+            "snapshot_metadata": snapshot_metadata,
+        }
+
+        return PortfolioSnapshot.from_dict(snapshot_dict)

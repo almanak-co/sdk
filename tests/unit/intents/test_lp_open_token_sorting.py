@@ -74,13 +74,22 @@ class TestParsePoolInfoTokenSwapFlag:
         assert fee == 500
         assert swapped is True
 
-    def test_pool_address_format_returns_false(self, compiler):
-        """Pool address format (0x...) always returns tokens_swapped=False."""
-        with patch.object(compiler, "_resolve_token", side_effect=[WETH, USDC]):
+    def test_bare_pool_address_fails_hard(self, compiler, caplog):
+        """Bare pool address (no '/') must fail hard with a clear error.
+
+        Previously this path silently substituted WETH/USDC as a placeholder
+        pair, which would compile a working LP intent against the wrong pool
+        and only fail on-chain -- silent data corruption with real-money risk.
+        Until an on-chain pool resolver is implemented (calling
+        Pool.token0()/token1()/fee()), bare pool addresses must return None.
+        """
+        with caplog.at_level("ERROR"):
             result = compiler._parse_pool_info("0xABCDEF1234567890ABCDEF1234567890ABCDEF12")
-        assert result is not None
-        _, _, _, swapped = result
-        assert swapped is False
+        assert result is None
+        assert any(
+            "bare pool address" in rec.message.lower() and "not supported" in rec.message.lower()
+            for rec in caplog.records
+        )
 
     def test_default_fee_tier_without_fee(self, compiler):
         """Pool without fee part -> default 3000."""
@@ -187,6 +196,7 @@ class TestCompileLPOpenInversion:
         intent.amount1 = Decimal(str(amount1))
         intent.intent_id = "test-intent-001"
         intent.max_slippage = None
+        intent.protocol_params = None
         return intent
 
     @patch("almanak.framework.intents.pool_validation.validate_v3_pool")
@@ -197,7 +207,7 @@ class TestCompileLPOpenInversion:
         mock_adapter.get_position_manager_address.return_value = "0x" + "AA" * 20
         mock_adapter.get_mint_calldata.return_value = b"\x00" * 32
         mock_adapter.estimate_mint_gas.return_value = 500000
-        mock_validate.return_value = MagicMock(is_valid=True)
+        mock_validate.return_value = MagicMock(is_valid=True, pool_address=None)
 
         intent = self._make_lp_intent(
             range_lower=550,
@@ -236,7 +246,7 @@ class TestCompileLPOpenInversion:
         mock_adapter.get_position_manager_address.return_value = "0x" + "AA" * 20
         mock_adapter.get_mint_calldata.return_value = b"\x00" * 32
         mock_adapter.estimate_mint_gas.return_value = 500000
-        mock_validate.return_value = MagicMock(is_valid=True)
+        mock_validate.return_value = MagicMock(is_valid=True, pool_address=None)
 
         intent = self._make_lp_intent(
             range_lower=550,
@@ -251,11 +261,14 @@ class TestCompileLPOpenInversion:
             approve_amounts[token_addr] = amount
             return []
 
+        # Return distinct ticks so the tick_lower < tick_upper guard passes
+        tick_values = iter([-100, 100])
+
         with (
             patch.object(compiler, "_parse_pool_info", return_value=(USDT, WBNB, 500, True)),
             patch.object(compiler, "_validate_pool", return_value=None),
             patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
-            patch.object(IntentCompiler, "_price_to_tick", return_value=0),
+            patch.object(IntentCompiler, "_price_to_tick", side_effect=lambda *a, **kw: next(tick_values)),
             patch.object(compiler, "_build_approve_tx", side_effect=mock_build_approve),
         ):
             compiler._compile_lp_open(intent)
@@ -272,7 +285,7 @@ class TestCompileLPOpenInversion:
         mock_adapter.get_position_manager_address.return_value = "0x" + "AA" * 20
         mock_adapter.get_mint_calldata.return_value = b"\x00" * 32
         mock_adapter.estimate_mint_gas.return_value = 500000
-        mock_validate.return_value = MagicMock(is_valid=True)
+        mock_validate.return_value = MagicMock(is_valid=True, pool_address=None)
 
         intent = self._make_lp_intent(
             pool="USDC/WETH/3000",

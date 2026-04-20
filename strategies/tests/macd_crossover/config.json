@@ -10,5 +10,33 @@
     "base_token": "ARB",
     "quote_token": "USDC",
     "chain": "arbitrum",
-    "protocol": "uniswap_v3"
+    "protocol": "uniswap_v3",
+    "anvil_funding": {
+        "ETH": 10,
+        "USDC": 10000,
+        "ARB": 500
+    },
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+            "chain": "arbitrum",
+            "amount": "10",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            "chain": "arbitrum",
+            "amount": "10000",
+            "amount_type": "usd"
+        },
+        {
+            "symbol": "ARB",
+            "address": "0x912ce59144191c1204e64559fe8253a0e49e6548",
+            "chain": "arbitrum",
+            "amount": "500",
+            "amount_type": "token"
+        }
+    ]
 }
