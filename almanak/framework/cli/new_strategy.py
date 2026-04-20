@@ -2122,6 +2122,229 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self.trade_size_usd = Decimal(str(get_config("trade_size_usd", "100")))"""
 
 
+# ---------------------------------------------------------------------------
+# Template-specific get_status() bodies
+# ---------------------------------------------------------------------------
+# Every template's ``get_status()`` returns a dict that always includes the
+# canonical trio ``{strategy, chain, wallet}``. Stateful templates add a
+# ``state`` field (the StrEnum ``.value`` for JSON-safety) plus a handful of
+# template-specific fields sourced from instance attributes that ``__init__``
+# + ``on_intent_executed`` already maintain. No gateway round-trips, no
+# computation beyond simple attribute reads.
+#
+# Serialisation rules (enforced in the emitted bodies):
+#   - ``Decimal`` values are cast to ``str`` (JSON-safe, preserves precision).
+#   - ``datetime`` values use ``.isoformat()`` (None-safe via guard).
+#   - ``StrEnum`` members are exposed via ``getattr(x, 'value', x)`` which
+#     degrades gracefully when the attribute is already a plain string
+#     (e.g. loaded from a legacy state file).
+#
+# If a template does not track a particular field (e.g. ``health_factor``
+# without a gateway query), the field is set to ``None`` rather than
+# fabricated — the operator dashboard renders ``None`` as "n/a".
+# ---------------------------------------------------------------------------
+
+
+def _get_template_get_status(template: StrategyTemplate, strategy_name: str) -> str:
+    """Return the full indented source of the template-specific ``get_status``.
+
+    The returned string includes the ``def get_status(self)`` signature and a
+    trailing blank line, so it can be substituted verbatim into the class body.
+    """
+    # Base dict is always the same; templates append fields to it.
+    # Templates reference a module-level ``_safe`` helper (emitted by the
+    # scaffold in the file header) to normalise Decimal / datetime / Enum
+    # values coming out of ``_last_position_snapshot`` — without it, the
+    # docstring's "JSON-safe" promise was a lie, and operator dashboards
+    # that call json.dumps(strategy.get_status()) crashed the moment a
+    # snapshot carried a Decimal health_factor or a datetime last_trade_ts.
+    base = (
+        "    def get_status(self) -> dict[str, Any]:\n"
+        '        """Get current strategy status for monitoring/dashboards.\n'
+        "\n"
+        "        Pure accessor: reads only instance state (no gateway calls, no I/O).\n"
+        "        Returned values are JSON-safe (Decimal->str, datetime->isoformat,\n"
+        "        StrEnum->str via getattr(.value, fallback)).\n"
+        '        """\n'
+        "        status: dict[str, Any] = {\n"
+        f'            "strategy": "{strategy_name}",\n'
+        '            "chain": self.chain,\n'
+        '            "wallet": self.wallet_address[:10] + "..." if self.wallet_address else None,\n'
+        "        }\n"
+    )
+
+    if template == StrategyTemplate.LENDING_LOOP:
+        extra = (
+            '        snapshot = getattr(self, "_last_position_snapshot", None) or {}\n'
+            "        status.update(\n"
+            "            {\n"
+            '                "state": getattr(self._loop_state, "value", self._loop_state),\n'
+            '                "loop_count": self._loop_count,\n'
+            '                "current_leverage": str(self._current_leverage),\n'
+            '                "target_leverage": str(self.target_leverage),\n'
+            '                "health_factor": _safe(snapshot.get("health_factor")),\n'
+            '                "supply_usd": _safe(snapshot.get("supply_usd")),\n'
+            '                "debt_usd": _safe(snapshot.get("debt_usd")),\n'
+            '                "ltv": _safe(snapshot.get("ltv")),\n'
+            '                "collateral_token": self.collateral_token,\n'
+            '                "borrow_token": self.borrow_token,\n'
+            "            }\n"
+            "        )\n"
+            "        return status\n\n"
+        )
+        return base + extra
+
+    if template == StrategyTemplate.BASIS_TRADE:
+        extra = (
+            '        snapshot = getattr(self, "_last_position_snapshot", None) or {}\n'
+            "        status.update(\n"
+            "            {\n"
+            '                "state": getattr(self._trade_state, "value", self._trade_state),\n'
+            '                "base_token": self.base_token,\n'
+            '                "quote_token": self.quote_token,\n'
+            '                "perp_market": self.perp_market,\n'
+            '                "spot_size_usd": str(self.spot_size_usd),\n'
+            '                "hedge_ratio": str(self.hedge_ratio),\n'
+            '                "spot_leg_value_usd": _safe(snapshot.get("spot_leg_value_usd")),\n'
+            '                "perp_leg_value_usd": _safe(snapshot.get("perp_leg_value_usd")),\n'
+            '                "funding_pnl_usd": _safe(snapshot.get("funding_pnl_usd")),\n'
+            '                "net_delta": _safe(snapshot.get("net_delta")),\n'
+            "            }\n"
+            "        )\n"
+            "        return status\n\n"
+        )
+        return base + extra
+
+    if template == StrategyTemplate.VAULT_YIELD:
+        extra = (
+            '        snapshot = getattr(self, "_last_position_snapshot", None) or {}\n'
+            "        status.update(\n"
+            "            {\n"
+            '                "state": getattr(self._state, "value", self._state),\n'
+            '                "vault_address": self.vault_address,\n'
+            '                "deposit_token": self.deposit_token,\n'
+            '                "deposit_amount": str(self.deposit_amount),\n'
+            '                "vault_shares": _safe(snapshot.get("vault_shares")),\n'
+            '                "current_yield_apr": _safe(snapshot.get("current_yield_apr")),\n'
+            '                "deposited_usd": _safe(snapshot.get("deposited_usd")),\n'
+            "            }\n"
+            "        )\n"
+            "        return status\n\n"
+        )
+        return base + extra
+
+    if template == StrategyTemplate.PERPS:
+        extra = (
+            '        snapshot = getattr(self, "_last_position_snapshot", None) or {}\n'
+            "        direction = self._position_direction or self.direction\n"
+            "        status.update(\n"
+            "            {\n"
+            '                "state": getattr(self._position_state, "value", self._position_state),\n'
+            '                "direction": direction,\n'
+            '                "perp_market": self.perp_market,\n'
+            '                "collateral_token": self.collateral_token,\n'
+            '                "position_size_usd": str(self.position_size_usd),\n'
+            '                "entry_price": str(self._entry_price) if self._entry_price else None,\n'
+            '                "leverage": str(self.leverage),\n'
+            '                "pnl_usd": _safe(snapshot.get("pnl_usd")),\n'
+            '                "liq_price": _safe(snapshot.get("liq_price")),\n'
+            "            }\n"
+            "        )\n"
+            "        return status\n\n"
+        )
+        return base + extra
+
+    if template == StrategyTemplate.STAKING:
+        extra = (
+            '        snapshot = getattr(self, "_last_position_snapshot", None) or {}\n'
+            "        status.update(\n"
+            "            {\n"
+            '                "state": getattr(self._stake_state, "value", self._stake_state),\n'
+            '                "stake_token": self.stake_token,\n'
+            '                "staking_protocol": self.staking_protocol,\n'
+            '                "staked_amount": str(self._staked_amount) if self._staked_amount else None,\n'
+            '                "rewards_usd": _safe(snapshot.get("rewards_usd")),\n'
+            '                "unbonding_end_ts": _safe(snapshot.get("unbonding_end_ts")),\n'
+            "            }\n"
+            "        )\n"
+            "        return status\n\n"
+        )
+        return base + extra
+
+    if template == StrategyTemplate.TA_SWAP:
+        extra = (
+            '        snapshot = getattr(self, "_last_position_snapshot", None) or {}\n'
+            "        status.update(\n"
+            "            {\n"
+            '                "state": "holding_base" if self._holding_base else "holding_quote",\n'
+            '                "holding_base": self._holding_base,\n'
+            '                "base_token": self.base_token,\n'
+            '                "quote_token": self.quote_token,\n'
+            '                "indicator": self._indicator,\n'
+            '                "last_signal": _safe(snapshot.get("last_signal")),\n'
+            '                "last_trade_ts": _safe(snapshot.get("last_trade_ts")),\n'
+            "            }\n"
+            "        )\n"
+            "        return status\n\n"
+        )
+        return base + extra
+
+    if template == StrategyTemplate.DYNAMIC_LP:
+        extra = (
+            '        snapshot = getattr(self, "_last_position_snapshot", None) or {}\n'
+            "        tick_range = None\n"
+            "        if self._range_lower is not None and self._range_upper is not None:\n"
+            "            tick_range = [str(self._range_lower), str(self._range_upper)]\n"
+            "        status.update(\n"
+            "            {\n"
+            '                "state": "open" if self._position_id is not None else "idle",\n'
+            '                "position_id": self._position_id,\n'
+            '                "tick_range": tick_range,\n'
+            '                "pool": self.pool,\n'
+            '                "in_range": _safe(snapshot.get("in_range")),\n'
+            '                "fees_earned_usd": _safe(snapshot.get("fees_earned_usd")),\n'
+            "            }\n"
+            "        )\n"
+            "        return status\n\n"
+        )
+        return base + extra
+
+    if template == StrategyTemplate.MULTI_STEP:
+        extra = (
+            '        snapshot = getattr(self, "_last_position_snapshot", None) or {}\n'
+            "        tick_range = None\n"
+            "        if self._range_lower is not None and self._range_upper is not None:\n"
+            "            tick_range = [str(self._range_lower), str(self._range_upper)]\n"
+            "        status.update(\n"
+            "            {\n"
+            '                "state": "open" if self._position_id is not None else "idle",\n'
+            '                "position_id": self._position_id,\n'
+            '                "tick_range": tick_range,\n'
+            '                "pool": self.pool,\n'
+            '                "in_range": _safe(snapshot.get("in_range")),\n'
+            '                "fees_earned_usd": _safe(snapshot.get("fees_earned_usd")),\n'
+            "            }\n"
+            "        )\n"
+            "        return status\n\n"
+        )
+        return base + extra
+
+    if template == StrategyTemplate.COPY_TRADER:
+        extra = (
+            "        status.update(\n"
+            "            {\n"
+            '                "open_trades_count": len(self._open_trades),\n'
+            '                "action_types": [str(a) for a in self.action_types],\n'
+            "            }\n"
+            "        )\n"
+            "        return status\n\n"
+        )
+        return base + extra
+
+    # BLANK template: return the base dict as-is.
+    return base + "        return status\n\n"
+
+
 def _get_template_callbacks(template: StrategyTemplate) -> str:
     """Generate on_intent_executed and persistence callbacks for stateful templates."""
     if template == StrategyTemplate.DYNAMIC_LP:
@@ -2548,13 +2771,19 @@ def _build_strategy_content(
     init_params = _get_template_init_params(template, config)
     decide_logic = _get_template_decide_logic(template, config)
     callbacks_str = _get_template_callbacks(template)
+    get_status_block = _get_template_get_status(template, strategy_name)
 
     # State machine enum (typed StrEnum; empty for stateless templates).
     # Injected above the strategy class so authors (and tests) can import it.
     state_enum_block = _generate_state_enum_definition(template)
     # Only pull StrEnum into the generated file when a state machine is emitted;
     # otherwise the import would be unused (F401 lint error).
-    strenum_import = "from enum import StrEnum\n" if state_enum_block else ""
+    # ``_safe`` (emitted below) always needs ``from enum import Enum``. When
+    # the template also defines a StrEnum state machine, merge the two into a
+    # single ``from enum import Enum, StrEnum`` to keep ruff/isort happy (two
+    # separate ``from enum import ...`` lines trigger I001 in the scaffolded
+    # file). The non-StrEnum path keeps ``from enum import Enum`` on its own.
+    enum_import = "from enum import Enum, StrEnum\n" if state_enum_block else "from enum import Enum\n"
     # Blank line + block when we have an enum; empty string otherwise so the
     # resulting file has no awkward trailing blank lines.
     state_enum_section = f"\n\n{state_enum_block}" if state_enum_block else ""
@@ -2597,8 +2826,9 @@ Strategy Pattern:
 """
 
 import logging
+from datetime import date, datetime
 from decimal import ROUND_DOWN, Decimal  # noqa: F401 - ROUND_DOWN used by lending template only
-{strenum_import}from typing import Any, Optional
+{enum_import}from typing import Any, Optional
 
 # Core strategy framework imports
 from almanak.framework.intents import Intent
@@ -2609,6 +2839,28 @@ from almanak.framework.strategies import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _safe(v: Any) -> Any:
+    """Normalise a ``get_status()`` field into a JSON-serialisable primitive.
+
+    Called by the generated ``get_status()`` on every value that comes out of
+    ``_last_position_snapshot`` (which strategies populate with whatever types
+    they like — raw Decimal prices, datetime timestamps, Enum signals, ...).
+    Without this, ``json.dumps(strategy.get_status())`` on an operator
+    dashboard would crash the first time a snapshot carried a Decimal or a
+    datetime.
+    """
+    if v is None:
+        return None
+    if isinstance(v, Decimal):
+        return str(v)
+    if isinstance(v, datetime | date):
+        return v.isoformat()
+    if isinstance(v, Enum):
+        return getattr(v, "value", str(v))
+    return v
+
 {state_enum_section}
 
 @almanak_strategy(
@@ -2681,15 +2933,7 @@ class {class_name}(IntentStrategy):
             logger.exception(f"Error in decide(): {{e}}")
             return Intent.hold(reason=f"Error: {{str(e)}}")
 
-    def get_status(self) -> dict[str, Any]:
-        """Get current strategy status for monitoring/dashboards."""
-        return {{
-            "strategy": "{strategy_name}",
-            "chain": self.chain,
-            "wallet": self.wallet_address[:10] + "..." if self.wallet_address else None,
-        }}
-
-'''
+{get_status_block}'''
 
     part2 = f'''
 if __name__ == "__main__":

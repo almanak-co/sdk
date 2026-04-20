@@ -1744,9 +1744,12 @@ def test_stateful_templates_emit_strenum_class(
             chain=SupportedChain.ARBITRUM,
             output_dir=Path(tmpdir),
         )
-    # Grep: the import must appear exactly once, at module level.
-    assert "from enum import StrEnum" in code, (
-        f"{template.value} must emit 'from enum import StrEnum' import"
+    # Grep: StrEnum must be imported (alone or alongside Enum). VIB-3207 v2
+    # emits ``_safe`` which needs ``Enum``, so stateful templates now merge
+    # the two into ``from enum import Enum, StrEnum`` rather than running
+    # two separate ``from enum`` lines (which would trigger ruff I001).
+    assert "from enum import Enum, StrEnum" in code or "from enum import StrEnum" in code, (
+        f"{template.value} must emit a StrEnum import"
     )
     # The class declaration must be present with ``StrEnum`` as the base.
     assert f"class {enum_name}(StrEnum):" in code, (
@@ -1773,6 +1776,13 @@ def test_stateless_templates_do_not_emit_strenum_import(template: StrategyTempla
             chain=SupportedChain.ARBITRUM,
             output_dir=Path(tmpdir),
         )
+    # Stateless templates still import ``Enum`` (used by ``_safe``) but must
+    # not drag in ``StrEnum`` as an imported symbol (which would be unused
+    # and fail F401). ``StrEnum`` may still appear in the base get_status
+    # docstring — so we check the import line specifically.
+    assert "from enum import Enum, StrEnum" not in code, (
+        f"{template.value} must not combine-import StrEnum when no state machine is emitted"
+    )
     assert "from enum import StrEnum" not in code, (
         f"{template.value} must not import StrEnum when no state machine is emitted"
     )
@@ -1962,3 +1972,567 @@ def test_basis_trade_scaffolded_init_uses_strenum() -> None:
         )
     assert "self._trade_state = BasisTradeState.IDLE" in code
     assert 'self._trade_state = "idle"' not in code
+
+
+# ---------------------------------------------------------------------------
+# VIB-3207: enriched get_status() per template
+# ---------------------------------------------------------------------------
+#
+# Every template's generated ``get_status()`` must:
+#   1. Return a dict.
+#   2. Always include the canonical ``{strategy, chain, wallet}`` trio.
+#   3. Include template-specific fields when stateful.
+#   4. Emit JSON-safe values (no raw Decimal / datetime / StrEnum objects
+#      should survive into the returned dict — they must be str / isoformat
+#      / .value respectively).
+#   5. Never call into the gateway (covered implicitly by the fact that
+#      the tests wire ``gateway_client`` to None on the strategy instance).
+# ---------------------------------------------------------------------------
+
+
+def _scaffold_and_get_class(template: StrategyTemplate, chain: SupportedChain = SupportedChain.ARBITRUM):
+    """Scaffold a template and return a concrete subclass suitable for `get_status()` tests.
+
+    Stubs out ``decide()`` / ``get_open_positions()`` / ``generate_teardown_intents()``
+    so the class can be instantiated without wiring up a full strategy stack.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        code = generate_strategy_file(
+            name="StatusCheck",
+            template=template,
+            chain=chain,
+            output_dir=Path(tmpdir),
+        )
+    ns: dict = {}
+    exec(compile(code, "<scaffold>", "exec"), ns)  # noqa: S102
+    from almanak.framework.strategies import IntentStrategy as _Base
+
+    base_cls = next(
+        v
+        for v in ns.values()
+        if isinstance(v, type) and issubclass(v, _Base) and v is not _Base
+    )
+
+    class _Concrete(base_cls):
+        def decide(self, market):
+            return None
+
+        def get_open_positions(self):
+            return None
+
+        def generate_teardown_intents(self, mode=None, market=None):
+            return []
+
+    return _Concrete, ns
+
+
+def _bare_instance(cls):
+    """Create an instance without invoking ``IntentStrategy.__init__``.
+
+    ``get_status()`` is a pure accessor; we only need the instance
+    attributes it reads. Bypassing ``__init__`` avoids pulling in the
+    full gateway/state scaffolding.
+
+    Note: ``chain`` and ``wallet_address`` are ``@property`` on the base
+    IntentStrategy, so we assign the underlying ``_chain`` / ``_wallet_address``
+    slots directly.
+    """
+    inst = cls.__new__(cls)
+    inst._chain = "arbitrum"
+    inst._wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
+    inst.config = {}
+    return inst
+
+
+def _assert_base_status_shape(status: dict, *, expected_chain: str = "arbitrum") -> None:
+    """Every template's get_status() must include the canonical trio."""
+    assert isinstance(status, dict)
+    assert status["strategy"] == "status_check"
+    assert status["chain"] == expected_chain
+    # wallet is truncated with "...".
+    assert status["wallet"] is not None
+    assert status["wallet"].startswith("0x") and status["wallet"].endswith("...")
+
+
+def _assert_json_serializable(status: dict) -> None:
+    """The full status dict must round-trip through json WITHOUT a custom encoder.
+
+    CodeRabbit audit fix: the prior version passed ``default=lambda o: None``,
+    which silently replaced any non-JSON-safe value (Decimal, datetime, Enum)
+    with ``null`` and let the test pass. That defeated the test's purpose —
+    the generated ``get_status()`` could emit raw Decimals and still "round
+    trip" under the default encoder. Now the call is bare ``json.dumps(status)``
+    so a non-serialisable value raises ``TypeError`` and fails the test.
+    """
+    import json
+
+    dumped = json.dumps(status)
+    # Round-trip sanity: re-parsing the string gives a dict with the same keys.
+    reparsed = json.loads(dumped)
+    assert set(reparsed.keys()) == set(status.keys())
+
+
+def test_get_status_blank_template_returns_canonical_trio_only() -> None:
+    cls, _ = _scaffold_and_get_class(StrategyTemplate.BLANK)
+    inst = _bare_instance(cls)
+
+    status = inst.get_status()
+    _assert_base_status_shape(status)
+    assert set(status.keys()) == {"strategy", "chain", "wallet"}
+    _assert_json_serializable(status)
+
+
+def test_get_status_lending_loop_exposes_state_and_health_fields() -> None:
+    from decimal import Decimal
+
+    cls, ns = _scaffold_and_get_class(StrategyTemplate.LENDING_LOOP)
+    LendingLoopState = ns["LendingLoopState"]
+
+    inst = _bare_instance(cls)
+    inst._loop_state = LendingLoopState.BORROWED
+    inst._loop_count = 2
+    inst._current_leverage = Decimal("1.85")
+    inst.target_leverage = Decimal("2.0")
+    inst.collateral_token = "WETH"
+    inst.borrow_token = "USDC"
+    # Use real Decimals in the snapshot (not pre-stringified strings) so the
+    # generated get_status()'s ``_safe`` helper is actually exercised. Before
+    # CodeRabbit's audit the templates dropped snapshot values in raw, which
+    # would have crashed ``json.dumps(status)`` on this fixture. The strings
+    # in the asserts below are what ``_safe`` should convert Decimals into.
+    inst._last_position_snapshot = {
+        "health_factor": Decimal("1.72"),
+        "supply_usd": Decimal("5000.00"),
+        "debt_usd": Decimal("2000.00"),
+        "ltv": Decimal("0.40"),
+    }
+
+    status = inst.get_status()
+    _assert_base_status_shape(status)
+    assert status["state"] == "borrowed"  # StrEnum .value, not enum repr
+    assert status["loop_count"] == 2
+    assert status["current_leverage"] == "1.85"  # Decimal -> str
+    assert status["target_leverage"] == "2.0"
+    assert status["health_factor"] == "1.72"
+    assert status["supply_usd"] == "5000.00"
+    assert status["debt_usd"] == "2000.00"
+    assert status["ltv"] == "0.40"
+    assert status["collateral_token"] == "WETH"
+    assert status["borrow_token"] == "USDC"
+    _assert_json_serializable(status)
+
+
+def test_get_status_lending_loop_defaults_position_fields_to_none() -> None:
+    """Without a position snapshot, health_factor / supply_usd / debt_usd / ltv are None."""
+    from decimal import Decimal
+
+    cls, ns = _scaffold_and_get_class(StrategyTemplate.LENDING_LOOP)
+    LendingLoopState = ns["LendingLoopState"]
+
+    inst = _bare_instance(cls)
+    inst._loop_state = LendingLoopState.IDLE
+    inst._loop_count = 0
+    inst._current_leverage = Decimal("1.0")
+    inst.target_leverage = Decimal("2.0")
+    inst.collateral_token = "WETH"
+    inst.borrow_token = "USDC"
+
+    status = inst.get_status()
+    assert status["state"] == "idle"
+    assert status["health_factor"] is None
+    assert status["supply_usd"] is None
+    assert status["debt_usd"] is None
+    assert status["ltv"] is None
+
+
+def test_get_status_basis_trade_exposes_legs_and_delta() -> None:
+    from decimal import Decimal
+
+    cls, ns = _scaffold_and_get_class(StrategyTemplate.BASIS_TRADE)
+    BasisTradeState = ns["BasisTradeState"]
+
+    inst = _bare_instance(cls)
+    inst._trade_state = BasisTradeState.HEDGED
+    inst.base_token = "WETH"
+    inst.quote_token = "USDC"
+    inst.perp_market = "ETH/USD"
+    inst.spot_size_usd = Decimal("10000")
+    inst.hedge_ratio = Decimal("1.0")
+    inst._last_position_snapshot = {
+        "spot_leg_value_usd": Decimal("10050.12"),
+        "perp_leg_value_usd": Decimal("-10010.00"),
+        "funding_pnl_usd": Decimal("42.50"),
+        "net_delta": Decimal("0.0034"),
+    }
+
+    status = inst.get_status()
+    _assert_base_status_shape(status)
+    assert status["state"] == "hedged"
+    assert status["base_token"] == "WETH"
+    assert status["quote_token"] == "USDC"
+    assert status["perp_market"] == "ETH/USD"
+    assert status["spot_size_usd"] == "10000"
+    assert status["hedge_ratio"] == "1.0"
+    assert status["spot_leg_value_usd"] == "10050.12"
+    assert status["perp_leg_value_usd"] == "-10010.00"
+    assert status["funding_pnl_usd"] == "42.50"
+    assert status["net_delta"] == "0.0034"
+    _assert_json_serializable(status)
+
+
+def test_get_status_vault_yield_exposes_shares_and_apr() -> None:
+    from decimal import Decimal
+
+    cls, ns = _scaffold_and_get_class(StrategyTemplate.VAULT_YIELD)
+    VaultYieldState = ns["VaultYieldState"]
+
+    inst = _bare_instance(cls)
+    inst._state = VaultYieldState.DEPOSITED
+    inst.vault_address = "0xbeef000000000000000000000000000000000000"
+    inst.deposit_token = "USDC"
+    inst.deposit_amount = Decimal("1000")
+    inst._last_position_snapshot = {
+        "vault_shares": Decimal("998.12"),
+        "current_yield_apr": Decimal("0.0543"),
+        "deposited_usd": Decimal("1000.00"),
+    }
+
+    status = inst.get_status()
+    _assert_base_status_shape(status)
+    assert status["state"] == "deposited"
+    assert status["vault_address"] == "0xbeef000000000000000000000000000000000000"
+    assert status["deposit_token"] == "USDC"
+    assert status["deposit_amount"] == "1000"
+    assert status["vault_shares"] == "998.12"
+    assert status["current_yield_apr"] == "0.0543"
+    assert status["deposited_usd"] == "1000.00"
+    _assert_json_serializable(status)
+
+
+def test_get_status_perps_exposes_direction_and_entry() -> None:
+    from decimal import Decimal
+
+    cls, ns = _scaffold_and_get_class(StrategyTemplate.PERPS)
+    PerpsState = ns["PerpsState"]
+
+    inst = _bare_instance(cls)
+    inst._position_state = PerpsState.OPEN
+    inst.direction = "LONG"
+    inst._position_direction = "LONG"
+    inst._is_long = True
+    inst._position_is_long = True
+    inst.perp_market = "ETH/USD"
+    inst.collateral_token = "USDC"
+    inst.position_size_usd = Decimal("1000")
+    inst._entry_price = Decimal("2000")
+    inst.leverage = Decimal("5")
+    inst._last_position_snapshot = {
+        "pnl_usd": Decimal("12.34"),
+        "liq_price": Decimal("1600"),
+    }
+
+    status = inst.get_status()
+    _assert_base_status_shape(status)
+    assert status["state"] == "open"
+    assert status["direction"] == "LONG"
+    assert status["perp_market"] == "ETH/USD"
+    assert status["collateral_token"] == "USDC"
+    assert status["position_size_usd"] == "1000"
+    assert status["entry_price"] == "2000"
+    assert status["leverage"] == "5"
+    assert status["pnl_usd"] == "12.34"
+    assert status["liq_price"] == "1600"
+    _assert_json_serializable(status)
+
+
+def test_get_status_perps_idle_state_has_none_entry_price() -> None:
+    from decimal import Decimal
+
+    cls, ns = _scaffold_and_get_class(StrategyTemplate.PERPS)
+    PerpsState = ns["PerpsState"]
+
+    inst = _bare_instance(cls)
+    inst._position_state = PerpsState.IDLE
+    inst.direction = "SHORT"
+    inst._position_direction = None
+    inst._is_long = False
+    inst._position_is_long = None
+    inst.perp_market = "ETH/USD"
+    inst.collateral_token = "USDC"
+    inst.position_size_usd = Decimal("500")
+    inst._entry_price = None
+    inst.leverage = Decimal("3")
+
+    status = inst.get_status()
+    assert status["state"] == "idle"
+    assert status["direction"] == "SHORT"  # Falls back to self.direction
+    assert status["entry_price"] is None
+    assert status["pnl_usd"] is None
+    assert status["liq_price"] is None
+
+
+def test_get_status_staking_exposes_staked_amount_and_rewards() -> None:
+    from decimal import Decimal
+
+    cls, ns = _scaffold_and_get_class(StrategyTemplate.STAKING, chain=SupportedChain.ETHEREUM)
+    StakingState = ns["StakingState"]
+
+    inst = _bare_instance(cls)
+    inst._chain = "ethereum"
+    inst._stake_state = StakingState.STAKED
+    inst.stake_token = "ETH"
+    inst.staking_protocol = "lido"
+    inst._staked_amount = Decimal("1.5")
+    # Exercise the _safe helper's datetime branch: pass a real datetime for
+    # unbonding_end_ts (the pre-audit version pre-stringified it, which never
+    # hit the isoformat path and would have silently broken any strategy that
+    # passed a real datetime).
+    from datetime import UTC as _UTC, datetime as _dt
+
+    inst._last_position_snapshot = {
+        "rewards_usd": Decimal("3.21"),
+        "unbonding_end_ts": _dt(2026, 5, 1, 0, 0, 0, tzinfo=_UTC),
+    }
+
+    status = inst.get_status()
+    _assert_base_status_shape(status, expected_chain="ethereum")
+    assert status["state"] == "staked"
+    assert status["stake_token"] == "ETH"
+    assert status["staking_protocol"] == "lido"
+    assert status["staked_amount"] == "1.5"
+    assert status["rewards_usd"] == "3.21"
+    assert status["unbonding_end_ts"] == "2026-05-01T00:00:00+00:00"
+    _assert_json_serializable(status)
+
+
+def test_get_status_ta_swap_exposes_signal_state() -> None:
+    cls, _ = _scaffold_and_get_class(StrategyTemplate.TA_SWAP)
+
+    inst = _bare_instance(cls)
+    inst._holding_base = True
+    inst.base_token = "WETH"
+    inst.quote_token = "USDC"
+    inst._indicator = "rsi"
+    # Exercise the _safe helper's Enum branch for last_signal: pass a real
+    # Enum member so the generated get_status() has to normalise it via
+    # ``getattr(v, 'value', str(v))``.
+    from datetime import UTC as _UTC, datetime as _dt
+    from enum import Enum as _Enum
+
+    class _Signal(_Enum):
+        BUY = "buy"
+
+    inst._last_position_snapshot = {
+        "last_signal": _Signal.BUY,
+        "last_trade_ts": _dt(2026, 4, 19, 12, 0, 0, tzinfo=_UTC),
+    }
+
+    status = inst.get_status()
+    _assert_base_status_shape(status)
+    assert status["state"] == "holding_base"
+    assert status["holding_base"] is True
+    assert status["base_token"] == "WETH"
+    assert status["quote_token"] == "USDC"
+    assert status["indicator"] == "rsi"
+    assert status["last_signal"] == "buy"
+    assert status["last_trade_ts"] == "2026-04-19T12:00:00+00:00"
+    _assert_json_serializable(status)
+
+
+def test_get_status_ta_swap_holding_quote_state() -> None:
+    """When not holding base, ``state`` flips to 'holding_quote'."""
+    cls, _ = _scaffold_and_get_class(StrategyTemplate.TA_SWAP)
+
+    inst = _bare_instance(cls)
+    inst._holding_base = False
+    inst.base_token = "WETH"
+    inst.quote_token = "USDC"
+    inst._indicator = "bollinger"
+
+    status = inst.get_status()
+    assert status["state"] == "holding_quote"
+    assert status["holding_base"] is False
+
+
+def test_get_status_dynamic_lp_exposes_position_and_tick_range() -> None:
+    from decimal import Decimal
+
+    cls, _ = _scaffold_and_get_class(StrategyTemplate.DYNAMIC_LP)
+
+    inst = _bare_instance(cls)
+    inst._position_id = "12345"
+    inst._range_lower = Decimal("1900")
+    inst._range_upper = Decimal("2100")
+    inst.pool = "WETH/USDC/3000"
+    inst._last_position_snapshot = {
+        "in_range": True,
+        "fees_earned_usd": Decimal("5.55"),
+    }
+
+    status = inst.get_status()
+    _assert_base_status_shape(status)
+    assert status["state"] == "open"
+    assert status["position_id"] == "12345"
+    assert status["tick_range"] == ["1900", "2100"]
+    assert status["pool"] == "WETH/USDC/3000"
+    assert status["in_range"] is True
+    assert status["fees_earned_usd"] == "5.55"
+    _assert_json_serializable(status)
+
+
+def test_get_status_dynamic_lp_no_position_returns_idle() -> None:
+    cls, _ = _scaffold_and_get_class(StrategyTemplate.DYNAMIC_LP)
+
+    inst = _bare_instance(cls)
+    inst._position_id = None
+    inst._range_lower = None
+    inst._range_upper = None
+    inst.pool = "WETH/USDC/3000"
+
+    status = inst.get_status()
+    assert status["state"] == "idle"
+    assert status["position_id"] is None
+    assert status["tick_range"] is None
+    assert status["in_range"] is None
+    assert status["fees_earned_usd"] is None
+
+
+def test_get_status_multi_step_exposes_position_and_tick_range() -> None:
+    from decimal import Decimal
+
+    cls, _ = _scaffold_and_get_class(StrategyTemplate.MULTI_STEP)
+
+    inst = _bare_instance(cls)
+    inst._position_id = "77"
+    inst._range_lower = Decimal("1800")
+    inst._range_upper = Decimal("2200")
+    inst.pool = "WETH/USDC/3000"
+
+    status = inst.get_status()
+    _assert_base_status_shape(status)
+    assert status["state"] == "open"
+    assert status["position_id"] == "77"
+    assert status["tick_range"] == ["1800", "2200"]
+    assert status["pool"] == "WETH/USDC/3000"
+    _assert_json_serializable(status)
+
+
+def test_get_status_copy_trader_exposes_open_trades_count() -> None:
+    cls, _ = _scaffold_and_get_class(StrategyTemplate.COPY_TRADER)
+
+    inst = _bare_instance(cls)
+    inst._open_trades = [{"intent_type": "SWAP"}, {"intent_type": "LP_OPEN"}]
+    inst.action_types = ["SWAP", "LP_OPEN"]
+
+    status = inst.get_status()
+    _assert_base_status_shape(status)
+    assert status["open_trades_count"] == 2
+    assert status["action_types"] == ["SWAP", "LP_OPEN"]
+    _assert_json_serializable(status)
+
+
+# ---------------------------------------------------------------------------
+# Cross-template invariants
+# ---------------------------------------------------------------------------
+
+
+# Templates whose init requires heavier wiring (gateway/services) for a full
+# ``__init__``; we always bypass ``__init__`` via ``_bare_instance`` here, so
+# every template in this list works.
+_ALL_TEMPLATES_FOR_STATUS = list(StrategyTemplate)
+
+
+@pytest.mark.parametrize(
+    "template", _ALL_TEMPLATES_FOR_STATUS, ids=lambda t: t.value
+)
+def test_get_status_always_returns_canonical_trio(template: StrategyTemplate) -> None:
+    """Every template must keep the canonical ``{strategy, chain, wallet}`` trio."""
+    # Staking template only supports Ethereum; every other template works on Arbitrum.
+    chain = SupportedChain.ETHEREUM if template == StrategyTemplate.STAKING else SupportedChain.ARBITRUM
+    expected_chain = "ethereum" if template == StrategyTemplate.STAKING else "arbitrum"
+    cls, _ = _scaffold_and_get_class(template, chain=chain)
+    inst = _bare_instance(cls)
+    inst._chain = expected_chain
+    # Seed the minimum attributes that get_status reads, regardless of template.
+    _seed_minimum_status_attrs(inst, template)
+
+    status = inst.get_status()
+    assert isinstance(status, dict)
+    assert status["strategy"] == "status_check"
+    assert status["chain"] == expected_chain
+    assert status["wallet"] is not None
+
+
+@pytest.mark.parametrize(
+    "template", _ALL_TEMPLATES_FOR_STATUS, ids=lambda t: t.value
+)
+def test_get_status_is_json_serializable(template: StrategyTemplate) -> None:
+    """Every template's get_status() output must round-trip through json.dumps."""
+    import json
+
+    chain = SupportedChain.ETHEREUM if template == StrategyTemplate.STAKING else SupportedChain.ARBITRUM
+    cls, _ = _scaffold_and_get_class(template, chain=chain)
+    inst = _bare_instance(cls)
+    _seed_minimum_status_attrs(inst, template)
+    status = inst.get_status()
+
+    # No custom encoder: the generator must produce JSON-safe values out of the box.
+    json.dumps(status)
+
+
+def _seed_minimum_status_attrs(inst, template: StrategyTemplate) -> None:
+    """Set the minimum instance attributes that each template's get_status() reads.
+
+    We bypass ``__init__`` in these tests so we must mirror the subset of
+    attributes assigned by ``_get_template_init_params`` that the emitted
+    ``get_status()`` reads.
+    """
+    from decimal import Decimal
+
+    if template == StrategyTemplate.LENDING_LOOP:
+        inst._loop_state = "idle"
+        inst._loop_count = 0
+        inst._current_leverage = Decimal("1.0")
+        inst.target_leverage = Decimal("2.0")
+        inst.collateral_token = "WETH"
+        inst.borrow_token = "USDC"
+    elif template == StrategyTemplate.BASIS_TRADE:
+        inst._trade_state = "idle"
+        inst.base_token = "WETH"
+        inst.quote_token = "USDC"
+        inst.perp_market = "ETH/USD"
+        inst.spot_size_usd = Decimal("10000")
+        inst.hedge_ratio = Decimal("1.0")
+    elif template == StrategyTemplate.VAULT_YIELD:
+        inst._state = "idle"
+        inst.vault_address = "0x0000000000000000000000000000000000000000"
+        inst.deposit_token = "USDC"
+        inst.deposit_amount = Decimal("1000")
+    elif template == StrategyTemplate.PERPS:
+        inst._position_state = "idle"
+        inst.direction = "LONG"
+        inst._position_direction = None
+        inst.perp_market = "ETH/USD"
+        inst.collateral_token = "USDC"
+        inst.position_size_usd = Decimal("1000")
+        inst._entry_price = None
+        inst.leverage = Decimal("5")
+    elif template == StrategyTemplate.STAKING:
+        inst._stake_state = "idle"
+        inst.stake_token = "ETH"
+        inst.staking_protocol = "lido"
+        inst._staked_amount = None
+    elif template == StrategyTemplate.TA_SWAP:
+        inst._holding_base = False
+        inst.base_token = "WETH"
+        inst.quote_token = "USDC"
+        inst._indicator = "rsi"
+    elif template in (StrategyTemplate.DYNAMIC_LP, StrategyTemplate.MULTI_STEP):
+        inst._position_id = None
+        inst._range_lower = None
+        inst._range_upper = None
+        inst.pool = "WETH/USDC/3000"
+    elif template == StrategyTemplate.COPY_TRADER:
+        inst._open_trades = []
+        inst.action_types = []
+    # BLANK needs nothing.
