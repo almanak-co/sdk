@@ -166,8 +166,15 @@ class TestAsterPerpsKeeperSettlement:
         )
         assert omt.user.lower() == funded_wallet.lower()
         assert omt.is_long is True
-        assert omt.margin == margin_wei, (
-            f"Settled margin {omt.margin} != deposited {margin_wei}"
+        # Aster deducts openFee + executionFee from the deposited amount at
+        # settlement: OpenMarketTrade.margin is the post-fee value credited to
+        # the position, not the raw amount transferred by the trader. The
+        # wallet-level balance-delta check below still uses margin_wei because
+        # the trader is only debited the pre-fee amount.
+        deposited = omt.margin + omt.open_fee + omt.execution_fee
+        assert deposited == margin_wei, (
+            f"Settled margin+fees {omt.margin}+{omt.open_fee}+{omt.execution_fee}"
+            f"={deposited} != deposited {margin_wei}"
         )
         assert omt.qty > 0
         assert omt.entry_price > 0

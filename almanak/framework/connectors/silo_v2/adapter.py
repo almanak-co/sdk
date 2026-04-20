@@ -466,7 +466,13 @@ class SiloV2Adapter:
                 "data": calldata,
                 "value": 0,
             },
-            gas_estimate=350_000,
+            # Observed on Avalanche WAVAX/USDC: borrow() uses ~365k gas on a cold
+            # direct call but can climb to ~417k when re-priced against interest
+            # accrual that lands on a later block than eth_estimateGas snapshotted.
+            # The 10% avalanche buffer on top of a 372k estimate (409k) was not
+            # enough and caused intermittent OOG reverts with empty revert data.
+            # 600k leaves headroom without being wasteful.
+            gas_estimate=600_000,
             description=f"Borrow {borrow_amount} {borrow_asset} from Silo V2 ({market.market_name})",
         )
 

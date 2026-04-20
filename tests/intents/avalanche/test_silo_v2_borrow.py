@@ -47,10 +47,24 @@ SILO_V2_USDC_SILO = "0xfA5f7d5BcD70dC2F031eE906fc692a9e19584CB0"  # USDC vault (
 
 # Skip reason for borrow/repay tests that require USDC liquidity
 SKIP_NO_LIQUIDITY = (
-    "Silo V2 WAVAX/USDC market has zero USDC deposits at fork block — "
+    "Silo V2 WAVAX/USDC market has insufficient borrowable USDC at fork block — "
     "borrow tests require USDC liquidity from other depositors. "
     "Ticket: VIB-2643"
 )
+
+
+def _silo_borrowable_liquidity(web3: Web3, silo_address: str) -> int:
+    """Return the borrowable underlying available on a Silo V2 vault.
+
+    totalAssets() is misleading here — it sums Collateral-type (borrowable)
+    AND Protected-type (non-borrowable, guaranteed-withdrawal) deposits, so a
+    silo with only Protected deposits still reports totalAssets > 0 but
+    reverts on borrow. Silo V2's getLiquidity() returns just the amount
+    currently available to borrow, which is what the skip guard needs.
+    """
+    selector = Web3.keccak(text="getLiquidity()")[:4]
+    raw = web3.eth.call({"to": silo_address, "data": "0x" + selector.hex()})
+    return int.from_bytes(raw, "big") if raw else 0
 
 
 # =============================================================================
@@ -94,18 +108,19 @@ class TestSiloV2BorrowIntent:
         5. Parse receipt for Borrow event
         6. Verify USDC balance increased by exact borrow amount
         """
-        # Runtime liquidity check — skip if no USDC deposited in the silo
-        usdc_balance = get_token_balance(web3, SILO_V2_USDC_SILO, SILO_V2_USDC_SILO)
-        total_assets = web3.eth.call({"to": SILO_V2_USDC_SILO, "data": "0x01e1d114"})  # totalAssets()
-        if int.from_bytes(total_assets, "big") == 0:
-            pytest.skip(SKIP_NO_LIQUIDITY)
-
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc = tokens["USDC"]
         usdc_decimals = get_token_decimals(web3, usdc)
 
         supply_amount = Decimal("5")  # 5 WAVAX as collateral
         borrow_amount = Decimal("1")  # 1 USDC (very low LTV, well under 30%)
+
+        # Skip if the silo doesn't have enough borrowable USDC for this test —
+        # getLiquidity() excludes Protected (non-borrowable) deposits, unlike
+        # totalAssets().
+        borrow_amount_wei = int(borrow_amount * Decimal(10**usdc_decimals))
+        if _silo_borrowable_liquidity(web3, SILO_V2_USDC_SILO) < borrow_amount_wei:
+            pytest.skip(SKIP_NO_LIQUIDITY)
 
         print(f"\n{'='*80}")
         print(f"Test: Supply {supply_amount} WAVAX, then Borrow {borrow_amount} USDC from Silo V2")
@@ -223,14 +238,15 @@ class TestSiloV2BorrowIntent:
         4. Parse receipt for Repay event
         5. Verify USDC balance decreased by exact repay amount
         """
-        # Runtime liquidity check — skip if no USDC deposited in the silo
-        total_assets = web3.eth.call({"to": SILO_V2_USDC_SILO, "data": "0x01e1d114"})  # totalAssets()
-        if int.from_bytes(total_assets, "big") == 0:
-            pytest.skip(SKIP_NO_LIQUIDITY)
-
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc = tokens["USDC"]
         usdc_decimals = get_token_decimals(web3, usdc)
+
+        # Skip if the silo doesn't have enough borrowable USDC for the 1 USDC
+        # setup-borrow required by this repay test.
+        setup_borrow_wei = int(Decimal("1") * Decimal(10**usdc_decimals))
+        if _silo_borrowable_liquidity(web3, SILO_V2_USDC_SILO) < setup_borrow_wei:
+            pytest.skip(SKIP_NO_LIQUIDITY)
 
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
