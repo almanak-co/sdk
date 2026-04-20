@@ -38,6 +38,7 @@ from almanak.framework.cli.status import (
 from almanak.framework.cli.status import (
     strategy_status as framework_status_cmd,
 )
+from almanak.framework.cli.strat_pnl import strat_pnl as framework_strat_pnl_cmd
 from almanak.framework.cli.support_matrix import support_matrix as framework_support_matrix_cmd
 from almanak.framework.cli.teardown import teardown as framework_teardown_group
 
@@ -172,6 +173,7 @@ strat.add_command(framework_status_cmd, name="status")
 strat.add_command(framework_logs_cmd, name="logs")
 strat.add_command(framework_pause_cmd, name="pause")
 strat.add_command(framework_resume_cmd, name="resume")
+strat.add_command(framework_strat_pnl_cmd, name="pnl")
 
 
 def _load_cli_config(path: str) -> dict:
