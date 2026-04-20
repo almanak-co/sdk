@@ -220,7 +220,9 @@ class IntentExecutionService:
         price_map: dict[str, str] = {}
         for symbol in symbols:
             try:
-                resp = self._client.market.GetPrice(gateway_pb2.PriceRequest(token=symbol, quote="USD"))
+                resp = self._client.market.GetPrice(
+                    gateway_pb2.PriceRequest(token=symbol, quote="USD", chain=self._chain or "")
+                )
                 price_val = float(resp.price)
                 if price_val > 0:
                     price_map[symbol] = str(resp.price)

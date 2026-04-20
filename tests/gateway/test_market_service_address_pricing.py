@@ -11,6 +11,7 @@ This proves the full "resolve unknown token from address -> price it" path
 without relying on any hardcoded entry for the test token (cbBTC on Base).
 """
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -120,6 +121,73 @@ async def test_getprice_resolves_cbbtc_from_address_without_hardcoded_entry():
     assert "coingecko" in list(response.sources_ok)
     # The on-chain lookup must have been called exactly once, on Base.
     fake_lookup.lookup.assert_awaited_once_with("base", CBBTC_ADDRESS)
+
+
+@pytest.mark.asyncio
+async def test_getprice_forwards_resolved_token_with_chain_to_aggregator():
+    """Resolved address metadata must reach the aggregator with chain context.
+
+    This is the contract the original bug violated: when the caller provides
+    an address plus chain hint, ``GetPrice`` must forward a ``ResolvedToken``
+    carrying that chain so downstream price sources can use address endpoints
+    instead of symbol lookup.
+    """
+    settings = MagicMock()
+    settings.chains = ["base"]
+    settings.network = "mainnet"
+    settings.coingecko_api_key = ""
+    settings.enable_manual_price_overrides = False
+
+    servicer = MarketServiceServicer(settings)
+
+    fake_metadata = TokenMetadata(
+        symbol="cbBTC",
+        name="Coinbase Wrapped BTC",
+        decimals=8,
+        address=CBBTC_ADDRESS,
+        is_native=False,
+    )
+    fake_lookup = MagicMock()
+    fake_lookup.lookup = AsyncMock(return_value=fake_metadata)
+
+    async def fake_get_onchain_lookup(chain: str):
+        return fake_lookup
+
+    await servicer._ensure_initialized()
+
+    captured: dict[str, object] = {}
+
+    async def fake_get_aggregated_price(token: str, quote: str, *, resolved_token=None):
+        captured["token"] = token
+        captured["quote"] = quote
+        captured["resolved_token"] = resolved_token
+
+        class _Result:
+            price = Decimal("65000")
+            source = "aggregated"
+            confidence = 1.0
+            stale = False
+            timestamp = datetime.now(UTC)
+
+        return _Result()
+
+    servicer._price_aggregator.get_aggregated_price = AsyncMock(side_effect=fake_get_aggregated_price)
+    servicer._price_aggregator.get_last_details = MagicMock(return_value={})
+
+    with patch.object(servicer, "_get_onchain_lookup", side_effect=fake_get_onchain_lookup):
+        request = gateway_pb2.PriceRequest(token=CBBTC_ADDRESS, quote="USD", chain="base")
+        context = MagicMock()
+        context.set_code = MagicMock()
+        context.set_details = MagicMock()
+
+        response = await servicer.GetPrice(request, context)
+
+    assert Decimal(response.price) == Decimal("65000")
+    resolved = captured["resolved_token"]
+    assert isinstance(resolved, ResolvedToken)
+    assert resolved.address.lower() == CBBTC_ADDRESS.lower()
+    assert resolved.chain.value.lower() == "base"
+    assert resolved.symbol == "cbBTC"
 
 
 @pytest.mark.asyncio

@@ -177,7 +177,7 @@ def create_sync_stochastic_func(
 
 def create_sync_atr_func(
     atr_calculator: "ATRCalculator",
-    price_oracle: Callable[[str, str], Decimal],
+    price_oracle: Callable[..., Decimal],
 ) -> Callable[..., "ATRData"]:
     """Create a sync callable wrapper for ATR calculator.
 
@@ -217,7 +217,7 @@ def create_sync_atr_func(
 
 def create_sync_sma_func(
     ma_calculator: "MovingAverageCalculator",
-    price_oracle: Callable[[str, str], Decimal],
+    price_oracle: Callable[..., Decimal],
 ) -> Callable[..., "MAData"]:
     """Create a sync callable wrapper for SMA calculator.
 
@@ -255,7 +255,7 @@ def create_sync_sma_func(
 
 def create_sync_ema_func(
     ma_calculator: "MovingAverageCalculator",
-    price_oracle: Callable[[str, str], Decimal],
+    price_oracle: Callable[..., Decimal],
 ) -> Callable[..., "MAData"]:
     """Create a sync callable wrapper for EMA calculator.
 

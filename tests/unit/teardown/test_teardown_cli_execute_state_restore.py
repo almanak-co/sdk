@@ -215,7 +215,7 @@ def test_inject_balance_provider_sets_sync_callable(monkeypatch: pytest.MonkeyPa
     )
     monkeypatch.setattr(
         "almanak.framework.data.price.gateway_oracle.GatewayPriceOracle",
-        lambda _client: FakePriceOracle(),
+        lambda _client, default_chain=None: FakePriceOracle(),
     )
 
     teardown_cli_module._inject_balance_provider(

@@ -236,7 +236,9 @@ class ToolExecutor:
         try:
             from almanak.gateway.proto import gateway_pb2
 
-            resp = self._client.market.GetPrice(gateway_pb2.PriceRequest(token=token, quote="USD"))
+            resp = self._client.market.GetPrice(
+                gateway_pb2.PriceRequest(token=token, quote="USD", chain=self._default_chain)
+            )
             price = Decimal(str(resp.price))
             return price if price > 0 else None
         except Exception:  # noqa: BLE001
@@ -580,7 +582,13 @@ class ToolExecutor:
 
         if tool_name == "get_price":
             try:
-                resp = self._client.market.GetPrice(gateway_pb2.PriceRequest(token=args["token"], quote="USD"))
+                resp = self._client.market.GetPrice(
+                    gateway_pb2.PriceRequest(
+                        token=args["token"],
+                        quote="USD",
+                        chain=args.get("chain", self._default_chain),
+                    )
+                )
                 return ToolResponse(
                     status="success",
                     data={
@@ -1562,7 +1570,7 @@ class ToolExecutor:
                 pass
 
             try:
-                resp = self._client.market.GetPrice(gateway_pb2.PriceRequest(token=token, quote="USD"))
+                resp = self._client.market.GetPrice(gateway_pb2.PriceRequest(token=token, quote="USD", chain=chain))
                 price = Decimal(str(resp.price))
                 total += raw_amount * price if price > 0 else raw_amount
             except Exception:  # noqa: BLE001 - gateway may raise any gRPC error
@@ -2073,7 +2081,9 @@ class ToolExecutor:
                     continue
                 try:
                     resolved = resolver.resolve(token_addr, chain)
-                    price_resp = self._client.market.GetPrice(gateway_pb2.PriceRequest(token=token_addr, quote="USD"))
+                    price_resp = self._client.market.GetPrice(
+                        gateway_pb2.PriceRequest(token=token_addr, quote="USD", chain=chain)
+                    )
                     token_price = Decimal(str(price_resp.price))
                     if token_price > 0 and resolved:
                         fee_usd = Decimal(tokens_owed_raw) / Decimal(10**resolved.decimals) * token_price
@@ -2612,7 +2622,9 @@ class ToolExecutor:
 
         # Get ETH price for USD conversion
         try:
-            eth_price_resp = self._client.market.GetPrice(gateway_pb2.PriceRequest(token="ETH", quote="USD"))
+            eth_price_resp = self._client.market.GetPrice(
+                gateway_pb2.PriceRequest(token="ETH", quote="USD", chain=args.get("chain", self._default_chain))
+            )
             eth_price = float(eth_price_resp.price)
         except Exception:  # noqa: BLE001 - gateway may raise any gRPC error
             eth_price = 2500.0  # fallback
@@ -3420,7 +3432,7 @@ class ToolExecutor:
                             continue
                         try:
                             price_resp = self._client.market.GetPrice(
-                                gateway_pb2.PriceRequest(token=token_addr, quote="USD")
+                                gateway_pb2.PriceRequest(token=token_addr, quote="USD", chain=chain)
                             )
                             token_price = Decimal(str(price_resp.price))
                             if token_price > 0:
@@ -3436,7 +3448,7 @@ class ToolExecutor:
                     if lp_usd_value > 0:
                         try:
                             underlying_price_resp = self._client.market.GetPrice(
-                                gateway_pb2.PriceRequest(token=underlying_token, quote="USD")
+                                gateway_pb2.PriceRequest(token=underlying_token, quote="USD", chain=chain)
                             )
                             underlying_price = Decimal(str(underlying_price_resp.price))
                             if underlying_price > 0:

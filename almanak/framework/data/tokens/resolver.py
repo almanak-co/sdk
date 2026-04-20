@@ -1853,7 +1853,34 @@ def get_token_resolver(
     )
 
 
+def create_token_resolver(
+    gateway_client: Any | None = None,
+    cache_file: str | None = None,
+    gateway_channel: "grpc.Channel | None" = None,
+) -> TokenResolver:
+    """Create a dedicated TokenResolver instance.
+
+    Unlike :func:`get_token_resolver`, this does not touch the process-wide
+    singleton. Use it for short-lived CLI commands or isolated runtime scopes
+    that need a gateway channel without mutating global resolver state.
+
+    Args:
+        gateway_client: DEPRECATED - Use gateway_channel instead.
+        cache_file: Optional path to cache file. Defaults to the standard cache.
+        gateway_channel: Optional gRPC channel for dynamic/on-chain lookups.
+
+    Returns:
+        A fresh ``TokenResolver`` instance.
+    """
+    return TokenResolver(
+        gateway_client=gateway_client,
+        cache_file=cache_file,
+        gateway_channel=gateway_channel,
+    )
+
+
 __all__ = [
     "TokenResolver",
     "get_token_resolver",
+    "create_token_resolver",
 ]

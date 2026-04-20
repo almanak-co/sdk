@@ -77,7 +77,7 @@ from .exceptions import (
     TokenResolutionTimeoutError,
 )
 from .models import BridgeType, ChainToken, ChainTokenConfig, ResolvedToken, Token
-from .resolver import TokenResolver, get_token_resolver
+from .resolver import TokenResolver, create_token_resolver, get_token_resolver
 from .utils import denormalize, normalize
 
 __all__ = [
@@ -86,6 +86,7 @@ __all__ = [
     # =========================================================================
     # Token Resolver - main entry point
     "get_token_resolver",
+    "create_token_resolver",
     "TokenResolver",
     # Resolved token model
     "ResolvedToken",

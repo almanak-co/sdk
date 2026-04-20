@@ -749,7 +749,7 @@ class PriceOracle(Protocol):
                 self._health_metrics: dict[str, SourceHealthMetrics] = {}
 
             async def get_aggregated_price(
-                self, token: str, quote: str = "USD"
+                self, token: str, quote: str = "USD", *, chain: str | None = None
             ) -> PriceResult:
                 results = []
                 errors = {}
@@ -775,12 +775,22 @@ class PriceOracle(Protocol):
                 )
     """
 
-    async def get_aggregated_price(self, token: str, quote: str = "USD") -> PriceResult:
+    async def get_aggregated_price(
+        self,
+        token: str,
+        quote: str = "USD",
+        *,
+        chain: str | None = None,
+    ) -> PriceResult:
         """Get aggregated price from multiple sources.
 
         Args:
             token: Token symbol to get price for
             quote: Quote currency (default "USD")
+            chain: Optional chain context for chain-specific or address-based
+                pricing. Single-chain callers may omit this and let the
+                implementation use its default chain, but multi-chain callers
+                should pass it explicitly.
 
         Returns:
             PriceResult with aggregated price and confidence

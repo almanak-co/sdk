@@ -40,6 +40,7 @@ Example:
 """
 
 import asyncio
+import inspect
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -343,6 +344,22 @@ if TYPE_CHECKING:
     from .yields.aggregator import YieldAggregator, YieldOpportunity
 
 logger = logging.getLogger(__name__)
+
+
+def _price_oracle_supports_chain_kwarg(get_aggregated_price: Any) -> bool:
+    """Return True when ``get_aggregated_price(..., chain=...)`` is supported."""
+    try:
+        parameters = inspect.signature(get_aggregated_price).parameters.values()
+    except (TypeError, ValueError):
+        return True
+
+    for parameter in parameters:
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "chain":
+            return parameter.kind != inspect.Parameter.POSITIONAL_ONLY
+
+    return False
 
 
 # =============================================================================
@@ -938,7 +955,7 @@ class MarketSnapshot:
             warnings.warn(warning_msg, UserWarning, stacklevel=2)
             logger.warning(warning_msg)
 
-    def price(self, token: str, quote: str = "USD") -> Decimal:
+    def price(self, token: str, quote: str = "USD", chain: str | None = None) -> Decimal:
         """Get the aggregated price for a token.
 
         Fetches the price from the configured PriceOracle, which may
@@ -952,6 +969,7 @@ class MarketSnapshot:
         Args:
             token: Token symbol (e.g., "WETH", "ETH", "USDC")
             quote: Quote currency (default "USD")
+            chain: Optional chain override. Defaults to this snapshot's chain.
 
         Returns:
             Price as a Decimal for precision
@@ -968,7 +986,8 @@ class MarketSnapshot:
             usdc_price = snapshot.price("USDC")
             # Returns: Decimal("1.00")
         """
-        cache_key = f"{token}/{quote}"
+        requested_chain = chain or self._chain
+        cache_key = f"{token}/{quote}@{requested_chain}"
 
         # Return cached value if available
         if cache_key in self._price_cache:
@@ -984,7 +1003,13 @@ class MarketSnapshot:
             raise ValueError("No price oracle configured for MarketSnapshot")
 
         try:
-            result: PriceResult = self._run_async(self._price_oracle.get_aggregated_price(token, quote))
+            get_aggregated_price = self._price_oracle.get_aggregated_price
+            coro = (
+                get_aggregated_price(token, quote, chain=requested_chain)
+                if _price_oracle_supports_chain_kwarg(get_aggregated_price)
+                else get_aggregated_price(token, quote)
+            )
+            result = self._run_async(coro)
             market_price = result.price
 
             # Apply stablecoin config logic for hybrid mode
@@ -2410,11 +2435,12 @@ class MarketSnapshot:
             return {}
 
         # Check cache first for all tokens
+        requested_chain = self._chain
         results: dict[str, Decimal] = {}
         tokens_to_fetch: list[str] = []
 
         for token in tokens:
-            cache_key = f"{token}/{quote}"
+            cache_key = f"{token}/{quote}@{requested_chain}"
             if cache_key in self._price_cache:
                 results[token] = self._price_cache[cache_key]
             else:
@@ -2425,12 +2451,17 @@ class MarketSnapshot:
             return results
 
         # Fetch remaining tokens in parallel
+        get_aggregated_price = self._price_oracle.get_aggregated_price
+        supports_chain_kwarg = _price_oracle_supports_chain_kwarg(get_aggregated_price)
+
         async def fetch_prices() -> dict[str, Decimal]:
             async def fetch_single(token: str) -> tuple[str, Decimal | None, str | None]:
                 """Fetch a single token price, returning (token, price, error)."""
                 try:
-                    result: PriceResult = await self._price_oracle.get_aggregated_price(  # type: ignore[union-attr]
-                        token, quote
+                    result: PriceResult = await (
+                        get_aggregated_price(token, quote, chain=requested_chain)
+                        if supports_chain_kwarg
+                        else get_aggregated_price(token, quote)
                     )
                     return (token, result.price, None)
                 except AllDataSourcesFailed as e:
@@ -2453,7 +2484,7 @@ class MarketSnapshot:
                 if price is not None:
                     fetched[token] = price
                     # Update cache
-                    cache_key = f"{token}/{quote}"
+                    cache_key = f"{token}/{quote}@{requested_chain}"
                     self._price_cache[cache_key] = price
                 else:
                     logger.warning(

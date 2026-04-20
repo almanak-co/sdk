@@ -28,6 +28,7 @@ Example:
 
 import asyncio
 import concurrent.futures
+import inspect
 import logging
 from abc import abstractmethod
 from collections.abc import Callable
@@ -121,6 +122,25 @@ from .strategy_models import (  # noqa: F401
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _price_oracle_supports_chain_arg(price_oracle: PriceOracle) -> bool:
+    """Return True when the callable accepts a third ``chain`` argument."""
+    try:
+        parameters = inspect.signature(price_oracle).parameters.values()
+    except (TypeError, ValueError):
+        return True
+
+    for parameter in parameters:
+        if parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            return True
+
+    positional_params = [
+        parameter
+        for parameter in parameters
+        if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return len(positional_params) >= 3
 
 
 # =============================================================================
@@ -303,12 +323,13 @@ class MarketSnapshot:
         """Get the current fork block number (paper trading only)."""
         return self._fork_block
 
-    def price(self, token: str, quote: str = "USD") -> Decimal:
+    def price(self, token: str, quote: str = "USD", chain: str | None = None) -> Decimal:
         """Get the price of a token.
 
         Args:
             token: Token symbol (e.g., "ETH", "WBTC")
             quote: Quote currency (default "USD")
+            chain: Optional chain override. Defaults to this snapshot's chain.
 
         Returns:
             Token price in quote currency
@@ -316,10 +337,11 @@ class MarketSnapshot:
         Raises:
             ValueError: If price cannot be determined
         """
-        cache_key = f"{token}/{quote}"
+        requested_chain = chain or self._chain
+        cache_key = f"{token}/{quote}@{requested_chain}"
 
         # Check pre-populated prices first
-        if token in self._prices:
+        if token in self._prices and (chain is None or requested_chain == self._chain):
             return self._prices[token]
 
         # Check cache
@@ -329,31 +351,37 @@ class MarketSnapshot:
         # Use oracle if available
         if self._price_oracle:
             try:
-                price_value = self._price_oracle(token, quote)
+                price_value = (
+                    self._price_oracle(token, quote, requested_chain)
+                    if _price_oracle_supports_chain_arg(self._price_oracle)
+                    else self._price_oracle(token, quote)
+                )
                 self._price_cache[cache_key] = PriceData(price=price_value)
                 return price_value
             except Exception as e:
                 logger.warning(f"Price oracle failed for {cache_key}: {e}")
 
-        raise ValueError(f"Cannot determine price for {token}/{quote}")
+        raise ValueError(f"Cannot determine price for {token}/{quote} on {requested_chain}")
 
-    def price_data(self, token: str, quote: str = "USD") -> PriceData:
+    def price_data(self, token: str, quote: str = "USD", chain: str | None = None) -> PriceData:
         """Get full price data for a token.
 
         Args:
             token: Token symbol
             quote: Quote currency (default "USD")
+            chain: Optional chain override. Defaults to this snapshot's chain.
 
         Returns:
             PriceData with current price and historical data
         """
-        cache_key = f"{token}/{quote}"
+        requested_chain = chain or self._chain
+        cache_key = f"{token}/{quote}@{requested_chain}"
 
         if cache_key in self._price_cache:
             return self._price_cache[cache_key]
 
         # Get basic price and create PriceData
-        current_price = self.price(token, quote)
+        current_price = self.price(token, quote, chain=requested_chain)
         return self._price_cache.get(cache_key, PriceData(price=current_price))
 
     def rsi(self, token: str, period: int = 14, timeframe: str | None = None) -> RSIData:
@@ -1180,7 +1208,13 @@ class MarketSnapshot:
         """
         self._prices[token] = price_value
 
-    def set_price_data(self, token: str, price_data: PriceData, quote: str = "USD") -> None:
+    def set_price_data(
+        self,
+        token: str,
+        price_data: PriceData,
+        quote: str = "USD",
+        chain: str | None = None,
+    ) -> None:
         """Pre-populate enriched price data for a token (useful for testing).
 
         Unlike set_price() which only sets a scalar price, this sets the full
@@ -1190,8 +1224,10 @@ class MarketSnapshot:
             token: Token symbol
             price_data: PriceData with price, change_24h_pct, etc.
             quote: Quote currency (default "USD")
+            chain: Optional chain override. Defaults to this snapshot's chain.
         """
-        cache_key = f"{token}/{quote}"
+        target_chain = chain or self._chain
+        cache_key = f"{token}/{quote}@{target_chain}"
         self._price_cache[cache_key] = price_data
 
     def set_balance(self, token: str, balance_data: TokenBalance) -> None:

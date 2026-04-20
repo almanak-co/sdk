@@ -33,23 +33,39 @@ class GatewayPriceOracle(PriceOracle):
             print(f"ETH price: ${result.price}")
     """
 
-    def __init__(self, client: GatewayClient, timeout: float = 30.0):
+    def __init__(
+        self,
+        client: GatewayClient,
+        timeout: float = 30.0,
+        default_chain: str | None = None,
+    ):
         """Initialize gateway-backed price oracle.
 
         Args:
             client: Connected GatewayClient instance
             timeout: RPC timeout in seconds
+            default_chain: Optional default chain to attach to price requests.
+                Single-chain runtimes should set this so address-based token
+                pricing and dynamic resolution always carry chain context.
         """
         self._client = client
         self._timeout = timeout
+        self._default_chain = default_chain.lower() if isinstance(default_chain, str) and default_chain else None
         self._source_health: dict[str, dict] = {}
 
-    async def get_aggregated_price(self, token: str, quote: str = "USD") -> PriceResult:
+    async def get_aggregated_price(
+        self,
+        token: str,
+        quote: str = "USD",
+        *,
+        chain: str | None = None,
+    ) -> PriceResult:
         """Get aggregated price from gateway.
 
         Args:
             token: Token symbol (e.g., "ETH", "WBTC")
             quote: Quote currency (default: "USD")
+            chain: Optional explicit chain context. Overrides ``default_chain``.
 
         Returns:
             PriceResult with price, source, timestamp, confidence
@@ -64,7 +80,8 @@ class GatewayPriceOracle(PriceOracle):
         )
 
         try:
-            request = gateway_pb2.PriceRequest(token=token, quote=quote)
+            request_chain = chain.lower() if isinstance(chain, str) and chain else self._default_chain
+            request = gateway_pb2.PriceRequest(token=token, quote=quote, chain=request_chain or "")
             # Offload synchronous gRPC call to a thread to avoid blocking the event loop
             response = await asyncio.to_thread(self._client.market.GetPrice, request, timeout=self._timeout)
 
@@ -90,9 +107,10 @@ class GatewayPriceOracle(PriceOracle):
 
         except Exception as e:
             error_msg = str(e)
+            request_ref = f"{token}/{quote}" if request_chain is None else f"{token}/{quote}@{request_chain}"
 
             if "UNAVAILABLE" in error_msg or "DEADLINE_EXCEEDED" in error_msg:
-                logger.error(f"Gateway price request failed for {token}/{quote}: {error_msg}")
+                logger.error(f"Gateway price request failed for {request_ref}: {error_msg}")
                 raise DataSourceUnavailable(
                     source="gateway",
                     reason=error_msg,
@@ -103,7 +121,7 @@ class GatewayPriceOracle(PriceOracle):
             # Only downgrade to WARNING when the token is known-unpriceable (expected failure).
             # Keep ERROR for unexpected exceptions to preserve observability.
             log_fn = logger.warning if _is_known_unpriceable(token) else logger.error
-            log_fn(f"Gateway price request failed for {token}/{quote}: {error_msg}")
+            log_fn(f"Gateway price request failed for {request_ref}: {error_msg}")
             raise AllDataSourcesFailed(errors={"gateway": error_msg}) from e
 
     def get_source_health(self, source_name: str) -> dict | None:

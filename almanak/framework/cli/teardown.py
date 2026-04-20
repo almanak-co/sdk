@@ -274,7 +274,7 @@ def _inject_balance_provider(
         try:
             from ..data.price.gateway_oracle import GatewayPriceOracle
 
-            price_oracle = GatewayPriceOracle(gateway_client)
+            price_oracle = GatewayPriceOracle(gateway_client, default_chain=chain)
         except Exception as e:
             logger.debug("Could not create GatewayPriceOracle for teardown, balance injection will be skipped: %s", e)
 

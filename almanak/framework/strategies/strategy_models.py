@@ -127,8 +127,10 @@ class PriceData:
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
-# Type for price oracle function
-PriceOracle = Callable[[str, str], Decimal]
+# Type for price oracle function. Runtime supports both legacy
+# ``(token, quote)`` callables and chain-aware ``(token, quote, chain)``
+# callables, so keep the type broad enough for both.
+PriceOracle = Callable[..., Decimal]
 
 # Type for RSI provider function (accepts optional timeframe kwarg for backward compat)
 RSIProvider = Callable[..., RSIData]

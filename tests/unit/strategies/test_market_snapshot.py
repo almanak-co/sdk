@@ -61,7 +61,7 @@ class TestMarketSnapshotSetPriceData:
         # USDC should still raise ValueError since no data is set
         try:
             market.price("USDC")
-            assert False, "Should have raised ValueError"
+            raise AssertionError("Should have raised ValueError")
         except ValueError:
             pass
 
@@ -77,6 +77,54 @@ class TestMarketSnapshotSetPriceData:
         pd = market.price_data("ETH")
         assert pd.price == Decimal("3000")
         assert pd.change_24h_pct == Decimal("5.0")
+
+    def test_price_forwards_snapshot_chain_to_oracle(self):
+        """Single-chain snapshots must pass their chain to the price oracle."""
+        captured: list[tuple[str, str, str | None]] = []
+
+        def mock_price_oracle(token: str, quote: str = "USD", chain: str | None = None) -> Decimal:
+            captured.append((token, quote, chain))
+            return Decimal("1850.50")
+
+        market = MarketSnapshot(
+            chain="arbitrum",
+            wallet_address="0xtest",
+            price_oracle=mock_price_oracle,
+        )
+
+        assert market.price("ETH") == Decimal("1850.50")
+        assert captured == [("ETH", "USD", "arbitrum")]
+
+    def test_price_cache_isolated_by_chain_override(self):
+        """An explicit chain override must not reuse another chain's cached price."""
+        calls: list[str | None] = []
+        prices = {
+            "arbitrum": Decimal("3000"),
+            "base": Decimal("3100"),
+        }
+
+        def mock_price_oracle(token: str, quote: str = "USD", chain: str | None = None) -> Decimal:
+            calls.append(chain)
+            assert chain is not None
+            return prices[chain]
+
+        market = MarketSnapshot(
+            chain="arbitrum",
+            wallet_address="0xtest",
+            price_oracle=mock_price_oracle,
+        )
+
+        assert market.price("ETH") == Decimal("3000")
+        assert market.price("ETH", chain="base") == Decimal("3100")
+        assert market.price("ETH") == Decimal("3000")
+        assert calls == ["arbitrum", "base"]
+
+    def test_set_price_data_chain_override(self):
+        """set_price_data() can pre-populate a non-default chain cache entry."""
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
+        market.set_price_data("ETH", PriceData(price=Decimal("3100")), chain="base")
+
+        assert market.price("ETH", chain="base") == Decimal("3100")
 
 
 class TestMultiChainMarketSnapshotSetPriceData:
@@ -109,7 +157,7 @@ class TestMultiChainMarketSnapshotSetPriceData:
 
         try:
             market.price("ETH", chain="ethereum")
-            assert False, "Should have raised ValueError"
+            raise AssertionError("Should have raised ValueError")
         except ValueError:
             pass
 

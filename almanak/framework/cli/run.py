@@ -377,7 +377,7 @@ def resolve_strategy_chain(
 
 def create_price_oracle(
     config: LocalRuntimeConfig,
-) -> PriceOracle:
+) -> Any:
     """Create a PriceOracle from configuration.
 
     Args:
@@ -398,20 +398,38 @@ def create_price_oracle(
     return aggregator
 
 
+def _price_oracle_supports_chain_kwarg(get_aggregated_price: Any) -> bool:
+    """Return True when ``get_aggregated_price(..., chain=...)`` is supported."""
+    try:
+        parameters = inspect.signature(get_aggregated_price).parameters.values()
+    except (TypeError, ValueError):
+        return True
+
+    for parameter in parameters:
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "chain":
+            return parameter.kind != inspect.Parameter.POSITIONAL_ONLY
+
+    return False
+
+
 def create_sync_price_oracle_func(
-    price_oracle: PriceOracle,
-) -> Callable[[str, str], Decimal]:
+    price_oracle: Any,
+) -> Callable[[str, str, str | None], Decimal]:
     """Create a sync callable wrapper for an async PriceOracle.
 
     Args:
         price_oracle: Async PriceOracle implementation
 
     Returns:
-        Sync callable (token, quote) -> Decimal
+        Sync callable (token, quote, chain) -> Decimal
     """
     import asyncio
 
-    def sync_price(token: str, quote: str = "USD") -> Decimal:
+    supports_chain_kwarg = _price_oracle_supports_chain_kwarg(price_oracle.get_aggregated_price)
+
+    def sync_price(token: str, quote: str = "USD", chain: str | None = None) -> Decimal:
         """Fetch price synchronously."""
         try:
             loop = asyncio.get_running_loop()
@@ -423,9 +441,19 @@ def create_sync_price_oracle_func(
             import nest_asyncio
 
             nest_asyncio.apply()
-            result = asyncio.get_event_loop().run_until_complete(price_oracle.get_aggregated_price(token, quote))
+            coro = (
+                price_oracle.get_aggregated_price(token, quote, chain=chain)
+                if supports_chain_kwarg
+                else price_oracle.get_aggregated_price(token, quote)
+            )
+            result = asyncio.get_event_loop().run_until_complete(coro)
         else:
-            result = asyncio.run(price_oracle.get_aggregated_price(token, quote))
+            coro = (
+                price_oracle.get_aggregated_price(token, quote, chain=chain)
+                if supports_chain_kwarg
+                else price_oracle.get_aggregated_price(token, quote)
+            )
+            result = asyncio.run(coro)
 
         return result.price
 
@@ -2407,7 +2435,7 @@ def run(
                 )
 
             click.echo("  Using gateway-backed providers for multi-chain...")
-            price_oracle = GatewayPriceOracle(gateway_client)
+            price_oracle = GatewayPriceOracle(gateway_client, default_chain=strategy_chains[0])
             balance_provider = GatewayBalanceProvider(
                 client=gateway_client,
                 wallet_address=effective_wallet,
@@ -2492,7 +2520,7 @@ def run(
                 sc_effective_wallet = chain_wallets.get(runtime_config.chain, sc_effective_wallet)
 
             click.echo("  Using gateway-backed providers...")
-            price_oracle = GatewayPriceOracle(gateway_client)
+            price_oracle = GatewayPriceOracle(gateway_client, default_chain=runtime_config.chain)
             balance_provider = GatewayBalanceProvider(
                 client=gateway_client,
                 wallet_address=sc_effective_wallet,
@@ -2681,7 +2709,7 @@ def run(
 
                     def _copy_price_fn(symbol: str, chain: str) -> Decimal | None:
                         try:
-                            return sync_price(symbol, "USD")
+                            return sync_price(symbol, "USD", chain)
                         except Exception:
                             return None
 

@@ -7,6 +7,8 @@ malformed) and both ``--gateway`` / ``--no-gateway`` paths.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
@@ -174,6 +176,72 @@ class TestAxResolveGatewayUnreachable:
         assert payload["status"] == "not_found"
         assert "gateway" in payload
         assert "59999" in payload["gateway"]
+
+    def test_command_does_not_mutate_singleton_gateway_channel(
+        self, runner: CliRunner
+    ) -> None:
+        from almanak.framework.data.tokens import get_token_resolver
+
+        resolver = get_token_resolver()
+        original_channel = resolver._gateway_channel
+        sentinel_channel = MagicMock(name="sentinel_channel")
+        resolver.set_gateway_channel(sentinel_channel)
+
+        try:
+            result = runner.invoke(
+                ax_cli,
+                ["--gateway-port", "59999", "-c", "arbitrum", "resolve", "USDC"],
+            )
+            assert result.exit_code == 0, result.output
+            assert resolver._gateway_channel is sentinel_channel
+        finally:
+            resolver.set_gateway_channel(original_channel)
+
+    def test_build_resolver_wraps_gateway_channel_with_auth(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import grpc
+
+        from almanak.framework.cli.ax import _build_resolver_for_cli
+        from almanak.framework.gateway_client import _AuthClientInterceptor
+
+        raw_channel = MagicMock(name="raw_channel")
+        intercepted_channel = MagicMock(name="intercepted_channel")
+        resolver_without_channel = MagicMock(name="resolver_without_channel")
+        resolver_with_channel = MagicMock(name="resolver_with_channel")
+        created_channels: list[object | None] = []
+        intercepted: dict[str, object] = {}
+
+        def fake_create_token_resolver(*, gateway_channel=None):
+            created_channels.append(gateway_channel)
+            return resolver_with_channel if gateway_channel is not None else resolver_without_channel
+
+        def fake_intercept_channel(channel, *interceptors):
+            intercepted["channel"] = channel
+            intercepted["interceptors"] = interceptors
+            return intercepted_channel
+
+        monkeypatch.setattr(grpc, "insecure_channel", lambda target: raw_channel)
+        monkeypatch.setattr(grpc, "intercept_channel", fake_intercept_channel)
+        monkeypatch.setattr("almanak.framework.data.tokens.create_token_resolver", fake_create_token_resolver)
+
+        ctx = SimpleNamespace(
+            obj={
+                "gateway_host": "localhost",
+                "gateway_port": 59999,
+                "gateway_auth_token": "secret-token",
+            }
+        )
+
+        resolver, channel, note = _build_resolver_for_cli(ctx, use_gateway=True)
+
+        assert resolver is resolver_with_channel
+        assert channel is intercepted_channel
+        assert note == "attempted dynamic lookup via localhost:59999"
+        assert created_channels == [None, intercepted_channel]
+        assert intercepted["channel"] is raw_channel
+        assert len(intercepted["interceptors"]) == 1
+        assert isinstance(intercepted["interceptors"][0], _AuthClientInterceptor)
 
 
 class TestAxResolveMalformedInput:

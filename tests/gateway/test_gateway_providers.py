@@ -2,11 +2,11 @@
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
+from almanak.framework.gateway_client import GatewayClient
 from almanak.gateway.proto import gateway_pb2
 
 
@@ -45,6 +45,31 @@ class TestGatewayPriceOracle:
         assert result.source == "coingecko"
         assert result.confidence == 0.95
         assert result.stale is False
+
+    def test_get_aggregated_price_forwards_chain_context(self, mock_client):
+        """Explicit/default chain context must be forwarded to PriceRequest."""
+        from almanak.framework.data.price.gateway_oracle import GatewayPriceOracle
+
+        mock_response = gateway_pb2.PriceResponse(
+            price="2500.50",
+            timestamp=int(datetime.now(UTC).timestamp()),
+            source="coingecko",
+            confidence=0.95,
+            stale=False,
+        )
+        mock_client.market.GetPrice.return_value = mock_response
+
+        oracle = GatewayPriceOracle(mock_client, default_chain="base")
+
+        import asyncio
+
+        asyncio.run(oracle.get_aggregated_price("0xabc", "USD"))
+        first_request = mock_client.market.GetPrice.call_args_list[0].args[0]
+        assert first_request.chain == "base"
+
+        asyncio.run(oracle.get_aggregated_price("0xabc", "USD", chain="arbitrum"))
+        second_request = mock_client.market.GetPrice.call_args_list[1].args[0]
+        assert second_request.chain == "arbitrum"
 
     def test_get_aggregated_price_empty_response(self, mock_client):
         """get_aggregated_price raises on empty response."""
