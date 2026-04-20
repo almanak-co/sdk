@@ -564,6 +564,9 @@ class GMXv2ReceiptParser:
             "realized_pnl",
             "exit_price",
             "fees_paid",
+            # VIB-3204 — placeholder extract_protocol_fees returning None;
+            # real perp-fee extraction lives in follow-up VIB-3211.
+            "protocol_fees",
         }
     )
 
@@ -1385,6 +1388,24 @@ class GMXv2ReceiptParser:
         except Exception as e:
             logger.warning(f"Failed to extract fees paid: {e}")
             return None
+
+    # =============================================================================
+    # Protocol Fee Extraction (VIB-3204)
+    # =============================================================================
+
+    def extract_protocol_fees(self, _receipt: dict[str, Any]) -> None:
+        """Placeholder for GMX V2 perp-fee extraction (VIB-3204).
+
+        GMX V2 encodes open / close fees in ``PositionFeesInfo`` events
+        emitted by the position handler. Decoding those events (including
+        borrowing, funding, and execution-fee components) is non-trivial
+        and is deferred to a follow-up; ``extract_fees_paid`` already
+        surfaces the execution fee in wei for operator-level accounting.
+
+        Follow-up ticket: "Perps fee extraction for GMX V2 / Drift —
+        follow-up to VIB-3204".
+        """
+        return None
 
 
 # =============================================================================

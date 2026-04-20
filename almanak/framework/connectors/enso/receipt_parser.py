@@ -84,7 +84,14 @@ class EnsoReceiptParser:
         print(f"Received: {result.amount_out}")
     """
 
-    SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset({"swap_amounts"})
+    SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset(
+        {
+            "swap_amounts",
+            # VIB-3204 — placeholder extract_protocol_fees returning None;
+            # real integrator-fee extraction lives in follow-up VIB-3210.
+            "protocol_fees",
+        }
+    )
 
     def __init__(self, **kwargs: Any) -> None:
         """Initialize EnsoReceiptParser.
@@ -395,6 +402,23 @@ class EnsoReceiptParser:
             result = tx_hash.hex()
             return result if result.startswith("0x") else "0x" + result
         return str(tx_hash) if tx_hash else ""
+
+    # =============================================================================
+    # Protocol Fee Extraction (VIB-3204)
+    # =============================================================================
+
+    def extract_protocol_fees(self, _receipt: dict[str, Any]) -> None:
+        """Placeholder for Enso aggregator integrator-fee extraction (VIB-3204).
+
+        Enso surfaces its integrator fee in the quote response at
+        compile time, not in on-chain receipt events. Threading that
+        metadata through ActionBundle.metadata into the parser is
+        deferred to a follow-up.
+
+        Follow-up ticket: "Protocol fee extraction for aggregators
+        (Enso, LiFi) — follow-up to VIB-3204".
+        """
+        return None
 
 
 __all__ = ["EnsoReceiptParser", "SwapResult"]

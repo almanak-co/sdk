@@ -3,19 +3,63 @@
 Raw observables are canonical; derived attribution is versioned and recomputable.
 A bug in the formula becomes a version bump, not permanent bad data.
 
-LP v1 formula:
-    principal_deposited = value_usd at OPEN
-    principal_recovered = amount0 * price0 + amount1 * price1 at CLOSE
-    fee_pnl = fees_token0 * price0 + fees_token1 * price1
-    hodl_value = initial_amount0 * close_price0 + initial_amount1 * close_price1
-    il = principal_recovered - hodl_value  (negative = impermanent loss)
-    price_pnl = hodl_value - principal_deposited
-    net_pnl = principal_recovered + fee_pnl - principal_deposited - gas
+Version history
+---------------
 
-Perp v1 formula:
-    price_pnl = unrealized_pnl (from protocol, signed)
-    fee_pnl = -gas  (simplified: protocol fees not yet available)
-    net_pnl = price_pnl + fee_pnl
+**v1** — placeholder attribution. ``fee_pnl_usd`` was hardcoded to ``0`` for LP
+and to ``-gas`` for perps. Impermanent loss was ``0``. Adequate for schema
+plumbing but not for PnL reporting.
+
+**v2 (VIB-3205)** — real IL and fee PnL:
+
+LP v2 formula::
+
+    principal_deposited = value_usd at OPEN
+    principal_recovered = value_usd at CLOSE
+    entry_state         = attribution_json["entry_state"] at OPEN
+                          {amount0, amount1, price0, price1}
+    current_prices      = market snapshot at CLOSE
+    hodl_value          = amount0_open * price0_now + amount1_open * price1_now
+    il_usd              = principal_recovered - hodl_value
+                          (negative = LP lost vs HODL)
+    price_pnl_usd       = hodl_value - principal_deposited
+    protocol_fees_usd   = open.protocol_fees_usd + close.protocol_fees_usd
+                          (VIB-3204 ProtocolFees.total_usd on each triggering tx)
+    fee_pnl_usd         = -protocol_fees_usd  when total_usd is known
+                          None                 when both events omit the field
+    net_pnl_usd         = principal_recovered - principal_deposited
+                          + (fee_pnl_usd or 0)
+                          - total_gas
+                          # NOTE: IL is NOT added here. principal_recovered
+                          # already reflects the on-chain outcome of the LP
+                          # position (post-IL), so adding ``il_usd`` would
+                          # double-count it. ``il_usd`` is a DIAGNOSTIC
+                          # attribution field (V_lp - V_hold) that explains
+                          # part of the gap between what a HODLer would have
+                          # made and what the LP realized; it is not a
+                          # separate cashflow.
+
+Perp v2 formula::
+
+    price_pnl_usd    = unrealized_pnl (from protocol, signed)
+    protocol_fees_usd= open.protocol_fees_usd + close.protocol_fees_usd
+                       (perp_fee_usd component; gmx_v2 currently None)
+    fee_pnl_usd      = -protocol_fees_usd when known, else None
+    funding_pnl_usd  = None (VIB-3205 follow-up)
+    net_pnl_usd      = price_pnl_usd + (fee_pnl_usd or 0) - total_gas
+
+Missing-data semantics (critical)
+---------------------------------
+
+"Unknown" and "measured zero" are different and must not be conflated:
+
+- ``protocol_fees_usd == ""`` on a raw event  => parser did not emit ProtocolFees
+  (legacy row or connector without VIB-3204 support). Attribution emits
+  ``fee_pnl_usd = None`` instead of 0.
+- ``protocol_fees_usd == "0"``                => parser measured a zero fee
+  (e.g. Aave V3 supply/borrow). Attribution emits ``fee_pnl_usd = 0``.
+- ``entry_state`` missing from ``open.attribution_json`` => legacy OPEN row
+  written before VIB-3205 schema extension. Attribution emits ``il_usd = None``.
 """
 
 import json
@@ -25,7 +69,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-CURRENT_VERSION = 1
+# v2 bumps the formula: real IL and fee_pnl replace v1 placeholders.
+CURRENT_VERSION = 2
 
 
 def _dec(value: Any) -> Decimal:
@@ -43,6 +88,229 @@ def _dec(value: Any) -> Decimal:
         return Decimal("0")
 
 
+def _protocol_fee_or_none(event: dict) -> Decimal | None:
+    """Return the protocol fee USD from an event, or None if not captured.
+
+    Distinguishes three cases:
+    - ``protocol_fees_usd`` field present and parseable -> ``Decimal(value)``
+      (includes measured zero)
+    - ``protocol_fees_usd`` missing / empty / None       -> ``None``
+    - present but malformed                              -> ``None`` (and warn)
+
+    The "None" return lets callers emit ``fee_pnl_usd = None`` on the
+    attribution dict rather than silently substituting zero, preserving the
+    "unknown" semantic for legacy rows written before VIB-3205.
+    """
+    raw = event.get("protocol_fees_usd")
+    if raw is None or raw == "":
+        return None
+    try:
+        return Decimal(str(raw))
+    except (InvalidOperation, ValueError, TypeError):
+        logger.warning("PnL attribution: malformed protocol_fees_usd=%r, treating as unknown", raw)
+        return None
+
+
+def _sum_protocol_fees(open_event: dict, close_event: dict) -> Decimal | None:
+    """Sum protocol fees from open and close events.
+
+    VIB-3205 audit fix (pr-auditor Important #4): both sides must be
+    measured (or both explicitly measured-zero) for the sum to be
+    trustworthy. Substituting zero for an unknown side would quietly
+    under-attribute — and that contradicts the module-level design
+    ("Unknown and measured zero are different and must not be
+    conflated"). During a phased VIB-3204 rollout (connectors ship fees
+    on one side at a time), this guard returns ``None`` for the rough
+    window where only one side is known; callers distinguish that from
+    the measured-zero case and surface it accordingly.
+
+    Returns:
+        - ``Decimal(sum)`` when BOTH ``open_fee`` and ``close_fee`` are
+          measured (including both being ``Decimal(0)`` — measured zero).
+        - ``None`` when either side is unknown.
+    """
+    open_fee = _protocol_fee_or_none(open_event)
+    close_fee = _protocol_fee_or_none(close_event)
+    if open_fee is None or close_fee is None:
+        return None
+    return open_fee + close_fee
+
+
+def _entry_state_from_open(open_event: dict) -> dict | None:
+    """Extract the entry_state sidecar from an OPEN event's attribution_json.
+
+    VIB-3205 schema: the OPEN ``PositionEvent`` carries ``attribution_json``
+    that may contain an ``entry_state`` dict capturing initial token amounts
+    and per-token prices. Returns ``None`` for legacy rows written before
+    this extension so IL math can skip rather than silently emit a wrong
+    number.
+    """
+    raw = open_event.get("attribution_json")
+    if not raw or raw == "{}":
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("PnL attribution: malformed attribution_json on OPEN, skipping entry_state")
+        return None
+    if not isinstance(data, dict):
+        return None
+    entry = data.get("entry_state")
+    return entry if isinstance(entry, dict) else None
+
+
+def _current_prices_from_close(close_event: dict) -> dict | None:
+    """Extract current-at-close per-token prices injected by the runner.
+
+    VIB-3205: the runner attaches ``current_prices`` (a dict of
+    ``{symbol_or_address: price_usd_str}``) to the CLOSE event's
+    ``attribution_json`` right before ``run_attribution_on_close`` — sourced
+    from the most recent ``PortfolioSnapshot.token_prices``. IL math needs
+    these to evaluate HODL value at close time.
+    """
+    raw = close_event.get("attribution_json")
+    if not raw or raw == "{}":
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    prices = data.get("current_prices")
+    return prices if isinstance(prices, dict) else None
+
+
+def _pair_close_with_open(history: list, close_event: Any) -> dict | None:
+    """Pair a CLOSE event with its matching OPEN, reopen-safe.
+
+    ``history`` comes from ``get_position_history`` ORDER BY timestamp ASC,
+    so the earliest event is first. For a position that gets reopened under
+    the same ``position_id`` (GMX V2 perps, lending markets, any
+    OPEN -> CLOSE -> OPEN -> CLOSE cycle), we walk the history forward and
+    maintain a stack of unpaired OPENs. When we find the CLOSE we're
+    attributing, the matching OPEN is the top of that stack.
+
+    Returns the OPEN event dict, or ``None`` if no matching OPEN exists
+    (e.g. legacy row, or the event sequence is malformed).
+    """
+    close_id = getattr(close_event, "id", None) if not isinstance(close_event, dict) else close_event.get("id")
+    unpaired_opens: list[dict] = []
+    for evt in history:
+        evt_type = evt.get("event_type")
+        if evt_type == "OPEN":
+            unpaired_opens.append(evt)
+        elif evt_type == "CLOSE":
+            if evt.get("id") == close_id:
+                return unpaired_opens[-1] if unpaired_opens else None
+            # Pop: this CLOSE pairs with the most recent unpaired OPEN.
+            if unpaired_opens:
+                unpaired_opens.pop()
+    # Fell through without finding the target CLOSE in history — fall back
+    # to the last unpaired OPEN so a CLOSE that isn't yet persisted to
+    # history still gets attributed (covers the hot-path where the caller
+    # passes the just-saved CLOSE event before the store re-reads it).
+    return unpaired_opens[-1] if unpaired_opens else None
+
+
+def _price_for_token(prices: dict, token: str) -> Decimal | None:
+    """Look up a token price in a flexible ``{key: price_or_dict}`` dict.
+
+    Supports two shapes to match ``PortfolioSnapshot.token_prices`` and the
+    simpler ``{symbol: price}`` form we persist on attribution_json:
+
+    - ``{"USDC": "1.00"}``                          -> flat price map
+    - ``{"arbitrum:0xaf88...": {"price_usd": "1.00", "symbol": "USDC"}}``
+      -> PortfolioSnapshot shape; we match by suffix after ``chain:`` and
+      by ``symbol`` field.
+
+    Comparison is case-insensitive. Returns ``None`` when the token is
+    missing or the price cannot be parsed to Decimal.
+    """
+    if not prices or not token:
+        return None
+    needle = str(token).lower()
+
+    def _parse(v: Any) -> Decimal | None:
+        try:
+            return Decimal(str(v))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+    for key, val in prices.items():
+        key_str = str(key).lower()
+        # Direct match: flat {symbol/address: price_str}
+        if key_str == needle or key_str.endswith(":" + needle):
+            if isinstance(val, dict):
+                price = val.get("price_usd")
+                parsed = _parse(price) if price is not None else None
+                if parsed is not None:
+                    return parsed
+                continue
+            parsed = _parse(val)
+            if parsed is not None:
+                return parsed
+        # PortfolioSnapshot shape: check nested symbol field
+        if isinstance(val, dict):
+            symbol = val.get("symbol")
+            if symbol and str(symbol).lower() == needle:
+                price = val.get("price_usd")
+                parsed = _parse(price) if price is not None else None
+                if parsed is not None:
+                    return parsed
+    return None
+
+
+def compute_impermanent_loss(open_event: dict, close_event: dict) -> Decimal | None:
+    """Compute impermanent loss for an LP position.
+
+    ``IL = V_lp - V_hold`` where
+
+    * ``V_lp`` = ``close_event["value_usd"]`` (current LP position value
+      supplied by PositionValuer; includes both in-range and out-of-range
+      single-sided positions)
+    * ``V_hold`` = ``amount0_open * price0_now + amount1_open * price1_now``
+      (what holding the entry tokens would be worth at close-time prices)
+
+    Negative IL means the LP lost value compared to HODL.
+
+    Returns ``None`` when either input is missing — legacy OPEN rows without
+    ``entry_state`` (pre-VIB-3205 schema), OPEN rows with unparseable
+    ``entry_state``, or CLOSE rows missing ``current_prices``. Attribution
+    must not silently emit an incorrect zero.
+    """
+    entry = _entry_state_from_open(open_event)
+    if entry is None:
+        return None
+    prices = _current_prices_from_close(close_event)
+    if prices is None:
+        return None
+
+    amount0_open = _dec(entry.get("amount0"))
+    amount1_open = _dec(entry.get("amount1"))
+    if amount0_open == 0 and amount1_open == 0:
+        return None
+
+    token0 = entry.get("token0") or open_event.get("token0") or ""
+    token1 = entry.get("token1") or open_event.get("token1") or ""
+
+    price0_now = _price_for_token(prices, token0) if token0 else None
+    price1_now = _price_for_token(prices, token1) if token1 else None
+
+    # CodeRabbit audit fix: return None when ANY non-zero leg is missing
+    # its price. The previous code defaulted missing prices to 0, which
+    # silently under-priced the hodl for a two-sided LP and produced a
+    # concrete (but wrong) impermanent_loss_usd. Single-sided legs
+    # (amount == 0) are OK to skip because their contribution is
+    # mathematically zero regardless of the missing price.
+    if (price0_now is None and amount0_open != 0) or (price1_now is None and amount1_open != 0):
+        return None
+
+    hodl = (amount0_open * (price0_now or Decimal("0"))) + (amount1_open * (price1_now or Decimal("0")))
+    v_lp = _dec(close_event.get("value_usd"))
+    return v_lp - hodl
+
+
 def attribute_lp(open_event: dict, close_event: dict) -> dict:
     """Compute LP PnL attribution from OPEN and CLOSE events.
 
@@ -51,7 +319,9 @@ def attribute_lp(open_event: dict, close_event: dict) -> dict:
         close_event: The CLOSE position event dict.
 
     Returns:
-        Attribution dict with versioned breakdown.
+        Attribution dict with versioned breakdown. Numeric fields are encoded
+        as strings for JSON fidelity; "unknown" fields are encoded as
+        ``None`` (not ``"0"``) to preserve the distinction for dashboards.
     """
     principal_deposited = _dec(open_event.get("value_usd"))
 
@@ -60,7 +330,7 @@ def attribute_lp(open_event: dict, close_event: dict) -> dict:
     amount1_recovered = _dec(close_event.get("amount1"))
     close_value_usd = _dec(close_event.get("value_usd"))
 
-    # Fees collected at close
+    # Fees collected at close (raw token-denominated; kept for audit trail)
     fees_token0 = _dec(close_event.get("fees_token0"))
     fees_token1 = _dec(close_event.get("fees_token1"))
 
@@ -73,20 +343,37 @@ def attribute_lp(open_event: dict, close_event: dict) -> dict:
     # Otherwise fall back to 0 (raw data incomplete).
     principal_recovered = close_value_usd if close_value_usd else Decimal("0")
 
-    # Fee PnL: if we have a USD value for the position, we estimate fee value
-    # proportionally. Without per-token prices, we store raw token amounts.
-    # For v1, fee_pnl is estimated from the close event's value_usd context.
-    fee_pnl = Decimal("0")
+    # Fee PnL (VIB-3205): sum of ProtocolFees.total_usd on open+close trigger
+    # txs, expressed as a *cost* (negative contribution to net PnL).
+    # Returns None when both sides omit the field so dashboards can flag
+    # "unknown" rather than mis-render a placeholder zero.
+    fees_paid = _sum_protocol_fees(open_event, close_event)
+    fee_pnl: Decimal | None = None if fees_paid is None else -fees_paid
 
-    # Impermanent loss requires per-token prices which we may not have in v1.
-    # Store what we can compute.
-    il = Decimal("0")
+    # Impermanent loss (VIB-3205): real IL when entry_state + current_prices
+    # are available, else None. None must not cascade into net_pnl as 0;
+    # instead, net_pnl when IL is unknown omits the IL term (HODL-relative
+    # attribution simply isn't available for this row).
+    il = compute_impermanent_loss(open_event, close_event)
 
     # Price PnL = what hodling would have given - what was deposited
-    price_pnl = principal_recovered - principal_deposited if principal_deposited else Decimal("0")
+    # When IL is known, price_pnl = principal_recovered - il - principal_deposited
+    # (equivalently: hodl_value - principal_deposited). When IL is unknown,
+    # fall back to the v1 notion (principal_recovered - principal_deposited)
+    # so dashboards still have a usable number.
+    if il is not None and principal_deposited:
+        hodl_value = principal_recovered - il
+        price_pnl = hodl_value - principal_deposited
+    elif principal_deposited:
+        price_pnl = principal_recovered - principal_deposited
+    else:
+        price_pnl = Decimal("0")
 
-    # Net PnL includes fees and gas
-    net_pnl = principal_recovered + fee_pnl - principal_deposited - total_gas
+    # Net PnL = principal_recovered - principal_deposited + fee_pnl - gas
+    # IL is *already captured* in principal_recovered (which reflects actual
+    # value at close), so it must NOT be added again here — it's broken out
+    # as a reporting signal only.
+    net_pnl = principal_recovered + (fee_pnl or Decimal("0")) - principal_deposited - total_gas
 
     return {
         "version": CURRENT_VERSION,
@@ -95,8 +382,8 @@ def attribute_lp(open_event: dict, close_event: dict) -> dict:
         "principal_recovered_usd": str(principal_recovered),
         "fees_token0": str(fees_token0),
         "fees_token1": str(fees_token1),
-        "fee_pnl_usd": str(fee_pnl),
-        "impermanent_loss_usd": str(il),
+        "fee_pnl_usd": None if fee_pnl is None else str(fee_pnl),
+        "impermanent_loss_usd": None if il is None else str(il),
         "price_pnl_usd": str(price_pnl),
         "gas_usd": str(total_gas),
         "net_pnl_usd": str(net_pnl),
@@ -130,10 +417,19 @@ def attribute_perp(open_event: dict, close_event: dict) -> dict:
     # Price PnL from protocol's unrealized_pnl (already signed for direction)
     price_pnl = unrealized_pnl
 
-    # Fee PnL: protocol fees not separately tracked yet, use gas as proxy
-    fee_pnl = -total_gas
+    # Fee PnL (VIB-3205): real protocol fees paid on open+close tx. Replaces
+    # the v1 ``-gas`` proxy. None when the connector does not yet emit
+    # ProtocolFees (e.g. gmx_v2 is currently None — see VIB-3211 follow-up).
+    fees_paid = _sum_protocol_fees(open_event, close_event)
+    fee_pnl: Decimal | None = None if fees_paid is None else -fees_paid
 
-    net_pnl = price_pnl + fee_pnl
+    # Funding PnL (VIB-3205): not populated from receipt data — funding
+    # accumulates continuously between open and close. Populating requires a
+    # time-series integrator that reads funding rate snapshots. Tracked as
+    # VIB-3214 ("Perp funding PnL tracking, VIB-3205 follow-up").
+    funding_pnl: Decimal | None = None
+
+    net_pnl = price_pnl + (fee_pnl or Decimal("0")) - total_gas
 
     return {
         "version": CURRENT_VERSION,
@@ -143,7 +439,8 @@ def attribute_perp(open_event: dict, close_event: dict) -> dict:
         "leverage": str(leverage),
         "is_long": is_long,
         "price_pnl_usd": str(price_pnl),
-        "fee_pnl_usd": str(fee_pnl),
+        "fee_pnl_usd": None if fee_pnl is None else str(fee_pnl),
+        "funding_pnl_usd": None if funding_pnl is None else str(funding_pnl),
         "gas_usd": str(total_gas),
         "net_pnl_usd": str(net_pnl),
     }
@@ -176,6 +473,122 @@ def compute_attribution(open_event: dict, close_event: dict) -> str:
         return "{}"
 
 
+def build_entry_state(
+    *,
+    token0: str,
+    token1: str,
+    amount0: Any,
+    amount1: Any,
+    price0: Any = None,
+    price1: Any = None,
+) -> dict[str, Any]:
+    """Package initial token amounts and prices for later IL attribution.
+
+    Stored under ``attribution_json["entry_state"]`` on ``OPEN`` events so
+    that the subsequent CLOSE-time ``compute_impermanent_loss`` can evaluate
+    HODL value without re-reading the OPEN's raw tx. Normalises to strings
+    for JSON fidelity; callers may pass Decimal / int / str.
+    """
+
+    def _s(v: Any) -> str | None:
+        if v is None:
+            return None
+        return str(v)
+
+    return {
+        "token0": token0 or "",
+        "token1": token1 or "",
+        "amount0": _s(amount0) or "0",
+        "amount1": _s(amount1) or "0",
+        "price0": _s(price0),
+        "price1": _s(price1),
+    }
+
+
+async def _fetch_latest_token_prices(store: Any, deployment_id: str) -> dict[str, Any] | None:
+    """Read the most recent ``PortfolioSnapshot.token_prices`` for a deployment.
+
+    Returns ``None`` if the store has no snapshot yet (first-iteration OPEN
+    before the first snapshot is written) or if fetching fails. Attribution
+    downstream must tolerate ``None`` and emit ``il_usd=None`` rather than a
+    misleading zero.
+    """
+    if not hasattr(store, "get_latest_snapshot"):
+        return None
+    try:
+        snapshot = await store.get_latest_snapshot(deployment_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to fetch latest snapshot for %s", deployment_id, exc_info=True)
+        return None
+    if snapshot is None:
+        return None
+    prices = getattr(snapshot, "token_prices", None)
+    if not isinstance(prices, dict) or not prices:
+        return None
+    return prices
+
+
+async def stamp_entry_state_on_open(store: Any, open_event: Any) -> None:
+    """Persist entry_state on the OPEN event's attribution_json (VIB-3205).
+
+    Called by StrategyRunner after ``save_position_event`` for OPEN events so
+    that the later CLOSE-time ``compute_impermanent_loss`` can evaluate HODL
+    value. entry_state captures the initial token amounts + per-token prices
+    read from the latest ``PortfolioSnapshot.token_prices``.
+
+    This is best-effort: if no prices are available (first iteration before
+    the first snapshot is written, or the snapshot lacks prices for these
+    tokens), we still stamp amounts. ``compute_impermanent_loss`` will treat
+    None prices as "unknown" and return ``None``.
+    """
+    try:
+        token0 = getattr(open_event, "token0", "") or ""
+        token1 = getattr(open_event, "token1", "") or ""
+        amount0 = getattr(open_event, "amount0", "") or "0"
+        amount1 = getattr(open_event, "amount1", "") or "0"
+
+        prices = await _fetch_latest_token_prices(store, open_event.deployment_id)
+        price0 = _price_for_token(prices, token0) if prices else None
+        price1 = _price_for_token(prices, token1) if prices else None
+
+        entry_state = build_entry_state(
+            token0=token0,
+            token1=token1,
+            amount0=amount0,
+            amount1=amount1,
+            price0=price0,
+            price1=price1,
+        )
+
+        # Merge with any existing attribution_json content to preserve
+        # fields written by other subsystems.
+        existing: dict[str, Any] = {}
+        raw = getattr(open_event, "attribution_json", "") or ""
+        if raw and raw != "{}":
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    existing = parsed
+            except (json.JSONDecodeError, TypeError):
+                existing = {}
+        existing["entry_state"] = entry_state
+
+        new_json = json.dumps(existing)
+        open_event.attribution_json = new_json
+        if hasattr(store, "update_position_attribution"):
+            await store.update_position_attribution(
+                open_event.id, new_json, getattr(open_event, "attribution_version", 0) or 0
+            )
+        else:
+            await store.save_position_event(open_event)
+    except Exception:  # noqa: BLE001
+        # VIB-3205 audit fix (pr-auditor Important #5): escalate from debug
+        # to warning. This is a financially-sensitive module — losing
+        # entry_state on OPEN permanently breaks IL for that position,
+        # and debug-level logs are invisible in production.
+        logger.warning("Failed to stamp entry_state on OPEN", exc_info=True)
+
+
 async def run_attribution_on_close(
     store: Any,
     close_event: Any,
@@ -184,6 +597,11 @@ async def run_attribution_on_close(
 
     Called by StrategyRunner after saving a CLOSE position event.
     Updates the event's attribution_json in the store.
+
+    VIB-3205: this function injects ``current_prices`` from the latest
+    ``PortfolioSnapshot.token_prices`` into the close_event's
+    ``attribution_json`` right before dispatch so the LP attribution can
+    compute real impermanent loss against HODL value.
 
     Args:
         store: StateManager or SQLiteStore with get_position_history/save_position_event.
@@ -195,24 +613,61 @@ async def run_attribution_on_close(
     attribution = "{}"
     try:
         history = await store.get_position_history(close_event.deployment_id, close_event.position_id)
-        # Find the OPEN event
-        open_event = None
-        for evt in history:
-            if evt.get("event_type") == "OPEN":
-                open_event = evt
-                break
+        # VIB-3205 audit fix (pr-auditor Blocker #2): pair each CLOSE with the
+        # OPEN that IMMEDIATELY PRECEDES it among unpaired OPENs, not the
+        # first-ever OPEN. Positions that get reopened under the same
+        # ``position_id`` (GMX V2 perps, lending markets, any OPEN -> CLOSE
+        # -> OPEN -> CLOSE cycle) were otherwise mis-paired with the stale
+        # first OPEN — wrong ``principal_deposited`` and wrong ``entry_state``
+        # prices. Same class of bug as VIB-3206's reopen issue.
+        open_event = _pair_close_with_open(history, close_event)
 
         if open_event is None:
             logger.debug(
-                "No OPEN event found for position %s, skipping attribution",
+                "No matching OPEN event found for position %s, skipping attribution",
                 close_event.position_id,
             )
             return attribution
 
         close_dict = close_event.to_dict() if hasattr(close_event, "to_dict") else {}
+
+        # VIB-3205: inject current-at-close prices into the close_event's
+        # attribution_json sidecar so compute_impermanent_loss can evaluate
+        # HODL value. Best-effort — if no snapshot exists yet, IL silently
+        # falls back to None rather than mis-reporting zero.
+        prices = await _fetch_latest_token_prices(store, close_event.deployment_id)
+        if prices:
+            close_attr = close_dict.get("attribution_json") or "{}"
+            try:
+                close_attr_parsed = json.loads(close_attr) if isinstance(close_attr, str) else close_attr
+                if not isinstance(close_attr_parsed, dict):
+                    close_attr_parsed = {}
+            except (json.JSONDecodeError, TypeError):
+                close_attr_parsed = {}
+            close_attr_parsed["current_prices"] = prices
+            close_dict["attribution_json"] = json.dumps(close_attr_parsed)
+
         attribution = compute_attribution(open_event, close_dict)
 
         if attribution != "{}":
+            # CodeRabbit audit fix: persist ``current_prices`` INSIDE the
+            # attribution_json we store, so ``recompute_attribution`` can
+            # re-derive IL / price_pnl from the SAME close-time snapshot
+            # when the formula changes. Without this, recomputes would
+            # degrade every v2 LP close back to ``impermanent_loss_usd=None``
+            # because the transient sidecar set at lines 639-648 above
+            # was never committed to disk.
+            if prices:
+                try:
+                    attr_parsed = json.loads(attribution)
+                    if isinstance(attr_parsed, dict):
+                        attr_parsed["current_prices"] = prices
+                        attribution = json.dumps(attr_parsed)
+                except (json.JSONDecodeError, TypeError):
+                    # Attribution isn't a dict — leave as-is; recompute will
+                    # log a warning if it ever hits this row.
+                    logger.debug("Could not embed current_prices into attribution JSON")
+
             close_event.attribution_json = attribution
             close_event.attribution_version = CURRENT_VERSION
             # Use partial update to avoid overwriting stored fields
@@ -226,7 +681,11 @@ async def run_attribution_on_close(
                 close_event.position_id,
             )
     except Exception:
-        logger.debug("Failed to run attribution on close", exc_info=True)
+        # VIB-3205 audit fix (pr-auditor Important #5): escalate from debug
+        # to warning so production log pipelines surface attribution
+        # failures. A silent attribution failure leaves the dashboard
+        # showing corrupted / missing PnL for that close.
+        logger.warning("Failed to run attribution on close", exc_info=True)
 
     return attribution
 
@@ -263,17 +722,35 @@ async def recompute_attribution(
                 continue
 
             history = await store.get_position_history(deployment_id, position_id)
-            open_event = None
-            for evt in history:
-                if evt.get("event_type") == "OPEN":
-                    open_event = evt
-                    break
-
+            # Same reopen-safe pairing rule as run_attribution_on_close.
+            open_event = _pair_close_with_open(history, close_dict)
             if open_event is None:
                 continue
 
             attribution = compute_attribution(open_event, close_dict)
             if attribution != "{}":
+                # CodeRabbit audit fix (round 3): preserve the persisted
+                # ``current_prices`` sidecar across a recompute. Without this,
+                # ``compute_attribution`` rebuilds the attribution payload from
+                # scratch and the new JSON no longer contains current_prices —
+                # so the next call to ``recompute_attribution`` (or any future
+                # read via ``_current_prices_from_close``) would silently lose
+                # the close-time price snapshot, and IL would collapse back to
+                # None. Re-merge current_prices from the stored attribution
+                # into the newly computed one before persisting.
+                try:
+                    existing_attr = json.loads(close_dict.get("attribution_json") or "{}")
+                    new_attr = json.loads(attribution)
+                    if (
+                        isinstance(existing_attr, dict)
+                        and isinstance(new_attr, dict)
+                        and "current_prices" in existing_attr
+                    ):
+                        new_attr["current_prices"] = existing_attr["current_prices"]
+                        attribution = json.dumps(new_attr)
+                except (json.JSONDecodeError, TypeError):
+                    # Stored attribution isn't valid JSON — nothing to preserve.
+                    pass
                 # Use partial update to avoid wiping stored fields
                 if hasattr(store, "update_position_attribution"):
                     await store.update_position_attribution(close_dict["id"], attribution, version)
@@ -303,6 +780,7 @@ async def recompute_attribution(
                         entry_price=close_dict.get("entry_price", ""),
                         mark_price=close_dict.get("mark_price", ""),
                         leverage=close_dict.get("leverage", ""),
+                        protocol_fees_usd=close_dict.get("protocol_fees_usd", ""),
                     )
                     await store.save_position_event(evt_obj)
                 count += 1

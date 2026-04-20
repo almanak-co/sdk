@@ -1556,6 +1556,25 @@ class AerodromeReceiptParser:
             logger.warning(f"Failed to extract liquidity: {e}")
             return None
 
+    # =============================================================================
+    # Protocol Fee Extraction (VIB-3204)
+    # =============================================================================
+
+    def extract_protocol_fees(self, _receipt: dict[str, Any]) -> None:
+        """Placeholder for Aerodrome protocol-fee extraction (VIB-3204).
+
+        Aerodrome uses stable vs volatile pool-level fees (0.05% / 0.3%)
+        that are not exposed in the standard Swap event — they require a
+        second call into the pool metadata. Resolving the pool -> fee
+        mapping at the receipt-parser layer is deferred to a follow-up;
+        this method returns ``None`` so the enricher skips the field
+        cleanly without polluting extraction_warnings.
+
+        Follow-up ticket: "Aerodrome pool-fee resolution in receipt parser
+        — follow-up to VIB-3204".
+        """
+        return None
+
     # Backward compatibility methods
     def is_aerodrome_event(self, topic: str | bytes) -> bool:
         """Check if a topic is a known Aerodrome event.

@@ -314,6 +314,103 @@ class StakeData:
         }
 
 
+@dataclass(frozen=True)
+class ProtocolFees:
+    """Protocol fees paid by the user on a single transaction.
+
+    VIB-3204: Structured accounting of fees captured by the protocol (as
+    opposed to gas paid to the chain, which is tracked separately on the
+    ExecutionResult). Strategy authors and PnL attribution consumers read
+    this to attribute net PnL correctly.
+
+    Semantics:
+        - ``swap_fee_usd``: fee captured by the DEX (Uniswap V3 fee tier,
+          Aerodrome fee, etc.). For aggregators (Enso, LiFi), this is the
+          integrator fee.
+        - ``lp_fee_usd``: fee captured by LPs on swaps that traverse their
+          pool. For ``LP_COLLECT_FEES`` intents, this is the realized fee
+          distribution.
+        - ``lending_origination_fee_usd``: origination / withdrawal fee
+          charged by lending protocols. Most (Aave V3, Morpho Blue) are
+          zero — populate ``Decimal(0)``, not ``None``, so downstream code
+          can distinguish "measured to be zero" from "unknown".
+        - ``vault_fee_usd``: ERC-4626 deposit/redeem fee.
+        - ``perp_fee_usd``: perps open/close fee (not funding — that is
+          tracked separately).
+        - ``total_usd``: sum of all populated components. Callers should
+          use this when attributing net PnL.
+
+    All amounts are *USD*. Raw token-denominated fees belong in
+    ``extracted_data`` under protocol-specific keys; this struct is for
+    attributing PnL impact.
+    """
+
+    total_usd: Decimal
+    swap_fee_usd: Decimal | None = None
+    lp_fee_usd: Decimal | None = None
+    lending_origination_fee_usd: Decimal | None = None
+    vault_fee_usd: Decimal | None = None
+    perp_fee_usd: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the ``total_usd`` == sum-of-populated-components invariant.
+
+        VIB-3204 audit fix (pr-auditor Blocker #3): without this check,
+        callers could construct ``ProtocolFees(total_usd=Decimal(0), ...)``
+        with ``swap_fee_usd=None`` (a semantic lie: "fees measured to be
+        zero" + "swap fee not measured") — two consumers looking at the
+        same struct would disagree on whether a fee was paid. PnL
+        attribution would then systematically under-attribute swap costs.
+
+        Rule: ``total_usd`` must equal the sum of all populated component
+        fields. If no components are populated, ``total_usd`` must be 0
+        (vacuously true — the struct represents "nothing measured yet,
+        but nothing detected either" = no fee).
+        """
+        components = (
+            ("swap_fee_usd", self.swap_fee_usd),
+            ("lp_fee_usd", self.lp_fee_usd),
+            ("lending_origination_fee_usd", self.lending_origination_fee_usd),
+            ("vault_fee_usd", self.vault_fee_usd),
+            ("perp_fee_usd", self.perp_fee_usd),
+        )
+        # CodeRabbit audit fix (round 3): reject negative fee values. A
+        # protocol fee is a cost the wallet paid — it cannot be negative.
+        # A buggy parser emitting a negative value would silently flip the
+        # sign of net PnL in ``PnLAttributor`` because ``protocol_fees_usd``
+        # is subtracted from gross. Catch the lie at the struct boundary.
+        if self.total_usd < 0:
+            raise ValueError(f"ProtocolFees.total_usd must be non-negative, got {self.total_usd}")
+        for name, val in components:
+            if val is not None and val < 0:
+                raise ValueError(f"ProtocolFees.{name} must be non-negative, got {val}")
+
+        populated = [v for _, v in components if v is not None]
+        expected_total = sum(populated, Decimal(0))
+        if self.total_usd != expected_total:
+            raise ValueError(
+                "ProtocolFees.total_usd must equal the sum of populated "
+                f"components. Got total_usd={self.total_usd}, sum of "
+                f"populated={expected_total}. Populated components: "
+                f"swap_fee_usd={self.swap_fee_usd}, lp_fee_usd={self.lp_fee_usd}, "
+                f"lending_origination_fee_usd={self.lending_origination_fee_usd}, "
+                f"vault_fee_usd={self.vault_fee_usd}, perp_fee_usd={self.perp_fee_usd}."
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "total_usd": str(self.total_usd),
+            "swap_fee_usd": str(self.swap_fee_usd) if self.swap_fee_usd is not None else None,
+            "lp_fee_usd": str(self.lp_fee_usd) if self.lp_fee_usd is not None else None,
+            "lending_origination_fee_usd": (
+                str(self.lending_origination_fee_usd) if self.lending_origination_fee_usd is not None else None
+            ),
+            "vault_fee_usd": str(self.vault_fee_usd) if self.vault_fee_usd is not None else None,
+            "perp_fee_usd": str(self.perp_fee_usd) if self.perp_fee_usd is not None else None,
+        }
+
+
 # =============================================================================
 # Exports
 # =============================================================================
@@ -326,4 +423,5 @@ __all__ = [
     "SupplyData",
     "PerpData",
     "StakeData",
+    "ProtocolFees",
 ]

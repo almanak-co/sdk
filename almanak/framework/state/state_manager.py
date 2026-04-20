@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from almanak.framework.execution.clob_handler import ClobFill, ClobOrderState, ClobOrderStatus
     from almanak.framework.observability.ledger import LedgerEntry
+    from almanak.framework.observability.position_events import PositionEvent
     from almanak.framework.portfolio import PortfolioMetrics, PortfolioSnapshot
 
 from .exceptions import (  # noqa: E402 (re-exported for callers)
@@ -1743,4 +1744,124 @@ class StateManager:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_ledger_entries", latency, False, str(e))
             logger.error(f"Failed to get ledger entries: {e}")
+            return []
+
+    # -------------------------------------------------------------------------
+    # PositionEvent delegation (VIB-3204 audit fix)
+    # -------------------------------------------------------------------------
+    # ``StrategyRunner`` emits PositionEvents after every successful intent
+    # and ``pnl_attributor`` reads them back for CLOSE-time IL attribution
+    # (VIB-3205). Historically the runner called ``state_manager.save_position_event``
+    # directly but StateManager never grew a delegation — every call silently
+    # raised AttributeError and was swallowed by the runner's outer
+    # try/except, leaving entry_state / attribution_json permanently empty
+    # (and thus compute_impermanent_loss returning None for every LP close).
+    # These methods delegate to the warm backend.
+
+    async def save_position_event(self, event: "PositionEvent") -> bool:
+        """Persist a PositionEvent (OPEN/CLOSE/COLLECT_FEES/SNAPSHOT)."""
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm or not hasattr(self._warm, "save_position_event"):
+            return False
+        start = time.perf_counter()
+        try:
+            result = await self._warm.save_position_event(event)
+            latency = (time.perf_counter() - start) * 1000
+            # CodeRabbit round-4: record success metric from the backend's
+            # actual return, not a hard-coded True. Backends return False
+            # on silent no-ops; we want those to register as failures so
+            # observability reflects reality.
+            ok = bool(result)
+            self._record_metrics(
+                StateTier.WARM,
+                "save_position_event",
+                latency,
+                ok,
+                None if ok else "backend_returned_false",
+            )
+            return ok
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "save_position_event", latency, False, str(e))
+            logger.error(f"Failed to save position event: {e}")
+            return False
+
+    async def update_position_attribution(self, event_id: str, attribution_json: str, attribution_version: int) -> bool:
+        """Partial update of attribution_json + attribution_version on a PositionEvent."""
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm or not hasattr(self._warm, "update_position_attribution"):
+            return False
+        start = time.perf_counter()
+        try:
+            result = await self._warm.update_position_attribution(event_id, attribution_json, attribution_version)
+            latency = (time.perf_counter() - start) * 1000
+            ok = bool(result)
+            self._record_metrics(
+                StateTier.WARM,
+                "update_position_attribution",
+                latency,
+                ok,
+                None if ok else "backend_returned_false",
+            )
+            return ok
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "update_position_attribution", latency, False, str(e))
+            logger.error(f"Failed to update position attribution: {e}")
+            return False
+
+    async def get_position_events(
+        self,
+        strategy_id: str,
+        event_type: str | None = None,
+        limit: int = 100,
+    ) -> list:
+        """Query position events for a strategy (newest-first).
+
+        Backend signature is ``(deployment_id, position_id, event_type, limit)``
+        — call with keyword args so positional binding can't silently bind
+        ``event_type`` to ``position_id``. CodeRabbit round-4 caught this:
+        my round-3 forwarding was ``(strategy_id, event_type, limit)`` which
+        mis-bound, producing empty results for every caller that passed
+        ``event_type`` (e.g. ``recompute_attribution`` filtering CLOSE events).
+        """
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm or not hasattr(self._warm, "get_position_events"):
+            return []
+        start = time.perf_counter()
+        try:
+            result = await self._warm.get_position_events(
+                deployment_id=strategy_id,
+                position_id=None,
+                event_type=event_type,
+                limit=limit,
+            )
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_position_events", latency, True)
+            return result
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_position_events", latency, False, str(e))
+            logger.error(f"Failed to get position events: {e}")
+            return []
+
+    async def get_position_history(self, strategy_id: str, position_id: str) -> list:
+        """Fetch full history (timestamp-ASC) for a single position_id."""
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm or not hasattr(self._warm, "get_position_history"):
+            return []
+        start = time.perf_counter()
+        try:
+            result = await self._warm.get_position_history(strategy_id, position_id)
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_position_history", latency, True)
+            return result
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_position_history", latency, False, str(e))
+            logger.error(f"Failed to get position history: {e}")
             return []

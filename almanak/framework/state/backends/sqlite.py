@@ -389,6 +389,7 @@ CREATE TABLE IF NOT EXISTS position_events (
     tx_hash TEXT,
     gas_usd TEXT,
     ledger_entry_id TEXT,
+    protocol_fees_usd TEXT DEFAULT '',  -- VIB-3205: ProtocolFees.total_usd on triggering tx
     attribution_json TEXT DEFAULT '{}',
     attribution_version INTEGER DEFAULT 0
 );
@@ -587,6 +588,11 @@ class SQLiteStore:
         _add_column_if_missing("transaction_ledger", "execution_mode", "TEXT DEFAULT ''")
         _add_column_if_missing("position_events", "cycle_id", "TEXT DEFAULT ''")
         _add_column_if_missing("position_events", "execution_mode", "TEXT DEFAULT ''")
+
+        # VIB-3205: protocol_fees_usd captured from ProtocolFees.total_usd at
+        # event time so attribution can attribute real fee PnL (not the v1
+        # placeholder of 0). Empty string remains the "unknown" sentinel.
+        _add_column_if_missing("position_events", "protocol_fees_usd", "TEXT DEFAULT ''")
 
     async def backfill_deployment_id(self, old_strategy_id: str, new_deployment_id: str) -> int:
         """Migrate data from a bare strategy name to the canonical deployment_id.
@@ -2086,8 +2092,9 @@ class SQLiteStore:
                         fees_token0, fees_token1,
                         leverage, entry_price, mark_price, unrealized_pnl, is_long,
                         tx_hash, gas_usd, ledger_entry_id,
+                        protocol_fees_usd,
                         attribution_json, attribution_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event.id,
@@ -2119,6 +2126,12 @@ class SQLiteStore:
                         event.tx_hash,
                         event.gas_usd,
                         event.ledger_entry_id,
+                        # VIB-3205: preserve measured-zero vs unknown.
+                        # ``getattr(..., "") or ""`` collapses a measured Decimal("0") to
+                        # the empty string because Decimal(0) is falsy, which would make
+                        # it indistinguishable from "parser did not emit protocol_fees"
+                        # at read time. Normalize only the None / missing-attr cases.
+                        ("" if getattr(event, "protocol_fees_usd", None) is None else str(event.protocol_fees_usd)),
                         event.attribution_json,
                         event.attribution_version,
                     ),

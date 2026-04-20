@@ -270,6 +270,22 @@ class LiFiReceiptParser:
         """LiFi swaps do not close LP positions."""
         return None
 
+    # =============================================================================
+    # Protocol Fee Extraction (VIB-3204)
+    # =============================================================================
+
+    def extract_protocol_fees(self, _receipt: dict[str, Any]) -> None:
+        """Placeholder for LiFi aggregator protocol-fee extraction (VIB-3204).
+
+        LiFi surfaces per-step fees in the quote response at compile
+        time; receipts don't contain a uniform fee event. Threading the
+        quote metadata into parser scope is deferred to a follow-up.
+
+        Follow-up ticket: "Protocol fee extraction for aggregators
+        (Enso, LiFi) — follow-up to VIB-3204".
+        """
+        return None
+
     def parse_approval_receipt(
         self,
         receipt: dict[str, Any],

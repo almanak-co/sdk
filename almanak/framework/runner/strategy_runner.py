@@ -1536,7 +1536,25 @@ class StrategyRunner:
                             pos_event.position_type,
                             pos_event.position_id,
                         )
-                        # Run PnL attribution on CLOSE events (VIB-2776)
+                        # VIB-3205: stamp entry_state on OPEN events so subsequent
+                        # CLOSE-time IL attribution can evaluate HODL value.
+                        if pos_event.event_type == "OPEN" and pos_event.position_id:
+                            try:
+                                from ..observability.pnl_attributor import stamp_entry_state_on_open
+
+                                await stamp_entry_state_on_open(self.state_manager, pos_event)
+                            except Exception:  # noqa: BLE001
+                                # Entry-state stamping is best-effort but NOT trivial: if it
+                                # silently drops, close-time IL attribution later short-circuits
+                                # to None with no hint as to why. Escalate to WARNING with a
+                                # traceback so operators notice the first time a class of
+                                # position fails to record its entry price basis.
+                                logger.warning(
+                                    "Entry-state stamp failed (non-blocking) for position=%s",
+                                    pos_event.position_id,
+                                    exc_info=True,
+                                )
+                        # Run PnL attribution on CLOSE events (VIB-2776, v2 VIB-3205)
                         if pos_event.event_type == "CLOSE" and pos_event.position_id:
                             try:
                                 from ..observability.pnl_attributor import run_attribution_on_close

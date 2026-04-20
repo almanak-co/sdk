@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from almanak.framework.connectors.base import EventRegistry, HexDecoder
 from almanak.framework.execution.extract_result import (
@@ -43,6 +43,9 @@ from almanak.framework.execution.extract_result import (
     ExtractResult,
 )
 from almanak.framework.utils.log_formatters import format_address, format_gas_cost, format_tx_hash
+
+if TYPE_CHECKING:
+    from almanak.framework.execution.extracted_data import ProtocolFees
 
 logger = logging.getLogger(__name__)
 
@@ -729,6 +732,7 @@ class AaveV3ReceiptParser:
             "debt_token",
             "supply_rate",
             "remaining_debt",
+            "protocol_fees",  # VIB-3204 — extract_protocol_fees returns measured-zero
         }
     )
 
@@ -1887,6 +1891,43 @@ class AaveV3ReceiptParser:
 
         except Exception as e:
             logger.warning(f"Failed to extract remaining debt: {e}")
+            return None
+
+    # =============================================================================
+    # Protocol Fee Extraction (VIB-3204)
+    # =============================================================================
+
+    def extract_protocol_fees(self, receipt: dict[str, Any]) -> "ProtocolFees | None":
+        """Extract protocol fees for Aave V3 pool operations.
+
+        Aave V3 charges ZERO protocol fees at the pool layer on
+        Supply / Withdraw / Borrow / Repay. This is *measured* to be
+        zero, not *unknown*: populate ``total_usd=Decimal(0)`` and
+        ``lending_origination_fee_usd=Decimal(0)`` so downstream PnL
+        attribution can distinguish "protocol measured to be free" from
+        "not yet measured". Flash loans DO charge a fee, but those use
+        a different intent type (FLASH_LOAN) with its own extractor.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field.
+
+        Returns:
+            ``ProtocolFees`` with all USD fields zero if this is a
+            recognised Aave operation, otherwise ``None``.
+        """
+        from almanak.framework.execution.extracted_data import ProtocolFees
+
+        try:
+            parsed = self.parse_receipt(receipt)
+            has_operation = bool(parsed.supplies or parsed.withdraws or parsed.borrows or parsed.repays)
+            if not has_operation:
+                return None
+            return ProtocolFees(
+                total_usd=Decimal(0),
+                lending_origination_fee_usd=Decimal(0),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to extract protocol_fees: {e}")
             return None
 
     def is_aave_event(self, topic: str | bytes) -> bool:

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from almanak.framework.connectors.base import BaseReceiptParser, EventRegistry, HexDecoder
 
 if TYPE_CHECKING:
-    from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
+    from almanak.framework.execution.extracted_data import LPCloseData, ProtocolFees, SwapAmounts
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +169,7 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
             "tick_upper",
             "liquidity",
             "lp_close_data",
+            "protocol_fees",  # VIB-3204 — extract_protocol_fees implemented below
         }
     )
 
@@ -697,6 +698,75 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
 
         except Exception as e:
             logger.warning(f"Failed to extract lp_close_data: {e}")
+            return None
+
+    # =============================================================================
+    # Protocol Fee Extraction (VIB-3204)
+    # =============================================================================
+
+    def extract_protocol_fees(
+        self,
+        receipt: dict[str, Any],
+        *,
+        fee_tier_bps: int | None = None,
+    ) -> "ProtocolFees | None":
+        """Extract DEX protocol fees from a PancakeSwap V3 swap receipt.
+
+        PancakeSwap V3 is a Uniswap V3 fork with the same pip-based fee
+        tiers. The fee tier is resolved at compile time and forwarded by
+        the ResultEnricher via ``bundle_metadata["selected_fee_tier"]``
+        (signature-introspection opt-in — see VIB-3203 / VIB-3204).
+
+        VIB-3204 audit fix (Codex P1, pr-auditor Blocker #2): do NOT
+        return ``ProtocolFees(total_usd=Decimal(0))`` when the fee is
+        known-non-zero but USD conversion isn't available. That would
+        systematically under-attribute swap costs — a silent accounting
+        bug. Until a price oracle is plumbed through to this layer, this
+        parser returns ``None`` (ExtractMissing semantic). Callers that
+        want the in-token fee can derive it from
+        ``amount_in_decimal * fee_tier_bps / 1_000_000`` using values
+        already on ``result.swap_amounts``.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field.
+            fee_tier_bps: Pool fee tier in pips (e.g. 500 = 5 bps),
+                forwarded by the enricher.
+
+        Returns:
+            ``None`` — USD conversion not available at this layer. A
+            future iteration with price-oracle access will return a
+            populated ``ProtocolFees``. Also returns ``None`` when no
+            Swap event is present OR when ``fee_tier_bps`` is missing.
+        """
+        # ProtocolFees import kept local to preserve import order semantics
+        # inherited from the pre-fix version of this method.
+        from almanak.framework.execution.extracted_data import ProtocolFees  # noqa: F401
+
+        if fee_tier_bps is None or fee_tier_bps <= 0:
+            return None
+
+        try:
+            status = receipt.get("status", 0)
+            if isinstance(status, str):
+                status = int(status, 16) if status.startswith("0x") else int(status)
+            if status != 1:
+                return None
+
+            swap_topic = self._normalize_topic(EVENT_TOPICS["Swap"])
+            logs = receipt.get("logs", []) or []
+            for log in logs:
+                topics = log.get("topics") or []
+                if not topics:
+                    continue
+                if self._normalize_topic(topics[0]) == swap_topic:
+                    # Swap detected + valid fee_tier_bps, but we cannot
+                    # convert to USD in this layer. Return None (unknown)
+                    # rather than a misleading Decimal(0).
+                    return None
+            return None
+
+        except Exception as e:
+            logger.warning(f"Failed to extract protocol_fees: {e}")
             return None
 
     # Backward compatibility methods

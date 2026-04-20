@@ -134,6 +134,13 @@ class PositionEvent:
     gas_usd: str = ""
     ledger_entry_id: str = ""
 
+    # Protocol fees (VIB-3205): USD cost captured by the protocol on this tx.
+    # Sourced from ``result.extracted_data["protocol_fees"].total_usd`` (the
+    # ProtocolFees dataclass shipped by VIB-3204). A parser that does not yet
+    # emit ``protocol_fees`` leaves this empty string — attribution must treat
+    # empty as "unknown", distinct from a measured zero ("0").
+    protocol_fees_usd: str = ""
+
     # Attribution
     attribution_json: str = "{}"
     attribution_version: int = 0
@@ -214,6 +221,28 @@ def build_position_event_from_intent(
         event.liquidity = str(getattr(lp_open, "liquidity", "") or "")
         event.tick_lower = getattr(lp_open, "tick_lower", None)
         event.tick_upper = getattr(lp_open, "tick_upper", None)
+        # VIB-3205 audit fix (Codex P1, pr-auditor Blocker #1): populate
+        # amount0/amount1 + token0/token1 from the extracted LP open data.
+        # Without these, `compute_impermanent_loss` short-circuits to None
+        # because the entry-state builder reads amount0/amount1 off the
+        # PositionEvent. Previously this block only copied position_id /
+        # liquidity / ticks, leaving the IL pipeline as dead code in
+        # production.
+        amount0 = getattr(lp_open, "amount0", None)
+        amount1 = getattr(lp_open, "amount1", None)
+        if amount0 is not None:
+            event.amount0 = str(amount0)
+        if amount1 is not None:
+            event.amount1 = str(amount1)
+        # Token addresses: LPOpenData doesn't carry them directly, so fall
+        # back to the intent's from_token / to_token (LP intents expose these
+        # as the two sides of the pair) before the swap-based fallback below.
+        t0 = getattr(intent, "token0", None) or getattr(intent, "from_token", None)
+        t1 = getattr(intent, "token1", None) or getattr(intent, "to_token", None)
+        if t0:
+            event.token0 = str(t0)
+        if t1:
+            event.token1 = str(t1)
 
     if lp_close:
         event.amount0 = str(getattr(lp_close, "amount0_received", "") or "")
@@ -229,11 +258,18 @@ def build_position_event_from_intent(
                 event.fees_token1 = str(fee)
                 break
 
-    # Swap amounts (for value estimation)
+    # Swap amounts (for value estimation).
+    # Guard token0/token1 so we don't clobber the LP pair tokens the lp_open
+    # branch already populated from intent.token0/token1 — a SWAP leg that
+    # co-occurs with an LP_OPEN (e.g. single-asset provisioning that swaps
+    # half into the other side) would otherwise overwrite the real pair
+    # identities with (token_in, token_out), breaking IL math downstream.
     swap = extracted.get("swap_amounts")
     if swap:
-        event.token0 = getattr(swap, "token_in", "") or ""
-        event.token1 = getattr(swap, "token_out", "") or ""
+        if not event.token0:
+            event.token0 = getattr(swap, "token_in", "") or ""
+        if not event.token1:
+            event.token1 = getattr(swap, "token_out", "") or ""
         if not event.amount0:
             event.amount0 = str(getattr(swap, "amount_in_decimal", "") or "")
         if not event.amount1:
@@ -249,6 +285,16 @@ def build_position_event_from_intent(
         event.is_long = getattr(perp, "is_long", None)
         if hasattr(perp, "position_id") and perp.position_id:
             event.position_id = str(perp.position_id)
+
+    # Protocol fees (VIB-3205): capture ProtocolFees.total_usd so PnL
+    # attribution can reference the real protocol fee paid on this tx.
+    # Leave empty string when the parser did not emit protocol_fees —
+    # attribution distinguishes empty ("unknown") from "0" ("measured zero").
+    protocol_fees = extracted.get("protocol_fees")
+    if protocol_fees is not None and hasattr(protocol_fees, "total_usd"):
+        total_usd = getattr(protocol_fees, "total_usd", None)
+        if total_usd is not None:
+            event.protocol_fees_usd = str(total_usd)
 
     # Final guard: don't emit lifecycle events without a position_id
     return event if event.position_id else None

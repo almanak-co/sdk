@@ -168,8 +168,21 @@ class TestSupportedExtractions:
         assert "lp_close_data" in parser.SUPPORTED_EXTRACTIONS
 
     def test_matches_uniswap_v3_support(self):
-        """PancakeSwap V3 should support the same extractions as Uniswap V3."""
-        expected = {"position_id", "swap_amounts", "tick_lower", "tick_upper", "liquidity", "lp_close_data"}
+        """PancakeSwap V3 should support the same extractions as Uniswap V3.
+
+        VIB-3204 added ``protocol_fees`` to both parsers' SUPPORTED_EXTRACTIONS
+        so the enricher's capability gate forwards the new extractor. The
+        two parsers remain aligned — this is a regression test for that.
+        """
+        expected = {
+            "position_id",
+            "swap_amounts",
+            "tick_lower",
+            "tick_upper",
+            "liquidity",
+            "lp_close_data",
+            "protocol_fees",
+        }
         parser = PancakeSwapV3ReceiptParser(chain="bsc")
         assert parser.SUPPORTED_EXTRACTIONS == expected
 

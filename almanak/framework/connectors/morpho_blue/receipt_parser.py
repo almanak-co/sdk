@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from almanak.framework.connectors.base.hex_utils import HexDecoder
 from almanak.framework.connectors.base.registry import EventRegistry
@@ -46,6 +46,9 @@ from almanak.framework.execution.extract_result import (
     ExtractResult,
 )
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash
+
+if TYPE_CHECKING:
+    from almanak.framework.execution.extracted_data import ProtocolFees
 
 logger = logging.getLogger(__name__)
 
@@ -1319,4 +1322,57 @@ class MorphoBlueReceiptParser:
             return None
         except Exception as e:
             logger.warning(f"Failed to extract supply collateral amount: {e}")
+            return None
+
+    # =========================================================================
+    # Protocol Fee Extraction (VIB-3204)
+    # =========================================================================
+
+    def extract_protocol_fees(self, receipt: dict[str, Any]) -> "ProtocolFees | None":
+        """Extract protocol fees for Morpho Blue pool operations.
+
+        Morpho Blue charges ZERO protocol fees at the core market layer
+        on Supply / Withdraw / Borrow / Repay. (Market-specific fees,
+        if any, are set by market creators and are already accounted for
+        in realized rates.) The zero is *measured*, not *unknown*, so
+        downstream PnL attribution can distinguish "protocol measured
+        to be free" from "not yet measured".
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field.
+
+        Returns:
+            ``ProtocolFees`` with ``total_usd = 0`` if this receipt
+            contains a recognised Morpho operation, otherwise ``None``.
+        """
+        from almanak.framework.execution.extracted_data import ProtocolFees
+
+        try:
+            result = self.parse_receipt(receipt)
+            recognised_types = {
+                MorphoBlueEventType.SUPPLY,
+                MorphoBlueEventType.WITHDRAW,
+                MorphoBlueEventType.BORROW,
+                MorphoBlueEventType.REPAY,
+                MorphoBlueEventType.SUPPLY_COLLATERAL,
+                MorphoBlueEventType.WITHDRAW_COLLATERAL,
+            }
+            has_operation = any(event.event_type in recognised_types for event in result.events)
+            if not has_operation:
+                return None
+            # VIB-3204 audit fix (pr-auditor Blocker #3): populate the
+            # ``lending_origination_fee_usd`` component explicitly so
+            # consumers can distinguish "measured to be zero" from
+            # "unknown". Without the component set, an all-None payload
+            # with ``total_usd=0`` reads as vacuous — same shape as
+            # ``ProtocolFees()`` would default to and indistinguishable
+            # from "parser didn't measure anything". Matches the Aave V3
+            # representation so both lending protocols expose the same
+            # structured payload for the same outcome.
+            return ProtocolFees(
+                total_usd=Decimal(0),
+                lending_origination_fee_usd=Decimal(0),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to extract protocol_fees: {e}")
             return None

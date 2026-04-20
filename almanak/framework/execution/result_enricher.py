@@ -33,7 +33,7 @@ from .extract_result import (
     ExtractMissing,
     ExtractOk,
 )
-from .extracted_data import LPCloseData, SwapAmounts
+from .extracted_data import LPCloseData, ProtocolFees, SwapAmounts
 from .receipt_registry import ReceiptParserRegistry
 
 if TYPE_CHECKING:
@@ -119,27 +119,34 @@ class ResultEnricher:
 
     # Extraction specifications per intent type
     # Maps intent type to list of fields to extract
+    #
+    # VIB-3204: ``protocol_fees`` is added to every intent type that charges
+    # protocol-level fees (DEX fees, origination fees, perp open/close fees,
+    # vault fees). Parsers that don't implement the extractor simply yield
+    # ``None`` and the field is skipped — no warning is emitted for missing
+    # methods when the parser doesn't declare SUPPORTED_EXTRACTIONS.
     EXTRACTION_SPECS: dict[str, list[str]] = {
         # === DEX / AMM ===
-        "SWAP": ["swap_amounts"],
+        "SWAP": ["swap_amounts", "protocol_fees"],
         # === Liquidity Providing ===
-        "LP_OPEN": ["position_id", "tick_lower", "tick_upper", "liquidity", "bin_ids"],
+        "LP_OPEN": ["position_id", "tick_lower", "tick_upper", "liquidity", "bin_ids", "protocol_fees"],
         "LP_CLOSE": [
             "lp_close_data",
             "amount0_collected",
             "amount1_collected",
             "fees0",
             "fees1",
+            "protocol_fees",
         ],
         # === LP Fee Collection ===
-        "LP_COLLECT_FEES": ["fees0", "fees1", "bin_ids"],
+        "LP_COLLECT_FEES": ["fees0", "fees1", "bin_ids", "protocol_fees"],
         # === Lending ===
         # Singular forms used by EVM parsers (Aave, Morpho, etc.)
         # Plural forms used by Solana parsers (Jupiter Lend, Kamino)
-        "BORROW": ["borrow_amount", "borrow_amounts", "borrow_rate", "debt_token"],
-        "REPAY": ["repay_amount", "repay_amounts", "remaining_debt"],
-        "SUPPLY": ["supply_amount", "supply_amounts", "a_token_received", "supply_rate"],
-        "WITHDRAW": ["withdraw_amount", "withdraw_amounts", "a_token_burned"],
+        "BORROW": ["borrow_amount", "borrow_amounts", "borrow_rate", "debt_token", "protocol_fees"],
+        "REPAY": ["repay_amount", "repay_amounts", "remaining_debt", "protocol_fees"],
+        "SUPPLY": ["supply_amount", "supply_amounts", "a_token_received", "supply_rate", "protocol_fees"],
+        "WITHDRAW": ["withdraw_amount", "withdraw_amounts", "a_token_burned", "protocol_fees"],
         # === Perpetuals ===
         "PERP_OPEN": [
             "position_id",
@@ -147,16 +154,18 @@ class ResultEnricher:
             "collateral",
             "entry_price",
             "leverage",
+            "protocol_fees",
         ],
         "PERP_CLOSE": [
             "realized_pnl",
             "exit_price",
             "fees_paid",
             "collateral_returned",
+            "protocol_fees",
         ],
         # === Staking ===
-        "STAKE": ["stake_amount", "shares_received", "wsteth_received", "stake_token"],
-        "UNSTAKE": ["unstake_amount", "underlying_received", "cooldown_end"],
+        "STAKE": ["stake_amount", "shares_received", "wsteth_received", "stake_token", "protocol_fees"],
+        "UNSTAKE": ["unstake_amount", "underlying_received", "cooldown_end", "protocol_fees"],
         # === Flash Loans ===
         "FLASH_LOAN": ["loan_amount", "fee_paid", "loan_token"],
         # === Prediction Markets ===
@@ -172,8 +181,8 @@ class ResultEnricher:
         ],
         "ENSURE_BALANCE": ["amount_transferred", "source_chain"],
         # === Vault Operations (MetaMorpho ERC-4626) ===
-        "VAULT_DEPOSIT": ["deposit_data"],
-        "VAULT_REDEEM": ["redeem_data"],
+        "VAULT_DEPOSIT": ["deposit_data", "protocol_fees"],
+        "VAULT_REDEEM": ["redeem_data", "protocol_fees"],
         # === No-Op ===
         "HOLD": [],  # No extraction needed
     }
@@ -433,9 +442,14 @@ class ResultEnricher:
             variant = self._invoke_extract(extract_method, parser, receipt, field, extract_kwargs)
 
             if isinstance(variant, ExtractOk):
-                self._attach_to_result(result, field, variant.value, intent_type)
-                logger.debug(f"Enrichment: extracted {field}={type(variant.value).__name__} from receipt")
-                return
+                attached = self._attach_to_result(result, field, variant.value, intent_type)
+                if attached:
+                    logger.debug(f"Enrichment: extracted {field}={type(variant.value).__name__} from receipt")
+                    return
+                # Value rejected by type-check (see _attach_to_result). Keep
+                # scanning subsequent receipts — a later one may produce
+                # a valid value for this field.
+                continue
             if isinstance(variant, ExtractError):
                 last_error = variant
                 continue
@@ -474,25 +488,40 @@ class ResultEnricher:
         ``(expected_out - actual_out) / expected_out``. The value comes from
         the compiler's ``ActionBundle.metadata["expected_output_human"]``.
 
+        VIB-3204 — protocol_fees extractors for DEX swap intents can consume
+        a ``fee_tier_bps`` int so they can compute the swap fee without
+        re-reading on-chain pool metadata. Sourced from
+        ``ActionBundle.metadata["selected_fee_tier"]``.
+
         Returns a mapping that can be passed directly as ``**kwargs`` to
         the extract method. Parsers that do not accept the kwarg fall back
-        to positional-only invocation via :meth:`_invoke_extract`.
+        to positional-only invocation via :meth:`_invoke_extract` (TypeError
+        fallback).
         """
         if not bundle_metadata:
             return {}
-        if field != "swap_amounts":
-            return {}
-        raw = bundle_metadata.get("expected_output_human")
-        if raw is None:
-            return {}
-        try:
-            expected_out = Decimal(str(raw))
-        except (InvalidOperation, TypeError, ValueError):
-            logger.debug("Could not coerce expected_output_human=%r to Decimal; skipping", raw)
-            return {}
-        if not expected_out.is_finite() or expected_out <= 0:
-            return {}
-        return {"expected_out": expected_out}
+        if field == "swap_amounts":
+            raw = bundle_metadata.get("expected_output_human")
+            if raw is None:
+                return {}
+            try:
+                expected_out = Decimal(str(raw))
+            except (InvalidOperation, TypeError, ValueError):
+                logger.debug("Could not coerce expected_output_human=%r to Decimal; skipping", raw)
+                return {}
+            if not expected_out.is_finite() or expected_out <= 0:
+                return {}
+            return {"expected_out": expected_out}
+        if field == "protocol_fees":
+            raw_tier = bundle_metadata.get("selected_fee_tier")
+            if raw_tier in (None, ""):
+                return {}
+            try:
+                return {"fee_tier_bps": int(str(raw_tier))}
+            except (TypeError, ValueError):
+                logger.debug("Could not coerce selected_fee_tier=%r to int; skipping", raw_tier)
+                return {}
+        return {}
 
     def _invoke_extract(
         self,
@@ -588,11 +617,18 @@ class ResultEnricher:
         field: str,
         value: Any,
         intent_type: str,
-    ) -> None:
+    ) -> bool:
         """Attach extracted value to appropriate result field.
 
         Core typed fields are set directly on the result.
         All values are also added to extracted_data dict.
+
+        Returns:
+            ``True`` when the value was accepted and attached. ``False``
+            when the value was rejected (e.g. wrong type for a typed
+            field); the caller should treat this as if the receipt did
+            not produce a valid value and continue scanning subsequent
+            receipts in the bundle rather than stopping.
 
         Args:
             result: ExecutionResult to populate
@@ -613,19 +649,31 @@ class ResultEnricher:
                         if not parsed.is_finite():
                             logger.warning(f"Ignoring non-finite string position_id {value!r}")
                             result.extracted_data[field] = value
-                            return
+                            return True
                     except InvalidOperation:
                         logger.warning(f"Ignoring invalid string position_id {value!r}: not a valid decimal or address")
                         result.extracted_data[field] = value
-                        return
+                        return True
             result.position_id = value
         elif field == "swap_amounts" and isinstance(value, SwapAmounts):
             result.swap_amounts = value
         elif field == "lp_close_data" and isinstance(value, LPCloseData):
             result.lp_close_data = value
+        elif field == "protocol_fees" and not isinstance(value, ProtocolFees):
+            # VIB-3204 audit fix (CodeRabbit multi-receipt): rejecting the
+            # value is correct, but the caller MUST continue scanning the
+            # remaining receipts in a multi-tx bundle rather than treat
+            # this rejection as "attached successfully" and stop. Return
+            # False so _extract_field keeps looking.
+            logger.warning(
+                "Enrichment: parser returned non-ProtocolFees value for 'protocol_fees' "
+                f"(type={type(value).__name__}); ignoring and continuing receipt scan"
+            )
+            return False
 
         # Always add to extracted_data for full access
         result.extracted_data[field] = value
+        return True
 
     def _has_extracted(self, result: ExecutionResult, field: str) -> bool:
         """Check if a field was successfully extracted.

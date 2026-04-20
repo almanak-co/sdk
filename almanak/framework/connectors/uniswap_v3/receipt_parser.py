@@ -23,7 +23,7 @@ from almanak.framework.execution.extract_result import (
 )
 
 if TYPE_CHECKING:
-    from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
+    from almanak.framework.execution.extracted_data import LPCloseData, ProtocolFees, SwapAmounts
 from almanak.framework.utils.log_formatters import (
     format_gas_cost,
     format_slippage_bps,
@@ -357,6 +357,7 @@ class UniswapV3ReceiptParser:
             "tick_upper",
             "liquidity",
             "lp_close_data",
+            "protocol_fees",  # VIB-3204 — extract_protocol_fees implemented below
         }
     )
 
@@ -1498,6 +1499,91 @@ class UniswapV3ReceiptParser:
 
         except Exception as e:
             logger.warning(f"Failed to extract lp_close_data: {e}")
+            return None
+
+    # =============================================================================
+    # Protocol Fee Extraction (VIB-3204)
+    # =============================================================================
+
+    def extract_protocol_fees(
+        self,
+        receipt: dict[str, Any],
+        *,
+        fee_tier_bps: int | None = None,
+    ) -> ProtocolFees | None:
+        """Extract DEX protocol fees from a swap receipt.
+
+        Uniswap V3 swap fees are a pool-wide basis-points slice of
+        ``amount_in``. The numeric fee tier is resolved at compile time and
+        forwarded by the ResultEnricher via ``bundle_metadata["selected_fee_tier"]``
+        so the parser does not need to re-read pool state.
+
+        Fee amount (token-denominated):
+
+            fee_amount_in = amount_in * fee_tier_bps / 1_000_000
+
+        (``fee_tier_bps`` is Uniswap's pip-based tier, e.g. 500 = 0.05%, so
+        the divisor is ``1_000_000`` — not ``10_000``.)
+
+        VIB-3204 audit contract: until a price oracle is plumbed through
+        to this layer, the parser returns ``None`` (unknown) — never a
+        ``ProtocolFees(total_usd=Decimal(0))``, which would falsely
+        advertise "measured to be zero" and cause PnL attribution to
+        under-attribute swap costs. Callers that want the in-token fee
+        can derive it from
+        ``result.swap_amounts.amount_in_decimal * fee_tier_bps / 1_000_000``
+        using values already on ``result.swap_amounts``.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field.
+            fee_tier_bps: Pool fee tier, forwarded from
+                ``bundle_metadata["selected_fee_tier"]`` by the enricher.
+
+        Returns:
+            ``None`` — USD conversion not available at this layer. A
+            future iteration with price-oracle access will return a
+            populated ``ProtocolFees``. Also returns ``None`` when no
+            Swap event is present OR when ``fee_tier_bps`` is missing.
+        """
+
+        if fee_tier_bps is None or fee_tier_bps <= 0:
+            # Cannot compute without the compile-time fee tier; do not
+            # guess — leave the field unset so the caller distinguishes
+            # "no compile-time metadata" from "zero fee measured".
+            return None
+
+        try:
+            parse_result = self.parse_receipt(receipt)
+            if not parse_result.swap_result:
+                return None
+
+            # VIB-3204 audit fix (Codex P1): do NOT return
+            # ``ProtocolFees(total_usd=Decimal(0))`` here. Every successful
+            # Uniswap V3 swap charges a non-zero LP fee; reporting
+            # ``total_usd=0`` would tell PnL attribution "this swap was
+            # free" — worse than reporting "unknown". The parser does not
+            # have price-oracle access, so it cannot perform the USD
+            # conversion at this layer.
+            #
+            # We return ``None`` (ExtractMissing semantic) so downstream
+            # consumers know the fee is not yet measured at this layer.
+            # The missing component is USD price, NOT the fee itself:
+            # callers with price access can compute it as
+            #   fee_in_token = amount_in_decimal * fee_tier_bps / 1_000_000
+            #   fee_usd      = fee_in_token * price(token_in)
+            # using values already attached to ``result.swap_amounts`` and
+            # ``result.extracted_data``. When PnL attribution (VIB-3205)
+            # consolidates this, it will plug in the price.
+            #
+            # When a future iteration of this parser gains price access
+            # (e.g. via a ``price_oracle`` kwarg forwarded through the
+            # enricher like ``expected_out`` / ``fee_tier_bps``), this
+            # branch should return a populated ``ProtocolFees`` with a
+            # real ``total_usd``.
+            return None
+
+        except Exception as e:
+            logger.warning(f"Failed to extract protocol_fees: {e}")
             return None
 
     # Backward compatibility methods
