@@ -353,13 +353,6 @@ class GatewayServer:
         if stale_count:
             logger.warning("Gateway startup: reconciled %d ghost RUNNING instance(s) -> STALE", stale_count)
 
-        # Ensure PostgreSQL schema is up-to-date (idempotent, runs once)
-        if self.settings.database_url:
-            from almanak.gateway.database import ensure_schema
-
-            await ensure_schema(self.settings.database_url)
-            logger.debug("PostgreSQL schema initialized")
-
         # Initialize LifecycleStore (uses same gateway DB or database_url for platform)
         lifecycle_store = get_lifecycle_store(
             database_url=self.settings.database_url,

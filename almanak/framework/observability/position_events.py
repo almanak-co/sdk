@@ -11,11 +11,11 @@ enriched snapshot deltas (Phase 1d), not lifecycle events.
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class PositionEventType(str, Enum):
+class PositionEventType(StrEnum):
     """Types of position lifecycle events."""
 
     OPEN = "OPEN"
@@ -24,7 +24,7 @@ class PositionEventType(str, Enum):
     SNAPSHOT = "SNAPSHOT"
 
 
-class PositionType(str, Enum):
+class PositionType(StrEnum):
     """Types of tracked positions (immutable-ID only)."""
 
     LP = "LP"

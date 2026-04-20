@@ -1,19 +1,13 @@
 """Gateway schema helpers.
 
-Historically this module ran Postgres DDL at gateway startup via
-``ensure_schema()``. That path silently drifted production and has been
-retired: the ``metrics-database`` repo's Prisma migrations are now the
-sole source of Postgres schema. ``ensure_schema()`` remains as a guard
-that refuses non-SQLite URLs. ``POSTGRES_SCHEMA`` is kept as dead
-intent-of-record until platform confirms Prisma parity.
+Historically this module ran Postgres DDL at gateway startup. That path
+silently drifted production and has been retired: the ``metrics-database``
+repo's migrations are now the sole source of Postgres schema. This module
+retains shared URL helpers plus a reference copy of the legacy DDL; the SDK
+must not execute Postgres schema changes at gateway startup.
 """
 
-import logging
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
-
-from almanak.gateway.validation import ValidationError
-
-logger = logging.getLogger(__name__)
 
 
 def _strip_schema_param(database_url: str) -> tuple[str, str | None]:
@@ -231,31 +225,3 @@ CREATE INDEX IF NOT EXISTS idx_transaction_ledger_intent_type
 ALTER TABLE transaction_ledger ADD COLUMN IF NOT EXISTS deployment_id TEXT DEFAULT '';
 ALTER TABLE transaction_ledger ADD COLUMN IF NOT EXISTS execution_mode TEXT DEFAULT '';
 """
-
-
-async def ensure_schema(database_url: str) -> None:
-    """SQLite-only schema bootstrap guard.
-
-    Historically this function issued ``CREATE TABLE`` / ``ALTER TABLE``
-    against the central ``metrics_db`` at gateway startup. That pattern
-    silently drifted production schema outside of Prisma migrations, so
-    SDK-side DDL against Postgres is no longer permitted: the
-    ``metrics-database`` repo owns the canonical schema and its migrations
-    must be applied before the gateway starts.
-
-    Behaviour:
-    - SQLite URL: no-op (``SQLiteStore`` bootstraps its own tables).
-    - Anything else: raises ``ValidationError`` to fail the gateway fast
-      rather than silently drifting production.
-    """
-    scheme = urlparse(database_url).scheme.lower()
-    if scheme == "sqlite" or scheme.startswith("sqlite+"):
-        logger.debug("ensure_schema: SQLite URL detected, skipping (SQLiteStore handles its own DDL)")
-        return
-
-    raise ValidationError(
-        "database_url",
-        f"ensure_schema() refuses to run DDL against scheme='{scheme}'. "
-        "Postgres schema must be applied via metrics-database Prisma migrations "
-        "(see metrics-database/prisma/migrations) before gateway startup.",
-    )

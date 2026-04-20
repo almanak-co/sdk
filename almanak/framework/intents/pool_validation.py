@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 from almanak.core.contracts import AERODROME, AGNI_FINANCE, PANCAKESWAP_V3, SUSHISWAP_V3, TRADERJOE_V2, UNISWAP_V3
 from almanak.framework.data.pools.reader import GET_POOL_SELECTOR
@@ -43,7 +43,7 @@ _V3_PROTOCOL_REGISTRY: dict[str, dict[str, dict[str, str]]] = {
 _AERODROME_GET_POOL_SELECTOR = "0x79bc57d5"
 
 
-class PoolValidationReason(str, Enum):
+class PoolValidationReason(StrEnum):
     """Typed reasons for a PoolValidationResult outcome.
 
     The compiler uses this enum to decide whether to fail compilation

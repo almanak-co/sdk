@@ -351,8 +351,8 @@ class TestBuyIntentCompilation:
         submission price, not the share count.
         """
         # Configure round_price_to_tick to actually snap (mock returns floor-to-0.01)
-        adapter_with_mocks.clob.round_price_to_tick.side_effect = (
-            lambda price, side, market=None, tick_size=None: Decimal("0.01")
+        adapter_with_mocks.clob.round_price_to_tick.side_effect = lambda price, side, market=None, tick_size=None: (
+            Decimal("0.01")
         )
 
         intent = PredictionBuyIntent(
@@ -575,8 +575,8 @@ class TestSellIntentCompilation:
         snapped via ``round_price_to_tick`` before submission. Mirror of the
         BUY off-tick test on the SELL side."""
         # SELL rounds UP (ceiling) — mock the snap to return the next tick up
-        adapter_with_mocks.clob.round_price_to_tick.side_effect = (
-            lambda price, side, market=None, tick_size=None: Decimal("0.71")
+        adapter_with_mocks.clob.round_price_to_tick.side_effect = lambda price, side, market=None, tick_size=None: (
+            Decimal("0.71")
         )
 
         intent = PredictionSellIntent(

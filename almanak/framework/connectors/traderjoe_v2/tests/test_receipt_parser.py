@@ -445,7 +445,7 @@ class TestExtractSwapAmountsDecimals:
         receipt = _make_swap_receipt(USDC_ADDRESS, usdc_amount_raw, WAVAX_ADDRESS, wavax_amount_raw)
 
         mock_resolver = MagicMock()
-        mock_resolver.get_decimals.side_effect = lambda chain, addr: (6 if addr.lower() == USDC_ADDRESS.lower() else 18)
+        mock_resolver.get_decimals.side_effect = lambda chain, addr: 6 if addr.lower() == USDC_ADDRESS.lower() else 18
 
         with patch(
             "almanak.framework.connectors.traderjoe_v2.receipt_parser.get_token_resolver", return_value=mock_resolver
@@ -499,7 +499,7 @@ class TestExtractSwapAmountsDecimals:
         receipt = _make_swap_receipt(USDC_ADDRESS, usdc_raw, WAVAX_ADDRESS, 10**18)
 
         mock_resolver = MagicMock()
-        mock_resolver.get_decimals.side_effect = lambda chain, addr: (6 if addr.lower() == USDC_ADDRESS.lower() else 18)
+        mock_resolver.get_decimals.side_effect = lambda chain, addr: 6 if addr.lower() == USDC_ADDRESS.lower() else 18
 
         with patch(
             "almanak.framework.connectors.traderjoe_v2.receipt_parser.get_token_resolver", return_value=mock_resolver

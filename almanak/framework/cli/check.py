@@ -55,7 +55,7 @@ import json
 import logging
 import sys
 from dataclasses import asdict, dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
-class Severity(str, Enum):
+class Severity(StrEnum):
     """Finding severity. ``ERROR`` drives exit code 2, ``WARNING`` drives 1."""
 
     ERROR = "error"
@@ -77,7 +77,7 @@ class Severity(str, Enum):
     INFO = "info"
 
 
-class Layer(str, Enum):
+class Layer(StrEnum):
     """Which check layer produced the finding (for --json consumers)."""
 
     LOAD = "load"
